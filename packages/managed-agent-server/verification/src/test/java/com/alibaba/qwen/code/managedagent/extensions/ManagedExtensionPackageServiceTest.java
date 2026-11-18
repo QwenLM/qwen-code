@@ -6,10 +6,13 @@ import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionP
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.SettingsCommand;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.SourceImport;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.StandaloneSkill;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Target;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionSource;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedSkillCatalogSource;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcExtensionPackageRepository;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
@@ -159,6 +162,68 @@ class ManagedExtensionPackageServiceTest {
     }
 
     @Test
+    void compiledSkillMetadataUsesHostedUtf8Limits() {
+        assertThat(new StandaloneSkill("review:review", "界".repeat(1365) + "x", true, 4300).description()).hasSize(1366);
+        assertThatThrownBy(() -> new StandaloneSkill("review:review", "界".repeat(1366), true, 4300))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void compiledSkillMetadataFollowsTheExactPublishedPinAfterRestart() throws Exception {
+        var provider = sourceProvider();
+        var preparer = mock(HarnessConnector.class);
+        when(preparer.supportsPackagePreparation()).thenReturn(true);
+        when(preparer.preparePackage(anyMap(), any())).thenAnswer(call -> {
+            InputStream stream = call.getArgument(1);
+            byte[] content = stream.readAllBytes();
+            String description = new String(content, StandardCharsets.UTF_8);
+            return new HarnessConnector.PreparedPackage(Map.of("manifest", manifest, "packageDigest", DigestUtils.sha256Hex(content),
+                    "standaloneSkill", new StandaloneSkill("complete:review", description, true, 4300)), new ByteArrayInputStream(content));
+        });
+        service.configurePreparation(preparer);
+        var first = service.importSource("tenant", "operator", "workspace", "first", new SourceImport(
+                new ManagedExtensionSource.Reference("business", "skill", "review", "1"), manifest.target())).pin();
+        var second = service.importSource("tenant", "operator", "workspace", "second", new SourceImport(
+                new ManagedExtensionSource.Reference("business", "skill", "review", "2"), manifest.target())).pin();
+        var reloaded = repository();
+        assertThat(second.extensionId()).isEqualTo(first.extensionId());
+        assertThat(second.packageRevision()).isGreaterThan(first.packageRevision());
+        assertThat(reloaded.standaloneSkill("tenant", "workspace", first)).isEqualTo(new StandaloneSkill("complete:review", "source-1", true, 4300));
+        assertThat(reloaded.standaloneSkill("tenant", "workspace", second)).isEqualTo(new StandaloneSkill("complete:review", "source-2", true, 4300));
+        var catalog = mock(ManagedSkillCatalogSource.class,
+                org.mockito.AdditionalAnswers.delegatesTo(provider));
+        var entry = new ManagedSkillCatalogSource.Entry(
+                new ManagedExtensionSource.Reference("business", "skill", "review", "1"), manifest.target(), "review", "Review", true);
+        org.mockito.Mockito.doReturn(List.of(entry)).when(catalog).catalog(any());
+        service.configureSources(List.of(catalog));
+        when(workspaces.accessOf("tenant", "peer", "workspace")).thenReturn(WorkspaceAccess.OPERATOR);
+        properties.getExtensions().setAllowedActors(List.of("operator", "peer"));
+        assertThat(service.defaultSkillPins("tenant", "peer", "workspace", "old-default")).containsExactly(first);
+        var unseen = new ManagedExtensionSource.Reference("business", "skill", "review", "0");
+        org.mockito.Mockito.doReturn(List.of(new ManagedSkillCatalogSource.Entry(
+                unseen, manifest.target(), "review", "Review", true))).when(catalog).catalog(any());
+        var command = new SourceImport(unseen, manifest.target());
+        String requestDigest = DigestUtils.sha256Hex(json.writeValueAsBytes(command));
+        String sourceDigest = DigestUtils.sha256Hex("source-0");
+        var pending = reloaded.preparePublish("tenant", "operator", "workspace", second.extensionId(), second.extensionId(),
+                sourceDigest, "explicit-pending", requestDigest, json.writeValueAsString(manifest),
+                new com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.SourceOrigin(unseen, sourceDigest, requestDigest),
+                new StandaloneSkill("complete:review", "source-0", true, 4300), false, write -> {});
+        assertThat(pending.state()).isEqualTo("pending");
+        var older = service.defaultSkillPins("tenant", "peer", "workspace", "unseen-default").getFirst();
+        assertThat(older.packageRevision()).isNotEqualTo(pending.revision());
+        assertThat(service.defaultSkillPins("tenant", "operator", "workspace", "same-default")).containsExactly(older);
+        assertThat(reloaded.list("tenant", "workspace")).extracting(p -> p.pin()).containsExactly(second);
+        assertThat(reloaded.get("tenant", "workspace", older).source().reference()).isEqualTo(unseen);
+        var explicit = service.importSource("tenant", "operator", "workspace", "explicit-older",
+                new SourceImport(unseen, manifest.target())).pin();
+        assertThat(reloaded.list("tenant", "workspace")).extracting(p -> p.pin()).containsExactly(explicit);
+        assertThat(reloaded.standaloneSkill("another-tenant", "workspace", first)).isNull();
+        assertThat(reloaded.standaloneSkill("tenant", "workspace", new Pin(
+                first.extensionId(), first.packageRevision(), second.packageDigest(), null))).isNull();
+    }
+
+    @Test
     void retainsIntentBeforeSourceFailureAndRejectsChangedKeysAndRevisionBytes() throws Exception {
         var provider = sourceProvider();
         var reference = new ManagedExtensionSource.Reference("business", "extension", "suite_1", "1");
@@ -246,13 +311,17 @@ class ManagedExtensionPackageServiceTest {
         var harness = mock(HarnessConnector.class);
         when(harness.supportsPackagePreparation()).thenReturn(true);
         String digest = DigestUtils.sha256Hex(bytes);
+        var skill = new StandaloneSkill("complete:review", "Uploaded Skill", false, 4300);
         when(harness.preparePackage(anyMap(), any())).thenAnswer(call -> new HarnessConnector.PreparedPackage(
-                Map.of("manifest", json.convertValue(manifest, Map.class), "packageDigest", digest), new ByteArrayInputStream(bytes)));
+                Map.of("manifest", json.convertValue(manifest, Map.class), "packageDigest", digest, "standaloneSkill", skill),
+                new ByteArrayInputStream(bytes)));
         service.configurePreparation(harness);
         String metadata = "{\"sourceKind\":\"skill\",\"target\":{\"platform\":\"linux\",\"arch\":\"any\"},"
                 + "\"sourceDigest\":\"" + digest + "\",\"compilerVersion\":1}";
         var imported = service.importPackage("tenant", "operator", "workspace", null, "install", metadata,
                 new ByteArrayInputStream(bytes), bytes.length);
+        var pin = new Pin(imported.extensionId(), imported.revision(), imported.packageDigest(), null);
+        assertThat(repository().standaloneSkill("tenant", "workspace", pin)).isEqualTo(skill);
         assertThat(service.lookup("tenant", "operator", "workspace", "publish", "install")).isEqualTo(imported);
         assertThat(service.importPackage("tenant", "operator", "workspace", null, "install", metadata,
                 new ByteArrayInputStream(bytes), bytes.length)).isEqualTo(imported);
@@ -430,7 +499,10 @@ class ManagedExtensionPackageServiceTest {
     }
 
     private ManagedExtensionPackageService service() {
-        return new ManagedExtensionPackageService(new com.alibaba.qwen.code.managedagent.persistence.JdbcExtensionPackageRepository(
-                jdbc, manager, json, beans.getBeanProvider(SecretProtector.class)), workspaces, properties, archives, json);
+        return new ManagedExtensionPackageService(repository(), workspaces, properties, archives, json);
+    }
+
+    private JdbcExtensionPackageRepository repository() {
+        return new JdbcExtensionPackageRepository(jdbc, manager, json, beans.getBeanProvider(SecretProtector.class));
     }
 }

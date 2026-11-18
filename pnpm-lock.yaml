@@ -683,6 +683,9 @@ importers:
       '@wecom/aibot-node-sdk':
         specifier: ^1.0.7
         version: 1.0.7(debug@4.4.3(supports-color@7.2.0))(supports-color@7.2.0)
+      proper-lockfile:
+        specifier: ^4.1.2
+        version: 4.1.2
       saxes:
         specifier: 6.0.0
         version: 6.0.0
@@ -690,6 +693,9 @@ importers:
         specifier: 7.30.2
         version: 7.30.2
     devDependencies:
+      '@types/proper-lockfile':
+        specifier: ^4.1.4
+        version: 4.1.4
       typescript:
         specifier: 5.8.3
         version: 5.8.3

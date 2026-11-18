@@ -15,6 +15,8 @@ import {
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { SESSION_TRANSCRIPT_MAX_INDEX_BYTES } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import { createWorktreeSessionMarkerExclusive } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
+import { writeWorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
@@ -1084,6 +1086,302 @@ describe('merged session catalog pagination', () => {
         retry.sessions.map((session) => session.artifactCount).sort(),
       ).toEqual([3, 4, 5]);
       abortHarness.controller = undefined;
+    });
+  });
+
+  describe('goal sidecar projection', () => {
+    async function writeGoalSidecar(
+      session: BridgeSessionSummary,
+      content: string,
+      archived = false,
+    ): Promise<void> {
+      const chats = path.join(
+        new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+        'chats',
+        ...(archived ? ['archive'] : []),
+      );
+      await fs.mkdir(chats, { recursive: true });
+      await fs.writeFile(
+        path.join(chats, `${session.sessionId}.goal.json`),
+        content,
+      );
+    }
+
+    const projection = {
+      v: 1,
+      goalId: 'goal-1',
+      status: 'paused',
+      objective: 'ship it',
+      updatedAt: 1_700_000_000_000,
+    };
+
+    it('projects the goal sidecar onto a persisted summary', async () => {
+      const session = summary(0);
+      await persist(session);
+      await writeGoalSidecar(session, JSON.stringify(projection));
+      const { bridge } = bridgeFor([]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        {},
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.goal).toEqual({
+        status: 'paused',
+        objective: 'ship it',
+        updatedAt: new Date(1_700_000_000_000).toISOString(),
+      });
+    });
+
+    it('projects the goal sidecar of an archived session', async () => {
+      const session = summary(0);
+      await persist(session, session.createdAt, true);
+      await writeGoalSidecar(session, JSON.stringify(projection), true);
+      const { bridge } = bridgeFor([]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { archiveState: 'archived' },
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.goal?.status).toBe('paused');
+    });
+
+    it.each(['{not json', '{"v":1}'])(
+      'leaves goal unset for a corrupt or absent sidecar: %s',
+      async (content) => {
+        const corrupt = summary(0);
+        const absent = summary(1);
+        await Promise.all([persist(corrupt), persist(absent)]);
+        await writeGoalSidecar(corrupt, content);
+        const { bridge } = bridgeFor([]);
+
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          {},
+          { runtimeBaseDir },
+        );
+
+        const byId = new Map(
+          result.sessions.map((session) => [session.sessionId, session]),
+        );
+        expect(byId.get(corrupt.sessionId)?.goal).toBeUndefined();
+        expect(byId.get(absent.sessionId)?.goal).toBeUndefined();
+      },
+    );
+
+    it('keeps the goal projection through the live overlay merge', async () => {
+      // A goal-bearing session always has a transcript: the journal hook
+      // appends the goal_state record before writing the sidecar, so the
+      // persisted list (transcript-driven) always sees it. The live bridge
+      // summary carries no goal field; the overlay must not drop the
+      // sidecar projection enriched onto the persisted entry.
+      const session = summary(0);
+      await persist(session);
+      await writeGoalSidecar(session, JSON.stringify(projection));
+      const { bridge } = bridgeFor([
+        { ...session, clientCount: 2, hasActivePrompt: true },
+      ]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        {},
+        { runtimeBaseDir },
+      );
+
+      expect(result.sessions[0]?.goal?.objective).toBe('ship it');
+      expect(result.sessions[0]?.clientCount).toBe(2);
+    });
+
+    it('projects the goal sidecar in the organized view', async () => {
+      // The organized view scans persisted summaries through a different
+      // enrich call site than the default list; it must carry the goal too.
+      const session = summary(0);
+      await persist(session);
+      await writeGoalSidecar(session, JSON.stringify(projection));
+      const { bridge } = bridgeFor([]);
+
+      const result = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { view: 'organized', group: 'all' },
+        { runtimeBaseDir },
+      );
+
+      const row = result.sessions.find(
+        (item) => item.sessionId === session.sessionId,
+      );
+      expect(row?.goal).toEqual({
+        status: 'paused',
+        objective: 'ship it',
+        updatedAt: new Date(1_700_000_000_000).toISOString(),
+      });
+    });
+
+    it('projects the goal sidecar onto search results', async () => {
+      const session = summary(0);
+      await persist(session);
+      await writeGoalSidecar(session, JSON.stringify(projection));
+
+      const result = await searchWorkspaceSessionsForResponse(
+        workspaceCwd,
+        'stored',
+        {},
+        { runtimeBaseDir },
+      );
+
+      const hit = result.results.find(
+        (item) => item.session.sessionId === session.sessionId,
+      );
+      expect(hit).toBeDefined();
+      expect(hit?.session.goal).toEqual({
+        status: 'paused',
+        objective: 'ship it',
+        updatedAt: new Date(1_700_000_000_000).toISOString(),
+      });
+    });
+  });
+});
+
+describe('worktree sidecar enrichment (R3-1)', () => {
+  let directory: string;
+  let workspaceCwd: string;
+  let runtimeBaseDir: string;
+
+  beforeEach(async () => {
+    directory = await fs.mkdtemp(path.join(os.tmpdir(), 'session-wt-enrich-'));
+    workspaceCwd = path.join(directory, 'workspace');
+    runtimeBaseDir = path.join(directory, 'runtime');
+    await fs.mkdir(workspaceCwd);
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  it('reads worktree.baseCommit from worktreeBase, not originalHeadCommit, for restart survivors', async () => {
+    // enrichWorktreeSidecars is the sole producer of worktree meta for sessions
+    // listed after a daemon restart. worktreeBase is the worktree's own base;
+    // originalHeadCommit is the source checkout's HEAD (differs for a worktree
+    // created from a sibling managed worktree). The precedence must prefer
+    // worktreeBase, and baseBranch comes from originalBranch.
+    const sessionId = '00000000-0000-4000-8000-000000000001';
+    const chats = path.join(
+      new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+      'chats',
+    );
+    await fs.mkdir(chats, { recursive: true });
+    await fs.writeFile(
+      path.join(chats, `${sessionId}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${sessionId}-user`,
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date(Date.UTC(2026, 0, 1)).toISOString(),
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'stored prompt' }] },
+        cwd: workspaceCwd,
+      })}\n`,
+    );
+    const worktreeDir = path.join(
+      workspaceCwd,
+      '.qwen',
+      'worktrees',
+      'my-task',
+    );
+    await fs.mkdir(worktreeDir, { recursive: true });
+    await createWorktreeSessionMarkerExclusive(worktreeDir, sessionId);
+    await writeWorktreeSession(path.join(chats, `${sessionId}.worktree.json`), {
+      slug: 'my-task',
+      worktreePath: worktreeDir,
+      worktreeBranch: 'worktree-my-task',
+      originalCwd: workspaceCwd,
+      workspaceCwd,
+      originalBranch: 'main',
+      originalHeadCommit: 'source-sha',
+      worktreeBase: 'base-sha',
+    });
+    const bridge = {
+      listWorkspaceSessions: vi.fn(() => []),
+    } as unknown as AcpSessionBridge;
+
+    const result = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      {},
+      { runtimeBaseDir },
+    );
+
+    const row = result.sessions.find((s) => s.sessionId === sessionId);
+    expect(row?.worktree).toMatchObject({
+      baseCommit: 'base-sha',
+      baseBranch: 'main',
+    });
+  });
+
+  it('falls back to originalHeadCommit for a legacy sidecar with no worktreeBase', async () => {
+    // Every released daemon writes originalHeadCommit (required) and no
+    // worktreeBase (optional). The sibling above sets both, so it cannot see
+    // the legacy fallback arm: dropping `|| sidecar.originalHeadCommit` from
+    // the enrichment would leave it green. This sidecar omits worktreeBase
+    // entirely, so baseCommit must come from originalHeadCommit.
+    const sessionId = '00000000-0000-4000-8000-000000000002';
+    const chats = path.join(
+      new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+      'chats',
+    );
+    await fs.mkdir(chats, { recursive: true });
+    await fs.writeFile(
+      path.join(chats, `${sessionId}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${sessionId}-user`,
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date(Date.UTC(2026, 0, 1)).toISOString(),
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'stored prompt' }] },
+        cwd: workspaceCwd,
+      })}\n`,
+    );
+    const worktreeDir = path.join(
+      workspaceCwd,
+      '.qwen',
+      'worktrees',
+      'legacy-task',
+    );
+    await fs.mkdir(worktreeDir, { recursive: true });
+    await createWorktreeSessionMarkerExclusive(worktreeDir, sessionId);
+    await writeWorktreeSession(path.join(chats, `${sessionId}.worktree.json`), {
+      slug: 'legacy-task',
+      worktreePath: worktreeDir,
+      worktreeBranch: 'worktree-legacy-task',
+      originalCwd: workspaceCwd,
+      workspaceCwd,
+      originalBranch: 'main',
+      originalHeadCommit: 'legacy-sha',
+    });
+    const bridge = {
+      listWorkspaceSessions: vi.fn(() => []),
+    } as unknown as AcpSessionBridge;
+
+    const result = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      {},
+      { runtimeBaseDir },
+    );
+
+    const row = result.sessions.find((s) => s.sessionId === sessionId);
+    expect(row?.worktree).toMatchObject({
+      baseCommit: 'legacy-sha',
+      baseBranch: 'main',
     });
   });
 });
