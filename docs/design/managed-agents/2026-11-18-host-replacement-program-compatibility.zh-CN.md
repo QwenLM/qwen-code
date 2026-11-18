@@ -1,7 +1,5 @@
 # Agent Host 替换的程序兼容性
 
-[English](2026-11-18-host-replacement-program-compatibility.md) | [简体中文](2026-11-18-host-replacement-program-compatibility.zh-CN.md)
-
 ## 1. 状态与背景
 
 已实施并完成本地验证，2026-11-18。解决 [#13644](https://github.com/QwenLM/qwen-code/issues/13644)。已通过 `gh` 阅读 Issue 及评论；当前实现基于 `feat/managed-agents/defined-a-capacity` 分支的 `b9da38c7bd`。
@@ -14,7 +12,7 @@ Issue 描述了替换 Host 时保留 Agent 固定的 `execution.provider`，却�
 
 如果替换会导致任一受影响的固定程序 Agent 在最终绑定集合中没有兼容 Host，则拒绝替换。指出受影响 Agent ID，保留显式固定程序配置和注册恢复能力。如果其他绑定 Host 仍提供该程序，则允许替换。与现有替换行为一致，检查所有被映射的 Agent，包括已禁用和已退役记录。
 
-范围包括 core 注册存储、CLI 注册 HTTP 错误映射与客户端密钥恢复、定向回归测试和本双语设计。不修改 Java/控制平面、schema 或调度，不自动解除固定，不保证运行时可用，也不修复此前已完成的不兼容替换。已有不兼容 Agent 可由所有者显式重新绑定。准入后的心跳变化不属于本配置检查的范围。
+范围包括 core 注册存储、CLI 注册 HTTP 错误映射与客户端密钥恢复、定向回归测试和本设计。不修改 Java/控制平面、schema 或调度，不自动解除固定，不保证运行时可用，也不修复此前已完成的不兼容替换。已有不兼容 Agent 可由所有者显式重新绑定。准入后的心跳变化不属于本配置检查的范围。
 
 ## 3. 建议方案
 
