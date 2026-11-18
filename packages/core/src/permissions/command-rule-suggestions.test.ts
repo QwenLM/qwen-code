@@ -57,6 +57,29 @@ describe.each([
   ['monitor', 'Monitor'],
 ] as const)('%s permission suggestions', (toolName, displayName) => {
   it.each([
+    ['git commit -m', 'git commit *'],
+    ['echo', 'echo *'],
+  ])(
+    'requires confirmation for an empty quoted argument after %s',
+    async (prefix, pattern) => {
+      const manager = makeManager([`${displayName}(${pattern})`]);
+      for (const empty of ['""', "''"]) {
+        const command = `${prefix} ${empty}`;
+        expect(await manager.evaluate({ toolName, command })).toBe('ask');
+        expect(await suggestCommandRules(command, displayName)).toEqual({
+          permissionRules: [],
+        });
+      }
+      expect(
+        await manager.evaluate({
+          toolName,
+          command: `${prefix} "message"`,
+        }),
+      ).toBe('allow');
+    },
+  );
+
+  it.each([
     'git > /tmp/log push origin \\\nmain',
     'git > /tmp/log push origin "ma\\\n in"',
     'npm install && git <&- push origin main',

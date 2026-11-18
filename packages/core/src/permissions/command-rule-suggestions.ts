@@ -294,8 +294,8 @@ export async function suggestCommandRules(
           part.start < raw.end,
       ),
   );
-  // An offered persistent choice must cover the same segments the matcher
-  // will score. Never save a partial set that immediately asks again.
+  // Cover the selected segments produced by the matcher splitter. This does
+  // not certify an enclosing shell wrapper's permission.
   const covered = required.every((part) =>
     rules.some((rule) => matchesRule(rule, canonicalTool, part.text)),
   );

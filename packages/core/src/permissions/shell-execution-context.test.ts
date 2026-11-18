@@ -93,6 +93,26 @@ for (const command of [
     },
   );
 }
+for (const command of [
+  "env A=1 -S 'cat /etc/shadow'",
+  'env A=1 -Scat /etc/shadow',
+]) {
+  add(
+    `env options stop at assignment: ${command}`,
+    command,
+    { operationsEmpty: true },
+    { deny: ['Read(//etc/shadow)'] },
+  );
+}
+add(
+  'env assignment preserves the following command',
+  'env A=1 cat /etc/shadow',
+  {
+    decision: 'deny',
+    operation: { virtualTool: 'read_file', filePath: '/etc/shadow' },
+  },
+  { deny: ['Read(//etc/shadow)'] },
+);
 // The real GNU env witness rejects this spelling as an executable name.
 add(
   'env tab escape negative control',
