@@ -51919,7 +51919,16 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       );
     } finally {
       pair.restore();
-      await fsp.rm(logDir, { recursive: true, force: true });
+      // The daemon's block-buffered logger keeps writing until close; rm
+      // racing a live flush dies with ENOTEMPTY on loaded hosts.
+      await handle?.close();
+      handle = undefined;
+      await fsp.rm(logDir, {
+        recursive: true,
+        force: true,
+        maxRetries: 3,
+        retryDelay: 100,
+      });
     }
   }, 30_000);
 
@@ -52106,7 +52115,16 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       );
     } finally {
       await pair.restore();
-      await fsp.rm(logDir, { recursive: true, force: true });
+      // The daemon's block-buffered logger keeps writing until close; rm
+      // racing a live flush dies with ENOTEMPTY on loaded hosts.
+      await handle?.close();
+      handle = undefined;
+      await fsp.rm(logDir, {
+        recursive: true,
+        force: true,
+        maxRetries: 3,
+        retryDelay: 100,
+      });
     }
   }, 30_000);
 
