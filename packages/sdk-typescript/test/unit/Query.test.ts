@@ -1006,78 +1006,62 @@ describe('Query', () => {
     it.each([
       {
         label: 'allow',
-        result: { behavior: 'allow' as const, updatedInput: {} },
+        run: async () => ({ behavior: 'allow' as const, updatedInput: {} }),
+        response: { behavior: 'allow', updatedInput: {} },
       },
       {
         label: 'deny',
-        result: { behavior: 'deny' as const, message: 'Denied' },
+        run: async () => ({ behavior: 'deny' as const, message: 'Denied' }),
+        response: { behavior: 'deny', message: 'Denied' },
       },
-    ])('clears the permission deadline on $label', async ({ result }) => {
-      const query = new Query(transport, {
-        cwd: '/test',
-        canUseTool: async () => {
-          expect(vi.getTimerCount()).toBe(1);
-          return result;
+      {
+        label: 'throw',
+        run: () => {
+          throw new Error('Callback error');
         },
-      });
-      await respondToInitialize(transport, query);
-      vi.useFakeTimers();
-      try {
-        transport.simulateMessage(
-          createControlRequest('can_use_tool', 'ok-permission'),
-        );
-        await vi.waitFor(() => {
-          const response = findControlResponse(
-            transport.getAllWrittenMessages(),
-            'ok-permission',
-          );
-          expect(response?.response).toMatchObject({
-            subtype: 'success',
-            response: result,
-          });
-        });
-        expect(vi.getTimerCount()).toBe(0);
-      } finally {
-        await query.close();
-        vi.clearAllTimers();
-        vi.useRealTimers();
-      }
-    });
-
-    it.each(['throw', 'reject'])(
-      'clears the permission deadline when the callback fails (%s)',
-      async (failure) => {
+        response: {
+          behavior: 'deny',
+          message: 'Permission check failed: Callback error',
+        },
+      },
+      {
+        label: 'reject',
+        run: () => Promise.reject(new Error('Callback error')),
+        response: {
+          behavior: 'deny',
+          message: 'Permission check failed: Callback error',
+        },
+      },
+    ])(
+      'arms and clears the default permission deadline on $label',
+      async ({ run, response: expectedResponse }) => {
         const query = new Query(transport, {
           cwd: '/test',
-          canUseTool: () => {
-            const error = new Error('Callback error');
-            if (failure === 'throw') throw error;
-            return Promise.reject(error);
-          },
+          canUseTool: run,
         });
         await respondToInitialize(transport, query);
         vi.useFakeTimers();
+        const timeoutSpy = vi.spyOn(globalThis, 'setTimeout');
         try {
           transport.simulateMessage(
-            createControlRequest('can_use_tool', 'failed-permission'),
+            createControlRequest('can_use_tool', 'deadline-permission'),
           );
           await vi.waitFor(() => {
             const response = findControlResponse(
               transport.getAllWrittenMessages(),
-              'failed-permission',
+              'deadline-permission',
             );
             expect(response?.response).toMatchObject({
               subtype: 'success',
-              response: {
-                behavior: 'deny',
-                message: 'Permission check failed: Callback error',
-              },
+              response: expectedResponse,
             });
           });
+          expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 60_000);
           expect(vi.getTimerCount()).toBe(0);
         } finally {
           await query.close();
           vi.clearAllTimers();
+          timeoutSpy.mockRestore();
           vi.useRealTimers();
         }
       },
