@@ -10,6 +10,8 @@ import {
   createSourceFile,
   forEachChild,
   isCallExpression,
+  isImportDeclaration,
+  isNamedImports,
   isNumericLiteral,
   isObjectLiteralExpression,
   isPropertyAssignment,
@@ -72,6 +74,29 @@ function testCalls(text: string): CallExpression[] {
 }
 const calls = testCalls(rawSource);
 
+// What the suite binds, not what the module exports: a local
+// createUntil(12_000) beside a dropped import reverts the ceiling with every
+// budget assertion still green.
+function budgetImports(): string[] {
+  const tree = createSourceFile(
+    'suite.ts',
+    rawSource,
+    ScriptTarget.Latest,
+    true,
+  );
+  return tree.statements.flatMap((stmt) =>
+    isImportDeclaration(stmt) &&
+    isStringLiteral(stmt.moduleSpecifier) &&
+    stmt.moduleSpecifier.text === './tui-editor-parity-budget.js' &&
+    stmt.importClause?.namedBindings &&
+    isNamedImports(stmt.importClause.namedBindings)
+      ? stmt.importClause.namedBindings.elements.map(
+          (element) => (element.propertyName ?? element.name).text,
+        )
+      : [],
+  );
+}
+
 function permissionsCases(parsed: CallExpression[]) {
   return parsed.flatMap((call) => {
     const [name] = call.arguments;
@@ -121,6 +146,8 @@ describe('tui-editor-parity wait ceiling (#17544)', () => {
     expect(MAX_READY_PROMPT_BUDGET_MS + ciWaitMs).toBeLessThan(
       config.test?.testTimeout ?? 0,
     );
+
+    expect(budgetImports().sort()).toEqual(['permissionsCaseOptions', 'until']);
 
     // The helper the suite really polls with, measured rather than re-spelled:
     // wiring it to a smaller budget than WAIT_LOCAL_MS reds here. Advancing by
