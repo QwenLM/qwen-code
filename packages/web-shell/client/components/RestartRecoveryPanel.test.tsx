@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DaemonClient,
   type DaemonRestartRecoveryBatchResult,
+  type DaemonRestartRecoveryContinueBatchResult,
 } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
 import { formatTimestamp } from './MessageTimestamp';
@@ -30,6 +31,7 @@ function recoveryResult(
     interruption: string;
     lastActivityAt?: string;
   }>,
+  truncated = false,
 ): DaemonRestartRecoveryBatchResult {
   return {
     workspaces: [
@@ -43,7 +45,7 @@ function recoveryResult(
           lastActivityAt: item.lastActivityAt ?? '2026-11-17T09:12:31.000Z',
           interruption: item.interruption,
         })),
-        truncated: false,
+        truncated,
       },
     ],
   };
@@ -677,6 +679,109 @@ describe('RestartRecoveryPanel', () => {
     expect(
       container.querySelector('[data-testid="restart-recovery-panel"]'),
     ).not.toBeNull();
+  });
+
+  it('keeps a rescan affordance after continuing all visible truncated rows', async () => {
+    client.getRestartRecoveries
+      .mockResolvedValueOnce(
+        recoveryResult(
+          [{ sessionId: SESSION_A, interruption: 'daemon_shutdown' }],
+          true,
+        ),
+      )
+      .mockResolvedValueOnce({ workspaces: [] });
+    client.continueRestartRecoveries.mockResolvedValue({
+      results: [
+        {
+          workspace: '/ws',
+          sessionId: SESSION_A,
+          status: 'accepted',
+          kind: 'interrupted_prompt',
+        },
+      ],
+    });
+    render();
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        '1 task interrupted by a restart',
+      ),
+    );
+    act(() => buttonByText('Review').click());
+    act(() => buttonByText('Continue').click());
+
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        'More interrupted tasks may be available beyond the scan limit. Retry to scan again.',
+      ),
+    );
+    expect(
+      container.querySelector('[data-testid="restart-recovery-panel"]'),
+    ).not.toBeNull();
+    act(() => buttonByText('Retry').click());
+    await waitFor(() =>
+      expect(client.getRestartRecoveries).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="restart-recovery-panel"]'),
+      ).toBeNull(),
+    );
+  });
+
+  it('ignores a late continuation result after the capability is restored', async () => {
+    client.getRestartRecoveries.mockResolvedValue(
+      recoveryResult([{ sessionId: SESSION_A, interruption: 'in_flight' }]),
+    );
+    let finish!: (value: DaemonRestartRecoveryContinueBatchResult) => void;
+    const pending = new Promise<DaemonRestartRecoveryContinueBatchResult>(
+      (resolve) => {
+        finish = resolve;
+      },
+    );
+    client.continueRestartRecoveries.mockReturnValue(pending);
+    render();
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        '1 task interrupted by a restart',
+      ),
+    );
+    act(() => buttonByText('Review').click());
+    act(() => buttonByText('Continue').click());
+    await waitFor(() =>
+      expect(client.continueRestartRecoveries).toHaveBeenCalledOnce(),
+    );
+    render({ supported: false });
+    expect(
+      container.querySelector('[data-testid="restart-recovery-panel"]'),
+    ).toBeNull();
+    render();
+    await waitFor(() =>
+      expect(client.getRestartRecoveries).toHaveBeenCalledTimes(2),
+    );
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        '1 task interrupted by a restart',
+      ),
+    );
+    act(() => buttonByText('Review').click());
+
+    await act(async () => {
+      finish({
+        results: [
+          {
+            workspace: '/ws',
+            sessionId: SESSION_A,
+            status: 'not_continuable',
+            kind: 'degraded_history',
+          },
+        ],
+      });
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain('11111111');
+    expect(container.textContent).not.toContain(
+      'This task is no longer waiting for recovery. (degraded_history)',
+    );
   });
 
   it('clears a notice when the capability disappears', async () => {

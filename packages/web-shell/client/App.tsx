@@ -4387,9 +4387,12 @@ export function App({
   const recoveryWorkspaceCwds = useMemo(
     () =>
       ordinaryWorkspaces
+        .filter(
+          (entry) => !lockedWorkspaceCwd || entry.cwd === lockedWorkspaceCwd,
+        )
         .filter((entry) => entry.trusted && isAbsolutePath(entry.cwd))
         .map((entry) => entry.cwd),
-    [ordinaryWorkspaces],
+    [lockedWorkspaceCwd, ordinaryWorkspaces],
   );
   const recoveryWorkspaceLabels = useMemo(
     () =>

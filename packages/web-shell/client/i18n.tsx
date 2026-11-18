@@ -1416,6 +1416,8 @@ const EN: Messages = {
     'No reply from the daemon. Earlier sessions may already be running; check their state before retrying.',
   'restartRecovery.loadFailed': 'Could not read interrupted tasks',
   'restartRecovery.retry': 'Retry',
+  'restartRecovery.truncated':
+    'More interrupted tasks may be available beyond the scan limit. Retry to scan again.',
   'restartRecovery.scanFailedWorkspaces': (v) =>
     `Could not scan: ${v?.workspaces ?? ''}`,
   'session.archived': 'This conversation is archived',
@@ -6833,6 +6835,8 @@ const ZH: Messages = {
     'Daemon 未回复；前面的会话可能已在运行，请先确认会话状态再重试。',
   'restartRecovery.loadFailed': '无法读取中断任务',
   'restartRecovery.retry': '重试',
+  'restartRecovery.truncated':
+    '可能还有更多被中断的任务超出扫描上限，请重试扫描。',
   'restartRecovery.scanFailedWorkspaces': (v) =>
     `无法扫描：${v?.workspaces ?? ''}`,
   'session.archived': '该会话已归档',

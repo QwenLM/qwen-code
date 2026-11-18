@@ -318,12 +318,19 @@ later.
 ### Web Shell surface
 
 - After daemon availability changes from unavailable to available, request the
-  batch once for the workspaces the sidebar already queries.
+  batch once for the trusted workspaces visible under the current workspace
+  lock, using the same inventory scope as the sidebar.
 - If items exist, show a banner above the session list: “N tasks were
   interrupted by the restart”. Opening it shows a panel.
 - Each row shows the workspace label, a shortened session id, the last
   activity time, and an interruption badge. The current conversation is never
   switched.
+- If a scan is truncated, retain a notice and an explicit rescan action after
+  every visible row has been accepted. Do not automatically continue entries
+  that were omitted by the scan limit.
+- Availability, capability, workspace-scope, or client changes invalidate older
+  continuation callbacks. They cannot restore or overwrite a disabled or
+  newly reset panel.
 - A row's Continue submits that session; Continue all submits the rows that do
   not need tool confirmation, in batches of 10. Rows that come back `accepted`
   leave the panel; rows that come back `confirmation_required` stay with a

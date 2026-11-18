@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   DaemonClient,
   DaemonRestartRecoveryContinueResult,
@@ -71,6 +71,10 @@ export function RestartRecoveryPanel({
   const [scanFailures, setScanFailures] = useState<string[]>([]);
   const [scanNonce, setScanNonce] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
+  const [scanTruncated, setScanTruncated] = useState(false);
+  const requestEpoch = useRef(0);
+  const availabilityRef = useRef({ available, supported });
+  availabilityRef.current = { available, supported };
 
   const workspaceKey = useMemo(
     () => JSON.stringify([...workspaceCwds].sort()),
@@ -82,22 +86,22 @@ export function RestartRecoveryPanel({
   );
 
   useEffect(() => {
-    if (!available || !supported || requestWorkspaces.length === 0) {
-      setRows([]);
-      setLoadFailed(false);
-      setScanFailures([]);
-      setNotice(null);
-      setOpen(false);
-      return;
-    }
-    let cancelled = false;
+    requestEpoch.current += 1;
     setRows([]);
     setLoadFailed(false);
     setScanFailures([]);
     setNotice(null);
+    setScanTruncated(false);
+    setBusy(false);
+    if (!available || !supported || requestWorkspaces.length === 0) {
+      setOpen(false);
+      return;
+    }
+    let cancelled = false;
     void (async () => {
       const next: RestartRecoveryRow[] = [];
       const failed: string[] = [];
+      let truncated = false;
       try {
         for (
           let index = 0;
@@ -116,6 +120,7 @@ export function RestartRecoveryPanel({
               failed.push(member.workspace);
               continue;
             }
+            truncated ||= member.truncated;
             for (const item of member.items) {
               next.push({ ...item, workspace: member.cwd });
             }
@@ -127,6 +132,7 @@ export function RestartRecoveryPanel({
         );
         setRows(next);
         setScanFailures(failed);
+        setScanTruncated(truncated);
         setLoadFailed(failed.length > 0);
       } catch {
         if (!cancelled) setLoadFailed(true);
@@ -144,8 +150,19 @@ export function RestartRecoveryPanel({
       options: { clearNotice?: boolean } = {},
     ): Promise<boolean> => {
       if (targets.length === 0) return true;
+      const epoch = requestEpoch.current;
+      if (
+        !availabilityRef.current.available ||
+        !availabilityRef.current.supported
+      ) {
+        return false;
+      }
       setBusy(true);
       if (options.clearNotice !== false) setNotice(null);
+      const isCurrent = () =>
+        requestEpoch.current === epoch &&
+        availabilityRef.current.available &&
+        availabilityRef.current.supported;
       try {
         const result = await client.continueRestartRecoveries({
           sessions: targets.map((row) => ({
@@ -154,6 +171,7 @@ export function RestartRecoveryPanel({
           })),
           ...(confirmToolTurn ? { confirmToolTurn: true } : {}),
         });
+        if (!isCurrent()) return false;
         const notContinuable = result.results.find(
           (entry) => entry.status === 'not_continuable',
         );
@@ -207,10 +225,10 @@ export function RestartRecoveryPanel({
         }
         return true;
       } catch {
-        setNotice(t('restartRecovery.batchStopped'));
+        if (isCurrent()) setNotice(t('restartRecovery.batchStopped'));
         return false;
       } finally {
-        setBusy(false);
+        if (isCurrent()) setBusy(false);
       }
     },
     [client, t],
@@ -231,10 +249,13 @@ export function RestartRecoveryPanel({
     }
   }, [rows, runBatch]);
 
+  if (!available || !supported) return null;
+
   if (
     rows.length === 0 &&
     !loadFailed &&
     scanFailures.length === 0 &&
+    !scanTruncated &&
     notice === null
   ) {
     return null;
@@ -256,13 +277,16 @@ export function RestartRecoveryPanel({
               ? t('restartRecovery.loadFailed')
               : rows.length > 0
                 ? t('restartRecovery.title', { count: rows.length })
-                : ''}
+                : scanTruncated
+                  ? t('restartRecovery.truncated')
+                  : ''}
         </span>
         <div className="flex shrink-0 gap-1">
           {notice !== null &&
             rows.length === 0 &&
             !loadFailed &&
-            scanFailures.length === 0 && (
+            scanFailures.length === 0 &&
+            !scanTruncated && (
               <Button
                 type="button"
                 size="sm"
@@ -272,7 +296,7 @@ export function RestartRecoveryPanel({
                 {t('restartRecovery.hide')}
               </Button>
             )}
-          {(loadFailed || scanFailures.length > 0) && (
+          {(loadFailed || scanFailures.length > 0 || scanTruncated) && (
             <Button
               type="button"
               size="sm"
@@ -322,6 +346,12 @@ export function RestartRecoveryPanel({
       {notice && (
         <p className="mt-1 text-xs text-destructive" role="alert">
           {notice}
+        </p>
+      )}
+
+      {scanTruncated && rows.length > 0 && (
+        <p className="mt-1 text-xs text-muted-foreground">
+          {t('restartRecovery.truncated')}
         </p>
       )}
 

@@ -1237,6 +1237,8 @@ export const ZH_TW: Record<string, MessageValue> = {
     'Daemon 未回覆；先前的會話可能正在執行，請先確認會話狀態再重試。',
   'restartRecovery.loadFailed': '無法讀取中斷的任務',
   'restartRecovery.retry': '重試',
+  'restartRecovery.truncated':
+    '可能有更多被中斷的任務超出掃描上限，請重試掃描。',
   'restartRecovery.scanFailedWorkspaces': (v) =>
     `無法掃描：${v?.workspaces ?? ''}`,
   'session.archived': '該會話已歸檔',

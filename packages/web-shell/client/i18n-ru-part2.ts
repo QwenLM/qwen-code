@@ -354,6 +354,8 @@ export const RU_PART2: Record<
     'Нет ответа daemon. Предыдущие сессии могут уже выполняться; проверьте их состояние перед повторной попыткой.',
   'restartRecovery.loadFailed': 'Не удалось прочитать прерванные задачи',
   'restartRecovery.retry': 'Повторить',
+  'restartRecovery.truncated':
+    'Возможно, есть ещё прерванные задачи сверх лимита сканирования. Повторите сканирование.',
   'restartRecovery.scanFailedWorkspaces': (v) =>
     `Не удалось просканировать: ${v?.workspaces ?? ''}`,
   'session.archived': 'Этот разговор в архиве',
