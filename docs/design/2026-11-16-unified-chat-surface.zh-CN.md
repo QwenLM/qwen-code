@@ -270,7 +270,8 @@ capabilities 的既有能力风格。聊天面绝不在 `kind` 上分支：区�
 JSX 抽取——再加由 `statusFacts` 驱动的用量统计），以及面板插槽区。它接收
 控制器与插槽渲染器作为 props，不引入 `daemon/**`、`components/managed/**`
 或 `@qwen-code/sdk/daemon` 的任何内容。后端专属面板（daemon artifacts、
-managed 诊断/任务/恢复/终端）由所属页面以插槽传入。
+managed 诊断/任务/终端）由所属页面以插槽传入。Managed 恢复没有面板插槽：
+其裁决以对话消息呈现。
 
 ### 适配器
 

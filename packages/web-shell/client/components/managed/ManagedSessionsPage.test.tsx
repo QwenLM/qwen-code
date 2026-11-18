@@ -1479,6 +1479,11 @@ describe('ManagedSessionsPage', () => {
     };
     await render('s1');
     expect(container.querySelector('textarea')?.disabled).toBe(true);
+    // No verdict was ever published, so the disabled composer would otherwise
+    // have nothing on the page explaining it.
+    expect(messageErrorTexts()).toContain(
+      'The original Turn is being reconciled. New input will be available after its outcome is confirmed.',
+    );
     await act(async () => {
       await mocks.editorProps!.onSubmit('Another turn');
       await flush();
@@ -6220,6 +6225,344 @@ describe('ManagedSessionsPage', () => {
     ).toContain('Request discarded. The draft is back in the composer.');
   });
 
+  it('keeps focus inside the host page when a discard has no composer to focus', async () => {
+    provider = { ...provider, canCancel: false };
+    const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}:host:s1`;
+    sessionStorage.setItem(
+      key,
+      JSON.stringify({
+        idempotencyKey: 'host-pending',
+        sessionId: 's1',
+        text: 'Host request',
+      }),
+    );
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { capabilities: { canSend: false, canCancel: false } }),
+    );
+    await render('s1', 'en', provider, undefined, true, {
+      hostSessionOnly: true,
+    });
+    expect(messageErrorTexts()).toContain(
+      'The previous message was not confirmed as submitted. Retrying reuses the same request and will not run twice.',
+    );
+    await focusAndClickDiscard();
+    // Host mode renders no session-list nav, so the focus fallback must land on
+    // the page wrapper rather than dropping to <body>.
+    expect(document.activeElement).not.toBe(document.body);
+    expect(container.contains(document.activeElement)).toBe(true);
+  });
+
+  it('does not steal another session’s composer when a discard’s loading window ends', async () => {
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [summary('s1'), summary('s2')],
+    });
+    mocks.client.getSession.mockImplementation(
+      (_id: string) => new Promise<ManagedAgentSessionSummary>(() => {}),
+    );
+    seedPending({
+      idempotencyKey: 'key-1',
+      text: 'Session draft',
+      sessionId: 's1',
+    });
+    await render('s1');
+    // s1's summary never lands: the discard can only park focus on the list.
+    await focusAndClickDiscard();
+    expect(document.activeElement).toBe(container.querySelector('nav'));
+
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      summary(id),
+    );
+    await click('Task s2Completed');
+    await render('s2');
+    // The latch was armed by s1's discard: s2's composer becoming focusable
+    // must not pull focus into a session the user navigated to.
+    expect(container.querySelector('textarea')?.value).toBe('');
+    expect(document.activeElement).not.toBe(
+      container.querySelector('textarea'),
+    );
+  });
+
+  it('moves focus to the composer after a discard inside a shadow root with a host nav slot', async () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: 'open' });
+    const shadowContainer = document.createElement('div');
+    shadow.appendChild(shadowContainer);
+    const navigationTarget = document.createElement('nav');
+    document.body.appendChild(navigationTarget);
+    const shadowRoot = createRoot(shadowContainer);
+    try {
+      seedPending({
+        idempotencyKey: 'key-1',
+        text: 'Session draft',
+        sessionId: 's1',
+      });
+      await act(async () => {
+        shadowRoot.render(
+          <I18nProvider language="en">
+            <ManagedSessionsPage
+              sessionId="s1"
+              onSelectSession={onSelect}
+              managedAgentProvider={provider}
+              navigationTarget={navigationTarget}
+              interactive={true}
+            />
+          </I18nProvider>,
+        );
+        await flush();
+      });
+      const discard = [...shadowContainer.querySelectorAll('button')].find(
+        (item) => item.textContent === 'Discard this request',
+      );
+      expect(discard).toBeDefined();
+      discard!.focus();
+      await act(async () => {
+        discard!.click();
+        await flush();
+      });
+      // In Chromium the discard button's unmount leaves document.activeElement
+      // at body and shadow.activeElement null; the latch must treat that as
+      // unclaimed and land focus on the composer that just got the draft back,
+      // not drop the latch. jsdom keeps the detached button as the shadow
+      // root's activeElement, so assert only the outcome, not the browser's
+      // exact blur state.
+      expect(shadow.activeElement).toBe(
+        shadowContainer.querySelector('textarea'),
+      );
+      expect(shadowContainer.querySelector('textarea')?.value).toBe(
+        'Session draft',
+      );
+    } finally {
+      await act(async () => shadowRoot.unmount());
+      navigationTarget.remove();
+      host.remove();
+    }
+  });
+
+  it('leaves focus alone when the user moved on during a discard’s loading window', async () => {
+    let releaseSummary!: (value: ManagedAgentSessionSummary) => void;
+    mocks.client.getSession.mockImplementationOnce(
+      () =>
+        new Promise<ManagedAgentSessionSummary>((resolve) => {
+          releaseSummary = resolve;
+        }),
+    );
+    seedPending({
+      idempotencyKey: 'key-1',
+      text: 'Session draft',
+      sessionId: 's1',
+    });
+    await render('s1');
+    await focusAndClickDiscard();
+    expect(document.activeElement).toBe(container.querySelector('nav'));
+
+    // The user moves on to another control while the summary is still
+    // loading.
+    const refresh = [...container.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Refresh',
+    );
+    expect(refresh).toBeDefined();
+    await act(async () => {
+      refresh!.focus();
+      await flush();
+    });
+
+    await act(async () => {
+      releaseSummary(summary('s1'));
+      await flush();
+    });
+    // The composer is focusable again, but the latch died with the user's
+    // own focus move: it must not be stolen back.
+    expect(container.querySelector('textarea')?.disabled).toBe(false);
+    expect(document.activeElement).toBe(refresh);
+  });
+
+  it('leaves focus alone when the user moved on to a host-page control during a discard in a shadow root', async () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: 'open' });
+    const shadowContainer = document.createElement('div');
+    shadow.appendChild(shadowContainer);
+    const navigationTarget = document.createElement('nav');
+    document.body.appendChild(navigationTarget);
+    const hostButton = document.createElement('button');
+    hostButton.textContent = 'Host toolbar';
+    document.body.appendChild(hostButton);
+    const shadowRoot = createRoot(shadowContainer);
+    let releaseSummary!: (value: ManagedAgentSessionSummary) => void;
+    mocks.client.getSession.mockImplementationOnce(
+      () =>
+        new Promise<ManagedAgentSessionSummary>((resolve) => {
+          releaseSummary = resolve;
+        }),
+    );
+    try {
+      seedPending({
+        idempotencyKey: 'key-1',
+        text: 'Session draft',
+        sessionId: 's1',
+      });
+      await act(async () => {
+        shadowRoot.render(
+          <I18nProvider language="en">
+            <ManagedSessionsPage
+              sessionId="s1"
+              onSelectSession={onSelect}
+              managedAgentProvider={provider}
+              navigationTarget={navigationTarget}
+              interactive={true}
+            />
+          </I18nProvider>,
+        );
+        await flush();
+      });
+      const discard = [...shadowContainer.querySelectorAll('button')].find(
+        (item) => item.textContent === 'Discard this request',
+      );
+      expect(discard).toBeDefined();
+      discard!.focus();
+      await act(async () => {
+        discard!.click();
+        await flush();
+      });
+
+      // The user moves on to a control in the host page — outside the shadow
+      // root — while the summary is still loading.
+      await act(async () => {
+        hostButton.focus();
+        await flush();
+      });
+
+      await act(async () => {
+        releaseSummary(summary('s1'));
+        await flush();
+      });
+      // ShadowRoot.activeElement is null both for "nothing focused inside"
+      // and "focus outside the root"; the composer must not steal focus from
+      // a host-page element the user demonstrably moved to.
+      expect(shadowContainer.querySelector('textarea')?.disabled).toBe(false);
+      expect(shadow.activeElement).not.toBe(
+        shadowContainer.querySelector('textarea'),
+      );
+      expect(document.activeElement).toBe(hostButton);
+    } finally {
+      await act(async () => shadowRoot.unmount());
+      hostButton.remove();
+      navigationTarget.remove();
+      host.remove();
+    }
+  });
+
+  it('moves focus to the composer when a later summary lifts the send gate', async () => {
+    let releaseStream!: () => void;
+    mocks.client.getSession.mockImplementationOnce(async (id: string) =>
+      summary(id, { capabilities: { canSend: false, canCancel: false } }),
+    );
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      await new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      yield* [];
+    });
+    seedPending({
+      idempotencyKey: 'key-1',
+      text: 'Session draft',
+      sessionId: 's1',
+    });
+    await render('s1');
+    // The summary says the session cannot send: the discard parks focus on
+    // the session list, with the latch armed for as long as the gate can
+    // still lift.
+    await focusAndClickDiscard();
+    expect(document.activeElement).toBe(container.querySelector('nav'));
+
+    // The stream's clean pass delivers the summary that lifts the gate.
+    await act(async () => {
+      releaseStream();
+      await flush();
+    });
+    expect(container.querySelector('textarea')?.value).toBe('Session draft');
+    expect(document.activeElement).toBe(container.querySelector('textarea'));
+  });
+
+  it('leaves Ctrl+Y to the session search box instead of resubmitting', async () => {
+    provider = { ...provider, titleSearch: true };
+    seedPending({
+      idempotencyKey: 'key-1',
+      text: 'Session draft',
+      sessionId: 's1',
+    });
+    await render('s1');
+    const search = container.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    );
+    expect(search).not.toBeNull();
+    search!.focus();
+    await act(async () => {
+      search!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'y',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await flush();
+    });
+    // Ctrl+Y is redo in this field: firing the pending request from it would
+    // silently mutate the conversation while the user edits their search.
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    expect(mocks.client.createSession).not.toHaveBeenCalled();
+
+    // The composer itself still retries with the same chord.
+    const composer = container.querySelector('textarea')!;
+    composer.focus();
+    await act(async () => {
+      composer.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'y',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await flush();
+    });
+    expect(mocks.client.submitPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('says the recovery state could not be confirmed instead of showing a stale verdict as current', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: { canSend: false, canCancel: false },
+        recovery: {
+          state: 'awaiting_evidence',
+          reasonCode: 'input_unsettled',
+          turnId: 'p1',
+          nextTurnAllowed: false,
+          actions: {
+            recheck: true,
+            cancel: false,
+            continueInNewSession: true,
+          },
+        },
+      }),
+    );
+    provider = {
+      ...provider,
+      recovery: {
+        query: vi.fn().mockRejectedValue(new Error('503')),
+        recheck: vi.fn(),
+      },
+    };
+    await render('s1');
+    expect(messageErrorTexts()).toContain(
+      'The latest recovery state could not be confirmed. Existing restrictions remain in effect.',
+    );
+    // A recovery read failure is not a request the user can retry away.
+    expect(messageErrors().some((message) => message.retryable)).toBe(false);
+  });
+
   it('offers discard on the binding creation page that renders no transcript', async () => {
     const bindingProvider = {
       ...provider,
@@ -6239,6 +6582,87 @@ describe('ManagedSessionsPage', () => {
 
     expect(document.activeElement).not.toBe(document.body);
     expect(document.activeElement).toBe(container.querySelector('nav'));
+  });
+
+  it('explains the unconfirmed prompt beside the binding page actions and keeps the draft', async () => {
+    const workspace = {
+      workspaceId: 'ws-a',
+      displayName: 'Project A',
+      state: 'active',
+      canCreateSession: true,
+      defaultCwdRelative: '.',
+    };
+    const createSession = vi
+      .fn()
+      .mockRejectedValue(new TypeError('Network failed'));
+    provider = {
+      ...provider,
+      workspaceBinding: {
+        agentId: 'agent-a',
+        list: vi.fn().mockResolvedValue({ data: [workspace], supported: true }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+        createSession,
+      },
+    } as unknown as ManagedAgentProvider;
+    seedPending({ idempotencyKey: 'key-1', text: 'Bind this draft' });
+    await render();
+    const notice = container.querySelector('[data-managed-unconfirmed]');
+    expect(notice).not.toBeNull();
+    // A bare button would leave the user guessing what is unconfirmed and
+    // that retry exists at all.
+    expect(notice!.textContent).toContain(
+      'The previous message was not confirmed as submitted',
+    );
+    expect(
+      [...notice!.querySelectorAll('button')].map((item) => item.textContent),
+    ).toEqual(['Retry the same request', 'Discard this request']);
+
+    await focusAndClickDiscard();
+
+    expect(container.querySelector('[data-managed-unconfirmed]')).toBeNull();
+    // The creator's editor is the only one mounted here: the draft has to
+    // land in it, not in a page composer that does not exist.
+    expect(mocks.editorProps?.composerScopeKey).toBe(
+      'managed:http://managed-test:new',
+    );
+    expect(container.querySelector('textarea')?.value).toBe('Bind this draft');
+    expect(container.querySelector('textarea')?.disabled).toBe(false);
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps the durable pending record when its discard cannot be persisted', async () => {
+    const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
+    seedPending({
+      idempotencyKey: 'key-1',
+      text: 'Only durable copy',
+      sessionId: 's1',
+    });
+    const stored = sessionStorage.getItem(key);
+    const setItem = vi
+      .spyOn(Storage.prototype, 'setItem')
+      .mockImplementation(() => {
+        throw new Error('quota');
+      });
+    const removeItem = vi
+      .spyOn(Storage.prototype, 'removeItem')
+      .mockImplementation(() => {
+        throw new Error('quota');
+      });
+    try {
+      await render('s1');
+      await focusAndClickDiscard();
+      // Clearing the in-memory record alone would destroy the only durable
+      // copy while telling the user the draft is back.
+      expect(sessionStorage.getItem(key)).toBe(stored);
+      expect(container.querySelector('textarea')?.disabled).toBe(true);
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+        'Could not discard this request',
+      );
+    } finally {
+      setItem.mockRestore();
+      removeItem.mockRestore();
+    }
   });
 
   it('reports an export failure for another Session without blaming this conversation', async () => {
@@ -6281,6 +6705,50 @@ describe('ManagedSessionsPage', () => {
         'no longer available',
       );
       expect(messageErrorTexts()).toEqual([]);
+    } finally {
+      slot.remove();
+    }
+  });
+
+  it('reports another Session’s export failure while the page is not interactive', async () => {
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [summary('s1'), summary('s2')],
+    });
+    provider = {
+      ...provider,
+      exportSnapshot: vi
+        .fn()
+        .mockRejectedValue(new Error('invalid_export_snapshot')),
+    };
+    const slot = document.createElement('aside');
+    document.body.appendChild(slot);
+    try {
+      // A side panel keeps the sidebar mounted with interactive=false; neither
+      // the owner-filtered list channel nor an interactive-gated alert would
+      // show this refusal.
+      await render('s1', 'en', provider, slot, false);
+      const triggers = slot.querySelectorAll<HTMLButtonElement>(
+        'button[aria-haspopup="menu"]',
+      );
+      expect(triggers.length).toBeGreaterThan(1);
+      await act(async () => {
+        triggers[1]!.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        );
+      });
+      const exportItem = [
+        ...document.querySelectorAll('[role="menuitem"]'),
+      ].find((item) =>
+        item.textContent?.includes('Export HTML'),
+      ) as HTMLElement;
+      expect(exportItem).toBeDefined();
+      await act(async () => {
+        exportItem.click();
+        await flush();
+      });
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+        'no longer available',
+      );
     } finally {
       slot.remove();
     }

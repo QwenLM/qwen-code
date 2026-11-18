@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import type {
   ManagedAgentProvider,
   ManagedAgentSessionSummary,
@@ -22,8 +21,6 @@ export function useManagedRecovery(
     key: string;
     value?: ManagedSessionRecovery;
     error?: string;
-    errorCode?: string;
-    busy?: boolean;
   }>({ key });
   const [pending, setPending] = useState(false);
   const lifetime = useRef<AbortController | undefined>(undefined);
@@ -59,16 +56,21 @@ export function useManagedRecovery(
   const publish = useCallback(
     (next?: ManagedSessionRecovery) => {
       const previous = currentValue.current;
-      if (previous === next) return previous;
-      stableReads.current =
-        previous?.state === next?.state &&
-        previous?.reasonCode === next?.reasonCode
-          ? stableReads.current + 1
-          : 0;
+      if (previous !== next) {
+        stableReads.current =
+          previous?.state === next?.state &&
+          previous?.reasonCode === next?.reasonCode
+            ? stableReads.current + 1
+            : 0;
+      }
       currentValue.current = next;
       setSnapshot((current) => ({
         ...(current.key === key ? current : { key }),
         value: next,
+        // A confirmed read supersedes an earlier failed one: keeping the
+        // failure would report a stale refusal for the rest of the Session,
+        // even when the verdict itself did not change.
+        error: undefined,
       }));
       return previous;
     },
@@ -153,8 +155,6 @@ export function useManagedRecovery(
         setSnapshot((current) => ({
           ...(current.key === key ? current : { key }),
           error: String(error),
-          errorCode:
-            error instanceof JavaManagedAgentHttpError ? error.code : undefined,
         }));
     }
   }, [accept, publish, provider, clientId, sessionId, key]);
@@ -200,56 +200,6 @@ export function useManagedRecovery(
     };
   }, [interactive, provider, read, pollRecovery]);
 
-  async function recheck() {
-    const api = provider.recovery;
-    const abort = lifetime.current;
-    if (
-      !api ||
-      !sessionId ||
-      !value?.turnId ||
-      !value.actions.recheck ||
-      !abort ||
-      abort.signal.aborted ||
-      snapshot.busy
-    )
-      return;
-    setSnapshot((current) => ({
-      ...(current.key === key ? current : { key }),
-      busy: true,
-      error: undefined,
-      errorCode: undefined,
-    }));
-    try {
-      const next = await api.recheck(sessionId, value.turnId, {
-        clientId,
-        signal: abort.signal,
-      });
-      if (abort.signal.aborted) return;
-      suppressed.current = { count: 0 };
-      setPending(false);
-      publish(next);
-      setSnapshot((current) => ({
-        ...(current.key === key ? current : { key }),
-        busy: false,
-      }));
-      await refreshRef.current();
-    } catch (error) {
-      if (abort.signal.aborted) return;
-      setSnapshot((current) => ({
-        ...(current.key === key ? current : { key }),
-        busy: false,
-        error: String(error),
-        errorCode:
-          error instanceof JavaManagedAgentHttpError ? error.code : undefined,
-      }));
-      if (
-        error instanceof JavaManagedAgentHttpError &&
-        error.code === 'recovery_target_changed'
-      )
-        await refreshRef.current()?.catch(() => undefined);
-    }
-  }
-
   const summaryVerdict = summary?.recovery;
   const valueDiffersFromSummary =
     value !== undefined &&
@@ -266,9 +216,6 @@ export function useManagedRecovery(
       pending || valueDiffersFromSummary
         ? (trustedCanSend.current ?? trustedCanSendDefault)
         : undefined,
-    busy: snapshot.key === key && snapshot.busy === true,
     error: snapshot.key === key ? snapshot.error : undefined,
-    errorCode: snapshot.key === key ? snapshot.errorCode : undefined,
-    recheck,
   };
 }

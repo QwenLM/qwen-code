@@ -632,8 +632,7 @@ function ManagedSessionsContent({
   // page-level alert instead of posing as a failed turn in this Session. A
   // page failure has no owning conversation — exporting another Session from
   // the sidebar must still report it here.
-  const pageError =
-    interactive && raisedError?.pageLevel ? raisedError.message : undefined;
+  const pageError = raisedError?.pageLevel ? raisedError.message : undefined;
   const [discarded, setDiscarded] = useState(false);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
@@ -865,6 +864,15 @@ function ManagedSessionsContent({
             : `managed.recovery.explanation.${recovery.value.state}`,
         )
       : undefined;
+  // A failed recovery read leaves the last verdict standing, so say that it
+  // could not be confirmed rather than letting it read as current. A held
+  // first miss has no published verdict at all: without this the composer is
+  // disabled with nothing on the page explaining why.
+  const recoveryNotice = recovery.error
+    ? recoveryText('managed.recovery.requestFailed')
+    : interactive && sendsBlocked && recovery.value === undefined
+      ? recoveryText('managed.recovery.explanation.recovering')
+      : undefined;
   const messages = useMemo<Message[]>(() => {
     // Only the unconfirmed request itself can be retried. A transcript read
     // failure or a recovery verdict describes a different condition, and
@@ -880,6 +888,7 @@ function ManagedSessionsContent({
           requestFailure,
           failureMessage,
           recoveryError,
+          recoveryNotice,
         ].filter((message): message is string => Boolean(message)),
       ),
     ];
@@ -912,6 +921,7 @@ function ManagedSessionsContent({
     requestError,
     failureMessage,
     recoveryError,
+    recoveryNotice,
     sessionId,
     pendingHere,
     busy,
@@ -1039,7 +1049,7 @@ function ManagedSessionsContent({
   // re-run a guard that can only early-return, and wrapping either in
   // useCallback would change when their large closures are captured.
   const submitRef = useRef<() => void>(() => {});
-  const discardPendingRef = useRef<() => void>(() => {});
+  const discardPendingRef = useRef<() => Promise<boolean>>(async () => false);
   // MessageItem compares this prop by identity, so an inline arrow would
   // re-render every visible message row on each page render.
   const retryMessage = useCallback(() => void submitRef.current(), []);
@@ -1047,9 +1057,10 @@ function ManagedSessionsContent({
   // only copy of the draft. Discard sits with the failure it resolves. The ref
   // keeps this identity stable for the message-list memo.
   const discardMessage = useCallback(() => discardPendingRef.current(), []);
+  const discardPendingHere = !sessionId && pendingHere && !busy;
   const discardAction =
     pendingHere && !busy ? (
-      <Button variant="ghost" size="sm" onClick={discardMessage}>
+      <Button variant="ghost" size="sm" onClick={() => void discardMessage()}>
         {t('managed.discard')}
       </Button>
     ) : undefined;
@@ -1075,9 +1086,20 @@ function ManagedSessionsContent({
       )
         return;
       const target = event.composedPath()[0];
+      // Ctrl+Y is redo in the page's other editable controls (session search,
+      // workspace-creation fields) and yank in shell keymaps. Only the
+      // composer's own retry is intended, so an editable target outside it
+      // keeps its native binding.
+      const editableElsewhere =
+        target instanceof Element &&
+        target.closest(
+          'input, textarea, [contenteditable="true"], [data-web-terminal]',
+        ) !== null &&
+        !composerContainerRef.current?.contains(target);
       if (
         !(target instanceof Node) ||
         (target !== document.body && !pageRef.current?.contains(target)) ||
+        editableElsewhere ||
         (target instanceof Element &&
           target.closest('[role="dialog"], [role="alertdialog"]'))
       )
@@ -1100,7 +1122,7 @@ function ManagedSessionsContent({
       return;
     pendingElsewhereIntent.current = undefined;
     if (intent.action === 'retry') void submitRef.current();
-    else discardPendingRef.current();
+    else void discardPendingRef.current();
   }, [busy, pendingHere, sessionId]);
 
   // The Discard button unmounts itself, dropping focus to <body>: land it on
@@ -1820,14 +1842,21 @@ function ManagedSessionsContent({
     };
     openPendingOwner(current);
   }
-  function discardPending() {
+  // 放弃的是一条无法确认的发送意图，不是已经落库的消息；恢复到原会话
+  // 输入框后继续编辑，避免用户丢失唯一一份草稿。持久记录先清除成功才放手：
+  // 清除失败时它是唯一一份持久副本，不能只清掉内存里的状态。
+  async function discardPending(): Promise<boolean> {
     const current = pendingRef.current;
-    if (!current || current.sessionId !== sessionId) return;
-    // 放弃的是一条无法确认的发送意图，不是已经落库的消息；恢复到原会话
-    // 输入框后继续编辑，避免用户丢失唯一一份草稿。
+    if (!current || current.sessionId !== sessionId) return false;
+    const abort = lifetime.current;
+    if (!(await persistPending(pendingKey, undefined))) {
+      if (!abort?.signal.aborted)
+        setError(t('managed.pendingDiscardFailed'), true);
+      return false;
+    }
+    if (abort?.signal.aborted) return false;
     pendingRef.current = undefined;
     setPending(undefined);
-    void persistPending(pendingKey, undefined);
     setText(current.text);
     composerRef.current?.setText(current.text);
     restoreManagedAttachments(composerRef.current, current.input);
@@ -1838,6 +1867,7 @@ function ManagedSessionsContent({
     if (current.sessionId === undefined) setListRevision((value) => value + 1);
     focusComposer.current = { sessionId };
     setDiscarded(true);
+    return true;
   }
 
   discardPendingRef.current = discardPending;
@@ -2452,43 +2482,49 @@ function ManagedSessionsContent({
           )}
           {provider.workspaceBinding &&
             (!sessionId || workspaceCreationOpen) && (
-              <>
-                {/* The binding creator replaces the transcript, so the
-                    conversation's discard slot is not rendered here. */}
-                {!sessionId && discardAction}
-                <WorkspaceBindingCreator
-                  key={!sessionId ? 'new' : 'workspace'}
-                  provider={provider}
-                  workspaceCreationOpen={workspaceCreationOpen}
-                  onWorkspaceCreationOpenChange={onWorkspaceCreationOpenChange}
-                  onOpenLocalWorkspace={onOpenLocalWorkspace}
-                  daemonWorkspaces={daemonWorkspaces}
-                  onSelectDaemonWorkspace={onSelectDaemonWorkspace}
-                  creationOnly={Boolean(sessionId)}
-                  clientId={clientId}
-                  workspaceId={workspaceId}
-                  onSelectWorkspace={
-                    !sessionId
-                      ? (onSessionWorkspaceChange ?? onSelectWorkspace)
-                      : undefined
-                  }
-                  interactive={interactive}
-                  creationSkills={creationSkills}
-                  onWorkspaceCreated={(id) => {
-                    setWorkspaceRevision((current) => current + 1);
-                    onWorkspaceCreated?.(id);
-                  }}
-                  onCreated={(createdId, createdWorkspaceId) => {
-                    setListRevision((current) => current + 1);
-                    onSelectSession(createdId, createdWorkspaceId);
-                  }}
-                  onAbandoned={() => setListRevision((current) => current + 1)}
-                  renderWelcomeHeader={renderWelcomeHeader}
-                  renderWelcomeFooter={renderWelcomeFooter}
-                  renderComposerFooter={CustomComposerFooter}
-                  alignManagedChatWithHost={alignManagedChatWithHost}
-                />
-              </>
+              <WorkspaceBindingCreator
+                key={!sessionId ? 'new' : 'workspace'}
+                provider={provider}
+                workspaceCreationOpen={workspaceCreationOpen}
+                onWorkspaceCreationOpenChange={onWorkspaceCreationOpenChange}
+                onOpenLocalWorkspace={onOpenLocalWorkspace}
+                daemonWorkspaces={daemonWorkspaces}
+                onSelectDaemonWorkspace={onSelectDaemonWorkspace}
+                creationOnly={Boolean(sessionId)}
+                clientId={clientId}
+                workspaceId={workspaceId}
+                onSelectWorkspace={
+                  !sessionId
+                    ? (onSessionWorkspaceChange ?? onSelectWorkspace)
+                    : undefined
+                }
+                interactive={interactive}
+                creationSkills={creationSkills}
+                onWorkspaceCreated={(id) => {
+                  setWorkspaceRevision((current) => current + 1);
+                  onWorkspaceCreated?.(id);
+                }}
+                onCreated={(createdId, createdWorkspaceId) => {
+                  setListRevision((current) => current + 1);
+                  onSelectSession(createdId, createdWorkspaceId);
+                }}
+                onAbandoned={() => setListRevision((current) => current + 1)}
+                unconfirmed={
+                  discardPendingHere
+                    ? { text: pendingHere.text, input: pendingHere.input }
+                    : undefined
+                }
+                onUnconfirmedRetry={
+                  discardPendingHere ? retryMessage : undefined
+                }
+                onUnconfirmedDiscard={
+                  discardPendingHere ? discardMessage : undefined
+                }
+                renderWelcomeHeader={renderWelcomeHeader}
+                renderWelcomeFooter={renderWelcomeFooter}
+                renderComposerFooter={CustomComposerFooter}
+                alignManagedChatWithHost={alignManagedChatWithHost}
+              />
             )}
           {latestSuccessfulTodos !== undefined &&
             latestSuccessfulTodos.length > 0 && (

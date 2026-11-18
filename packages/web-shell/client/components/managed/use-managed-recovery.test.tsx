@@ -7,7 +7,6 @@ import type {
   ManagedAgentSessionSummary,
   ManagedSessionRecovery,
 } from './managed-agent-provider';
-import { JavaManagedAgentHttpError } from './java-managed-agent-client';
 import { useManagedRecovery } from './use-managed-recovery';
 
 describe('useManagedRecovery', () => {
@@ -79,7 +78,7 @@ describe('useManagedRecovery', () => {
     vi.useRealTimers();
   });
 
-  it('polls every five seconds while visible and rechecks only the original Turn', async () => {
+  it('polls every five seconds while visible and stops when inactive', async () => {
     await render();
     expect(provider.recovery!.query).toHaveBeenCalledTimes(1);
     await tick();
@@ -88,14 +87,7 @@ describe('useManagedRecovery', () => {
       ...blocked,
       state: 'recovering',
     });
-    await act(async () => {
-      await current.recheck();
-    });
-    expect(provider.recovery!.recheck).toHaveBeenCalledWith(
-      's1',
-      't1',
-      expect.anything(),
-    );
+    await tick();
     expect(current.value?.state).toBe('recovering');
     interactive = false;
     await render();
@@ -119,6 +111,19 @@ describe('useManagedRecovery', () => {
     await tick();
     expect(current.value?.state).toBe('ready');
     expect(refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears a failed read once a later read confirms the same verdict', async () => {
+    vi.mocked(provider.recovery!.query).mockRejectedValueOnce(
+      new Error('unreadable'),
+    );
+    await render();
+    expect(current.error).toContain('unreadable');
+    // The verdict is unchanged, so only the failure has to go: a latched
+    // refusal would report a stale error for the rest of the Session.
+    await tick();
+    expect(current.value?.state).toBe('awaiting_evidence');
+    expect(current.error).toBeUndefined();
   });
 
   it('does not install stale evidence for a different Turn', async () => {
@@ -260,50 +265,6 @@ describe('useManagedRecovery', () => {
     expect(provider.recovery!.query).toHaveBeenCalledTimes(afterSwitch + 1);
   });
 
-  it('keeps the recheck state while a summary refresh lands', async () => {
-    vi.mocked(provider.recovery!.recheck).mockReturnValue(
-      new Promise<never>(() => undefined),
-    );
-    await render();
-    await act(async () => {
-      void current.recheck();
-    });
-    expect(current.busy).toBe(true);
-    summary = { ...summary, recovery: { ...blocked } };
-    await render();
-    expect(current.busy).toBe(true);
-  });
-
-  it('keeps the recheck refusal while a summary refresh lands', async () => {
-    vi.mocked(provider.recovery!.recheck).mockRejectedValueOnce(
-      new JavaManagedAgentHttpError(
-        409,
-        'recovery_recheck_unavailable',
-        'no work',
-      ),
-    );
-    await render();
-    await act(async () => {
-      await current.recheck();
-    });
-    expect(current.errorCode).toBe('recovery_recheck_unavailable');
-    summary = { ...summary, recovery: { ...blocked } };
-    await render();
-    expect(current.errorCode).toBe('recovery_recheck_unavailable');
-  });
-
-  it('re-reads the summary when recheck reports a changed target', async () => {
-    vi.mocked(provider.recovery!.recheck).mockRejectedValueOnce(
-      new JavaManagedAgentHttpError(409, 'recovery_target_changed', 'moved'),
-    );
-    await render();
-    await act(async () => {
-      await current.recheck();
-    });
-    expect(current.errorCode).toBe('recovery_target_changed');
-    expect(refresh).toHaveBeenCalledTimes(1);
-  });
-
   it('stops polling once the Session is terminal', async () => {
     summary.recovery = {
       ...blocked,
@@ -315,20 +276,5 @@ describe('useManagedRecovery', () => {
     expect(provider.recovery!.query).not.toHaveBeenCalled();
     await tick();
     expect(provider.recovery!.query).not.toHaveBeenCalled();
-  });
-
-  it('surfaces the recheck refusal code', async () => {
-    vi.mocked(provider.recovery!.recheck).mockRejectedValueOnce(
-      new JavaManagedAgentHttpError(
-        409,
-        'recovery_recheck_unavailable',
-        'no work',
-      ),
-    );
-    await render();
-    await act(async () => {
-      await current.recheck();
-    });
-    expect(current.errorCode).toBe('recovery_recheck_unavailable');
   });
 });

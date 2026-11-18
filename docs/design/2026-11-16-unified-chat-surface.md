@@ -310,8 +310,8 @@ slice 2 extracts from the inline JSX currently duplicated in `App.tsx` and
 region. It takes the controller and slot renderers as props and imports
 nothing from `daemon/**`, `components/managed/**`, or
 `@qwen-code/sdk/daemon`. Backend-specific panels (daemon artifacts, managed
-diagnostics/tasks/recovery/terminal) are passed in as slots by the owning
-page.
+diagnostics/tasks/terminal) are passed in as slots by the owning page. Managed
+recovery has no panel slot: its verdict renders as a conversation message.
 
 ### Adapters
 
