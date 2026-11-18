@@ -20,6 +20,15 @@ export const HOSTED_COLD_OPEN_LIMIT = 8;
 export const HOSTED_SUSPEND_WORK_WAIT_MS = 30_000;
 /** Teardown retries (backoff + jitter) before operator recovery. */
 export const HOSTED_SUSPEND_TEARDOWN_RETRY_CAP = 5;
+/**
+ * Bounded post-cap reconciliation wait before the gate auto-clears. Must
+ * exceed the writer lease (60s) plus the Store request timeout (30s) so the
+ * lease has expired and no in-flight seal from the capped attempt remains;
+ * after it, any acquire bumps the generation and fences the old seal, so the
+ * next load cold-opens safely without an operator (design open question 8).
+ * A candidate, validated against the real Store timeout before enablement.
+ */
+export const HOSTED_SUSPEND_RECONCILE_MS = 65_000;
 const JITTER_FRACTION = 0.1;
 const WORK_POLL_MS = 25;
 

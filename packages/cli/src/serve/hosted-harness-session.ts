@@ -355,6 +355,7 @@ import {
 import {
   HOSTED_COLD_OPEN_LIMIT,
   HOSTED_IDLE_SUSPEND_MS,
+  HOSTED_SUSPEND_RECONCILE_MS,
   admitSuspensionWork,
   armIdleSuspension,
   beginSuspensionClose,
@@ -4615,6 +4616,7 @@ export function registerHostedHarnessSessionRoutes(
     idleSuspendMs?: number;
     suspendRetryBaseMs?: number;
     suspendRetryCap?: number;
+    suspendReconcileMs?: number;
     coldOpenLimit?: number;
   },
 ): {
@@ -4626,6 +4628,7 @@ export function registerHostedHarnessSessionRoutes(
     revertedAttempts: number;
     eligibilityFailures: number;
     blockedTeardowns: number;
+    reconciledGates: number;
     openBusyRefusals: number;
     coldOpens: number;
     coldOpenTotalMs: number;
@@ -4682,6 +4685,7 @@ export function registerHostedHarnessSessionRoutes(
     revertedAttempts: 0,
     eligibilityFailures: 0,
     blockedTeardowns: 0,
+    reconciledGates: 0,
     openBusyRefusals: 0,
     coldOpens: 0,
     coldOpenTotalMs: 0,
@@ -5115,11 +5119,32 @@ export function registerHostedHarnessSessionRoutes(
       // seal reconciliation.
       for (const stop of session.streams) stop();
       void session.managed.stopRenewal().catch(() => undefined);
+      // Bounded automatic recovery (design open question 8): renewal is
+      // stopped and no further seal attempt is made, so once the writer
+      // lease expires and the capped attempt's in-flight request times out,
+      // any acquire bumps the generation and fences the old seal. The gate
+      // therefore auto-clears after that bound and the next load cold-opens
+      // safely; an operator is needed only if the Store stays unreachable,
+      // which surfaces as the load's own transient Store failure. The gate
+      // stays blocked (refusing loads) during the wait.
+      const reconcileMs =
+        options?.suspendReconcileMs ?? HOSTED_SUSPEND_RECONCILE_MS;
       writeStderrLineSafe(
-        `qwen serve: Hosted Session ${sessionId} teardown needs operator recovery` +
+        `qwen serve: Hosted Session ${sessionId} teardown uncertain` +
           ` afterMs=${Date.now() - attemptStart} attempts=${suspension.teardownAttempts}` +
-          ` reason=${String(lastTeardownError)}`,
+          ` reason=${String(lastTeardownError)}; gate auto-clears in ${reconcileMs}ms`,
       );
+      const reconcileTimer = setTimeout(() => {
+        const entry = suspensions.get(sessionId);
+        if (entry === suspension && entry.gate === 'blocked') {
+          suspensions.delete(sessionId);
+          suspensionStats.reconciledGates += 1;
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${sessionId} suspension gate reconciled; next load cold-opens.`,
+          );
+        }
+      }, reconcileMs);
+      reconcileTimer.unref?.();
     }
   };
 
