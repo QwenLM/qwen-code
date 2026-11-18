@@ -129,8 +129,9 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_148_100;
 // The restart recovery inbox (#17677: panel copy and state strings across
 // three locales) measures 2,145,251 bytes on the merged 0c28638cc7 tree;
 // combined with the Generic Webhook copy the merged 9de5d9a311 tree measures
-// 2,147,405, 1,295 above the previous 2,146,100 ceiling. The warning sits 695
-// above that measurement and the ceiling 1,695 above it.
+// 2,147,405, 1,295 above the previous 2,146,100 ceiling. Main 3d75b8ee60
+// measures 2,147,740, so the warning sits 360 above that measurement and the
+// ceiling 1,360 above it.
 const MAX_DOCUMENT_RUNTIME_BYTES = 2_149_100;
 
 // Modules that must not be reachable from the document entry, checked against
