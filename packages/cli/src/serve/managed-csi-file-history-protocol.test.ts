@@ -102,6 +102,32 @@ describe.each(['posix', 'win32'] as const)(
         }
       },
     );
+    it.each(
+      fixture.snapshotCwdCases.filter(
+        ({ cwd }) =>
+          typeof cwd === 'string' &&
+          [...cwd].some(
+            (char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127,
+          ),
+      ),
+    )(
+      'rejects control-bearing cwd through the existing error kind',
+      ({ cwd }) => {
+        const observation = readCsiFileHistoryObservation(
+          fixture.valid.find((entry) => entry.name === 'snapshot-cwd')!
+            .observation,
+          owner,
+        );
+        Object.assign(observation.state.snapshots[0], { cwd });
+        expect(() => readCsiFileHistoryObservation(observation, owner)).toThrow(
+          expect.objectContaining({
+            name: 'ManagedToolProtocolError',
+            code: 'managed_tool_invalid_request',
+            message: 'Managed Tool invocation data is invalid.',
+          }),
+        );
+      },
+    );
     it.each([
       'C:\\workspace',
       'C:\\',

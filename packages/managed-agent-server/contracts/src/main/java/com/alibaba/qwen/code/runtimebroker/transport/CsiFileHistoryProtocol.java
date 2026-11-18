@@ -157,7 +157,8 @@ public final class CsiFileHistoryProtocol {
 
     /** CSI origins use canonical POSIX syntax, regardless of the reader host. */
     private static void posixSnapshotOrigin(String value) {
-        require(value.startsWith("/") && value.indexOf('\0') < 0 && !value.contains("//"));
+        require(value.startsWith("/") && value.indexOf('\0') < 0 && !value.contains("//")
+                && value.codePoints().noneMatch(c -> c < 32 || c == 127));
         for (String segment : value.split("/")) {
             require(!".".equals(segment) && !"..".equals(segment));
         }

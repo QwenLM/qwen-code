@@ -13,7 +13,10 @@ import {
   parseManagedToolFileHistoryPromptId,
   parseManagedToolFileHistoryState,
 } from './managed-tool-file-history-protocol.js';
-import { managedToolDigest } from './managed-tool-protocol.js';
+import {
+  managedToolDigest,
+  ManagedToolProtocolError,
+} from './managed-tool-protocol.js';
 import type { Config } from '../config/config.js';
 
 vi.mock('node:path', async (importOriginal) => ({
@@ -345,7 +348,7 @@ describe('managed file history protocol', () => {
         ['POSIX root', '/'],
         ['POSIX trailing separator', '/workspace/'],
         ['POSIX filename characters', '/workspace/[notes] 项目'],
-        ['POSIX escapes', '/workspace/a\\b"c\nd'],
+        ['POSIX escapes', '/workspace/a\\b"cd'],
         ['Win32 drive', 'C:\\workspace'],
         ['Win32 drive root', 'C:\\'],
         ['Win32 trailing separator', 'C:\\workspace\\'],
@@ -398,6 +401,47 @@ describe('managed file history protocol', () => {
           parseManagedToolFileHistoryBinding({ ...nativeBinding, snapshots }),
         ).toThrow();
       });
+
+      it.each(
+        [...Array.from({ length: 32 }, (_, code) => code), 127].flatMap(
+          (code) => ['posix', 'win32'].map((origin) => ({ code, origin })),
+        ),
+      )(
+        'rejects snapshot cwd control $code in $origin origins without echoing it',
+        ({ code, origin }) => {
+          const control = String.fromCharCode(code);
+          const root = origin === 'posix' ? '/' : 'C:\\';
+          for (const body of [
+            `${control}workspace`,
+            `work${control}space`,
+            `workspace${control}`,
+          ]) {
+            const snapshots = [{ ...snapshot, cwd: root + body }];
+            for (const parse of [
+              () =>
+                parseManagedToolFileHistoryState({
+                  ownerSessionId,
+                  revision: 1,
+                  snapshots,
+                }),
+              () =>
+                parseManagedToolFileHistoryBinding({
+                  ...nativeBinding,
+                  snapshots,
+                }),
+            ]) {
+              expect(parse).toThrow(
+                expect.objectContaining({
+                  name: 'ManagedToolProtocolError',
+                  code: 'managed_tool_invalid_request',
+                  message: 'Managed Tool invocation data is invalid.',
+                }),
+              );
+              expect(parse).toThrow(ManagedToolProtocolError);
+            }
+          }
+        },
+      );
 
       it('preserves legacy omission and keeps execution paths native', () => {
         expect(parseManagedToolFileHistoryBinding(nativeBinding)).toEqual(

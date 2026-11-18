@@ -202,6 +202,9 @@ function snapshots(value: unknown): SerializedFileHistorySnapshot[] {
 function snapshotOrigin(value: unknown): string {
   const result = text(value, 4096);
   if (
+    [...result].some(
+      (char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127,
+    ) ||
     ![path.posix, path.win32].some(
       (grammar) =>
         grammar.isAbsolute(result) && grammar.normalize(result) === result,
