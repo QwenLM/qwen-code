@@ -1127,7 +1127,7 @@ function findOperatorBoundaries(
     if (inSingle) {
       continue;
     }
-    if (ch === '`') {
+    if (includeGroups && ch === '`') {
       inBacktick = true;
       continue;
     }
@@ -1144,7 +1144,7 @@ function findOperatorBoundaries(
       includeGroups &&
       (parameterDepth > 0 || (ch === '{' && command[i - 1] === '$'))
     ) {
-      if (ch === '{') parameterDepth++;
+      if (ch === '{' && command[i - 1] === '$') parameterDepth++;
       else if (ch === '}') parameterDepth--;
       continue;
     }
@@ -1163,6 +1163,16 @@ function findOperatorBoundaries(
     }
 
     if (includeGroups && wordParenDepth > 0) {
+      if (
+        ch === '#' &&
+        i - 1 !== lastWordParenClose &&
+        (i === 0 || /[ \t\n;&|()]/.test(command[i - 1]!))
+      ) {
+        const newline = command.indexOf('\n', i);
+        if (newline === -1) break;
+        i = newline - 1;
+        continue;
+      }
       if (ch === '(') wordParenDepth++;
       else if (ch === ')') {
         wordParenDepth--;

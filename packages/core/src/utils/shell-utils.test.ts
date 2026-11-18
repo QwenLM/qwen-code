@@ -1123,6 +1123,15 @@ describe('normalizeMonitorCommand', () => {
       strippedTrailingAmp: false,
     });
   });
+
+  it('does not execute a quoted wrapper positional argument as a payload', () => {
+    const command = 'bash -c "echo $X" ignored';
+    expectNormalized(
+      command,
+      'echo $X',
+      'echo $X ignored\nbash -c "echo $X" ignored',
+    );
+  });
 });
 
 describe('escapeShellArg', () => {

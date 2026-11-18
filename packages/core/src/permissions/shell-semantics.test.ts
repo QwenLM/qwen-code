@@ -621,7 +621,10 @@ describe('extractShellOperations', () => {
     ['cat <&-2', [read(`${CWD}/&-2`)]],
     [
       'tee >&-$HOME/.bashrc',
-      [{ ...write(`${CWD}/&-$HOME/.bashrc`), pathUnknown: true }],
+      sorted([
+        { ...write(`${CWD}/&-$HOME/.bashrc`), pathUnknown: true },
+        { ...write(`${CWD}/$HOME/.bashrc`), pathUnknown: true },
+      ]),
     ],
     [
       'tee >&-{a,b}',
@@ -1032,6 +1035,94 @@ describe('extractShellOperationsAcrossCommand', () => {
     ).toEqual([uncertainWrite('/repo/settings.json')]);
   });
 
+  it('keeps a pipeline boundary across an empty newline segment', () => {
+    expect(
+      across("true |\ncd /tmp\nprintf '{}' > .qwen/settings.json"),
+    ).toEqual([uncertainWrite(REPO_SETTINGS)]);
+  });
+
+  it('pairs a subshell whose closing segment is unmodelled', () => {
+    expect(
+      across(
+        '(cd .qwen; echo a > b; if true; then :; fi); echo z > settings.json',
+      ),
+    ).toContainEqual(write('/repo/settings.json'));
+  });
+
+  it('walks command substitutions in wrapper positional arguments', () => {
+    expect(across("bash -c 'true' $(rm -rf /tmp/a)")).toContainEqual(
+      edit('/tmp/a'),
+    );
+  });
+
+  it('extracts a negated simple command', () => {
+    expect(across('! rm -rf .qwen/settings.json')).toEqual([
+      edit(REPO_SETTINGS),
+    ]);
+  });
+
+  it.each(['eval "cd .qwen"', 'source ./env.sh', '. ./env.sh'])(
+    'does not certify cwd after a current-shell dynamic command: %s',
+    (prefix) => {
+      expect(across(`${prefix}; printf '{}' > settings.json`)).toEqual([
+        uncertainWrite('/repo/settings.json'),
+      ]);
+    },
+  );
+
+  it.each([
+    'HOME=/repo; cd ~',
+    'export HOME=/repo; cd',
+    'unset HOME; cd',
+    'HOME=.qwen >/dev/null; cd',
+  ])('does not resolve a mutated HOME target: %s', (prefix) => {
+    expect(across(`${prefix}; printf '{}' > settings.json`)).toEqual([
+      uncertainWrite('/repo/settings.json'),
+    ]);
+  });
+
+  it('marks a tilde write unknown after HOME changes', () => {
+    const writes = across('HOME=.qwen; echo {} > ~/settings.json');
+    expect(writes).toHaveLength(1);
+    expect(writes[0]!.pathUnknown).toBe(true);
+  });
+
+  it('keeps HOME uncertainty after a pipeline-final mutation', () => {
+    const writes = across('true | HOME=.qwen; echo {} > ~/settings.json');
+    expect(writes).toHaveLength(1);
+    expect(writes[0]!.pathUnknown).toBe(true);
+  });
+
+  it('seeds nested substitutions with HOME uncertainty', () => {
+    expect(across('HOME=.qwen; echo "$(cd; echo x > settings.json)"')).toEqual([
+      uncertainWrite('/repo/settings.json'),
+    ]);
+  });
+
+  it.each<[string, ShellOperation['virtualTool']]>([
+    ['mv a.txt $OUT', 'write_file'],
+    ['cp a.txt $OUT', 'write_file'],
+    ["sed -i 's/a/b/' $CFG", 'edit'],
+    ['truncate -s0 $CFG', 'edit'],
+    ['ln -s a $D', 'write_file'],
+    ['tee $OUT', 'write_file'],
+  ])('emits an unresolved destination for %s', (command, virtualTool) => {
+    const destinations = across(command).filter(
+      (op) => op.virtualTool === virtualTool && op.filePath?.includes('$'),
+    );
+    expect(destinations).toHaveLength(1);
+    expect(destinations[0]!.pathUnknown).toBe(true);
+  });
+
+  it.each(['cat <(rm -rf /tmp/b)', 'command >(rm -rf /tmp/b)'])(
+    'walks process substitution without inventing operand paths: %s',
+    (command) => {
+      const operations = across(command);
+      expect(operations).toContainEqual(edit('/tmp/b'));
+      expect(operations.some((op) => op.filePath?.includes('(rm'))).toBe(false);
+    },
+  );
+
   // A backgrounded `cd` runs in a subshell, so the parent's cwd is untouched
   // and the next segment's relative write lands in the *original* directory —
   // which is exactly where a protected settings file lives. Attributing the
@@ -1088,6 +1179,17 @@ describe('extractShellOperationsAcrossCommand', () => {
     // matter, only that the call returns without throwing or hanging.
     const deep = 'bash -lc "bash -lc \\"bash -lc \'bash -lc echo > x.txt\'\\""';
     expect(() => across(deep)).not.toThrow();
+  });
+
+  it('keeps substitutions visible beyond the wrapper depth cap', () => {
+    let deep = 'echo $(rm -rf /tmp/depth-cap)';
+    for (let index = 0; index < 6; index++) {
+      deep = `bash -lc ${JSON.stringify(deep)}`;
+    }
+    expect(across(deep)).toContainEqual({
+      ...edit('/tmp/depth-cap'),
+      pathUnknown: true,
+    });
   });
 });
 

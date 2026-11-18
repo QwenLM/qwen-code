@@ -406,16 +406,20 @@ function trimShellSyntax(token: string, bare: string): string {
  * paths are consistent across platforms and compatible with picomatch / the
  * permission rule matching system.
  */
+function isHomeExpansion(p: string, bare?: string): boolean {
+  const normP = p.replace(/\\/g, '/');
+  // Only a tilde the user typed unquoted expands. Quoted and decoded spellings
+  // name a literal directory instead.
+  const tildeIsBare = bare === undefined || bare.startsWith('1');
+  return tildeIsBare && (normP === '~' || normP.startsWith('~/'));
+}
+
 function resolvePath(p: string, cwd: string, bare?: string): string {
   // Normalize inputs to forward slashes for consistent cross-platform handling
   const normP = p.replace(/\\/g, '/');
   const normCwd = cwd.replace(/\\/g, '/');
 
-  // Only a tilde the user typed unquoted expands: `"~/x"` and `$'\x7e/x'`
-  // both decode to `~/x`, and bash opens the literal directory `~` — expanding
-  // it invented a path under $HOME that no rule can match.
-  const tildeIsBare = bare === undefined || bare.startsWith('1');
-  if (tildeIsBare && (normP === '~' || normP.startsWith('~/'))) {
+  if (isHomeExpansion(p, bare)) {
     const homeDir = os.homedir().replace(/\\/g, '/');
     const rest = normP.slice(1); // '' or '/some/path'
     // nodePath.posix.join handles the rest correctly:
@@ -494,6 +498,7 @@ interface ArgumentWord {
 let argumentContext: readonly ArgumentWord[] = [];
 let wrapperExpansions: ReadonlySet<string> = new Set();
 let cwdUncertaintyContext = false;
+let homeUncertaintyContext = false;
 
 /**
  * The marking of the argument characters `fragment` was taken from.
@@ -558,6 +563,10 @@ function pathOperation(
       operation.pathGlobOnly = true;
     }
   }
+  if (homeUncertaintyContext && isHomeExpansion(path, inherited)) {
+    operation.pathUnknown = true;
+    delete operation.pathGlobOnly;
+  }
   return operation;
 }
 
@@ -606,7 +615,12 @@ function stripCommandPrefixes(words: string[], bares: string[]): string[] {
   // `time` is a reserved word only before the pipeline's assignments and
   // command. After an assignment or `command`, the external executable runs
   // instead and cannot change this shell's cwd.
-  while (words[start] === 'time' && bares[start] === '1111') {
+  for (;;) {
+    if (words[start] === '!' && bares[start] === '1') {
+      start++;
+      continue;
+    }
+    if (words[start] !== 'time' || bares[start] !== '1111') break;
     let next = start + 1;
     if (words[next] === '-p' && bares[next] === '11') next++;
     if (words[next] === '--' && bares[next] === '11') {
@@ -662,6 +676,10 @@ function looksLikePath(s: string): boolean {
   // URLs are handled separately by the web-fetch handlers
   if (s.includes('://')) return false;
   return true;
+}
+
+function looksLikeFileOperand(s: string): boolean {
+  return looksLikePath(s) || isDynamicShellPath(s);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -779,6 +797,10 @@ function extractRedirects(
       ) {
         operation.pathGlobOnly = true;
       }
+    }
+    if (homeUncertaintyContext && isHomeExpansion(target, bare)) {
+      operation.pathUnknown = true;
+      delete operation.pathGlobOnly;
     }
     (virtualTool === 'read_file' ? readFiles : writeFiles).push(operation);
   };
@@ -1088,7 +1110,9 @@ function targetDirectoryPath(
   const bare = fragmentBare(target);
   return {
     path: resolvePath(target, cwd, bare),
-    pathUnknown: isUncertainPath(target, bare),
+    pathUnknown:
+      isUncertainPath(target, bare) ||
+      (homeUncertaintyContext && isHomeExpansion(target, bare)),
     pathIsAbsolute: isShellAbsolutePath(target),
   };
 }
@@ -1858,22 +1882,22 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       args,
       new Set(['-t', '-r', '--reference', '--date', '-d', '--time']),
     )
-      .filter(looksLikePath)
+      .filter(looksLikeFileOperand)
       .map((p) => pathOperation('write_file', p, cwd)),
 
   mkdir: (args, cwd) =>
     getPositionalArgs(args, new Set(['-m', '--mode', '-Z', '--context']))
-      .filter(looksLikePath)
+      .filter(looksLikeFileOperand)
       .map((p) => pathOperation('write_file', p, cwd)),
 
   mkfifo: (args, cwd) =>
     getPositionalArgs(args, new Set(['-m', '--mode', '-Z']))
-      .filter(looksLikePath)
+      .filter(looksLikeFileOperand)
       .map((p) => pathOperation('write_file', p, cwd)),
 
   tee: (args, cwd) =>
     getPositionalArgs(args)
-      .filter(looksLikePath)
+      .filter(looksLikeFileOperand)
       .map((p) => pathOperation('write_file', p, cwd)),
 
   cp: (args, cwd) => {
@@ -1886,7 +1910,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     ]);
     const targetDir = targetDirectoryPath(args, cwd, flagsWithValue);
     const positional = getPositionalArgs(args, flagsWithValue).filter(
-      looksLikePath,
+      looksLikeFileOperand,
     );
     if (positional.length === 0) return [];
     if (targetDir) {
@@ -1915,7 +1939,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     ]);
     const targetDir = targetDirectoryPath(args, cwd, flagsWithValue);
     const positional = getPositionalArgs(args, flagsWithValue).filter(
-      looksLikePath,
+      looksLikeFileOperand,
     );
     if (targetDir && positional.length > 0) {
       return [
@@ -1948,7 +1972,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     ]);
     const targetDir = targetDirectoryPath(args, cwd, flagsWithValue);
     const positional = getPositionalArgs(args, flagsWithValue).filter(
-      looksLikePath,
+      looksLikeFileOperand,
     );
     if (targetDir && positional.length > 0) {
       return [
@@ -1998,7 +2022,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
         '--exclude-from',
         '--filter',
       ]),
-    ).filter(looksLikePath);
+    ).filter(looksLikeFileOperand);
     if (positional.length === 0) return [];
     if (positional.length === 1) {
       return [pathOperation('read_file', positional[0]!, cwd)];
@@ -2021,7 +2045,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     ]);
     const targetDir = targetDirectoryPath(args, cwd, flagsWithValue);
     const positional = getPositionalArgs(args, flagsWithValue).filter(
-      looksLikePath,
+      looksLikeFileOperand,
     );
     if (targetDir && positional.length > 0) {
       return [
@@ -2042,7 +2066,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
 
   rm: (args, cwd) =>
     getPositionalArgs(args, new Set(['--interactive']))
-      .filter(looksLikePath)
+      .filter(looksLikeFileOperand)
       .map((p) => pathOperation('edit', p, cwd)),
 
   rmdir: (args, cwd) =>
@@ -2050,12 +2074,12 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       args,
       new Set(['--ignore-fail-on-non-empty', '-p', '--parents']),
     )
-      .filter(looksLikePath)
+      .filter(looksLikeFileOperand)
       .map((p) => pathOperation('edit', p, cwd)),
 
   unlink: (args, cwd) =>
     getPositionalArgs(args)
-      .filter(looksLikePath)
+      .filter(looksLikeFileOperand)
       .map((p) => pathOperation('edit', p, cwd)),
 
   shred: (args, cwd) =>
@@ -2063,7 +2087,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       args,
       new Set(['-n', '--iterations', '-s', '--size', '--random-source']),
     )
-      .filter(looksLikePath)
+      .filter(looksLikeFileOperand)
       .map((p) => pathOperation('edit', p, cwd)),
 
   truncate: (args, cwd) =>
@@ -2081,7 +2105,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
         '--no-create',
       ]),
     )
-      .filter(looksLikePath)
+      .filter(looksLikeFileOperand)
       .map((p) => pathOperation('edit', p, cwd)),
 
   chmod: (args, cwd) => {
@@ -2094,7 +2118,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     );
     return positional
       .slice(1)
-      .filter(looksLikePath)
+      .filter(looksLikeFileOperand)
       .map((p) => pathOperation('edit', p, cwd));
   },
 
@@ -2106,7 +2130,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     );
     return positional
       .slice(1)
-      .filter(looksLikePath)
+      .filter(looksLikeFileOperand)
       .map((p) => pathOperation('edit', p, cwd));
   },
 
@@ -2114,13 +2138,13 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     const positional = getPositionalArgs(args, new Set(['--reference']));
     return positional
       .slice(1)
-      .filter(looksLikePath)
+      .filter(looksLikeFileOperand)
       .map((p) => pathOperation('edit', p, cwd));
   },
 
   rename: (args, cwd) => {
     // rename FROM TO file... — skip first two positionals (the from/to patterns)
-    const positional = getPositionalArgs(args).filter(looksLikePath);
+    const positional = getPositionalArgs(args).filter(looksLikeFileOperand);
     return positional.slice(2).map((p) => pathOperation('edit', p, cwd));
   },
 
@@ -2135,7 +2159,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
         args,
         new Set(['-i', '--input', '-d', '--directory', '-o', '--output']),
       )
-        .filter(looksLikePath)
+        .filter(looksLikeFileOperand)
         .map((p) => pathOperation('edit', p, cwd)),
     ];
   },
@@ -2159,7 +2183,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
     const positional = getPositionalArgs(
       args,
       new Set(['-e', '-f', '-I', '-M', '-m', '-0']),
-    ).filter(looksLikePath);
+    ).filter(looksLikeFileOperand);
     const files = hasExplicitScript ? positional : positional.slice(1);
     const tool: 'edit' | 'read_file' = hasInPlace ? 'edit' : 'read_file';
     return files.map((p) => pathOperation(tool, p, cwd));
@@ -2197,7 +2221,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       '--separate',
     ]);
     const positional = getPositionalArgs(args, flagsWithValue).filter(
-      looksLikePath,
+      looksLikeFileOperand,
     );
     // If -e/-f was used, all positionals are file paths.
     // Otherwise, the first positional is the script expression.
@@ -2501,7 +2525,12 @@ export function extractShellOperations(
   const fdRedirects = new Set<number>();
   const fdCloses = new Set<number>();
   const bares: string[] = [];
-  const tokens = tokenize(simpleCommand, fdRedirects, fdCloses, bares);
+  const tokens = tokenize(
+    maskProcessSubstitutions(simpleCommand),
+    fdRedirects,
+    fdCloses,
+    bares,
+  );
   if (tokens.length === 0) return [];
 
   // Extract I/O redirections before dispatching to the command handler.
@@ -2594,11 +2623,13 @@ export function extractShellOperations(
 /**
  * Cap on recursive shell-wrapper unwrapping. A pathological command can wrap
  * itself many levels deep (`bash -lc "bash -lc \"...\""`) to obscure intent;
- * after this many unwraps we stop and analyse whatever remains as-is. Four is
- * enough for every legitimate wrapper combination observed in the wild
- * (login shells, sandbox shells, tmux send-keys).
+ * after this many unwraps we keep analysing recursively but mark every resulting
+ * path unknown. Four is enough for every legitimate wrapper combination observed
+ * in the wild (login shells, sandbox shells, tmux send-keys). A separate hard
+ * recursion cap bounds pathological input.
  */
 const MAX_SHELL_UNWRAP_DEPTH = 4;
+const MAX_SHELL_SUBSTITUTION_DEPTH = 100;
 
 /**
  * Classify a literal `cd` command and resolve its target cwd when static.
@@ -2635,7 +2666,12 @@ function resolveCdTargetCwd(
   const fdRedirects = new Set<number>();
   const fdCloses = new Set<number>();
   const bares: string[] = [];
-  const words = tokenize(command, fdRedirects, fdCloses, bares);
+  const words = tokenize(
+    maskProcessSubstitutions(command),
+    fdRedirects,
+    fdCloses,
+    bares,
+  );
   // extractRedirects compacts `words` and `bares` together, so the target and
   // its marking are read from the filtered arrays.
   const redirects = extractRedirects(words, cwd, fdRedirects, fdCloses, bares);
@@ -2649,6 +2685,9 @@ function resolveCdTargetCwd(
         bares[2] === '11'));
   const prefixes = stripCommandPrefixes(words, bares);
 
+  if (['eval', 'source', '.'].includes(words[0]!)) {
+    return { kind: 'dynamic', redirects };
+  }
   if (words[0] === 'popd') return { kind: 'dynamic', redirects };
   if (words[0] !== 'cd' && words[0] !== 'pushd') return { kind: 'not-cd' };
   // Repeated `time` and `time --` differ between Bash 3.2 and newer Bash.
@@ -2682,11 +2721,14 @@ function resolveCdTargetCwd(
   }
 
   const target = words[targetIndex] ?? process.env['HOME'];
+  const targetBare = bares[targetIndex];
   if (!target || target === '-' || isDynamicShellPath(target)) {
     return { kind: 'dynamic', redirects };
   }
+  const homeTarget =
+    words[targetIndex] === undefined || isHomeExpansion(target, targetBare);
   if (
-    (words[targetIndex] === undefined &&
+    (homeTarget &&
       (homeUnknown ||
         prefixes.some((prefix) => envAssignmentName(prefix) === 'HOME'))) ||
     (!isShellAbsolutePath(target) &&
@@ -2695,7 +2737,6 @@ function resolveCdTargetCwd(
   ) {
     return { kind: 'dynamic', redirects };
   }
-  const targetBare = bares[targetIndex];
   // A target the shell had to decode (`cd $'\x7e'` is the literal directory
   // `~`, never $HOME) may not exist at all — bash then fails the cd and the
   // rest of the segment runs where it already was — so resolve it without
@@ -2729,11 +2770,13 @@ function toRedirectOperations({
 }
 
 function markUndecodablePathOps(ops: ShellOperation[]): ShellOperation[] {
-  return ops.map((op) =>
-    op.filePath && hasUnpairedSurrogate(op.filePath)
-      ? { ...op, pathUnknown: true }
-      : op,
-  );
+  return ops
+    .filter((op) => op.filePath !== PROCESS_SUBSTITUTION_PLACEHOLDER)
+    .map((op) =>
+      op.filePath && hasUnpairedSurrogate(op.filePath)
+        ? { ...op, pathUnknown: true }
+        : op,
+    );
 }
 
 /**
@@ -3010,6 +3053,14 @@ function commandSubstitutionPayloads(command: string): string[] {
         continue;
       }
     }
+    if (!inDouble && (ch === '<' || ch === '>') && command[i + 1] === '(') {
+      const end = commandSubstitutionEnd(command, i + 1);
+      if (end >= 0) {
+        payloads.push(command.slice(i + 2, end));
+        i = end;
+        continue;
+      }
+    }
     if (ch === '`') {
       const end = backtickEnd(command, i);
       if (end >= 0) {
@@ -3021,6 +3072,56 @@ function commandSubstitutionPayloads(command: string): string[] {
     if (ch === '$') dollarPending = !ansiCIntroducer;
   }
   return payloads;
+}
+
+const PROCESS_SUBSTITUTION_PLACEHOLDER = '/dev/fd/qwen-process-substitution';
+
+function maskProcessSubstitutions(command: string): string {
+  let result = '';
+  let copiedThrough = 0;
+  let replacements = 0;
+  let inSingle = false;
+  let inDouble = false;
+  let inAnsiC = false;
+  let escaped = false;
+  let dollarPending = false;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!;
+    const ansiCIntroducer: boolean = dollarPending;
+    dollarPending = false;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && (!inSingle || inAnsiC)) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inAnsiC = inSingle ? false : ansiCIntroducer;
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle) continue;
+    if (!inDouble && (ch === '<' || ch === '>') && command[i + 1] === '(') {
+      const end = commandSubstitutionEnd(command, i + 1);
+      if (end >= 0) {
+        result +=
+          command.slice(copiedThrough, i) + PROCESS_SUBSTITUTION_PLACEHOLDER;
+        copiedThrough = end + 1;
+        replacements++;
+        i = end;
+        continue;
+      }
+    }
+    if (ch === '$') dollarPending = !ansiCIntroducer;
+  }
+  return replacements > 0 ? result + command.slice(copiedThrough) : command;
 }
 
 function structuralPrefix(command: string): {
@@ -3083,7 +3184,7 @@ function unmodeledShellSegments(
   const blocks: string[] = [];
   for (let i = 0; i < segments.length; i++) {
     const command = segments[i]!.command;
-    const { first, negated } = structuralPrefix(command);
+    const { first } = structuralPrefix(command);
     const opener = first ? openers[first] : undefined;
     if (opener) {
       marked.add(i);
@@ -3097,7 +3198,6 @@ function unmodeledShellSegments(
     }
     if (
       (first !== undefined && closers.has(first)) ||
-      negated ||
       first === 'coproc' ||
       hasComplexParameterExpansion(command)
     ) {
@@ -3112,6 +3212,8 @@ function walkCompoundCommand(
   cwd: string,
   depth: number,
   initialCwdUnknown: boolean,
+  initialHomeUnknown = false,
+  initialCdPathUnknown = false,
 ): ShellOperation[] {
   const subCommands = splitCompoundCommandSegments(
     stripHeredocBodies(command),
@@ -3127,23 +3229,35 @@ function walkCompoundCommand(
   };
   const unmodeledSegments = unmodeledShellSegments(subCommands);
   const groupEnds = new Map<number, number>();
-  const groups: number[] = [];
+  const groups: Array<{ index: number; caseDepth: number }> = [];
+  let caseDepth = 0;
   for (let i = 0; i < subCommands.length; i++) {
-    if (unmodeledSegments.has(i)) continue;
+    const { first } = structuralPrefix(subCommands[i]!.command);
+    if (first === 'case') caseDepth++;
+    if (first === 'esac') caseDepth = Math.max(0, caseDepth - 1);
     const terminator = subCommands[i]!.terminator;
     if (terminator === '(' || terminator === '{') {
-      groups.push(i);
+      groups.push({ index: i, caseDepth });
     } else if (terminator === ')' || terminator === '}') {
       const start = groups[groups.length - 1];
+      // A case pattern's ')' is not the close of a surrounding subshell. A
+      // subshell opened inside the case still pairs at its own nesting level.
+      if (
+        terminator === ')' &&
+        start !== undefined &&
+        start.caseDepth < caseDepth
+      ) {
+        continue;
+      }
       const opener =
-        start === undefined ? undefined : subCommands[start]!.terminator;
+        start === undefined ? undefined : subCommands[start.index]!.terminator;
       if (
         start !== undefined &&
         ((opener === '(' && terminator === ')') ||
           (opener === '{' && terminator === '}'))
       ) {
         groups.pop();
-        groupEnds.set(start, i);
+        groupEnds.set(start.index, i);
       }
     }
   }
@@ -3151,20 +3265,49 @@ function walkCompoundCommand(
   const visitSimple = (sub: string, scope: CwdScope) => {
     if (!sub) return;
     const outerCwdUncertainty = cwdUncertaintyContext;
+    const outerHomeUncertainty = homeUncertaintyContext;
     cwdUncertaintyContext = scope.unknown;
+    homeUncertaintyContext = scope.homeUnknown;
     try {
       const expansions = new Set(wrapperExpansions);
       const unwrapped = stripShellWrapper(sub, expansions);
-      if (depth < MAX_SHELL_UNWRAP_DEPTH && unwrapped === sub) {
-        for (const payload of commandSubstitutionPayloads(sub)) {
+      const nestedPayloadCounts = new Map<string, number>();
+      if (depth < MAX_SHELL_SUBSTITUTION_DEPTH && unwrapped !== sub) {
+        for (const payload of commandSubstitutionPayloads(unwrapped)) {
+          nestedPayloadCounts.set(
+            payload,
+            (nestedPayloadCounts.get(payload) ?? 0) + 1,
+          );
+        }
+      }
+      for (const payload of commandSubstitutionPayloads(sub)) {
+        const nestedCount = nestedPayloadCounts.get(payload) ?? 0;
+        if (nestedCount > 0) {
+          nestedPayloadCounts.set(payload, nestedCount - 1);
+          continue;
+        }
+        const before = ops.length;
+        if (depth < MAX_SHELL_SUBSTITUTION_DEPTH) {
           ops.push(
             ...walkCompoundCommand(
               payload,
               scope.cwd,
               depth + 1,
               scope.unknown,
+              scope.homeUnknown,
+              scope.cdPathUnknown,
             ),
           );
+        } else {
+          const payloadOps = extractShellOperations(payload, scope.cwd);
+          ops.push(
+            ...(scope.unknown ? markCwdUnknownOps(payloadOps) : payloadOps),
+          );
+        }
+        if (depth >= MAX_SHELL_UNWRAP_DEPTH) {
+          for (let i = before; i < ops.length; i++) {
+            if (ops[i]!.filePath) ops[i] = { ...ops[i]!, pathUnknown: true };
+          }
         }
       }
 
@@ -3188,22 +3331,48 @@ function walkCompoundCommand(
       }
 
       const assignmentMarks: string[] = [];
+      const assignmentFdRedirects = new Set<number>();
+      const assignmentFdCloses = new Set<number>();
       const assignmentWords = tokenize(
-        sub,
-        undefined,
-        undefined,
+        maskProcessSubstitutions(sub),
+        assignmentFdRedirects,
+        assignmentFdCloses,
+        assignmentMarks,
+      );
+      // Redirects do not stop an assignment-only segment from changing this
+      // shell's environment for later segments.
+      extractRedirects(
+        assignmentWords,
+        scope.cwd,
+        assignmentFdRedirects,
+        assignmentFdCloses,
         assignmentMarks,
       );
       const prefixes = stripCommandPrefixes(assignmentWords, assignmentMarks);
+      const recordEnvironmentMutation = (name: string | undefined) => {
+        if (name === 'HOME') scope.homeUnknown = true;
+        if (name === 'CDPATH') scope.cdPathUnknown = true;
+      };
       if (assignmentWords.length === 0) {
         for (const prefix of prefixes) {
-          const name = envAssignmentName(prefix);
-          if (name === 'HOME') scope.homeUnknown = true;
-          if (name === 'CDPATH') scope.cdPathUnknown = true;
+          recordEnvironmentMutation(envAssignmentName(prefix));
+        }
+      } else if (
+        ['export', 'declare', 'typeset', 'readonly', 'local'].includes(
+          assignmentWords[0]!,
+        )
+      ) {
+        for (const word of assignmentWords.slice(1)) {
+          recordEnvironmentMutation(envAssignmentName(word));
+        }
+      } else if (assignmentWords[0] === 'unset') {
+        for (const word of assignmentWords.slice(1)) {
+          recordEnvironmentMutation(word);
         }
       }
 
-      if (depth < MAX_SHELL_UNWRAP_DEPTH && unwrapped !== sub) {
+      if (depth < MAX_SHELL_SUBSTITUTION_DEPTH && unwrapped !== sub) {
+        const before = ops.length;
         const outer = wrapperExpansions;
         wrapperExpansions = expansions;
         try {
@@ -3213,22 +3382,30 @@ function walkCompoundCommand(
               scope.cwd,
               depth + 1,
               scope.unknown,
+              scope.homeUnknown,
+              scope.cdPathUnknown,
             ),
           );
         } finally {
           wrapperExpansions = outer;
         }
+        if (depth >= MAX_SHELL_UNWRAP_DEPTH) {
+          for (let i = before; i < ops.length; i++) {
+            if (ops[i]!.filePath) ops[i] = { ...ops[i]!, pathUnknown: true };
+          }
+        }
         return;
       }
       if (unwrapped !== sub) {
         shellSemanticsDebugLogger.warn(
-          `Shell wrapper unwrap depth limit reached (${MAX_SHELL_UNWRAP_DEPTH}); analysing remaining command as-is.`,
+          `Shell wrapper recursion limit reached (${MAX_SHELL_SUBSTITUTION_DEPTH}); analysing remaining command as-is.`,
         );
       }
       const subOps = extractShellOperations(sub, scope.cwd);
       ops.push(...(scope.unknown ? markCwdUnknownOps(subOps) : subOps));
     } finally {
       cwdUncertaintyContext = outerCwdUncertainty;
+      homeUncertaintyContext = outerHomeUncertainty;
     }
   };
 
@@ -3316,12 +3493,16 @@ function walkCompoundCommand(
         !pipedOut &&
         (current.cwd !== listScope.cwd ||
           current.unknown !== listScope.unknown ||
-          current.stickyUnknown !== listScope.stickyUnknown)
+          current.stickyUnknown !== listScope.stickyUnknown ||
+          current.homeUnknown !== listScope.homeUnknown ||
+          current.cdPathUnknown !== listScope.cdPathUnknown)
       ) {
         listScope.unknown = true;
         listScope.stickyUnknown ||= current.stickyUnknown;
+        listScope.homeUnknown ||= current.homeUnknown;
+        listScope.cdPathUnknown ||= current.cdPathUnknown;
       }
-      pipedIn = pipedOut;
+      if (segment.command) pipedIn = pipedOut;
       i = last;
     }
   };
@@ -3332,8 +3513,8 @@ function walkCompoundCommand(
       cwd,
       unknown: initialCwdUnknown,
       stickyUnknown: false,
-      homeUnknown: false,
-      cdPathUnknown: false,
+      homeUnknown: initialHomeUnknown,
+      cdPathUnknown: initialCdPathUnknown,
     },
     0,
   );

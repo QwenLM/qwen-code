@@ -2176,7 +2176,11 @@ export function normalizeMonitorCommand(
   stripShellWrapper(command, expandedWords);
   const safetyCommand =
     expandedWords.size > 0
-      ? [safetyParts.join(' ').trim(), command.trim(), alternatePayload ?? '']
+      ? [
+          safetyParts.join(' ').trim(),
+          command.trim(),
+          payloadUnresolved ? (alternatePayload ?? '') : '',
+        ]
           .filter(Boolean)
           .join('\n')
       : wrapperTokens && !payloadUnresolved && safetyParts.length > 0

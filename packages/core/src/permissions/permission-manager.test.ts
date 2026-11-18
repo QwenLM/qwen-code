@@ -2044,6 +2044,16 @@ describe('PermissionManager', () => {
     // R7-9: an unresolvable -c payload may be the option terminator, so a
     // wrapper wildcard must not auto-allow the unreadable spelling while
     // the readable twin asks.
+    it('does not promote a quoted wrapper positional argument to a command', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['Bash(rm -rf *)'],
+      });
+      expect(await pm.evaluate(mon('bash -c "echo $X" "rm -rf /tmp/x"'))).toBe(
+        'allow',
+      );
+    });
+
     it('does not auto-allow an unresolvable wrapper payload via a wildcard', async () => {
       pm = makeShellPm('bash', { permissionsAllow: ['Bash(bash -c *)'] });
       expect(await pm.evaluate(mon('bash -c $CMD'))).toBe('ask');
@@ -3507,6 +3517,34 @@ describe('PermissionManager — compound shell write attribution', () => {
       expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
     },
   );
+
+  it('keeps backtick command boundaries visible to Bash deny rules', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)'],
+      permissionsDeny: ['Bash(rm -rf *)'],
+    });
+    expect(
+      await pm.evaluate(sh('echo `cd /tmp && rm -rf victim`', '/repo')),
+    ).toBe('deny');
+  });
+
+  it.each([
+    "echo ${x:-{} ; cd .qwen; printf '{}' > settings.json",
+    "echo $(date # (x\n); cd .qwen; printf '{}' > settings.json",
+  ])(
+    'keeps a protected write visible after lexer comments and braces: %s',
+    async (command) => {
+      const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+    },
+  );
+
+  it('asks instead of dropping an unresolved move destination', async () => {
+    const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+    expect(await pm.evaluate(sh('mv .qwen/settings.json $OUT', '/repo'))).toBe(
+      'ask',
+    );
+  });
 
   it.each([
     "sh -c 'echo $(pwd)#1; rm .qwen/settings.json'",
