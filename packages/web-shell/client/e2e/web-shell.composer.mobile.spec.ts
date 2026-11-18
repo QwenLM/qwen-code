@@ -390,8 +390,10 @@ test('simple mobile composer switches directly to advanced mode without losing i
   await expect(attachments).toHaveCount(0);
   await composer.locator('[data-web-shell-composer-submit]').tap();
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
-  const submitted = JSON.stringify(firstRequestBody(daemon.promptRequests()));
-  expect(submitted).toContain('保留中文草稿和附件');
+  expectPromptBodyToContainText(
+    firstRequestBody(daemon.promptRequests()),
+    '保留中文草稿和附件',
+  );
   await expect(textarea).toHaveValue('');
   await expect(attachments).toHaveCount(0);
 });

@@ -219,7 +219,11 @@ test('simple composer grows, submits, and cancels through the existing session',
   await expect(send).toBeEnabled();
   await send.click();
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
-  expect(JSON.stringify(daemon.promptRequests()[0].body)).toContain('第二行');
+  expect(daemon.promptRequests()[0].body).toMatchObject({
+    prompt: expect.arrayContaining([
+      expect.objectContaining({ type: 'text', text: prompt }),
+    ]),
+  });
   await expect(editor.locator('.cm-placeholder')).toBeVisible();
   await expect(send).toBeEnabled();
   await send.click();
