@@ -126,7 +126,13 @@ clicked, using the list data the sidebar already holds.
   seed runs before the empty-conversation early return, so side-records-only
   sessions (artifacts registered before the first prompt — the same
   transcript shape the library guard accepts) gain a count on their first
-  open even though they have no conversation to load. The
+  open even though they have no conversation to load. The daemon/ACP
+  restore funnel reads selectively via `readRestoreProjection` and never
+  calls `loadSession`, so the projection read runs the same seed for
+  conversation-less transcripts (a missing projection is a candidate too —
+  the index builder rejects them); sessions with a conversation keep the
+  selective read's zero-extra-I/O contract. Both funnels share one seed
+  method and one record-composition helper with the library guard. The
   seed also requires an authoritative journal: no history gap (a broken chain
   can orphan artifact events off the active branch and undercount) and no
   record-level damage warnings — the same predicate the library mutation
@@ -305,7 +311,9 @@ clicked, using the list data the sidebar already holds.
   record-level damage warnings including change-level drops, tolerated
   per-artifact skips, all-refused journals refused by the seed and the
   library guard alike, side-records-only sessions seeded before the
-  empty-conversation early return), in both active and archived states, from
+  empty-conversation early return and through the daemon restore projection
+  funnel, conversation sessions untouched by the projection read), in both
+  active and archived states, from
   event and snapshot (fork) records, counting the cold-restorable set
   (non-snapshot published file locators excluded via the shared bridge/core
   predicate, real preview snapshots kept); library

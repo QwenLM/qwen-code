@@ -106,7 +106,11 @@
   暖 load 不新增写盘；部分读取的 transcript 绝不播种。播种在空对话早退
   之前执行，因此 side-records-only 会话（首个 prompt 之前注册的产物——与
   库守卫接受的 transcript 形状相同）即使没有可加载的对话，也在首次打开时
-  获得数量。播种还要求 journal
+  获得数量。daemon/ACP 恢复漏斗经 `readRestoreProjection` 选择性读取、
+  从不调用 `loadSession`，因此投影读取对无对话的 transcript 执行同一播种
+  （投影缺失也是候选——索引构建器会拒绝这类 transcript）；有对话的会话
+  保持选择性读取的零额外 I/O 契约。两个漏斗与库守卫共用同一个播种方法
+  和同一个记录组合助手。播种还要求 journal
   具备权威性：无历史链缺口（断链会把 artifact 事件孤儿化出活跃分支而少计），
   且无记录级损坏警告——与库变更守卫同一判定
   （`hasDisqualifyingArtifactJournalWarning`）；单产物级跳过仍被容忍。两处
@@ -249,7 +253,8 @@
   snapshot，两条路径的先 journal 后 sidecar 顺序，无计数旧事件保留已有
   sidecar）；load 播种及其权威性门（历史链缺口、含变更级丢弃的记录级损坏
   警告、被容忍的单产物级跳过、全拒绝日志被播种与库守卫同样拒绝、
-  side-records-only 会话在空对话早退之前播种），active
+  side-records-only 会话在空对话早退之前及经 daemon 恢复投影漏斗播种、
+  有对话会话不被投影读取触碰），active
   与 archived 两态、event 与 snapshot（fork）记录、按冷启动可恢复集合计数
   （无快照 published file 定位符经 bridge/core 共享谓词排除、真正预览快照
   保留）；库删除更新（可恢复
