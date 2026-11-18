@@ -154,6 +154,35 @@ describe('managed DingTalk reconnect arbitration (#17173 R11)', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('a retry firing while an attempt is in flight re-arms instead of opening a second socket', async () => {
+    const stream = await startOpen();
+    latest().emit('close'); // arms the single retry
+    expect(vi.getTimerCount()).toBe(1);
+
+    // A connect arriving through the same entry the adapter uses, before that
+    // retry fires, builds its socket but never opens it — the attempt stays
+    // genuinely unresolved while the retry comes due.
+    const connecting = stream.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sockets()).toBe(2);
+
+    await vi.advanceTimersByTimeAsync(RETRY_MS);
+    // The running attempt owns the socket: no third one, and the reconnect is
+    // re-armed rather than dropped on the floor — two timers, the in-flight
+    // attempt's connect timeout and the re-armed retry.
+    expect(sockets()).toBe(2);
+    expect(vi.getTimerCount()).toBe(2);
+
+    latest().open();
+    await connecting;
+    // The successful attempt clears the re-armed retry; only its heartbeat runs.
+    expect(sockets()).toBe(2);
+    expect(vi.getTimerCount()).toBe(1);
+
+    stream.disconnect();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('a first connect that never opens surfaces and arms no retry', async () => {
     const { createStreamClient } = createManagedDingtalkDeps();
     const stream = createStreamClient(SETTINGS, () => true);

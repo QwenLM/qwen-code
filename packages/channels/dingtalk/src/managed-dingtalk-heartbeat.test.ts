@@ -112,10 +112,12 @@ describe('managed DingTalk heartbeat timer cleanup (#17173 R5)', () => {
     // Exactly one active timer: the heartbeat interval of the open socket.
     expect(vi.getTimerCount()).toBe(1);
 
-    // Network drop: the SDK schedules its autoReconnect but does not clear
-    // the interval; the wrapper's close listener must retire it.
+    // Network drop: the SDK no longer reconnects (autoReconnect is off) but it
+    // still does not clear the interval; the wrapper's close listener retires
+    // it and arms the single retry.
     latestSocket().emit('close');
-    expect(vi.getTimerCount()).toBe(1); // only the reconnect timeout remains
+    // Only the wrapper's reconnect timeout remains.
+    expect(vi.getTimerCount()).toBe(1);
 
     await vi.advanceTimersByTimeAsync(RECONNECT_RETRY_MS); // the reconnect attempt runs
     await vi.advanceTimersByTimeAsync(0);

@@ -364,7 +364,8 @@ describe('managed DingTalk stream SDK wiring pins (#17173 R12)', () => {
     });
     // Reconnect is owned by the wrapper; the SDK's own close-triggered
     // reconnect would run a second chain alongside it (#17173 R11). The
-    // published config type omits the field, so it is set through internals.
+    // constructor's options type omits the field, so it is assigned on the
+    // instance, whose config type carries it.
     expect(
       (mockState.instance as unknown as { config: { autoReconnect: boolean } })
         .config.autoReconnect,

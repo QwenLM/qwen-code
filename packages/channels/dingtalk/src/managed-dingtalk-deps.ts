@@ -43,7 +43,6 @@ function createStreamClient(
   });
   const internals = client as unknown as {
     debug: boolean;
-    config: { autoReconnect: boolean };
     onDownStream: (data: unknown) => void;
     connect: () => Promise<void>;
     heartbeatIntervallId?: ReturnType<typeof setInterval>;
@@ -55,13 +54,11 @@ function createStreamClient(
   };
   internals.debug = false;
   // The SDK arms its own reconnect from every socket's close event without
-  // reading its `reconnecting` flag, and it calls back into this wrapper's
-  // connect. Together with the wrapper's own failure retry that gives two
-  // independent chains per drop, compounding on every further close. Reconnect
-  // is centralized below instead (#17173 R11). Set through internals because
-  // the published config type omits autoReconnect even though the runtime
-  // reads it (dist/client.mjs DEFAULT_CONFIG and the close handler).
-  internals.config.autoReconnect = false;
+  // reading its `reconnecting` flag, so each drop adds a chain that compounds
+  // on the next close. Reconnect is centralized below instead (#17173 R11).
+  // Assigned on the instance because the constructor's options type omits the
+  // field, while the config it exposes carries it.
+  client.config.autoReconnect = false;
   // The SDK creates a heartbeat interval on every socket open but never
   // clears it on close, and the next open overwrites the only stored handle —
   // the old interval keeps pinging the replacement socket. Retire it on close,
@@ -244,7 +241,6 @@ function createStreamClient(
       },
     );
   };
-  internals.connect = guardedConnect;
   return {
     connect: () => guardedConnect(),
     disconnect: () => {
