@@ -8,7 +8,9 @@ const COMMANDS: &[&str] = &[
     "choose_workspace",
     "install_update",
     "open_logs",
+    "request_turn_notification_authorization",
     "restart_runtime",
+    "show_turn_notification",
 ];
 
 fn main() {

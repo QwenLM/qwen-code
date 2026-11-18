@@ -245,8 +245,12 @@ jobs:
     if: "${{ needs.prepare.outputs.already_published != 'true' }}"
     strategy:
       fail-fast: false
+      # macos-latest compiles and tests the macOS-gated turn notification
+      # module (src-tauri/src/turn_notification.rs) — no other lane in the
+      # repo builds it, so a macOS-only compile break would otherwise merge
+      # green and surface in the first release build.
       matrix:
-        os: ['ubuntu-22.04', 'windows-2022']
+        os: ['ubuntu-22.04', 'windows-2022', 'macos-latest']
     runs-on: '${{ matrix.os }}'
     timeout-minutes: 45
     defaults:

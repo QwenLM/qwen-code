@@ -9,6 +9,7 @@ import {
 import { useBrowserNotificationSettings } from '../../browser-turn-notifications';
 import { useI18n } from '../../i18n';
 import { getShadowAwareActiveElement } from '../../utils/dom';
+import { isMacOSDesktopShell } from '../../utils/externalOpen';
 import { Button } from '../ui/button';
 import {
   Popover,
@@ -32,17 +33,24 @@ export function BrowserNotificationControl() {
   useEffect(() => () => clearTimeout(timer.current), []);
   if (!settings) return null;
 
-  const enabled = settings.enabled && settings.permission === 'granted';
+  // WebKit never grants the Web Notification permission in the macOS
+  // desktop shell, but the host posts the system notification itself, so
+  // there the setting is considered active on the host preference alone.
+  const hostNotified = isMacOSDesktopShell();
+  const enabled =
+    settings.enabled && (settings.permission === 'granted' || hostNotified);
   const canAuthorize =
-    settings.permission === 'default' || settings.permission === 'granted';
+    settings.permission === 'default' ||
+    settings.permission === 'granted' ||
+    hostNotified;
   const status = settings.pending
     ? 'requesting'
-    : settings.permission === 'unavailable'
+    : settings.permission === 'unavailable' && !hostNotified
       ? 'unavailable'
-      : settings.permission === 'denied'
-        ? 'denied'
-        : enabled
-          ? 'helpEnabled'
+      : enabled
+        ? 'helpEnabled'
+        : settings.permission === 'denied' && !hostNotified
+          ? 'denied'
           : settings.error
             ? 'error'
             : settings.permission === 'default'
