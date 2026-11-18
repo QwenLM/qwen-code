@@ -3823,38 +3823,45 @@ export class SessionService {
     // projection is NOT a restore candidate: the index builder found no
     // conversation record at all, so no downstream path carries an
     // artifactSnapshot for it and a count written here would advertise a
-    // set no cold open can deliver. A defined projection with an empty
-    // apiHistory is the metadata-bearing side-records shape (creation-time
-    // records reconstruct messages but no model turns); the shared helper
-    // confines the auxiliary full read to that local shape under the size
-    // cap. Sessions with a conversation keep the selective read's
-    // zero-extra-I/O contract.
+    // set no cold open can deliver. For a defined projection with an empty
+    // apiHistory (the metadata-bearing side-records shape), count exactly
+    // the set THIS projection delivers — its artifactSnapshot is built
+    // from the active-segment side-record selection, which can be narrower
+    // than a whole-transcript rebuild (an event parented to a non-tail
+    // metadata record is counted by a rebuild but delivered by nobody).
+    // Counting the delivery keeps the row and the cold open telling one
+    // story, and needs no auxiliary read: the reader already paid the
+    // indexing cost. Sessions with a conversation keep the selective
+    // read's zero-extra-I/O contract; their count arrives via the recorder
+    // and the load funnel.
     if (projection && projection.runtime.apiHistory.length === 0) {
-      const filePath = this.getSessionFilePath(sessionId, 'active');
-      await this.seedSideRecordsOnlyTranscript(
+      const count =
+        projection.runtime.artifactSnapshot?.artifacts.filter(
+          isRestorablePersistedArtifact,
+        ).length ?? 0;
+      const summaryPath = this.getArtifactSummaryPathForState(
         sessionId,
         'active',
-        filePath,
-        async () => {
-          let sourceReadComplete = true;
-          const records = await this.readAllRecords(filePath, () => {
-            sourceReadComplete = false;
-          });
-          return { records, sourceReadComplete };
-        },
       );
+      const existing = readSessionArtifactSummarySidecar(summaryPath);
+      if (
+        existing?.artifactCount !== count &&
+        (count > 0 || existing !== undefined)
+      ) {
+        writeSessionArtifactSummarySidecar(summaryPath, count);
+      }
     }
     return projection;
   }
 
   /**
-   * First-open seed for conversation-less transcripts, shared by both
-   * restore funnels so the size cap, ownership, shape and authority gates
-   * cannot drift. The projection funnel has not read the transcript yet,
-   * so its read happens here behind the cap; the load funnel passes the
-   * records it already read for the conversation (the cap still governs
-   * the seed, so one session yields one list row through either funnel).
-   * The boundary is inclusive, matching the library mutation read's
+   * First-open seed for conversation-less transcripts in the load funnel,
+   * owning the size cap, ownership, shape and authority gates in one
+   * place. The load funnel passes the records it already read for the
+   * conversation; the cap still governs the seed. (The projection funnel
+   * does not read here — it counts the artifactSnapshot its own selective
+   * read already delivers, so count and delivery share one source.) The
+   * boundary is inclusive, matching the library mutation read's
    * `size > maxBytes` refusal; a failed size probe skips the seed.
    * Returns the rebuilt snapshot for the restore payload, or undefined
    * when any gate declines.
@@ -3875,18 +3882,36 @@ export class SessionService {
       size = undefined;
     }
     if (size === undefined || size > MAX_TRANSCRIPT_READ_BYTES) {
+      debugLogger.debug(
+        `artifact summary seed: size gate declined for ${sessionId} ` +
+          `(size=${size ?? 'unavailable'})`,
+      );
       return undefined;
     }
     const { records, sourceReadComplete } = await readRecords();
     const firstRecord = records[0];
+    if (!firstRecord) {
+      debugLogger.debug(
+        `artifact summary seed: empty transcript for ${sessionId}`,
+      );
+      return undefined;
+    }
     if (
-      !firstRecord ||
       !(await this.sessionBelongsToCurrentProject(
         firstRecord.sessionId,
         firstRecord.cwd,
-      )) ||
-      !isSideRecordsOnlyTranscript(records)
+      ))
     ) {
+      debugLogger.debug(
+        `artifact summary seed: foreign project for ${sessionId}`,
+      );
+      return undefined;
+    }
+    if (!isSideRecordsOnlyTranscript(records)) {
+      debugLogger.debug(
+        `artifact summary seed: shape gate declined for ${sessionId} ` +
+          '(raw records are not all system metadata)',
+      );
       return undefined;
     }
     const { messages, gaps } = this.reconstructHistory(records, {
@@ -3898,6 +3923,9 @@ export class SessionService {
     // opened session can never show. Metadata-bearing side-records
     // transcripts reconstruct their creation records as messages and pass.
     if (messages.length === 0) {
+      debugLogger.debug(
+        `artifact summary seed: no reconstructable message for ${sessionId}`,
+      );
       return undefined;
     }
     return this.seedArtifactSummaryFromRecords(
