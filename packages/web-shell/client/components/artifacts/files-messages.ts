@@ -74,3 +74,41 @@ export const FILES_MESSAGES_ZH = {
   'files.sourceTooLarge':
     '文件超过 4 MiB 源码预览上限，请通过文件菜单下载后在本地查看。',
 };
+
+export const FILES_MESSAGES_RU = {
+  'files.delete': 'Удалить файл',
+  'files.deleteTitle': 'Удалить файл?',
+  'files.deleteWarning': 'Файл будет удалён безвозвратно. Это нельзя отменить.',
+  'files.copyRelativePath': 'Копировать относительный путь',
+  'files.copyAbsolutePath': 'Копировать абсолютный путь',
+  'files.reference': 'Ссылка',
+  'files.title': 'Файлы',
+  'files.newFile': 'Новый файл',
+  'files.newFolder': 'Новая папка',
+  'files.deleteMenu': 'Удалить',
+  'files.deleteFolderTitle': 'Удалить папку?',
+  'files.deleteFolderWarning':
+    'Эта папка и всё её содержимое будут удалены безвозвратно. Это действие нельзя отменить.',
+  'files.deleting': 'Удаление…',
+  'files.name': 'Имя',
+  'files.create': 'Создать',
+  'files.creating': 'Создание…',
+  'files.destination': 'Создать в',
+  'files.invalidName':
+    'Введите одно имя без слэшей и управляющих символов. «.» и «..» не допускаются.',
+  'files.uploadTo': 'Перетащите файлы для загрузки в',
+  'files.description': 'Просмотр файлов рабочей области',
+  'files.filter': 'Фильтр файлов…',
+  'files.noMatches': 'Нет совпадений в загруженных путях',
+  'files.resizeTree': 'Изменить размер предпросмотра и дерева',
+  'files.toggleTree': 'Показать или скрыть дерево файлов',
+  'files.closePreview': 'Закрыть предпросмотр файла',
+  'files.emptyDirectory': 'Пустая папка',
+  'files.truncated': 'Показаны только первые 2,000 записей',
+  'files.loadFailed': 'Не удалось загрузить браузер файлов',
+  'files.reloadUnavailable':
+    'Перезагрузка может оборвать соединение или состояние страницы-хоста. Закройте «Файлы» и откройте снова после обновления приложения.',
+  'files.close': 'Закрыть «Файлы»',
+  'files.sourceTooLarge':
+    'Файл превышает лимит предпросмотра исходника 4 MiB. Используйте «Скачать» в меню файла, чтобы прочитать его локально.',
+};

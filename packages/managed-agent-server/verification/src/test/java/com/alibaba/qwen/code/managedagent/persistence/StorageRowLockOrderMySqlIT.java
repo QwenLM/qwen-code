@@ -4,9 +4,10 @@ import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -70,9 +71,9 @@ class StorageRowLockOrderMySqlIT {
         schema = jdbc.queryForObject("SELECT DATABASE()", String.class);
         threads = Executors.newFixedThreadPool(2);
         jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id)"
-                + " VALUES (?, ?, ?, ?, ?)", JdbcRuntimeBindingRepository.storageAliasKey(TENANT, STORAGE),
-                JdbcRuntimeBindingRepository.storageFenceKey(TENANT),
-                JdbcRuntimeBindingRepository.storageFenceKey(STORAGE), TENANT, STORAGE);
+                + " VALUES (?, ?, ?, ?, ?)", RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE),
+                RuntimeAdmissionFences.storageFenceKey(TENANT),
+                RuntimeAdmissionFences.storageFenceKey(STORAGE), TENANT, STORAGE);
     }
 
     @AfterEach
@@ -211,7 +212,7 @@ class StorageRowLockOrderMySqlIT {
             assertThat(committed.queryForObject("SELECT COUNT(*) FROM performance_schema.data_locks"
                     + " WHERE OBJECT_SCHEMA = ? AND INDEX_NAME = 'uk_ma_storage_business_key' AND LOCK_STATUS = 'GRANTED'"
                     + " AND LOCK_DATA LIKE ?", Integer.class, schema,
-                    "'" + JdbcRuntimeBindingRepository.storageAliasKey(later, STORAGE) + "'%"))
+                    "'" + RuntimeAdmissionFences.storageAliasKey(later, STORAGE) + "'%"))
                     .as("recovery holds the later alias's record").isPositive();
         });
     }
@@ -219,7 +220,7 @@ class StorageRowLockOrderMySqlIT {
     @Test
     void physicalRecoveryOnASingleConnectionKeepsItsCallersTransaction() {
         registerLocal();
-        String alias = JdbcRuntimeBindingRepository.storageAliasKey(TENANT, STORAGE);
+        String alias = RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE);
         // The offline recovery entry runs on one connection, as here.
         var single = new SingleConnectionDataSource(database.url(), System.getProperty("mysql.user"),
                 System.getProperty("mysql.password", ""), true);
@@ -267,7 +268,8 @@ class StorageRowLockOrderMySqlIT {
                 .put("stateDirectory", temp.resolve("runtime").toString()).put("nodeExecutable", "/test/node")
                 .put("cliEntry", "/test/cli.js");
         var cleared = new CapturingJdbc(database.source(), "fence_operation_id = NULL WHERE");
-        var operation = new WorkspaceMigrationStore(cleared, manager, guard, new InMemoryRuntimeBindingRepository(),
+        var operation = new WorkspaceMigrationStore(cleared, manager, guard, new JdbcRuntimeBindingRepository(database.source(),
+                new AesGcmSecretProtector("test", new byte[32])),
                 request.toString().getBytes(StandardCharsets.UTF_8), true,
                 new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker());
         operation.retire(mock(RuntimeBrokerService.class));
@@ -288,14 +290,14 @@ class StorageRowLockOrderMySqlIT {
         jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
                 + " registration_state, storage_kind, registration_revision, registration_json)"
                 + " VALUES (?, ?, ?, ?, ?, ?, 'REGISTERED', 'LOCAL', 1, '{}')",
-                JdbcRuntimeBindingRepository.storageAliasKey(tenant, STORAGE), JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                JdbcRuntimeBindingRepository.storageFenceKey(STORAGE), tenant, STORAGE, physical);
+                RuntimeAdmissionFences.storageAliasKey(tenant, STORAGE), RuntimeAdmissionFences.storageFenceKey(tenant),
+                RuntimeAdmissionFences.storageFenceKey(STORAGE), tenant, STORAGE, physical);
     }
 
     private void registerLocal() {
         jdbc.update("UPDATE ma_storage SET physical_key = ?, registration_state = 'REGISTERED', storage_kind = 'LOCAL',"
                 + " registration_revision = 1, registration_json = '{}' WHERE alias_key = ?", PHYSICAL,
-                JdbcRuntimeBindingRepository.storageAliasKey(TENANT, STORAGE));
+                RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE));
         jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, mount_state)"
                 + " VALUES (?, ?, 'LOCAL', 'READY')", PHYSICAL, PHYSICAL);
     }

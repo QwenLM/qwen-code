@@ -44,6 +44,7 @@ import static org.mockito.Mockito.mock;
         "spring.datasource.password=",
         "qwen.managed-agent.harness.enabled=false",
         "qwen.managed-agent.session-store.enabled=true",
+        "qwen.managed-agent.client-files.enabled=true",
         "qwen.managed-agent.tool-publication.entry-concurrency=4"
 })
 @Import(SurfaceRegistryGateTest.ExtraControllers.class)
@@ -175,6 +176,14 @@ class SurfaceRegistryGateTest {
                     mock(ToolPublicationStore.class),
                     mock(ToolPublicationDataStore.class),
                     mock(ToolPublicationAdmissionStore.class), properties);
+        }
+
+        @Bean
+        TerminalTicketController surfaceGateTerminalTicket() {
+            return new TerminalTicketController(
+                    mock(com.alibaba.qwen.code.managedagent.workspace.runtime
+                            .WorkspaceTerminalRelayService.class),
+                    new TerminalTicketStore(java.time.Clock.systemUTC()));
         }
     }
 }

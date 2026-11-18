@@ -484,6 +484,61 @@ describe('scheduled-task keepalive', () => {
     expect(() => ka.stop()).not.toThrow();
   });
 
+  it('revives through the worktree-aware restore callback when provided', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'a', sessionId: 'sess-1', sessionOwnedByTask: false }),
+    ]);
+    const restoreSession = vi.fn().mockResolvedValue(undefined);
+    const resumeSession = vi
+      .fn()
+      .mockRejectedValue(new Error('raw resume bypassed worktree restore'));
+    const ka = startScheduledTaskKeepalive({
+      bridge: {
+        ...bridge,
+        recordHeartbeat: () => {
+          throw new Error('not resident');
+        },
+        resumeSession,
+      },
+      restoreSession,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    try {
+      await ka.tick();
+      expect(restoreSession).toHaveBeenCalledWith({
+        sessionId: 'sess-1',
+        workspaceCwd: workspace,
+      });
+      expect(resumeSession).not.toHaveBeenCalled();
+    } finally {
+      ka.stop();
+    }
+  });
+
+  it('rehydrates through the worktree-aware restore callback when provided', async () => {
+    await updateCronTasks(workspace, () => [
+      task({ id: 'a', sessionId: 'sess-1' }),
+    ]);
+    const restoreSession = vi.fn().mockResolvedValue(undefined);
+    const resumeSession = vi
+      .fn()
+      .mockRejectedValue(new Error('raw resume bypassed worktree restore'));
+
+    const res = await rehydrateScheduledTaskSessions({
+      bridge: { resumeSession },
+      restoreSession,
+      boundWorkspace: workspace,
+    });
+
+    expect(res).toEqual({ loaded: ['sess-1'], failed: [] });
+    expect(restoreSession).toHaveBeenCalledWith({
+      sessionId: 'sess-1',
+      workspaceCwd: workspace,
+    });
+    expect(resumeSession).not.toHaveBeenCalled();
+  });
+
   it('rehydrate loads each distinct bound session, skipping unbound', async () => {
     await updateCronTasks(workspace, () => [
       task({ id: 'a', sessionId: 'sess-1' }),

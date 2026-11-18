@@ -264,6 +264,9 @@ export function assertManagedSessionChildContinuationEnabled(): void {
  */
 export const MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS = Object.freeze([
   'email',
+  'dingtalk',
+  'github',
+  'wecom',
 ] as const);
 
 /**
@@ -920,7 +923,9 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         contentRef: 'ref',
         deadline: 'timeOrNull',
         admissionRef: 'ref',
+        notBefore: 'timeOrNull',
       },
+      optional: ['notBefore'],
     },
     'wake.requested': {
       fields: {

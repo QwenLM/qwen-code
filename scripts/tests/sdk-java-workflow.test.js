@@ -28,7 +28,7 @@ const brokerTestPattern = ['Test*', '*Test', '*Tests', '*TestCase']
   .join(',');
 
 const writeBackFind =
-  "timeout 300 find . \\( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-parent' -o -path '*/com/alibaba/qwen-managed-agent-contracts' -o -path '*/com/alibaba/qwen-managed-agent-control-plane' -o -path '*/com/alibaba/qwen-managed-agent-runtime-broker' -o -path '*/com/alibaba/qwen-managed-agent-persistence' -o -path '*/com/alibaba/qwen-managed-agent-adapters' -o -path '*/com/alibaba/qwen-managed-agent-runtime-external' -o -path '*/com/alibaba/qwen-managed-agent-runtime-host' -o -path '*/com/alibaba/qwen-managed-agent-runtime-http' -o -path '*/com/alibaba/qwen-managed-agent-runtime-local' -o -path '*/com/alibaba/qwen-managed-agent-runtime-kubernetes' -o -path '*/com/alibaba/qwen-managed-agent-runtime-ssh' -o -path '*/com/alibaba/qwen-managed-agent-runtime-static' -o -path '*/com/alibaba/qwen-managed-agent-server' -o -path '*/com/alibaba/qwen-managed-agent-verification' -o -path '*/com/alibaba/qwen-managed-agent-*' \\) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml*' ! -name '*.part' ! -name '*.part.lock' ! -name '*.tmp' -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?";
+  "timeout 300 find . \\( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-parent' -o -path '*/com/alibaba/qwen-managed-agent-contracts' -o -path '*/com/alibaba/qwen-managed-agent-control-plane' -o -path '*/com/alibaba/qwen-managed-agent-runtime-broker' -o -path '*/com/alibaba/qwen-managed-agent-persistence' -o -path '*/com/alibaba/qwen-managed-agent-adapters' -o -path '*/com/alibaba/qwen-managed-agent-runtime-external' -o -path '*/com/alibaba/qwen-managed-agent-runtime-host' -o -path '*/com/alibaba/qwen-managed-agent-runtime-http' -o -path '*/com/alibaba/qwen-managed-agent-runtime-local' -o -path '*/com/alibaba/qwen-managed-agent-runtime-ssh' -o -path '*/com/alibaba/qwen-managed-agent-runtime-static' -o -path '*/com/alibaba/qwen-managed-agent-server' -o -path '*/com/alibaba/qwen-managed-agent-verification' -o -path '*/com/alibaba/qwen-managed-agent-*' \\) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml*' ! -name '*.part' ! -name '*.part.lock' ! -name '*.tmp' -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?";
 
 const workflow = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
 const job = (name) => {
@@ -477,7 +477,6 @@ describe('SDK Java self-hosted workflow guards', () => {
       'qwen-managed-agent-runtime-external',
       'qwen-managed-agent-runtime-host',
       'qwen-managed-agent-runtime-http',
-      'qwen-managed-agent-runtime-kubernetes',
       'qwen-managed-agent-runtime-local',
       'qwen-managed-agent-runtime-ssh',
       'qwen-managed-agent-runtime-static',
@@ -679,7 +678,6 @@ describe('SDK Java self-hosted workflow guards', () => {
             'qwen-managed-agent-runtime-external',
             'qwen-managed-agent-runtime-host',
             'qwen-managed-agent-runtime-http',
-            'qwen-managed-agent-runtime-kubernetes',
             'qwen-managed-agent-runtime-local',
             'qwen-managed-agent-runtime-ssh',
             'qwen-managed-agent-runtime-static',
@@ -750,7 +748,6 @@ describe('SDK Java self-hosted workflow guards', () => {
             'qwen-managed-agent-runtime-external',
             'qwen-managed-agent-runtime-host',
             'qwen-managed-agent-runtime-http',
-            'qwen-managed-agent-runtime-kubernetes',
             'qwen-managed-agent-runtime-local',
             'qwen-managed-agent-runtime-ssh',
             'qwen-managed-agent-runtime-static',
@@ -2875,10 +2872,15 @@ describe('SDK Java contract version guard', () => {
     expect(step.if).toBe(
       "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}",
     );
-    expect(index).toBeGreaterThan(names.indexOf('Check lint gate freshness'));
+    // The freshness check now runs after `npm ci` (it parses ci.yml with the
+    // `yaml` dependency), so both cheap guards come before it, not after.
+    expect(index).toBeLessThan(names.indexOf('Check lint gate freshness'));
     expect(
       names.indexOf('Check Flyway migration versions are unique'),
-    ).toBeGreaterThan(names.indexOf('Check lint gate freshness'));
+    ).toBeLessThan(names.indexOf('Check lint gate freshness'));
+    expect(names.indexOf('Check lint gate freshness')).toBeGreaterThan(
+      parsed.steps.findIndex((s) => s.run?.includes('pnpm install')),
+    );
     expect(index).toBeLessThan(
       parsed.steps.findIndex((s) => s.run?.includes('pnpm install')),
     );

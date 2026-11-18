@@ -137,6 +137,16 @@ export class HostedMonitorLoop {
     private readonly onNotification?: () => void,
   ) {}
 
+  /**
+   * Whether the loop still observes. The owning Session's map keeps every
+   * loop it ever started, so idle-suspension eligibility tests this flag
+   * rather than the map's size; a parked or stopped loop no longer holds
+   * the Session resident.
+   */
+  get live(): boolean {
+    return !this.ended;
+  }
+
   /** Resolves once every settle queued so far has finished. */
   get done(): Promise<void> {
     if (this.pending === 0) {

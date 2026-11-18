@@ -42,6 +42,7 @@ import { computeWorkflowScriptDigest } from '../../agents/runtime/workflow-saved
 import { convertToFunctionResponse } from '../../core/coreToolScheduler.js';
 import { WorkflowAgentFailedError } from '../../agents/runtime/workflow-agent-failure.js';
 import { WORKFLOW_AUTHORING_SKILL_NAME } from '../../skills/workflow-authoring-skill.js';
+import { runWithInvocationContext } from '../../utils/invocation-context.js';
 
 /**
  * The description, fixed at construction, points at the `workflow-authoring`
@@ -64,6 +65,14 @@ function fakeConfig(): Config {
 type Dispatch = WorkflowToolOptions['dispatch'];
 /** Config fields that silence the one-time usage banner. */
 const QUIET = { getSkipWorkflowUsageWarning: () => true };
+/** An ACP session (`--acp`) with its workflow controls on. */
+const ACP = {
+  isInteractive: () => false,
+  getExperimentalZedIntegration: () => true,
+  isWorkflowsEnabled: () => true,
+  getBareMode: () => false,
+  isTrustedFolder: () => true,
+};
 const unused = async () => 'unused';
 const replyOk = async () => 'ok';
 const tagged = async (prompt: string) => `T:${prompt}`;
@@ -919,12 +928,12 @@ await agent('scan package.json')
     expect(invocation.getDescription()).toContain('deep-research.js');
   });
 
-  it('rejects background runs outside an interactive completion channel', () => {
+  it('rejects background runs outside the TUI and ACP clients, or without a completion channel', () => {
     const background = { script: 'return 1', run_in_background: true };
     const headless = configWithRegistry({ isInteractive: () => false });
     headless.registry.setCompletionCallback(vi.fn());
     expect(() => new WorkflowTool(headless.config).build(background)).toThrow(
-      /interactive TUI/i,
+      /only in the interactive TUI and ACP clients/i,
     );
 
     const { config, registry } = configWithRegistry({
@@ -939,15 +948,224 @@ await agent('scan package.json')
       }),
     ).toThrow(/completion channel/i);
 
+    const acpWithoutChannel = configWithRegistry(ACP);
+    expect(() =>
+      new WorkflowTool(acpWithoutChannel.config).build(background),
+    ).toThrow(/completion channel/i);
+
     registry.setCompletionCallback(vi.fn());
-    const acpConfig = {
-      isInteractive: () => true,
-      getExperimentalZedIntegration: () => true,
-      getWorkflowRunRegistry: () => registry,
-    } as unknown as Config;
-    expect(() => new WorkflowTool(acpConfig).build(background)).toThrow(
-      /interactive TUI/i,
+    expect(new WorkflowTool(config).build(background).params).toMatchObject({
+      run_in_background: true,
+    });
+  });
+
+  // An ACP session turns its workflow controls off when workflows are
+  // disabled (also by a settings reload mid-session), in bare mode, and in an
+  // untrusted workspace; a background run there could not be seen or
+  // stopped. Trust is the resolved decision, not the folder-trust feature
+  // toggle, and a host that cannot answer one of these counts as off.
+  it.each<[string, Record<string, unknown>, boolean]>([
+    ['controls on', {}, true],
+    ['workflows disabled', { isWorkflowsEnabled: () => false }, false],
+    ['bare mode', { getBareMode: () => true }, false],
+    ['untrusted workspace', { isTrustedFolder: () => false }, false],
+    [
+      'untrusted workspace, folder-trust toggle on',
+      { getFolderTrust: () => true, isTrustedFolder: () => false },
+      false,
+    ],
+    ['no workflows answer', { isWorkflowsEnabled: undefined }, false],
+    ['no trust answer', { isTrustedFolder: undefined }, false],
+  ])(
+    'gates ACP background runs on the workflow controls: %s',
+    (_label, extra, allowed) => {
+      const { config, registry } = configWithRegistry({ ...ACP, ...extra });
+      registry.setCompletionCallback(vi.fn());
+      const build = () =>
+        new WorkflowTool(config).build({
+          script: 'return 1',
+          run_in_background: true,
+        });
+      if (allowed) {
+        expect(build().params.run_in_background).toBe(true);
+      } else {
+        expect(build).toThrow(/workflow controls are off/);
+      }
+    },
+  );
+
+  it('keeps workflows in the foreground when the Channel target cannot receive a background result', () => {
+    const { config, registry } = configWithRegistry(ACP);
+    registry.setCompletionCallback(vi.fn());
+    const tool = new WorkflowTool(config);
+    const origin = {
+      channelName: 'qq',
+      chatId: 'group',
+      senderId: 'member',
+      backgroundWorkflowBlocked: true as const,
+    };
+    runWithInvocationContext(
+      undefined,
+      () => {
+        expect(() => tool.build({ script: 'return 1' })).not.toThrow();
+        expect(() =>
+          tool.build({ script: 'return 1', run_in_background: true }),
+        ).toThrow(/channel target cannot receive background results/i);
+      },
+      origin,
     );
+    expect(
+      tool.build({ script: 'return 1', run_in_background: true }).params,
+    ).toMatchObject({ run_in_background: true });
+  });
+
+  // A cron, notification or runtime goal turn of a Channel session has no
+  // launch origin; a background result there would reach no chat.
+  it('keeps workflows in the foreground in a Channel turn with no launch origin', async () => {
+    const { config, registry } = configWithRegistry({ ...ACP, ...QUIET });
+    registry.setCompletionCallback(vi.fn());
+    const tool = new WorkflowTool(config);
+    const detached = tool.build({
+      script: 'return 1',
+      run_in_background: true,
+    });
+    runWithInvocationContext(
+      undefined,
+      () => {
+        expect(() => tool.build({ script: 'return 1' })).not.toThrow();
+        expect(() =>
+          tool.build({ script: 'return 1', run_in_background: true }),
+        ).toThrow(/no channel chat to report a background result to/i);
+      },
+      undefined,
+      true,
+    );
+    await expect(
+      runWithInvocationContext(
+        undefined,
+        () => detached.execute(live()),
+        undefined,
+        true,
+      ),
+    ).resolves.toMatchObject({
+      error: {
+        message: expect.stringContaining('no channel chat'),
+        type: ToolErrorType.EXECUTION_DENIED,
+      },
+    });
+    expect(registry.list()).toHaveLength(0);
+  });
+
+  // The tool runs inside the turn's invocation context, so the Channel
+  // target is read again when the invocation executes, not only at build.
+  it('refuses at execute time a detached invocation for a Channel target that cannot receive it', async () => {
+    const { config, registry } = configWithRegistry({ ...ACP, ...QUIET });
+    registry.setCompletionCallback(vi.fn());
+    const invocation = new WorkflowTool(config).build({
+      script: 'return 1',
+      run_in_background: true,
+    });
+    const blocked = {
+      channelName: 'qq',
+      chatId: 'group',
+      senderId: 'member',
+      backgroundWorkflowBlocked: true as const,
+    };
+
+    await expect(
+      runWithInvocationContext(
+        undefined,
+        () => invocation.execute(live()),
+        blocked,
+      ),
+    ).resolves.toMatchObject({
+      error: {
+        message: expect.stringContaining(
+          'channel target cannot receive background results',
+        ),
+        type: ToolErrorType.EXECUTION_DENIED,
+      },
+    });
+    expect(registry.list()).toHaveLength(0);
+  });
+
+  it('rechecks the workflow controls before executing a detached invocation', async () => {
+    let enabled = true;
+    const { config, registry } = configWithRegistry({
+      ...ACP,
+      ...QUIET,
+      isWorkflowsEnabled: () => enabled,
+    });
+    registry.setCompletionCallback(vi.fn());
+    const invocation = new WorkflowTool(config).build({
+      script: 'return 1',
+      run_in_background: true,
+    });
+
+    enabled = false;
+    await expect(invocation.execute(live())).resolves.toMatchObject({
+      error: {
+        message: expect.stringContaining('workflow controls are off'),
+        type: ToolErrorType.EXECUTION_DENIED,
+      },
+    });
+    expect(registry.list()).toHaveLength(0);
+  });
+
+  // An ACP session (Web Shell, IDE clients) is spawned on pipes, so it reads
+  // as non-interactive; its session registers the completion channel that
+  // turns a settled run into a notification turn.
+  it('runs a model-requested background workflow in an ACP session and reports it once', async () => {
+    const { config, registry } = configWithRegistry({ ...ACP, ...QUIET });
+    const completion = vi.fn();
+    registry.setCompletionCallback(completion);
+    let resolveDispatch: ((value: string) => void) | undefined;
+    const tool = new WorkflowTool(config, {
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          resolveDispatch = resolve;
+        }),
+    });
+    const turn = new AbortController();
+    const invocation = tool.build({
+      script: `phase('slow'); return { marker: 'ACP_BG', answer: await agent('work') };`,
+      run_in_background: true,
+    });
+    (
+      invocation as unknown as { setCallId: (callId: string) => void }
+    ).setCallId('acp-workflow-call');
+    const execution = invocation.execute(turn.signal);
+
+    await vi.waitFor(() => expect(resolveDispatch).toBeDefined());
+    const result = await execution;
+    const entry = registry.list()[0]!;
+    expect(entry).toMatchObject({
+      status: 'running',
+      isBackgrounded: true,
+      resumeInBackground: true,
+      toolUseId: 'acp-workflow-call',
+    });
+    expect(result.workflowRunId).toBe(entry.runId);
+    expect(texts(result).join('\n')).toContain(
+      `Workflow started in background.\nRun ID: ${entry.runId}`,
+    );
+
+    // The turn that started it ends (or is stopped) without touching the run.
+    turn.abort();
+    await Promise.resolve();
+    expect(registry.get(entry.runId)?.status).toBe('running');
+    expect(completion).not.toHaveBeenCalled();
+
+    resolveDispatch?.('done');
+    await registry.getHandle(entry.runId)!.completion;
+    expect(registry.get(entry.runId)?.status).toBe('completed');
+    expect(completion).toHaveBeenCalledTimes(1);
+    expect(completion.mock.calls[0][1]).toContain('<kind>workflow</kind>');
+    expect(completion.mock.calls[0][1]).toContain('ACP_BG');
+    expect(completion.mock.calls[0][2]).toMatchObject({
+      runId: entry.runId,
+      status: 'completed',
+    });
   });
 
   // A retry of a saved workflow whose file is no longer readable falls back to

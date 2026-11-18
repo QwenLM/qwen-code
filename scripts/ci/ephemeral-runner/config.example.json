@@ -10,6 +10,7 @@
   "pidsLimit": 1024,
   "ttlSeconds": 10800,
   "shutdownGraceSeconds": 60,
+  "drainTimeoutSeconds": 1800,
   "minDiskBytes": 10737418240,
   "stallAlertSeconds": 1800,
   "stateDir": "/var/lib/qwen-ephemeral-runner",

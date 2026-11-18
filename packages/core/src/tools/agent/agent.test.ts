@@ -3556,9 +3556,21 @@ describe('AgentTool', () => {
         .mockReturnValue(
           client as unknown as ReturnType<Config['getLlmClient']>,
         );
-    const chatWith = (generationConfig: object) => ({
+    const chatWith = (
+      generationConfig: object,
+      dispatchedConfig?: object,
+      dispatchedRequest?: object,
+    ) => ({
       getChat: vi.fn().mockReturnValue({
         getGenerationConfig: vi.fn().mockReturnValue(generationConfig),
+        ...(dispatchedConfig && {
+          getDispatchedGenerationConfig: vi
+            .fn()
+            .mockReturnValue(dispatchedConfig),
+        }),
+        ...(dispatchedRequest && {
+          getDispatchedRequest: vi.fn().mockReturnValue(dispatchedRequest),
+        }),
       }),
     });
     /** Parent declarations `[name, description][]` (+ registry names). */
@@ -3962,6 +3974,37 @@ describe('AgentTool', () => {
       await runFork(forkParams('some task', { fork_turns: '1' }));
       expect(getHistory).toHaveBeenCalledWith();
       expectSeed([h.startup, h.secondUser, h.secondModel]);
+    });
+
+    it('inherits the dispatched parent prompt instead of a later canonical variant', async () => {
+      const generationConfig = {
+        systemInstruction: 'dispatched parent instruction',
+      };
+      const runtimeView = {
+        contentGenerator: {
+          generateContent: vi.fn(),
+          generateContentStream: vi.fn(),
+          embedContent: vi.fn(),
+        },
+        contentGeneratorConfig: {
+          ...config.getContentGeneratorConfig(),
+          model: 'dispatched-parent-model',
+        },
+      };
+      llmClient({
+        getHistory: vi.fn().mockReturnValue([]),
+        ...chatWith(
+          { systemInstruction: 'canonical model instruction' },
+          generationConfig,
+          { model: 'dispatched-parent-model', generationConfig, runtimeView },
+        ),
+      });
+      await runFork(forkParams('some task'));
+      expect(createArgs()?.[2]).toMatchObject({
+        renderedSystemPrompt: 'dispatched parent instruction',
+      });
+      expect(createArgs()?.[3]).toEqual({ model: 'dispatched-parent-model' });
+      expect(createArgs()?.[8]).toBe(runtimeView);
     });
 
     it('caps fork turns and uses bubble approval mode', async () => {

@@ -34,6 +34,11 @@ These commands help you save, restore, and summarize work progress.
 | `/export`        | Export session history to file                                           | `/export html`, `/export md`, `/export json`, `/export jsonl` |
 | `/rename`        | Rename or tag the current session                                        | `/rename My Feature` or `/tag`                                |
 | `/commit`        | Create a git commit with an AI-drafted message                           | `/commit` or `/commit only stage the parser changes`          |
+| `/pr`            | Bind a GitHub pull request to this session                               | `/pr 123`, `/pr #123`, or `/pr <PR URL>`                      |
+
+> [!note]
+>
+> `/pr` with a bare number resolves the PR in the session's target-directory repository, which may not be where your work happened — the success message prints the resolved URL so you can check it. A full PR URL names its own repository. There is no unbind command. To fix a bare-number bind, re-run `/pr` with the full URL of the PR you meant — when the intended PR carries the same number, that replaces the wrong entry in place; otherwise the wrong entry stays until you bind enough further PRs to push it past the session's 10-binding cap, or edit the session's PR sidecar file.
 
 > [!note]
 >
@@ -611,6 +616,8 @@ Use {{args}} for parameter injection.
 | Raw Injection    | `prompt = "Fix: {{args}}"`              | `/fix "Button issue"` | `Fix: "Button issue"`    |
 | In Shell Command | `prompt = "Search: !{grep {{args}} .}"` | `/search "hello"`     | Execute `grep "hello" .` |
 
+Argument text is inserted literally: dollar sequences such as `$$` and `$&` keep their characters, and placeholder names inside the arguments are not expanded again. Arguments inside `!{...}` still receive shell escaping before permission checks and execution.
+
 #### 2. Default Parameter Processing
 
 | Input Situation | Processing Method                                      | Example                                        |
@@ -1079,11 +1086,29 @@ you have open. Several of them share one process and one inbox, so a
 sender has to name the session it means — every Qwen Code session does
 that automatically.
 
-Messages sent _to_ one are refused rather than held. Holding is a
-question put to a person, and nobody is watching a held-message list on a
-driven session's behalf; a sender is told at once instead of
-waiting out an expiry. Where a held message should surface for those
-sessions is not settled yet.
+It can receive messages from sessions in the same review class and from
+trusted controllers when the inbound policy is unset. It shows an
+accepted message and hands it to the model as a turn of its own once
+the session is idle. A message the rules would hold is
+refused instead, because nobody is watching a held-message list on a
+driven session's behalf, and the sender is told at once rather than
+waiting out an expiry. An explicit `hold` setting is answered the same
+way. Where a held message should surface for these sessions is not
+settled yet.
+
+The shared ACP inbox accepts peer and controller credentials. The
+own-process credential described above is available to single-session
+terminal inboxes.
+
+After you stop a turn, messages that the gate would otherwise accept
+receive `queue-full` until you send another prompt. Inbound policy and
+rate limits still apply. Senders can retry after the next prompt.
+
+When the session closes or `/clear` switches its conversation, the host
+sends `expired` for messages still waiting in the old queue. Messages
+appear in the transcript when a turn takes them. A message whose turn
+was cancelled before the model saw it is not corrected. That gap exists
+in a terminal session too.
 
 A session registers unless its own settings turn
 `agents.crossSessionMessaging` off, or it was started with `--bare` or

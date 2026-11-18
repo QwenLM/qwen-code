@@ -9,7 +9,7 @@ import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -262,7 +262,7 @@ public class WorkspaceFileUploadStore {
             }
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenant, scope.binding().getStorageId());
             String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage WHERE alias_key = ? FOR UPDATE", String.class,
-                    JdbcRuntimeBindingRepository.storageAliasKey(tenant, scope.binding().getStorageId()));
+                    RuntimeAdmissionFences.storageAliasKey(tenant, scope.binding().getStorageId()));
             var owners = jdbc.queryForList("SELECT mount_state, mount_revision FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", physical);
             if (owners.size() != 1 || !"READY".equals(owners.getFirst().get("mount_state"))
                     || !(owners.getFirst().get("mount_revision") instanceof Number mount)
@@ -299,7 +299,7 @@ public class WorkspaceFileUploadStore {
                     workspace.getBytes(StandardCharsets.UTF_8), locator.sessionId() == null ? null : locator.sessionId().getBytes(StandardCharsets.UTF_8),
                     ManagedSchemaKeys.key(scope.binding().getStorageId()),
                     scope.binding().getStorageId().getBytes(StandardCharsets.UTF_8),
-                    JdbcRuntimeBindingRepository.storageAliasKey(tenant, scope.binding().getStorageId()), physical,
+                    RuntimeAdmissionFences.storageAliasKey(tenant, scope.binding().getStorageId()), physical,
                     ManagedWorkspaceRegistry.actorKey(tenant, actor), digest, encode(target));
             if (jdbc.update("UPDATE ma_storage_owner SET member_count = member_count + 1 WHERE storage_key = ?"
                     + " AND mount_state = 'READY' AND mount_revision = ?",

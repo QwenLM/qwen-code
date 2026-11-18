@@ -77,7 +77,7 @@ describe('managed host build lane', () => {
     }
   });
 
-  it('builds untrusted PR code with a read-only token and no secrets', () => {
+  it('builds PR code with a read-only token and no secrets on either arm', () => {
     // A job-level `permissions:` block replaces the workflow default, so the
     // job's effective scope is the one the untrusted build actually runs with.
     expect(job.permissions ?? workflow.permissions).toEqual({
@@ -91,7 +91,14 @@ describe('managed host build lane', () => {
     const secretRef = /\$\{\{[^}]*\bsecrets\b/;
     expect(workflowSource).not.toMatch(secretRef);
     expect(workflowSource).toMatch(/\$\{\{\s*github\./);
-    expect(job['runs-on']).toBe('ubuntu-latest');
+    // Both self-hosted arms keep this credential-free boundary. The split is
+    // capacity, not trust: the disposable pool is sized for untrusted forks,
+    // so trusted PRs take the persistent x64 fleet their other CI uses. The
+    // per-event routing matrix lives in
+    // .github/scripts/ci-runner-routing.test.mjs; pin the shape here.
+    expect(job['runs-on']).toBe(
+      '${{ (github.event_name == \'pull_request\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && ((github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\'), github.event.pull_request.author_association)) && fromJSON(\'["self-hosted", "linux", "x64", "ecs-qwen"]\') || fromJSON(\'["self-hosted", "ecs-qwen-ephemeral"]\')) || fromJSON(\'["ubuntu-latest"]\') }}',
+    );
     expect(job.if).toContain("github.repository == 'QwenLM/qwen-code'");
     const checkout = job.steps.find((step) =>
       String(step.uses ?? '').startsWith('actions/checkout@'),
@@ -100,9 +107,39 @@ describe('managed host build lane', () => {
   });
 
   it('bounds the job and never cancels a post-merge witness', () => {
-    expect(job['timeout-minutes']).toBeGreaterThan(0);
+    // The ceiling follows the arm the selector picks: 90 prices the
+    // disposable pool's cold install, and the warm persistent fleet keeps the
+    // hosted 20. The trust terms are spelled exactly as runs-on spells them.
+    expect(job['timeout-minutes']).toBe(
+      '${{ (github.event_name == \'pull_request\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\' && !(github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\'), github.event.pull_request.author_association))) && 90 || 20 }}',
+    );
     expect(workflow.concurrency['cancel-in-progress']).toBe(
       "${{ github.event_name == 'pull_request' }}",
+    );
+  });
+
+  it('prepares the disposable pool without changing hosted setup', () => {
+    const hostedNode = stepNamed('Set up Node.js 22.x');
+    expect(hostedNode.if).toBe("${{ runner.environment == 'github-hosted' }}");
+    const poolNode = stepNamed('Use pre-installed Node.js (self-hosted)');
+    expect(poolNode.uses).toBe('./.github/actions/self-hosted-node');
+    expect(poolNode.if).toBe("${{ runner.environment == 'self-hosted' }}");
+    const diskFloor = stepNamed('Disk floor gate (self-hosted)');
+    expect(diskFloor.if).toBe("${{ runner.environment == 'self-hosted' }}");
+    expect(diskFloor.env).toEqual({
+      DISK_FLOOR_MIN_FREE_KB: '8388608',
+      DISK_FLOOR_MAX_USED_PCT: '85',
+    });
+    // The invocation and its position are what make the gate act: a gutted
+    // `run:` that keeps the name and both overrides, or a gate moved below
+    // the install it exists to protect, must red here as it does in the
+    // sibling capture suite.
+    expect(diskFloor.run).toBe(
+      'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"',
+    );
+    const names = job.steps.map((step) => step.name);
+    expect(names.indexOf('Disk floor gate (self-hosted)')).toBeLessThan(
+      names.indexOf('Install dependencies'),
     );
   });
 
@@ -185,9 +222,11 @@ describe('managed host build lane', () => {
 describe('managed host stays out of the default build and the package', () => {
   it('does not charge the default build for the host bundle', () => {
     expect(pkg.scripts.build).not.toContain('managed-host');
-    // The default passes it replaces must survive the split.
-    expect(pkg.scripts.build).toContain('--mode transcript');
-    expect(pkg.scripts.build).toContain('tsc -p tsconfig.lib.json');
+    // `build` runs the chain through the heap-capped `build:steps` delegate,
+    // so the default passes it replaces must survive in that delegate.
+    expect(pkg.scripts.build).toContain('npm run build:steps');
+    expect(pkg.scripts['build:steps']).toContain('--mode transcript');
+    expect(pkg.scripts['build:steps']).toContain('tsc -p tsconfig.lib.json');
   });
 
   it('keeps the entry unpublished so the lane is its only gate', () => {

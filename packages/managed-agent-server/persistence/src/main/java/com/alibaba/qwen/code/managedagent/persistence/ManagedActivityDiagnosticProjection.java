@@ -273,7 +273,7 @@ final class ManagedActivityDiagnosticProjection {
             // Publication already verified the external object; do not fetch it under the Session fence.
             return null;
         }
-        return com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.toolOutcomeBody(ref, referenced -> {
+        return com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory.toolOutcomeBody(ref, referenced -> {
             StoredResource part = resources.apply(referenced.path("resourceId").asText());
             requireReference(part, referenced);
             return part.bytes();
@@ -422,13 +422,19 @@ final class ManagedActivityDiagnosticProjection {
             var source = jdbc.queryForMap("SELECT record_bytes, record_digest FROM ma_session_journal_tx WHERE tenant_id = ?"
                     + " AND session_id = ? AND journal_revision = ?", tenant, session, transaction.revision());
             byte[] raw = (byte[]) source.get("record_bytes");
+            if (raw == null) {
+                JdbcJournalPacks packs = store.journalPacks();
+                raw = packs == null ? null : packs.resolveBytes(tenant, session,
+                        transaction.revision(), (String) source.get("record_digest"),
+                        transaction.bytes());
+            }
             require(raw != null, "Diagnostic recovery journal is missing.");
             require(raw.length == transaction.bytes() && DigestUtils.sha256Hex(raw).equals(source.get("record_digest")),
                     "Diagnostic recovery journal digest conflicts.");
             boolean complete = true;
             long observed = transaction.events() == 0 ? completedSequence : transaction.first() - 1;
             int observedCount = 0;
-            for (JsonNode record : com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.records(raw)) {
+            for (JsonNode record : com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory.records(raw)) {
                 JsonNode event = record.path("managedSession");
                 if (!"managed_session_event_v1".equals(record.path("subtype").asText())) {
                     continue;

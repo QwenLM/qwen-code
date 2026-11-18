@@ -372,7 +372,7 @@ worktree 展示入口不是纯读取。`findSessionWorktree` / `findSessionWorkt
 - 行 helper `requireSessionForUpdate`（7061/7066）先锁 PUBLIC Session 行，仅在取得该锁后才读取并锁定对应 event-stream 计数器。列表映射器与严格单 Session 映射器对缺少 stream 的处理不同。需要同时锁二者的路径随后通过 `requireTurnForUpdate`（7106）锁 Turn；提取后保留其 NOT_FOUND 映射。
 - 许多准入、修改和策略入口首先执行 `WorkspaceMigrationAdmission.lockTenant`，然后按路径依次处理 Session/stream、Turn/receipt/operation。MCP/extension 的 idle 复核（1340）专门按此顺序进行新鲜加锁读取：Session plan -> 活动 Turn -> 未结算 child-run record -> requested action records -> 活动 operation/rename/receipt。已有 journal 快照是这些读取不能改成普通一致性读取的原因。
 - 生命周期准入 `beginLifecycle`（2695）先锁 migration tenant，按条件锁 retention tenant，再锁 Session/stream；保留失败操作的重放/恢复、状态授权和 idle journal 检查，按原顺序写 operation/fence/head 及事件。`completeOperation`（4143）先执行 legacy CSI guard，再按条件锁 placement 和 bounded retention，随后根据生命周期协议在 Session 之前或之后加 deletion 锁，最后处理 operation claim。不得统一其分支顺序。
-- `ManagedLegacySessionGuard.requireLegacyMutation` 本身通过 `ManagedSessionStore.namedRootDeadlock` 进行使用索引的 CSI root 加锁读取，查询超时为 10 秒。一些 Turn lease 路径采用此 guard 加带条件 UPDATE，准入/终态路径则取得完整 Session/stream 锁后再处理 Turn。保留差异；通用的行 helper 事务或锁会改变语义。
+- `ManagedLegacySessionGuard.requireLegacyMutation` 先对生成列 `is_csi_guard` 做一致性非加锁读取：pin 列只随 Session root INSERT 写入，因此快照可见且未 pin 的 root 无需加锁即可判定。仅已 pin 的 root 或调用方快照之外的 root 才回落到通过 `ManagedSessionStore.namedRootDeadlock` 按 `pk_ma_session` 加锁的当前读。两次读取均保留 10 秒查询超时，且不再有任何分支使用 `idx_ma_session_csi_guard`。一些 Turn lease 路径采用此 guard 加带条件 UPDATE，准入/终态路径则取得完整 Session/stream 锁后再处理 Turn。保留差异；通用的行 helper 事务或锁会改变语义。
 - 物化和 replay-floor 推进在检查 Turn 证据或更新 coverage 之前先锁 Session/stream。撤回修复 `rebuildTurnText`（6172）只在外层 Turn 工作流已经取得原有 owner/epoch 锁之后，才锁 stream coverage 和 message 行。
 
 ### A1 依赖闭包与边界

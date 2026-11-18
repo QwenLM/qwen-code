@@ -39,16 +39,6 @@ class ManagedAgentPreflightTest {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
 
     @Test
-    void treatsOnlyLoopbackSpellingsAsLoopback() {
-        assertTrue(ManagedAgentPreflight.isLoopback("127.0.0.1"));
-        assertTrue(ManagedAgentPreflight.isLoopback("::1"));
-        assertTrue(ManagedAgentPreflight.isLoopback("localhost"));
-        assertTrue(ManagedAgentPreflight.isLoopback(null));
-        assertFalse(ManagedAgentPreflight.isLoopback("0.0.0.0"));
-        assertFalse(ManagedAgentPreflight.isLoopback("10.0.0.1"));
-    }
-
-    @Test
     void acceptsOnlyLowercaseSha256Digests() {
         assertTrue(ManagedAgentPreflight.isDigest(DIGEST));
         assertFalse(ManagedAgentPreflight.isDigest(
@@ -1707,20 +1697,29 @@ class ManagedAgentPreflightTest {
                 new ManagedAgentProperties().getRuntimeBroker();
         broker.setHost("127.0.0.1");
         broker.setPort(4182);
-        // Node's URL parser folds each of these into the Broker's origin.
-        for (String url : List.of("http://127.1:4182", "http://2130706433:4182",
-                "http:/127.0.0.1:4182", "http:///127.0.0.1:4182",
-                "http://127.0.0.1:4182/./", "http://127.0.0.1:4182/proxy/..")) {
+        // Canonical http(s)://host[:port][/] spellings pass.
+        for (String url : List.of("http://127.0.0.1:4182", "http://127.0.0.1:4182/",
+                "http://localhost:4182", "http://LocalHost:4182", "HTTP://127.0.0.1:4182")) {
             assertEquals(ManagedAgentPreflight.Status.PASS,
                     urlCheck(url, broker).status(), url);
         }
-        // And refuses these, so the Harness never starts.
-        for (String url : List.of("http://127.0.0.08:4182",
-                "http://127.0.0.1:65536", "http://127.0.0.1:99999")) {
+        // Non-canonical WHATWG spellings and invalid ports/octets are refused directly.
+        for (String url : List.of("http://127.1:4182", "http://2130706433:4182",
+                "http://0177.0.0.1:4182", "http://127.0.0.010:4182",
+                "http:/127.0.0.1:4182", "http:///127.0.0.1:4182",
+                "http://127.0.0.08:4182", "http://127.0.0.1:65536",
+                "http://127.0.0.1:99999", "http://127.0.0.1:0", "http://127.0.0.1:")) {
             ManagedAgentPreflight.Check check = urlCheck(url, broker);
             assertEquals(ManagedAgentPreflight.Status.FAIL, check.status(), url);
             assertEquals("the Hosted Harness refuses " + url
                     + ", which is not a valid URL", check.detail());
+        }
+        // Dot-segment paths are refused as non-origin URLs rather than folded.
+        for (String url : List.of("http://127.0.0.1:4182/./", "http://127.0.0.1:4182/proxy/..")) {
+            ManagedAgentPreflight.Check check = urlCheck(url, broker);
+            assertEquals(ManagedAgentPreflight.Status.FAIL, check.status(), url);
+            assertEquals("the Hosted Harness refuses " + url
+                    + ", which is not an http or https origin", check.detail());
         }
         // Only whether the Harness accepts an https host with an xn-- label
         // depends on IDNA; plain http to one is refused either way.
@@ -1731,10 +1730,7 @@ class ManagedAgentPreflightTest {
         broker.setHost("::1");
         assertEquals(ManagedAgentPreflight.Status.FAIL,
                 urlCheck("http://::1:4182", broker).status());
-        // A leading zero makes an octet octal: 010 is 8, not the bound 10.
         broker.setHost("127.0.0.10");
-        assertEquals(ManagedAgentPreflight.Status.WARN,
-                urlCheck("http://127.0.0.010:4182", broker).status());
         assertEquals(ManagedAgentPreflight.Status.PASS,
                 urlCheck("http://127.0.0.10:4182", broker).status());
         // The fix names the bound address, which the Harness accepts
@@ -2042,7 +2038,7 @@ class ManagedAgentPreflightTest {
     @Test
     void warnsWhenTheToolPathUsesAnotherProvisioner() {
         ManagedAgentProperties properties = toolProperties();
-        properties.getRuntimeBroker().setProvisioner("kubernetes-workspace");
+        properties.getRuntimeBroker().setProvisioner("fixture-http");
         assertEquals(ManagedAgentPreflight.Status.WARN,
                 ManagedAgentPreflight.toolPathCheck(properties).status());
     }
