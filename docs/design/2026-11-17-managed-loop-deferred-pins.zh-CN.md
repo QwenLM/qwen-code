@@ -148,7 +148,7 @@
 
 ## 合并后审计：提到回调外的 sibling 与 main 的继承红
 
-第二次合入 main（合并提交 `383bdc690c`；其上的守卫修复是 `9a74ffa29c`，只改本记录与元测试，故下方臂证据承接到它）。incoming 提交未触碰本 PR 的十一个文件，且本 diff 在 `packages/managed-agent-server`、`packages/sdk-java`、`packages/web-shell` 与 `packages/web-templates` 上与 main 逐字节相同。main 也未触碰 `packages/core/src/managed-runtime`、`packages/core/src/skills`、`WorkspaceToolProfiles`、`CronSlots`、`cronParser` 与共享槽 fixtures，故这些守卫读取的每个 oracle 都未变；loop 注入路径上的 Java 变化是 #17703 的 `mergeInto`/`sessionSkills` 签名及其调用方，由两条真实臂覆盖。
+第二次合入 main（合并提交 `383bdc690c`）。其上的每个提交都只改本记录与元测试——从不改 runner、core、cli 或 Java 源码——故下方臂证据承接到分支 head。incoming 提交未触碰本 PR 的十一个文件，且本 diff 在 `packages/managed-agent-server`、`packages/sdk-java`、`packages/web-shell` 与 `packages/web-templates` 上与 main 逐字节相同。main 也未触碰 `packages/core/src/managed-runtime`、`packages/core/src/skills`、`WorkspaceToolProfiles`、`CronSlots`、`cronParser` 与共享槽 fixtures，故这些守卫读取的每个 oracle 都未变；loop 注入路径上的 Java 变化是 #17703 的 `mergeInto`/`sessionSkills` 签名及其调用方，由两条真实臂覆盖。
 
 **三条继承红，各以实测归属，均非本 diff 所致。**
 
