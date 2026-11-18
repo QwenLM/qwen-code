@@ -71,6 +71,14 @@ export interface ManagedWecomAdapterDeps {
     onStopped: (reason: string) => void,
   ) => ManagedWecomStreamClient;
   readonly sendMessage: (chatId: string, text: string) => Promise<void>;
+  /**
+   * Whether the live socket can currently send. The claim phase consults it so
+   * a transient disconnect (reconnect backoff) pauses delivery claims instead
+   * of claiming batches it can only settle unknown — the control plane only
+   * claims planned/partial deliveries, so each outage poll would otherwise take
+   * another batch out of automatic delivery.
+   */
+  readonly isConnected: () => boolean;
   readonly lock: (
     directory: string,
     onCompromised: () => void,
@@ -215,6 +223,7 @@ export class ManagedWecomAdapter {
       options.name,
       options.cwd,
       this.settings.botId,
+      options.controlPlane.destinationKey ?? '',
     );
     this.controlPlane = options.controlPlane;
     this.deps = options.deps;
@@ -751,6 +760,11 @@ export class ManagedWecomAdapter {
     // lands mid-tick must not claim a batch it would then abandon to settle
     // unknown. The DingTalk reference guards the phase the same way.
     if (!this.running || !this.state) return;
+    // A transient disconnect (reconnect backoff) leaves the adapter running but
+    // unable to send. Pause the claim phase too: claiming now would move
+    // deliveries to sending server-side only to settle them unknown, taking
+    // them out of automatic delivery while the socket heals.
+    if (!this.deps.isConnected()) return;
     let claimed: ManagedClaimedDelivery[];
     try {
       claimed = await this.controlPlane.claimDeliveries(CLAIM_BATCH);

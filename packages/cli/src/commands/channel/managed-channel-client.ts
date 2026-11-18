@@ -51,6 +51,13 @@ export class HttpManagedChannelControlPlane
     this.root = `${options.baseUrl.replace(/\/+$/, '')}/internal/managed-channels/v1/channels/${encodeURIComponent(options.channelId)}`;
   }
 
+  get destinationKey(): string {
+    const base = this.options.baseUrl.replace(/\/+$/, '');
+    return [base, this.options.tenantId, this.options.channelId].join(
+      String.fromCharCode(0),
+    );
+  }
+
   async register(request: {
     platform: ManagedChannelAdapter;
     accountId: string;

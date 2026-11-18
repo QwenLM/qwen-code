@@ -103,6 +103,14 @@ export function validManagedReceipt(value: unknown): boolean {
 
 /** The trusted control-plane surface the adapter talks to. */
 export interface ManagedChannelControlPlane {
+  /**
+   * A stable key of the destination this client talks to (control-plane base
+   * URL, tenant, channel). An adapter that persists pending work keys its state
+   * by it so a ledger staged for one destination is never replayed into another
+   * when the same configured entry is restarted against a different tenant or
+   * channel. Optional so test doubles that do not persist may omit it.
+   */
+  readonly destinationKey?: string;
   register(request: {
     platform: ManagedChannelAdapter;
     accountId: string;

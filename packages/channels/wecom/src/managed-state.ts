@@ -159,8 +159,9 @@ export class ManagedWecomStateStore {
   readonly directory: string;
   readonly file: string;
 
-  constructor(name: string, cwd: string, botId: string) {
-    // One directory per configured entry (channel name + botId) per workspace,
+  constructor(name: string, cwd: string, botId: string, destinationKey = '') {
+    // One directory per configured entry (channel name + botId) AND control-plane
+    // destination (base URL + tenant + channel) per workspace,
     // beside the other channel state — the same name+account key shape the
     // DingTalk store uses. Its lock serializes concurrent managed instances of
     // this entry; two entries sharing a botId get separate directories and
@@ -169,7 +170,7 @@ export class ManagedWecomStateStore {
     // the lock merges. The Legacy WeCom channel keeps no on-disk state and
     // takes no lock, so the lock does not arbitrate managed-versus-Legacy.
     const key = createHash('sha256')
-      .update(`${name}\u0000${botId}`)
+      .update(`${name}\u0000${botId}\u0000${destinationKey}`)
       .digest('hex')
       .slice(0, 16);
     this.directory = join(

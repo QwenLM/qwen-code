@@ -233,6 +233,7 @@ export function createManagedWecomDeps(): ManagedWecomAdapterDeps {
         current = client;
       }),
     sendMessage: (chatId, text) => sendMessage(current, chatId, text),
+    isConnected: () => current?.isConnected ?? false,
     lock: async (directory, onCompromised) => {
       const { default: lockfile } = await import('proper-lockfile');
       const { mkdirSync } = await import('node:fs');

@@ -47,7 +47,7 @@ function messageData(overrides: Record<string, unknown> = {}): string {
   });
 }
 
-function fakeControlPlane() {
+function fakeControlPlane(destinationKey = 'cp|tenant-a|chan-1') {
   const register: unknown[] = [];
   const submit: ManagedInboundEvent[] = [];
   const attempts: string[] = [];
@@ -64,6 +64,7 @@ function fakeControlPlane() {
       ) => (Error & { status?: number; code?: string }) | undefined)
     | undefined;
   const controlPlane: ManagedChannelControlPlane = {
+    destinationKey,
     register: async (request) => {
       register.push(request);
     },
@@ -138,11 +139,19 @@ function fakeDeps(hooks: { log?: (line: string) => void } = {}) {
   let stopped: ((reason: string) => void) | undefined;
   const sent: Array<{ chatId: string; text: string }> = [];
   let behavior: 'ok' | 'fail' = 'ok';
+  let connected = false;
   const deps: ManagedWecomAdapterDeps = {
     createStreamClient: (_settings, onMessage, onStopped) => {
       handler = onMessage;
       stopped = onStopped;
-      return { connect: async () => {}, disconnect: () => {} };
+      return {
+        connect: async () => {
+          connected = true;
+        },
+        disconnect: () => {
+          connected = false;
+        },
+      };
     },
     sendMessage: async (chatId, text) => {
       sent.push({ chatId, text });
@@ -150,6 +159,7 @@ function fakeDeps(hooks: { log?: (line: string) => void } = {}) {
         throw new Error('send failed');
       }
     },
+    isConnected: () => connected,
     lock: async () => async () => {},
     now: () => 1_750_000_000_000,
     log: hooks.log ?? (() => {}),
@@ -162,6 +172,9 @@ function fakeDeps(hooks: { log?: (line: string) => void } = {}) {
       stopped!(reason),
     setBehavior: (value: 'ok' | 'fail') => {
       behavior = value;
+    },
+    setConnected: (value: boolean) => {
+      connected = value;
     },
   };
 }
@@ -2669,5 +2682,86 @@ describe('ManagedWecomAdapter — outbound save-failure guards (P1)', () => {
     expect(lines.some((l) => l.includes('orphan removal'))).toBe(true);
     spy.mockRestore();
     await adapter.disconnect();
+  });
+});
+
+describe('ManagedWecomAdapter — connection and destination guards (P1)', () => {
+  it('pauses delivery claims while the connection is down, then delivers once after reconnect', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    plane.enqueue([delivery('d1', 1), delivery('d2', 1)]);
+    // A transient SDK disconnect (reconnect backoff): the adapter stays running
+    // but cannot send. The claim phase must pause, not claim batches it would
+    // settle unknown.
+    fake.setConnected(false);
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(0);
+    expect(plane.receipts).toHaveLength(0);
+    // Reauthentication: both queued replies deliver exactly once, accepted.
+    fake.setConnected(true);
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(2);
+    expect(plane.receipts).toHaveLength(2);
+    expect(
+      plane.receipts.every(
+        (r) => (r.receipt as { outcome: string }).outcome === 'accepted',
+      ),
+    ).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('a destination change never replays one tenant pending into another', async () => {
+    const cwd = tempCwd();
+    // Tenant A stages a pending claim (its admission answer has not landed).
+    const planeA = fakeControlPlane('cp|tenant-a|chan-1');
+    const fakeA = fakeDeps();
+    const adapterA = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: planeA.controlPlane,
+      deps: fakeA.deps,
+      pollLoop: false,
+    });
+    await adapterA.connect();
+    fakeA.push('m1', messageData({ msgid: 'm1' }));
+    expect(pendingOf(adapterA)).toEqual(['wecom:m1']);
+    const stateFileA = adapterA.stateFile;
+    await adapterA.disconnect();
+
+    // Restart the SAME configured entry against tenant B: a different
+    // destination keys a different state directory, so A's pending claim is
+    // never loaded into B nor submitted under B's tenant header.
+    const planeB = fakeControlPlane('cp|tenant-b|chan-1');
+    const fakeB = fakeDeps();
+    const adapterB = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: planeB.controlPlane,
+      deps: fakeB.deps,
+      pollLoop: false,
+    });
+    await adapterB.connect();
+    expect(adapterB.stateFile).not.toBe(stateFileA);
+    expect(pendingOf(adapterB)).toEqual([]);
+    await adapterB.tick();
+    expect(planeB.submit).toHaveLength(0);
+    await adapterB.disconnect();
+
+    // A's pending claim is still available to A on its own restart.
+    const planeA2 = fakeControlPlane('cp|tenant-a|chan-1');
+    const fakeA2 = fakeDeps();
+    const adapterA2 = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: planeA2.controlPlane,
+      deps: fakeA2.deps,
+      pollLoop: false,
+    });
+    await adapterA2.connect();
+    expect(adapterA2.stateFile).toBe(stateFileA);
+    expect(pendingOf(adapterA2)).toEqual(['wecom:m1']);
+    await adapterA2.disconnect();
   });
 });
