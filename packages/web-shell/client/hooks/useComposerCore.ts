@@ -2266,6 +2266,7 @@ export function useComposerCore(
               lane.activeReaders.add(reader),
             onReaderSettled: (reader: FileReader) =>
               lane.activeReaders.delete(reader),
+            isCancelled: () => imageIngestionLaneRef.current !== lane,
           };
           const imageResult = await readImageTransfer(
             transfer.imageCandidates,
