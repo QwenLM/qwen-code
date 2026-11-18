@@ -19,6 +19,7 @@ import {
 } from '../agents/forkedAgent.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { stripSystemReminderBlocks } from '../core/environmentContext.js';
 
 const debugLogger = createDebugLogger('FOLLOWUP');
 
@@ -81,6 +82,103 @@ const SUGGESTION_SCHEMA: Record<string, unknown> = {
 
 /** Minimum assistant turns before generating suggestions */
 const MIN_ASSISTANT_TURNS = 2;
+const MAX_CONTEXT_CHARS = 4_000;
+const CONTEXT_SEPARATOR = '\n\n';
+
+function truncateContext(
+  text: string,
+  maxChars: number,
+  headRatio = 0.5,
+): string {
+  if (text.length <= maxChars) return text;
+  const marker = ' [...truncated...] ';
+  if (maxChars <= marker.length) return text.slice(0, maxChars);
+  const head = Math.floor((maxChars - marker.length) * headRatio);
+  return `${text.slice(0, head)}${marker}${text.slice(-(maxChars - marker.length - head))}`;
+}
+
+function compactConversation(history: readonly Content[]): string {
+  const dialogue = history.flatMap((entry, index) => {
+    if (entry.role !== 'user' && entry.role !== 'model') {
+      return [];
+    }
+    const text = (entry.parts ?? [])
+      .filter(
+        (part) =>
+          !part.thought &&
+          part.partMetadata?.['qwen-code:memory-catalog-snapshot'] !== true,
+      )
+      .map((part) => stripSystemReminderBlocks(part.text ?? ''))
+      .join('\n')
+      .trim();
+    return text ? [{ index, role: entry.role, text }] : [];
+  });
+  const latestUser = dialogue.findLast((entry) => entry.role === 'user');
+  const latestAssistant = dialogue.findLast((entry) => entry.role === 'model');
+  const selected: Array<{ index: number; partIndex: number; text: string }> =
+    [];
+  let used = 0;
+  const add = (
+    index: number,
+    text: string,
+    budget: number,
+    headRatio = 0.5,
+    partIndex = -1,
+  ) => {
+    const separator = selected.length ? CONTEXT_SEPARATOR.length : 0;
+    const available = Math.min(budget, MAX_CONTEXT_CHARS - used - separator);
+    if (available <= 0) return 0;
+    const compact = truncateContext(text, available, headRatio);
+    selected.push({ index, partIndex, text: compact });
+    used += separator + compact.length;
+    return compact.length;
+  };
+
+  if (latestUser) add(latestUser.index, `User: ${latestUser.text}`, 1_000, 0.6);
+  if (latestAssistant) {
+    add(
+      latestAssistant.index,
+      `Assistant: ${latestAssistant.text}`,
+      1_800,
+      0.4,
+    );
+  }
+
+  let toolChars = 0;
+  for (
+    let index = history.length - 1;
+    index > (latestUser?.index ?? -1);
+    index--
+  ) {
+    const parts = history[index].parts ?? [];
+    for (let partIndex = parts.length - 1; partIndex >= 0; partIndex--) {
+      const result = parts[partIndex].functionResponse;
+      const separator = toolChars ? CONTEXT_SEPARATOR.length : 0;
+      const available = Math.min(200, 400 - toolChars - separator);
+      if (!result || available < 40) continue;
+      const error = result.response?.['error'];
+      const output = error ?? result.response?.['output'];
+      const text =
+        typeof output === 'string' ? stripSystemReminderBlocks(output) : '';
+      const status = error !== undefined ? 'error' : 'completed';
+      const summary = `Tool ${result.name ?? 'unknown'}: ${status}${text ? `; ${text}` : ''}`;
+      toolChars += separator + add(index, summary, available, 0.3, partIndex);
+    }
+  }
+
+  for (const entry of [...dialogue].reverse()) {
+    if (entry.role === 'user' && entry !== latestUser) {
+      add(entry.index, `User: ${entry.text}`, 600);
+    }
+  }
+  return selected
+    .sort(
+      (left, right) =>
+        left.index - right.index || left.partIndex - right.partIndex,
+    )
+    .map((entry) => entry.text)
+    .join(CONTEXT_SEPARATOR);
+}
 
 /**
  * Generate a prompt suggestion using an LLM call.
@@ -96,6 +194,7 @@ export async function generatePromptSuggestion(
   abortSignal: AbortSignal,
   options?: { enableCacheSharing?: boolean; model?: string },
 ): Promise<{ suggestion: string | null; filterReason?: string }> {
+  if (abortSignal.aborted) return { suggestion: null };
   // Don't suggest in very early conversations
   const modelTurns = conversationHistory.filter(
     (c) => c.role === 'model',
@@ -117,28 +216,29 @@ export async function generatePromptSuggestion(
     // can hold ANOTHER session's transcript + systemInstruction. Only use it
     // when it belongs to THIS session; otherwise fall back to the
     // session-safe base-LLM path (#9233).
-    const modelOverride = options?.model;
-    const cacheSharingState = cacheSafe
+    const model = options?.model ?? config.getFastModel() ?? config.getModel();
+    const useCache = cacheSafe?.model === model;
+    const cacheSharingState = useCache
       ? 'true'
-      : cacheSafeSessionId
-        ? 'session_mismatch'
-        : 'false';
+      : cacheSafe
+        ? 'model_mismatch'
+        : cacheSafeSessionId
+          ? 'session_mismatch'
+          : 'false';
     debugLogger.debug(
-      `Generating suggestion: cacheSharing=${cacheSharingState}, model=${modelOverride || '(default)'}`,
+      `Generating suggestion: cacheSharing=${cacheSharingState}, model=${model}`,
     );
-    const raw = cacheSafe
-      ? await generateViaForkedQuery(
-          config,
-          cacheSafe,
-          abortSignal,
-          modelOverride,
-        )
-      : await generateViaBaseLlm(
-          config,
-          conversationHistory,
-          abortSignal,
-          modelOverride,
-        );
+    const raw =
+      cacheSafe && useCache
+        ? await generateViaForkedQuery(config, cacheSafe, abortSignal, model)
+        : await generateViaBaseLlm(
+            config,
+            conversationHistory,
+            abortSignal,
+            model,
+          );
+
+    if (abortSignal.aborted) return { suggestion: null };
 
     const suggestion = typeof raw === 'string' ? raw.trim() : null;
 
@@ -171,9 +271,8 @@ async function generateViaForkedQuery(
   config: Config,
   cacheSafeParams: CacheSafeParams,
   abortSignal: AbortSignal,
-  modelOverride?: string,
+  model: string,
 ): Promise<string | null> {
-  const model = modelOverride ?? config.getFastModel() ?? cacheSafeParams.model;
   const result = await runForkedAgent({
     config,
     userMessage: SUGGESTION_PROMPT,
@@ -209,11 +308,12 @@ async function generateViaBaseLlm(
   config: Config,
   conversationHistory: Content[],
   abortSignal: AbortSignal,
-  modelOverride?: string,
+  model: string,
 ): Promise<string | null> {
-  const model = modelOverride ?? config.getFastModel() ?? config.getModel();
+  const context = compactConversation(conversationHistory);
+  if (!context) return null;
   const contents: Content[] = [
-    ...conversationHistory,
+    { role: 'user', parts: [{ text: context }] },
     { role: 'user', parts: [{ text: SUGGESTION_PROMPT }] },
   ];
 

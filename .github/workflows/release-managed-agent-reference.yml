@@ -16,7 +16,7 @@ on:
       - 'packages/sdk-java/qwencode/**'
       - 'packages/managed-agent-server/**'
       - 'packages/core/src/managed-runtime/contracts/**'
-      - 'packages/cli/src/serve/capabilities.ts'
+      - 'packages/sdk-typescript/src/daemon/capabilities.ts'
       - 'packages/cli/src/serve/broker-managed-runtime-provider.ts'
       - 'packages/cli/src/serve/hosted-harness-contract.ts'
       - 'docs/users/managed-agent-reference-deployment.md'

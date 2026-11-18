@@ -499,6 +499,8 @@ export interface PendingPromptActionOptions {
 
 export interface GetTasksActionOptions {
   silent?: boolean;
+  /** Also list the sends the daemon reports back to this session. */
+  includeSubSessions?: boolean;
 }
 
 export interface DaemonPromptImage {
@@ -900,6 +902,11 @@ export interface DaemonWorkspaceEventSignals {
   extensionsVersion: number;
   artifactsVersion: number;
   sourcesVersion?: number;
+  /**
+   * Per caller session: how many times a send it made that the daemon
+   * reports back started or settled. Re-read its sub-session tasks on change.
+   */
+  subSessionTaskVersions?: Record<string, number>;
   lastExtensionChange?: {
     status?:
       | 'installed'
