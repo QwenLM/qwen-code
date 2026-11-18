@@ -188,16 +188,36 @@ export class ManagedWecomStateStore {
   }
 
   load(): ManagedWecomState | undefined {
+    // Name the file and keep the cause, and keep an I/O failure distinguishable
+    // from a corrupt state: one entry directory now holds a ledger per
+    // registration, so the operator must know WHICH file is unreadable (e.g.
+    // EISDIR) versus merely invalid, while a sibling registration's healthy
+    // ledger sits beside it.
+    let raw: string;
     try {
-      const value: unknown = JSON.parse(readFileSync(this.file, 'utf8'));
-      if (!validManagedWecomState(value)) throw new Error('invalid state');
-      return value;
+      raw = readFileSync(this.file, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw new Error(
-        'Managed WeCom state is unreadable or invalid; restore it before restarting.',
+        `Managed WeCom state at ${this.file} could not be read; restore it before restarting.`,
+        { cause: error },
       );
     }
+    let value: unknown;
+    try {
+      value = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(
+        `Managed WeCom state at ${this.file} is not valid JSON; restore it before restarting.`,
+        { cause: error },
+      );
+    }
+    if (!validManagedWecomState(value)) {
+      throw new Error(
+        `Managed WeCom state at ${this.file} is invalid; restore it before restarting.`,
+      );
+    }
+    return value;
   }
 
   save(state: ManagedWecomState): void {
@@ -212,9 +232,13 @@ export class ManagedWecomStateStore {
         closeSync(fd);
       }
       renameSync(temporary, this.file);
-    } catch {
+    } catch (error) {
+      // Keep the underlying fs error (ENOSPC/EACCES/EIO…) as the cause, like the
+      // DingTalk/GitHub/email sibling stores, so the adapter's loss diagnostic
+      // names the real fault instead of only the fixed sentence.
       throw new Error(
         'Managed WeCom state could not be saved; admission stopped.',
+        { cause: error },
       );
     } finally {
       rmSync(temporary, { force: true });

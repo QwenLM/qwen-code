@@ -6,7 +6,7 @@
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MANAGED_OUTBOUND_LIMIT,
@@ -1706,7 +1706,7 @@ describe('managed WeCom adapter hostile inputs', () => {
         recent: [],
       }),
     );
-    await expect(adapter.connect()).rejects.toThrow(/unreadable or invalid/);
+    await expect(adapter.connect()).rejects.toThrow(/is invalid/);
   });
 });
 
@@ -1936,9 +1936,13 @@ describe('managed WeCom adapter review fixes (round 2)', () => {
     );
     plane.setRefuseSubmit(undefined);
     await adapter.tick();
-    expect(lines.filter((l) => l.includes('admission resumed'))).toHaveLength(
-      1,
-    );
+    const resume = lines.filter((l) => l.includes('admission resumed'));
+    expect(resume).toHaveLength(1);
+    // This resume came from the held claim's FRESH admission, which proves the
+    // binding and resets the refusal streak (submit() clears instanceRefusals
+    // before lifting). The line must state that reset, not claim the streak
+    // still stands — the latter is only true on a drop/replayed-answer lift.
+    expect(resume[0]).toMatch(/refusal streak is reset/);
     await adapter.disconnect();
   });
 
@@ -2729,8 +2733,10 @@ describe('ManagedWecomAdapter — connection and destination guards (P1)', () =>
     await adapterA.disconnect();
 
     // Restart the SAME configured entry against tenant B: a different
-    // destination keys a different state directory, so A's pending claim is
-    // never loaded into B nor submitted under B's tenant header.
+    // destination keys a different ledger FILE beneath the SAME entry directory
+    // (the directory is the per-entry connection lock, not per-destination), so
+    // A's pending claim is never loaded into B nor submitted under B's tenant
+    // header.
     const planeB = fakeControlPlane('cp|tenant-b|chan-1');
     const fakeB = fakeDeps();
     const adapterB = new ManagedWecomAdapter({
@@ -2743,6 +2749,11 @@ describe('ManagedWecomAdapter — connection and destination guards (P1)', () =>
     });
     await adapterB.connect();
     expect(adapterB.stateFile).not.toBe(stateFileA);
+    // The isolation is file-deep, not directory-deep: both ledgers sit beneath
+    // the one per-entry connection-lock directory (moving the destination term
+    // back into the directory hash would let two instances of one bot entry
+    // each take a lock and self-displace).
+    expect(dirname(adapterB.stateFile)).toBe(dirname(stateFileA));
     expect(pendingOf(adapterB)).toEqual([]);
     await adapterB.tick();
     expect(planeB.submit).toHaveLength(0);
@@ -2838,6 +2849,11 @@ describe('ManagedWecomAdapter — connection and destination guards (P1)', () =>
     });
     await adapterB.connect();
     expect(adapterB.stateFile).not.toBe(stateFileA);
+    // The isolation is file-deep, not directory-deep: both ledgers sit beneath
+    // the one per-entry connection-lock directory (moving the destination term
+    // back into the directory hash would let two instances of one bot entry
+    // each take a lock and self-displace).
+    expect(dirname(adapterB.stateFile)).toBe(dirname(stateFileA));
     expect(pendingOf(adapterB)).toEqual([]);
     await adapterB.tick();
     expect(planeB.submit).toHaveLength(0);

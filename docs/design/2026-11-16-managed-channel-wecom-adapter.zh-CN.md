@@ -45,8 +45,10 @@
 
 1. **入站无 ack、不重投。** SDK 把 `aibot_msg_callback` 帧分发给事件处理器，
    从不向提供方确认；提供方也不重投。DingTalk 流对每帧回 ack（SUCCESS /
-   LATER）并重投未确认帧。因此 WeCom 适配器没有「留待重投」臂：无法持久化暂存
-   的帧就是丢失，必须按丢失记录日志。
+   LATER）并重投未确认帧。因此 WeCom 适配器没有「留待重投」臂：到达适配器却无法
+   持久化暂存的帧就是丢失，必须按丢失记录日志。适配器停止之后才到达的帧根本不会
+   到达它——deps 在自己的 `stopped`/`authenticated` 门控处丢弃——故该 stop 后丢弃
+   不算暂存丢失，也不按丢失记录日志。
 2. **没有 session webhook。** DingTalk 回复指向会话的 `sessionWebhook`——一个
    会过期的 bearer 能力，所以 DingTalk 适配器要缓存、快照与逐出 webhook。
    WeCom 回复经活着的认证 WebSocket、仅以 `chatid` 定位；没有逐消息的能力需要
@@ -171,11 +173,16 @@ WeCom 特有增补：回复走活认证 WebSocket（DingTalk 的逐会话 webhoo
 共享 `MANAGED_OUTBOUND_LIMIT`）、已落定排重窗口（上限 256）。每个配置条目
 （渠道 name + botId）每个工作区范围一个目录
 （`~/.qwen/channels/<workspace-scope>/wecom-<hash>`），与 DingTalk 存储相同的
-name+account key 形状。目录是连接锁的键，故同一条目的两个实例即便目标控制面
-目的地不同也争同一把锁（WeCom 每个 bot 只允许一个连接并踢掉另一个）。目录下的
-账本文件另按完整注册身份（控制面 + tenant + channel + actor + workspace +
-cwd-relative）键控，故一个注册下暂存的 pending 账本绝不会被同一条目的另一注册
-加载或重放。每个账本是 `0700` 目录内的 `0600` 文件，原子写 + fsync + rename，
+name+account key 形状。目录是连接锁的键——按配置条目且按工作区范围——故同一
+工作区范围内同一条目的两个实例即便目标控制面目的地不同也争同一把锁（WeCom 每个
+bot 只允许一个连接并踢掉另一个）。同一条目从两个工作区范围运行（一个克隆与旁边
+一个 worktree）会哈希到不同目录、各拿独立锁，于是两者都连接、WeCom 踢掉一个；
+因此一个 bot 条目必须从单一工作区范围运行。目录下的账本文件另按完整注册身份
+（控制面 + tenant + channel + actor + workspace + cwd-relative）键控，故一个注册
+下暂存的 pending 账本绝不会被同一条目的另一注册加载或重放。该隔离的代价是刻意
+的：身份变更会把前一注册暂存的认领滞留在旧账本文件里——它们不被重放，因为把它们
+重放进新主人正是键控要防的跨所有权 hazard；任何已认领的投递由控制面的租约对账
+落定 unknown。每个账本是 `0700` 目录内的 `0600` 文件，原子写 + fsync + rename，
 校验器拒绝不可读或非法状态而非静默重置。目录锁（`proper-lockfile`，WeCom 包的
 新依赖）串行化该条目的并发托管实例；共用同一 botId 的两个条目得到不同目录与不同
 锁（SDK 随即只允许一个连接并踢掉另一个），因此复制或改名条目是运维配置问题，
@@ -237,9 +244,11 @@ cwd-relative）键控，故一个注册下暂存的 pending 账本绝不会被�
 - deps 见证对假 SDK 客户端：认证等待在 `authenticated` resolve、在超时/错误/被踢
   reject；只有 `message.text` 到达适配器；被踢调用 `onStopped`；超预算段切成有序
   的提供方尺寸块；断连客户端的发送瞬态失败。
-- 真实提供方腿（认证 WebSocket 入站 + `sendMessage` 出站）在 deps 允许处以讲
-  aibot 帧协议的回环端点演练；真实租户冒烟需要 WeCom 智能机器人凭据，是后续工作，
-  不是合并门。
+- 真实提供方腿（认证 WebSocket 入站 + `sendMessage` 出站）可经 `wsUrl` 设置以讲
+  aibot 帧协议的 `wss://` 回环端点演练。它作为本地验证 rig 运行，而非提交的测试
+  ——每个提交套件都替换提供方（`vi.mock('@wecom/aibot-node-sdk')` 与假 deps），故
+  SDK 侧解码与 ack 关联仍是决策 4 承认的未验证层。真实租户冒烟需要 WeCom 智能
+  机器人凭据，是后续工作，不是合并门。
 
 ## 决策清单
 

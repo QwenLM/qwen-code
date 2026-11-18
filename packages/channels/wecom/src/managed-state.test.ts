@@ -470,18 +470,56 @@ describe('ManagedWecomStateStore', () => {
     expect(store().load()).toBeUndefined();
   });
 
-  it('throws on a corrupt (unparseable) file', () => {
+  it('throws on a corrupt (unparseable) file, naming the file and keeping the cause', () => {
     const s = store();
     mkdirSync(s.directory, { recursive: true });
     writeFileSync(s.file, '{not json');
-    expect(() => s.load()).toThrow(/unreadable or invalid/);
+    let caught: unknown;
+    try {
+      s.load();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain(s.file);
+    expect((caught as Error).message).toMatch(/is not valid JSON/);
+    expect((caught as Error).cause).toBeInstanceOf(SyntaxError);
   });
 
-  it('throws on a parseable but invalid state', () => {
+  it('throws on a parseable but invalid state, naming the file', () => {
     const s = store();
     mkdirSync(s.directory, { recursive: true });
     writeFileSync(s.file, JSON.stringify({ ...baseState(), generation: 0 }));
-    expect(() => s.load()).toThrow(/unreadable or invalid/);
+    let caught: unknown;
+    try {
+      s.load();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain(s.file);
+    expect((caught as Error).message).toMatch(/is invalid/);
+  });
+
+  it('an I/O read failure is distinct from a corrupt state and keeps the cause', () => {
+    const s = store();
+    mkdirSync(s.directory, { recursive: true });
+    // A directory sitting at the ledger path makes readFileSync fail with an
+    // I/O error (EISDIR on POSIX), not a corrupt state. The diagnostic must name
+    // the file and keep the cause so the operator can tell an unreadable ledger
+    // from an invalid sibling under the same entry directory. The errno itself
+    // is platform-specific, so only the cause's presence is pinned here.
+    mkdirSync(s.file);
+    let caught: unknown;
+    try {
+      s.load();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain(s.file);
+    expect((caught as Error).message).toMatch(/could not be read/);
+    expect((caught as Error).cause).toBeInstanceOf(Error);
   });
 
   it('keeps the state file 0600 inside a 0700 directory', () => {
@@ -537,9 +575,18 @@ describe('ManagedWecomStateStore', () => {
     // atomic temp+rename must leave it intact.
     chmodSync(s.directory, 0o500);
     try {
-      expect(() => s.save({ ...baseState(), generation: 9 })).toThrow(
-        /could not be saved/,
-      );
+      let caught: unknown;
+      try {
+        s.save({ ...baseState(), generation: 9 });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toMatch(/could not be saved/);
+      // The underlying fs error survives as the cause (sibling-store parity),
+      // so the adapter's loss diagnostic can name the real fault, not only the
+      // fixed sentence.
+      expect((caught as Error).cause).toBeInstanceOf(Error);
     } finally {
       chmodSync(s.directory, 0o700);
     }

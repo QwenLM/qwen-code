@@ -56,8 +56,11 @@ Two provider mechanics differ from DingTalk and are load-bearing:
    frames to event handlers and never acknowledges them to the provider; the
    provider does not redeliver. DingTalk's stream acks each frame (SUCCESS /
    LATER) and redelivers the unacked ones. The WeCom adapter therefore has no
-   "leave it unacked for redelivery" arm: a frame it cannot durably stage is
-   lost, and must be logged as lost.
+   "leave it unacked for redelivery" arm: a frame that reaches the adapter but
+   cannot be durably staged is lost, and must be logged as lost. A frame that
+   arrives after the adapter has stopped never reaches it — the deps drop it at
+   their own `stopped`/`authenticated` gate — so that post-stop drop is not a
+   staged loss and is not logged as one.
 2. **No session webhook.** A DingTalk reply targets the conversation's
    `sessionWebhook`, a bearer capability that expires, so the DingTalk adapter
    caches, snapshots and evicts webhooks. A WeCom reply travels over the live
@@ -232,14 +235,23 @@ version, account generation, the instance-refusal streak, the pending claims
 shared `MANAGED_OUTBOUND_LIMIT`), and the settled dedupe window (cap 256). One
 directory per configured entry (channel name + botId) per workspace scope
 (`~/.qwen/channels/<workspace-scope>/wecom-<hash>`), the same name+account key
-shape the DingTalk store uses. The directory is the connection lock's key, so
-two instances of the same entry contend for one lock even when they target
-different control-plane destinations (WeCom admits one connection per bot and
-kicks the other). The ledger file beneath it is keyed separately by the full
-registration identity (control plane + tenant + channel + actor + workspace +
-cwd-relative), so a pending ledger staged under one registration is never
-loaded or replayed under another registration of the same entry. Each ledger is
-a `0600` file inside the `0700` directory, atomic write + fsync + rename, and a
+shape the DingTalk store uses. The directory is the connection lock's key — per
+configured entry AND per workspace scope — so two instances of the same entry in
+the same workspace scope contend for one lock even when they target different
+control-plane destinations (WeCom admits one connection per bot and kicks the
+other). The same entry run from two workspace scopes (a clone and a worktree
+beside it) hashes to different directories and takes independent locks, so both
+would connect and WeCom would kick one; one bot entry must therefore run from a
+single workspace scope. The ledger file beneath the directory is keyed
+separately by the full registration identity (control plane + tenant + channel +
+actor + workspace + cwd-relative), so a pending ledger staged under one
+registration is never loaded or replayed under another registration of the same
+entry. The cost of that isolation is deliberate: an identity change strands the
+prior registration's staged claims in the old ledger file — they are not
+replayed, because replaying them into the new owner is exactly the
+cross-ownership hazard the keying prevents; the control plane's lease
+reconciliation settles any already-claimed delivery unknown. Each ledger is a
+`0600` file inside the `0700` directory, atomic write + fsync + rename, and a
 validator refuses an unreadable or invalid state rather than silently resetting
 it. The directory lock
 (`proper-lockfile`, a new dependency of the WeCom package) serializes concurrent
@@ -324,9 +336,13 @@ webhooks.
   split into ordered provider-sized chunks; a disconnected client's send
   fails transient.
 - The real-provider leg (authenticated WebSocket inbound + `sendMessage`
-  outbound) is exercised against a loopback endpoint speaking the aibot frame
-  protocol where the deps allow it; a live-tenant smoke needs a WeCom
-  intelligent bot credential and is a follow-up, not a merge gate.
+  outbound) can be exercised against a `wss://` loopback endpoint speaking the
+  aibot frame protocol via the `wsUrl` setting. It is run as a local verification
+  rig, not a committed test — every committed suite replaces the provider
+  (`vi.mock('@wecom/aibot-node-sdk')` and fake deps), so the SDK-facing decode
+  and ack correlation stay the unverified layer Decision 4 admits. A live-tenant
+  smoke needs a WeCom intelligent bot credential and is a follow-up, not a merge
+  gate.
 
 ## Decisions
 

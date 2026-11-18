@@ -638,7 +638,7 @@ export class ManagedWecomAdapter {
         );
         state.pending = state.pending.filter((p) => p.eventId !== eventId);
         state.recent = [...state.recent, eventId].slice(-RECENT_LIMIT);
-        this.liftStallWhenNothingHeld();
+        this.liftStallWhenNothingHeld(true);
         this.persist();
         return;
       }
@@ -655,12 +655,14 @@ export class ManagedWecomAdapter {
     );
     state.pending = state.pending.filter((entry) => entry.eventId !== eventId);
     state.recent = [...state.recent, eventId].slice(-RECENT_LIMIT);
-    if (!admitted.replayed && wasHeld) {
+    const streakReset = !admitted.replayed && wasHeld;
+    if (streakReset) {
       state.instanceRefusals = 0;
     }
     // Lift (and log) the stall when the last held claim leaves — including a
-    // fresh held admission, so recovery is visible, not silent.
-    this.liftStallWhenNothingHeld();
+    // fresh held admission, so recovery is visible, not silent. The resume line
+    // states the streak's actual fate: a fresh admission just reset it.
+    this.liftStallWhenNothingHeld(!streakReset);
     try {
       this.persist();
     } catch (error) {
@@ -673,20 +675,25 @@ export class ManagedWecomAdapter {
 
   /**
    * The stall exists to be lifted by the held claim's probe: when the last
-   * held claim leaves without proving the binding — dropped on a per-message
-   * verdict or settled by a replayed answer — no probe remains, and a flag
-   * kept armed would gate every later tick. The refusal streak is NOT reset
-   * here: only the held claim's fresh admission proves the binding, so the
-   * next instance-scoped refusal re-holds without a new first-occurrence drop.
+   * held claim leaves no probe remains, and a flag kept armed would gate every
+   * later tick. Whether the refusal streak survives depends on HOW the last
+   * held claim left: a fresh (non-replayed) admission proves the binding and
+   * resets the streak (submit() clears instanceRefusals before calling here);
+   * a per-message verdict drop, a policy drop, or a replayed answer leaves the
+   * streak standing, so the next instance-scoped refusal re-holds without a new
+   * first-occurrence drop. The caller passes which case it is so the resume line
+   * states the streak's actual fate rather than always claiming it stands.
    */
-  private liftStallWhenNothingHeld(): void {
+  private liftStallWhenNothingHeld(streakSurvived: boolean): void {
     if (
       this.instanceStalled &&
       !this.state!.pending.some((entry) => entry.held === true)
     ) {
       this.instanceStalled = false;
       this.log(
-        'Managed WeCom admission resumed; no claim remains held, and the refusal streak still stands for the next instance-scoped refusal.',
+        streakSurvived
+          ? 'Managed WeCom admission resumed; no claim remains held, and the refusal streak still stands for the next instance-scoped refusal.'
+          : "Managed WeCom admission resumed; no claim remains held, and the held claim's fresh admission proved the binding, so the refusal streak is reset.",
       );
     }
   }
@@ -712,7 +719,7 @@ export class ManagedWecomAdapter {
         state.pending = state.pending.filter(
           (p) => p.eventId !== entry.eventId,
         );
-        this.liftStallWhenNothingHeld();
+        this.liftStallWhenNothingHeld(true);
         this.persist();
         continue;
       }
