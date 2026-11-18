@@ -51953,6 +51953,10 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       );
     } finally {
       await pair.restore();
+      // The logger appends by path, so removing its log dir while the daemon
+      // still drains recreates daemon.log and the parent rmdir hits ENOTEMPTY.
+      await pair.handle.close();
+      handle = undefined;
       await fsp.rm(logDir, { recursive: true, force: true });
     }
   }, 30_000);
