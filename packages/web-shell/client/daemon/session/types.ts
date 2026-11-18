@@ -193,6 +193,19 @@ export interface DaemonConnectionState {
    * the previous session's artifacts leak under the new one.
    */
   restoredArtifactsSessionId?: string;
+  /**
+   * Artifact count captured from the session-list summary at click time, so
+   * the header artifact entry can show it before the load response lands.
+   * A hint only: the load-embedded snapshot and the gated fetch supersede it,
+   * and the provider clears it once authoritative data commits.
+   */
+  artifactCountHint?: number;
+  /**
+   * Session the artifactCountHint belongs to. Same keying contract as
+   * restoredArtifactsSessionId: consumers must only use the hint when this
+   * matches the current sessionId.
+   */
+  artifactCountHintSessionId?: string;
   error?: string;
   /** Latest HTTP error status kept for diagnostics; use missingSession for UI. */
   errorStatus?: number;
@@ -646,6 +659,9 @@ export interface DaemonSessionActions {
     options?: {
       workspaceCwd?: string;
       sessionContext?: DaemonProductSessionContext;
+      /** Artifact count from the clicked session's list summary, shown in
+       * the header entry before the load response lands. Omit when unknown. */
+      artifactCountHint?: number;
     },
   ): Promise<void>;
   /** `memory` replay is reserved for the provider's live-journal repair. */

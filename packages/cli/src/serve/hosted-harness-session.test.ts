@@ -24,6 +24,11 @@ import { createServer, type Server, ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import express from 'express';
+import {
+  resolveSseAdmissionCaps,
+  type SseAdmissionCaps,
+} from './daemon-status.js';
+import { getSseOccupancy } from './sse-occupancy.js';
 import type { Part } from '@google/genai';
 import supertest from 'supertest';
 import {
@@ -687,6 +692,7 @@ async function app(
   withBroker = false,
   instanceId?: string,
   extensionPackages = true,
+  caps?: SseAdmissionCaps,
 ) {
   const result = express();
   result.use(express.json());
@@ -711,6 +717,7 @@ async function app(
     contract,
     state.root,
     withBroker ? { baseUrl: 'http://127.0.0.1:1', token: 'test' } : undefined,
+    { sseAdmissionCaps: caps },
   );
   const listener = createServer(result);
   listeners.add(listener);
@@ -23413,6 +23420,69 @@ describe('Hosted Harness no-tool session', () => {
     } finally {
       listener.closeAllConnections();
     }
+  });
+
+  it('counts hosted event streams in the shared occupancy and refuses at the cap', async () => {
+    const server = await app(
+      false,
+      undefined,
+      true,
+      resolveSseAdmissionCaps({ maxConnections: 10, maxSseConnections: 1 }),
+    );
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('No port');
+    const url = `http://127.0.0.1:${address.port}/session/${SESSION_ID}/events`;
+    const streamHeaders = {
+      'X-Qwen-Harness-Protocol-Version': '1',
+      'X-Qwen-Harness-Boot-Id': BOOT_ID,
+      'X-Qwen-Client-Id': created.body.clientId as string,
+    };
+    const before = getSseOccupancy();
+    const controller = new AbortController();
+    try {
+      const first = await fetch(url, {
+        headers: streamHeaders,
+        signal: controller.signal,
+      });
+      expect(first.status).toBe(200);
+      await vi.waitFor(
+        () => {
+          expect(getSseOccupancy().bySurface.hostedEvents).toBe(
+            before.bySurface.hostedEvents + 1,
+          );
+        },
+        { timeout: 5_000 },
+      );
+      const second = await fetch(url, {
+        headers: streamHeaders,
+        signal: controller.signal,
+      });
+      expect(second.status).toBe(503);
+      expect(second.headers.get('retry-after')).toBe('5');
+      expect(await second.json()).toEqual({
+        error:
+          'Daemon SSE connection limit reached (1/1). ' +
+          'Retry after the Retry-After interval.',
+        code: 'sse_connection_limit_exceeded',
+        limit: 1,
+        active: 1,
+        scope: 'daemon',
+      });
+    } finally {
+      controller.abort();
+      server.closeAllConnections();
+    }
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().total).toBe(before.total);
+      },
+      { timeout: 5_000 },
+    );
   });
 
   it('stops writing an event stream after backpressure ends it', async () => {

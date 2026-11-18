@@ -1088,6 +1088,30 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).toBe(true);
   });
 
+  it('forwards the session artifact count to onLoadSession when the summary carries one', async () => {
+    // The click-time hint path: a summary with artifactCount must reach
+    // onLoadSession as a third argument; without one the call keeps its
+    // two-argument shape (pinned by the collapsed-switcher tests below).
+    active.sessions = [
+      makeSession('session-a', {
+        displayName: 'API review',
+        groupId: 'group-1',
+        artifactCount: 3,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar(false);
+    await flushSidebar();
+
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((el) => el.textContent?.includes('API review'));
+    expect(row).toBeDefined();
+    await act(async () => click(row!));
+
+    expect(loadSession).toHaveBeenCalledWith('session-a', '/tmp/project', 3);
+  });
+
   it('keeps project sessions available from the collapsed sidebar', async () => {
     connection.capabilities = {
       qwenCodeVersion: '1.2.3',
@@ -1855,6 +1879,50 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     await flushSidebar();
     expect(loadSession).toHaveBeenCalledWith('session-a', '/tmp/project');
     expect(document.querySelector('[data-slot="dialog-content"]')).toBeNull();
+  });
+
+  it('forwards the artifact count when search selects a counted session', async () => {
+    active.sessions = [
+      makeSession('session-a', {
+        displayName: 'API review',
+        groupId: 'group-1',
+        artifactCount: 3,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar(true);
+    await flushSidebar();
+
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-trigger]',
+    );
+    act(() => {
+      trigger!.dispatchEvent(
+        new PointerEvent('pointerover', { bubbles: true }),
+      );
+    });
+    await flushSidebar();
+
+    const switcher = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    const searchButton = switcher!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    act(() => {
+      searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    const row = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="dialog"] [role="option"]'),
+    ).find((element) => element.textContent?.includes('API review'));
+    expect(row).not.toBeUndefined();
+    act(() => {
+      row!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+    expect(loadSession).toHaveBeenCalledWith('session-a', '/tmp/project', 3);
   });
 
   it('resets collapsed search state when the sidebar expands', async () => {
@@ -2774,6 +2842,28 @@ describe('Recent sessions shared rows', () => {
     );
     expect(loadSession).not.toHaveBeenCalled();
     expect(recent.textContent).not.toContain('API review');
+  });
+
+  it('forwards the artifact count when opening a counted recent session', async () => {
+    enableRecentSessions();
+    active.sessions = [
+      makeSession('session-a', {
+        displayName: 'API review',
+        artifactCount: 3,
+      }),
+    ];
+    active.data = active.sessions;
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: active.sessions,
+    });
+    renderSidebar();
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    const row = recent.querySelector<HTMLElement>(
+      `div.${sidebarStyles.sessionRow}`,
+    )!;
+    await act(async () => click(row));
+    expect(loadSession).toHaveBeenCalledWith('session-a', '/tmp/project', 3);
   });
 
   it('hides a stale recent row when the pinned catalog already contains it', async () => {

@@ -4,10 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import express from 'express';
 import type { RequestHandler } from 'express';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  resolveSseAdmissionCaps,
+  type SseAdmissionCaps,
+} from '../daemon-status.js';
+import { getSseOccupancy } from '../sse-occupancy.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -94,7 +101,13 @@ afterEach(() => {
   apps = [];
 });
 
-function setup(options: { enabled?: boolean; trusted?: boolean } = {}) {
+function setup(
+  options: {
+    enabled?: boolean;
+    trusted?: boolean;
+    caps?: SseAdmissionCaps;
+  } = {},
+) {
   const runtime = {
     workspaceId: 'ws',
     workspaceCwd: '/work/ws',
@@ -115,6 +128,7 @@ function setup(options: { enabled?: boolean; trusted?: boolean } = {}) {
     mutate,
     isAgentCollaborationEnabledFor: enabled,
     daemonLoopbackBaseUrl: () => 'http://127.0.0.1:4170/',
+    sseAdmissionCaps: options.caps,
   });
   apps.push(app);
   return app;
@@ -394,5 +408,60 @@ describe('session agent routes', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('session-events SSE admission (issue #17554)', () => {
+  it('counts the agent event stream and refuses at the shared cap', async () => {
+    const app = setup({
+      caps: resolveSseAdmissionCaps({
+        maxConnections: 10,
+        maxSseConnections: 1,
+      }),
+    });
+    const server = createServer(app);
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    const port = (server.address() as AddressInfo).port;
+    const url = `http://127.0.0.1:${port}/workspaces/ws/agent/session-events?sessionId=${SESSION}`;
+    const before = getSseOccupancy();
+    const controller = new AbortController();
+    try {
+      const first = await fetch(url, { signal: controller.signal });
+      expect(first.status).toBe(200);
+      expect(first.headers.get('content-type')).toContain('text/event-stream');
+      await vi.waitFor(
+        () => {
+          expect(getSseOccupancy().bySurface.agentEvents).toBe(
+            before.bySurface.agentEvents + 1,
+          );
+        },
+        { timeout: 5_000 },
+      );
+
+      const second = await fetch(url, { signal: controller.signal });
+      expect(second.status).toBe(503);
+      expect(second.headers.get('retry-after')).toBe('5');
+      expect(await second.json()).toEqual({
+        error:
+          'Daemon SSE connection limit reached (1/1). ' +
+          'Retry after the Retry-After interval.',
+        code: 'sse_connection_limit_exceeded',
+        limit: 1,
+        active: 1,
+        scope: 'daemon',
+      });
+    } finally {
+      controller.abort();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().total).toBe(before.total);
+      },
+      { timeout: 5_000 },
+    );
   });
 });
