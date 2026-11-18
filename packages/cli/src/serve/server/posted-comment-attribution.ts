@@ -828,27 +828,33 @@ export function extractPostedCommentIds(entry: unknown): string[] {
     const response = fr['response'];
     if (response === null || typeof response !== 'object') continue;
     const output = (response as Record<string, unknown>)['output'];
-    if (typeof output !== 'string') continue;
+    const commandPrefix = 'Command: ';
+    if (typeof output !== 'string' || !output.startsWith(commandPrefix)) {
+      continue;
+    }
 
     // The shell tool echoes "Command: <cmd>\nDirectory: ...\nOutput (stdout
     // and stderr combined): <result>\nExecution Error: ...". Recorded
     // transcripts keep the earlier "Output:" / "Error:" labels.
-    const command =
-      output.match(/^Command: ([\s\S]*?)\nDirectory:/)?.[1] ??
-      output.match(
-        /^Command: ([\s\S]*?)\nOutput(?: \(stdout and stderr combined\))?:/,
-      )?.[1] ??
-      '';
-    const segment = command ? creationSegment(command) : undefined;
+    const headerPattern =
+      /\nDirectory: [^\n]*\n(Output(?: \(stdout and stderr combined\))?): /g;
+    const header = headerPattern.exec(output);
+    if (header && headerPattern.exec(output)) continue;
+    const boundary =
+      header ?? /\n(Output(?: \(stdout and stderr combined\))?): /.exec(output);
+    if (!boundary) continue;
+
+    const command = output.slice(commandPrefix.length, boundary.index);
+    const segment = creationSegment(command);
     if (!segment) continue;
-    const result =
-      output.match(
-        /\nOutput(?: \(stdout and stderr combined\))?: ([\s\S]*?)\n(?:Execution )?Error:/,
-      )?.[1] ??
-      output.match(
-        /\nOutput(?: \(stdout and stderr combined\))?: ([\s\S]*)$/,
-      )?.[1] ??
-      '';
+    const resultStart = boundary.index + boundary[0].length;
+    const errorPrefix =
+      boundary[1] === 'Output' ? '\nError:' : '\nExecution Error:';
+    const resultEnd = output.indexOf(errorPrefix, resultStart);
+    const result = output.slice(
+      resultStart,
+      resultEnd === -1 ? undefined : resultEnd,
+    );
 
     // The output must be attributable to the creation. When another gh/curl
     // command runs AFTER the creation, it may have produced the output —

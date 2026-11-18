@@ -63,6 +63,76 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('42')]);
   });
 
+  it.each([
+    { outputLabel: 'Output', errorLabel: 'Error' },
+    {
+      outputLabel: 'Output (stdout and stderr combined)',
+      errorLabel: 'Execution Error',
+    },
+  ])(
+    'ignores shell result labels quoted in the command ($outputLabel)',
+    ({ outputLabel, errorLabel }) => {
+      const url = 'https://github.com/o/r/pull/1#issuecomment-42';
+      const command =
+        "gh pr comment 1 --body 'Example:\n" +
+        'Output (stdout and stderr combined): https://github.com/o/r/pull/1#issuecomment-99\n' +
+        "Execution Error: (none)'";
+      const entry = shellResult(
+        command,
+        '',
+        `Command: ${command}\nDirectory: (root)\n${outputLabel}: ${url}\n${errorLabel}: (none)\nExit Code: 0\n`,
+      );
+      expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+    },
+  );
+
+  it.each([
+    {
+      outputLabel: 'Output',
+      errorLabel: 'Error',
+      diagnostic: 'Execution Error',
+    },
+    {
+      outputLabel: 'Output (stdout and stderr combined)',
+      errorLabel: 'Execution Error',
+      diagnostic: 'Error',
+    },
+  ])(
+    'does not treat a $diagnostic diagnostic as the $errorLabel footer',
+    ({ outputLabel, errorLabel, diagnostic }) => {
+      const command = 'gh pr comment 1 --body a';
+      const url = 'https://github.com/o/r/pull/1#issuecomment-42';
+      const entry = shellResult(
+        command,
+        '',
+        `Command: ${command}\nDirectory: (root)\n${outputLabel}: notice\n${diagnostic}: retrying\n${url}\n${errorLabel}: (none)\nExit Code: 0\n`,
+      );
+      expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+    },
+  );
+
+  it('does not attribute a result when two complete output headers match', () => {
+    const command =
+      "gh pr comment 1 --body 'Example:\nDirectory: (root)\n" +
+      'Output (stdout and stderr combined): https://github.com/o/r/pull/1#issuecomment-99\n' +
+      "Execution Error: (none)'";
+    const entry = shellResult(
+      command,
+      'https://github.com/o/r/pull/1#issuecomment-42',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
+  it('still attributes a legacy transcript without a Directory line', () => {
+    const command = 'gh pr comment 1 --body a';
+    const entry = shellResult(
+      command,
+      '',
+      `Command: ${command}\nOutput: https://github.com/o/r/pull/1#issuecomment-42\nError: (none)\nExit Code: 0\n`,
+    );
+    expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+  });
+
   it('attributes a gh pr comment creation', () => {
     const entry = shellResult(
       'gh pr comment 16458 --repo QwenLM/qwen-code --body-file report.md',
