@@ -605,6 +605,24 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             throw new ManagedAgentException(409, "unsupported_feature",
                     "The Hosted Harness does not support Session Skills.");
         }
+        if (extensionPins == null && additions.isEmpty() && extensionPackages != null && extensionPackages.hasSkillCatalog()) {
+            var workspace = selection == null ? workspaces.readableDefault(tenantId, actorId)
+                    : workspaces.findReadable(tenantId, actorId, selection.workspaceId());
+            if (workspace == null) {
+                if (selection == null) {
+                    throw new ManagedAgentException(400, "workspace_required", "Select a Workspace.");
+                }
+                throw new ManagedAgentException(404, "workspace_not_found", "Workspace was not found.");
+            }
+            if (!workspace.canCreateSession()) {
+                throw new ManagedAgentException(403, "workspace_forbidden", "Workspace cannot be used.");
+            }
+            var pins = extensionPackages.defaultSkillPins(tenantId, actorId, workspace.workspaceId(), idempotencyKey);
+            extensionPins = pins.isEmpty() ? null : pins;
+            if (selection == null) {
+                selection = new WorkspaceSelection(workspace.workspaceId(), ".");
+            }
+        }
         if (extensionPins != null && !harness.supportsSessionExtensions()) {
             throw new ManagedAgentException(409, "unsupported_feature", "The Hosted Harness does not support extension packages.");
         }

@@ -9,7 +9,11 @@ import java.util.List;
 import java.util.Map;
 
 public interface ExtensionPackages {
-    public interface Selection { }
+    public interface Selection {
+        default List<ManagedExtensionPackages.StandaloneSkill> standaloneSkills() { return List.of(); }
+    }
+    default boolean hasSkillCatalog() { return false; }
+    default List<Pin> defaultSkillPins(String tenant, String actor, String workspace, String requestId) { return List.of(); }
     public Selection authorizeSelection(String tenant, String actor, String workspace, List<Pin> pins);
     public void requireSelection(String tenant, String actor, String workspace, List<Pin> pins);
     public void requireSelection(String tenant, String actor, String workspace, List<Pin> pins, Selection selection);
