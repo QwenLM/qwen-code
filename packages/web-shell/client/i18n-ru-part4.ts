@@ -26,6 +26,8 @@ export const RU_PART4: Record<
   'sidebar.switchFailed': 'Не удалось переключить сессию',
   'sidebar.currentDeleteDisabled':
     'Текущая сессия выполняется и не может быть удалена',
+  'sidebar.deleteRunningDisabled':
+    'Сессию с фоновыми задачами нельзя удалить: удаление остановит их',
   'sidebar.currentStandaloneDeleteDisabled':
     'Сначала откройте другой чат, чтобы удалить текущую сессию без рабочей области',
   'sidebar.deleteConfirmDescription': (v) =>
