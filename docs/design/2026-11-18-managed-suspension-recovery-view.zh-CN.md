@@ -17,7 +17,7 @@
 - `state`——journal 生命周期：`ACTIVE` 或 `SEALED`。
 - `writer_generation`、`writer_id`、`writer_lease_until`——围栏写者及其租约。
 - `activation_phase`、`activation_id`、`activation_expires_at`——已投影的 activation。
-- `activation_head_revision` 与 `journal_revision`——投影是否齐平。提交路径在同一事务里更新 activation 投影，并拒绝把偏斜的投影认作齐平；不含 activation 变更的提交会让 `activation_head_revision` 落在 `journal_revision` 之后，直到某次带 activation 的提交追上。
+- `activation_head_revision` 与 `journal_revision`——投影是否齐平。`JournalCommit` 在该事务带 activation 变更**或它本来就已齐平**时把它推进到新修订，并绝不把偏斜的投影认作齐平。因此已齐平的投影会跨普通提交保持齐平；只有本来就落后的投影才会一直落后，直到某次带 activation 的提交追上。
 - `is_wake_pending`、`wake_head_revision`——wake 投影。wake 扫描只有在独立重放已提交前缀、证明该修订上没有任何待处理 wake 输入之后，才清除该提示。
 - `recovery_status`、`recovery_detail_code`——恢复阻塞（若有）。
 

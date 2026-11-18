@@ -17,7 +17,7 @@ The `ma_session_head` row (kind `MANAGED_SESSION`) carries:
 - `state` — journal lifecycle: `ACTIVE` or `SEALED`.
 - `writer_generation`, `writer_id`, `writer_lease_until` — the fencing writer and its lease.
 - `activation_phase`, `activation_id`, `activation_expires_at` — the projected activation.
-- `activation_head_revision` vs `journal_revision` — projection currency. The commit path updates the activation projection in the same transaction as the commit and refuses to certify a skewed projection as current; a commit without an activation change leaves `activation_head_revision` behind `journal_revision` until an activation-bearing commit catches it up.
+- `activation_head_revision` vs `journal_revision` — projection currency. `JournalCommit` advances it to the new revision when the transaction carries an activation change **or when it was already current**, and never certifies a skewed projection as current. A current projection therefore stays current across ordinary commits; only one that was already behind stays behind until an activation-bearing commit catches it up.
 - `is_wake_pending`, `wake_head_revision` — the wake projection. The wake scan clears the hint only after an independent replay of the committed prefix proves no pending wake input at that exact revision.
 - `recovery_status`, `recovery_detail_code` — the recovery block, if any.
 

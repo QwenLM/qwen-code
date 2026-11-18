@@ -7,7 +7,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   HOSTED_IDLE_SUSPEND_MS,
-  HOSTED_SUSPEND_RECONCILE_MS,
   admitSuspensionWork,
   armIdleSuspension,
   beginSuspensionClose,
@@ -33,9 +32,10 @@ describe('suspension reconciliation bound', () => {
     for (const lease of [60_000, 120_000, 300_000]) {
       expect(suspensionReconcileMs(lease)).toBeGreaterThan(lease + 30_000);
     }
-    expect(HOSTED_SUSPEND_RECONCILE_MS).toBe(suspensionReconcileMs(60_000));
+    // The 60s default lease is the candidate the design names (100s).
+    expect(suspensionReconcileMs(60_000)).toBe(100_000);
     expect(suspensionReconcileMs(300_000)).toBeGreaterThan(
-      HOSTED_SUSPEND_RECONCILE_MS,
+      suspensionReconcileMs(60_000),
     );
   });
 });

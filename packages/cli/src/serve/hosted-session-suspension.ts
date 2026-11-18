@@ -42,8 +42,6 @@ const RECONCILE_MARGIN_MS = 10_000;
 export function suspensionReconcileMs(leaseDurationMs: number): number {
   return leaseDurationMs + STORE_REQUEST_TIMEOUT_MS + RECONCILE_MARGIN_MS;
 }
-/** The candidate wait at the 60s default lease; measured before enablement. */
-export const HOSTED_SUSPEND_RECONCILE_MS = suspensionReconcileMs(60_000);
 const JITTER_FRACTION = 0.1;
 const WORK_POLL_MS = 25;
 

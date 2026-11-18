@@ -31,7 +31,7 @@
 
 ## 3. 行为
 
-- capped uncertain teardown 时 Harness 停流、停 activation 续约与写者租约续约，保持闸门 **blocked**（以 `hosted_session_teardown_blocked` 拒绝 load），并在 `suspensionReconcileMs(leaseDurationMs)` 之后调度闸门清除——即该 Session 自己的写者租约 + 30s Store 请求超时 + 10s 余量。它是派生值而非固定值：租约由客户端提供、上限 `MAX_LEASE_MILLIS`（300s），按 60s 默认调好的常量会在配置租约仍存活时就清掉闸门。`HOSTED_SUSPEND_RECONCILE_MS` 就是该函数在 60s 默认下的取值（100s），属候选值，启用前对照真实 Store 超时验证。
+- capped uncertain teardown 时 Harness 停流、停 activation 续约与写者租约续约，保持闸门 **blocked**（以 `hosted_session_teardown_blocked` 拒绝 load），并在 `suspensionReconcileMs(leaseDurationMs)` 之后调度闸门清除——即该 Session 自己的写者租约 + 30s Store 请求超时 + 10s 余量。它是派生值而非固定值：租约由客户端提供、上限 `MAX_LEASE_MILLIS`（300s），按 60s 默认调好的常量会在配置租约仍存活时就清掉闸门。在 60s 默认租约下该函数取值 100s——这就是启用前要对照真实 Store 超时验证的候选值。它不再导出任何常量：租约是唯一输入。
 - 边界后移除闸门 entry（若仍 blocked 且未被复用）；下一次 load 冷打开。`reconciledGates` 计数记录自动恢复。
 - 控制面对 `hosted_session_teardown_blocked` 的分类不变（拒绝，非免预算等待）：teardown 楔住的 Turn 以该码失败；Session 本身为后续请求恢复。Session 级恢复自动；在飞 Turn 是楔住 teardown 的代价。
 - 闸门清除时 Store 仍不可达，则冷打开以暂时性 Store 错误失败并重试至 Store 恢复；闸门本身无需运维。
