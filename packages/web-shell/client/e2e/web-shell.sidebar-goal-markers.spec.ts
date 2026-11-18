@@ -216,3 +216,51 @@ test('a goal-changed catalog bump repaints the marker without a reload @smoke', 
     'Goal: Paused — keep the loop running',
   );
 });
+
+test('a goal-changed catalog bump removes the marker when the goal is cleared @smoke', async ({
+  page,
+  baseURL,
+}) => {
+  // Clearing is the transition a maintainer most wants witnessed: the child
+  // deletes the sidecar and bumps the clock, and the polling client must drop
+  // the marker on its own. Driven like the repaint case above — by-reference
+  // mutation plus a revision bump — because a reload would assert the load
+  // path instead of the notification path this covers.
+  const scenario = createWebShellDaemonScenario({
+    sessions: goalSessions,
+    capabilities: {
+      sessionLiveStatePollIntervalMs: 250,
+      features: [
+        'session_events',
+        'permission_vote',
+        'session_permission_vote',
+        'session_scope_override',
+        'session_source_metadata',
+        'session_btw_stream',
+        'workspace_settings',
+        'workspace_voice',
+        'workspace_session_live_state',
+      ],
+    },
+  });
+  await openSidebar(page, baseURL!, scenario);
+
+  const activeMarker = row(page, 'E2E Harness Session').getByTestId(
+    'session-goal-marker',
+  );
+  // Assert presence, not a tone: goalSessions is a module-level fixture the
+  // repaint case above mutates by reference, so the starting status depends
+  // on test order. This case is about the marker disappearing, not its tone.
+  await expect(activeMarker).toHaveCount(1, { timeout: 30000 });
+
+  const target = scenario.sessions.find(
+    (item) => item.sessionId === 'web-shell-e2e-session',
+  )!;
+  target.goal = undefined;
+  scenario.sessionCatalogVersion = {
+    ...scenario.sessionCatalogVersion,
+    revision: scenario.sessionCatalogVersion.revision + 1,
+  };
+
+  await expect(activeMarker).toHaveCount(0, { timeout: 30000 });
+});
