@@ -830,16 +830,24 @@ export function extractPostedCommentIds(entry: unknown): string[] {
     const output = (response as Record<string, unknown>)['output'];
     if (typeof output !== 'string') continue;
 
-    // The shell tool echoes "Command: <cmd>\nDirectory: ...\nOutput: <result>".
+    // The shell tool echoes "Command: <cmd>\nDirectory: ...\nOutput (stdout
+    // and stderr combined): <result>\nExecution Error: ...". Recorded
+    // transcripts keep the earlier "Output:" / "Error:" labels.
     const command =
       output.match(/^Command: ([\s\S]*?)\nDirectory:/)?.[1] ??
-      output.match(/^Command: ([\s\S]*?)\nOutput:/)?.[1] ??
+      output.match(
+        /^Command: ([\s\S]*?)\nOutput(?: \(stdout and stderr combined\))?:/,
+      )?.[1] ??
       '';
     const segment = command ? creationSegment(command) : undefined;
     if (!segment) continue;
     const result =
-      output.match(/\nOutput: ([\s\S]*?)\nError:/)?.[1] ??
-      output.match(/\nOutput: ([\s\S]*)$/)?.[1] ??
+      output.match(
+        /\nOutput(?: \(stdout and stderr combined\))?: ([\s\S]*?)\n(?:Execution )?Error:/,
+      )?.[1] ??
+      output.match(
+        /\nOutput(?: \(stdout and stderr combined\))?: ([\s\S]*)$/,
+      )?.[1] ??
       '';
 
     // The output must be attributable to the creation. When another gh/curl

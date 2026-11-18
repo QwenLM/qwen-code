@@ -16,7 +16,11 @@ import {
   reviewCommentKey,
 } from './posted-comment-attribution.js';
 
-function shellResult(command: string, output: string): unknown {
+function shellResult(
+  command: string,
+  output: string,
+  text = `Command: ${command}\nDirectory: (root)\nOutput (stdout and stderr combined): ${output}\nExecution Error: (none)\nExit Code: 0\n`,
+): unknown {
   return {
     type: 'tool_result',
     message: {
@@ -26,7 +30,7 @@ function shellResult(command: string, output: string): unknown {
           functionResponse: {
             name: 'run_shell_command',
             response: {
-              output: `Command: ${command}\nDirectory: (root)\nOutput: ${output}\nError: (none)\nExit Code: 0\n`,
+              output: text,
             },
           },
         },
@@ -47,6 +51,16 @@ describe('extractPostedCommentIds', () => {
       'https://github.com/o/r/pull/1#issuecomment-42',
     );
     expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+  });
+
+  it('attributes a creation recorded with the earlier Output/Error labels', () => {
+    const command = 'gh pr comment 1 --body a';
+    const entry = shellResult(
+      command,
+      '',
+      `Command: ${command}\nDirectory: (root)\nOutput: https://github.com/o/r/pull/1#issuecomment-42\nError: (none)\nExit Code: 0\n`,
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([issueCommentKey('42')]);
   });
 
   it('attributes a gh pr comment creation', () => {
