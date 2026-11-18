@@ -19,6 +19,8 @@ import type {
   SessionSourcesResult,
   SessionSourceUpsertResult,
   SessionSourceRemoveResult,
+  GeneratedUiStateSnapshot,
+  GeneratedUiStateWriteResult,
   TurnResultCode,
   TurnResultErrorPayload,
   SessionExternalRecordRequest,
@@ -48,6 +50,7 @@ import type {
 import type { PermissionPolicy } from './permission.js';
 import type { BridgeExecutionEngine } from './bridgeOptions.js';
 import type {
+  DaemonSessionArtifact,
   SessionArtifactInput,
   SessionArtifactMutationResult,
   SessionArtifactsEnvelope,
@@ -576,6 +579,8 @@ export interface BridgeRestoreSessionRequest {
   suppressWorktreeContextRestore?: boolean;
   /** Delay ask_user_question recovery until daemon route validation finishes. */
   deferRestoreAskUserQuestionPrompt?: boolean;
+  /** Hold cold-restored automatic work until the route reconciles cwd. */
+  deferAutomaticWorkUntilCwdRestore?: boolean;
   /**
    * Daemon-internal: session-level MCP servers for ACP `session/load` /
    * `session/resume` (see `BridgeSpawnRequest.mcpServers`). Absent means
@@ -847,6 +852,12 @@ export interface BridgeRestoredSession extends BridgeSession {
   state: BridgeSessionState;
   /** Artifact restore warnings surfaced during session load/resume. */
   artifactWarnings?: string[];
+  /**
+   * Restored artifact snapshot embedded in the restore response so clients can
+   * surface a session-level artifact entry before the replay renders. Omitted
+   * when the session has no artifacts.
+   */
+  artifacts?: DaemonSessionArtifact[];
   /** True when response-mode history replay aborted after emitting a prefix. */
   partial?: true;
   /** Agent-provided replay failure detail when `partial` is true. */
@@ -1035,6 +1046,14 @@ export interface ChangeSessionCwdRequest {
    * before and after mutating the session Config.
    */
   conversationDirectoryExpectation?: BridgeConversationDirectoryExpectation;
+  /**
+   * Daemon-internal: the caller itself owns the reset-pending admission
+   * barrier for this session (the worktree handoff arms it for the whole
+   * transfer) and may relocate while it is armed. Only the handoff route
+   * sets this; the user cd route constructs its request literally, so an
+   * external client cannot inject the flag.
+   */
+  allowWhileResetPending?: boolean;
 }
 
 export interface ChangeSessionCwdResult {
@@ -1243,6 +1262,10 @@ export interface BridgeSessionSummary {
   sourceId?: string;
   clientCount: number;
   hasActivePrompt: boolean;
+  /** Prompts admitted but not yet finished (running + queued). Flips
+   * synchronously at admission, before promptActive — covers the
+   * attachment-resolution window hasActivePrompt alone misses. */
+  pendingPromptCount?: number;
   /** Per-session active-work observation. `idle` is emitted only from a
    * fresh snapshot that covers every negotiated hold category. */
   activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
@@ -1282,6 +1305,24 @@ export interface BridgeSessionSummary {
    * session can produce several PRs (stacked or follow-up work).
    */
   prs?: SessionPrInfo[];
+  /**
+   * Session artifact count, present when non-zero. Live entries carry the
+   * live public count; there, absent means ZERO — the in-memory store is
+   * authoritative, and the list merge drops a stale sidecar-derived count
+   * when the live entry omits the field — EXCEPT while
+   * `artifactCountPending` is true (see there). Persisted summaries are
+   * enriched best-effort from the artifact summary sidecar with the
+   * restorable count; there, absent means unknown (no sidecar / older
+   * daemon), not zero.
+   */
+  artifactCount?: number;
+  /**
+   * True while the session's artifact restore is still in flight: the
+   * entry is live, but its store is not hydrated yet, so `artifactCount`
+   * is omitted and MUST NOT be read as zero. The list merge keeps the
+   * sidecar-enriched count for such rows. Absent once the restore settles.
+   */
+  artifactCountPending?: boolean;
 }
 
 /** Original event-bus cursor captured when a prompt id was first admitted. */
@@ -1416,6 +1457,18 @@ export interface BridgeClientRequestContext {
    * from request input.
    */
   onPromptAdmitted?: () => void;
+  /** Internal cancellation while a guarded prompt waits for its ACP write. */
+  dispatchSignal?: AbortSignal;
+  /** Internal signal when the prompt write begins and may reach the ACP child. */
+  onPromptWriteStarted?: () => void;
+  /** Internal signal after the bridge writes the queued prompt to ACP. */
+  onPromptDispatched?: () => void;
+  /** Internal authorization check when dequeuing a prompt and before its ACP write. */
+  assertCanDispatch?: () => void;
+  /** Approval mode required for the delegated turn. */
+  expectedApprovalMode?: ApprovalMode;
+  /** The live mode before the switch. Older children still enforce expectedApprovalMode. */
+  approvalModeBeforeStart?: ApprovalMode;
   /**
    * Internal model input that replaces the public prompt only inside the
    * trusted ACP child. The bridge still echoes and persists `PromptRequest`
@@ -1479,6 +1532,10 @@ export interface BridgeClientRequestContext {
 }
 
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
+export const DAEMON_EXPECTED_APPROVAL_MODE_META_KEY =
+  'qwen.daemon.expectedApprovalMode';
+export const DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY =
+  'qwen.daemon.approvalModeBeforeStart';
 export const DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY =
   'qwen.daemon.restoreAskUserQuestion';
 export const DAEMON_RESTORE_MANAGED_APPROVAL_META_KEY =
@@ -1506,6 +1563,8 @@ export const DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY =
   'qwen.daemon.suppressRestoreAskUserQuestion';
 export const DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY =
   'qwen.daemon.suppressWorktreeContextRestore';
+export const DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY =
+  'qwen.daemon.deferAutomaticWorkUntilCwdRestore';
 export const DAEMON_PASSIVE_MANAGED_RUNTIME_RECOVERY_META_KEY =
   'qwen.daemon.passiveManagedRuntimeRecovery';
 export const DAEMON_ATTACHMENT_REFERENCES_META_KEY =
@@ -1967,6 +2026,8 @@ export interface BridgeBackgroundNotification {
   kind: 'agent';
   toolUseId?: string;
   label?: string;
+  fromSession?: { sessionId: string; workspaceCwd: string };
+  sentMessageContext?: string;
 }
 
 export type RuntimeMcpServerAddResult =
@@ -2300,6 +2361,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   getSessionLastEventId(sessionId: string): number;
 
+  getSessionPendingPermissionIds(sessionId: string): readonly string[];
+
   /**
    * Return the epoch token of this session's event bus. Regenerated on
    * every bus construction (daemon restart), never persisted. Throws
@@ -2488,6 +2551,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   getSessionSummary(sessionId: string): BridgeSessionSummary;
 
+  /** Includes cold restores and explicit-id spawns before they become live. */
+  hasSessionOrPendingRegistration(sessionId: string): boolean;
+
   /** Daemon-internal execution location; never populated from client input. */
   getSessionExecutionSnapshot(
     sessionId: string,
@@ -2602,6 +2668,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     sessionId: string,
   ): Promise<ServeSessionContextStatus>;
 
+  /** Capture a guard for a live approval-mode read used by the daemon. */
+  captureSessionApprovalModeGuard(sessionId: string): () => void;
+
   /** Read structured context-window usage for a live session. */
   getSessionContextUsageStatus(
     sessionId: string,
@@ -2640,6 +2709,28 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
 
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
+
+  /**
+   * Read one Generated UI card's saved view state on the session's active
+   * branch. A card that was never saved has revision 0 and value null. Throws
+   * `GeneratedUiStateError` when the state cannot be read.
+   */
+  getGeneratedUiState(
+    sessionId: string,
+    cardId: string,
+    context: { clientId: string },
+  ): Promise<GeneratedUiStateSnapshot>;
+
+  /**
+   * Save one card's view state if `baseRevision` is still current; a stale or
+   * oversized write is reported in the result, not thrown.
+   */
+  setGeneratedUiState(
+    sessionId: string,
+    cardId: string,
+    write: { baseRevision: number; value: unknown },
+    context: { clientId: string },
+  ): Promise<GeneratedUiStateWriteResult>;
 
   /** Execute an App-visible tool through the bound session permission pipeline. */
   callMcpAppTool(

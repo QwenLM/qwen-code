@@ -202,6 +202,7 @@ describe('createTranscriptReplayMachine', () => {
       taskId: 'Explore-1',
       kind: 'agent',
       status: 'completed',
+      fromSession: { sessionId: 'other-session', workspaceCwd: '/tmp/other' },
     };
     const item = {
       ...record('completed-1', 'system', {
@@ -372,6 +373,39 @@ describe('createTranscriptReplayMachine', () => {
           sourceRecordIds: ['mention-rec-1'],
         },
       },
+    });
+  });
+
+  it('replays where a /send message went, dropping a malformed target', () => {
+    const mention = (id: string, sentTo: unknown) =>
+      updates(
+        createTranscriptReplayMachine(),
+        record(id, 'user', {
+          subtype: 'agent_mention',
+          message: { role: 'user', parts: [{ text: '<sent-message>…' }] },
+          systemPayload: {
+            displayText: 'look at this',
+            mentionedAgentIds: [],
+            sentTo,
+          },
+        }),
+      )[0]!._meta as { qwenAgentMessage: Record<string, unknown> };
+
+    expect(
+      mention('sent-1', {
+        sessionId: 'kid',
+        workspaceCwd: '/work/b',
+        title: 'Kid',
+        extra: 1,
+      }).qwenAgentMessage,
+    ).toEqual({
+      kind: 'agent_mention',
+      mentionedAgentIds: [],
+      sentTo: { sessionId: 'kid', workspaceCwd: '/work/b', title: 'Kid' },
+    });
+    expect(mention('sent-2', { sessionId: 'kid' }).qwenAgentMessage).toEqual({
+      kind: 'agent_mention',
+      mentionedAgentIds: [],
     });
   });
 

@@ -88,7 +88,10 @@ import {
   type RepairOrphanedToolUseOptions,
   userContentPushSnapshotKey,
 } from './llm-chat.js';
-import { restorableAskUserQuestionCallIds } from './ask-user-question-restore.js';
+import {
+  findRestorableAskUserQuestion,
+  restorableAskUserQuestionCallIds,
+} from './ask-user-question-restore.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   assembleSystemPrompt,
@@ -2335,7 +2338,30 @@ export class LlmClient {
         ...(gitStatus ? [{ text: wrapSystemReminder(gitStatus) }] : []),
       ],
     };
-    this.getChat().addHistory(markApiHistoryDirectoryContext(context));
+    const chat = this.getChat();
+    const pendingQuestion = chat.peekLastHistoryEntry();
+    if (findRestorableAskUserQuestion(pendingQuestion)) {
+      const directoryContext: Content = {
+        role: 'user',
+        parts: [{ text: await getDirectoryContextString(this.config) }],
+      };
+      if (chat.peekLastHistoryEntry() === pendingQuestion) {
+        // Keep the pending call last and adjacent to its future answer.
+        const history = chat.getHistoryShallow();
+        history.splice(
+          -1,
+          0,
+          markApiHistoryDirectoryContext(context),
+          markApiHistoryDirectoryContext(directoryContext),
+        );
+        chat.setHistory(history, chat.getCompletedToolCallIds());
+      } else {
+        chat.addHistory(markApiHistoryDirectoryContext(context));
+        chat.addHistory(markApiHistoryDirectoryContext(directoryContext));
+      }
+      return;
+    }
+    chat.addHistory(markApiHistoryDirectoryContext(context));
     await this.addDirectoryContext();
   }
 

@@ -798,7 +798,10 @@ describe('tool group summary logic', () => {
 });
 
 describe('tool output session links', () => {
-  function renderSessionLinkTool(readonly: boolean): HTMLElement {
+  function renderSessionLinkTool(
+    readonly: boolean,
+    target = 'child-session',
+  ): HTMLElement {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -806,7 +809,7 @@ describe('tool output session links', () => {
       <ToolLine
         tool={makeTool({
           toolName: 'custom_tool',
-          rawOutput: '[child](qwen-session://child-session)',
+          rawOutput: `[child](qwen-session://${target})`,
         })}
         forceExpanded
       />
@@ -828,10 +831,21 @@ describe('tool output session links', () => {
     return container;
   }
 
-  it('keeps interactive tool session links clickable by default', () => {
-    const handler = vi.fn();
+  it.each([
+    { target: 'child-session', detail: 'child-session' },
+    {
+      target: 'child-session?workspace=C%3A%5Crepos%5Cproject+%28copy%29',
+      detail: {
+        sessionId: 'child-session',
+        workspaceCwd: 'C:\\repos\\project (copy)',
+        source: 'session-link',
+      },
+    },
+  ])('opens the tool result link to $target', ({ target, detail }) => {
+    const seen: unknown[] = [];
+    const handler = (event: Event) => seen.push((event as CustomEvent).detail);
     window.addEventListener('qwen:open-session', handler);
-    const container = renderSessionLinkTool(false);
+    const container = renderSessionLinkTool(false, target);
     const link = container.querySelector('a[role="button"]');
     expect(link?.textContent).toBe('child');
     act(() => {
@@ -839,8 +853,8 @@ describe('tool output session links', () => {
         new MouseEvent('click', { bubbles: true, cancelable: true }),
       );
     });
-    expect(handler).toHaveBeenCalledOnce();
     window.removeEventListener('qwen:open-session', handler);
+    expect(seen).toEqual([detail]);
   });
 
   it('renders tool session links as inert text in readonly mode', () => {

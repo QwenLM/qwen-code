@@ -104,6 +104,7 @@ import {
   AUTO_MEMORY_SNAPSHOT_METADATA,
   appendAutoMemoryContext,
   appendAutoMemorySnapshot,
+  findLatestAutoMemorySnapshot,
   getAutoMemorySnapshot,
   withoutAutoMemorySnapshots,
 } from '../memory/request-context.js';
@@ -704,6 +705,7 @@ export function llmPreparedProviderPin(
     'thinkingMandatory',
     'extra_body',
     'modalities',
+    'imageDetail',
     'schemaCompliance',
     'contextWindowSize',
     'splitToolMedia',
@@ -2810,6 +2812,14 @@ export class LlmChat {
     return this.config.getModelRouteIdentity?.() ?? '';
   }
 
+  private memorySnapshotsBecameVisible(visible: boolean): boolean {
+    return (
+      this.memorySnapshotsVisible !== true &&
+      visible &&
+      findLatestAutoMemorySnapshot(this.history) !== undefined
+    );
+  }
+
   /**
    * Make the single-slot token counters describe the route identified by
    * `targetRouteKey` (default: the active route). Counts recorded for a
@@ -2845,15 +2855,7 @@ export class LlmChat {
     const memorySnapshotsVisible = Boolean(
       this.config.getAutoMemoryContext?.(),
     );
-    if (
-      this.memorySnapshotsVisible !== true &&
-      memorySnapshotsVisible &&
-      this.history.some((entry) =>
-        entry.parts?.some(
-          (part) => part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true,
-        ),
-      )
-    ) {
+    if (this.memorySnapshotsBecameVisible(memorySnapshotsVisible)) {
       // A suppressed request cannot account for catalogs that are visible
       // again. Invalidate every route before adoption. The opposite flip
       // (visible -> suppressed) deliberately keeps the authoritative count:
@@ -2965,6 +2967,23 @@ export class LlmChat {
   getLastPromptTokenCount(targetRouteKey?: string): number {
     this.adoptTokenCountsForRoute(targetRouteKey);
     return this.lastPromptTokenCount;
+  }
+
+  /** Reads the active route's prompt count without mutating chat or telemetry state. */
+  peekLastPromptTokenCount(): number {
+    if (
+      (this.lastPromptTokenCount === 0 &&
+        this.tokenCountsByRouteKey.size === 0) ||
+      this.memorySnapshotsBecameVisible(
+        Boolean(this.config.getAutoMemoryContext?.()),
+      )
+    ) {
+      return 0;
+    }
+    const routeKey = this.currentRouteKey();
+    return routeKey === this.tokenCountsRouteKey
+      ? this.lastPromptTokenCount
+      : (this.tokenCountsByRouteKey.get(routeKey)?.promptTokenCount ?? 0);
   }
 
   /** Previous model-response tokens used by the next prompt estimate. */

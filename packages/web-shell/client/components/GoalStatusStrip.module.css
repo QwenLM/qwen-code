@@ -36,6 +36,20 @@
   font-weight: 600;
 }
 
+/* Same lifecycle tones as the Goals page's status pill, from the shared
+   execution-status palette (App.module.css). */
+.status[data-status='running'] {
+  color: var(--status-running-fg);
+}
+
+.status[data-status='attention'] {
+  color: var(--status-attention-fg);
+}
+
+.status[data-status='done'] {
+  color: var(--status-done-fg);
+}
+
 .activity,
 .objective {
   color: var(--muted-foreground);
@@ -96,6 +110,17 @@
 .action:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+/* Navigation, not a control: the Goals-page jump wears the same interactive
+   blue as the Goals page's session-jump affordances, so it reads apart from
+   the grey edit/pause/clear controls. The Target glyph is the app-wide Goals
+   icon (the sidebar's Goals entry uses it too). Declared after the
+   `.action:hover` rules so the blue survives hover at equal specificity. */
+.goalsAction,
+.goalsAction:hover:not(:disabled),
+.goalsAction:focus-visible:not(:disabled) {
+  color: var(--agent-blue-500);
 }
 
 /*

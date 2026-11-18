@@ -1,6 +1,6 @@
 # Experimental Mods
 
-Qwen Code can run a small subset of the Claude Code Mod API in headless and interactive terminal sessions.
+Qwen Code can run a small subset of the Claude Code Mod API in headless, interactive terminal and [ACP](#acp-sessions) sessions.
 This feature is opt-in and requires a trusted workspace and an enabled Claude or
 native Qwen extension. Agent Plugins v1 packages continue to ignore hooks.
 
@@ -124,6 +124,33 @@ Other commands and model requests remain blocked; fix the Mod configuration and
 restart the session. File or plugin commands named `help` or `quit` do not gain
 this recovery exception.
 
+## ACP sessions
+
+ACP sessions (`qwen --acp`, used by the Web Shell, Zed and the VS Code
+companion) load the workspace's Mods with the same setting and checks. Each ACP
+session has its own Mods, even when one process serves several sessions. A
+session that a client loads again while it is still open keeps its Mods and
+does not repeat `session.start`.
+
+An ACP session has no surface of its own: `session.start` receives
+`surface: null` and `isInteractive: false`, as in a headless run. It raises
+`session.start` and `session.end`, and `turn.start` and `turn.complete` for
+each prompt that runs `UserPromptSubmit`. `$.model.complete`, `$.store`, the
+`$.session` reads, `$.clock` and `$.turn.abort` work as in the terminal.
+
+It does not raise `ui.render`, `prompt.submit`, `tool.call` or `tool.check` yet,
+so hooks on them are skipped with the diagnostic described in
+[Middleware and recovery](#middleware-and-recovery). `$.prompt.submit` drops its prompt, and
+Mod commands are not offered. If the Mods fail to load, the session refuses each
+prompt with the reason; fix the Mod configuration and start a new session.
+
+Transcript logs, `turn.complete` notes and load diagnostics reach the client as
+the ACP extension notification `qwen/notify/session/mod-log`, with params
+`{ sessionId, plugin, text }`. The text has ANSI and control characters
+removed, with the limits of headless runs. Clients that do not know the method
+ignore it. The Web Shell daemon forwards each one to the session's event stream
+as a `mod_log` event with the same fields; the Web Shell does not show them yet.
+
 ## Supported subset
 
 | Surface    | Behavior                                                                                                                                                                                                               |
@@ -142,12 +169,12 @@ this recovery exception.
 | Prompts    | `prompt.submit` and `$.prompt.submit` in headless runs and the Ink and OpenTUI terminals, described in [Submitted prompts](#submitted-prompts)                                                                         |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input                                |
 | Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                                               |
-| Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, and for reply blocks in both terminals, described in [The band above the prompt](#the-band-above-the-prompt) and [Reply rows](#reply-rows) |
+| Drawing    | `ui.render` draws the [band above the prompt](#the-band-above-the-prompt) and rewrites complete [reply rows](#reply-rows) and expanded [thinking rows](#thinking-rows) in both the Ink and OpenTUI terminal interfaces |
 | Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                                                |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
 Runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
-`$.session.messages` and `repo`, `$.state`, `$.clock.after` and `every`, `ui.render` sites other than the band above the prompt and reply rows, streaming events and hot reload are not implemented.
+`$.session.messages` and `repo`, `$.state`, `$.clock.after` and `every`, additional `ui.render` sites, streaming events and hot reload are not implemented.
 Commands cannot return `context`, `exitCode` or engine references yet. Hooks for
 other Claude Code events load without running, as described in
 [Middleware and recovery](#middleware-and-recovery).
@@ -512,7 +539,7 @@ hooks described above; ordinary hook failure can recover without resetting modul
 state. Guest promise jobs run only while a host request is active, including its
 queued notification drain.
 
-Mods do not run in ACP, managed/SSH, sandbox or session-agent entry points in
+Mods do not run in managed/SSH, sandbox or session-agent entry points in
 this version. Safe mode, bare mode and `disableAllHooks` also prevent loading.
 Restart after changing plugin code, options or extension activation. An already loaded
 command rechecks every participating plugin before execution and refuses a changed
@@ -537,7 +564,7 @@ declares:
 | `$.session.cwd()`, `$.session.root()` | the session's working directory; the two are the same in Qwen Code                      |
 | `$.session.model()`                   | the main model's id                                                                     |
 | `$.session.turns()`                   | the user turns in the session's transcript, counting resumed turns and not rewound ones |
-| `$.session.surfaces()`                | `["terminal"]` in a terminal, `[]` in a headless run                                    |
+| `$.session.surfaces()`                | `["terminal"]` in a terminal, `[]` in a headless run or an ACP session                  |
 | `$.session.surface()`                 | the first surface, or `null`                                                            |
 | `$.session.usage()`                   | `{startedAt, context: {tokens, window, percent}, rateLimits}`                           |
 | `$.clock.now()`                       | the current time in epoch milliseconds                                                  |
@@ -763,7 +790,8 @@ it beneath the answer, up to 4,096 characters:
 
 - in a terminal, as the transcript line `[Mod <plugins>] <text>`;
 - in headless text mode, as the same line on stderr after the answer;
-- in JSON modes, as a `system` `ui_log` message before the result.
+- in JSON modes, as a `system` `ui_log` message before the result;
+- in an ACP session, as a `qwen/notify/session/mod-log` notification.
 
 The conversation record keeps the answer. In a terminal the hooks run after the
 answer, and the next prompt can already start. A headless run waits for them
@@ -1150,9 +1178,48 @@ in the terminal scrollback, a printed row cannot change, so the site is not
 offered and its hooks are skipped. OpenTUI always draws them. Subagent views,
 the session preview and headless runs do not raise the site yet. A row whose text is too large for a Mod payload is not raised.
 
+## Thinking rows
+
+`Thinking` is a Qwen Code site; Claude Code has no counterpart. The Ink and
+OpenTUI terminals raise it when a complete, expanded block of the model's
+thinking is visible in the main transcript. Click a collapsed thought to
+open it, or press `ctrl+o` to expand all thoughts and scroll to the ones you
+want to read. A hook receives:
+
+```js
+{
+  surface: 'terminal',
+  component: 'Thinking',
+  requestId: '41', // the transcript item's id
+  props: {
+    text: 'Check how the worker queues dispatches first.', // the block's markdown
+  },
+}
+```
+
+```js
+on('ui.render', { component: 'Thinking' }, ($, e, next) =>
+  next({ ...e, props: { ...e.props, text: e.props.text.toUpperCase() } }),
+);
+```
+
+Spread `e.props` as above, so the hook keeps working if a later release adds
+a prop. The hook rewrites the expanded body. The envelope and prop keys are
+pinned. A rewritten `text` holds at most 100,000 characters and no control
+characters other than tabs and line breaks. A block needs nonblank text to
+trigger the hook. The session keeps the original thought and uses the same
+answer cache as [reply rows](#reply-rows) when a thought is reopened or
+scrolled back into view.
+
+Ink offers the site with virtualized history and can split a long thought
+into several blocks, each raised on its own. The `/copy` command reads
+assistant replies, so Ink omits its Mermaid and LaTeX source hints from
+thinking bodies.
+
 The host raises a site only when some hook may hear it: a hook that names a
 `component` in its matcher hears only the sites it names, and `ui.invalidate`
-re-runs only the sites the calling Mod may hear.
+re-runs only the sites the calling Mod may hear. A hook with no `component`
+matcher hears every site, including `Thinking`.
 
 ## TypeScript, JSX and relative imports
 
