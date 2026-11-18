@@ -175,16 +175,23 @@ function stripHeredocBodies(command: string): string | undefined {
   // the lines. Normalize it to a space (as segmentation does) so a `#` that
   // follows a continuation is judged against the joined line: in `: \<newline>
   // # Use <<'EOF' …` the `#` begins a real comment, not an escaped word.
-  command = command.replace(/\\\r?\n/g, ' ');
   let result = '';
   let quote: ShellQuote | null = null;
   let arithmeticDepth = 0;
-  const pending: Array<{ delimiter: string; stripTabs: boolean }> = [];
+  const pending: Array<{
+    delimiter: string;
+    stripTabs: boolean;
+    quoted: boolean;
+  }> = [];
   let i = 0;
   while (i < command.length) {
     const ch = command[i]!;
     if (ch === '\\' && quote !== "'") {
       if (i + 1 === command.length) return undefined;
+      if (command[i + 1] === '\n' || command.startsWith('\r\n', i + 1)) {
+        i += command[i + 1] === '\r' ? 3 : 2;
+        continue;
+      }
       result += command.slice(i, i + 2);
       i += 2;
       continue;
@@ -216,7 +223,7 @@ function stripHeredocBodies(command: string): string | undefined {
     // check. Segmentation drops the comment itself later. The boundary must be
     // unescaped, so the `#` in `tee review\ #1.md` (part of the filename) does
     // not hide the real heredoc that follows it.
-    if (ch === '#' && isUnescapedWordBoundary(command, i)) {
+    if (ch === '#' && isUnescapedWordBoundary(result, result.length)) {
       while (i < command.length && command[i] !== '\n' && command[i] !== '\r') {
         result += command[i];
         i++;
@@ -227,15 +234,25 @@ function stripHeredocBodies(command: string): string | undefined {
       const bodyStart = ch === '\r' && command[i + 1] === '\n' ? i + 2 : i + 1;
       result += command.slice(i, bodyStart);
       i = bodyStart;
-      for (const { delimiter, stripTabs } of pending) {
+      for (const { delimiter, stripTabs, quoted } of pending) {
         let closed = false;
+        let continued = '';
         while (i < command.length) {
           const end = command.indexOf('\n', i);
           const line = command
             .slice(i, end === -1 ? undefined : end)
             .replace(/\r$/, '');
           i = end === -1 ? command.length : end + 1;
-          if ((stripTabs ? line.replace(/^\t+/, '') : line) === delimiter) {
+          const logicalLine = continued + line;
+          if (!quoted && end !== -1 && /(?:^|[^\\])(?:\\\\)*\\$/.test(line)) {
+            continued = logicalLine.slice(0, -1);
+            continue;
+          }
+          continued = '';
+          if (
+            (stripTabs ? logicalLine.replace(/^\t+/, '') : logicalLine) ===
+            delimiter
+          ) {
             closed = true;
             break;
           }
@@ -261,11 +278,29 @@ function stripHeredocBodies(command: string): string | undefined {
       }
       while (command[j] === ' ' || command[j] === '\t') j++;
       let delim = '';
+      let quoted = false;
       const dq = command[j];
       if (dq === "'" || dq === '"') {
+        quoted = true;
         j++;
         while (j < command.length && command[j] !== dq) {
-          if (dq === '"' && command[j] === '\\') return undefined;
+          if (dq === '"' && command[j] === '\\') {
+            const escaped = command[j + 1];
+            if (escaped === '\n' || command.startsWith('\r\n', j + 1)) {
+              j += escaped === '\r' ? 3 : 2;
+              continue;
+            }
+            if (
+              escaped === '"' ||
+              escaped === '\\' ||
+              escaped === '$' ||
+              escaped === '`'
+            ) {
+              delim += escaped;
+              j += 2;
+              continue;
+            }
+          }
           delim += command[j];
           j++;
         }
@@ -282,10 +317,11 @@ function stripHeredocBodies(command: string): string | undefined {
         }
         // A backslash before/within the delimiter quotes it (<<\EOF is <<'EOF'):
         // the delimiter word itself has the backslashes removed.
+        quoted = delim.includes('\\');
         delim = delim.replace(/\\/g, '');
       }
       if (delim === '' && dq !== "'" && dq !== '"') return undefined;
-      pending.push({ delimiter: delim, stripTabs });
+      pending.push({ delimiter: delim, stripTabs, quoted });
       result += command.slice(i, j);
       i = j;
       continue;

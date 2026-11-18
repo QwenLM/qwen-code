@@ -294,6 +294,18 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
   });
 
+  it.each([
+    'cat > note.md <<"END\\MARK"\nbody\nEND\\MARK',
+    "cat > note.md <<'NOTE'\n# trailing \\\nNOTE",
+    'cat > note.md <<NOTE\nbody\nNO\\\nTE',
+  ])('preserves backslashes according to heredoc quoting (%j)', (setup) => {
+    const entry = shellResult(
+      `${setup}\ngh pr comment 1 --body-file note.md`,
+      'https://github.com/o/r/pull/1#issuecomment-42',
+    );
+    expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+  });
+
   it('attributes a gh pr comment creation', () => {
     const entry = shellResult(
       'gh pr comment 16458 --repo QwenLM/qwen-code --body-file report.md',
