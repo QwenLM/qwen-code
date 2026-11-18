@@ -8245,6 +8245,7 @@ export class Config {
       `${this.sessionId}.worktree.json`,
       `${this.sessionId}.pr.json`,
       `${this.sessionId}.title.json`,
+      `${this.sessionId}.branch.json`,
       `${this.sessionId}.artifacts.json`,
       `${this.sessionId}.goal.json`,
     ].map((fileName) => ({

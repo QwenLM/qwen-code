@@ -9,6 +9,8 @@ import {
   normalizeLanguage,
 } from './i18n';
 import type { WebShellLanguage } from './i18n';
+import { ZH_TW } from './i18n-zh-tw';
+import { SIMPLIFIED_ONLY_GLYPHS } from './test/zh-tw-glyphs';
 import { CHANNEL_METHOD_PLATFORMS } from './components/channels/channel-platform';
 import { RU_PART6 } from './i18n-ru-part6';
 import * as ruPart1Stub from './i18n-ru-part1.transcript-stub';
@@ -723,6 +725,14 @@ describe('web-shell ru locale', () => {
     expect(normalizeLanguage('zh')).toBe('zh-CN');
     expect(normalizeLanguage('zh-cn')).toBe('zh-CN');
     expect(normalizeLanguage('zh_cn')).toBe('zh-CN');
+    expect(normalizeLanguage('zh-TW')).toBe('zh-TW');
+    expect(normalizeLanguage('zh_TW')).toBe('zh-TW');
+    expect(normalizeLanguage('zh-Hant')).toBe('zh-TW');
+    expect(normalizeLanguage('zh-HK')).toBe('zh-TW');
+    // Region- and script-qualified Traditional tags reach the same catalog.
+    for (const value of ['zh-MO', 'zh-Hant-TW', 'zh-hk-x', 'zh-mo-x']) {
+      expect(normalizeLanguage(value)).toBe('zh-TW');
+    }
     // Unrelated locales still collapse to en (fr, ja, … are not shipped).
     expect(normalizeLanguage('fr-FR')).toBe('en');
     expect(normalizeLanguage('ja-JP')).toBe('en');
@@ -742,22 +752,24 @@ describe('web-shell ru locale', () => {
       expect(languageSettingToWebShellLanguage(value)).toBe('ru');
     }
     expect(languageSettingToWebShellLanguage('zh')).toBe('zh-CN');
+    expect(languageSettingToWebShellLanguage('zh-TW')).toBe('zh-TW');
+    expect(languageSettingToWebShellLanguage('zh_HK')).toBe('zh-TW');
     expect(languageSettingToWebShellLanguage('en')).toBe('en');
     expect(languageSettingToWebShellLanguage('fr')).toBeUndefined();
   });
 
   it('lists ru in the picker with the "Русский [ru]" label', () => {
-    expect(WEB_SHELL_LANGUAGES).toEqual(['en', 'zh-CN', 'ru']);
+    expect(WEB_SHELL_LANGUAGES).toEqual(['en', 'zh-CN', 'zh-TW', 'ru']);
     expect(languageLabel('ru')).toBe('Русский [ru]');
   });
 
   it('lists every shipped language in the /language error and usage copy', () => {
     // The /language gate, help and completions derive from WEB_SHELL_LANGUAGES;
-    // the error/usage copy must carry the same set, in both locales.
+    // the error/usage copy must carry the same set in every locale.
     for (const language of WEB_SHELL_LANGUAGES) {
       const t = getTranslator(language);
-      expect(t('language.invalid')).toContain('en, zh-CN, ru');
-      expect(t('language.usage')).toContain('en|zh-CN|ru');
+      expect(t('language.invalid')).toContain('en, zh-CN, zh-TW, ru');
+      expect(t('language.usage')).toContain('en|zh-CN|zh-TW|ru');
       expect(t('language.usage')).toContain('[--project|--global]');
     }
   });
@@ -894,5 +906,104 @@ describe('web-shell ru locale', () => {
     expect(ruPart6Stub.RU_PART6).toEqual({});
     expect(Object.keys(ruRemainderStub)).toEqual(['RU_REMAINDER']);
     expect(ruRemainderStub.RU_REMAINDER).toEqual({});
+  });
+});
+
+describe('web-shell zh-TW locale', () => {
+  it('uses Taiwan Traditional Chinese instead of the Simplified catalog', () => {
+    const tw = getTranslator('zh-TW');
+    const zh = getTranslator('zh-CN');
+    expect(tw('files.title')).toBe('檔案');
+    expect(zh('files.title')).toBe('文件');
+    expect(tw('files.delete')).toBe('刪除檔案');
+    expect(tw('managed.approval.failed')).toContain('審批回答');
+    expect(
+      tw(
+        "You've used up your weekly credits.{{reset}} Please try again after the reset.",
+        { reset: '' },
+      ),
+    ).toContain('週額度');
+    expect(languageLabel('zh-TW')).toBe('繁體中文 [zh-TW]');
+    expect(tw('language.invalid')).toContain('zh-TW');
+  });
+
+  it('resolves the Simplified script and region tags the Traditional side honours', () => {
+    for (const tag of [
+      'zh-Hans',
+      'zh-Hans-CN',
+      'zh_SG',
+      'zh-sg-x',
+      'zh-cn-x',
+    ]) {
+      expect(normalizeLanguage(tag)).toBe('zh-CN');
+      expect(languageSettingToWebShellLanguage(tag)).toBe('zh-CN');
+    }
+    // Script wins over region: zh-Hant-CN stays Traditional.
+    expect(normalizeLanguage('zh-Hant-CN')).toBe('zh-TW');
+    expect(languageSettingToWebShellLanguage('zh-Hant-CN')).toBe('zh-TW');
+  });
+
+  it('carries no Simplified-only vocabulary in any entry', () => {
+    for (const [key, value] of Object.entries(ZH_TW)) {
+      const text = typeof value === 'function' ? value({}) : value;
+      expect(`${key}: ${text}`).not.toMatch(SIMPLIFIED_ONLY_GLYPHS);
+    }
+  });
+
+  it('translates the surfaces that would otherwise stay English', () => {
+    const tw = getTranslator('zh-TW');
+    const en = getTranslator('en');
+    for (const key of [
+      'sidebar.gitCloneJobGone',
+      'channels.editor.field.github.prCommentWatch',
+      'channels.editor.field.github.prCommentWatch.description',
+      'sidebar.liveVoicePending',
+      'memory.lastDream',
+      'memory.savedIn',
+    ]) {
+      expect(tw(key, { path: '/w' })).not.toBe(en(key, { path: '/w' }));
+    }
+    expect(tw('sidebar.liveVoicePending')).toBe('語音通話');
+    expect(tw('memory.savedIn', { path: '/w' })).toBe('已儲存於 /w');
+  });
+
+  it('names the column axis 欄, the row axis 行 and the machine 電腦', () => {
+    const tw = getTranslator('zh-TW');
+    expect(tw('markdownTable.freezeFirstColumn')).toBe('凍結首欄');
+    expect(tw('markdownTable.unfreezeFirstColumn')).toBe('取消凍結首欄');
+    expect(tw('markdownTable.hideColumn')).toBe('隱藏欄');
+    expect(tw('markdownTable.showHiddenColumns', { count: 2 })).toBe(
+      '顯示 2 個隱藏欄',
+    );
+    expect(tw('markdownTable.column', { index: 3 })).toBe('第 3 欄');
+    expect(tw('markdownTable.resizeColumn', { column: 'A' })).toBe(
+      '調整 A 欄寬',
+    );
+    expect(tw('markdownTable.rows', { count: 10 })).toBe('共10行');
+    expect(tw('workspaceHost.thisComputer')).toBe('這臺電腦');
+    expect(tw('daemon.connection.saved')).toBe('已連線的電腦');
+  });
+
+  it('reports only the table truncation that happened', () => {
+    const tw = getTranslator('zh-TW');
+    const shape = {
+      visibleRows: 5,
+      totalRows: 10,
+      visibleColumns: 3,
+      totalColumns: 3,
+    };
+    expect(tw('echartsChart.tableNotice', { ...shape, omittedRows: 5 })).toBe(
+      '顯示 5/10 行',
+    );
+    expect(
+      tw('echartsChart.tableNotice', { ...shape, omittedColumns: 2 }),
+    ).toBe('顯示 3/3 欄');
+    expect(
+      tw('echartsChart.tableNotice', {
+        ...shape,
+        omittedRows: 5,
+        omittedColumns: 2,
+      }),
+    ).toBe('顯示 5/10 行，3/3 欄');
   });
 });
