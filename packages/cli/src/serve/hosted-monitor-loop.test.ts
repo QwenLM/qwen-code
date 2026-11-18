@@ -288,6 +288,17 @@ function committed(
 }
 
 describe('HostedMonitorLoop', () => {
+  it('reports liveness for suspension eligibility', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    expect(rig.loop.live).toBe(true);
+    await rig.loop.start(params());
+    expect(rig.loop.live).toBe(true);
+    await rig.loop.stop('stop_requested');
+    expect(rig.loop.live).toBe(false);
+    await closeLoop(rig);
+  });
+
   it('drains an abandoned quota stop before removing its transcript', async () => {
     const harness = await createHarness();
     const rig = await openLoop(harness);
