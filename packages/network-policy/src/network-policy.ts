@@ -107,7 +107,8 @@ function addressScope(
   if (family === 6) {
     address = new SocketAddress({ address, family: 'ipv6' }).address;
     if (address.startsWith('::ffff:')) {
-      return addressScope(address.slice('::ffff:'.length), 4);
+      const mapped = address.slice('::ffff:'.length);
+      return isIP(mapped) === 4 ? addressScope(mapped, 4) : 'blocked';
     }
   }
   const type = family === 6 ? 'ipv6' : 'ipv4';

@@ -143,6 +143,10 @@ describe('resolveNetworkTarget address policies', () => {
     'fd00:0ec2:0000:0000:0000:0000:0000:0254',
     '::ffff:169.254.169.254',
     '::ffff:6464:64c8',
+    '::ffff:0:7f00:1',
+    '::ffff:0:a9fe:a9fe',
+    '::ffff:0:808:808',
+    '::ffff:1:808:808',
   ])('never permits the special address %s', async (address) => {
     for (const policy of ['public', 'allow-private'] as const) {
       await expect(
@@ -219,6 +223,26 @@ describe('resolveNetworkTarget address policies', () => {
       resolveNetworkTarget('https://receiver.test/', 'allow-private'),
     ).rejects.toThrow(NetworkPolicyError);
   });
+
+  it.each([
+    '::ffff:0:7f00:1',
+    '::ffff:0:a9fe:a9fe',
+    '0:0:0:0:ffff:0:808:808',
+    '::ffff:1:808:808',
+  ])(
+    'rejects a non-mapped IPv6 DNS answer after a public answer: %s',
+    async (address) => {
+      mockDns([
+        { address: '8.8.8.8', family: 4 },
+        { address, family: 6 },
+      ]);
+      for (const policy of ['public', 'allow-private'] as const) {
+        await expect(
+          resolveNetworkTarget('https://receiver.test/', policy),
+        ).rejects.toThrow(NetworkPolicyError);
+      }
+    },
+  );
 
   it.each([
     ['::ffff:8.8.8.8', true, true],
