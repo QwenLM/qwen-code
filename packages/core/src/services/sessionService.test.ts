@@ -1632,9 +1632,9 @@ describe('SessionService', () => {
       ).resolves.toBe(true);
 
       expect(assertCanMutate).toHaveBeenCalledOnce();
-      // One fence check per cleanup step; the goal and artifact-summary
-      // sidecar removals each added one alongside the worktree/pr/title/
-      // ledger steps.
+      // One fence check per cleanup step; this PR's goal sidecar removal adds
+      // one alongside the pre-existing cleanup steps (the artifact-summary
+      // fence among them came from main), taking the total from 9 to 10.
       expect(assertCleanupOwned).toHaveBeenCalledTimes(10);
       expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA, {
         assertCanCommit: assertCleanupOwned,

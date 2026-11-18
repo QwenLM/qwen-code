@@ -118,7 +118,11 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_145_100;
 // contributes only its EN/ZH `sidebar.sessionGoal` label strings (~151 bytes)
 // to this bundle. This PR's deliberate budget raise was folded into main's
 // larger `/send` ceilings below when merging, so the CURRENT caps apply: the
-// warning sits 5,056 above that measurement and the ceiling 6,056 above it.
+// warning sits 7,056 above that measurement and the ceiling 8,056 above it.
+// Those two figures price THIS feature against the caps, not the remaining
+// headroom: after merging main the same tree measures 2,145,649 locally,
+// already over the warning and 451 below the ceiling. Size new copy against
+// that 451, and re-measure in CI before trusting it.
 // The `/send` command, its composer chip and session tab copy (ten keys
 // across two locales) add 1,283: 2,137,893 against 2,139,176 locally on main
 // 039ed577fb without and with the change. Recording the exchange in the
