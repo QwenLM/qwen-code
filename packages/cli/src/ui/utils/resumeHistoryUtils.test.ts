@@ -2605,12 +2605,17 @@ describe('computeResumedUserTurnCount', () => {
   });
 
   it('stays below the mint seed when background mints claimed higher ids (S1)', () => {
-    // Three user turns but a background mint claimed id 9: the mint seed is
-    // 10 while the visible-statistic seed must stay at the user-turn count.
-    const records = [userRecord(), userRecord(), userRecord()];
+    // Three user turns plus a background notification that claimed id 9: the
+    // mint seed is 10 (highest claim + 1) while the visible-statistic seed
+    // stays at the user-turn count (3), since the notification is not a user
+    // turn. The fixture actually constructs the higher claim the name describes.
+    const records = [
+      { ...userRecord(), promptId: 's########0' },
+      { ...userRecord(), promptId: 's########1' },
+      { ...userRecord(), promptId: 's########2' },
+      { ...userRecord('notification'), promptId: 's########9' },
+    ];
     expect(computeResumedUserTurnCount(records)).toBe(3);
-    expect(computeResumedPromptCountSeed(records, 's')).toBeGreaterThanOrEqual(
-      3,
-    );
+    expect(computeResumedPromptCountSeed(records, 's')).toBe(10);
   });
 });
