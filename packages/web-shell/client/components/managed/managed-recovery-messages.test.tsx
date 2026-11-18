@@ -25,4 +25,21 @@ describe('managed recovery copy', () => {
       expect(`${key}: ${t(key)}`).not.toMatch(SIMPLIFIED_ONLY_GLYPHS);
     }
   });
+
+  it('translates the ended explanation and falls back in Traditional Chinese', () => {
+    const { result } = renderHook(() => useManagedRecoveryText(), {
+      wrapper: ({ children }: PropsWithChildren) => (
+        <I18nProvider language="zh-TW">{children}</I18nProvider>
+      ),
+    });
+    const t = result.current;
+    expect(t('managed.recovery.explanation.ended')).toBe(
+      '原會話已關閉。可以檢視保留的記錄，或在新會話繼續。',
+    );
+    expect(
+      t(
+        'managed.recovery.explanation.unpublished' as keyof typeof MANAGED_RECOVERY_MESSAGES_EN,
+      ),
+    ).toBe('原會話需要運維處理');
+  });
 });

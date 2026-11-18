@@ -41,6 +41,10 @@ const appBridgeMocks = vi.hoisted(() => ({
         sendNotification?: ReturnType<typeof vi.fn>;
       },
     ) => Promise<unknown>;
+    fallbackRequestHandler?: (
+      request: { method: string; params?: Record<string, unknown> },
+      extra?: { signal: AbortSignal },
+    ) => Promise<unknown>;
   } | null,
   lastCapabilities: undefined as unknown,
   lastOptions: undefined as unknown,
@@ -1518,6 +1522,132 @@ describe('built-in Generated UI admission', () => {
       'updateModelContext',
     );
     expect(appBridgeMocks.last?.onupdatemodelcontext).toBeUndefined();
+  });
+
+  describe('saved card state', () => {
+    const CARD = 'gc_aaaaaaaaaaaaaaaaaaaaaa';
+    const card = {
+      ...display,
+      toolResult: {
+        content: [{ type: 'text', text: 'Checklist' }],
+        _meta: { 'qwen/generated-ui': { cardId: CARD } },
+      },
+    };
+    function host(
+      shown: McpAppDisplay,
+      viewState: {
+        get: ReturnType<typeof vi.fn>;
+        set: ReturnType<typeof vi.fn>;
+      },
+      toolSession = 'owner',
+    ) {
+      const { container, rerender } = renderApp(shown);
+      rerender(
+        <McpAppGeneratedUiContext.Provider
+          value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+        >
+          <McpAppSessionContext.Provider value="owner">
+            <McpAppToolsContext.Provider
+              value={{ sessionId: toolSession, callTool: vi.fn(), viewState }}
+            >
+              <McpApp display={shown} />
+            </McpAppToolsContext.Provider>
+          </McpAppSessionContext.Provider>
+        </McpAppGeneratedUiContext.Provider>,
+      );
+      return container;
+    }
+    const store = () => ({
+      get: vi.fn().mockResolvedValue({ cardId: CARD, revision: 3, value: [1] }),
+      set: vi
+        .fn()
+        .mockResolvedValue({ outcome: 'saved', cardId: CARD, revision: 4 }),
+    });
+
+    it('answers for the card it mounted and shows the outcome itself', async () => {
+      const viewState = store();
+      const container = host(card, viewState);
+      expect(appBridgeMocks.lastCapabilities).toMatchObject({
+        experimental: { 'qwen-code/generated-ui-state': {} },
+      });
+      const request = appBridgeMocks.last!.fallbackRequestHandler!;
+      await act(async () => {
+        await expect(
+          request({ method: 'qwen-code/generated-ui-state/load', params: {} }),
+        ).resolves.toEqual({ value: [1] });
+      });
+      expect(viewState.get).toHaveBeenCalledWith(CARD);
+      await act(async () => {
+        await request({
+          method: 'qwen-code/generated-ui-state/save',
+          params: { value: [1, 2], cardId: 'gc_bbbbbbbbbbbbbbbbbbbbbb' },
+        });
+      });
+      expect(viewState.set).toHaveBeenCalledWith(CARD, {
+        baseRevision: 3,
+        value: [1, 2],
+      });
+      await vi.waitFor(() =>
+        expect(
+          container
+            .querySelector('[data-generated-ui-save]')
+            ?.getAttribute('data-generated-ui-save'),
+        ).toBe('saved'),
+      );
+      await expect(
+        request({ method: 'qwen-code/other', params: {} }),
+      ).rejects.toThrow();
+    });
+
+    it('reports a cancelled load and ignores a late successful read', async () => {
+      const viewState = store();
+      const read = Promise.withResolvers<{
+        cardId: string;
+        revision: number;
+        value: number[];
+      }>();
+      viewState.get.mockReturnValueOnce(read.promise);
+      const container = host(card, viewState);
+      const request = appBridgeMocks.last!.fallbackRequestHandler!;
+      const abort = new AbortController();
+      const loading = request(
+        { method: 'qwen-code/generated-ui-state/load' },
+        { signal: abort.signal },
+      );
+      await vi.waitFor(() => expect(viewState.get).toHaveBeenCalledWith(CARD));
+      await act(async () => abort.abort(new Error('Request timed out')));
+      const unavailable = container.querySelector(
+        '[data-generated-ui-save="unavailable"]',
+      );
+      read.resolve({ cardId: CARD, revision: 3, value: [1] });
+      await expect(loading).rejects.toThrow('Request timed out');
+      expect(unavailable).not.toBeNull();
+      await request({
+        method: 'qwen-code/generated-ui-state/save',
+        params: { value: [2] },
+      });
+      expect(viewState.set).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        'a result without a card id',
+        { ...display, toolResult: { content: [] } },
+        'owner',
+      ],
+      [
+        'another MCP App claiming a card id',
+        { ...card, serverName: 'demo', requiredFeature: undefined },
+        'owner',
+      ],
+      ['a host of another session', card, 'other'],
+    ])('does not offer state for %s', (_name, shown, toolSession) => {
+      host(shown as McpAppDisplay, store(), toolSession);
+      expect(appBridgeMocks.lastCapabilities).not.toHaveProperty(
+        'experimental',
+      );
+      expect(appBridgeMocks.last?.fallbackRequestHandler).toBeUndefined();
+    });
   });
 
   it('retains manually installed legacy Generated UI behavior', () => {

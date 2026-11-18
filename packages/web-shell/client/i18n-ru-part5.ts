@@ -57,6 +57,10 @@ export const RU_PART5: Record<
     `Не показано: ${v?.count ?? 0} ${ruPlural(v?.count, 'рабочая область', 'рабочие области', 'рабочих областей')} (нет доверия или удалённый доступ).`,
   'goals.notYetEvaluated': 'ещё не оценено',
   'goals.openSessionHint': 'Открыть сессию этой цели',
+  'goals.viewAll': 'Все цели',
+  'goals.budget.turns': 'Ходы',
+  'goals.budget.tokens': 'Токены',
+  'goals.budget.time': 'Активное время',
   'goals.error.emptyCondition': 'Введите условие для цели.',
   'goals.error.clearKeyword': (v) =>
     `"${v?.word ?? ''}" снимает цель, а не задаёт её. Опишите условие, к которому нужно работать.`,

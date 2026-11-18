@@ -22,6 +22,7 @@ import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
@@ -79,13 +80,17 @@ class DurableLocalProcessRuntimeProvisionerTest {
                     changedField.equals("boot") ? "22222222-2222-2222-2222-222222222222" : identity.bootId(),
                     "macos", "macos");
             var replaced = new LocalRuntimeStore(directory.toRealPath(), changed);
-            assertFalse(replaced.rebooted(registration(store, request, handle)));
+            assertEquals(changedField.equals("boot"), replaced.rebooted(registration(store, request, handle)));
             try (var second = provisioner(replaced)) {
                 assertEquals(RuntimeObservation.Outcome.UNKNOWN,
                         await(second.reconcile(request, SEED, handle, lease)).getOutcome());
-                assertThrows(RuntimeBrokerException.class, () -> second.verifyOperatorRegistration(binding));
-                assertThrows(RuntimeBrokerException.class,
-                        () -> second.attestOperatorStop(binding, "11111111-1111-1111-1111-111111111111"));
+                if (changedField.equals("host")) {
+                    assertThrows(RuntimeBrokerException.class, () -> second.verifyOperatorRegistration(binding));
+                    assertThrows(RuntimeBrokerException.class,
+                            () -> second.attestOperatorStop(binding, "11111111-1111-1111-1111-111111111111"));
+                } else {
+                    second.verifyOperatorRegistration(binding);
+                }
                 assertBlocked(second.stopDrained(binding));
                 assertTrue(workers.getLast().isAlive());
                 assertEquals(LocalRuntimeStore.State.READY, registration(store, request, handle).state());
@@ -621,10 +626,11 @@ class DurableLocalProcessRuntimeProvisionerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void trustedSameHostRebootAddsStopProofWithoutRelaunch(boolean managed) throws Exception {
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void trustedSameHostRebootAddsStopProofWithoutRelaunch(boolean managed, boolean mac) throws Exception {
         var request = request(managed);
-        var store = store();
+        var host = mac ? new LocalRuntimeStore.HostIdentity(HOST.hostId(), HOST.bootId(), "macos", "macos") : HOST;
+        var store = new LocalRuntimeStore(directory.toRealPath(), host);
         try (var first = provisioner(store)) {
             var handle = await(first.ensureResource(request, SEED, null));
             var lease = launch(first, store, request);
@@ -634,7 +640,11 @@ class DurableLocalProcessRuntimeProvisionerTest {
             assertNotNull(loss.getLossEvidence());
             assertNull(loss.getStopEvidence());
             var reboot = new LocalRuntimeStore.HostIdentity(HOST.hostId(),
-                    "22222222-2222-2222-2222-222222222222", "pid:[2]", "time:[2]");
+                    "22222222-2222-2222-2222-222222222222", mac ? "macos" : "pid:[2]", mac ? "macos" : "time:[2]");
+            var foreignPlatform = new LocalRuntimeStore.HostIdentity(HOST.hostId(), reboot.bootId(),
+                    mac ? "pid:[2]" : "macos", mac ? "time:[2]" : "macos");
+            assertFalse(new LocalRuntimeStore(directory.toRealPath(), foreignPlatform)
+                    .rebooted(registration(store, request, handle)));
             try (var second = new LocalProcessRuntimeProvisioner(List.of("must-not-run"), directory, TRANSPORT,
                     null, new LocalRuntimeStore(directory.toRealPath(), reboot), true)) {
                 var stopped = await(second.reconcile(request, SEED, handle, lease));
@@ -650,10 +660,11 @@ class DurableLocalProcessRuntimeProvisionerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"INTENT", "LAUNCHING", "REGISTERED"})
-    void trustedRebootCanRecoverStartupWithoutInventingALease(String state) throws Exception {
+    @CsvSource({"INTENT,false", "INTENT,true", "LAUNCHING,false", "LAUNCHING,true", "REGISTERED,false", "REGISTERED,true"})
+    void trustedRebootCanRecoverStartupWithoutInventingALease(String state, boolean mac) throws Exception {
         var request = request(true);
-        var store = store();
+        var host = mac ? new LocalRuntimeStore.HostIdentity(HOST.hostId(), HOST.bootId(), "macos", "macos") : HOST;
+        var store = new LocalRuntimeStore(directory.toRealPath(), host);
         try (var first = provisioner(store)) {
             var handle = await(first.ensureResource(request, SEED, null));
             if (state.equals("REGISTERED")) {
@@ -667,7 +678,7 @@ class DurableLocalProcessRuntimeProvisionerTest {
                 return null;
             });
             var reboot = new LocalRuntimeStore.HostIdentity(HOST.hostId(),
-                    "22222222-2222-2222-2222-222222222222", HOST.pidNamespace(), HOST.timeNamespace());
+                    "22222222-2222-2222-2222-222222222222", host.pidNamespace(), host.timeNamespace());
             try (var second = new LocalProcessRuntimeProvisioner(List.of("must-not-run"), directory, TRANSPORT,
                     null, new LocalRuntimeStore(directory.toRealPath(), reboot), true)) {
                 var observed = await(second.reconcile(request, SEED, handle, null));
@@ -703,10 +714,11 @@ class DurableLocalProcessRuntimeProvisionerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"INTENT", "LAUNCHING", "REGISTERED"})
-    void drainedStopAcceptsOnlyTrustedSameHostRebootProof(String state) throws Exception {
+    @CsvSource({"INTENT,false", "INTENT,true", "LAUNCHING,false", "LAUNCHING,true", "REGISTERED,false", "REGISTERED,true"})
+    void drainedStopAcceptsOnlyTrustedSameHostRebootProof(String state, boolean mac) throws Exception {
         var request = closeRequest();
-        var store = store();
+        var host = mac ? new LocalRuntimeStore.HostIdentity(HOST.hostId(), HOST.bootId(), "macos", "macos") : HOST;
+        var store = new LocalRuntimeStore(directory.toRealPath(), host);
         try (var first = provisioner(store)) {
             var handle = await(first.ensureResource(request, SEED, null));
             var lease = state.equals("REGISTERED") ? launch(first, store, request) : null;
@@ -718,15 +730,15 @@ class DurableLocalProcessRuntimeProvisionerTest {
             });
             var binding = closeBinding(request, handle, lease);
             var reboot = new LocalRuntimeStore.HostIdentity(HOST.hostId(),
-                    "22222222-2222-2222-2222-222222222222", "pid:[2]", "time:[2]");
+                    "22222222-2222-2222-2222-222222222222", mac ? "macos" : "pid:[2]", mac ? "macos" : "time:[2]");
             var foreign = new LocalRuntimeStore.HostIdentity("b".repeat(32), reboot.bootId(),
                     reboot.pidNamespace(), reboot.timeNamespace());
             if (state.equals("LAUNCHING")) {
                 assertBlocked(first.stopDrained(binding));
             }
-            for (var host : List.of(foreign, reboot)) {
+            for (var candidate : List.of(foreign, reboot)) {
                 try (var refused = new LocalProcessRuntimeProvisioner(List.of("must-not-run"), directory, TRANSPORT,
-                        null, new LocalRuntimeStore(directory.toRealPath(), host), host == foreign)) {
+                        null, new LocalRuntimeStore(directory.toRealPath(), candidate), candidate == foreign)) {
                     assertBlocked(refused.stopDrained(binding));
                 }
             }

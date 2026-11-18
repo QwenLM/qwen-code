@@ -60,101 +60,26 @@
       "hostname": "qwen_broker",
       "port": 8443
     },
-    {
-      "url": "http://127.1:4182",
-      "verdict": "accepted",
-      "hostname": "127.0.0.1",
-      "port": 4182
-    },
-    {
-      "url": "http://127.0.1:4182",
-      "verdict": "accepted",
-      "hostname": "127.0.0.1",
-      "port": 4182
-    },
-    {
-      "url": "http://127.0.0.1.:4182",
-      "verdict": "accepted",
-      "hostname": "127.0.0.1",
-      "port": 4182
-    },
-    {
-      "url": "http://0177.0.0.1:4182",
-      "verdict": "accepted",
-      "hostname": "127.0.0.1",
-      "port": 4182
-    },
-    {
-      "url": "http://2130706433:4182",
-      "verdict": "accepted",
-      "hostname": "127.0.0.1",
-      "port": 4182
-    },
-    {
-      "url": "http://0x7f000001:4182",
-      "verdict": "accepted",
-      "hostname": "127.0.0.1",
-      "port": 4182
-    },
-    {
-      "url": "http://0x7f.1:4182",
-      "verdict": "accepted",
-      "hostname": "127.0.0.1",
-      "port": 4182
-    },
-    {
-      "url": "http://127.0.0.010:4182",
-      "verdict": "accepted",
-      "hostname": "127.0.0.8",
-      "port": 4182
-    },
+    { "url": "http://127.1:4182", "verdict": "invalid" },
+    { "url": "http://127.0.1:4182", "verdict": "invalid" },
+    { "url": "http://127.0.0.1.:4182", "verdict": "invalid" },
+    { "url": "http://0177.0.0.1:4182", "verdict": "invalid" },
+    { "url": "http://2130706433:4182", "verdict": "invalid" },
+    { "url": "http://0x7f000001:4182", "verdict": "invalid" },
+    { "url": "http://0x7f.1:4182", "verdict": "invalid" },
+    { "url": "http://127.0.0.010:4182", "verdict": "invalid" },
     { "url": "http://127.0.0.08:4182", "verdict": "invalid" },
     { "url": "http://127.0.0.256:4182", "verdict": "invalid" },
-    {
-      "url": "http://127.256:4182",
-      "verdict": "accepted",
-      "hostname": "127.0.1.0",
-      "port": 4182
-    },
+    { "url": "http://127.256:4182", "verdict": "invalid" },
     { "url": "http://1.2.3.4.5:4182", "verdict": "invalid" },
     { "url": "http://127..1:4182", "verdict": "invalid" },
     { "url": "http://a.0x1:4182", "verdict": "invalid" },
-    {
-      "url": "http:/127.0.0.1:4182",
-      "verdict": "accepted",
-      "hostname": "127.0.0.1",
-      "port": 4182
-    },
-    {
-      "url": "http:127.0.0.1:4182",
-      "verdict": "accepted",
-      "hostname": "127.0.0.1",
-      "port": 4182
-    },
-    {
-      "url": "http:///127.0.0.1:4182",
-      "verdict": "accepted",
-      "hostname": "127.0.0.1",
-      "port": 4182
-    },
-    {
-      "url": "http://127.0.0.1:4182/./",
-      "verdict": "accepted",
-      "hostname": "127.0.0.1",
-      "port": 4182
-    },
-    {
-      "url": "http://127.0.0.1:4182/proxy/..",
-      "verdict": "accepted",
-      "hostname": "127.0.0.1",
-      "port": 4182
-    },
-    {
-      "url": "http://127.0.0.1:4182/..",
-      "verdict": "accepted",
-      "hostname": "127.0.0.1",
-      "port": 4182
-    },
+    { "url": "http:/127.0.0.1:4182", "verdict": "invalid" },
+    { "url": "http:127.0.0.1:4182", "verdict": "invalid" },
+    { "url": "http:///127.0.0.1:4182", "verdict": "invalid" },
+    { "url": "http://127.0.0.1:4182/./", "verdict": "not-origin" },
+    { "url": "http://127.0.0.1:4182/proxy/..", "verdict": "not-origin" },
+    { "url": "http://127.0.0.1:4182/..", "verdict": "not-origin" },
     { "url": "http://127.0.0.1:4182//", "verdict": "not-origin" },
     { "url": "http://127.0.0.1:4182/broker", "verdict": "not-origin" },
     { "url": "http://127.0.0.1:4182/proxy/../broker", "verdict": "not-origin" },
@@ -176,6 +101,7 @@
       "hostname": "[::1]",
       "port": 80
     },
+    { "url": "http://[::1]:4182/broker", "verdict": "not-origin" },
     { "url": "http://::1:4182", "verdict": "invalid" },
     { "url": "http://[::1:4182", "verdict": "invalid" },
     {
@@ -205,17 +131,16 @@
     },
     { "url": "http://127.0.0.1:65536", "verdict": "invalid" },
     { "url": "http://127.0.0.1:99999", "verdict": "invalid" },
-    {
-      "url": "http://127.0.0.1:",
-      "verdict": "accepted",
-      "hostname": "127.0.0.1",
-      "port": 80
-    },
+    { "url": "http://127.0.0.1:", "verdict": "invalid" },
+    { "url": "http://127.0.0.1:0", "verdict": "invalid" },
+    { "url": "http://127.0.0.1:99999999999999999999", "verdict": "invalid" },
     { "url": "http://127.0.0.1:port", "verdict": "invalid" },
     { "url": "https://qwen_broker:port", "verdict": "invalid" },
     { "url": "http://192.0.2.7:4182", "verdict": "plain-outside-loopback" },
     { "url": "http://qwen_broker:4182", "verdict": "plain-outside-loopback" },
-    { "url": "http://localhost.:4182", "verdict": "plain-outside-loopback" },
+    { "url": "http://localhost.:4182", "verdict": "invalid" },
+    { "url": "https://broker.example.:8443", "verdict": "invalid" },
+    { "url": "https://localhost.:8443", "verdict": "invalid" },
     { "url": "http://128.0.0.1:4182", "verdict": "plain-outside-loopback" },
     { "url": "127.0.0.1:4182", "verdict": "invalid" },
     { "url": "localhost:4182", "verdict": "not-origin" },

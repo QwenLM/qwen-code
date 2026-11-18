@@ -47,6 +47,17 @@ export interface SlashCommandCompletionResult {
 }
 
 type Translate = (key: string) => string;
+
+/**
+ * Completes one command's arguments from data the static trees cannot hold
+ * (workspaces, sessions). Gets the line up to the cursor; returns `undefined`
+ * when the line is not its command, `null` for no menu. `from`/`to` are
+ * offsets within the line.
+ */
+export type SlashArgumentCompleter = (
+  lineTextBeforeCursor: string,
+) => SlashCommandCompletionResult | null | undefined;
+
 const COMMAND_NAME_PATTERN = String.raw`([^\s/]+)`;
 
 interface SubcommandNode {
@@ -724,6 +735,7 @@ export function getSlashCommandCompletionResult(
   translate: Translate = (key) => key,
   categoryOrder: CommandDisplayCategoryOrder = DEFAULT_COMMAND_CATEGORY_ORDER,
   includeEmpty = false,
+  argumentCompleter?: SlashArgumentCompleter,
 ): SlashCommandCompletionResult | null {
   const {
     lineStart,
@@ -732,6 +744,17 @@ export function getSlashCommandCompletionResult(
     textBefore,
     cursor: safeCursor,
   } = getLineBounds(text, cursor);
+
+  const custom = argumentCompleter?.(textBefore);
+  if (custom !== undefined) {
+    return custom
+      ? {
+          ...custom,
+          from: lineStart + custom.from,
+          to: lineStart + custom.to,
+        }
+      : null;
+  }
 
   const subMatch = textBefore.match(
     new RegExp(`^/${COMMAND_NAME_PATTERN}\\s+(.*)$`),
