@@ -22,6 +22,17 @@ import {
  */
 export type IntentTransport = () => Promise<Admission>;
 
+/**
+ * One dispatched attempt and the identity that binds its settlement evidence.
+ * The adapter must record the operation id next to the backend identity of the
+ * request it just made, so an incoming event can name the attempt it belongs
+ * to. Binding the id after the event arrives cannot authenticate it.
+ */
+export interface DaemonIntentDispatch {
+  readonly operationId: string;
+  readonly result: IntentResult;
+}
+
 interface TrackedIntent {
   readonly operation: ChatOperation;
   readonly admission: Admission;
@@ -41,29 +52,23 @@ export interface DaemonChatIntents {
     kind: IntentKind,
     target: IntentTarget,
     transport: IntentTransport,
-  ): Promise<IntentResult>;
+  ): Promise<DaemonIntentDispatch>;
   /**
-   * Apply authoritative outcome evidence to the matching in-flight intent.
+   * Apply authoritative outcome evidence to the attempt it belongs to. The
+   * witness is bound to one dispatched operation, so a late witness for a
+   * finished attempt cannot establish a later attempt that shares the same
+   * visible target. Unknown or already-terminal operations are a no-op.
    * For approvals the decision establishes only while it still applies to the
-   * current request; a superseded request never establishes.
+   * current request; without a request identity currency is unverifiable and
+   * the decision never establishes.
    */
   settle(
-    kind: IntentKind,
-    target: IntentTarget,
+    operationId: string,
     witness: OutcomeWitness,
   ): IntentResult | undefined;
   /** Track which approval request is still current (supersede detection). */
   setCurrentApprovalRequest(requestId: string | undefined): void;
   readonly currentApprovalRequestId: string | undefined;
-}
-
-function sameTarget(a: IntentTarget, b: IntentTarget): boolean {
-  return (
-    a.sessionId === b.sessionId &&
-    (a.turnId ?? null) === (b.turnId ?? null) &&
-    (a.attemptId ?? null) === (b.attemptId ?? null) &&
-    (a.requestId ?? null) === (b.requestId ?? null)
-  );
 }
 
 function stateFor(
@@ -116,15 +121,20 @@ export function createDaemonChatIntents(): DaemonChatIntents {
       } catch {
         admission = 'unknown';
       }
+      const operationId = `daemon-intent-${++nextId}`;
       if (admission === 'rejected') {
-        // Rejected requests carry no outcome and are not tracked.
-        return resolveIntent('rejected', 'none', target);
+        // Rejected requests carry no outcome and are not tracked, so settling
+        // this id is a no-op.
+        return {
+          operationId,
+          result: resolveIntent('rejected', 'none', target),
+        };
       }
       // Transport acceptance is admission only; no outcome evidence exists at
       // dispatch, so the witness is 'none' and the outcome stays unsettled.
       const result = resolveIntent(admission, 'none', target);
       const operation: ChatOperation = {
-        id: `daemon-intent-${++nextId}`,
+        id: operationId,
         kind,
         state: stateFor(kind, result.outcome),
         target,
@@ -132,27 +142,26 @@ export function createDaemonChatIntents(): DaemonChatIntents {
       tracked = [...tracked, { operation, admission }];
       const keep = new Set(operations().map((op) => op.id));
       tracked = tracked.filter((intent) => keep.has(intent.operation.id));
-      return result;
+      return { operationId, result };
     },
-    settle(kind, target, witness) {
+    settle(operationId, witness) {
       const intent = tracked.find(
-        (candidate) =>
-          candidate.operation.kind === kind &&
-          sameTarget(candidate.operation.target, target) &&
-          candidate.operation.state !== 'established' &&
-          candidate.operation.state !== 'failed',
+        (candidate) => candidate.operation.id === operationId,
       );
       if (!intent) return undefined;
+      const { kind, target, state } = intent.operation;
+      if (state === 'established' || state === 'failed') return undefined;
       // A superseded approval never establishes: the decision must apply to
       // the still-current request, not merely to the request it was sent for.
+      // Without a request identity that currency cannot be verified.
       const effectiveWitness =
         kind === 'approval' &&
-        target.requestId !== undefined &&
-        target.requestId !== currentApprovalRequestId
+        (target.requestId === undefined ||
+          target.requestId !== currentApprovalRequestId)
           ? 'none'
           : witness;
       const result = resolveIntent(intent.admission, effectiveWitness, target);
-      replace(intent.operation.id, {
+      replace(operationId, {
         ...intent.operation,
         state: stateFor(kind, result.outcome),
       });
