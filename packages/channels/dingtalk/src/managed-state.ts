@@ -195,19 +195,24 @@ export class ManagedDingtalkStateStore {
 
   /**
    * The pre-registration-identity ledger this entry used before the upgrade.
-   * When the identity-keyed ledger is absent and a sibling `managed-state.json`
-   * exists, the upgrade strands it: its staged-but-unadmitted claims were acked
-   * to the provider (which does not redeliver an acked frame) and the control
-   * plane never saw them, so they are lost. Report the path and its pending /
-   * outbound counts so the drop is explicit, never silent. The legacy ledger is
-   * NOT adopted — adopting it would replay one registration's pending into
-   * another, the cross-ownership hazard the identity keying prevents.
+   * A sibling `managed-state.json` is stranded by the upgrade: its
+   * staged-but-unadmitted claims were acked to the provider (which does not
+   * redeliver an acked frame) and the control plane never saw them, so they are
+   * lost. Report the path and its pending / outbound counts so the drop is
+   * explicit, never silent. Detection is NOT gated on the identity-keyed ledger
+   * being absent: a rollback to the pre-upgrade build can stage fresh claims
+   * into `managed-state.json` after a keyed ledger already exists, and those
+   * must still be reported (R2-6). The caller archives the file once reported
+   * (`archiveStrandedLegacy`) so a static legacy is not re-announced on every
+   * later start. The legacy ledger is NOT adopted — adopting it would replay
+   * one registration's pending into another, the cross-ownership hazard the
+   * identity keying prevents.
    */
   strandedLegacyLedger():
     | { path: string; pending: number; outbound: number }
     | undefined {
     const legacyPath = join(this.directory, 'managed-state.json');
-    if (existsSync(this.file) || !existsSync(legacyPath)) return undefined;
+    if (!existsSync(legacyPath)) return undefined;
     let pending = 0;
     let outbound = 0;
     try {
@@ -221,6 +226,29 @@ export class ManagedDingtalkStateStore {
       // A corrupt legacy ledger still strands; report it with zero counts.
     }
     return { path: legacyPath, pending, outbound };
+  }
+
+  /**
+   * Archive a reported legacy ledger so it is not re-announced on every later
+   * start (and a second registration of the entry is not told the first
+   * registration's claims were its own). Renaming — not deleting — keeps the
+   * stranded claims inspectable, and a rollback that stages a fresh
+   * `managed-state.json` is detected again on the next upgrade. This never
+   * adopts the claims into the keyed ledger. Returns the archived path, or
+   * undefined when there is nothing to archive or the rename fails (the file
+   * then stays and is reported again next start — degraded, never a startup
+   * failure).
+   */
+  archiveStrandedLegacy(): string | undefined {
+    const legacyPath = join(this.directory, 'managed-state.json');
+    if (!existsSync(legacyPath)) return undefined;
+    const archived = `${legacyPath}.stranded-${randomUUID()}`;
+    try {
+      renameSync(legacyPath, archived);
+      return archived;
+    } catch {
+      return undefined;
+    }
   }
 
   save(state: ManagedDingtalkState): void {

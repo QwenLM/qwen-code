@@ -342,12 +342,20 @@ describe('ManagedDingtalkStateStore', () => {
   it('reports a stranded legacy ledger on upgrade, without adopting it', () => {
     const s = store();
     mkdirSync(s.directory, { recursive: true });
-    // Seed the pre-upgrade single ledger with one pending claim and one
-    // outbound segment; the identity-keyed ledger does not exist yet.
+    // Seed the pre-upgrade single ledger with ASYMMETRIC counts (2 pending,
+    // 3 outbound) so swapping the two count assignments — or the two
+    // interpolations in the adapter's notice — reds this suite (R2-2).
     const legacy = {
       ...baseState(),
-      pending: [{ eventId: 'dingtalk:m1', event: inbound('m1') }],
-      outbound: [{ deliveryId: 'd-1', ordinal: 0, messageId: 'm-1' }],
+      pending: [
+        { eventId: 'dingtalk:m1', event: inbound('m1') },
+        { eventId: 'dingtalk:m2', event: inbound('m2') },
+      ],
+      outbound: [
+        { deliveryId: 'd-1', ordinal: 0, messageId: 'm-1' },
+        { deliveryId: 'd-2', ordinal: 1, messageId: 'm-2' },
+        { deliveryId: 'd-3', ordinal: 2, messageId: 'm-3' },
+      ],
     };
     writeFileSync(
       join(s.directory, 'managed-state.json'),
@@ -356,13 +364,15 @@ describe('ManagedDingtalkStateStore', () => {
     const stranded = s.strandedLegacyLedger();
     expect(stranded).toBeDefined();
     expect(stranded!.path).toBe(join(s.directory, 'managed-state.json'));
-    expect(stranded!.pending).toBe(1);
-    expect(stranded!.outbound).toBe(1);
+    expect(stranded!.pending).toBe(2);
+    expect(stranded!.outbound).toBe(3);
     // The legacy ledger is reported, not adopted: load() still returns undefined
     // (the identity-keyed file is absent), so no pending replays across identities.
     expect(s.load()).toBeUndefined();
-    // Once the identity-keyed ledger exists, the legacy file is no longer reported.
-    s.save(baseState());
+    // Once archived (reported), the legacy file is no longer detected, so a
+    // static legacy is not re-announced on every later start (R2-6).
+    const archived = s.archiveStrandedLegacy();
+    expect(archived).toBeDefined();
     expect(s.strandedLegacyLedger()).toBeUndefined();
   });
 
@@ -370,6 +380,45 @@ describe('ManagedDingtalkStateStore', () => {
     const s = store();
     expect(s.strandedLegacyLedger()).toBeUndefined();
   });
+
+  it('still reports a legacy ledger staged after a rollback (keyed ledger exists)', () => {
+    const s = store();
+    mkdirSync(s.directory, { recursive: true });
+    // A keyed ledger already exists (the entry upgraded once)...
+    s.save(baseState());
+    // ...then a rollback to the pre-upgrade build stages fresh legacy claims.
+    writeFileSync(
+      join(s.directory, 'managed-state.json'),
+      JSON.stringify({
+        ...baseState(),
+        pending: [{ eventId: 'dingtalk:rb', event: inbound('rb') }],
+        outbound: [],
+      }),
+    );
+    // Detection must not be gated on the keyed ledger being absent (R2-6):
+    // these acked, unadmitted claims would otherwise vanish with no trace.
+    const stranded = s.strandedLegacyLedger();
+    expect(stranded).toBeDefined();
+    expect(stranded!.pending).toBe(1);
+    expect(stranded!.outbound).toBe(0);
+    // Still not adopted: the keyed ledger is untouched by detection.
+    expect(s.load()).toEqual(baseState());
+  });
+
+  it.each(['{not json', 'null', '[]'])(
+    'a corrupt legacy ledger (%s) reports zero counts instead of throwing',
+    (raw) => {
+      const s = store();
+      mkdirSync(s.directory, { recursive: true });
+      writeFileSync(join(s.directory, 'managed-state.json'), raw);
+      // The catch keeps a damaged legacy from turning the upgrade into a hard
+      // startup failure (R2-4): report zero counts, never throw.
+      const stranded = s.strandedLegacyLedger();
+      expect(stranded).toBeDefined();
+      expect(stranded!.pending).toBe(0);
+      expect(stranded!.outbound).toBe(0);
+    },
+  );
 
   it('keeps the state file 0600 inside a 0700 directory (R4)', () => {
     const s = store();

@@ -39,7 +39,7 @@
 
 账本文件从 `managed-state.json` 改名为 `managed-state-<ledgerKey>.json`，**不接管**：升级后第一次重启在全新的身份键控账本上启动。一条已暂存（已持久化并向 DingTalk 流 ack `SUCCESS`，而流不重投已 ack 的帧）但尚未准入的认领被滞留——控制面从未见过它（只有 `submitInbound` 使认领可见），故只有本客户端自己的账本能重驱动它，而新账本不含它。同一次重置还丢掉未回执的出站段、去重窗口与 webhook 回复目标表。这是 WeCom 设计记录的刻意滞留取舍：接管旧账本会把一个注册的 pending 重放进另一注册，正是键控要防的跨所有权 hazard。
 
-为使丢弃显式而非静默，`connect()` 在身份键控文件缺失且同目录存在 `managed-state.json` 时探测旧账本，打一行日志指明该路径及其 pending/outbound 条数（`strandedLegacyLedger()`），但不接管它。`load()` 亦点名 `this.file` 并以 `{ cause }` 保留 fs 错误，拆分 I/O 失败与 JSON 损坏，使面对多个 `<hash>.json` 账本的操作者能判断哪个注册坏了。
+为使丢弃显式而非静默，`connect()` 探测同目录的 `managed-state.json`（`strandedLegacyLedger()`），打一行日志指明该路径及其 pending/outbound 条数，但不接管它。探测刻意**不**以身份键控账本缺失为门：回滚到升级前版本可能在键控账本已存在后又向 `managed-state.json` 暂存新认领，这些已 ack 未准入的认领仍须被报告，而非无声消失。一经报告，旧文件即被归档——重命名为 `managed-state.json.stranded-<id>`，绝不删除，使被滞留的认领仍可查——经 `archiveStrandedLegacy()`，如此静态旧账本不会在之后每次启动重复提示，同一条目的第二注册也不会被告知第一注册的认领是它自己的；回滚若再暂存新的 `managed-state.json`，下次升级会再次探测到。后果子句（「其已暂存未准入的认领……丢失」）仅在 `pending + outbound > 0` 时输出，故静默升级（0/0）仍得到点名路径与条数的诊断行，但没有虚假的数据丢失告警。损坏的旧账本返回零计数而不抛出，故受损旧账本绝不会把升级变成硬性启动失败。`load()` 亦点名 `this.file` 并以 `{ cause }` 保留 fs 错误，拆分 I/O 失败与 JSON 损坏，使面对多个 `<hash>.json` 账本的操作者能判断哪个注册坏了。
 
 webhook 回复目标缓存（`state.webhooks`）位于身份键控账本内，故现按注册作用域：身份变更后，先前已知会话的无 webhook 帧没有缓存的回复目标而被丢弃（ack + 去重），旧共享账本本仍会准入它。这是分区的代价，由测试钉住；若跨身份变更的无 webhook 帧常见，把缓存提升到条目作用域是可能的后续。
 

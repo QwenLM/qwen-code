@@ -237,18 +237,25 @@ export class ManagedDingtalkAdapter {
     }
     try {
       const loaded = this.store.load();
-      if (!loaded) {
-        // The upgrade to per-registration ledgers strands the legacy
-        // managed-state.json: make the drop explicit (its staged-but-unadmitted
-        // claims were acked to the provider and are lost), never silent. The
-        // legacy ledger is not adopted — that would replay one registration's
-        // pending into another.
-        const legacy = this.store.strandedLegacyLedger();
-        if (legacy) {
-          this.log(
-            `Managed DingTalk upgraded to per-registration ledgers; the legacy ledger ${legacy.path} (${legacy.pending} pending, ${legacy.outbound} outbound) is stranded and not replayed; its staged-but-unadmitted claims were acked to the provider and are lost.`,
-          );
-        }
+      // The upgrade to per-registration ledgers strands the legacy
+      // managed-state.json: make the drop explicit, never silent. Detect it
+      // even when a keyed ledger already exists — a rollback to the
+      // pre-upgrade build can stage fresh legacy claims after the upgrade
+      // (R2-6). Archive it once reported so a static legacy is not re-announced
+      // on every later start. The legacy ledger is not adopted — that would
+      // replay one registration's pending into another.
+      const legacy = this.store.strandedLegacyLedger();
+      if (legacy) {
+        const reportedPath = this.store.archiveStrandedLegacy() ?? legacy.path;
+        // Only claim a loss when there was something to lose: a quiescent
+        // legacy ledger (0 pending, 0 outbound) strands nothing (R2-1).
+        const loss =
+          legacy.pending > 0 || legacy.outbound > 0
+            ? ' Its staged-but-unadmitted claims were acked to the provider and are lost.'
+            : '';
+        this.log(
+          `Managed DingTalk upgraded to per-registration ledgers; the legacy ledger ${reportedPath} (${legacy.pending} pending, ${legacy.outbound} outbound) is stranded and not replayed.${loss}`,
+        );
       }
       this.state = loaded ?? {
         version: 1,

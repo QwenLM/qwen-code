@@ -2636,13 +2636,23 @@ describe('managed DingTalk adapter registration-identity isolation', () => {
       JSON.stringify({
         version: 1,
         generation: 1,
+        // Asymmetric counts (2 pending, 3 outbound) so swapping the two count
+        // assignments or the two interpolations reds this test (R2-2).
         pending: [
           {
             eventId: 'dingtalk:legacy',
             event: { platformEventId: 'dingtalk:legacy' },
           },
+          {
+            eventId: 'dingtalk:legacy2',
+            event: { platformEventId: 'dingtalk:legacy2' },
+          },
         ],
-        outbound: [{ deliveryId: 'd-1', ordinal: 0, messageId: 'm-1' }],
+        outbound: [
+          { deliveryId: 'd-1', ordinal: 0, messageId: 'm-1' },
+          { deliveryId: 'd-2', ordinal: 1, messageId: 'm-2' },
+          { deliveryId: 'd-3', ordinal: 2, messageId: 'm-3' },
+        ],
         recent: [],
         webhooks: {},
       }),
@@ -2650,12 +2660,89 @@ describe('managed DingTalk adapter registration-identity isolation', () => {
     await adapter.connect();
     const stranded = lines.filter((l) => l.includes('stranded'));
     expect(stranded).toHaveLength(1);
+    // The notice names the archived path (the legacy file is renamed once
+    // reported), which still sits under the entry's managed-state.json stem.
     expect(stranded[0]).toContain(join(dir, 'managed-state.json'));
-    expect(stranded[0]).toContain('1 pending');
-    expect(stranded[0]).toContain('1 outbound');
-    // Not adopted: the legacy pending never replays into the new ledger.
-    expect(plane.submit).toHaveLength(0);
+    expect(stranded[0]).toContain('2 pending');
+    expect(stranded[0]).toContain('3 outbound');
+    expect(stranded[0]).toContain('are lost');
+    // Not adopted: the legacy pending never enters this registration's state.
+    // Assert the state itself, not plane.submit — connect() never drives
+    // resubmitPending(), so an empty submit list could not discriminate an
+    // adoption mutant (R2-3).
+    expect(pendingOf(adapter)).toEqual([]);
     await adapter.disconnect();
+  });
+
+  it('a quiescent legacy ledger (0/0) is reported without a loss alarm', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [],
+        outbound: [],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) => l.includes('stranded'));
+    // The design doc requires one line naming the path and counts even for a
+    // quiescent upgrade, but nothing was lost, so no loss alarm (R2-1).
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 pending');
+    expect(stranded[0]).toContain('0 outbound');
+    expect(stranded[0]).not.toContain('are lost');
+    await adapter.disconnect();
+  });
+
+  it('a legacy ledger staged after a rollback is still reported (keyed ledger exists)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    // The entry already upgraded once: a keyed ledger exists.
+    await adapter.connect();
+    await adapter.disconnect();
+    expect(lines.filter((l) => l.includes('stranded'))).toHaveLength(0);
+    // A rollback stages fresh legacy claims; the next upgrade must report them
+    // even though the keyed ledger exists (R2-6).
+    lines.length = 0;
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [
+          {
+            eventId: 'dingtalk:rollback',
+            event: { platformEventId: 'dingtalk:rollback' },
+          },
+        ],
+        outbound: [],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    const adapter2 = adapterFor(cwd, plane, fake);
+    await adapter2.connect();
+    const stranded = lines.filter((l) => l.includes('stranded'));
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('1 pending');
+    expect(stranded[0]).toContain('are lost');
+    expect(pendingOf(adapter2)).toEqual([]);
+    await adapter2.disconnect();
   });
 
   it('a webhook-less frame after an identity change is dropped (cache is identity-scoped)', async () => {
