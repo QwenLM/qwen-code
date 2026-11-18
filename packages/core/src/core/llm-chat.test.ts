@@ -29,7 +29,14 @@ import type {
   Tool,
 } from '@google/genai';
 import { ApiError } from '@google/genai';
-import { AuthType, type ContentGenerator } from './contentGenerator.js';
+import {
+  AuthType,
+  type ContentGenerator,
+  type ContentGeneratorConfig,
+} from './contentGenerator.js';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { DefaultOpenAICompatibleProvider } from './openaiContentGenerator/provider/default.js';
 import { FinishReason } from './genai-compat.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 import { SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE } from '../qwen/subscription-errors.js';
@@ -9118,6 +9125,149 @@ describe('LlmChat', async () => {
       expect(hasChunkText(events2, 'fallback-a partial')).toBe(true);
       expect(fallbackA).toHaveBeenCalledTimes(2);
       expect(fallbackB).not.toHaveBeenCalled();
+    });
+
+    it('real HTTP: the ledger skips an exhausted fallback on the next same-turn request', async () => {
+      // Real-scenario witness: a real local OpenAI-compatible server answers
+      // 429 capacity for the primary and fallback-a and streams a completion
+      // for fallback-b. The real OpenAI SDK + fetch path drives the real
+      // fallback chain and the real ModelAvailabilityService over real sockets.
+      const { preloadRuntimeFetchModule } = await import(
+        '../utils/runtimeFetchOptions.js'
+      );
+      await preloadRuntimeFetchModule();
+      const requests: string[] = [];
+      const server: Server = createServer((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', () => {
+          const model = (
+            JSON.parse(Buffer.concat(chunks).toString()) as { model: string }
+          ).model;
+          requests.push(model);
+          if (model === 'fallback-b') {
+            res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+            res.write(
+              `data: ${JSON.stringify({
+                id: 'chunk-1',
+                object: 'chat.completion.chunk',
+                model,
+                choices: [
+                  {
+                    index: 0,
+                    delta: { role: 'assistant', content: 'real-ok' },
+                    finish_reason: null,
+                  },
+                ],
+              })}\n\n`,
+            );
+            res.write(
+              `data: ${JSON.stringify({
+                id: 'chunk-1',
+                object: 'chat.completion.chunk',
+                model,
+                choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+              })}\n\n`,
+            );
+            res.write('data: [DONE]\n\n');
+            res.end();
+            return;
+          }
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              error: { message: 'Throttling: TPM(1/1)', code: '429' },
+            }),
+          );
+        });
+      });
+      await new Promise<void>((resolve) => {
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      const { port } = server.address() as AddressInfo;
+      const baseUrl = `http://127.0.0.1:${port}/v1`;
+      const generatorCliConfig = {
+        getCliVersion: () => '0.0.0-test',
+        getProxy: () => undefined,
+        getSessionId: () => 'test-session-id',
+      } as unknown as Config;
+      const realGenerator = (model: string): OpenAIContentGenerator => {
+        const contentGeneratorConfig: ContentGeneratorConfig = {
+          model,
+          apiKey: 'test-key',
+          baseUrl,
+          authType: AuthType.USE_OPENAI,
+          maxRetries: 0,
+        };
+        return new OpenAIContentGenerator(
+          contentGeneratorConfig,
+          generatorCliConfig,
+          new DefaultOpenAICompatibleProvider(
+            contentGeneratorConfig,
+            generatorCliConfig,
+          ),
+        );
+      };
+      try {
+        const service = new ModelAvailabilityService();
+        vi.mocked(
+          mockConfig.isModelAvailabilityTrackingEnabled,
+        ).mockReturnValue(true);
+        vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+          service,
+        );
+        vi.mocked(mockConfig.getContentGenerator).mockReturnValue(
+          realGenerator('test-model'),
+        );
+        mockGeneratorConfig({
+          model: 'test-model',
+          authType: AuthType.USE_OPENAI,
+          apiKey: 'test-key',
+          baseUrl,
+          maxRetries: 0,
+        });
+        vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+          'fallback-a',
+          'fallback-b',
+        ]);
+        mockResolver(
+          vi.fn().mockImplementation(async (modelId: string) => ({
+            contentGenerator: realGenerator(modelId),
+            contentGeneratorConfig: {
+              model: modelId,
+              authType: AuthType.USE_OPENAI,
+              apiKey: 'test-key',
+              baseUrl,
+              maxRetries: 0,
+            },
+            retryAuthType: AuthType.USE_OPENAI,
+            model: modelId,
+          })),
+        );
+
+        // Request 1: primary 429 -> fallback-a 429 (recorded) -> fallback-b serves.
+        const events1 = await sendSessionCollect(
+          'test',
+          'real-http-ledger-turn',
+        );
+        expect(hasChunkText(events1, 'real-ok')).toBe(true);
+        expect(requests).toContain('fallback-a');
+
+        // Request 2, same turn: the ledger skips the exhausted fallback-a.
+        requests.length = 0;
+        const events2 = await sendSessionCollect(
+          'test',
+          'real-http-ledger-turn',
+        );
+        expect(hasChunkText(events2, 'real-ok')).toBe(true);
+        expect(requests).toContain('test-model');
+        expect(requests).toContain('fallback-b');
+        expect(requests).not.toContain('fallback-a');
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close((err) => (err ? reject(err) : resolve()));
+        });
+      }
     });
 
     it('skips by the resolved model id when resolution rewrites the entry', async () => {
