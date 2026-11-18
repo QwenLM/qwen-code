@@ -143,7 +143,10 @@ describe('Session review-worktree lease sweep', () => {
       }),
       getSessionService: vi.fn().mockReturnValue({
         setSessionPrBoundCallback: vi.fn(),
+        setSessionGoalChangedCallback: vi.fn(),
       }),
+      setCurrentSessionScheduledTaskCreator: vi.fn(),
+      getCurrentSessionScheduledTaskCreator: vi.fn(),
       getToolRegistry: vi.fn().mockReturnValue({
         getTool: vi.fn(),
         ensureTool: vi.fn().mockResolvedValue(true),
