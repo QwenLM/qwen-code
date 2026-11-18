@@ -752,7 +752,10 @@ export class LlmClient {
   private toolExplorationBudgetPromptId: string | undefined;
   // Prompt ids introduced by a flagged concurrent side query. Their tool-result
   // continuations arrive unflagged, so the recorded id — not the flag — is what
-  // keeps them from draining the owning turn's pending async hook block.
+  // keeps them from draining the owning turn's pending async hook block. Kept
+  // for the client's lifetime: a side query still awaiting its continuation must
+  // stay refused even after a new main turn starts, and prompt ids are per-turn
+  // unique, so a recorded id is never legitimately reused.
   private readonly concurrentSideQueryPromptIds = new Set<string>();
   private lastPromptId: string | undefined = undefined;
   private activeTodoWorkChainPromptId: string | undefined;
@@ -4379,11 +4382,6 @@ export class LlmClient {
       // the ownership check below every budget entrypoint enforces for the
       // side turn's tool results too.
       if (!options?.isConcurrentSideQuery) {
-        // A new main turn supersedes the previous turn's side queries; a retry
-        // or goal turn reusing the same prompt id must keep them recorded.
-        if (prompt_id !== this.toolExplorationBudgetPromptId) {
-          this.concurrentSideQueryPromptIds.clear();
-        }
         this.toolExplorationBudget.reset();
         this.toolExplorationBudgetPromptId = prompt_id;
         this.beginTurnBudget(messageType, request, prompt_id);

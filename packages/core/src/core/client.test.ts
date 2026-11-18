@@ -1677,6 +1677,67 @@ describe('Gemini Client (client.ts)', () => {
         'stale continue hook output',
       );
     });
+
+    it('still refuses a side continuation that arrives after a new main turn starts', async () => {
+      // The /btw side query is recorded, then a NEW main turn starts before the
+      // side's unflagged continuation arrives. The record must survive the new
+      // turn so the late continuation cannot drain the new turn's block.
+      await run([{ text: 'main task' }], 'prompt-v4-owner', {
+        type: SendMessageType.UserQuery,
+      });
+      await run([{ text: '/btw question' }], 'prompt-v4-side', {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+      });
+      await run([{ text: 'new main task' }], 'prompt-v4-main2', {
+        type: SendMessageType.UserQuery,
+      });
+      // The block becomes pending only after the new main turn has started.
+      installAsyncOutput('new turn hook output');
+      await run(
+        [fnResponse('read_file', { ok: true }, 'call-v4-side')],
+        'prompt-v4-side',
+        { type: SendMessageType.ToolResult },
+      );
+      expect(
+        hasAsyncBlock(mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>),
+      ).toBe(false);
+      // The new main turn's own continuation still receives the block.
+      await run(
+        [fnResponse('read_file', { ok: true }, 'call-v4-main2')],
+        'prompt-v4-main2',
+        { type: SendMessageType.ToolResult },
+      );
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      expect(hasAsyncBlock(parts)).toBe(true);
+      expect((parts.find(isAsyncHookPart) as Part).text).toContain(
+        'new turn hook output',
+      );
+    });
+
+    it('still refuses a side continuation after a same-id retry of the main turn', async () => {
+      // A retry/goal turn reusing the main turn's prompt id must not drop the
+      // recorded side-query id either.
+      await run([{ text: 'main task' }], 'prompt-v7-owner', {
+        type: SendMessageType.UserQuery,
+      });
+      await run([{ text: '/btw question' }], 'prompt-v7-side', {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+      });
+      await run([{ text: 'retry' }], 'prompt-v7-owner', {
+        type: SendMessageType.Retry,
+      });
+      installAsyncOutput('retry turn hook output');
+      await run(
+        [fnResponse('read_file', { ok: true }, 'call-v7-side')],
+        'prompt-v7-side',
+        { type: SendMessageType.ToolResult },
+      );
+      expect(
+        hasAsyncBlock(mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>),
+      ).toBe(false);
+    });
   });
 
   describe('DW04: explicit workflow mode eligibility', () => {
