@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type {
   Config,
   LlmClient,
@@ -23,8 +24,10 @@ export interface SharedLoopRoundOptions {
   config: Config;
   /** Cancels the round. */
   signal: AbortSignal;
-  /** The signal the batch's tools run under. */
-  toolSignal: AbortSignal;
+  /** The signal the batch's tools run under, unless the batch brings one. */
+  toolSignal?: AbortSignal;
+  /** Leave each result for the turn to record when it sends it. */
+  deferRecording: boolean;
   /** Run the round on the event-bus kernel. */
   useEventBus: boolean;
   onModelEvent: NonNullable<AgentLoopHost['onModelEvent']>;
@@ -37,8 +40,16 @@ export interface SharedLoopBatch {
   handled: Map<string, string>;
   /** The provider ids already answered, which the batch adds to. */
   responded: Set<string>;
+  /**
+   * The signal the batch's tools run under, for a turn that makes one per
+   * batch.
+   */
+  toolSignal?: AbortSignal;
+  beforeToolLaunch?: AgentLoopHost['beforeToolLaunch'];
   onToolResult: NonNullable<AgentLoopHost['onToolResult']>;
 }
+
+export type SharedLoopRound = ReturnType<typeof startSharedLoopRound>;
 
 /**
  * A round on the shared agent loop (`experimental.unifiedAgentLoop`), its
@@ -49,6 +60,8 @@ export interface SharedLoopBatch {
  * batch waits for the turn to hand it its scheduler with `runBatch` before
  * it processes any call, replays included. A turn that leaves before then
  * must `close` the round, which skips the batch; the first of the two wins.
+ * The batch's tools run in the async context of the `runBatch` call, not in
+ * the one the round started in.
  */
 export function startSharedLoopRound(
   client: LlmClient,
@@ -91,14 +104,14 @@ export function startSharedLoopRound(
     first: round,
     maxRounds: 1,
     duplicates,
-    // Esc keeps the results, which the TUI pairs into history.
+    // A cancelled batch keeps its results, which the turn pairs into history.
     keepCancelledResults: true,
-    // The TUI records only the results it sends, in its own session.
-    deferRecording: true,
+    deferRecording: options.deferRecording,
     useEventBus: options.useEventBus,
     executor: {
       run: (requests, signal, hooks) =>
-        taken?.executor.run(requests, signal, hooks) ?? Promise.resolve([]),
+        taken?.executor.run(requests, taken.toolSignal ?? signal, hooks) ??
+        Promise.resolve([]),
     },
     host: {
       onModelEvent: options.onModelEvent,
@@ -111,6 +124,8 @@ export function startSharedLoopRound(
         duplicates.responded = taken.responded;
         return undefined;
       },
+      beforeToolLaunch: (request, settled) =>
+        taken?.beforeToolLaunch?.(request, settled) ?? true,
       onToolResult: (result) => taken?.onToolResult(result),
     },
   });
@@ -121,7 +136,14 @@ export function startSharedLoopRound(
   return {
     model,
     runBatch: (batch) => {
-      supply(batch);
+      const inTurn = AsyncLocalStorage.snapshot();
+      supply({
+        ...batch,
+        executor: {
+          run: (requests, signal, hooks) =>
+            inTurn(() => batch.executor.run(requests, signal, hooks)),
+        },
+      });
       return run.then(({ reason, parts, responses }) => ({
         parts: parts ?? [],
         ...(responses ? { responses } : {}),

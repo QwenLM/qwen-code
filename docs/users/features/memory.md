@@ -233,13 +233,17 @@ Two things to know before enabling it:
 
 ### `/memory`
 
-Opens the Memory panel. From here you can:
+Opens the Memory panel. In Web Shell, files stay read-only when their complete text is unavailable, including files that exceed the content limit, files that change during a read, and files with a byte-order mark or invalid UTF-8. If a file changed during a read, select its memory tab again to retry.
+
+From here you can:
 
 - Turn auto-memory saving on or off
 - Turn periodic cleanup (dream) on or off
 - Open your personal QWEN.md (`~/.qwen/QWEN.md`)
 - Open the project QWEN.md
 - Browse the auto-memory folder
+
+In Web Shell, use **Refresh** inside the Memory panel to reload the file list and selected file's content. If a temporary read failure made the file read-only, resolve the problem and click **Refresh** to retry without closing the panel. Editing is restored only after a complete read; truncated content remains read-only. A refresh is confirmed after the selected file loads completely or is confirmed absent. If the file-list refresh fails, the panel shows an error. If memory changes while the file list is refreshing, the panel asks you to refresh again with a status message; nothing is written to disk. Your unsaved draft stays in place when the refresh fails or is superseded before reloading the selected file. A refresh that reloads the selected file replaces the draft. To use `/memory refresh` from the composer, close the panel first; the command reopens it and the normal initial load reads the content.
 
 ### `/memory migrate-team`
 

@@ -96,49 +96,6 @@ public interface RuntimeTransport {
         return failed;
     }
 
-    /** Separate CSI receipt; context attestation alone cannot prove the mounted storage. */
-    public default CompletionStage<Map<String, Object>> attestCsi(RuntimeLease lease,
-            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
-            Map<String, Object> storage, Map<String, Object> pod) {
-        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
-                "workspace_csi_attestation_unavailable", "Workspace CSI attestation is unavailable.", false));
-    }
-
-    public default CompletionStage<Map<String, Object>> attestCsiFiles(RuntimeLease lease,
-            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
-            Map<String, Object> boot, Map<String, Object> pod) {
-        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
-                "workspace_csi_attestation_unavailable", "Original file boot attestation is unavailable.", false));
-    }
-
-    public default CompletionStage<Map<String, Object>> csiFileHistory(RuntimeLease lease,
-            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> boot,
-            ContextBinding binding, Map<String, Object> operation) {
-        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
-                "csi_file_history_unavailable", "Original CSI file history is unavailable.", false));
-    }
-
-    public default CompletionStage<Map<String, Object>> csiFileExecute(RuntimeLease lease,
-            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> boot,
-            ContextBinding binding, String executionId) {
-        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
-                "csi_native_execution_unavailable", "Original CSI execution is unavailable.", false));
-    }
-
-    public default CompletionStage<byte[]> csiFileFinalize(RuntimeBindingRecord runtime, ContextBinding binding,
-            Map<String, Object> operation) {
-        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
-                "csi_file_finalization_unavailable", "Original CSI file finalization is unavailable.", false));
-    }
-
-    /** Explicit comparison inputs are component expectations, not trusted CSI placement provenance. */
-    public default CompletionStage<Map<String, Object>> acknowledgeCsi(RuntimeLease lease, RuntimeSession session,
-            Map<String, Object> boot, Map<String, Object> expectedPod, Map<String, Object> request,
-            Map<String, Object> expectedCaptureIdentity) {
-        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
-                "workspace_csi_acknowledgement_unavailable", "Workspace CSI acknowledgement is unavailable.", false));
-    }
-
     /**
      * Installs directory context only; does not activate a Session. The
      * Session record must be ACQUIRING or READY and name this binding at its
