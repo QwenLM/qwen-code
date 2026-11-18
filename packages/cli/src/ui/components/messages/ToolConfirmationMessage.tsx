@@ -984,6 +984,7 @@ export const ToolConfirmationMessage: React.FC<
             </Text>
           </Box>
         )}
+        {proseDropped && !proseHiddenWhole && <HiddenOverflowRegistration />}
         {proseHiddenWhole && (
           <OverflowNotice message={t('... prompt hidden ...')} />
         )}

@@ -1939,6 +1939,48 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).toContain('Do you want to proceed?');
     });
 
+    it('registers the reveal for prose the destinations crowd out entirely', async () => {
+      // The destinations own every body row, so the prompt is dropped with no row
+      // left to announce it — and this frame has no destination count either, so
+      // nothing else in it would light the reveal. Without a registration the
+      // prompt has simply stopped existing, and ctrl-s never offers it back.
+      const availableTerminalHeight = 9;
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'info',
+                title: 'Confirm Web Fetch',
+                prompt: longPrompt,
+                urls: ['https://e.com/a'],
+                hideAlwaysAllow: true,
+                onConfirm: vi.fn(),
+              }}
+              config={mockConfig}
+              availableTerminalHeight={availableTerminalHeight}
+              contentWidth={50}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+
+      await vi.waitFor(() => {
+        expect(lastFrame() ?? '').toMatch(/overflowing:[1-9]/);
+      }, WAIT_FOR_FRAME);
+      const frame = lastFrame() ?? '';
+      expect(frame).not.toContain('finding 1');
+      expect(frame).not.toMatch(/prompt hidden/);
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight + 1,
+      );
+      expect(frame).toContain('URLs to fetch:');
+      expect(frame).toContain('https://e.com/a');
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+    });
+
     it('still shows a plain-text prompt that fits a one-row budget', () => {
       const availableTerminalHeight = 8;
       const { lastFrame } = renderWithProviders(
