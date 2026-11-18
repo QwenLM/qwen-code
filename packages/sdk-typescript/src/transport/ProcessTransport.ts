@@ -306,7 +306,7 @@ export class ProcessTransport implements Transport {
   ): Error | undefined {
     if (code !== 0 && code !== null) {
       return new Error(`CLI process exited with code ${code}`);
-    } else if (signal) {
+    } else if (signal && !this.closed) {
       return new Error(`CLI process terminated by signal ${signal}`);
     }
     return undefined;
@@ -448,6 +448,17 @@ export class ProcessTransport implements Transport {
   }
 
   async close(): Promise<void> {
+    // Closing must not hide a failure already visible before our shutdown.
+    if (!this.closed && this.childProcess) {
+      const { exitCode, signalCode } = this.childProcess;
+      if (exitCode !== null || signalCode !== null) {
+        this._exitError ??= this.abortController.signal.aborted
+          ? new AbortError('Operation aborted')
+          : (this.getProcessExitError(exitCode, signalCode) ?? null);
+      }
+    }
+    this.closed = true;
+
     if (this.childStdin) {
       this.childStdin.end();
       this.childStdin = null;
@@ -466,7 +477,6 @@ export class ProcessTransport implements Transport {
     this.requestChildProcessExit();
 
     this.ready = false;
-    this.closed = true;
     this.inputClosed = true;
   }
 
@@ -484,11 +494,14 @@ export class ProcessTransport implements Transport {
     ) {
       const error =
         this._exitError ??
-        this.getProcessExitError(
-          this.childProcess.exitCode,
-          this.childProcess.signalCode,
-        );
+        (this.abortController.signal.aborted
+          ? new AbortError('Operation aborted')
+          : this.getProcessExitError(
+              this.childProcess.exitCode,
+              this.childProcess.signalCode,
+            ));
       if (error) {
+        this._exitError ??= error;
         throw error;
       }
       return;
@@ -504,7 +517,7 @@ export class ProcessTransport implements Transport {
           return;
         }
 
-        const error = this.getProcessExitError(code, signal);
+        const error = this._exitError ?? this.getProcessExitError(code, signal);
         if (error) {
           reject(error);
         } else {
