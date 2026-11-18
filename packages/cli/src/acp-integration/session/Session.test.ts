@@ -24035,7 +24035,8 @@ describe('Session', () => {
           }),
           expect.any(String),
           undefined,
-          undefined,
+          // Background notifications opt out of the foreground ledger (P2).
+          expect.objectContaining({ isSessionTurn: false }),
         );
       });
       expect(
