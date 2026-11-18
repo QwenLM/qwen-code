@@ -245,7 +245,9 @@ reversible; a later PR can flip the default once nightly evidence is in.
   (subagent shared loop, unified-loop speculation) sharing the session `Config`.
 - `packages/cli/src/nonInteractiveCli.ts` — a headless teammate turn mints its
   own prompt id; a `teammateTurnActive` flag keeps it for the turn and its
-  continuations and restores the base id for the next foreground turn. A
+  continuations and restores the base id for the next foreground turn. The
+  teammate id is minted only for an actual `Teammate` send — a Goal first
+  segment coinciding with a teammate batch keeps the base id (R14). A
   runtime-origin Goal run keeps the base prompt id but sets a fresh
   `ledgerTurnKey` so it opens its own ledger turn (R10-4).
 - `packages/cli/src/config/settingsSchema.ts` + `packages/cli/src/config/config.ts`

@@ -68,7 +68,7 @@ main 的模型 fallback（`core/llm-chat.ts`「Model fallback chain」）是**�
 - `packages/cli/src/acp-integration/session/Session.ts` + `packages/cli/src/acp-integration/session/ledger-turn-key.ts` — ACP 发送置 `isSessionTurn`；`deriveLedgerTurnKey` 把轮内续发后缀归一化为 `ledgerTurnKey`（prompt 身份不变）。后台 notification 执行器对整个 notification 循环传 `isSessionTurn: false`（P2 ACP-notification）。
 - `packages/cli/src/ui/hooks/use-llm-stream.ts` + `packages/cli/src/ui/contexts/SessionContext.tsx` — prompt-id 铸造计数器（`promptCount`）对每个铸造的顶层轮（用户 query、cron、teammate、notification、goal、retry）递增；用户可见 Prompts 统计（`userPromptCount`）对用户 query、cron、teammate 轮（历史计为 prompt 的集合）递增，供 `/stats`（`statsCommand.ts`）、反馈阈值（`useFeedbackDialog.ts`）与 tip 节奏（`AppContainer.tsx`）。
 - `packages/core/src/core/agent-loop.ts` — `turnModelRound` 构造其 `Turn` 不带 `isSessionTurn`：每个生产调用方都是共享会话 `Config` 的后台轮（subagent 共享 loop、unified-loop speculation）。
-- `packages/cli/src/nonInteractiveCli.ts` — headless teammate 轮新铸自己的 prompt id；`teammateTurnActive` 标志在该轮及其续发保留它，并为下一前台轮恢复基础 id。runtime 源的 Goal run 保留基础 prompt id 但置全新 `ledgerTurnKey`，使其开启自己的台账轮（R10-4）。
+- `packages/cli/src/nonInteractiveCli.ts` — headless teammate 轮新铸自己的 prompt id；`teammateTurnActive` 标志在该轮及其续发保留它，并为下一前台轮恢复基础 id。teammate id 仅为真正的 `Teammate` 发送铸造——与 teammate batch 重合的 Goal 首段保持基础 id（R14）。runtime 源的 Goal run 保留基础 prompt id 但置全新 `ledgerTurnKey`，使其开启自己的台账轮（R10-4）。
 - `packages/cli/src/config/settingsSchema.ts` + `packages/cli/src/config/config.ts` — `experimental.modelAvailabilityTracking`（默认 false）+ 透传，CLI 接线测试镜像 `unifiedAgentLoop` 的 opt-in/opt-out/unset 形状。
 - `docs/users/configuration/settings.md` + `packages/web-shell/client/settings.ts` / `settings/messages.ts` — 设置参考行、Web Shell alias 与 zh-CN label/description。
 
