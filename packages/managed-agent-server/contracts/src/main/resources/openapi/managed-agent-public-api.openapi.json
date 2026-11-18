@@ -12417,7 +12417,7 @@
           },
           "inputAttachments": {
             "type": "boolean",
-            "description": "Optional deployment capability; missing means false."
+            "description": "True when the Harness supports input-attachments/1 and the visible Session admits attachment input: a Workspace-bound Session requires the fresh Workspace Turn admission (files opt-in, current OPERATOR access and the original binding's frozen execution facts), while an unbound Session requires ACTIVE status and must not be a public child. An active Turn does not itself make this false; the composer separately disables sending while a Turn runs. Missing means false."
           },
           "rename": {
             "type": "boolean",

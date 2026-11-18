@@ -2152,6 +2152,23 @@ describe('ManagedSessionsPage', () => {
     expect(provider.workspaceFiles!.read).not.toHaveBeenCalled();
   });
 
+  it('enables inline attachments on an unbound Session without Workspace upload', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          inputAttachments: true,
+          workspaceTurns: false,
+        },
+      }),
+    );
+    await render('s1');
+    expect(mocks.editorProps?.attachmentsEnabled).toBe(true);
+    expect(mocks.editorProps?.visibleToolbarActions).toContain('addMenu');
+    expect(mocks.editorProps?.fileUploadTarget).toBeUndefined();
+  });
+
   it.each(['default', 'auto-edit', 'yolo'] as const)(
     'shows persisted policy as fixed even on an unbound Session (%s)',
     async (approvalMode) => {
