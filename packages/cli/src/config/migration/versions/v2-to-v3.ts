@@ -87,9 +87,11 @@ function normalizeDisableValue(value: unknown): {
  * V2 -> V3 migration (boolean polarity normalization stage).
  *
  * Migration contract:
- * - Input: V2 settings object (`$version: 2`).
+ * - Input: V2 settings object (`$version: 2`), or a versionless object with
+ *   nested V2 disable* keys (unless claimed by V5 -> V4).
  * - Output: `$version: 3` with deprecated disable* fields removed and
- *   valid values migrated to enable* equivalents.
+ *   valid values migrated to enable* equivalents (keeping existing boolean
+ *   enable* values when `$version` was absent).
  *
  * Compatibility strategy:
  * - Accept boolean values and coercible strings "true"/"false".
@@ -114,7 +116,8 @@ export class V2ToV3Migration implements SettingsMigration {
    * `$version` over keys nothing reads any more: the setting would be ignored
    * for good. Same approach as V3 -> V4's versionless `gitCoAuthor` branch.
    * A versionless file that V5 -> V4 would unwrap is left to it: once this
-   * migration stamps a `$version`, V5 -> V4 no longer recognises the file.
+   * migration stamps a `$version`, V5 -> V4 no longer recognises the file
+   * (any `disable*` keys in that mixed file stay unmigrated, as on `main`).
    */
   shouldMigrate(settings: unknown): boolean {
     if (typeof settings !== 'object' || settings === null) {
@@ -127,6 +130,8 @@ export class V2ToV3Migration implements SettingsMigration {
       return true;
     }
     if (s['$version'] === undefined) {
+      // Defer to V5 -> V4 so wrapped modelProviders still unwrap; any
+      // disable* keys in such a mixed file stay unmigrated, as on main.
       if (v5ToV4Migration.shouldMigrate(s)) {
         return false;
       }
@@ -159,7 +164,9 @@ export class V2ToV3Migration implements SettingsMigration {
    * - Input object is not mutated.
    * - Valid migration and invalid cleanup are deterministic.
    * - Deprecated disable* keys are not retained after migration.
-   * - For versionless input, an enable* key that is already set is kept.
+   * - For input that reaches this step without `$version` (not already
+   *   stamped `$version: 2` by V1 -> V2), an existing boolean enable*
+   *   value is kept.
    */
   migrate(
     settings: unknown,
@@ -173,12 +180,13 @@ export class V2ToV3Migration implements SettingsMigration {
     const result = structuredClone(settings) as Record<string, unknown>;
     const processedPaths = new Set<string>();
     const warnings: string[] = [];
-    // A versionless file was hand-written, and may already set the enable*
-    // key next to a stale disable* key. Keep the explicit value there. V2
-    // files keep the existing policy of deriving the target from disable*.
+    // Input that reaches V2 -> V3 without `$version` (not stamped
+    // `$version: 2` by V1 -> V2 first) may already set a boolean enable*
+    // key next to a stale disable* key. Keep that boolean value; V2 files
+    // and non-boolean targets derive the target from disable*.
     const keepsExistingTarget = (path: string) =>
       result['$version'] === undefined &&
-      getNestedProperty(result, path) !== undefined;
+      typeof getNestedProperty(result, path) === 'boolean';
 
     // Step 1: Handle consolidated paths (multiple old paths → single new path)
     // Policy: if ANY of the old disable* settings is true, the new enable* should be false

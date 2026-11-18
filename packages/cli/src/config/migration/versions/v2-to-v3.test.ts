@@ -678,6 +678,33 @@ describe('V2ToV3Migration', () => {
         model: { generationConfig: { enableCacheControl: true } },
       });
     });
+
+    it('should replace a non-boolean enable* key when deriving from disable* in a versionless file', () => {
+      const handWritten = {
+        general: { disableAutoUpdate: true, enableAutoUpdate: 'false' },
+        model: {
+          generationConfig: {
+            disableCacheControl: true,
+            enableCacheControl: 'false',
+          },
+        },
+      };
+
+      const { settings: result, warnings } = migration.migrate(
+        handWritten,
+        'user',
+      ) as {
+        settings: Record<string, unknown>;
+        warnings: string[];
+      };
+
+      expect(result).toEqual({
+        $version: 3,
+        general: { enableAutoUpdate: false },
+        model: { generationConfig: { enableCacheControl: false } },
+      });
+      expect(warnings).toHaveLength(0);
+    });
   });
 
   describe('version properties', () => {

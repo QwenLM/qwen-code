@@ -47,6 +47,20 @@ describe('Migration Framework Integration', () => {
       expect(settings['general']).toEqual({ enableAutoUpdate: false });
     });
 
+    it('replaces a non-boolean enableAutoUpdate in a versionless file that also has a disable* key', () => {
+      const handWritten = {
+        general: { disableAutoUpdate: true, enableAutoUpdate: 'false' },
+      };
+
+      const settings = runMigrations(handWritten, 'user').settings as Record<
+        string,
+        unknown
+      >;
+
+      expect(settings['$version']).toBe(SETTINGS_VERSION);
+      expect(settings['general']).toEqual({ enableAutoUpdate: false });
+    });
+
     it('still unwraps V5 modelProviders in a versionless file that also has a disable* key', () => {
       const handWritten = {
         general: { disableAutoUpdate: true },

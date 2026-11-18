@@ -64,7 +64,7 @@ Qwen Code automatically migrates legacy configuration settings to the new format
 
 > [!note]
 >
-> **Boolean value inversion:** When migrating, boolean values are inverted (e.g., `disableAutoUpdate: true` becomes `enableAutoUpdate: false`).
+> **Boolean value inversion:** When migrating, boolean values are inverted (e.g., `disableAutoUpdate: true` becomes `enableAutoUpdate: false`). When migrating nested `disable*` keys in a file without `$version` that was not first migrated from V1, an existing boolean `enable*` value is kept instead of being overwritten by the inverted or consolidated result.
 
 #### Consolidation policy for `disableAutoUpdate` and `disableUpdateNag`
 
