@@ -163,8 +163,10 @@ export const DISPOSABLE_IGNORED_ROOTS: ReadonlySet<string> = new Set([
  * `hash === null` records a carried deletion (the carry removed the path);
  * any other state of that path is new work. `executable` is the carried
  * file's exec bit, so a mode-only change is new work too. Non-regular
- * carried entries (symlinks, directories) are not recorded — the gate then
- * treats them as work, the conservative direction.
+ * carried entries (symlinks, directories) get no content identity. A carried
+ * untracked symlink is still waived by the general symlink waiver (it holds no
+ * data in this checkout — removing it only unlinks it); any other non-regular
+ * carried entry reads as work, the conservative direction (R5-6).
  */
 export interface CarriedEntry {
   path: string;
@@ -175,10 +177,11 @@ export interface CarriedEntry {
 /**
  * Compute carry-time content identities for the overlay paths inside a
  * worktree: absent paths become carried deletions, regular files are hashed
- * with `git hash-object` (batched to bound argv) and carry their exec bit.
- * Non-regular entries are omitted so the gate treats them as work. Rejects
- * on a read/hash failure — a caller that cannot describe the overlay must
- * not record an exemption it cannot later verify.
+ * with `git hash-object --no-filters` (raw bytes, batched to bound argv) and
+ * carry their exec bit. Non-regular entries are omitted (a carried untracked
+ * symlink falls to the general symlink waiver; other non-regular entries read
+ * as work). Rejects on a read/hash failure — a caller that cannot describe
+ * the overlay must not record an exemption it cannot later verify.
  */
 export async function computeCarriedIdentities(
   worktreePath: string,
@@ -230,6 +233,52 @@ export async function computeCarriedIdentities(
     }
   }
   return entries;
+}
+
+/**
+ * Whether the source checkout still holds the carried overlay, content-for-
+ * content. The no-archive collection of a pristine carried-only worktree is
+ * safe only on that premise: the overlay is a copy of the source's dirty state,
+ * so deleting the worktree's copy loses nothing while the source keeps it. The
+ * gate verifies the worktree side, but the source may have moved on (reverted,
+ * re-edited, or lost the files) — nothing else checks it (R5-2). Compare the
+ * source's current identities for the carried paths against the recorded ones.
+ * Fail-closed: a source that cannot be read, or whose content no longer matches,
+ * does NOT authorize the no-archive delete (the caller snapshots instead).
+ */
+export async function carriedOverlayStillHeldBySource(
+  sourcePath: string,
+  carriedEntries: readonly CarriedEntry[],
+): Promise<boolean> {
+  try {
+    const current = new Map(
+      (
+        await computeCarriedIdentities(
+          sourcePath,
+          carriedEntries.map((e) => e.path),
+        )
+      ).map((e) => [e.path, e]),
+    );
+    for (const stored of carriedEntries) {
+      const cur = current.get(stored.path);
+      if (stored.hash === null) {
+        if (cur !== undefined && cur.hash !== null) return false;
+      } else if (
+        cur === undefined ||
+        cur.hash === null ||
+        cur.hash !== stored.hash ||
+        cur.executable !== stored.executable
+      ) {
+        return false;
+      }
+    }
+    return true;
+  } catch (error) {
+    debugLogger.debug(
+      `carriedOverlayStillHeldBySource: cannot verify source ${sourcePath}, refusing no-archive collection: ${error}`,
+    );
+    return false;
+  }
 }
 
 /**
@@ -306,16 +355,17 @@ export async function worktreeHasPopulatedGitlink(
 ): Promise<boolean> {
   try {
     await fs.access(path.join(worktreePath, '.git'));
-    const { stdout, stderr } = await runGitCapture(worktreePath, [
-      ...NO_EXEC_CONFIG,
-      '--no-optional-locks',
-      'ls-files',
-      '--stage',
-      '-z',
-    ]);
+    const { stdout, stderr } = await runGitCapture(
+      worktreePath,
+      [...NO_EXEC_CONFIG, '--no-optional-locks', 'ls-files', '--stage', '-z'],
+      undefined,
+      64 * 1024 * 1024,
+    );
     if (stderr.trim().length > 0) return true;
+    let hasGitlink = false;
     for (const entry of stdout.split('\0')) {
       if (!entry.startsWith('160000 ')) continue;
+      hasGitlink = true;
       const separator = entry.indexOf('\t');
       if (separator < 0) return true;
       const gitlinkPath = path.resolve(
@@ -339,6 +389,24 @@ export async function worktreeHasPopulatedGitlink(
           throw error;
         });
       if (populated) return true;
+    }
+    // A deinited submodule's working directory is gone, but its object
+    // database (possibly holding unpushed commits) persists in the
+    // per-worktree admin dir `<git-dir>/modules/<name>` (R5-3). The
+    // working-directory probe above reads it as unpopulated; detect the
+    // persisting object store so the only copy of those commits is not
+    // deleted. Any initialized submodule leaves a modules entry.
+    if (hasGitlink) {
+      const gitDir = (
+        await runGit(worktreePath, [
+          ...NO_EXEC_CONFIG,
+          'rev-parse',
+          '--git-dir',
+        ])
+      ).trim();
+      const modulesDir = path.resolve(worktreePath, gitDir, 'modules');
+      const modules = await fs.readdir(modulesDir).catch(() => [] as string[]);
+      if (modules.length > 0) return true;
     }
     return false;
   } catch (error) {
@@ -527,6 +595,25 @@ async function hasNonCarriedWork(
         (e) => [e.path, e],
       ),
     );
+    // Verify every carried entry against its current identity independent of
+    // whether `git status` lists it: a carried untracked file the session
+    // deleted leaves no status record, so the status loop alone would read the
+    // checkout clean and collect it without a snapshot (R5-8). Any drift — a
+    // content file edited, deleted, or replaced by a non-regular entry, or a
+    // carried deletion restored — is work.
+    for (const [rel, stored] of carried) {
+      const cur = current.get(rel);
+      if (stored.hash === null) {
+        if (cur !== undefined && cur.hash !== null) return true;
+      } else if (
+        cur === undefined ||
+        cur.hash === null ||
+        cur.hash !== stored.hash ||
+        cur.executable !== stored.executable
+      ) {
+        return true;
+      }
+    }
     // One collapsed probe: --ignored=matching lists ignored entries (dirs
     // collapsed, so a large node_modules does not enumerate file-level and
     // overflow the capture buffer), --untracked-files=all keeps non-ignored
@@ -535,15 +622,20 @@ async function hasNonCarriedWork(
     // predicate's ignored geometry, so nested ignored disposable output
     // (`packages/app/node_modules/`) is waived here exactly as capture
     // excludes it.
-    const { stdout, stderr } = await runGitCapture(worktreePath, [
-      ...NO_EXEC_CONFIG,
-      '--no-optional-locks',
-      'status',
-      '--porcelain',
-      '--untracked-files=all',
-      '--ignored=matching',
-      '-z',
-    ]);
+    const { stdout, stderr } = await runGitCapture(
+      worktreePath,
+      [
+        ...NO_EXEC_CONFIG,
+        '--no-optional-locks',
+        'status',
+        '--porcelain',
+        '--untracked-files=all',
+        '--ignored=matching',
+        '-z',
+      ],
+      undefined,
+      64 * 1024 * 1024,
+    );
     if (stderr.trim().length > 0) {
       debugLogger.debug(
         `worktreeHasWork: carried status probe at ${worktreePath} reported on stderr, treating as work: ${stderr.trim()}`,

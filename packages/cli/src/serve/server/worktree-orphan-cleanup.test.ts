@@ -248,10 +248,11 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
   });
 
   it('preserves a dirty checkout when the snapshot capture fails (P6 U3 fail-closed)', async () => {
-    // A worktree with genuine work whose git state cannot be read for the
-    // snapshot meta: capture rejects, so the checkout must be preserved —
-    // never delete without a durable snapshot. Removing the worktree's .git
-    // makes rev-parse fail while the directory still holds work.
+    // A worktree with genuine work whose git state cannot be read: the
+    // preservation gates fail closed (an unreadable .git reads as populated),
+    // so the checkout is kept — never delete a checkout we cannot describe.
+    // Removing the worktree's .git makes every probe fail while the directory
+    // still holds work.
     const plan = await planFor('snapfail');
     fs.writeFileSync(path.join(plan.lockKey, 'work.txt'), 'mine\n');
     fs.rmSync(path.join(plan.lockKey, '.git'), {
@@ -369,6 +370,164 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
         path.join(
           repoParent,
           'session-submodule-preserve.worktree-snapshot.tar.gz',
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it('snapshots a pristine carried-only checkout when the source moved on (R5-2)', async () => {
+    const plan = await carriedPlan('carried-source-gone', true);
+    // The worktree side is pristine, but the source re-edited the carried
+    // untracked file after creation: the worktree now holds the only copy of
+    // the carry-time content, so collecting it bare would lose that content.
+    fs.writeFileSync(path.join(repoRoot, 'carry.txt'), 'source-moved-on\n');
+
+    await executeWorktreeCleanup(plan);
+
+    expect(fs.existsSync(plan.lockKey)).toBe(false);
+    const snapBase = path.join(
+      repoParent,
+      'session-carried-source-gone.worktree-snapshot',
+    );
+    expect(fs.existsSync(`${snapBase}.tar.gz`)).toBe(true);
+    const restored = path.join(repoParent, 'restored-source-gone');
+    git(repoRoot, 'worktree', 'add', '--detach', restored, 'HEAD');
+    const meta = await readWorktreeSnapshotMeta(`${snapBase}.json`);
+    await restoreWorktreeSnapshot(`${snapBase}.tar.gz`, restored, meta);
+    expect(fs.readFileSync(path.join(restored, 'carry.txt'), 'utf8')).toBe(
+      'carried-untracked\n',
+    );
+  });
+
+  it('verifies the recorded carry source, not originalCwd, when they differ (R5-14)', async () => {
+    // A session /cd'd into a sibling checkout: the carry comes from the
+    // sibling (carriedFrom) while originalCwd stays the workspace root. The
+    // workspace root is a decoy that still holds the carry-time content, so
+    // verifying IT would wrongly authorize the no-archive delete after the
+    // true source moved on — the worktree holds the overlay's last copy.
+    fs.writeFileSync(path.join(repoRoot, 'carry.txt'), 'carried-untracked\n');
+    fs.appendFileSync(path.join(repoRoot, '.gitignore'), 'extra-rule\n');
+    const sibling = path.join(repoParent, 'sibling');
+    git(repoRoot, 'worktree', 'add', '--detach', sibling, 'HEAD');
+    fs.writeFileSync(path.join(sibling, 'carry.txt'), 'carried-untracked\n');
+    fs.appendFileSync(path.join(sibling, '.gitignore'), 'extra-rule\n');
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree(
+      'carried-divergent',
+      'main',
+      {
+        detached: true,
+        carryDirtyState: true,
+        dirtyStateSource: sibling,
+      },
+    );
+    expect(result.success).toBe(true);
+    const worktreePath = fs.realpathSync(result.worktree!.path);
+    const sessionId = 'session-carried-divergent';
+    await writeWorktreeSessionMarker(worktreePath, sessionId);
+    const plan: WorktreeCleanupPlan = {
+      sessionId,
+      sidecar: {
+        slug: 'carried-divergent',
+        worktreePath,
+        worktreeBranch: '',
+        originalCwd: repoRoot,
+        originalBranch: 'main',
+        originalHeadCommit: '',
+        carriedFrom: sibling,
+        carriedEntries: result.carriedEntries!,
+      },
+      sidecarPath: path.join(repoParent, `${sessionId}.worktree.json`),
+      lockKey: worktreePath,
+    };
+    // The true source moves on; the decoy workspace root still matches.
+    fs.writeFileSync(path.join(sibling, 'carry.txt'), 'sibling-moved-on\n');
+
+    await executeWorktreeCleanup(plan);
+
+    expect(fs.existsSync(plan.lockKey)).toBe(false);
+    const snapBase = path.join(
+      repoParent,
+      'session-carried-divergent.worktree-snapshot',
+    );
+    expect(fs.existsSync(`${snapBase}.tar.gz`)).toBe(true);
+    const restored = path.join(repoParent, 'restored-divergent');
+    git(repoRoot, 'worktree', 'add', '--detach', restored, 'HEAD');
+    const meta = await readWorktreeSnapshotMeta(`${snapBase}.json`);
+    await restoreWorktreeSnapshot(`${snapBase}.tar.gz`, restored, meta);
+    expect(fs.readFileSync(path.join(restored, 'carry.txt'), 'utf8')).toBe(
+      'carried-untracked\n',
+    );
+  });
+
+  it('snapshots when the session deleted a carried untracked file (R5-8)', async () => {
+    const plan = await carriedPlan('carried-del-untracked', true);
+    // An untracked deletion leaves no status record; only the content-only
+    // verification catches it, so the reaper must snapshot rather than read
+    // the checkout clean and delete it bare.
+    fs.rmSync(path.join(plan.lockKey, 'carry.txt'));
+
+    await executeWorktreeCleanup(plan);
+
+    expect(fs.existsSync(plan.lockKey)).toBe(false);
+    const snapBase = path.join(
+      repoParent,
+      'session-carried-del-untracked.worktree-snapshot',
+    );
+    expect(fs.existsSync(`${snapBase}.tar.gz`)).toBe(true);
+  });
+
+  it('preserves a checkout whose submodule was initialized then deinited (R5-3)', async () => {
+    // A real submodule: init inside the worktree leaves its object database
+    // under the per-worktree <git-dir>/modules even after deinit empties the
+    // working directory. That store can hold the only copy of unpushed
+    // commits, so the whole checkout must be kept (no snapshot, no deletion).
+    const subRoot = path.join(repoParent, 'subrepo');
+    fs.mkdirSync(subRoot);
+    git(subRoot, 'init', '-q');
+    git(subRoot, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+    git(subRoot, 'config', 'user.email', 't@e.com');
+    git(subRoot, 'config', 'user.name', 't');
+    git(subRoot, 'config', 'commit.gpgsign', 'false');
+    git(subRoot, 'commit', '-qm', 'sub', '--allow-empty', '--no-verify');
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        subRoot,
+        'lib',
+      ],
+      { cwd: repoRoot, stdio: 'pipe' },
+    );
+    git(repoRoot, 'commit', '-qm', 'add submodule', '--no-verify');
+    const plan = await planFor('deinit-preserve');
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'update',
+        '--init',
+        '-q',
+        'lib',
+      ],
+      { cwd: plan.lockKey, stdio: 'pipe' },
+    );
+    git(plan.lockKey, 'submodule', 'deinit', '-q', '-f', 'lib');
+
+    await executeWorktreeCleanup(plan);
+
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(
+          repoParent,
+          'session-deinit-preserve.worktree-snapshot.tar.gz',
         ),
       ),
     ).toBe(false);

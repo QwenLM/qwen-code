@@ -57,11 +57,13 @@ geometry is safe there. `createUserWorktree` therefore returns both
 
 Add an optional `carriedEntries?: CarriedEntry[]` to `WorktreeSession`, where
 `CarriedEntry = { path: string; hash: string | null; executable: boolean }`.
-`hash` is the `git hash-object` blob hash of the carried content; `hash === null`
-records a carried deletion (the carry removed the path); `executable` is the
-carried file's exec bit so a mode-only change is detectable. Non-regular carried
-entries (symlinks, directories) are not recorded — the gate then treats them as
-work, the conservative direction.
+`hash` is the raw on-disk blob hash of the carried content (`git hash-object
+--no-filters`); `hash === null` records a carried deletion (the carry removed the
+path); `executable` is the carried file's exec bit so a mode-only change is
+detectable. Non-regular carried entries (symlinks, directories) get no content
+identity: a carried untracked symlink falls to the general symlink waiver (it
+holds no data in this checkout), while any other non-regular carried entry reads
+as work, the conservative direction.
 
 Optional for back-compat: sidecars written before the field existed (and
 worktrees created without `carryDirtyState`) omit it, and readers treat absent as
@@ -76,6 +78,18 @@ reaper then treats the overlay as work and snapshots it (the safe direction); th
 carry itself is untouched. The journal-backed creation path still bounds the
 overlay with `maxCarriedPathsBytes` (`CARRIED_PATHS_MAX_BYTES`).
 
+A companion `carriedFrom?: string` records the checkout the overlay was carried
+FROM when it differs from `originalCwd`: the branch-worktree route and the
+handoff capture the session's own checkout (`dirtyStateSource`), which a `/cd`
+into a sibling checkout makes differ from the workspace root that `originalCwd`
+must keep naming for the ownership-checked routes. The reaper's source-side
+check (D4) reads `carriedFrom ?? originalCwd`; verifying `originalCwd` when the
+two differ could authorize deleting the overlay's last copy (R5-14). The two
+routes record it unconditionally (it may equal `originalCwd`); `POST /session`
+and legacy sidecars omit it, and the fallback names the right checkout there.
+A non-string value corrupts the sidecar like any other field. Relocation writes
+preserve it with the rest of the sidecar.
+
 ### D2 — Writers persist the overlay
 
 Every creation path that calls `createUserWorktree` with `carryDirtyState`
@@ -83,8 +97,13 @@ records the returned `carriedEntries` in the sidecar it writes:
 
 - `POST /session` (daemon default worktree),
 - the branch-worktree route (`POST /session/:id/branch` with `worktree`),
-- the handoff (`to=worktree`),
-- `EnterWorktreeTool`.
+- the handoff (`to=worktree`).
+
+`EnterWorktreeTool` also creates worktrees but never enables `carryDirtyState`,
+so it is a no-carry writer and records nothing. The branch-worktree route and
+the handoff additionally record `carriedFrom` (their `dirtyStateSource`
+checkout); `POST /session` carries from its own root, which `originalCwd`
+already names, so it records no `carriedFrom`.
 
 `createUserWorktree` computes the identities right after the carry applies
 (`computeCarriedIdentities`: absent paths become null-hash deletions, regular
@@ -125,27 +144,39 @@ carried content, a restored carried deletion, a symlink replacement, or any
 content/mode drift — is new work and preserves the checkout (the reaper snapshots
 it). Rename/copy records refuse outright. Non-carried entries keep the existing
 session-marker / disposable-output / symlink waivers. The exemption is exact-path,
-not prefix. The content comparison uses `git hash-object` (with a `--` separator
-so a dash-leading path is not parsed as an option) at both carry and cleanup.
-`hash-object` applies the path's clean filter (e.g. `eol`/`text` normalization),
-so the identity is the clean-filtered blob hash, not the raw worktree bytes; the
-comparison is self-consistent because both sides hash the same way, and a content
-edit still changes the hash. A mode-only change is caught by the exec-bit field.
+not prefix. The content comparison uses `git hash-object --no-filters` (with a
+`--` separator so a dash-leading path is not parsed as an option) at both carry
+and cleanup, so the identity is the RAW on-disk blob hash. `--no-filters` is
+deliberate: the path's clean filter (`eol`/`text` normalization) could otherwise
+normalize an edit away, making a changed carried file hash identically and read
+pristine — the data-loss path this avoids (R4-1/R5-5). A mode-only change is
+caught by the exec-bit field. Every carried entry is also verified against its
+current identity even when `git status` does not list it (a carried untracked
+file the session deleted leaves no status record, R5-8). A pristine carried-only
+checkout is collected without an archive only while the source checkout still
+holds the overlay content-for-content; otherwise it is snapshotted (R5-2).
 
 ### D4 — The reaper passes the sidecar's overlay
 
 `executeWorktreeCleanup` calls
 `worktreeHasWork(plan.lockKey, sidecar.carriedEntries)`. A pristine carried-only
-checkout reads clean and is collected without a snapshot; a checkout with genuine
-session work — including a session change to a carried path — reads as work and is
-snapshotted then deleted (P6 U3). The core retention sweep (`worktreeCleanup.ts`)
-is unchanged in this deliverable.
+checkout reads clean; before collecting it without a snapshot the reaper also
+verifies the carry SOURCE checkout (`sidecar.carriedFrom ?? sidecar.originalCwd`)
+still holds the overlay content-for-content, and snapshots instead when it does
+not or cannot be read (R5-2/R5-14). A checkout with genuine session work —
+including a session change to a carried path — reads as work and is snapshotted
+then deleted (P6 U3). The core retention sweep (`worktreeCleanup.ts`) is
+unchanged in this deliverable.
 
 ## Acceptance
 
 - A session worktree whose only content is the pristine carried overlay is
   collected by the orphan reaper after the session is deleted (regression
   reproducing S8).
+- A pristine carried-only checkout is snapshotted instead when the carry source
+  no longer holds the overlay or cannot be read — including when the source is
+  a sibling checkout recorded in `carriedFrom` while `originalCwd` (the decoy)
+  still matches the carry-time identities (R5-2/R5-14).
 - A session change to a carried path is snapshotted, not deleted bare: staging a
   carried edit, deleting a carried file, a further unstaged edit of a carried
   tracked or untracked file, and a mode-only change each read as work (F1 cells).

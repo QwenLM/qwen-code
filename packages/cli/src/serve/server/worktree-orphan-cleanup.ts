@@ -10,6 +10,7 @@ import path from 'node:path';
 import {
   buildWorktreeSnapshotMeta,
   captureWorktreeSnapshot,
+  carriedOverlayStillHeldBySource,
   GitWorktreeService,
   readWorktreeSessionMarkerStrict,
   readWorktreeSessionStrict,
@@ -462,9 +463,13 @@ export async function executeWorktreeCleanup(
   // An initialized submodule holds its own object database (possibly unpushed
   // commits) that neither the worktree tar nor the removal preserves, so the
   // checkout must be kept whole — before either the snapshot or the clean
-  // deletion path (P1 submodule).
+  // deletion path (P1 submodule). The probe is fail-closed: an unreadable
+  // checkout also reads as populated, so the reason names both arms (R5-7).
   if (await worktreeHasPopulatedGitlink(plan.lockKey)) {
-    logWorktreeCleanupPreserve(sessionId, 'initialized submodule present');
+    logWorktreeCleanupPreserve(
+      sessionId,
+      'initialized submodule present (or gitlink probe unreadable)',
+    );
     return;
   }
   // Exempt the recorded carried overlay only while its content still matches
@@ -473,7 +478,30 @@ export async function executeWorktreeCleanup(
   // a session change to a carried path reads as work and is snapshotted
   // (R9-6). Absent carriedEntries (legacy sidecars, no-carry creations) keeps
   // the gate behaving exactly as before.
-  if (await worktreeHasWork(plan.lockKey, sidecar.carriedEntries)) {
+  let needsSnapshot = await worktreeHasWork(
+    plan.lockKey,
+    sidecar.carriedEntries,
+  );
+  // A pristine carried-only checkout reads clean, but collecting it WITHOUT an
+  // archive is safe only while the source checkout still holds the overlay —
+  // the overlay is a copy of the source's dirty state, and the source may have
+  // moved on (R5-2). Verify the source side; if it no longer holds the overlay
+  // (or cannot be read), snapshot instead of deleting bare. The source is the
+  // checkout the carry came FROM (carriedFrom), which a /cd into a sibling
+  // checkout makes differ from originalCwd — verifying originalCwd there
+  // could authorize deleting the overlay's last copy (R5-14).
+  if (
+    !needsSnapshot &&
+    sidecar.carriedEntries &&
+    sidecar.carriedEntries.length > 0 &&
+    !(await carriedOverlayStillHeldBySource(
+      sidecar.carriedFrom ?? sidecar.originalCwd,
+      sidecar.carriedEntries,
+    ))
+  ) {
+    needsSnapshot = true;
+  }
+  if (needsSnapshot) {
     // P6 U3: a managed session worktree with genuine work is snapshotted then
     // deleted instead of preserved forever — the archive preserves the work
     // and reopening the chat offers restore (D7). A capture failure falls
@@ -485,7 +513,6 @@ export async function executeWorktreeCleanup(
         sessionId,
         slug: sidecar.slug,
         baseCommit: sidecar.worktreeBase ?? sidecar.originalHeadCommit,
-        branch: sidecar.worktreeBranch,
       });
       const { snapshotPath } = await captureWorktreeSnapshot({
         worktreePath: plan.lockKey,

@@ -142,10 +142,15 @@ async function atomicWriteFile(
 ): Promise<void> {
   const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
   try {
+    // The archive can hold private work (e.g. a 0600 ignored file). Create the
+    // temp file owner-only BEFORE any content is written: node-tar opens its
+    // output at 0o666 & ~umask (0644 under the default umask), so chmod-ing
+    // only after the write would leave the archive world-readable for the
+    // whole capture (R5-1). Creating it 0600 first keeps it private from the
+    // first byte through the rename; the later write preserves the mode.
+    const handle = await fs.open(tmp, 'w', 0o600);
+    await handle.close();
     await write(tmp);
-    // The archive can hold private work (e.g. a 0600 ignored file); keep it
-    // owner-only from the first write through the rename, independent of the
-    // process umask (P2). No-op on Windows.
     await fs.chmod(tmp, 0o600).catch(() => {});
     await fs.rename(tmp, target);
   } catch (error) {
@@ -170,7 +175,6 @@ export async function buildWorktreeSnapshotMeta(
     sessionId: string;
     slug: string;
     baseCommit: string;
-    branch: string;
   },
 ): Promise<Omit<WorktreeSnapshotMeta, 'version' | 'createdAt'>> {
   await fs.access(path.join(worktreePath, '.git'));
@@ -192,10 +196,10 @@ export async function buildWorktreeSnapshotMeta(
       'HEAD',
     ])
   ).trim();
-  // Read the branch actually checked out now, not the sidecar's creation-time
-  // branch: a session may `git switch -c` after a detached creation, and a
-  // restore must recreate that branch, not a detached checkout (P2). Empty for
-  // a detached HEAD.
+  // Always read the branch actually checked out now — never trust a
+  // creation-time value: a session may `git switch -c` after a detached
+  // creation, and a restore must recreate that branch, not a detached
+  // checkout (P2). Empty for a detached HEAD.
   const branch = (
     await runGit(worktreePath, [
       ...NO_EXEC_CONFIG,
@@ -286,16 +290,21 @@ export async function captureWorktreeSnapshot(
   // and overflow the capture buffer. Only ignored entries are disposable
   // candidates: a tracked or non-ignored file under a regenerable directory
   // name is absent from this listing and is archived.
-  const ignoredOut = await runGit(worktreePath, [
-    ...NO_EXEC_CONFIG,
-    '--no-optional-locks',
-    'ls-files',
-    '--others',
-    '--ignored',
-    '--exclude-standard',
-    '--directory',
-    '-z',
-  ]);
+  const ignoredOut = await runGit(
+    worktreePath,
+    [
+      ...NO_EXEC_CONFIG,
+      '--no-optional-locks',
+      'ls-files',
+      '--others',
+      '--ignored',
+      '--exclude-standard',
+      '--directory',
+      '-z',
+    ],
+    undefined,
+    64 * 1024 * 1024,
+  );
   const ignoredEntries = ignoredOut.split('\0').filter((p) => p.length > 0);
   const matcher: DisposableIgnoredMatcher = {
     dirs: ignoredEntries.filter(

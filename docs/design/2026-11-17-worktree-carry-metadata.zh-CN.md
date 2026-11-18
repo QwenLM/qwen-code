@@ -46,9 +46,11 @@ sidecar 契约，排期于 #17237。
 
 给 `WorktreeSession` 增可选 `carriedEntries?: CarriedEntry[]`，其中
 `CarriedEntry = { path: string; hash: string | null; executable: boolean }`。
-`hash` 是搬运内容的 `git hash-object` blob 哈希；`hash === null` 记录搬运删除（携带
-移除了该路径）；`executable` 是搬运文件的可执行位，使仅模式变更也可检测。非常规搬运
-条目（symlink、目录）不被记录——门随之把它们当作工作，方向保守。
+`hash` 是搬运内容的磁盘原始字节 blob 哈希（`git hash-object --no-filters`）；
+`hash === null` 记录搬运删除（携带移除了该路径）；`executable` 是搬运文件的可执行位，
+使仅模式变更也可检测。非常规搬运条目（symlink、目录）没有内容身份：搬运的 untracked
+symlink 落入通用 symlink 豁免（它在本检出中不持有数据），其余非常规搬运条目读作工作，
+方向保守。
 
 可选以向后兼容：该字段出现前写入的 sidecar（以及未用 `carryDirtyState` 创建的 worktree）
 省略它，读取方把缺席当作「无记录的覆盖层」——has-work 门则与今日行为完全一致。运行时
@@ -59,6 +61,15 @@ sidecar 读取上限约束记录：由于身份增大了覆盖层，写入方（
 工作并快照（安全方向）；携带本身（worktree 里的文件）不受影响。journal 背书的创建路径仍用
 `maxCarriedPathsBytes`（`CARRIED_PATHS_MAX_BYTES`）约束覆盖层。
 
+伴随字段 `carriedFrom?: string` 记录覆盖层的搬运来源检出（当它与 `originalCwd` 不同时）：
+branch-worktree 路由与 handoff 从会话自己的检出捕获 dirty 状态（`dirtyStateSource`），
+会话 `/cd` 进兄弟检出会使它与 `originalCwd` 必须保持命名的 workspace 根（所有权校验路由
+要求）不同。回收器的源侧校验（D4）读 `carriedFrom ?? originalCwd`；两者不同时若校验
+`originalCwd`，可能授权删除覆盖层的最后副本（R5-14）。这两个路由无条件记录它（可能
+等于 `originalCwd`）；`POST /session` 与 legacy sidecar 缺席该字段，回退在那里命名的
+正是正确检出。非字符串值像其他字段一样使 sidecar 判为损坏。搬迁写入随 sidecar 其余
+字段一并保留它。
+
 ### D2 — 写入方持久化覆盖层
 
 每个以 `carryDirtyState` 调用 `createUserWorktree` 的创建路径，把返回的 `carriedEntries`
@@ -66,8 +77,12 @@ sidecar 读取上限约束记录：由于身份增大了覆盖层，写入方（
 
 - `POST /session`（daemon 缺省 worktree），
 - branch-worktree 路由（`POST /session/:id/branch` 带 `worktree`），
-- handoff（`to=worktree`），
-- `EnterWorktreeTool`。
+- handoff（`to=worktree`）。
+
+`EnterWorktreeTool` 也创建 worktree，但从不启用 `carryDirtyState`，属无携带写入方，
+不记录任何内容。branch-worktree 路由与 handoff 还记录 `carriedFrom`（它们的
+`dirtyStateSource` 检出）；`POST /session` 从自身根携带，`originalCwd` 已命名该根，
+故不记录 `carriedFrom`。
 
 `createUserWorktree` 在携带应用后立即计算身份（`computeCarriedIdentities`：缺席路径成为
 null-hash 删除，常规文件分批哈希）。计算失败使 `carriedEntries` 缺席——门随之把覆盖层
@@ -94,21 +109,28 @@ sparse-checkout 从不设置）恒拒绝；skip-worktree（`S`）仅在 `core.sp
 搬运路径的任何其他状态——暂存（`M `、`A `、`D `）、删除搬运内容、恢复搬运删除、symlink
 替换、或任何内容/模式漂移——都是新工作并保留 checkout（回收器快照它）。rename/copy 记录
 直接拒绝。非搬运条目保留现有 session-marker / disposable-output / symlink 豁免。豁免是
-精确路径而非前缀。内容比较在搬运与清理两侧都用 `git hash-object`（带 `--` 分隔符使以 `-`
-开头的路径不被当作选项）。`hash-object` 会应用路径的 clean 过滤器（如 `eol`/`text`
-归一化），故身份是 clean 过滤后的 blob 哈希而非原始工作树字节；比较自洽，因为两侧以同一
-方式哈希，内容编辑仍会改变哈希。仅模式变更由可执行位字段捕获。
+精确路径而非前缀。内容比较在搬运与清理两侧都用 `git hash-object --no-filters`（带 `--`
+分隔符使以 `-` 开头的路径不被当作选项），故身份是磁盘原始字节的 blob 哈希。`--no-filters`
+是刻意的：路径的 clean 过滤器（`eol`/`text` 归一化）否则可能把一次编辑归一化掉，使被改动
+的搬运文件哈希不变而被读作原始——这正是要避免的数据丢失路径（R4-1/R5-5）。仅模式变更由
+可执行位字段捕获。每个搬运条目还会对照其当前身份校验，即使 `git status` 未列出它（会话
+删除的搬运 untracked 文件不留 status 记录，R5-8）。仅含原始搬运内容的 checkout 只有在源
+检出仍逐内容持有该覆盖层时才免快照回收；否则改为快照（R5-2）。
 
 ### D4 — 回收器传入 sidecar 的覆盖层
 
 `executeWorktreeCleanup` 调用 `worktreeHasWork(plan.lockKey, sidecar.carriedEntries)`。
-仅含原始搬运内容的 checkout 读作干净并被免快照回收；含真实会话工作——包括对搬运路径的
-会话改动——的 checkout 读作工作并被先快照再删除（P6 U3）。core 保留清扫
-（`worktreeCleanup.ts`）在本交付项中保持不变。
+仅含原始搬运内容的 checkout 读作干净；免快照回收前，回收器还校验搬运来源检出
+（`sidecar.carriedFrom ?? sidecar.originalCwd`）仍逐内容持有该覆盖层，不再持有或不可读
+时改为快照（R5-2/R5-14）。含真实会话工作——包括对搬运路径的会话改动——的 checkout 读作
+工作并被先快照再删除（P6 U3）。core 保留清扫（`worktreeCleanup.ts`）在本交付项中保持不变。
 
 ## 验收
 
 - 仅含原始搬运覆盖层的会话 worktree 在会话删除后被孤儿回收器回收（复现 S8 的回归）。
+- 搬运来源不再持有覆盖层或不可读时，仅含原始搬运内容的 checkout 改为快照——包括来源
+  是 `carriedFrom` 记录的兄弟检出、而 `originalCwd`（诱饵）仍匹配搬运时身份的情形
+  （R5-2/R5-14）。
 - 对搬运路径的会话改动被快照而非裸删：暂存搬运编辑、删除搬运文件、对搬运 tracked 或
   untracked 文件的进一步未暂存编辑、仅模式变更，各读作工作（F1 单元）。
 - 原始搬运删除读作干净；恢复或暂存它读作工作。

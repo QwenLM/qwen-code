@@ -480,6 +480,26 @@ describe('writeWorktreeSession', () => {
       expect(read.session.slug).toBe(sample.slug);
     }
   });
+
+  it('round-trips the carriedFrom carry-source field (R5-14)', async () => {
+    const withSource: WorktreeSession = {
+      ...sample,
+      carriedFrom: '/repo-sibling',
+    };
+    await writeWorktreeSession(filePath, withSource);
+    await expect(strictRead()).resolves.toEqual({
+      state: 'valid',
+      session: withSource,
+    });
+  });
+
+  it('rejects a sidecar with a non-string carriedFrom (R5-14)', async () => {
+    await writeJson({ ...sample, carriedFrom: 42 });
+    await expectStrictInvalid();
+
+    await writeJson({ ...sample, carriedFrom: null });
+    await expectStrictInvalid();
+  });
 });
 
 describe('createWorktreeSession', () => {

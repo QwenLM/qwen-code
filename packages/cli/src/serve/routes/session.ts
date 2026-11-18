@@ -5857,6 +5857,10 @@ export function registerSessionRoutes(
                 // Record the carried overlay so the orphan reaper can exempt
                 // it (R9-6). Absent when the handoff carried nothing.
                 carriedEntries: created.carriedEntries,
+                // The carry came from the session's own checkout, which a
+                // /cd may have moved to a sibling: the reaper's source-side
+                // check must verify THAT checkout, not originalCwd (R5-14).
+                carriedFrom: sourceCwd,
               });
               assertRuntimeGenerationOpen?.();
               const changed = await runtime.bridge.changeSessionCwd(
@@ -6439,6 +6443,10 @@ export function registerSessionRoutes(
                   // it (R9-6); the journal already carries the paths for the
                   // prepared cleanup.
                   carriedEntries: worktreeResult.carriedEntries,
+                  // The carry came from the session's checkout, which may be
+                  // a sibling of the repo top: the reaper's source-side check
+                  // must verify THAT checkout, not originalCwd (R5-14).
+                  carriedFrom: base.checkoutCwd,
                 });
                 journal = await updateBranchWorktreeJournal(
                   journalPath,

@@ -110,6 +110,17 @@ export interface WorktreeSession {
    * gate behaves as if no exemption were passed.
    */
   carriedEntries?: CarriedEntry[];
+  /**
+   * The checkout the dirty overlay was carried FROM, when it differs from
+   * `originalCwd` (a session /cd'd into a sibling checkout: the creation
+   * routes pass `dirtyStateSource` while `originalCwd` stays the workspace
+   * root for the ownership-checked routes). The reaper's source-side check
+   * for the no-archive collection reads this, falling back to `originalCwd`
+   * when absent — verifying the wrong checkout could authorize deleting the
+   * overlay's last copy (R5-14). Absent when the carry source IS
+   * `originalCwd` and on sidecars written before the field existed.
+   */
+  carriedFrom?: string;
 }
 
 export type StrictWorktreeSession =
@@ -143,7 +154,8 @@ function isValidWorktreeSession(value: unknown): value is WorktreeSession {
     (v['supersedes'] === undefined || typeof v['supersedes'] === 'string') &&
     (v['carriedEntries'] === undefined ||
       (Array.isArray(v['carriedEntries']) &&
-        v['carriedEntries'].every(isValidCarriedEntry)))
+        v['carriedEntries'].every(isValidCarriedEntry))) &&
+    (v['carriedFrom'] === undefined || typeof v['carriedFrom'] === 'string')
   );
 }
 

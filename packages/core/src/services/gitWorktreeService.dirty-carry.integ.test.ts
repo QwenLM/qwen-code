@@ -28,6 +28,7 @@ import {
   CARRIED_PATHS_MAX_BYTES,
   GitWorktreeService,
   WorktreeDirtyCarryConflictError,
+  carriedOverlayStillHeldBySource,
   worktreeHasWork,
 } from './gitWorktreeService.js';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
@@ -1864,6 +1865,12 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
     await fs.writeFile(path.join(repoRoot, 'sub', 'a.txt'), 'carried\n');
     const { worktree, carriedEntries } = await createCarried('r96-prefix');
     expect(carriedEntries.map((e) => e.path)).toContain('sub/a.txt');
+    // The carried file alone is waived: this pins the file-level untracked
+    // listing — a collapsed '?? sub/' would not match the exact carried path
+    // and would read as work (R5-9).
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
+      false,
+    );
     await fs.writeFile(path.join(worktree.path, 'sub', 'b.txt'), 'sibling\n');
     await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
       true,
@@ -2061,5 +2068,95 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
     await fs.mkdir(path.join(wt, 'lib'));
     await fs.writeFile(path.join(wt, 'lib', 'file.txt'), 'submodule work\n');
     await expect(worktreeHasWork(wt)).resolves.toBe(true);
+  });
+
+  it('deleting a carried untracked file reads as work with no status record (R5-8)', async () => {
+    await makeDirty(repoRoot);
+    const { worktree, carriedEntries } =
+      await createCarried('r96-deluntracked');
+    // An untracked deletion leaves no `git status` record, so the status loop
+    // alone would read the checkout clean and collect it without a snapshot.
+    await fs.rm(path.join(worktree.path, 'untracked.txt'));
+    expect(git(worktree.path, 'status', '--porcelain')).not.toContain(
+      'untracked.txt',
+    );
+    // The content-only verification must still catch the drift.
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
+      true,
+    );
+  });
+
+  it('a deinited submodule still reads as work via its persisting object store (R5-3)', async () => {
+    // A real submodule initialized then deinited inside the worktree: the
+    // working directory is empty, but git keeps the object database under the
+    // per-worktree <git-dir>/modules — possibly the only copy of unpushed
+    // commits. The gate must read it as work so the reaper preserves it.
+    const subRoot = path.join(repoParent, 'subrepo');
+    await fs.mkdir(subRoot);
+    await initRepo(subRoot);
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        subRoot,
+        'lib',
+      ],
+      { cwd: repoRoot, encoding: 'utf8' },
+    );
+    git(repoRoot, 'commit', '-qm', 'add submodule', '--no-verify');
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r96-deinit', 'main');
+    expect(result.success).toBe(true);
+    const wt = result.worktree!.path;
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'update',
+        '--init',
+        '-q',
+        'lib',
+      ],
+      { cwd: wt, encoding: 'utf8' },
+    );
+    git(wt, 'submodule', 'deinit', '-q', '-f', 'lib');
+    // The working directory is emptied, but the object store persists.
+    expect(await fs.readdir(path.join(wt, 'lib'))).toHaveLength(0);
+    await expect(worktreeHasWork(wt)).resolves.toBe(true);
+  });
+
+  it('the source-side check authorizes the no-archive delete only while the source holds the overlay (R5-2)', async () => {
+    await makeDirty(repoRoot);
+    const { worktree, carriedEntries } = await createCarried('r96-source');
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
+      false,
+    );
+    // The source still holds every carried identity: collecting the pristine
+    // worktree without an archive loses nothing.
+    await expect(
+      carriedOverlayStillHeldBySource(repoRoot, carriedEntries),
+    ).resolves.toBe(true);
+    // The source re-edits a carried file: the worktree now holds the only
+    // copy of the carry-time content, so the no-archive delete is refused.
+    await fs.writeFile(
+      path.join(repoRoot, 'untracked.txt'),
+      'source-moved-on\n',
+    );
+    await expect(
+      carriedOverlayStillHeldBySource(repoRoot, carriedEntries),
+    ).resolves.toBe(false);
+    // An unreadable source is fail-closed too.
+    await expect(
+      carriedOverlayStillHeldBySource(
+        path.join(repoParent, 'gone'),
+        carriedEntries,
+      ),
+    ).resolves.toBe(false);
   });
 });

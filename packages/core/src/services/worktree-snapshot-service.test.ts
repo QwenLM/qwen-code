@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -17,6 +17,40 @@ import {
   WORKTREE_SNAPSHOT_SCHEMA_VERSION,
 } from './worktree-snapshot-service.js';
 import { WORKTREE_SESSION_FILE } from './gitWorktreeService.js';
+
+// R5-1: record the output file's mode at the moment node-tar is invoked. A
+// post-write chmod ends at the same 0600 mode (the P2 cell below) but leaves
+// the archive world-readable for the whole capture; only a pre-created 0600
+// temp file is private from the first byte. -1 means the file did not exist
+// when tar was called (node-tar would create it at 0666 & ~umask).
+const tarCreateEntryModes = vi.hoisted(() => [] as number[]);
+vi.mock('tar', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('tar')>();
+  const { statSync } = await import('node:fs');
+  // The service only ever calls create(options-with-file, entries); narrow
+  // the overloaded command to that shape for the delegating call.
+  const createFile = actual.create as (
+    options: { file: string },
+    entries: string[],
+  ) => Promise<void>;
+  const create = Object.assign(
+    (options: { file: string }, entries: string[]) => {
+      try {
+        tarCreateEntryModes.push(statSync(options.file).mode & 0o777);
+      } catch {
+        tarCreateEntryModes.push(-1);
+      }
+      return createFile(options, entries);
+    },
+    {
+      syncFile: actual.create.syncFile,
+      asyncFile: actual.create.asyncFile,
+      syncNoFile: actual.create.syncNoFile,
+      asyncNoFile: actual.create.asyncNoFile,
+    },
+  ) as unknown as typeof actual.create;
+  return { ...actual, create };
+});
 
 const gitEnv = {
   ...process.env,
@@ -223,7 +257,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       sessionId: 'session-meta',
       slug: 'meta',
       baseCommit: head,
-      branch: 'main',
     });
 
     expect(m.headCommit).toBe(head);
@@ -242,7 +275,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       sessionId: 'session-del',
       slug: 'del',
       baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-      branch: 'main',
     });
     expect(m.dirty.deleted).toEqual(['committed.txt']);
     const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
@@ -270,7 +302,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       sessionId: 'session-staged-del',
       slug: 'staged-del',
       baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-      branch: 'main',
     });
     expect(m.dirty.deleted).toEqual(['committed.txt']);
     const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
@@ -294,7 +325,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       sessionId: 'session-rename',
       slug: 'rename',
       baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-      branch: 'main',
     });
     expect(m.dirty.deleted).toEqual(['committed.txt']);
     const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
@@ -329,7 +359,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       sessionId: 'session-filedir',
       slug: 'filedir',
       baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-      branch: 'main',
     });
     expect(m.dirty.deleted).toEqual(['committed.txt']);
     const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
@@ -357,7 +386,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       sessionId: 'session-recreate',
       slug: 'recreate',
       baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-      branch: 'main',
     });
     expect(m.dirty.deleted).toEqual(['committed.txt']);
     const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
@@ -386,7 +414,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       sessionId: 'session-dirfile',
       slug: 'dirfile',
       baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-      branch: 'main',
     });
     expect(m.dirty.deleted).toEqual(['dir/a.txt']);
     const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
@@ -433,7 +460,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
           sessionId: 'session-badutf8',
           slug: 'badutf8',
           baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-          branch: 'main',
         }),
       ).rejects.toThrow(/not valid UTF-8/);
     },
@@ -451,7 +477,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
         sessionId: 'session-mm',
         slug: 'mm',
         baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-        branch: 'main',
       }),
     ).rejects.toThrow(/staged content differs/);
   });
@@ -472,7 +497,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       sessionId: 'session-nested',
       slug: 'nested',
       baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-      branch: 'main',
     });
     const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
       worktreePath: worktree,
@@ -496,7 +520,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       sessionId: 'session-confine',
       slug: 'confine',
       baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-      branch: 'main',
     });
     const { snapshotPath } = await captureWorktreeSnapshot({
       worktreePath: worktree,
@@ -537,7 +560,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       sessionId: 'session-symlink',
       slug: 'symlink',
       baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-      branch: 'main',
     });
     const { snapshotPath } = await captureWorktreeSnapshot({
       worktreePath: worktree,
@@ -565,7 +587,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       sessionId: 'session-dotgit',
       slug: 'dotgit',
       baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-      branch: 'main',
     });
     const { snapshotPath } = await captureWorktreeSnapshot({
       worktreePath: worktree,
@@ -603,7 +624,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
         sessionId: 'session-hiddenver',
         slug: 'hiddenver',
         baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-        branch: 'main',
       }),
     ).rejects.toThrow(/index flag hides/);
   });
@@ -626,7 +646,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       sessionId: 'session-conflict',
       slug: 'conflict',
       baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-      branch: 'main',
     });
     const { snapshotPath } = await captureWorktreeSnapshot({
       worktreePath: worktree,
@@ -657,7 +676,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
         sessionId: 'session-perms',
         slug: 'perms',
         baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-        branch: 'main',
       });
       const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
         worktreePath: worktree,
@@ -669,6 +687,29 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'the archive is owner-only before the first byte is written (R5-1)',
+    async () => {
+      await fs.writeFile(path.join(worktree, 'secret.txt'), 'private\n');
+      tarCreateEntryModes.length = 0;
+      const m = await buildWorktreeSnapshotMeta(worktree, {
+        sessionId: 'session-precreate',
+        slug: 'precreate',
+        baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      });
+      await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: m,
+      });
+      // The temp archive must already exist at 0600 when tar opens it; a
+      // chmod only after the write would record -1 (or a umask-derived mode)
+      // here while still ending at 0600.
+      expect(tarCreateEntryModes.length).toBeGreaterThan(0);
+      expect(tarCreateEntryModes.every((mode) => mode === 0o600)).toBe(true);
+    },
+  );
+
   it('records the branch actually checked out at capture (P2)', async () => {
     // A session created detached may `git switch -c` later; the header must
     // record the real branch even though the sidecar still says detached ('').
@@ -677,7 +718,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       sessionId: 'session-branch',
       slug: 'branch',
       baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-      branch: '',
     });
     expect(m.branch).toBe('real-branch');
   });
@@ -695,7 +735,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       sessionId: 'session-dist',
       slug: 'dist',
       baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-      branch: 'main',
     });
     const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
       worktreePath: worktree,
@@ -719,7 +758,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       sessionId: 'session-dist-untracked',
       slug: 'dist-untracked',
       baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-      branch: 'main',
     });
     const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
       worktreePath: worktree,
@@ -751,7 +789,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       sessionId: 'session-ignored',
       slug: 'ignored',
       baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-      branch: 'main',
     });
     const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
       worktreePath: worktree,
@@ -789,7 +826,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
         sessionId: 'session-nogit',
         slug: 'nogit',
         baseCommit: 'x',
-        branch: 'main',
       }),
     ).rejects.toThrow();
     await expect(
@@ -830,7 +866,6 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       sessionId: 'session-fsmonitor',
       slug: 'fsmonitor',
       baseCommit: git(worktree, 'rev-parse', 'HEAD'),
-      branch: 'main',
     });
     await expect(fs.access(canary)).rejects.toThrow();
   });
