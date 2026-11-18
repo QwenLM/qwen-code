@@ -18,6 +18,7 @@ import {
   getInlinePlainText,
 } from '../../utils/InlineMarkdownRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
+import { truncateToWidth } from '../../utils/textUtils.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type {
   ToolCallConfirmationDetails,
@@ -50,6 +51,10 @@ const COMPACT_BODY_MAX_LINES = 5;
 // content pays for it up front or the clip lands outside the cap unannounced.
 const MARKER_ROW = 1;
 
+// The branch's own body element — the command, the diff — is what the user is
+// being asked to authorise, so it keeps one row of any shared grant.
+const SUBJECT_ROW = 1;
+
 /**
  * Marker for content this component clipped by hand rather than through
  * MaxSizedBox. Registering the overflow is what makes the global
@@ -81,10 +86,18 @@ const OverflowNotice: React.FC<{
     return () => actions.removeOverflowingId(id);
   }, [actions, id, clipped]);
 
+  // The count is the whole point of the row when content was dropped, so the
+  // message is cut back to leave its columns free. Left to the row's own
+  // truncation, a long message takes everything and the count disappears.
+  const shownMessage =
+    width === undefined || !tail
+      ? message
+      : truncateToWidth(message, Math.max(0, width - 1 - stringWidth(tail)));
+
   return (
     <Box flexShrink={0}>
       <Text color={color} wrap="truncate">
-        {message}
+        {shownMessage}
       </Text>
       {tail ? (
         <Box flexShrink={0}>
@@ -93,6 +106,22 @@ const OverflowNotice: React.FC<{
       ) : null}
     </Box>
   );
+};
+
+/**
+ * Registers the reveal for content dropped with no row left to announce it.
+ * The count rides another row's tail, so this renders nothing itself; without
+ * it a clip this component performed would be silent and unrevealable.
+ */
+const HiddenOverflowRegistration: React.FC = () => {
+  const id = useId();
+  const actions = useOverflowActions();
+  useEffect(() => {
+    if (!actions) return;
+    actions.addOverflowingId(id);
+    return () => actions.removeOverflowingId(id);
+  }, [actions, id]);
+  return null;
 };
 
 export interface ToolConfirmationMessageProps {
@@ -337,24 +366,28 @@ export const ToolConfirmationMessage: React.FC<
     return warnings.length === 0 ? 0 : warningRows(warnings) + 1;
   }
 
-  // Inside one capped column the warnings box and the branch's own body
-  // element (the diff, the command) split `bodyHeight` rows. A warning renders
-  // as one pinned, truncated row, so the box needs `warnings.length` rows to
-  // show them all, and once it has to cut it renders exactly the ceiling it is
-  // given — which makes that ceiling the charge against the other side. The
-  // other side always keeps a row: with two it lays its element out through a
-  // box, with one it renders the notice that counts what it dropped.
+  // Inside one capped column the warnings and the branch's own body element
+  // (the diff, the command) split `bodyHeight` rows. The body element is the
+  // thing being authorised, so it reserves its row first and the warnings share
+  // out what is left: they keep their wrapped text while that fits, and once it
+  // does not, each is cut to one row, which is the charge that stops a warning
+  // wrapping to eight rows from squeezing the command out of its own dialog.
   function splitWarningBudget(bodyHeight: number, warnings: string[]) {
-    const want = warnings.length;
+    const room = bodyHeight - SUBJECT_ROW;
+    const wrapped = warningRows(warnings);
+    const want = wrapped <= room ? wrapped : warnings.length;
     // The blank row between the two sides is affordable only while both still
     // get a row once it is charged.
-    const gap = bodyHeight >= want + MARKER_ROW + MARKER_ROW ? 1 : 0;
-    const maxHeight = Math.min(
-      want,
-      Math.max(bodyHeight - MARKER_ROW - gap, MARKER_ROW),
-      bodyHeight,
-    );
-    return { maxHeight, gap, rows: maxHeight };
+    const gap = room >= want + MARKER_ROW ? 1 : 0;
+    const warningHeight = Math.min(want, Math.max(room - gap, 0));
+    return {
+      warningHeight,
+      gap,
+      // The rows fit the warnings as written, so nothing is cut and they render
+      // as plain wrapping text; otherwise they go through the truncating arms.
+      uncapped: warningHeight >= wrapped,
+      subjectHeight: bodyHeight - warningHeight - gap,
+    };
   }
 
   if (confirmationDetails.type === 'edit') {
@@ -411,21 +444,22 @@ export const ToolConfirmationMessage: React.FC<
     bodyBudget = compactClamp(availableBodyContentHeight());
     const bodyHeight = bodyBudget;
 
-    const constrainWarnings =
-      warnings.length > 0 &&
-      bodyHeight !== undefined &&
-      warningsHeight(warnings) + MINIMUM_MAX_HEIGHT > bodyHeight;
     let warningMaxHeight: number | undefined;
+    let warningsCapped = false;
     let warningMarginBottom = warnings.length > 0 ? 1 : 0;
     let diffHeight = bodyHeight;
-    if (constrainWarnings && bodyHeight !== undefined) {
+    if (warnings.length > 0 && bodyHeight !== undefined) {
       const warningSplit = splitWarningBudget(bodyHeight, warnings);
       warningMarginBottom = warningSplit.gap;
-      warningMaxHeight = warningSplit.maxHeight;
-      diffHeight = bodyHeight - warningSplit.rows - warningSplit.gap;
+      warningsCapped = !warningSplit.uncapped;
+      warningMaxHeight = warningSplit.uncapped
+        ? undefined
+        : warningSplit.warningHeight;
+      diffHeight = warningSplit.subjectHeight;
     } else if (diffHeight !== undefined) {
       diffHeight = Math.max(diffHeight - warningsHeight(warnings), 1);
     }
+    const warningsDropped = warningMaxHeight === 0;
 
     const renderedDiff =
       diffHeight === undefined || diffHeight >= MINIMUM_MAX_HEIGHT ? (
@@ -437,7 +471,17 @@ export const ToolConfirmationMessage: React.FC<
           settings={settings}
         />
       ) : diffHeight === 1 ? (
-        <OverflowNotice message={t('... diff hidden ...')} />
+        // The diff's last row is spent announcing itself: the renderer has no
+        // one-row arm, so the change itself cannot be shown at this grant. The
+        // warnings squeezed out with it are counted on the same row.
+        <OverflowNotice
+          message={t('... diff hidden ...')}
+          tail={
+            warningsDropped
+              ? `+${warnings.length} warning(s) hidden`
+              : undefined
+          }
+        />
       ) : null;
 
     bodyContent = (
@@ -449,16 +493,19 @@ export const ToolConfirmationMessage: React.FC<
             marginLeft={1}
             marginBottom={warningMarginBottom}
           >
-            {constrainWarnings &&
-            warningMaxHeight === 1 &&
-            warnings.length > 1 ? (
-              // A box cannot go below its two-row floor, so a one-row ask with
-              // several warnings would render two and overflow the column; the
-              // count rides a pinned row that truncation cannot squeeze off.
-              // Earlier warnings describe the mode, the last names the exact
-              // action, so it is the row that survives.
+            {warningsDropped ? (
+              // No row left for the warnings: the body element kept the grant.
+              // Nothing renders here, so the reveal is registered directly and
+              // the count rides the surviving row's tail.
+              <HiddenOverflowRegistration />
+            ) : warningsCapped && warningMaxHeight === 1 ? (
+              // A box cannot go below its two-row floor, so a one-row ask gets a
+              // pinned row instead. Earlier warnings describe the mode, the last
+              // names the exact action, so it is the row that survives, and the
+              // width says whether truncation cut characters off it.
               <OverflowNotice
                 color={theme.status.warning}
+                width={warningContentWidth}
                 message={`⚠ ${warnings.at(-1)?.replace(/\r\n?|\n/g, ' ↵ ')}`}
                 tail={
                   warnings.length > 1
@@ -466,11 +513,11 @@ export const ToolConfirmationMessage: React.FC<
                     : undefined
                 }
               />
-            ) : constrainWarnings ? (
+            ) : warningsCapped ? (
               <MaxSizedBox
                 maxHeight={warningMaxHeight}
                 maxWidth={warningContentWidth}
-                overflowDirection="bottom"
+                overflowDirection="top"
               >
                 {warnings.map((warning, idx) => (
                   <Box key={idx}>
@@ -551,21 +598,22 @@ export const ToolConfirmationMessage: React.FC<
     // warnings escaped it.
     bodyBudget = compactClamp(availableBodyContentHeight());
 
-    const warningsConstrained =
-      warningsCount > 0 &&
-      bodyBudget !== undefined &&
-      warningsHeight(warnings) + MINIMUM_MAX_HEIGHT > bodyBudget;
     let warningMarginTop = warningsCount > 0 ? 1 : 0;
     let warningMaxHeight: number | undefined;
+    let warningsCapped = false;
     let commandHeight = bodyBudget;
-    if (warningsConstrained && bodyBudget !== undefined) {
+    if (warningsCount > 0 && bodyBudget !== undefined) {
       const warningSplit = splitWarningBudget(bodyBudget, warnings);
       warningMarginTop = warningSplit.gap;
-      warningMaxHeight = warningSplit.maxHeight;
-      commandHeight = bodyBudget - warningSplit.rows - warningSplit.gap;
+      warningsCapped = !warningSplit.uncapped;
+      warningMaxHeight = warningSplit.uncapped
+        ? undefined
+        : warningSplit.warningHeight;
+      commandHeight = warningSplit.subjectHeight;
     } else if (commandHeight !== undefined) {
       commandHeight = Math.max(commandHeight - warningsHeight(warnings), 1);
     }
+    const warningsDropped = warningMaxHeight === 0;
 
     const renderedCommand =
       commandHeight === undefined || commandHeight >= MINIMUM_MAX_HEIGHT ? (
@@ -583,12 +631,18 @@ export const ToolConfirmationMessage: React.FC<
       ) : commandHeight === 1 ? (
         // The box cannot honour a one-row ask, so a pinned truncated row keeps
         // a cue that the command continues and registers it for the reveal only
-        // when the truncation really did cut the command off.
+        // when the truncation really did cut the command off. The command kept
+        // that row from the warnings, so the warnings it dropped ride the tail.
         <Box paddingX={1} marginLeft={1}>
           <OverflowNotice
             color={theme.text.link}
             width={warningContentWidth}
             message={executionProps.command.replace(/\r\n?|\n/g, ' ↵ ')}
+            tail={
+              warningsDropped
+                ? `+${warningsCount} warning(s) hidden`
+                : undefined
+            }
           />
         </Box>
       ) : null;
@@ -603,15 +657,19 @@ export const ToolConfirmationMessage: React.FC<
             marginLeft={1}
             marginTop={warningMarginTop}
           >
-            {warningsConstrained &&
-            warningMaxHeight === 1 &&
-            warningsCount > 1 ? (
-              // The box floor is two rows, so a one-row ask with several
-              // warnings gets a pinned row instead. The last warning names the
-              // exact action; the earlier ones only describe the mode, so it
-              // keeps that row.
+            {warningsDropped ? (
+              // No row left for the warnings: the command kept the grant. The
+              // count rides the command row's tail, so nothing renders here and
+              // the reveal is registered directly.
+              <HiddenOverflowRegistration />
+            ) : warningsCapped && warningMaxHeight === 1 ? (
+              // The box floor is two rows, so a one-row ask gets a pinned row
+              // instead. The last warning names the exact action; the earlier
+              // ones only describe the mode, so it keeps that row, and the width
+              // says whether truncation cut characters off it.
               <OverflowNotice
                 color={theme.status.warning}
+                width={warningContentWidth}
                 message={`⚠ ${warnings.at(-1)?.replace(/\r\n?|\n/g, ' ↵ ')}`}
                 tail={
                   warningsCount > 1
@@ -619,11 +677,11 @@ export const ToolConfirmationMessage: React.FC<
                     : undefined
                 }
               />
-            ) : warningsConstrained ? (
+            ) : warningsCapped ? (
               <MaxSizedBox
                 maxHeight={warningMaxHeight}
                 maxWidth={warningContentWidth}
-                overflowDirection="bottom"
+                overflowDirection="top"
               >
                 {warnings.map((warning, idx) => (
                   <Box key={idx}>

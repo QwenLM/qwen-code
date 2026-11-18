@@ -1147,6 +1147,9 @@ describe('ToolConfirmationMessage', () => {
       expect(frame.split(EOL).length).toBeLessThanOrEqual(
         availableTerminalHeight,
       );
+      // The warnings cannot keep their wrapped text inside the compact ceiling,
+      // so each is cut to one truncated row and the diff keeps the rows left
+      // over, clipped with its own counted footer.
       expect(frame).toContain('Plan mode could not determine');
       expect(frame).toContain('Exact shell command');
       expect(frame).toContain('lines hidden');
@@ -1194,10 +1197,11 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).toContain('Yes, allow once');
     });
 
-    it('counts the edit warnings a one-row body budget cannot show', async () => {
-      // Eight rows leave a one-row body, and the warning side wins that row: the
-      // warning naming the exact action is the one that changes the approval, so
-      // the mode warning is what goes — and it goes announced, not silently.
+    it('counts the edit warnings a one-row body budget drops whole', async () => {
+      // Eight rows leave a one-row body and the diff is the thing being
+      // authorised, so it keeps that row. Both warnings go — every row of them,
+      // not just their tails — and the count rides the row that survived so the
+      // removal is announced rather than silent.
       const availableTerminalHeight = 8;
       const { lastFrame } = render(
         <OverflowProvider>
@@ -1224,16 +1228,17 @@ describe('ToolConfirmationMessage', () => {
 
       await vi.waitFor(() => {
         const frame = lastFrame() ?? '';
-        expect(frame).toMatch(/\+1 warning\(s\) hidden/);
-        expect(frame).toContain('overflowing:1');
+        expect(frame).toMatch(/\+2 warning\(s\) hidden/);
+        // One id for the diff that has no room to render, one for the warnings
+        // dropped with no row of their own to say so.
+        expect(frame).toMatch(/overflowing:[1-9]/);
       }, WAIT_FOR_FRAME);
       const frame = lastFrame() ?? '';
       expect(frame.split(EOL).length).toBeLessThanOrEqual(
         availableTerminalHeight + 1,
       );
-      // The kept row is truncated to pay for its own count, so assert its head:
-      // the dropped warning would occupy that head instead.
-      expect(frame).toContain('Exact shell command:');
+      expect(frame).toContain('... diff hidden ...');
+      expect(frame).not.toContain('Exact shell command:');
       expect(frame).not.toContain('Unknown shell safety');
       expect(frame).toContain('Apply this change?');
       expect(frame).toContain('Yes, allow once');
@@ -1555,6 +1560,10 @@ describe('ToolConfirmationMessage', () => {
       // command keeps the row left over as a pinned truncated row. Uncapped and
       // unpinned, the same input puts seven body rows under a five-row cap, and
       // the cap answers by compressing rows onto each other.
+      //
+      // The warning box cuts its head, not its tail: the warning naming the
+      // exact action is the last one and the one that changes the approval, so
+      // it is the row that has to survive a cut.
       const availableTerminalHeight = 12;
       const { lastFrame } = render(
         <OverflowProvider>
@@ -1586,24 +1595,110 @@ describe('ToolConfirmationMessage', () => {
 
       await vi.waitFor(() => {
         const frame = lastFrame() ?? '';
-        expect(frame).toMatch(/last \d+ lines hidden/);
+        expect(frame).toMatch(/first \d+ lines hidden/);
         expect(frame).toMatch(/overflowing:[1-9]/);
       }, WAIT_FOR_FRAME);
       const frame = lastFrame() ?? '';
       expect(frame.split(EOL).length).toBeLessThanOrEqual(
         availableTerminalHeight + 1,
       );
-      // A contiguous prefix of the warnings, counted, with the head of the list
-      // intact: the compression artifact dropped `warning one` first.
-      expect(frame).toContain('warning one: writes to production');
-      expect(frame).toContain('warning two: outside workspace');
-      expect(frame).not.toContain('warning five: deletes state');
+      // A contiguous block of the warnings, counted, with the tail of the list
+      // intact: the dropped rows are the earlier mode warnings.
+      expect(frame).toContain('warning three: network access');
+      expect(frame).toContain('warning five: deletes state');
+      expect(frame).not.toContain('warning one: writes to production');
       // The command keeps a row and says the rest continues; it was squeezed to
       // one pinned truncated row, not dropped and not left as blank rows.
       expect(frame).toContain('npm run deploy');
       expect(frame).not.toContain('--project=prod');
       expect(frame).toContain('Yes, allow once');
       expect(frame).toContain('No, suggest changes (esc)');
+    });
+
+    it('keeps the command row when one warning takes the whole body budget', async () => {
+      // Eight rows of chrome leave a one-row body, and the warning used to take
+      // it: the command fell to zero rows and disappeared, leaving
+      // `Yes, allow once` answering a command the user never saw. The command is
+      // the thing being authorised, so it keeps the row and says what went.
+      const availableTerminalHeight = 8;
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'exec',
+                title: 'Confirm Shell Command',
+                command: 'npm run deploy -- --dry-run --verbose --project=prod',
+                rootCommand: 'npm',
+                hideAlwaysAllow: true,
+                warnings: ['warning one: writes to production'],
+                onConfirm: vi.fn(),
+              }}
+              config={mockConfig}
+              availableTerminalHeight={availableTerminalHeight}
+              contentWidth={50}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+
+      await vi.waitFor(() => {
+        const frame = lastFrame() ?? '';
+        expect(frame).toContain('npm run deploy');
+        expect(frame).toMatch(/overflowing:[1-9]/);
+      }, WAIT_FOR_FRAME);
+      const frame = lastFrame() ?? '';
+      // The warning that gave up its row is counted on the row that kept it, so
+      // the removal is visible and not merely registered.
+      expect(frame).toContain('+1 warning(s) hidden');
+      expect(frame).not.toContain('warning one');
+      expect(frame).not.toContain('--project=prod');
+      expect(frame).toContain("Allow execution of: 'npm'?");
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No, suggest changes (esc)');
+    });
+
+    it('keeps the command row in a compact exec whose warnings take the body', async () => {
+      // The compact ceiling replaces the grant rather than charging the chrome
+      // twice, so a four-row compact exec also lands on a one-row body. Same
+      // invariant at the other chrome tier: the command survives, truncated and
+      // registered, and it carries the warning count.
+      const availableTerminalHeight = 4;
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'exec',
+                title: 'Confirm Shell Command',
+                command: 'npm run deploy -- --dry-run --verbose --project=prod',
+                rootCommand: 'npm',
+                hideAlwaysAllow: true,
+                warnings: ['warning one: writes to production'],
+                onConfirm: vi.fn(),
+              }}
+              config={mockConfig}
+              availableTerminalHeight={availableTerminalHeight}
+              contentWidth={50}
+              compactMode={true}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+
+      await vi.waitFor(() => {
+        const frame = lastFrame() ?? '';
+        expect(frame).toContain('npm run deploy');
+        expect(frame).toMatch(/overflowing:[1-9]/);
+      }, WAIT_FOR_FRAME);
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('+1 warning(s) hidden');
+      expect(frame).not.toContain('warning one');
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No');
     });
 
     it('announces an exec command the body budget shrinks to a single row', async () => {
