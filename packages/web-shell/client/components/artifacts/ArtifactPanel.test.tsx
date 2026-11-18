@@ -187,6 +187,23 @@ vi.mock('./SideTaskPanel', () => ({
   },
 }));
 
+const changeOverviewHook = vi.hoisted(() => ({
+  args: undefined as unknown[] | undefined,
+}));
+vi.mock('./useChangeOverview', () => ({
+  useChangeOverview: (...args: unknown[]) => {
+    changeOverviewHook.args = args;
+    return {
+      gitAvailable: true,
+      loadFailed: false,
+      loading: false,
+      units: [],
+      commitsTruncated: false,
+      refresh: vi.fn(),
+    };
+  },
+}));
+
 const { ArtifactPanel } = await import('./ArtifactPanel');
 type ArtifactPanelTab = Parameters<typeof ArtifactPanel>[0]['tabs'][number];
 const { useArtifactWorkspaceTarget } = await import(
@@ -3613,6 +3630,301 @@ describe('ArtifactPanel add menu', () => {
     expect(menuText).toContain('New side task');
     expect(menuText).not.toContain('Existing side task');
   });
+
+  it('opens the change overview from the add menu', () => {
+    const onOpenChangeOverview = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'artifact',
+                kind: 'artifact',
+                title: 'Report',
+                artifactId: 'report',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+            ]}
+            activeTabId="artifact"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            changeOverviewAvailable
+            onOpenChangeOverview={onOpenChangeOverview}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    openAddMenu(container);
+    const item = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((el) => el.textContent?.includes('Change overview'));
+    expect(item).toBeDefined();
+    act(() => item?.click());
+    expect(onOpenChangeOverview).toHaveBeenCalledOnce();
+  });
+
+  it('hides the change overview from the add menu when unavailable', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'artifact',
+                kind: 'artifact',
+                title: 'Report',
+                artifactId: 'report',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+            ]}
+            activeTabId="artifact"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            changeOverviewAvailable={false}
+            onOpenChangeOverview={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    openAddMenu(container);
+    const menuText = document.body.querySelector('[role="menu"]')?.textContent;
+    expect(menuText).not.toContain('Change overview');
+  });
+
+  it('offers the change overview as an empty-state action when no tab is open', () => {
+    const onOpenChangeOverview = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[]}
+            activeTabId={null}
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            changeOverviewAvailable
+            onOpenChangeOverview={onOpenChangeOverview}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const action = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="right-panel-empty-actions"] button',
+      ),
+    ).find((button) => button.textContent?.includes('Change overview'));
+    expect(action).toBeDefined();
+    act(() => action?.click());
+    expect(onOpenChangeOverview).toHaveBeenCalledOnce();
+  });
+
+  it('respects the items allowlist and hides the change overview entry', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'artifact',
+                kind: 'artifact',
+                title: 'Report',
+                artifactId: 'report',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+            ]}
+            activeTabId="artifact"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            items={['review']}
+            changeOverviewAvailable
+            onOpenChangeOverview={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    openAddMenu(container);
+    const menuText = document.body.querySelector('[role="menu"]')?.textContent;
+    expect(menuText).not.toContain('Change overview');
+  });
+
+  it('hides the change overview entry once its singleton tab is already open', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'artifact',
+                kind: 'artifact',
+                title: 'Report',
+                artifactId: 'report',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+              },
+              {
+                id: 'change_overview',
+                kind: 'change_overview',
+                title: 'Change overview',
+                workspaceCwd: '/primary',
+                sessionId: 's1',
+              },
+            ]}
+            activeTabId="artifact"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            changeOverviewAvailable
+            onOpenChangeOverview={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    openAddMenu(container);
+    const menuText = document.body.querySelector('[role="menu"]')?.textContent;
+    expect(menuText).not.toContain('Change overview');
+  });
+
+  it('renders the change overview panel for a change_overview tab and wires the hook', () => {
+    changeOverviewHook.args = undefined;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'change_overview',
+                kind: 'change_overview',
+                title: 'Change overview',
+                workspaceCwd: '/primary',
+                workspaceId: 'primary-id',
+                sessionId: 's1',
+              },
+            ]}
+            activeTabId="change_overview"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            changeOverviewAvailable
+            onOpenChangeOverview={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(changeOverviewHook.args).toEqual(['/primary', 's1']);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    // The panel body renders (the mocked hook yields an empty scope), not a
+    // blank slot — replacing the render branch with a <div/> fails this.
+    expect(container.textContent).toContain('No changes in this scope');
+  });
+
+  it('shows the workspace-not-found state when the change_overview workspace is gone', () => {
+    changeOverviewHook.args = undefined;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'change_overview',
+                kind: 'change_overview',
+                title: 'Change overview',
+                workspaceCwd: '/removed',
+                workspaceId: 'removed-id',
+                sessionId: 's1',
+              },
+            ]}
+            activeTabId="change_overview"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            changeOverviewAvailable
+            onOpenChangeOverview={vi.fn()}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    // The accurate not-found guard fires instead of an endless retry, and the
+    // hook never runs for a workspace the daemon no longer advertises.
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(changeOverviewHook.args).toBeUndefined();
+  });
 });
 
 describe('ArtifactPanel review downloads', () => {
@@ -5845,5 +6157,194 @@ describe('ArtifactPanel binary document previews', () => {
     const download = container.querySelector<HTMLAnchorElement>('a[download]');
     expect(download?.getAttribute('href')).toBe('blob:pdf-preview');
     expect(download?.download).toBe('Report.PDF');
+  });
+});
+
+describe('ArtifactPanel task explanation', () => {
+  const task: DaemonSessionShellTaskStatus = {
+    kind: 'shell',
+    id: 'shell-1',
+    label: 'npm run dev',
+    description: 'npm run dev',
+    status: 'running',
+    startTime: 1_000,
+    runtimeMs: 5_000,
+    command: 'npm run dev',
+    cwd: '/work/project',
+  };
+
+  type ExplainPanelProps = {
+    explainTask?: DaemonSessionShellTaskStatus | null;
+    onExplainTask?: (task: DaemonSessionShellTaskStatus) => void;
+    taskExplanation?: {
+      messageId: string;
+      taskId: string;
+      question: string;
+      answer: string;
+      isPending: boolean;
+    } | null;
+  };
+
+  function renderExplainPanel(props: ExplainPanelProps) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    mockActions.getTaskRuntime.mockImplementation(() => new Promise(() => {}));
+    const element = (p: ExplainPanelProps) => (
+      <I18nProvider language="en">
+        <ArtifactPanel
+          artifacts={[]}
+          tabs={[
+            { id: 'shell:shell-1', kind: 'shell', title: task.command, task },
+          ]}
+          activeTabId="shell:shell-1"
+          reviewChanges={[]}
+          selectedReviewPath={null}
+          onSelectTab={() => {}}
+          onCloseTab={() => {}}
+          onOpenFilePreview={() => {}}
+          onClose={() => {}}
+          explainTask={p.explainTask === undefined ? task : p.explainTask}
+          onExplainTask={p.onExplainTask}
+          taskExplanation={p.taskExplanation}
+        />
+      </I18nProvider>
+    );
+    act(() => {
+      root.render(element(props));
+    });
+    return {
+      container,
+      root,
+      rerender: (p: ExplainPanelProps) =>
+        act(() => {
+          root.render(element(p));
+        }),
+    };
+  }
+
+  it('offers a header "?" that asks about the active task', () => {
+    const onExplainTask = vi.fn();
+    const { container } = renderExplainPanel({ onExplainTask });
+    const explain = container.querySelector<HTMLButtonElement>(
+      '[data-testid="artifact-panel-explain"]',
+    );
+    expect(explain).not.toBeNull();
+    expect(explain?.getAttribute('aria-label')).toBe(
+      'Explain task: npm run dev',
+    );
+    act(() => explain?.click());
+    expect(onExplainTask).toHaveBeenCalledExactlyOnceWith(task);
+  });
+
+  it('renders no "?" without an explainable task', () => {
+    const { container } = renderExplainPanel({
+      explainTask: null,
+      onExplainTask: vi.fn(),
+    });
+    expect(
+      container.querySelector('[data-testid="artifact-panel-explain"]'),
+    ).toBeNull();
+  });
+
+  it('mirrors the explanation in place when it matches the active task', () => {
+    const { container, rerender } = renderExplainPanel({
+      onExplainTask: vi.fn(),
+      taskExplanation: {
+        messageId: 'm1',
+        taskId: 'shell-1',
+        question: 'Explain what this task is doing: npm run dev',
+        answer: 'It runs the dev server.',
+        isPending: false,
+      },
+    });
+    const block = container.querySelector(
+      '[data-testid="artifact-panel-explanation"]',
+    );
+    expect(block).not.toBeNull();
+    expect(block?.textContent).toContain(
+      'Explain what this task is doing: npm run dev',
+    );
+    expect(block?.textContent).toContain('It runs the dev server.');
+    // A button-triggered explanation is not a typed /btw command.
+    expect(block?.textContent).not.toContain('/btw');
+    // The mirror has no focusable surface of its own, so the composer
+    // panel's key hints would advertise keys that act on whatever control
+    // holds focus (Enter on the header "?" re-asks the question).
+    expect(block?.textContent).not.toContain('Press Space');
+
+    rerender({
+      onExplainTask: vi.fn(),
+      taskExplanation: {
+        messageId: 'm2',
+        taskId: 'shell-1',
+        question: 'Explain what this task is doing: npm run dev',
+        answer: '',
+        isPending: true,
+      },
+    });
+    const pendingBlock = container.querySelector(
+      '[data-testid="artifact-panel-explanation"]',
+    );
+    expect(pendingBlock?.textContent).not.toContain('Ctrl+C');
+  });
+
+  it('does not mirror an explanation for another task', () => {
+    const { container } = renderExplainPanel({
+      onExplainTask: vi.fn(),
+      taskExplanation: {
+        messageId: 'm1',
+        taskId: 'other-task',
+        question: 'Explain what this task is doing: other',
+        answer: 'About another task.',
+        isPending: false,
+      },
+    });
+    expect(
+      container.querySelector('[data-testid="artifact-panel-explanation"]'),
+    ).toBeNull();
+  });
+
+  it('remounts the mirrored answer when a new ask replaces the old one', () => {
+    const explanation = (messageId: string) => ({
+      messageId,
+      taskId: 'shell-1',
+      question: 'Explain what this task is doing: npm run dev',
+      answer: 'It runs the dev server.',
+      isPending: false,
+    });
+    const { container, rerender } = renderExplainPanel({
+      onExplainTask: vi.fn(),
+      taskExplanation: explanation('m1'),
+    });
+    const contentSelector =
+      '[data-testid="artifact-panel-explanation"] [data-web-shell-btw-content]';
+    const first = container.querySelector(contentSelector);
+    expect(first).not.toBeNull();
+
+    rerender({ onExplainTask: vi.fn(), taskExplanation: explanation('m2') });
+
+    const second = container.querySelector(contentSelector);
+    expect(second).not.toBeNull();
+    expect(second).not.toBe(first);
+  });
+
+  it('excerpts a multi-KB label in the header aria label', () => {
+    const longTask = {
+      ...task,
+      label: 'echo ' + 'x'.repeat(4_000),
+      command: 'echo ' + 'x'.repeat(4_000),
+    };
+    const { container } = renderExplainPanel({
+      explainTask: longTask,
+      onExplainTask: vi.fn(),
+    });
+    const aria =
+      container
+        .querySelector('[data-testid="artifact-panel-explain"]')
+        ?.getAttribute('aria-label') ?? '';
+    expect(aria.length).toBeLessThanOrEqual(150);
+    expect(aria).toContain('…');
   });
 });

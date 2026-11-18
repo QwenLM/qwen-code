@@ -4187,7 +4187,7 @@ describe('multi-workspace session dispatch', () => {
         .set('X-Qwen-Client-Id', 'secondary-client')
         .send({ pr });
       expect(res.status).toBe(200);
-      expect(res.body.prs).toEqual([pr]);
+      expect(res.body.prs).toEqual([{ ...pr, source: 'create' }]);
       expect(secondaryBridge.metadataCalls[0]?.metadata).toEqual({ pr });
 
       const persisted = await readSessionPrs(secondaryPath);

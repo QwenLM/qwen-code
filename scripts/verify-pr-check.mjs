@@ -23,13 +23,18 @@
  */
 
 import {
+  closeSync,
   existsSync,
   lstatSync,
+  openSync,
   readFileSync,
   readdirSync,
+  readSync,
   realpathSync,
+  statSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
+import { createHash } from 'node:crypto';
 import { isEntryPoint } from './lib/entry-point.js';
 
 export const VERDICTS = ['merge-ready', 'findings', 'blocked', 'inconclusive'];
@@ -70,7 +75,7 @@ const HEADING_TITLE_MAX = 120;
 const FOOTER =
   /^_— .+ via Qwen Code \/verify-pr \(v[^;]+; skill [0-9a-f]{12}\)_$/;
 
-const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--context-root <pr-clone>] [--publish-lane] <artifact-dir>
+const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--context-root <pr-clone>] [--context-sha256 <digest>] [--publish-lane] <artifact-dir>
 
 Checks a local round against the rules the CI publisher enforces:
 
@@ -121,6 +126,14 @@ trust root must come from the host, never from git state inside the tree the
 round controls. Without it, a pr<n>-verify-<ts> dir under tmp/ falls back to
 the clone root (the tmp container's parent); a plain dir is its own root.
 
+The path and link-count guards only refuse a context that is demonstrably
+round-controlled (inside the trust root, or a hard link retaining a second
+name); a single-link file outside the root is NOT proof the host wrote it.
+Pass --context-sha256 <digest> — the sha256 that verify-pr-prepare.mjs prints
+host-side when it writes the snapshot — to bind the content: the check refuses
+a --context whose bytes do not match, so a rewritten or substituted snapshot
+is rejected even when its path and link count look clean.
+
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
 
@@ -151,6 +164,28 @@ function readIfExists(path) {
   } catch {
     return UNREADABLE;
   }
+}
+
+// A filesystem root contains every path on its volume: '/' on POSIX, a drive
+// root like 'C:\' on Windows. Both must fail closed rather than be used as a
+// discriminating trust root (R17-1, deferred Windows drive-root case). '/' is
+// also a valid root spelling on Windows (where sep is '\\'), so accept it on
+// every platform, not only where it equals sep (R6-1).
+export function isFilesystemRoot(root) {
+  return root === sep || root === '/' || /^[A-Za-z]:[\\/]$/.test(root);
+}
+
+// Root-aware containment. A filesystem root contains every path, so it must
+// fail closed rather than compare against '//' — no real path starts with
+// '//', which silently disabled the refusal for a round dir directly under a
+// root-level tmp/ (R17-1). Both the --context refusal and the --context-root
+// containment test use this so the two stay consistent.
+function withinRoot(root, p) {
+  return (
+    isFilesystemRoot(root) ||
+    p === root ||
+    p.startsWith(root.endsWith(sep) ? root : root + sep)
+  );
 }
 
 /** OIDs are quoted at every length from 7 to 40; compare by prefix. */
@@ -286,6 +321,181 @@ function gateRecordErrors(gateText, { publishLane = false } = {}) {
     }
   }
   return [];
+}
+
+/**
+ * Whether a round log carries a `container-nonce: <value>` line whose value's
+ * sha256 equals the gate record's hash (R16-1). Walks the round dir, skipping
+ * the declaration and gate record themselves, the TOP-LEVEL binary `evidence/`
+ * subtree (the skill's PNG artifacts never carry the nonce, and charging the
+ * byte budget against them would refuse a compliant round with large evidence —
+ * R3-1; a nested dir named evidence is still scanned — R4-5), and any
+ * non-regular file (a symlink is not followed). This is the SINGLE authoritative
+ * matcher (the step-7 shell no longer re-implements it, R1-2/R2-6), so it reads
+ * each log whole — a marker behind earlier output or straddling a chunk boundary
+ * is still found (the partial line is scanned before the carry is capped, R3-3)
+ * — while bounding the AGGREGATE work: one hoisted scratch buffer (R2-5), a
+ * total byte budget, and a visited-entry cap that counts directories too, so a
+ * PR-planted dir of huge no-newline files, many empty files, or a forest of
+ * empty dirs cannot stall the check (R3-3, R4-4). Returns { found, bounded } so
+ * the caller can tell "no marker" from "stopped at the bound" (R4-1). The
+ * plaintext lives only container-local, so a host battery cannot produce a match.
+ */
+function nonceLogMatches(roundDir, expected) {
+  const CHUNK_BYTES = 1024 * 1024;
+  const TOTAL_BUDGET = 64 * 1024 * 1024;
+  // The carry is capped to bound the per-chunk concatenation (a no-newline file
+  // would otherwise grow it quadratically), but the partial line is SCANNED
+  // before capping so a marker at its head is never lost (R3-3).
+  const CARRY_CAP = 256;
+  const MAX_ENTRIES = 20000;
+  const buf = Buffer.alloc(CHUNK_BYTES);
+  let budget = TOTAL_BUDGET;
+  let visited = 0;
+  let bounded = false;
+  const matches = (text) => {
+    for (const line of text.split('\n')) {
+      const match = /container-nonce:[ \t]*(\S+)/.exec(line);
+      if (
+        match &&
+        createHash('sha256').update(match[1]).digest('hex') === expected
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const walk = (d) => {
+    let entries;
+    try {
+      entries = readdirSync(d, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    for (const entry of entries) {
+      if (budget <= 0 || visited >= MAX_ENTRIES) {
+        bounded = true;
+        return false;
+      }
+      const p = join(d, entry.name);
+      if (entry.isDirectory()) {
+        // Only the TOP-LEVEL evidence/ subtree (the skill's binary PNG
+        // artifacts) is exempt from the byte budget; a nested directory named
+        // evidence is still scanned, so a log there is not silently lost
+        // (R4-5). Directories count against the entry cap so a planted forest
+        // of empty dirs cannot make the walk unbounded (R4-4).
+        if (d === roundDir && entry.name === 'evidence') continue;
+        visited++;
+        if (walk(p)) return true;
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (
+        entry.name === 'boundary.json' ||
+        entry.name === 'boundary-gate.json'
+      ) {
+        continue;
+      }
+      visited++;
+      let fd;
+      try {
+        fd = openSync(p, 'r');
+      } catch {
+        continue;
+      }
+      try {
+        let carry = '';
+        let pos = 0;
+        while (budget > 0) {
+          const toRead = Math.min(CHUNK_BYTES, budget);
+          const n = readSync(fd, buf, 0, toRead, pos);
+          if (n === 0) break;
+          pos += n;
+          budget -= n;
+          // The budget can exhaust on the LAST file, where no next entry would
+          // trip the loop-top check; record the bound here so the caller can
+          // tell exhaustion from a genuine absence (R4-1).
+          if (budget <= 0) bounded = true;
+          const text = carry + buf.toString('utf8', 0, n);
+          const lastNl = text.lastIndexOf('\n');
+          if (lastNl >= 0) {
+            if (matches(text.slice(0, lastNl))) return true;
+            const partial = text.slice(lastNl + 1);
+            if (matches(partial)) return true;
+            carry = partial.slice(-CARRY_CAP);
+          } else {
+            if (matches(text)) return true;
+            carry = text.slice(-CARRY_CAP);
+          }
+          if (n < toRead) break;
+        }
+        if (carry && matches(carry)) return true;
+      } catch {
+        // An unreadable file is skipped, not a crash out of the check.
+      } finally {
+        closeSync(fd);
+      }
+    }
+    return false;
+  };
+  const found = walk(roundDir);
+  return { found, bounded };
+}
+
+/**
+ * The container nonce corroboration (R16-1 / D17-1 / D17-2). The gate record
+ * carries only the nonce hash, never the plaintext, and a mode:"container"
+ * declaration is refused unless a round log line hashes to it. Runs against
+ * the round dir (the checker is the authoritative enforcement point, not the
+ * shell recipe). A missing/invalid gate is left to gateRecordErrors; the
+ * ci-lane record the publish job writes is exempt.
+ */
+export function containerNonceErrors(boundaryText, gateText, roundDir) {
+  let boundary;
+  try {
+    boundary = JSON.parse(boundaryText);
+  } catch {
+    return [];
+  }
+  if (
+    !boundary ||
+    typeof boundary !== 'object' ||
+    boundary.mode !== 'container'
+  ) {
+    return [];
+  }
+  let gate;
+  try {
+    gate = JSON.parse(gateText);
+  } catch {
+    return [];
+  }
+  if (
+    !gate ||
+    typeof gate !== 'object' ||
+    gate.gate !== 'require-isolation' ||
+    gate.passed !== true
+  ) {
+    return [];
+  }
+  const expected = gate.nonceSha256;
+  if (typeof expected !== 'string' || !/^[0-9a-f]{64}$/.test(expected)) {
+    return [
+      'boundary-gate.json records no nonceSha256 (the 64-hex sha256 of the container-local nonce): a mode:"container" declaration must be tied to a nonce the battery echoed from inside the boundary, not a plaintext copied from the PR-writable record',
+    ];
+  }
+  if (roundDir) {
+    const { found, bounded } = nonceLogMatches(roundDir, expected);
+    if (found) return [];
+    if (bounded) {
+      return [
+        'the nonce log scan hit its resource bound (64 MiB total / 20000 entries) before reading a matching container-nonce line: refusing mode:"container" — the marker may exist beyond the bound; reduce the round\'s non-evidence log volume or echo the nonce into an early log; if the battery ran on the host, declare mode:"waived" with the maintainer\'s approval (a waiver is not a free bypass)',
+      ];
+    }
+  }
+  return [
+    'round logs carry no container-nonce line whose sha256 matches boundary-gate.json nonceSha256: refusing mode:"container" — the battery must echo the container-local nonce ($HOME/.qwen-verify-nonce) into its logs; if the battery ran on the host, declare mode:"waived" with the maintainer\'s approval (a waiver is not a free bypass)',
+  ];
 }
 
 // A waiver's approval must be a permalink a reader can open, not free text:
@@ -942,6 +1152,7 @@ function main(argv) {
   }
   let contextPath = null;
   let contextRoot = null;
+  let contextSha = null;
   let publishLane = false;
   const positional = [];
   for (let index = 0; index < argv.length; index++) {
@@ -962,6 +1173,14 @@ function main(argv) {
         );
         return 2;
       }
+    } else if (arg === '--context-sha256') {
+      contextSha = argv[++index];
+      if (!contextSha || !/^[0-9a-f]{64}$/.test(contextSha)) {
+        process.stderr.write(
+          `verify-pr check: --context-sha256 requires the 64-hex digest prepare printed\n\n${HELP}`,
+        );
+        return 2;
+      }
     } else if (arg === '--publish-lane') {
       // The CI publish job's flag: honors the ci-lane gate record the job
       // writes itself. An argv claim, not an authenticated identity — a
@@ -973,6 +1192,12 @@ function main(argv) {
     } else {
       positional.push(arg);
     }
+  }
+  if (contextSha && !contextPath) {
+    process.stderr.write(
+      `verify-pr check: --context-sha256 binds a --context snapshot; pass --context too\n\n${HELP}`,
+    );
+    return 2;
   }
   const dir = positional[0];
   if (!dir || positional.length > 1) {
@@ -1000,7 +1225,17 @@ function main(argv) {
       );
       return 2;
     }
-    if (realDir !== realRoot && !realDir.startsWith(realRoot + sep)) {
+    // A root of '/' contains every path, so it cannot discriminate the
+    // PR-writable tree; it is a usage error, not a trust root (R2-2). Reject
+    // it here even without --context, where the in-context refusal below is
+    // never reached.
+    if (isFilesystemRoot(realRoot)) {
+      process.stderr.write(
+        `verify-pr check: --context-root ${contextRoot} is a filesystem root, which cannot discriminate the PR-writable tree — pass the PR clone path\n\n${HELP}`,
+      );
+      return 2;
+    }
+    if (!withinRoot(realRoot, realDir)) {
       process.stderr.write(
         `verify-pr check: --context-root ${contextRoot} does not contain the artifact directory ${dir}\n\n${HELP}`,
       );
@@ -1133,13 +1368,74 @@ function main(argv) {
           ? realpathSync(dirname(container))
           : realpathSync(dir);
     }
-    if (realContext === trustRoot || realContext.startsWith(trustRoot + sep)) {
-      process.stderr.write(
-        `verify-pr check: --context must not point inside the PR-writable worktree (${contextPath}): it cannot judge its own waiver — pass a host-held copy the round never saw\n`,
-      );
+    const insideByPath = withinRoot(trustRoot, realContext);
+    // A hard link gives a PR-writable file a second name outside the trust
+    // root; realpath cannot see the source name, but a freshly written host
+    // copy has exactly one link, so a link count above one means the context
+    // shares an inode with another name the round may control (R17-1). This
+    // needs no walk of the PR-writable tree, so an unreadable subdirectory or
+    // a source outside the artifact dir cannot hide the alias (R1-1, R1-2).
+    // Only check when the path test did not already refuse.
+    let contextIsAlias = false;
+    let contextLinks = 0;
+    if (!insideByPath) {
+      try {
+        const ctxStat = statSync(realContext);
+        if (ctxStat.isFile()) {
+          contextLinks = ctxStat.nlink;
+          contextIsAlias = ctxStat.nlink !== 1;
+        }
+      } catch {
+        // A missing/unreadable context is reported by the head-OID check below.
+      }
+    }
+    if (insideByPath || contextIsAlias) {
+      // One sentence per cause: for an alias or a '/' trust root the path is
+      // demonstrably outside the worktree, so the path-inside wording would
+      // be false and its remedy unreachable (R1-4).
+      let reason;
+      if (contextIsAlias) {
+        reason = `--context ${contextPath} is a hard link (${contextLinks} names) to a file the round can write; copy it instead of linking it, so the coordinates judging the waiver come from a host-held copy the round never saw`;
+      } else if (isFilesystemRoot(trustRoot)) {
+        // Only the derived root reaches here: an explicit filesystem-root
+        // --context-root is already a usage error at the containment gate
+        // (R2-2). The artifact dir sits directly under root-level tmp/ and no
+        // PR clone can contain it, so the remedy is to move it, not to pass
+        // --context-root (which would only trade this refusal for a containment
+        // error, R1-4).
+        reason = `--context ${contextPath} cannot be trusted: the artifact dir sits directly under a root-level tmp/, so the derived trust root is '${trustRoot}', which contains every path — move the artifact dir out of root-level tmp/ (no PR clone can contain it)`;
+      } else {
+        reason = `--context must not point inside the PR-writable worktree (${contextPath}): it cannot judge its own waiver — pass a host-held copy the round never saw`;
+      }
+      process.stderr.write(`verify-pr check: ${reason}\n`);
       return 1;
     }
     const snapshotText = readIfExists(contextPath);
+    // Content binding (R2-1): the digest prepare computed host-side is the
+    // provenance proof. A path outside the root and a single link can both be
+    // arranged by the round, but the bytes prepare wrote cannot be forged
+    // without matching this digest. Refuse on mismatch or an unverifiable read.
+    if (contextSha) {
+      if (snapshotText === null || snapshotText === UNREADABLE) {
+        process.stderr.write(
+          `verify-pr check: --context ${contextPath} is missing or unreadable; cannot verify it against --context-sha256\n`,
+        );
+        return 1;
+      }
+      const actualSha = createHash('sha256')
+        .update(snapshotText, 'utf8')
+        .digest('hex');
+      if (actualSha !== contextSha) {
+        process.stderr.write(
+          `verify-pr check: --context ${contextPath} does not match --context-sha256 (the snapshot prepare wrote); it was modified or is not the host-held copy — re-copy it from the prepare context\n`,
+        );
+        return 1;
+      }
+    } else {
+      // Disclose that provenance was never bound, rather than letting a clean
+      // path/link check read as proof the host wrote the snapshot (deferred).
+      snapshotWarning = `--context ${contextPath} has no --context-sha256 binding; provenance rests on the path/link checks alone — pass the digest prepare printed to bind the snapshot's bytes`;
+    }
     if (snapshotText !== null && snapshotText !== UNREADABLE) {
       try {
         const snapshot = JSON.parse(snapshotText);
@@ -1193,16 +1489,28 @@ function main(argv) {
   // The CI entry path is defined by $QWEN_VERIFY_CONTEXT; there the publish
   // job owns the declaration, so an absent boundary.json is a warning for
   // the round's own pre-finish self-check, not an error it cannot clear.
+  const publisherOwnsBoundary = !!process.env.QWEN_VERIFY_CONTEXT;
   const result = checkArtifacts({
     files,
     evidence,
     expectedHead,
-    publisherOwnsBoundary: !!process.env.QWEN_VERIFY_CONTEXT,
+    publisherOwnsBoundary,
     publishLane,
     coordinates,
     evidenceUnreadable,
     unreadableKeys,
   });
+  // The container nonce corroboration (R16-1) needs the round dir to scan the
+  // battery's logs, so it lives here rather than in checkArtifacts. It runs
+  // UNCONDITIONALLY: the exemption is the RECORD, not a flag — containerNonceErrors
+  // returns [] for the ci-lane record the publish job writes and for non-container
+  // modes, so neither the --publish-lane flag (R1-7) nor $QWEN_VERIFY_CONTEXT
+  // (R2-7) can switch the binding off for a require-isolation container claim.
+  // publisherOwnsBoundary still governs the absent-declaration tolerance in
+  // checkArtifacts; it does not exempt the nonce binding.
+  result.errors.push(
+    ...containerNonceErrors(files.boundary, files.boundaryGate, dir),
+  );
   result.errors.unshift(...unreadableErrors);
   if (snapshotWarning) result.warnings.unshift(snapshotWarning);
   const lines = [`verify-pr check: ${dir}`];

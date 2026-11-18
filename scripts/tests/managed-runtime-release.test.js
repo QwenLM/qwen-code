@@ -541,8 +541,13 @@ describe('Managed runtime publication gates', () => {
     // Workflow-wide: no release step may turn off Javadoc validation (the
     // v0.26.5 repair escaped doclint rather than skipping the javadoc gate).
     expect(JSON.stringify(workflow)).not.toMatch(
-      /-D(?:maven\.javadoc\.skip|doclint=|additionalJOption=)/,
+      /-D(?:maven\.javadoc\.(?:skip|failOnError|failOnWarnings)|doclint=|additionalJOption=)/,
     );
+    expect(
+      step('Verify the executable JAR and publication profile')[
+        'continue-on-error'
+      ],
+    ).toBeUndefined();
   });
 
   it('ships a single executable JAR and keeps the Central release plugins', () => {

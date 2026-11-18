@@ -9,6 +9,9 @@ For sending results without a conversational bot, [DingTalk Webhook Sending](./d
 use a configured group destination. They share the daemon's Channel delivery
 path and do not listen for incoming messages.
 
+[Generic Webhook Sending](./generic-webhook) uses the same delivery path for a
+receiver you control, with a fixed JSON contract and optional Bearer token.
+
 ## How It Works
 
 When you run `qwen channel start`, Qwen Code:
@@ -56,7 +59,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 | Option              | Required         | Description                                                                                                                                                                                                                                                                                                                                           |
 | ------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`              | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dingtalk-webhook`, `dws`, `wecom`, `wecom-webhook`, `wecom-callback`, `feishu`, `feishu-webhook`, `github`, `gitlab`, `email`, or a custom type from an extension (see [Plugins](./plugins))                                                                                                   |
+| `type`              | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dingtalk-webhook`, `dws`, `wecom`, `wecom-webhook`, `wecom-callback`, `feishu`, `feishu-webhook`, `generic-webhook`, `github`, `gitlab`, `email`, or a custom type from an extension (see [Plugins](./plugins))                                                                                |
 | `token`             | See description  | Required for Telegram (bot token) and WeCom Callback (verification token). Supports `$ENV_VAR` syntax. See [WeCom Callback](./wecom-callback) for application credentials                                                                                                                                                                             |
 | `clientId`          | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                                                                                                                                                                                                          |
 | `clientSecret`      | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                                                                                                                                                                                                   |

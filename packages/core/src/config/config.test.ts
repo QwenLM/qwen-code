@@ -45,8 +45,16 @@ import {
   AGENT_LOOP_SURFACES,
   UNIFIED_SURFACE_DEFAULTS,
   EVENT_BUS_SURFACE_DEFAULTS,
+  type AgentLoopSurface,
 } from './agent-loop-rollout.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
+
+/** The surfaces the shared loop is on for when nothing sets it. */
+const ON_BY_DEFAULT: ReadonlySet<AgentLoopSurface> = new Set([
+  'headless',
+  'ink',
+  'agent-core',
+]);
 import { Storage } from './storage.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
@@ -5194,6 +5202,44 @@ describe('Server Config (config.ts)', () => {
       expect(replacement.getSnapshot().goal?.status).toBe('active');
     });
 
+    it('refreshes the goal projection from the restored record on load', async () => {
+      // Restore itself writes nothing; the projection backfill is what gives
+      // a session journaled before the sidecar existed its sidebar marker.
+      const config = recordingConfig({
+        sessionData: resumedGoalSession('paused'),
+      });
+      const recorder = config.getChatRecordingService();
+      if (!recorder) throw new Error('expected a chat recording service');
+      const refresh = vi
+        .spyOn(recorder, 'refreshGoalProjection')
+        .mockImplementation(() => {});
+
+      await config.getGoalRuntimeReady();
+
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect(refresh).toHaveBeenCalledWith(
+        expect.objectContaining({
+          goalId: 'g-resumed',
+          status: 'paused',
+          objective: 'resume me',
+        }),
+      );
+    });
+
+    it('refreshes the goal projection to null for a goal-less restore', async () => {
+      const config = recordingConfig();
+      const recorder = config.getChatRecordingService();
+      if (!recorder) throw new Error('expected a chat recording service');
+      const refresh = vi
+        .spyOn(recorder, 'refreshGoalProjection')
+        .mockImplementation(() => {});
+
+      await config.getGoalRuntimeReady();
+
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect(refresh).toHaveBeenCalledWith(null);
+    });
+
     it('reports a committed Goal transition to telemetry', async () => {
       vi.mocked(logGoalState).mockClear();
       const config = recordingConfig();
@@ -7438,15 +7484,15 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to on for headless and the Ink TUI and off for every other surface', () => {
+      it('defaults to on for headless, the Ink TUI and AgentCore and off for every other surface', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
           expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(
-            surface === 'headless' || surface === 'ink',
+            ON_BY_DEFAULT.has(surface),
           );
         }
       });
 
-      it.each(['headless', 'ink'] as const)(
+      it.each(['headless', 'ink', 'agent-core'] as const)(
         'keeps %s on its own loop when the setting is false',
         (surface) => {
           expect(
@@ -7457,7 +7503,7 @@ describe('Server Config (config.ts)', () => {
         },
       );
 
-      it.each(['headless', 'ink'] as const)(
+      it.each(['headless', 'ink', 'agent-core'] as const)(
         'keeps %s on its own loop when the environment turns it off',
         (surface) => {
           vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', `${surface}=0`);
@@ -7512,7 +7558,7 @@ describe('Server Config (config.ts)', () => {
         vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'opentui');
         const config = makeConfig();
         expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(true);
-        expect(config.isUnifiedAgentLoopEnabled('agent-core')).toBe(false);
+        expect(config.isUnifiedAgentLoopEnabled('acp')).toBe(false);
         expect(config.isUnifiedAgentLoopEnabled('speculation')).toBe(false);
       });
     });
@@ -7563,10 +7609,10 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to shared for headless and the Ink TUI and legacy for every other surface', () => {
+      it('defaults to shared for headless, the Ink TUI and AgentCore and legacy for every other surface', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
           expect(makeConfig().getAgentLoopPath(surface)).toBe(
-            surface === 'headless' || surface === 'ink' ? 'shared' : 'legacy',
+            ON_BY_DEFAULT.has(surface) ? 'shared' : 'legacy',
           );
         }
       });
@@ -9985,6 +10031,27 @@ describe('Server Config (config.ts)', () => {
     expect(seen).toEqual([{ sessionId: 's1', number: 2 }]);
   });
 
+  it('relocateWorkingDirectory should carry the session goal-changed callback to the fresh SessionService', async () => {
+    // Like the pr-bound callback, the goal-changed callback is registered
+    // once at session init; relocation must re-carry it so a later goal
+    // transition still bumps the catalog clock.
+    const config = makeConfig();
+    const seen: string[] = [];
+    config.getSessionService().setSessionGoalChangedCallback((sessionId) => {
+      seen.push(sessionId);
+    });
+
+    await config.relocateWorkingDirectory(
+      NEW_DIR,
+      NEW_DIR,
+      SKIP_MOVE_SIDE_EFFECTS,
+    );
+
+    config.getSessionService().emitSessionGoalChanged('s1');
+
+    expect(seen).toEqual(['s1']);
+  });
+
   it('relocateWorkingDirectory should recreate cwd-derived file service', async () => {
     const config = makeConfig();
     mockProcessCwd(NEW_DIR);
@@ -10049,6 +10116,8 @@ describe('Server Config (config.ts)', () => {
       '.worktree.json',
       '.pr.json',
       '.title.json',
+      '.artifacts.json',
+      '.goal.json',
     ]);
     mockProcessCwd(NEW_DIR);
     existingPaths(...from);

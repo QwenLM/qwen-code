@@ -17,8 +17,6 @@ public interface RuntimeBrokerOperations {
 
     public CompletionStage<Void> drainHarnessSession(String tenantId, String harnessSessionId);
 
-    public CompletionStage<Void> closeResidentHarnessSession(RuntimeProvisionRequest request, String harnessSessionId);
-
     public CompletionStage<Void> drainHarnessResources(String tenantId, String harnessSessionId,
             RuntimeLifecycleAuthority authority, boolean stoppedOnly);
 
@@ -81,12 +79,6 @@ public interface RuntimeBrokerOperations {
      * attach that both fail cannot wedge the Session close. */
     public CompletionStage<Void> markTerminalPtyEstablished(
             String harnessSessionId, String terminalId);
-
-    public CompletionStage<ToolExecutionRecord> prepareCsiExecution(String harnessSessionId, String runtimeSessionId,
-            String idempotencyKey, Map<String, Object> reference, byte[] inputBytes, byte[] definitionBytes);
-
-    public CompletionStage<Map<String, Object>> readCsiBatch(String harnessSessionId, String runtimeSessionId,
-            String promptId, String batchId, Map<String, Object> recoveryOwner);
 
     public CompletionStage<ToolExecutionRecord> prepareExecution(
             String harnessSessionId, String runtimeSessionId,
