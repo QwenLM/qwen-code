@@ -583,6 +583,49 @@ describe('getSlashCommandCompletionResult', () => {
     ]);
   });
 
+  it('serves the Traditional subcommand trees for zh-TW', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'agents',
+        description: 'Manage agents',
+        argumentHint: 'manage|create',
+      },
+      { name: 'mcp', description: 'Manage MCP servers' },
+    ];
+    const tw = getTranslator('zh-TW');
+    expect(
+      getSlashCommandCompletionResult(
+        '/agents ',
+        8,
+        commands,
+        [],
+        'zh-TW',
+        tw,
+      )?.items.map((item) => item.detail),
+    ).toEqual(['管理現有 subagents', '建立新的 subagent']);
+    expect(
+      getSlashCommandCompletionResult(
+        '/mcp d',
+        6,
+        commands,
+        [],
+        'zh-TW',
+        tw,
+      )?.items.map((item) => item.detail),
+    ).toEqual(['顯示 MCP server 和工具描述', '隱藏 MCP server 和工具描述']);
+    const source = slashCompletionSource(
+      () => commands,
+      () => [],
+      () => 'zh-TW',
+    );
+    const state = EditorState.create({ doc: '/agents ' });
+    expect(
+      source(new CompletionContext(state, 8, true))?.options.map(
+        (option) => option.detail,
+      ),
+    ).toEqual(['管理現有 subagents', '建立新的 subagent']);
+  });
+
   it('returns command-provided subcommands when no built-in tree exists', () => {
     const commands: CommandInfo[] = [
       {

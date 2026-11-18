@@ -1003,6 +1003,70 @@ describe('Query', () => {
       await query.close();
     });
 
+    it.each([
+      {
+        label: 'allow',
+        run: async () => ({ behavior: 'allow' as const, updatedInput: {} }),
+        response: { behavior: 'allow', updatedInput: {} },
+      },
+      {
+        label: 'deny',
+        run: async () => ({ behavior: 'deny' as const, message: 'Denied' }),
+        response: { behavior: 'deny', message: 'Denied' },
+      },
+      {
+        label: 'throw',
+        run: () => {
+          throw new Error('Callback error');
+        },
+        response: {
+          behavior: 'deny',
+          message: 'Permission check failed: Callback error',
+        },
+      },
+      {
+        label: 'reject',
+        run: () => Promise.reject(new Error('Callback error')),
+        response: {
+          behavior: 'deny',
+          message: 'Permission check failed: Callback error',
+        },
+      },
+    ])(
+      'arms and clears the default permission deadline on $label',
+      async ({ run, response: expectedResponse }) => {
+        const query = new Query(transport, {
+          cwd: '/test',
+          canUseTool: run,
+        });
+        await respondToInitialize(transport, query);
+        vi.useFakeTimers();
+        const timeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+        try {
+          transport.simulateMessage(
+            createControlRequest('can_use_tool', 'deadline-permission'),
+          );
+          await vi.waitFor(() => {
+            const response = findControlResponse(
+              transport.getAllWrittenMessages(),
+              'deadline-permission',
+            );
+            expect(response?.response).toMatchObject({
+              subtype: 'success',
+              response: expectedResponse,
+            });
+          });
+          expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 60_000);
+          expect(vi.getTimerCount()).toBe(0);
+        } finally {
+          await query.close();
+          vi.clearAllTimers();
+          timeoutSpy.mockRestore();
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it('should handle PermissionResult format with updatedInput', async () => {
       const canUseTool = vi.fn().mockResolvedValue({
         behavior: 'allow',

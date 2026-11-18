@@ -58,6 +58,34 @@ const ZH: typeof EN = {
   clickToTurnOff: '点击关闭。',
 };
 
+const ZH_TW: typeof EN = {
+  label: 'Workflow 模式',
+  menuDescription: '新任務可交給 workflow 執行',
+  short: {
+    unbound: '需要先有會話',
+    updating: '正在更新…',
+    syncing: '正在同步…',
+    unknown: '狀態未確認',
+    onUnavailable: '已開啟，當前不可用',
+    unavailable: '當前不可用',
+  },
+  details: 'Workflow 模式詳情',
+  unbound: '建立或恢復會話後檢視可用性。',
+  updating: '正在更新 Workflow 模式…',
+  syncing: '正在同步 Workflow 模式…',
+  unknown: '暫時無法確認 Workflow 模式。',
+  on: 'Workflow 模式已開啟。',
+  off: 'Workflow 模式已關閉。',
+  onUnavailable: 'Workflow 模式已開啟，但當前不可用。',
+  unavailable: 'Workflow 模式當前不可用。',
+  initializing: '會話仍在初始化。',
+  workflowUnavailable: '此會話中的 Workflow 工具不可用。',
+  unsupported: '此會話不支援 Workflow 模式。',
+  nextTurn: '更改從下一輪新輸入開始生效，不會中斷當前輪次或修改思考強度。',
+  updateFailed: '更新 Workflow 模式失敗',
+  clickToTurnOff: '點選關閉。',
+};
+
 const RU: typeof EN = {
   label: 'Режим Workflow',
   menuDescription: 'Новые задачи можно поручать workflow',
@@ -88,5 +116,6 @@ const RU: typeof EN = {
 };
 
 export function getWorkflowModeMessages(language: WebShellLanguage) {
+  if (language === 'zh-TW') return ZH_TW;
   return language === 'zh-CN' ? ZH : language === 'ru' ? RU : EN;
 }
