@@ -799,7 +799,7 @@ export class NotebookEditTool
           },
           cell_id: {
             description:
-              'Target cell ID from read_file output, or cell-N 0-based fallback. Required for replace and delete. For insert, the new cell is inserted after this cell; if omitted, inserted at the beginning.',
+              'Use the cell ID shown by read_file. If the cell has a missing or empty ID, read_file shows cell-N, where N is its zero-based index. Required for replace and delete. For insert, the new cell is inserted after this cell; if omitted, inserted at the beginning.',
             type: 'string',
           },
           new_source: {
