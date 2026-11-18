@@ -71,7 +71,10 @@ import {
 } from '../hooks/types.js';
 import { HookSystem } from '../hooks/hookSystem.js';
 import { AsyncHookRegistry } from '../hooks/asyncHookRegistry.js';
-import { ASYNC_HOOK_CONTEXT_OPEN } from '../hooks/async-hook-context.js';
+import {
+  ASYNC_HOOK_CONTEXT_OPEN,
+  isAsyncHookContextPartText,
+} from '../hooks/async-hook-context.js';
 import { isUserPromptSubmitContextPartText } from '../utils/transcript-records.js';
 import {
   getHookExecutionOwner,
@@ -1488,6 +1491,17 @@ describe('Gemini Client (client.ts)', () => {
       } as unknown as ReturnType<Config['getHookSystem']>);
     };
 
+    // Identify the async envelope with the same exact matcher the code under
+    // test uses (whitespace-tolerant, rejects an internally nested tag), not a
+    // loose substring check, so a change to the envelope shape cannot leave a
+    // copy here asserting the old shape and passing vacuously.
+    const isAsyncHookPart = (part: string | Part): boolean =>
+      typeof part === 'object' &&
+      part !== null &&
+      isAsyncHookContextPartText(part.text ?? '');
+    const hasAsyncBlock = (parts: Array<string | Part>) =>
+      parts.some(isAsyncHookPart);
+
     it('delivers pending async output in the outgoing request', async () => {
       installAsyncOutput('async delivered context');
       await run([{ text: 'hello' }], 'prompt-async', {
@@ -1558,14 +1572,7 @@ describe('Gemini Client (client.ts)', () => {
       // The functionResponse part is carried through unchanged.
       expect(parts[fnResponseIndex]).toEqual(toolResult);
       // The tagged block is appended after the tool result, not before it.
-      const asyncIndex = parts.findIndex(
-        (part) =>
-          typeof part === 'object' &&
-          part !== null &&
-          'text' in part &&
-          typeof part.text === 'string' &&
-          part.text.includes(ASYNC_HOOK_CONTEXT_OPEN),
-      );
+      const asyncIndex = parts.findIndex(isAsyncHookPart);
       expect(asyncIndex).toBeGreaterThan(fnResponseIndex);
       expect((parts[asyncIndex] as Part).text).toContain('async tool result');
     });
@@ -1581,15 +1588,6 @@ describe('Gemini Client (client.ts)', () => {
       await run([{ text: 'hello' }], 'prompt-async-record', {
         type: SendMessageType.UserQuery,
       });
-      const hasAsyncBlock = (parts: Array<string | Part>) =>
-        parts.some(
-          (part) =>
-            typeof part === 'object' &&
-            part !== null &&
-            'text' in part &&
-            typeof part.text === 'string' &&
-            part.text.includes(ASYNC_HOOK_CONTEXT_OPEN),
-        );
       // The wire request carries the block...
       const wireParts = mockTurnRunFn.mock.lastCall?.[1] as Array<
         string | Part
@@ -1605,15 +1603,6 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('leaves the pending block for the owning turn across a /btw side query and its unflagged continuation', async () => {
-      const hasAsyncBlock = (parts: Array<string | Part>) =>
-        parts.some(
-          (part) =>
-            typeof part === 'object' &&
-            part !== null &&
-            'text' in part &&
-            typeof part.text === 'string' &&
-            part.text.includes(ASYNC_HOOK_CONTEXT_OPEN),
-        );
       // The main turn P claims the exploration-budget prompt id.
       await run([{ text: 'main task' }], 'prompt-owner', {
         type: SendMessageType.UserQuery,
@@ -1647,14 +1636,7 @@ describe('Gemini Client (client.ts)', () => {
         string | Part
       >;
       expect(hasAsyncBlock(ownerParts)).toBe(true);
-      const asyncPart = ownerParts.find(
-        (part) =>
-          typeof part === 'object' &&
-          part !== null &&
-          'text' in part &&
-          typeof part.text === 'string' &&
-          part.text.includes(ASYNC_HOOK_CONTEXT_OPEN),
-      ) as Part;
+      const asyncPart = ownerParts.find(isAsyncHookPart) as Part;
       expect(asyncPart.text).toContain('owned hook output');
     });
   });
