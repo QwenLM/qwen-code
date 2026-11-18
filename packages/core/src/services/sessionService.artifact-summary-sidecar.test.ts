@@ -660,6 +660,56 @@ describe('SessionService - artifact summary sidecar', () => {
     );
   });
 
+  it('seeds a side-records-only session through the daemon restore projection', async () => {
+    // The daemon/ACP funnel reads via readRestoreProjection and never
+    // calls loadSession; the first-open seed must run on that path too.
+    const a = persistedArtifact('https://example.com/projection-a');
+    const b = persistedArtifact('https://example.com/projection-b');
+    writeTranscript([{ ...artifactEventRecord([a, b]), parentUuid: null }]);
+
+    const projection = await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+
+    // The index builder rejects conversation-less transcripts, so the
+    // projection is undefined — the seed must still run on that branch.
+    expect(projection).toBeUndefined();
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      2,
+    );
+  });
+
+  it('does not seed through the projection for a session with a conversation', async () => {
+    // Sessions with a conversation keep the selective read's zero-extra-I/O
+    // contract; their count arrives via the loadSession funnel and the
+    // recorder, not the projection read.
+    const a = persistedArtifact('https://example.com/projection-normal');
+    writeTranscript([userRecord(), artifactEventRecord([a])]);
+
+    await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+
+    expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
+  });
+
+  it('seeds the archived sidecar for a side-records-only archived session', async () => {
+    const a = persistedArtifact('https://example.com/archived-side-only');
+    writeTranscript([{ ...artifactEventRecord([a]), parentUuid: null }]);
+    const archiveDir = path.join(path.dirname(transcriptPath), 'archive');
+    mkdirSync(archiveDir, { recursive: true });
+    renameSync(transcriptPath, path.join(archiveDir, `${SESSION_ID}.jsonl`));
+
+    const loaded = await service.loadArchivedSession(SESSION_ID, {
+      maxBytes: 10_000_000,
+    });
+
+    expect(loaded).toBeUndefined();
+    expect(
+      readSessionArtifactSummarySidecar(archivedSidecarPath)?.artifactCount,
+    ).toBe(1);
+  });
+
   it('does not zero-heal a correct sidecar from an all-refused journal', async () => {
     // Every artifact record is refused (forward payload version): the
     // rebuild yields no snapshot, but the damage warnings must still reach
