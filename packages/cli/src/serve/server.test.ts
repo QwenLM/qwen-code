@@ -51902,6 +51902,60 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   }, 20_000);
+
+  it('deep health reports the governing bound when the aggregate is below the pairing clamp (review R1-6 round 2)', async () => {
+    // With --max-sse-connections 5 the aggregate binds on EVERY listener
+    // (the gate tests it first), so a pairing-listener probe must read 5 —
+    // not the 51 clamp that no request on that listener can ever reach.
+    const lanInterfaces = await import('./local-control/lan-interfaces.js');
+    const candidate = { interfaceName: 'en0', address: '127.0.0.1' };
+    const selectSpy = vi
+      .spyOn(lanInterfaces, 'selectLanAddress')
+      .mockReturnValue(candidate);
+    const listSpy = vi
+      .spyOn(lanInterfaces, 'listLanCandidates')
+      .mockReturnValue([candidate]);
+    const { sleepInhibitor } = await import('@qwen-code/qwen-code-core');
+    const sleepSpy = vi
+      .spyOn(sleepInhibitor, 'acquire')
+      .mockReturnValue({ release: vi.fn() } as never);
+    let service: ReturnType<RunHandle['getLocalControl']> | undefined;
+    try {
+      handle = await runQwenServe(
+        { ...baseOpts, port: 0, maxConnections: 10, maxSseConnections: 5 },
+        { bridge: parkedBridge() },
+      );
+      await handle.runtimeReady;
+      service = handle.getLocalControl();
+      expect(service).toBeDefined();
+      const lanStatus = await service!.enable();
+      expect(lanStatus.active).toBe(true);
+      const pairingSecret = decodeURIComponent(
+        new URL(lanStatus.url!).hash.match(/token=([^&]+)/)![1]!,
+      );
+      const lanBase = `http://${lanStatus.address}:${lanStatus.port}`;
+      const lanAuth = { Authorization: `Bearer ${pairingSecret}` };
+      const primaryPort = (handle.server.address() as AddressInfo).port;
+      const deepOf = async (base: string, headers?: Record<string, string>) =>
+        (await (await fetch(`${base}/health?deep=1`, { headers })).json()) as {
+          connectedClientsMax: number | null;
+          listenerConnectedClients: number;
+          listenerConnectedClientsMax: number | null;
+        };
+      const lanDeep = await deepOf(lanBase, lanAuth);
+      const primaryDeep = await deepOf(`http://127.0.0.1:${primaryPort}`);
+      expect(lanDeep.listenerConnectedClients).toBe(0);
+      expect(lanDeep.listenerConnectedClientsMax).toBe(5);
+      expect(primaryDeep.listenerConnectedClientsMax).toBe(5);
+      expect(lanDeep.connectedClientsMax).toBe(5);
+      expect(primaryDeep.connectedClientsMax).toBe(5);
+    } finally {
+      await service?.disable().catch(() => {});
+      selectSpy.mockRestore();
+      listSpy.mockRestore();
+      sleepSpy.mockRestore();
+    }
+  }, 30_000);
 });
 
 describe('Deferred #17502 review pins (issue #17554, follow-up 4)', () => {
