@@ -83,9 +83,12 @@ export function RestartRecoveryPanel({
       return;
     }
     let cancelled = false;
+    setRows([]);
     setLoadFailed(false);
+    setNotice(null);
     void (async () => {
       const next: RestartRecoveryRow[] = [];
+      let memberFailed = false;
       try {
         for (
           let index = 0;
@@ -100,7 +103,10 @@ export function RestartRecoveryPanel({
           });
           if (cancelled) return;
           for (const member of result.workspaces) {
-            if (!('items' in member)) continue;
+            if (!('items' in member)) {
+              memberFailed = true;
+              continue;
+            }
             for (const item of member.items) {
               next.push({ ...item, workspace: member.cwd });
             }
@@ -111,6 +117,7 @@ export function RestartRecoveryPanel({
             Date.parse(right.lastActivityAt) - Date.parse(left.lastActivityAt),
         );
         setRows(next);
+        setLoadFailed(memberFailed);
       } catch {
         if (!cancelled) setLoadFailed(true);
       }

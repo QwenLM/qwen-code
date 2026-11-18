@@ -35,6 +35,7 @@ afterEach(() => {
 interface Fixture {
   runtime: WorkspaceRuntime;
   app: express.Express;
+  sessionService: SessionService;
   seed(
     sessionId: string,
     records: readonly PromptLedgerRecord[],
@@ -84,6 +85,7 @@ function makeFixture(trusted = true): Fixture {
   return {
     runtime,
     app,
+    sessionService,
     seed(sessionId, records, cwd = workspaceDir) {
       const transcriptPath = path.join(
         path.dirname(sessionService.getPromptLedgerPath(sessionId)),
@@ -117,7 +119,7 @@ function inFlight(promptId: string, at: number): PromptLedgerRecord {
 function terminal(
   promptId: string,
   at: number,
-  outcome: 'completed' | 'interrupted',
+  outcome: 'completed' | 'error' | 'interrupted',
   code?: string,
 ): PromptLedgerRecord {
   return {
@@ -139,7 +141,7 @@ describe('POST /sessions/recovery', () => {
     fixture.seed(crashed, [inFlight('p1', now - 2000)]);
     fixture.seed(shutdown, [
       inFlight('p1', now - 3000),
-      terminal('p1', now - 1000, 'interrupted', 'daemon_shutdown'),
+      terminal('p1', now - 1000, 'error', 'daemon_shutdown'),
     ]);
     fixture.seed(settled, [
       inFlight('p1', now - 4000),
@@ -165,6 +167,20 @@ describe('POST /sessions/recovery', () => {
     expect(
       member.items.map((item: { interruption: string }) => item.interruption),
     ).toEqual(['daemon_shutdown', 'in_flight']);
+  });
+
+  it('omits sessions moved to the archive', async () => {
+    const fixture = makeFixture();
+    const archived = randomUUID();
+    fixture.seed(archived, [inFlight('p1', Date.now())]);
+    await fixture.sessionService.archiveSessions([archived]);
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery')
+      .send({ workspaces: [fixture.runtime.workspaceId] });
+
+    expect(response.status).toBe(200);
+    expect(response.body.workspaces[0].items).toEqual([]);
   });
 
   it('accepts an absolute workspace path', async () => {
@@ -196,6 +212,22 @@ describe('POST /sessions/recovery', () => {
         sinceMs: 3 * day,
       });
     expect(withinThreeDays.body.workspaces[0].items).toHaveLength(1);
+  });
+
+  it('clamps the requested window to 30 days', async () => {
+    const fixture = makeFixture();
+    const day = 24 * 60 * 60 * 1000;
+    fixture.seed(randomUUID(), [inFlight('p1', Date.now() - 40 * day)]);
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery')
+      .send({
+        workspaces: [fixture.runtime.workspaceId],
+        sinceMs: 60 * day,
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body.workspaces[0].items).toEqual([]);
   });
 
   it('reports an unknown workspace as a member error', async () => {

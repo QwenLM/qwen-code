@@ -14,6 +14,7 @@ import type { SessionService } from '@qwen-code/qwen-code-core/services/sessionS
 
 const LEDGER_TAIL_BYTES = 64 * 1024;
 const TERMINAL_CODE_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
+const SHUTDOWN_INTERRUPTION_CODES = new Set(['daemon_shutdown', 'daemon_lost']);
 
 export const DEFAULT_RESTART_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const MAX_RESTART_RECOVERY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -55,9 +56,9 @@ export interface ScanRestartRecoveriesInput {
 /**
  * Classifies one session from the newest record of its prompt ledger.
  *
- * `settled` covers a completed, cancelled, or errored turn and any record
- * older than `sinceMs`. `missing` means there is no readable evidence; the
- * caller must not guess an outcome from it.
+ * `settled` covers a completed, cancelled, or unrelated errored turn and any
+ * record older than `sinceMs`. `missing` means there is no readable evidence;
+ * the caller must not guess an outcome from it.
  */
 export function readRestartRecoveryState(
   ledgerPath: string,
@@ -80,8 +81,14 @@ export function readRestartRecoveryState(
   }
   if (sinceMs !== undefined && last.at < sinceMs) return { kind: 'settled' };
   if (isPromptLedgerTerminalRecord(last)) {
-    if (last.terminal !== 'interrupted') return { kind: 'settled' };
     const code = last.code;
+    const interruptedByShutdown =
+      last.terminal === 'error' &&
+      typeof code === 'string' &&
+      SHUTDOWN_INTERRUPTION_CODES.has(code);
+    if (last.terminal !== 'interrupted' && !interruptedByShutdown) {
+      return { kind: 'settled' };
+    }
     return {
       kind: 'interrupted',
       interruption:

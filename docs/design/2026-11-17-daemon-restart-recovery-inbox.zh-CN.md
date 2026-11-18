@@ -2,7 +2,7 @@
 
 [English](2026-11-17-daemon-restart-recovery-inbox.md) | [简体中文](2026-11-17-daemon-restart-recovery-inbox.zh-CN.md)
 
-状态：提案。本次改动已实现只读扫描、两个恢复路由、daemon SDK 客户端方法、
+状态：本次改动已实现。包含只读扫描、两个恢复路由、daemon SDK 客户端方法、
 Web Shell 面板以及 REST 参考/协议条目。文中的行号已在提交 `5fc5a98ecc` 上核实。
 
 ## 问题与范围
@@ -84,8 +84,9 @@ ledger 很小（每个 prompt 约两条记录），且在准入和停机时已�
 - 终态为 `interrupted`：`interruption` 取记录的 `code`（如 `daemon_shutdown`、
   `daemon_lost`、`channel_closed`），`code` 不存在或不是不超过 64 个字符的小写标识符时
   取 `interrupted`。
-- 终态为 `completed`、`cancelled` 或 `error`：不列出该会话。已完成或已取消的轮次
-  不需要恢复，已报错的轮次已经发布了结果。
+- 终态为 `error` 且 `code` 为 `daemon_shutdown` 或 `daemon_lost`：daemon 或其子进程
+  在 prompt 完成前结束，按该 code 列出。其他 `error`、`completed` 和 `cancelled`
+  不列出。已完成或已取消的轮次不需要恢复，已报错的轮次已经发布了结果。
 
 不可读的 ledger 跳过（失败关闭）。尾部截断只丢失不完整的行：更早的有效记录仍能
 决定结果，因此崩溃在写入中断前留下 `in_flight` 记录时仍会列出。被跳过的会话绝不
@@ -93,8 +94,9 @@ ledger 很小（每个 prompt 约两条记录），且在准入和停机时已�
 按时间倒序；超过时返回 `truncated: true`。
 
 扫描只报告 ledger 能证明的事实：最新 prompt 要么从未到达终态，要么到达了
-`interrupted` 终态。时间戳无法形成 ISO 值的记录按不可读处理并省略。它不断言该会话
-可以继续。恢复类型和 `canContinue` 判定仍在加载后由已有分类器给出。
+`interrupted` 终态，要么以 `daemon_shutdown`/`daemon_lost` 错误结束。时间戳无法形成
+ISO 值的记录按不可读处理并省略。它不断言该会话可以继续。恢复类型和 `canContinue`
+判定仍在加载后由已有分类器给出。
 
 ### 只读批量路由
 
@@ -134,7 +136,8 @@ ledger 很小（每个 prompt 约两条记录），且在准入和停机时已�
 ```
 
 `sinceMs` 可选，默认 24 小时，服务端上限为 30 天。响应刻意不包含 prompt 文本、
-工具名和 `canContinue`；标题由客户端从它已经渲染的会话 catalog 中解析。
+工具名和 `canContinue`。已经持有会话 catalog 的调用方可以从 catalog 解析标题；
+本面板按 workspace 和缩短的会话 id 标识每一行。
 
 ### 批量继续路由
 
@@ -150,9 +153,9 @@ ledger 很小（每个 prompt 约两条记录），且在准入和停机时已�
 服务端串行处理列表，每次请求最多 10 个会话。对每个条目：
 
 1. 重新读取该会话的 ledger。如果最新 prompt 现在有 `completed`、`cancelled` 或
-   `error` 终态，返回 `not_continuable` 和 `code: 'already_moved'`。这覆盖扫描后
-   被其他客户端继续到已结算轮次的会话。新的 `in_flight` 记录表示轮次正在执行；
-   第 5 步的 `canContinue` 检查会拒绝它。
+   无关的 `error` 终态，返回 `not_continuable` 和 `code: 'already_moved'`。这覆盖
+   扫描后被其他客户端继续到已结算轮次的会话。新的 `in_flight` 记录表示轮次正在执行；
+   第 5 步的 `canContinue` 检查会拒绝它。`daemon_shutdown`/`daemon_lost` 错误仍可恢复。
 2. 从请求指定的 workspace 解析所属 runtime，应用与 `POST /session/:id/continue`
    相同的归属、信任和 generation 守卫，且不回退到主运行环境。standalone 会话不在
    范围内，会在冷加载时失败。
@@ -245,8 +248,8 @@ ledger 很小（每个 prompt 约两条记录），且在准入和停机时已�
 ## 设计决策
 
 - **使用 ledger，而不是 transcript 或 catalog 启发式。** ledger 已经区分中断的
-  prompt 与正常结束、取消或报错的 prompt，而且体积很小。扫描 transcript 尾部会重复
-  中断分类器；catalog 启发式完全看不到 prompt 结果。
+  prompt 与正常结束、取消或无关报错的 prompt，而且体积很小。扫描 transcript 尾部会
+  重复中断分类器；catalog 启发式完全看不到 prompt 结果。
 - **批量查询沿用 live state 的形状。** 复用 workspace 批量形状可以让信任、归属和
   错误语义与已有路由保持一致，而不是另造一个全局扫描。
 - **批量继续在服务端执行。** Web Shell 的 `loadSession` 和 `resumeSession` 操作会切换
@@ -267,8 +270,8 @@ ledger 很小（每个 prompt 约两条记录），且在准入和停机时已�
   会话，而不是猜测。
 - 批量执行期间崩溃会留下“前面的会话已继续、后面的未继续”的状态。逐会话结果是权威
   依据；重试会重读 ledger 并跳过已经前进的会话。
-- 按设计列表没有 prompt 文本，标题来自 catalog。标题不可用的会话仍会按 id 和
-  workspace 列出。
+- 按设计列表没有 prompt 文本，也没有标题；面板按 workspace 和缩短的会话 id 标识
+  每一行。已经持有 catalog 的调用方可以从 catalog 解析标题。
 - 默认 24 小时窗口是产品选择，不是正确性规则。更早的中断会话仍可从它自己的聊天
   界面继续。
 
@@ -287,9 +290,10 @@ ledger 很小（每个 prompt 约两条记录），且在准入和停机时已�
 ## 验证计划
 
 1. 用以下形状单测扫描器：悬空 `in_flight`；带 `daemon_shutdown` 的 `interrupted`；
-   带 `daemon_lost` 的 `interrupted`；最后一个 prompt 为 `completed`；最后一个 prompt
-   为 `cancelled`；多个 prompt 中较早的一个被中断；ledger 缺失；尾部截断；
-   ledger 尾部过大；归档会话；窗口之外的条目。
+   带 `daemon_lost` 的 `interrupted`；带 `daemon_shutdown` 的 `error` 终态；无关的
+   `error` 终态；最后一个 prompt 为 `completed`；最后一个 prompt 为 `cancelled`；
+   多个 prompt 中较早的一个被中断；ledger 缺失；尾部截断；ledger 尾部过大；归档会话；
+   窗口之外的条目。
 2. 路由测试扫描批量：1–20 个选择器、未知 workspace、不受信任 workspace、runtime
    不可用、逐成员失败、稳定排序，以及 `sinceMs` 的钳制。
 3. 路由测试继续批量：串行顺序、逐会话结果、`already_moved`、`degraded_history`、

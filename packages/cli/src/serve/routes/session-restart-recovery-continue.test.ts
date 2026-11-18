@@ -217,6 +217,8 @@ describe('POST /sessions/recovery/continue', () => {
     fixture.seed([inFlight('p1', Date.now())]);
     vi.mocked(fixture.bridge.getSessionContextStatus).mockResolvedValue({
       sessionId: fixture.sessionId,
+      v: 1,
+      workspaceCwd: fixture.runtime.workspaceCwd,
       recovery: { kind: 'interrupted_turn', canContinue: true },
       state: {},
     });
@@ -243,6 +245,8 @@ describe('POST /sessions/recovery/continue', () => {
     fixture.seed([inFlight('p1', Date.now())]);
     vi.mocked(fixture.bridge.getSessionContextStatus).mockResolvedValue({
       sessionId: fixture.sessionId,
+      v: 1,
+      workspaceCwd: fixture.runtime.workspaceCwd,
       recovery: {
         kind: 'interrupted_prompt',
         canContinue: true,
@@ -267,6 +271,8 @@ describe('POST /sessions/recovery/continue', () => {
     fixture.seed([inFlight('p1', Date.now())]);
     vi.mocked(fixture.bridge.getSessionContextStatus).mockResolvedValue({
       sessionId: fixture.sessionId,
+      v: 1,
+      workspaceCwd: fixture.runtime.workspaceCwd,
       recovery: { kind: 'degraded_history', canContinue: false },
       state: {},
     });

@@ -2,9 +2,9 @@
 
 [English](2026-11-17-daemon-restart-recovery-inbox.md) | [简体中文](2026-11-17-daemon-restart-recovery-inbox.zh-CN.md)
 
-Status: proposed. The read-only scan, both recovery routes, the daemon SDK
-client methods, the Web Shell panel, and the REST reference/protocol entries
-are implemented in this change. Line references were verified at commit
+Status: implemented in this change. The read-only scan, both recovery routes, the
+daemon SDK client methods, the Web Shell panel, and the REST reference/protocol
+entries are included here. Line references were verified at commit
 `5fc5a98ecc`.
 
 ## Problem and scope
@@ -110,9 +110,11 @@ Reduce each ledger to the last record of its newest prompt:
   and shaped as a lowercase identifier of at most 64 characters
   (`daemon_shutdown`, `daemon_lost`, `channel_closed`, ...), otherwise
   `interrupted`.
-- Terminal `completed`, `cancelled`, or `error`: the session is not listed. A
-  completed or cancelled turn is not waiting for recovery, and an errored turn
-  already published its outcome.
+- Terminal `error` with `code: 'daemon_shutdown'` or `'daemon_lost'`: the
+  daemon or its child ended before the prompt completed, so the session is
+  listed with that code. Other `error` terminals, `completed`, and `cancelled`
+  are not listed. A completed or cancelled turn is not waiting for recovery,
+  and an errored turn already published its outcome.
 
 An unreadable ledger is skipped (fail closed). A torn tail loses only the
 partial line: earlier valid records still decide the result, so a crash that
@@ -121,11 +123,12 @@ sessions are never replaced with a guess. Skip the archive directory and drop
 entries older than the requested window. Keep at most 200 entries per
 workspace, newest first, and report `truncated: true` when more were present.
 
-The scan reports what the ledger proves: the newest prompt either never
-reached a terminal or reached an `interrupted` one. A record whose timestamp
-cannot form an ISO value is treated as unreadable and omitted. It does not
-claim that the session can be continued. The recovery kind and the
-`canContinue` decision still come from the existing classifier after a load.
+The scan reports what the ledger proves: the newest prompt either never reached
+a terminal, reached an `interrupted` one, or ended with a
+`daemon_shutdown`/`daemon_lost` error. A record whose timestamp cannot form an
+ISO value is treated as unreadable and omitted. It does not claim that the
+session can be continued. The recovery kind and the `canContinue` decision still
+come from the existing classifier after a load.
 
 ### Read-only batch route
 
@@ -167,8 +170,8 @@ also covers the continuation route.
 
 `sinceMs` is optional and defaults to 24 hours. The server clamps it to 30 days.
 The response intentionally carries no prompt text, no tool name, and no
-`canContinue`; a title is resolved by the client from the session catalog it
-already renders.
+`canContinue`. Callers that already hold a session catalog can resolve a title
+from it; this panel identifies a row by its workspace and shortened session id.
 
 ### Batch continuation route
 
@@ -185,10 +188,11 @@ The server processes the list serially, at most 10 sessions per request. For
 each entry:
 
 1. Re-read that session's ledger. If the newest prompt now has a `completed`,
-   `cancelled`, or `error` terminal, return `not_continuable` with the
+   `cancelled`, or unrelated `error` terminal, return `not_continuable` with the
    `already_moved` code. This covers a session that another client continued
    to a settled turn after the scan. A new `in_flight` record means a turn is
-   active; the `canContinue` check in step 5 rejects it.
+   active; the `canContinue` check in step 5 rejects it. A
+   `daemon_shutdown`/`daemon_lost` error remains recoverable.
 2. Resolve the owner runtime from the requested workspace, applying the same
    ownership, trust, and generation guards as `POST /session/:id/continue`,
    with no primary-runtime fallback. Standalone conversations are out of scope
@@ -299,9 +303,10 @@ instead of falling back to another endpoint.
 ## Design decisions
 
 - **Ledger, not transcript or catalog heuristics.** The ledger already
-  distinguishes an interrupted prompt from a clean, cancelled, or errored one,
-  and it is small. A transcript tail scan would duplicate the interruption
-  classifier; a catalog heuristic could not see the prompt outcome at all.
+  distinguishes an interrupted prompt from a clean, cancelled, or unrelated
+  errored one, and it is small. A transcript tail scan would duplicate the
+  interruption classifier; a catalog heuristic could not see the prompt outcome
+  at all.
 - **Batch query mirrors live state.** Reusing the workspace-scoped batch shape
   keeps trust, ownership, and error semantics aligned with an existing route
   instead of inventing a global scan.
@@ -331,8 +336,9 @@ instead of falling back to another endpoint.
 - A crash during a batch leaves earlier sessions continued and later ones not.
   The per-session result is the authority; a retry re-reads the ledger and
   skips sessions that already moved on.
-- The list has no prompt text by design, so the title comes from the catalog.
-  A session whose title is unavailable is still listed by id and workspace.
+- The list has no prompt text or title by design; the panel identifies rows by
+  workspace and shortened session id. A caller that already holds a catalog can
+  resolve a title from it.
 - The default 24-hour window is a product choice, not a correctness rule. An
   older interrupted session remains continuable from its own chat surface.
 
@@ -354,10 +360,11 @@ instead of falling back to another endpoint.
 ## Validation plan
 
 1. Unit-test the scanner with: dangling `in_flight`; `interrupted` with
-   `daemon_shutdown`; `interrupted` with `daemon_lost`; last prompt
-   `completed`; last prompt `cancelled`; multiple prompts where an older one is
-   interrupted; missing ledger; torn tail; oversized ledger tail; archived
-   session; entry outside the window.
+   `daemon_shutdown`; `interrupted` with `daemon_lost`; terminal `error` with
+   `daemon_shutdown`; an unrelated terminal `error`; last prompt `completed`;
+   last prompt `cancelled`; multiple prompts where an older one is interrupted;
+   missing ledger; torn tail; oversized ledger tail; archived session; entry
+   outside the window.
 2. Route-test the scan batch: 1–20 selectors, unknown workspace, untrusted
    workspace, unavailable runtime, per-member failure, stable ordering, and the
    clamp on `sinceMs`.

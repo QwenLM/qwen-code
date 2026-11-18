@@ -144,6 +144,66 @@ describe('scanRestartRecoveries', () => {
     },
   );
 
+  it('lists a crash whose newest record sits beyond the bounded tail', () => {
+    const root = makeScanRoot();
+    const records = Array.from({ length: 1500 }, (_, index) =>
+      inFlight(`p${index}`, NOW - (1500 - index)),
+    );
+    writeLedger(root, 'long-ledger', records);
+
+    expect(
+      scanRestartRecoveries({
+        sessionService: root.sessionService,
+        sessionIds: ['long-ledger'],
+        sinceMs: WINDOW_START,
+      }).items,
+    ).toEqual([
+      {
+        sessionId: 'long-ledger',
+        lastActivityAt: new Date(NOW - 1).toISOString(),
+        interruption: 'in_flight',
+      },
+    ]);
+  });
+
+  it('lists a terminal error caused by a daemon shutdown', () => {
+    const root = makeScanRoot();
+    writeLedger(root, 'shutdown-error', [
+      inFlight('p1', NOW - 1000),
+      terminal('p1', NOW, 'error', 'daemon_shutdown'),
+    ]);
+
+    expect(
+      scanRestartRecoveries({
+        sessionService: root.sessionService,
+        sessionIds: ['shutdown-error'],
+        sinceMs: WINDOW_START,
+      }).items,
+    ).toEqual([
+      {
+        sessionId: 'shutdown-error',
+        lastActivityAt: new Date(NOW).toISOString(),
+        interruption: 'daemon_shutdown',
+      },
+    ]);
+  });
+
+  it('skips an unrelated terminal error with a code', () => {
+    const root = makeScanRoot();
+    writeLedger(root, 'model-error', [
+      inFlight('p1', NOW - 1000),
+      terminal('p1', NOW, 'error', 'upstream_error'),
+    ]);
+
+    expect(
+      scanRestartRecoveries({
+        sessionService: root.sessionService,
+        sessionIds: ['model-error'],
+        sinceMs: WINDOW_START,
+      }).items,
+    ).toEqual([]);
+  });
+
   it('uses the newest prompt, not an older interrupted one', () => {
     const root = makeScanRoot();
     writeLedger(root, 'moved-on', [

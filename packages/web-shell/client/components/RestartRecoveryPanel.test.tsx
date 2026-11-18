@@ -293,6 +293,36 @@ describe('RestartRecoveryPanel', () => {
     ).toBeNull();
   });
 
+  it('surfaces a failed workspace member instead of hiding it', async () => {
+    client.getRestartRecoveries.mockResolvedValue({
+      workspaces: [
+        {
+          workspace: '/ws',
+          workspaceId: 'workspace-1',
+          cwd: '/ws',
+          v: 1 as const,
+          items: [],
+          truncated: false,
+        },
+        {
+          workspace: '/other',
+          error: {
+            code: 'workspace_runtime_unavailable',
+            message: 'Workspace runtime is not active.',
+            status: 503,
+          },
+        },
+      ],
+    });
+    render({ workspaceCwds: ['/ws', '/other'] });
+
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        'Could not read interrupted tasks',
+      ),
+    );
+  });
+
   it('does not request when the daemon lacks the capability', async () => {
     render({ supported: false });
     await act(async () => {
