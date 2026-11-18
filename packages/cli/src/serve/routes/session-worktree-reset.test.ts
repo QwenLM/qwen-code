@@ -171,7 +171,9 @@ interface FakeBridge {
   setSummary(sessionId: string, summary: SessionSummaryStub): void;
 }
 
-function makeBridge(options: { resetSupport?: boolean } = {}): FakeBridge {
+function makeBridge(
+  options: { resetSupport?: boolean; deferralSupport?: boolean } = {},
+): FakeBridge {
   const summaries = new Map<string, SessionSummaryStub>();
   const spawnedIds: string[] = [];
   const getSessionSummary = vi.fn((sessionId: string) => {
@@ -231,6 +233,12 @@ function makeBridge(options: { resetSupport?: boolean } = {}): FakeBridge {
           setSessionResetPending,
           clearSessionResetPending,
         }),
+    ...(options.deferralSupport
+      ? {
+          fireDeferredRestoreAskUserQuestionPrompt: vi.fn(() => true),
+          discardDeferredRestoreAskUserQuestionPrompt: vi.fn(),
+        }
+      : {}),
   } as unknown as AcpSessionBridge;
   return {
     bridge,
@@ -255,6 +263,7 @@ function makeBridge(options: { resetSupport?: boolean } = {}): FakeBridge {
 function makeFixture(
   options: {
     resetSupport?: boolean;
+    deferralSupport?: boolean;
     onResponse?: (res: Response) => void;
   } = {},
 ) {
@@ -1911,6 +1920,97 @@ describe('POST /session/:id/load worktree classifications', () => {
     expect(res.body.worktree.path).toBe(fixture.realTarget);
     expect(res.body.worktreeState).toBeUndefined();
     expect(fixture.fake.killSession).not.toHaveBeenCalled();
+  });
+
+  it('does not arm the automatic-work hold when the locked read is legacy', async () => {
+    const fixture = makeFixture({ deferralSupport: true });
+    const sessionId = randomUUID();
+    await fixture.writeSidecar(sessionId, { workspaceCwd: undefined });
+    const sidecarPath =
+      fixture.sessionService.getWorktreeSessionPath(sessionId);
+    const otherCheckout = path.join(
+      fixture.workspaceDir,
+      '.qwen',
+      'worktrees',
+      'other',
+    );
+    mkdirSync(otherCheckout, { recursive: true });
+    overrideFirstSidecarRead(sidecarPath, (read) =>
+      read.state === 'valid'
+        ? {
+            ...read,
+            session: {
+              ...read.session,
+              workspaceCwd: fixture.workspaceDir,
+              worktreePath: otherCheckout,
+            },
+          }
+        : read,
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${sessionId}/load`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.worktreeState).toBeUndefined();
+    // The hold is armed only when the read under the ownership lock is
+    // strict; a legacy record there keeps the older lock-free behavior even
+    // on a bridge that could defer automatic work.
+    expect(fixture.fake.loadSession).toHaveBeenCalledWith(
+      expect.not.objectContaining({ deferAutomaticWorkUntilCwdRestore: true }),
+    );
+    expect(fixture.fake.killSession).not.toHaveBeenCalled();
+  });
+
+  it('heals a missing marker on a non-Channel strict restore instead of a permanent 409', async () => {
+    const fixture = makeFixture({ deferralSupport: true });
+    const sessionId = randomUUID();
+    // Source-less restore: no persisted Channel source, so the child's
+    // worktree restore is not suppressed.
+    vi.spyOn(
+      SessionService.prototype,
+      'readCreationMetadata',
+    ).mockResolvedValue({});
+    // Strict sidecar (records its workspace) but the checkout lost its
+    // `.qwen-session` marker — the pre-guard worktree / `git clean -xdf` /
+    // failed-publish case the child's worktree restore documents and repairs.
+    await fixture.writeSidecar(sessionId, {});
+    // The child heals the missing marker iff the daemon does not suppress its
+    // worktree restore; suppression is Channel-only, so a non-Channel restore
+    // must keep the heal (and the resumed notice it also produces).
+    fixture.fake.loadSession.mockImplementation(
+      async (req: {
+        sessionId: string;
+        workspaceCwd: string;
+        suppressWorktreeContextRestore?: boolean;
+      }) => {
+        if (!req.suppressWorktreeContextRestore) {
+          await fixture.createMarker(sessionId);
+        }
+        return {
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          currentCwd: req.workspaceCwd,
+          attached: false,
+          clientId: undefined,
+          hasActivePrompt: false,
+        };
+      },
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${sessionId}/load`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.worktreeState).toBe('persisted-v1');
+    expect(res.body.worktree.path).toBe(fixture.realTarget);
+    expect(fixture.fake.killSession).not.toHaveBeenCalled();
+    expect(fixture.fake.loadSession).toHaveBeenCalledWith(
+      expect.not.objectContaining({ suppressWorktreeContextRestore: true }),
+    );
+    expect((await fixture.readMarker()).state).toBe('valid');
   });
 
   it('attests a checkout recorded through a symlinked path', async () => {

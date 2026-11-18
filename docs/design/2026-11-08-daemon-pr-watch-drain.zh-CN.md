@@ -2,11 +2,11 @@
 
 [English](2026-11-08-daemon-pr-watch-drain.md) | [简体中文](2026-11-08-daemon-pr-watch-drain.zh-CN.md)
 
-状态：proposed（2026-11-08）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md)（下称「主设计」）中继 [观测与转换检测](2026-11-08-daemon-pr-watch-observation.md)（已合入 #16611）之后的增量。它实现 §4 投递与 §5 持久性，并一并落地观测增量延后到 drain 的 §2 watch 文件删除与 `lastBoundAt` 规则（因为它们需要 drain 的扫描完整性信息）。配置（§6）与 channel 迁移（§7）仍排除在外（PR B）。与观测一样，整条路径保持在内部关闭开关之后，在启用增量填充其 deps 之前对生产惰性。
+状态：已实现（#16656；2026-11-08 提案）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.zh-CN.md)（下称「主设计」）中继 [观测与转换检测](2026-11-08-daemon-pr-watch-observation.zh-CN.md)（已合入 #16611）之后的增量。它实现 §4 投递与 §5 持久性，并一并落地观测增量延后到 drain 的 §2 watch 文件删除与 `lastBoundAt` 规则（因为它们需要 drain 的扫描完整性信息）。配置（§6）与 channel 迁移（§7）仍排除在外（PR B）。与观测一样，整条路径当时保持在内部关闭开关之后，直到 PR B 移除该开关才对生产生效；启用增量此前已填充其 deps，但开关仍为 `false`。下文按该增量当时的设计描述；PR B（#17214）此后移除了该开关，启用现在即 deps 存在性。
 
 ## 问题
 
-观测把检测到的转换写进每个 PR watch 文件的 `pending`，但没有任何东西去 drain：不解析接收者、不准入 prompt、不唤醒休眠会话。存储有写入者却没有读取者，因此关注某 PR 的会话在该 PR 的 head、CI、可合并性或状态变化时收不到 daemon 通知。GitHub channel 自身的绑定投递目前仍处理 watch 事件；本增量新增 daemon 侧 drain，供 PR B 切换过去。按主 §7，任何构建都绝不能同时跑两个 poller，因此在 PR B 移除 adapter watch 之前 drain 保持关闭。
+观测把检测到的转换写进每个 PR watch 文件的 `pending`，但没有任何东西去 drain：不解析接收者、不准入 prompt、不唤醒休眠会话。存储有写入者却没有读取者，因此关注某 PR 的会话在该 PR 的 head、CI、可合并性或状态变化时收不到 daemon 通知。GitHub channel 自身的绑定投递目前仍处理 watch 事件；本增量新增 daemon 侧 drain，供 PR B 切换过去。按主 §7，任何构建都绝不能同时跑两个 poller，因此在 PR B 移除适配器的状态检测之前 drain 保持关闭。
 
 ## 现状
 
@@ -37,7 +37,7 @@
 - `run-qwen-serve.ts` 中 daemon 级 watch/drain deps 填充（allowed-hosts 发现、锁 registry 与 watch 目录、准入/restore deps、以及 listing→watch 写入 + `listedKeys`）：启用增量。drain 暴露 deps 接缝，在被填充且开关打开前惰性。
 - 从 `restoreSessionHandler` 抽取共享 restore、resume-后 drain 钩子、serve lifecycle close 重排：这些只在 drain 启用后才运行，故随启用增量落地以便端到端验证。本增量把 `wakeSession` 作为依赖注入并据此测试 drain 的 restore 处理；路由不改动。
 - 对交互式写入者的隔离（fencing，主 §4「Dormant sessions」）：session-writer-lease 暴露面是 channel 今天的现状，仍排除在外。
-- 手动 push 账本（主开放问题 5）：只记录经 autofix-pr helper 的 push。
+- 手动 push 账本（主设计中仍开放）：只记录经 autofix-pr helper 的 push。
 
 ## 拟议改动
 
@@ -97,7 +97,7 @@ drain 在与观测相同的门控 timer 块内、`runPrWatchObservationTick` 之
 2. **文件是唯一基线；投递是 PR 作用域。** 观测保持每 workspace，而检测与投递是 PR 作用域，因此不可达/untrusted/退役的绑定者不持陈旧副本，可达时重新成为候选。
 3. **准入即投递。** 一如 channel 的绑定 relay，准入后排在运行中 turn 之后的 prompt 在重启时随内存队列丢失；watch 文件已记录该键、不再注入。`delivered`（而非每会话准入 ring）阻止一个键被准入到另一个会话。
 4. **restore 是注入依赖。** drain 消费 `wakeSession`；从路由抽取共享 restore 随启用增量落地以便端到端测试。drain 的 restore 错误分类是自己的，并把 `session_writer_conflict` 视为临时。
-5. **默认关闭。** drain 在启用增量填充 deps、PR B 打开开关之前对生产惰性；任何构建都不跑两个 poller。
+5. **默认关闭。** drain 在启用增量填充 deps、PR B 移除该开关之前对生产惰性；任何构建都不跑两个 poller。
 
 ## 约束与风险
 
@@ -131,4 +131,4 @@ drain 在与观测相同的门控 timer 块内、`runPrWatchObservationTick` 之
 
 ## 开放问题
 
-- 继承自主设计（默认开启时机、`cancelled`/`stale` CI 谓词、手动 push 账本）；此处均不决定。
+- 继承自主设计（手动 push 账本）；此处均不决定。默认开启时机与 `cancelled`/`stale` CI 谓词已于 2026-11-14 定案：默认关闭，保留 core 的谓词。

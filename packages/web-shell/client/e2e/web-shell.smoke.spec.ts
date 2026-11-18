@@ -1852,6 +1852,15 @@ test('keeps the permission picker compact and marks full access as dangerous @sm
   ]) {
     await expect(fullAccess.locator(selector)).toHaveCSS('color', dangerColor);
   }
+
+  await fullAccess.click();
+  await expect(modeDropdown).toHaveCount(0);
+  const modeTrigger = page.locator('[data-web-shell-mode-button]');
+  await expect(modeTrigger).toHaveClass(/modeToolBtnDanger/);
+  await expect(modeTrigger.locator('[class*="toolBtnText"]')).toHaveCSS(
+    'color',
+    dangerColor,
+  );
 });
 
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {

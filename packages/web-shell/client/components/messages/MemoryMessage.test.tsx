@@ -181,6 +181,73 @@ describe('MemoryMessage', () => {
     expect(button('Edit').disabled).toBe(true);
   });
 
+  it('keeps withheld workspace content read-only without offering a replacement', async () => {
+    const workspacePath = '/workspace/QWEN.md';
+    memory.files = [
+      {
+        kind: 'memory_file',
+        path: workspacePath,
+        scope: 'workspace',
+        bytes: 32,
+        truncated: true,
+      },
+    ];
+    memory.status = { ...memory.status!, files: memory.files, totalBytes: 32 };
+    memory.readMemoryFile.mockResolvedValue({ content: '', truncated: true });
+
+    await mountOnUserTab();
+    act(() => button('Workspace').click());
+    await flush();
+
+    expect(memory.readMemoryFile).toHaveBeenLastCalledWith(workspacePath);
+    expect(container.textContent).toContain(
+      'The complete memory file text is unavailable. Editing is disabled.',
+    );
+    expect(container.textContent).not.toContain('No memory files found.');
+    expect(button('Edit').disabled).toBe(true);
+    act(() => button('Edit').click());
+    await flush();
+    expect(container.querySelector('textarea')).toBeNull();
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+
+    act(() => button('User').click());
+    await flush();
+    expect(container.textContent).toContain('No memory files found.');
+    expect(button('Edit').disabled).toBe(false);
+  });
+
+  it('shows an existing empty file without the missing-file placeholder', async () => {
+    const workspacePath = '/workspace/QWEN.md';
+    memory.files = [
+      {
+        kind: 'memory_file',
+        path: workspacePath,
+        scope: 'workspace',
+        bytes: 0,
+      },
+    ];
+    memory.status = { ...memory.status!, files: memory.files, totalBytes: 0 };
+    memory.readMemoryFile.mockResolvedValue({ content: '', truncated: false });
+
+    await mountOnUserTab();
+    act(() => button('Workspace').click());
+    await flush();
+
+    expect(memory.readMemoryFile).toHaveBeenLastCalledWith(workspacePath);
+    expect(container.textContent).toContain(workspacePath);
+    expect(container.textContent).not.toContain('No memory files found.');
+    expect(button('Edit').disabled).toBe(false);
+    act(() => button('Edit').click());
+    await flush();
+    expect(container.querySelector('textarea')?.value).toBe('');
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+
+    act(() => button('User').click());
+    await flush();
+    expect(container.textContent).toContain('No memory files found.');
+    expect(button('Edit').disabled).toBe(false);
+  });
+
   // #13100's destructive step: an outstanding status load makes `files`
   // empty, which looks exactly like "no memory file yet" and used to open
   // the create path with Edit + Save enabled over a file that is on disk.

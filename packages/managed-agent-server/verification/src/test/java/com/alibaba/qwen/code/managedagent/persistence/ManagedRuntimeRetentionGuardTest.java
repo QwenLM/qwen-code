@@ -13,7 +13,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeRetention;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
@@ -95,68 +94,6 @@ class ManagedRuntimeRetentionGuardTest {
     }
 
     @Test
-    void retainedPrivatePinKeepsAnExistingTerminalFamilyWhileOrdinaryHistoryExpires()
-            throws Exception {
-        var bindings =
-                new JdbcRuntimeBindingRepository(
-                        source, new AesGcmSecretProtector("key", new byte[32]));
-        var pinned = retire(bindings, request("pinned-history"));
-        var ordinary = retire(bindings, request("ordinary-history"));
-        jdbc.update(
-                "INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified, runtime_request_key) VALUES ('tenant', 'pinned-history', 'qwen-code', 'CLOSED', 1, 1, ?)",
-                "a".repeat(64));
-        var retention = new JdbcRuntimeRetention(source, bindings, guard);
-        assertThat(retention.sweep(Duration.ofDays(30), 100, null).bindingsDeleted()).isEqualTo(1);
-        assertThat(bindings.findById(pinned.getBindingId())).isNotNull();
-        assertThat(bindings.findById(ordinary.getBindingId())).isNull();
-        assertThat(jdbc.queryForObject("SELECT runtime_request_key FROM ma_session", String.class))
-                .isEqualTo("a".repeat(64));
-    }
-
-    @Test
-    void nativeAuthorizationEvidenceKeepsAnExistingTerminalExecution() throws Exception {
-        var bindings =
-                new JdbcRuntimeBindingRepository(
-                        source, new AesGcmSecretProtector("key", new byte[32]));
-        var retired = retire(bindings, request("grant-history"));
-        new JdbcToolExecutionRepository(source)
-                .findOrCreate(
-                        ToolExecutionRecord.prepared(
-                                "historical-call",
-                                "key",
-                                retired.getBindingId(),
-                                retired.getGeneration(),
-                                "grant-history",
-                                "runtime",
-                                "turn",
-                                "call",
-                                "digest",
-                                Map.of(
-                                        "sessionId",
-                                        "runtime",
-                                        "promptId",
-                                        "turn",
-                                        "callId",
-                                        "call",
-                                        "argsDigest",
-                                        "digest")));
-        // Historical evidence fixture; this does not establish actual SQL grant admission.
-        jdbc.update(
-                "UPDATE ma_tool_execution SET execution_state = 'SETTLED', execution_status ="
-                    + " 'not_started', settled_at = 946684800000,"
-                    + " native_authorization_json = ?",
-                "{\"retained\":true}");
-        var before = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution");
-        var retention = new JdbcRuntimeRetention(source, bindings, guard);
-        var result = retention.sweep(Duration.ofDays(30), 100, null);
-        assertThat(result.executionsDeleted()).isZero();
-        assertThat(result.bindingsDeleted()).isZero();
-        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns() + " FROM ma_tool_execution"))
-                .usingRecursiveComparison()
-                .isEqualTo(before);
-    }
-
-    @Test
     void aDifferentRawIdentityCannotEndChildProtection() throws Exception {
         child();
         projection();
@@ -196,19 +133,6 @@ class ManagedRuntimeRetentionGuardTest {
     }
 
     @Test
-    void aCsiReservationWithNoHolderStillRetainsItsExactBinding() throws Exception {
-        jdbc.update(
-                "INSERT INTO ma_storage_owner (storage_key, storage_kind, binding_id,"
-                    + " runtime_generation) VALUES (?, 'CSI', 'binding', 4)",
-                "a".repeat(64));
-        try (var connection = source.getConnection()) {
-            assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isTrue();
-            assertThat(guard.bindingReferenced(connection, binding("binding", 5))).isFalse();
-            assertThat(guard.bindingReferenced(connection, binding("other", 4))).isFalse();
-        }
-    }
-
-    @Test
     void releasedRuntimeSessionWithMembershipPinsItsBindingUntilEvidenceCleanup() throws Exception {
         var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("key", new byte[32]));
         var retired = retire(bindings, request("retained-member"));
@@ -228,11 +152,20 @@ class ManagedRuntimeRetentionGuardTest {
     }
 
     @Test
-    void csiRetirementRetainsItsBinding() throws Exception {
-        operation("CSI_RETIREMENT", "csi-retirement", "csi", 2);
+    void workspaceRetirementRetainsItsExactBindingAndGeneration() throws Exception {
+        operation("WORKSPACE_RETIREMENT", "retirement", "binding", 4);
         try (var connection = source.getConnection()) {
-            assertThat(guard.bindingReferenced(connection, binding("csi", 2))).isTrue();
-            assertThat(guard.bindingReferenced(connection, binding("absent", 1))).isFalse();
+            assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isTrue();
+            assertThat(guard.bindingReferenced(connection, binding("binding", 5))).isFalse();
+            assertThat(guard.bindingReferenced(connection, binding("absent", 4))).isFalse();
+            // No other operation kind retains a Runtime binding.
+            jdbc.update("UPDATE ma_operation SET operation_kind = 'WORKSPACE_OPERATOR_RECOVERY'");
+            assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isFalse();
+            // The fence follows the recorded target revision, not the binding alone.
+            jdbc.update("UPDATE ma_operation SET operation_kind = 'WORKSPACE_RETIREMENT',"
+                    + " target_revision = 5");
+            assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isFalse();
+            assertThat(guard.bindingReferenced(connection, binding("binding", 5))).isTrue();
         }
     }
 
@@ -252,48 +185,6 @@ class ManagedRuntimeRetentionGuardTest {
                     rawHash);
             assertThat(guard.executionReferenced(connection, call)).isTrue();
             assertThat(guard.executionReferenced(connection, "other")).isFalse();
-        }
-    }
-
-    @Test
-    void acknowledgementUsesRawHashAndSeesTheCallersUncommittedReference() throws Exception {
-        try (Connection connection = source.getConnection()) {
-            connection.setAutoCommit(false);
-            String hash = ToolPublicationContract.sha256("call".getBytes(StandardCharsets.UTF_8));
-            insertOperation(connection, "CSI_RETIREMENT", "retirement", "binding", 1);
-            try (var insert =
-                    connection.prepareStatement(
-                            "INSERT INTO ma_operation_work (operation_key, work_kind, target_key, target_id, tenant_id, state, payload_json, gmt_create, gmt_modified) VALUES (?, 'CSI_WORKER_ACK', ?, 'call', 'tenant', 'COMPLETE', '{}', 1, 1)")) {
-                insert.setString(1, operationKey("CSI_RETIREMENT", "retirement"));
-                insert.setString(2, hash);
-                insert.executeUpdate();
-            }
-            assertThat(guard.executionReferenced(connection, "call")).isTrue();
-            connection.rollback();
-            assertThat(guard.executionReferenced(connection, "call")).isFalse();
-        }
-    }
-
-    @Test
-    void sharedWorkReferencesRequireTheCsiOperationAndAckKinds() throws Exception {
-        operation("CSI_RETIREMENT", "retirement", "binding", 4);
-        String hash = ToolPublicationContract.sha256("call".getBytes(StandardCharsets.UTF_8));
-        jdbc.update(
-                "INSERT INTO ma_operation_work (operation_key, work_kind, target_key, target_id, tenant_id, state, payload_json, gmt_create, gmt_modified) VALUES (?, 'EXECUTION_ACK', ?, 'call', 'tenant', 'COMPLETE', '{}', 1, 1)",
-                operationKey("CSI_RETIREMENT", "retirement"),
-                hash);
-        try (var connection = source.getConnection()) {
-            assertThat(guard.executionReferenced(connection, "call")).isFalse();
-            jdbc.update("UPDATE ma_operation_work SET work_kind = 'CSI_WORKER_ACK'");
-            assertThat(guard.executionReferenced(connection, "call")).isTrue();
-            jdbc.update("UPDATE ma_operation SET operation_kind = 'WORKSPACE_OPERATOR_RECOVERY'");
-            assertThat(guard.executionReferenced(connection, "call")).isFalse();
-            assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isFalse();
-            jdbc.update(
-                    "UPDATE ma_operation SET operation_kind = 'CSI_RETIREMENT', target_revision ="
-                        + " 5");
-            assertThat(guard.bindingReferenced(connection, binding("binding", 4))).isFalse();
-            assertThat(guard.bindingReferenced(connection, binding("binding", 5))).isTrue();
         }
     }
 

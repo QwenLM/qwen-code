@@ -347,8 +347,8 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/managed-runtime-attestation-worker.ts',
     {
       reason:
-        'The Runtime worker scrubs the loader variables that only started its own process, so the commands it runs do not inherit them.',
-      accesses: { whole: 1 },
+        'The Runtime worker scrubs the loader variables that only started its own process, so the commands it runs do not inherit them, and passes its environment to the terminal host that spawns PTY sessions.',
+      accesses: { whole: 2 },
     },
   ],
   [
@@ -442,7 +442,9 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'daemon environment into the TLS trust probe child. NODE_TLS_REJECT_UNAUTHORIZED is read to skip the ' +
         'worker TLS trust check when it disables verification: workers inherit the variable unscrubbed and dial ' +
         'via fetch, which honors it, so the strict probe would flag an outage that never happens. ' +
-        'The Hosted Harness capability digest and private CSI Session Store URL are process-scoped deployment contracts fixed at daemon bootstrap.',
+        'The Hosted Harness capability digest and private CSI Session Store URL are process-scoped deployment contracts fixed at daemon bootstrap. ' +
+        'One more whole-object read resolves serve.sessionPrWatch: its two environment overrides are boot-time operator ' +
+        'contracts, read once beside the settings they override rather than per tick.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:HOSTED_HARNESS_CAPABILITY_DIGEST_ENV': 1,
@@ -459,7 +461,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:QWEN_SERVE_NO_MCP_POOL': 1,
         'key:QWEN_SERVE_NO_PERSISTENT_REGISTRATION': 1,
         'key:VITEST_WORKER_ID': 1,
-        whole: 6,
+        whole: 7,
       },
     },
   ],
@@ -609,6 +611,17 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'The PR-state refresh interval (QWEN_SESSION_PR_REFRESH_MINUTES) is a ' +
         'process-scoped operator switch; embedded callers may omit the ' +
         'environment argument.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/server/pr-watch-deps.ts',
+    {
+      reason:
+        'The watch reads the daemon’s own gh configuration, whose directory ' +
+        'precedence (GH_CONFIG_DIR, XDG_CONFIG_HOME, APPDATA, HOME) is ' +
+        'process-scoped: it describes the daemon’s gh login, not any one ' +
+        'workspace’s overlay.',
       accesses: { whole: 1 },
     },
   ],

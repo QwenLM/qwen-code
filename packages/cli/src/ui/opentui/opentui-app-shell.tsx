@@ -150,6 +150,10 @@ import { dialogAreaWidth } from './dialogs-shared.js';
 import { sanitizeTerminalText } from '../utils/textUtils.js';
 import { C } from './theme.js';
 import {
+  ExtensionSettingInput,
+  ExtensionPluginChoice,
+} from './ExtensionAcquisition.js';
+import {
   getDialogMaxHeight,
   STATIC_EXTRA_HEIGHT,
 } from '../utils/layoutUtils.js';
@@ -307,7 +311,9 @@ interface ActionModal {
   resolve: (confirmed: boolean) => void;
 }
 
-type ConfirmationModal = ShellModal | ActionModal;
+type SettingModal = Parameters<typeof ExtensionSettingInput>[0]['permission'];
+type ChoiceModal = Parameters<typeof ExtensionPluginChoice>[0]['permission'];
+type ConfirmationModal = ShellModal | ActionModal | SettingModal | ChoiceModal;
 
 export function OpenTuiApp(props: OpenTuiAppProps) {
   const {
@@ -596,6 +602,79 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             },
           ]);
         }),
+      presentChoice: (
+        marketplace: ChoiceModal['marketplace'],
+        signal: AbortSignal,
+      ) =>
+        new Promise<string>((resolve, reject) => {
+          if (signal.aborted) {
+            reject(new Error(t('Plugin selection cancelled.')));
+            return;
+          }
+          const id = ++modalSeq.current;
+          let settled = false;
+          const finish = (value: string | null, remove = true) => {
+            if (settled) return;
+            settled = true;
+            signal.removeEventListener('abort', abort);
+            ownedActionModals.current.delete(lifetime);
+            if (remove) setModals((prev) => prev.filter((m) => m.id !== id));
+            if (value !== null && !signal.aborted) resolve(value);
+            else reject(new Error(t('Plugin selection cancelled.')));
+          };
+          const abort = () => finish(null);
+          const lifetime = {
+            cancel: abort,
+            dispose: () => finish(null, false),
+          };
+          signal.addEventListener('abort', abort, { once: true });
+          ownedActionModals.current.add(lifetime);
+          setModals((prev) => [
+            ...prev,
+            {
+              kind: 'choice',
+              id,
+              marketplace,
+              resolve: (value) => finish(value),
+              cancel: abort,
+            },
+          ]);
+        }),
+      presentSetting: (setting: SettingModal['setting'], signal: AbortSignal) =>
+        new Promise<string>((resolve, reject) => {
+          if (signal.aborted) {
+            reject(new Error(t('Setting input cancelled')));
+            return;
+          }
+          const id = ++modalSeq.current;
+          let settled = false;
+          const finish = (value: string | null, remove = true) => {
+            if (settled) return;
+            settled = true;
+            signal.removeEventListener('abort', abort);
+            ownedActionModals.current.delete(lifetime);
+            if (remove) setModals((prev) => prev.filter((m) => m.id !== id));
+            if (value !== null && !signal.aborted) resolve(value);
+            else reject(new Error(t('Setting input cancelled')));
+          };
+          const abort = () => finish(null);
+          const lifetime = {
+            cancel: abort,
+            dispose: () => finish(null, false),
+          };
+          signal.addEventListener('abort', abort, { once: true });
+          ownedActionModals.current.add(lifetime);
+          setModals((prev) => [
+            ...prev,
+            {
+              kind: 'setting',
+              id,
+              setting,
+              resolve: (value) => finish(value),
+              cancel: abort,
+            },
+          ]);
+        }),
       presentAction: (
         prompt: ReactNode,
         options?: Pick<ConfirmationRequest, 'signal' | 'isCurrent'>,
@@ -661,6 +740,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         options,
       );
     });
+    manager.setRequestSetting((setting) =>
+      confirmations.presentSetting(setting, controller.signal),
+    );
+    manager.setRequestChoicePlugin((marketplace) =>
+      confirmations.presentChoice(marketplace, controller.signal),
+    );
     return () => controller.abort();
   }, [config, confirmations]);
 
@@ -1784,7 +1869,21 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               </box>
             </box>
           ) : activeModal ? (
-            activeModal.kind === 'shell' ? (
+            activeModal.kind === 'choice' ? (
+              <ExtensionPluginChoice
+                key={`choice-${activeModal.id}`}
+                permission={activeModal}
+                width={Math.max(0, terminalWidth - 4)}
+                height={dialogRegionHeight}
+              />
+            ) : activeModal.kind === 'setting' ? (
+              <ExtensionSettingInput
+                key={`setting-${activeModal.id}`}
+                permission={activeModal}
+                width={Math.max(0, terminalWidth - 4)}
+                height={dialogRegionHeight}
+              />
+            ) : activeModal.kind === 'shell' ? (
               <OpenTuiShellConfirmation
                 key={`shell-${activeModal.id}`}
                 commands={activeModal.commands}

@@ -38,7 +38,6 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 
 /**
@@ -99,13 +98,14 @@ public class SessionLifecycleCoordinator {
     // barrier forever (review round 9, R9-4).
     private static final int SETTLED_COMPLETION_BUDGET_FACTOR = 4;
     // The daemon refuses a lifecycle phase while it is still busy with the
-    // previous prompt: hosted_lifecycle_recovery_required names its cleanup
-    // debt, and hosted_turn_active names a turn, MCP call or hook that is
-    // still draining. Both clear through the daemon's own work, not by
-    // anything the caller changes, so neither is a permanent hook refusal
-    // or spends the close's retry budget.
+    // previous prompt, closing its resident Session, or out of cold-open
+    // admission slots. These clear through the daemon's own work, not by
+    // anything the caller changes, so none is a permanent hook refusal or
+    // spends the close's retry budget; past the budget the wait is
+    // published as recovery_blocked with its own code.
     private static final Set<String> SELF_CLEARING_DAEMON_REFUSALS =
-            Set.of("hosted_lifecycle_recovery_required", "hosted_turn_active");
+            Set.of("hosted_lifecycle_recovery_required", "hosted_turn_active",
+                    "hosted_session_closing", "hosted_session_open_busy");
     private final AgentStateStore store;
     private WorkspaceLifecycleStore lifecycle;
 
@@ -114,17 +114,24 @@ public class SessionLifecycleCoordinator {
         this.lifecycle = lifecycle;
     }
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setClientFilesRelay(ObjectProvider<ClientFilesRelayService> clientFilesRelay) {
+        this.clientFilesRelay = clientFilesRelay;
+    }
+
     public boolean supportsWorkspaceLifecycle() {
         return supportsWorkspaceLifecycle("hosted-workspace-files/1");
     }
 
     public boolean supportsWorkspaceLifecycle(String profile) {
-        return runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle(profile);
+        return (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+                ? runtimeWarmer.supportsWorkspaceClose(profile) : runtimeWarmer.supportsWorkspaceClose()) && harness.supportsLifecycle(profile);
     }
 
     public boolean supportsWorkspaceLifecycle(SessionRecord session) {
         return session.workspace() != null && RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
-                && harness.supportsLifecycle(session.toolProfile());
+                && (com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                        ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()));
     }
 
     private final ManagedSessionStore sessionStore;
@@ -136,26 +143,46 @@ public class SessionLifecycleCoordinator {
     private final ManagedAgentService sessions;
     private final ChildWorkspaceStore childWorkspaces;
     private final ObjectProvider<RuntimeBrokerOperations> brokerProviders;
+    // Lazy provider: the relay service depends on ManagedAgentService, so a
+    // constructor parameter here could form a cycle. Used to close the
+    // client-files binding when the harness detaches or the Session closes.
+    // Setter-injected (like setWorkspaceLifecycleStore) so tests can install a
+    // fake; unset means the teardown is a no-op rather than a swallowed NPE.
+    private ObjectProvider<ClientFilesRelayService> clientFilesRelay;
     private final ExecutorService executor;
     private final Clock clock;
     private final Duration leaseDuration;
     private final Duration retryInitialDelay;
     private final Duration retryMaxDelay;
     private final int maxOperationRetries;
-    private final String owner = UUID.randomUUID().toString();
-    private final java.util.concurrent.ScheduledExecutorService renewals =
-            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(task -> {
-                Thread thread = new Thread(task, "session-lifecycle-renewal");
-                thread.setDaemon(true);
-                return thread;
-            });
+    private final LeaseRenewalRunner runner =
+            new LeaseRenewalRunner("session-lifecycle-renewal");
+    private final String owner = runner.owner();
 
     @jakarta.annotation.PreDestroy
     void stopRenewals() {
-        renewals.shutdownNow();
+        runner.close();
     }
 
-    private final Set<String> active = ConcurrentHashMap.newKeySet();
+    // The harness-local client-files catalog is gone once the harness detaches
+    // or the Session closes; close the control-plane binding so the panel stops
+    // reporting a registration the model can no longer use. Best-effort: a
+    // relay failure must not wedge the lifecycle.
+    private void closeClientFilesBinding(OperationRecord operation) {
+        if (clientFilesRelay == null) {
+            return;
+        }
+        try {
+            clientFilesRelay.ifAvailable(relay ->
+                    relay.closeForSession(operation.tenantId(), operation.sessionId()));
+        } catch (RuntimeException failure) {
+            // Best-effort: a relay failure must not wedge the lifecycle, but it
+            // must be diagnosable — the binding then lingers until binding-ttl.
+            LOG.warn("Client files binding teardown failed tenant={} session={}",
+                    operation.tenantId(), operation.sessionId(), failure);
+        }
+    }
+
     static final Set<String> SETTLED_SESSION_STATES =
             Set.of("CLOSED", "ARCHIVED", "DELETED");
 
@@ -206,17 +233,10 @@ public class SessionLifecycleCoordinator {
 
     public void dispatch(String tenantId, String sessionId,
             String operationId) {
-        String key = tenantId + "\n" + sessionId + "\n" + operationId;
-        if (!active.add(key)) {
-            return;
-        }
-        executor.execute(() -> {
-            try {
-                deliver(tenantId, sessionId, operationId);
-            } finally {
-                active.remove(key);
-            }
-        });
+        runner.dispatchOnce(
+                executor,
+                LeaseRenewalRunner.scopedKey(tenantId, sessionId, operationId),
+                () -> deliver(tenantId, sessionId, operationId));
     }
 
     @Scheduled(scheduler = "managedAgentScheduler", fixedDelayString =
@@ -236,20 +256,15 @@ public class SessionLifecycleCoordinator {
         if (claimed == null) {
             return;
         }
-        var valid = new java.util.concurrent.atomic.AtomicBoolean(true);
-        long period = Math.max(1, leaseDuration.toMillis() / 3);
-        java.util.concurrent.ScheduledFuture<?> renewal;
+        long period = LeaseRenewalRunner.renewalPeriodMillis(leaseDuration);
+        LeaseRenewalRunner.RenewalHandle renewal;
         try {
-            renewal = renewals.scheduleWithFixedDelay(() -> {
-                try {
-                    if (!store.renewLifecycleOperation(tenantId, sessionId, operationId, owner,
-                            claimed.claimGeneration(), leaseDuration)) {
-                        valid.set(false);
-                    }
-                } catch (RuntimeException error) {
-                    valid.set(false);
-                }
-            }, period, period, java.util.concurrent.TimeUnit.MILLISECONDS);
+            renewal = runner.startFixedDelay(
+                    period,
+                    () -> store.renewLifecycleOperation(tenantId, sessionId,
+                            operationId, owner, claimed.claimGeneration(),
+                            leaseDuration),
+                    ignored -> {});
         } catch (java.util.concurrent.RejectedExecutionException stopped) {
             // The coordinator is shutting down; the claim's lease lets the
             // recovery scan re-drive this operation after restart, once a
@@ -274,7 +289,7 @@ public class SessionLifecycleCoordinator {
                 return;
             }
             harnessConfirmed = settle(claimed, harnessSettled);
-            if (!valid.get()) {
+            if (!renewal.isLive()) {
                 return;
             }
             if (!store.completeOperation(tenantId, sessionId, operationId,
@@ -328,10 +343,15 @@ public class SessionLifecycleCoordinator {
                         && SELF_CLEARING_DAEMON_REFUSALS.contains(refusal)) {
                     daemonWaitCode = refusal;
                 } else {
+                    // A wedged teardown keeps its own code too: the close
+                    // reconciles under this operation's authority or an
+                    // operator takes over, and the generic hooks code
+                    // would name a debt the Session does not have.
                     blocked = cause instanceof HarnessHttpFailure httpError
                             && httpError.getErrorCode() != null
                             && (httpError.getErrorCode().startsWith("workspace_lifecycle") || httpError.getErrorCode().startsWith("workspace_close")
-                                    || "runtime_admission_closed".equals(httpError.getErrorCode()))
+                                    || "runtime_admission_closed".equals(httpError.getErrorCode())
+                                    || "hosted_session_teardown_blocked".equals(httpError.getErrorCode()))
                             ? httpError.getErrorCode() : "workspace_lifecycle_hooks_unsettled";
                 }
             }
@@ -398,7 +418,7 @@ public class SessionLifecycleCoordinator {
                     ? adjustedAttempts >= (long) maxOperationRetries
                             * SETTLED_COMPLETION_BUDGET_FACTOR
                     : adjustedAttempts >= maxOperationRetries;
-            if (!cwdChange && budgetSpent && valid.get() && !exemptWait
+            if (!cwdChange && budgetSpent && renewal.isLive() && !exemptWait
                     && !staleBoot && daemonWaitCode == null) {
                 String terminalCode = settleReachedHarness
                         ? "session_close_completion_unsettled" : failureCode;
@@ -490,7 +510,7 @@ public class SessionLifecycleCoordinator {
                                     + " session={} operation={} failure={}",
                             tenantId, sessionId, operationId,
                             writeError.getMessage());
-                    if (valid.get()) {
+                    if (renewal.isLive()) {
                         if (blocked != null) {
                             store.blockLifecycleOperation(tenantId, sessionId,
                                     operationId, owner,
@@ -506,11 +526,11 @@ public class SessionLifecycleCoordinator {
                 }
                 return;
             }
-            if (valid.get() && blocked != null) {
+            if (renewal.isLive() && blocked != null) {
                 store.blockLifecycleOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(), blocked, Math.addExact(clock.millis(), delay),
                         exemptWait || staleBoot);
-            } else if (valid.get() && exemptWait && !staleBoot
+            } else if (renewal.isLive() && exemptWait && !staleBoot
                     && claimed.attemptCount() >= maxOperationRetries) {
                 // Past the budget the writer wait is published: the row reads
                 // recovery_blocked with its code rather than a healthy
@@ -525,7 +545,7 @@ public class SessionLifecycleCoordinator {
                         operationId, owner, claimed.claimGeneration(),
                         "session_close_writer_live",
                         Math.addExact(clock.millis(), delay), true);
-            } else if (valid.get() && !cwdChange && staleBoot
+            } else if (renewal.isLive() && !cwdChange && staleBoot
                     && claimed.attemptCount() >= maxOperationRetries) {
                 // The stale-view wait outlasts the budget only while the
                 // Harness keeps restarting between attempts — each
@@ -538,7 +558,7 @@ public class SessionLifecycleCoordinator {
                         operationId, owner, claimed.claimGeneration(),
                         "hosted_harness_generation_mismatch",
                         Math.addExact(clock.millis(), delay), true);
-            } else if (valid.get() && daemonWaitCode != null
+            } else if (renewal.isLive() && daemonWaitCode != null
                     && claimed.attemptCount() >= maxOperationRetries) {
                 // The daemon's wait is published the same way: the row
                 // reads recovery_blocked with the refusal's own code and
@@ -548,11 +568,11 @@ public class SessionLifecycleCoordinator {
                         operationId, owner, claimed.claimGeneration(),
                         daemonWaitCode,
                         Math.addExact(clock.millis(), delay), true);
-            } else if (valid.get() && (exemptWait || staleBoot || daemonWaitCode != null)) {
+            } else if (renewal.isLive() && (exemptWait || staleBoot || daemonWaitCode != null)) {
                 store.retryOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(),
                         Math.addExact(clock.millis(), delay), true);
-            } else if (valid.get()) {
+            } else if (renewal.isLive()) {
                 store.retryOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(), Math.addExact(clock.millis(), delay));
             }
@@ -564,7 +584,7 @@ public class SessionLifecycleCoordinator {
                     error.getClass().getSimpleName(), error.getMessage(),
                     error);
         } finally {
-            renewal.cancel(false);
+            renewal.close();
         }
     }
 
@@ -735,7 +755,8 @@ public class SessionLifecycleCoordinator {
             lifecycle.requireSettledExecutions(operation);
             JsonNode effects = lifecycle.recoverEffects(operation);
             if (effects == null) {
-                if (!harness.supportsLifecycle(session.toolProfile())) {
+                if (!(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                        ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()))) {
                     throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
                 }
                 try {
@@ -818,6 +839,10 @@ public class SessionLifecycleCoordinator {
             if (sessionStore.hasLiveWriter(operation.tenantId(), operation.sessionId())) {
                 throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
             }
+            // Only tear the binding down once the detach is actually proceeding:
+            // a live writer means the Session was not detached, and closing the
+            // registration here would destroy a live client-files binding.
+            closeClientFilesBinding(operation);
             runtimeWarmer.closeWorkspace(operation.tenantId(), operation.sessionId()).toCompletableFuture().join();
             return true;
         }
@@ -851,6 +876,11 @@ public class SessionLifecycleCoordinator {
                 throw new IllegalStateException(
                         "A Harness still holds the Session's journal writer");
             }
+            // A harness that merely answered the close (possibly another
+            // server's) does not prove the Session closed; only tear the binding
+            // down once the live-writer gate confirms the close is proceeding,
+            // so a refused close cannot destroy a live client-files registration.
+            closeClientFilesBinding(operation);
         }
         if (bound) {
             runtimeWarmer.closeWorkspace(operation.tenantId(), operation.sessionId()).toCompletableFuture().join();
@@ -1098,14 +1128,16 @@ public class SessionLifecycleCoordinator {
                                     harness.runMessageOperation(tenantId,
                                             childSessionId, stop);
                                 } catch (HarnessHttpFailure error) {
-                                    // A child waiting on its recovery or
-                                    // closing takes no stop yet: the retry
-                                    // asks again, as on the relay's arm.
+                                    // A child waiting on its recovery,
+                                    // closing, or out of cold-open slots
+                                    // takes no stop yet: the retry asks
+                                    // again, as on the relay's arm.
                                     if (!"hosted_turn_recovery_required"
                                             .equals(error.getErrorCode())
                                             && !"hosted_session_closing"
-                                                    .equals(error
-                                                            .getErrorCode())) {
+                                                    .equals(error.getErrorCode())
+                                            && !"hosted_session_open_busy"
+                                                    .equals(error.getErrorCode())) {
                                         stopFailure = error;
                                     }
                                 } catch (RuntimeException error) {

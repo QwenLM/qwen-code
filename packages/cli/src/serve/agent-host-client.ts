@@ -100,6 +100,12 @@ interface AgentHostCredential {
   workspaceId: string;
   hostId: string;
   secret: string;
+  /**
+   * {@link enrollmentTokenHash} of the token this credential enrolled with,
+   * or last spent re-joining: run again, that command goes on with it.
+   * Absent from what older versions wrote.
+   */
+  enrollmentTokenHash?: string;
 }
 
 export interface AgentHostConnectionOptions {
@@ -166,10 +172,15 @@ async function readCredential(
   }
 }
 
+/**
+ * `onlyOverSaved`: write only over a credential still saved, not one
+ * removed meanwhile (revoked, say).
+ */
 async function writeCredential(
   filePath: string,
   credential: AgentHostCredential,
   expected: AgentHostCredential | undefined,
+  { onlyOverSaved = false } = {},
 ): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
   const lock = await lockCredential(filePath);
@@ -178,6 +189,9 @@ async function writeCredential(
   try {
     const current = await readCredential(filePath);
     lock.assertHeld();
+    if (onlyOverSaved && !current) {
+      throw new Error('Saved Agent Host credential was removed.');
+    }
     if (
       current &&
       (current.hostId !== expected?.hostId ||
@@ -723,7 +737,9 @@ const activeConnections = new Map<
     bridge: AcpSessionBridge;
     generationGuard?: WorkspaceGenerationGuard;
     stop: AbortController;
-    start: Promise<void>;
+    start: Promise<{ recorded: boolean }>;
+    /** {@link enrollmentTokenHash} of the join that started it, if any. */
+    tokenHash?: string;
   }
 >();
 
@@ -735,20 +751,30 @@ function connectionKey(
   return JSON.stringify([serverUrl, workspaceId, workspaceCwd]);
 }
 
+/**
+ * `recorded`: the credential file records this join's token, so the same
+ * join again goes on with it; a rerun of one that records nothing is refused.
+ */
 export async function startAgentHostConnection(
   options: AgentHostConnectionOptions,
-): Promise<void> {
+): Promise<{ recorded: boolean }> {
   const key = connectionKey(
     normalizeServerUrl(options.serverUrl, options.allowHttp),
     options.workspaceId,
     options.workspaceCwd,
   );
+  const tokenHash =
+    options.enrollmentToken !== undefined
+      ? enrollmentTokenHash(options.enrollmentToken)
+      : undefined;
   const existing = activeConnections.get(key);
   if (existing) {
     if (
       existing.bridge === options.bridge &&
       existing.generationGuard === options.generationGuard &&
-      !options.enrollmentToken &&
+      // The same join sent again waits for (or keeps) the one under way:
+      // replacing it could cut off an answer that spent its token.
+      (!options.enrollmentToken || existing.tokenHash === tokenHash) &&
       !existing.stop.signal.aborted
     ) {
       return existing.start;
@@ -763,9 +789,10 @@ export async function startAgentHostConnection(
     generationGuard: options.generationGuard,
     stop,
     start,
+    ...(tokenHash !== undefined ? { tokenHash } : {}),
   });
   try {
-    await start;
+    return await start;
   } catch (error) {
     if (activeConnections.get(key)?.start === start)
       activeConnections.delete(key);
@@ -820,7 +847,7 @@ export function stopAgentHostConnection(target: {
 async function connectAgentHost(
   options: AgentHostConnectionOptions,
   stop: AbortController,
-): Promise<void> {
+): Promise<{ recorded: boolean }> {
   const assertOpen = () => {
     options.generationGuard?.assertOpen();
     stop.signal.throwIfAborted();
@@ -936,8 +963,13 @@ async function connectAgentHost(
       }),
     });
   if (savedCredential && options.enrollmentToken) {
+    const tokenHash = enrollmentTokenHash(options.enrollmentToken);
     try {
       await sendHeartbeat(savedCredential, options.enrollmentToken);
+      // This credential spent the token: run again, the command goes on.
+      if (savedCredential.enrollmentTokenHash !== tokenHash) {
+        credential = { ...savedCredential, enrollmentTokenHash: tokenHash };
+      }
     } catch (error) {
       if (
         (error as { status?: number }).status === 409 &&
@@ -955,20 +987,23 @@ async function connectAgentHost(
           await discardRevokedCredential(savedCredential);
           credential = undefined;
         }
-        if (credential) {
-          // The saved credential works, and the token was spent. A Replace
-          // this command ran (the secret was sent with this token), whose
-          // answer was lost, left a secret of its own: sent again, it is
-          // answered as that enrollment. Another command's is not taken.
+        // The saved credential works, and the token was spent. If this
+        // command's first run got this credential and failed after that,
+        // run again, it goes on with what it got; its record decides first,
+        // so a secret left behind by its enrollment cannot outrank it.
+        if (credential && savedCredential.enrollmentTokenHash !== tokenHash) {
+          // A Replace this command ran (the secret was sent with this
+          // token), whose answer was lost, left a secret of its own: sent
+          // again, it is answered as that enrollment. Another command's is
+          // not taken, and whatever else this command did (a Replace
+          // refused outright did nothing), it did not get this credential.
           const pending = await readEnrollmentSecret(files.enrollment).catch(
             () => undefined,
           );
           if (
             pending === undefined ||
             pending.secret === savedCredential.secret ||
-            !pending.tokenHashes.includes(
-              enrollmentTokenHash(options.enrollmentToken),
-            )
+            !pending.tokenHashes.includes(tokenHash)
           ) {
             throw new Error('Invalid or expired Agent Host enrollment token.');
           }
@@ -978,6 +1013,9 @@ async function connectAgentHost(
     }
     assertOpen();
   }
+  // Whether the credential file records this join's token, so a failed
+  // first heartbeat can point at a rerun that goes on with it.
+  let recorded = false;
   if (!credential) {
     if (!options.enrollmentToken) {
       throw new Error(
@@ -1066,11 +1104,31 @@ async function connectAgentHost(
       workspaceId: options.workspaceId,
       hostId: enrolled.host.id,
       secret: enrolled.secret,
+      enrollmentTokenHash: tokenHash,
     };
     await writeCredential(filePath, credential, savedCurrentCredential);
+    recorded = true;
     await clearEnrollmentSecret(files.enrollment, proposed.secret);
   } else if (!savedCurrentCredential) {
     await writeCredential(filePath, credential, undefined);
+    recorded = true;
+  } else if (credential !== savedCurrentCredential) {
+    // Only the token it spent changed. A failed save costs only a rerun of
+    // this command, refused as it was before.
+    await writeCredential(filePath, credential, savedCurrentCredential, {
+      onlyOverSaved: true,
+    }).then(
+      () => {
+        recorded = true;
+      },
+      (error: unknown) =>
+        writeStderrLine(
+          `Agent Host credential could not record its enrollment: ${extractErrorMessage(error)}`,
+        ),
+    );
+  } else {
+    // The saved credential already records this token.
+    recorded = true;
   }
   const activeCredential = credential;
 
@@ -1628,8 +1686,15 @@ async function connectAgentHost(
 
   if (!(await heartbeat())) {
     stop.signal.throwIfAborted();
+    // The same join again goes on with the credential only if it records
+    // this token; a re-join whose record write failed has no such rerun,
+    // so the advice must not send the operator into a refused one.
     throw new Error(
-      'Agent Host could not confirm its connection to the coordinator. Check the callback URL and saved credential.',
+      `Agent Host could not confirm its connection to the coordinator. Check the callback URL and saved credential${
+        options.enrollmentToken && recorded
+          ? ', then join again with the same token'
+          : ''
+      }.`,
     );
   }
   const timer = setInterval(() => void heartbeat(), HEARTBEAT_MS);
@@ -1735,6 +1800,7 @@ async function connectAgentHost(
       }
     }
   })();
+  return { recorded };
 }
 
 /**

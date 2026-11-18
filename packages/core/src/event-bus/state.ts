@@ -40,6 +40,11 @@ export interface LoopRunState extends RunState {
   /** Conversation-owned: the round to send next, and the final result. */
   current: AgentLoopRound;
   finished?: AgentLoopResult;
+  /**
+   * Conversation-owned: ends a cancelled run that has not settled. The
+   * adapter clears it when the run settles, however it settles.
+   */
+  settleTimer?: ReturnType<typeof setTimeout>;
   /** Llm-owned: the settled model round. */
   model?: {
     turn?: Turn;
