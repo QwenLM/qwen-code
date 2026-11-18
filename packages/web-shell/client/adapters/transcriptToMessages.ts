@@ -938,6 +938,7 @@ export function transcriptBlocksToDaemonMessages(
                   : `${block.id}-t-${messages.length}`,
                 role: 'assistant',
                 content: seg.text,
+                ...(backgroundTurn ? { backgroundTurn } : {}),
                 timestamp: blockTime,
                 sourceBlockIds: [block.id],
               });
@@ -1008,6 +1009,7 @@ export function transcriptBlocksToDaemonMessages(
             role: 'assistant',
             content: textBlock.text,
             ...(reportedArtifacts.length ? { reportedArtifacts } : {}),
+            ...(backgroundTurn ? { backgroundTurn } : {}),
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
             sourceBlockIds: [block.id],
@@ -1387,6 +1389,7 @@ export function transcriptBlocksToDaemonMessages(
           retryable:
             errorBlock.source === 'turn_error' &&
             isRetryableTurnErrorKind(errorKind),
+          ...(backgroundTurn ? { backgroundTurn } : {}),
           timestamp: blockTime,
           sourceBlockIds: [block.id],
           ...(errorBlock.source ? { source: errorBlock.source } : {}),
@@ -1403,6 +1406,7 @@ export function transcriptBlocksToDaemonMessages(
           content: promptCancelledText,
           variant: 'info',
           source: 'prompt_cancelled',
+          ...(backgroundTurn ? { backgroundTurn } : {}),
           ...(block.elapsedMs !== undefined
             ? { data: { elapsedMs: block.elapsedMs } }
             : {}),
