@@ -495,7 +495,11 @@ interface ArtifactPanelProps {
   ) => void;
   latestReviewAvailable?: boolean;
   onOpenLatestReview?: () => void;
-  /** Open the delivery-unit change overview tab (git workspaces only). */
+  /**
+   * Offer the delivery-unit change overview tab. Gated on an active workspace
+   * (a cwd to scope it to), not on git-ness: a non-git workspace still opens
+   * the tab, which reports that it is not a git repository.
+   */
   changeOverviewAvailable?: boolean;
   onOpenChangeOverview?: () => void;
   /** Open an interactive terminal tab in this panel (shown as an empty-state action). */

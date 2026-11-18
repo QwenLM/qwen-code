@@ -138,6 +138,16 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_196_000;
 // against 2,144,387 with the new copy. CSS and third-party inputs are unchanged,
 // and the forbidden-input guard passes. Leave 713 bytes to the warning and
 // 1,713 to the ceiling.
+// The Goal sidebar marker (#17515) and the background-task composer chips
+// (#17398) then grew the transcript dictionary past that ceiling: the Lint &
+// Static / Build lane on main d83fa2154e measures 2,146,529 JS bytes (CSS
+// 2,423,645, separate), 429 over the old 2,146,100 cap, which reddened every
+// PR's build. The bundle pulls web-shell's whole i18n table, so these legitimate
+// first-party strings land here; the third-party input mix is unchanged and the
+// forbidden-input guard passes. Re-track the lane measurement: leave 671 bytes
+// to the warning and 1,671 to the ceiling. (A local build against the worktree's
+// own node_modules measures lower — 2,138,797 — but the lane's absolute number
+// is what these constants track.)
 // Arabic transcript strings and RTL runtime wiring are retained in the
 // document bundle; interactive-only Arabic and Traditional Chinese are stubbed.
 // With the same installed dependencies on Node 24.22.3, main d83fa2154e

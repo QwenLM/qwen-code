@@ -501,6 +501,9 @@ async function enrichWorktreeSidecars(
           slug: sidecar.slug,
           path: sidecar.worktreePath,
           branch: sidecar.worktreeBranch,
+          baseCommit:
+            sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
+          baseBranch: sidecar.originalBranch || undefined,
         },
       });
     }
