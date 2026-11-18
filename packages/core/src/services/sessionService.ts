@@ -4034,25 +4034,31 @@ export class SessionService {
     // Runs before the empty-conversation early return: artifacts can be
     // registered before the first prompt, and those side-records-only
     // sessions are listable even though they have no conversation to load.
-    // The conversation-less shape goes through the shared capped helper so
-    // both funnels seed identically; a conversation transcript keeps the
-    // uncapped seed — its read is the load itself, and the restore
-    // payload's embedded snapshot must not depend on the sidecar cap.
-    const artifactSnapshot = isSideRecordsOnlyTranscript(records)
-      ? await this.seedSideRecordsOnlyTranscript(
-          sessionId,
-          state,
-          filePath,
-          async () => ({ records, sourceReadComplete }),
-        )
-      : this.seedArtifactSummaryFromRecords(
-          sessionId,
-          state,
-          records,
-          messages,
-          gaps,
-          sourceReadComplete,
-        );
+    // Only a transcript with a loadable conversation takes the uncapped
+    // seed — its read is the load itself, and the restore payload's
+    // embedded snapshot must not depend on the sidecar cap. Everything
+    // else goes through the shared capped helper, whose shape gate is the
+    // sole admission test: the raw records are unvalidated, so a
+    // conversation-less transcript carrying a record the validator drops
+    // (unknown type, invalid identity) is not all-system on the raw array
+    // and must still be refused rather than seeded from an empty active
+    // set — which would heal a correct sidecar to zero.
+    const artifactSnapshot =
+      messages.length > 0 && !isSideRecordsOnlyTranscript(records)
+        ? this.seedArtifactSummaryFromRecords(
+            sessionId,
+            state,
+            records,
+            messages,
+            gaps,
+            sourceReadComplete,
+          )
+        : await this.seedSideRecordsOnlyTranscript(
+            sessionId,
+            state,
+            filePath,
+            async () => ({ records, sourceReadComplete }),
+          );
 
     if (messages.length === 0) {
       return;

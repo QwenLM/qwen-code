@@ -1034,6 +1034,127 @@ describe('SessionService - artifact summary sidecar', () => {
     );
   });
 
+  it('does not heal a correct sidecar from a conversation-less transcript with an unvalidatable record', async () => {
+    // readAllRecords returns raw, unvalidated records: a record with an
+    // unknown type is dropped only later by the validator, so the raw
+    // array is not all-system even though the transcript has no
+    // conversation. The load funnel must still route it through the
+    // helper's shape gate (refuse) — the uncapped seed would rebuild from
+    // an empty active set and heal the correct count to zero, while the
+    // projection funnel refuses (review round-4 R4-1).
+    const a = persistedArtifact('https://example.com/unvalid-a');
+    const b = persistedArtifact('https://example.com/unvalid-b');
+    const c = persistedArtifact('https://example.com/unvalid-c');
+    const unknownType = {
+      uuid: 'bad-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:02.000Z',
+      type: 'brand_new_record_type',
+      cwd: root,
+      version: '1.0.0',
+    } as unknown as ChatRecord;
+    writeTranscript([
+      { ...artifactEventRecord([a, b, c]), parentUuid: null },
+      unknownType,
+    ]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 3);
+
+    await service.loadSession(SESSION_ID);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      3,
+    );
+
+    await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      3,
+    );
+  });
+
+  it('does not heal a correct sidecar when the unvalidatable record has an invalid identity', async () => {
+    // Same R4-1 branch with the other validator drop: a non-string uuid.
+    const a = persistedArtifact('https://example.com/baduuid-a');
+    const invalidIdentity = {
+      uuid: 42,
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:02.000Z',
+      type: 'user',
+      cwd: root,
+      version: '1.0.0',
+      message: { role: 'user', parts: [{ text: 'x' }] },
+    } as unknown as ChatRecord;
+    writeTranscript([
+      { ...artifactEventRecord([a]), parentUuid: null },
+      invalidIdentity,
+    ]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 1);
+
+    await service.loadSession(SESSION_ID);
+
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      1,
+    );
+  });
+
+  it('refuses the projection seed for an empty transcript with an existing sidecar', async () => {
+    // The helper's empty-records guard: nothing to rebuild from must not
+    // heal an existing count (review round-4 R4-4).
+    writeFileSync(transcriptPath, '', 'utf8');
+    writeSessionArtifactSummarySidecar(sidecarPath, 3);
+
+    await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      3,
+    );
+  });
+
+  it('refuses the projection seed for a foreign-project transcript', async () => {
+    // The helper's ownership guard (review round-4 R4-4).
+    const a = persistedArtifact('https://example.com/foreign-a');
+    const foreign = {
+      ...artifactEventRecord([a]),
+      parentUuid: null,
+      cwd: path.join(tmpdir(), 'foreign-project-root'),
+    };
+    writeTranscript([foreign]);
+
+    await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+
+    expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
+  });
+
+  it('refuses the projection seed from a partial transcript read', async () => {
+    // The projection funnel threads onIncompleteRead into
+    // sourceReadComplete; a truncated last line makes the read
+    // non-authoritative, so the seed must refuse even though the parsed
+    // prefix rebuilds a smaller count (review round-4 R4-5).
+    const a = persistedArtifact('https://example.com/partial-a');
+    const b = persistedArtifact('https://example.com/partial-b');
+    writeFileSync(
+      transcriptPath,
+      `${JSON.stringify({ ...artifactEventRecord([a, b]), parentUuid: null })}\n` +
+        '{"uuid":"trunc","type":"sys',
+      'utf8',
+    );
+    writeSessionArtifactSummarySidecar(sidecarPath, 5);
+
+    await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      5,
+    );
+  });
+
   it('reads the transcript in the projection funnel only for conversation-less sessions', async () => {
     // Pin the auxiliary read's cost directly: a conversation projection
     // must not pay the full parse, and the defined-projection/empty-
