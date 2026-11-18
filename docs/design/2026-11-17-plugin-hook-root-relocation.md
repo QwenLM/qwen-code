@@ -18,7 +18,9 @@ Keep `${CLAUDE_PLUGIN_ROOT}` in file-hook commands and the converted manifest un
 
 The shared builder serves Claude marketplace plugins, standalone plugins and Qoder conversion. Their output flows through compatible-extension conversion into extension installation/update preparation and GitHub update checks. The installed extension manager expands hook variables using the effective extension path; the hook registry then consumes active extension hooks, and the hook runner executes their commands. Mod fixtures also consume converted resources. Public defining-module exports may have unknown external consumers, so maintainers must approve the change in expansion timing.
 
-The updated file-hook regression requires a literal token and an identical serialized hooks object. Both Mod resource variants retain their content assertions after explicit expansion through the existing helper. Security refusal coverage is retained. No new loader, hook API, path rewrite policy or execution flag is introduced.
+Upgrading does not repair an extension installed by a pre-fix build: loading only parses and hydrates the persisted manifest, no `${CLAUDE_PLUGIN_ROOT}` token is left in it to match, and nothing re-converts an installed extension at startup. Such an install must be updated once (`qwen extensions update <name>`) or reinstalled, because loading never rewrites a persisted absolute command.
+
+The updated file-hook regression requires a literal token, an identical serialized hooks object, and a loaded command that reads the installed script after the converted tree is copied to an installed root and the conversion directory is deleted. Both Mod resource variants retain their content assertions after explicit expansion through the existing helper. Security refusal coverage is retained. No new loader, hook API, path rewrite policy or execution flag is introduced.
 
 ## Validation and acceptance
 

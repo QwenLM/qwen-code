@@ -26,6 +26,8 @@ import {
   performVariableReplacement,
   substituteHookVariables,
 } from './variables.js';
+import { ExtensionManager } from './extensionManager.js';
+import { ExtensionStore } from './extension-store.js';
 import {
   SubagentManager,
   loadSubagentFromDir,
@@ -665,7 +667,10 @@ describe('convertClaudePluginPackage', () => {
     const { result } = await layoutAndConvert(
       'plugin-with-hooks',
       { name: 'hooks-plugin', hooks: './hooks/hooks.json' },
-      { 'hooks/hooks.json': JSON.stringify(hooksJson) },
+      {
+        'hooks/hooks.json': JSON.stringify(hooksJson),
+        'scripts/post-install.sh': 'echo POST_INSTALL\n',
+      },
     );
 
     expect(result.config.hooks).toBeDefined();
@@ -681,6 +686,32 @@ describe('convertClaudePluginPackage', () => {
       ),
     );
     expect(stored.hooks).toEqual(hooksJson.hooks);
+
+    // Installation copies the converted tree and then deletes the conversion
+    // directory, so only load-time expansion can still reach the script.
+    const extensionsDir = path.join(testDir, 'extensions');
+    const installedDir = path.join(extensionsDir, 'hooks-plugin');
+    fs.cpSync(result.convertedDir, installedDir, { recursive: true });
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+
+    const manager = new ExtensionManager({
+      workspaceDir: testDir,
+      isWorkspaceTrusted: true,
+      extensionStore: new ExtensionStore({
+        extensionsDir,
+        storeDir: path.join(testDir, 'extension-store'),
+      }),
+    });
+    const loaded = await manager.loadExtension({ extensionDir: installedDir });
+    const installedCommand = (
+      loaded!.hooks!['PostToolUse']![0].hooks![0] as { command: string }
+    ).command;
+    expect(installedCommand).toBe(
+      path.join(installedDir, 'scripts', 'post-install.sh'),
+    );
+    expect(fs.readFileSync(installedCommand, 'utf8')).toBe(
+      'echo POST_INSTALL\n',
+    );
   });
 
   it.each(['absolute', 'relative-outside'])(
