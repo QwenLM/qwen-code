@@ -152,6 +152,50 @@ function findSessionFile(
   return visit(path.join(workspace, 'projects'));
 }
 
+async function waitForContinuationEvidence(
+  workspace: string,
+  sessionId: string,
+  promptId: string,
+): Promise<void> {
+  await waitFor(
+    'continued transcript',
+    async () => {
+      const transcriptPath = findSessionFile(workspace, sessionId, '.jsonl');
+      if (!transcriptPath) return false;
+      const transcript = readFileSync(transcriptPath, 'utf8');
+      return (
+        transcript.includes('recovered answer after restart') &&
+        transcript.includes(promptId)
+      );
+    },
+    60_000,
+  );
+
+  const ledgerPath = findSessionFile(workspace, sessionId, '.ledger.jsonl');
+  expect(ledgerPath).toBeTruthy();
+  await waitFor(
+    'continued ledger terminal',
+    async () => {
+      const ledger = ledgerPath ? readFileSync(ledgerPath, 'utf8') : '';
+      return ledger.split('\n').some((line) => {
+        if (!line) return false;
+        try {
+          const record = JSON.parse(line) as {
+            promptId?: unknown;
+            terminal?: unknown;
+          };
+          return (
+            record.promptId === promptId && record.terminal === 'completed'
+          );
+        } catch {
+          return false;
+        }
+      });
+    },
+    30_000,
+  );
+}
+
 function daemonEnv(workspace: string, qwenHome: string): NodeJS.ProcessEnv {
   return {
     ...process.env,
@@ -465,39 +509,11 @@ describeDaemon('qwen serve — restart recovery', () => {
     expect(result).toMatchObject({ status: 'accepted' });
     const continuationPromptId = result?.['promptId'];
     expect(typeof continuationPromptId).toBe('string');
-
-    let transcript = '';
-    await waitFor(
-      'continued transcript',
-      async () => {
-        const transcriptPath = findSessionFile(workspace, sessionId, '.jsonl');
-        if (!transcriptPath) return false;
-        transcript = readFileSync(transcriptPath, 'utf8');
-        return (
-          transcript.includes('recovered answer after restart') &&
-          transcript.includes(String(continuationPromptId))
-        );
-      },
-      60_000,
+    await waitForContinuationEvidence(
+      workspace,
+      sessionId,
+      String(continuationPromptId),
     );
-    expect(transcript).toContain('recovered answer after restart');
-
-    const ledgerPath = findSessionFile(workspace, sessionId, '.ledger.jsonl');
-    expect(ledgerPath).toBeTruthy();
-    let ledger = '';
-    await waitFor(
-      'continued ledger terminal',
-      async () => {
-        ledger = ledgerPath ? readFileSync(ledgerPath, 'utf8') : '';
-        return (
-          ledger.includes(String(continuationPromptId)) &&
-          ledger.includes('"terminal":"completed"')
-        );
-      },
-      30_000,
-    );
-    expect(ledger).toContain(String(continuationPromptId));
-    expect(ledger).toContain('"terminal":"completed"');
   }, 120_000);
 
   it('lists and continues a session after a graceful shutdown', async () => {
@@ -602,6 +618,13 @@ describeDaemon('qwen serve — restart recovery', () => {
     const records = asRecord(continuation.body)?.['results'];
     const result = Array.isArray(records) ? asRecord(records[0]) : undefined;
     expect(result).toMatchObject({ status: 'accepted' });
+    const continuationPromptId = result?.['promptId'];
+    expect(typeof continuationPromptId).toBe('string');
+    await waitForContinuationEvidence(
+      workspace,
+      sessionId,
+      String(continuationPromptId),
+    );
   }, 120_000);
 
   it('cleans up a daemon that exits before listening', async () => {
