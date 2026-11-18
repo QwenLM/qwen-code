@@ -1059,13 +1059,14 @@ export class FileHistoryService {
       const localOrigin = areSnapshotOriginsEqual(base, this.cwd);
       const grammar = getSnapshotPathGrammar(base);
       const hydrate = (backups: Record<string, FileHistoryBackup>) => {
+        const hydrated: Record<string, FileHistoryBackup> = Object.create(null);
         if (
           grammar.sep === '/' &&
           [base, ...Object.keys(backups)].some((path) =>
             /(^|\/)\.\.(\/|$)/.test(path),
           )
         ) {
-          return { ...backups };
+          return Object.assign(hydrated, backups);
         }
         const groups = new Map<string, Array<[string, FileHistoryBackup]>>();
         for (const entry of Object.entries(backups)) {
@@ -1085,18 +1086,21 @@ export class FileHistoryService {
         // shortens.
         const refusedKey = (key: string): boolean =>
           grammar.sep === '\\' && isRefusedWin32KeySpelling(key);
-        return Object.fromEntries(
-          [...groups.values()].flatMap((group) =>
-            group.length === 1
-              ? [
-                  [
-                    localOrigin && !refusedKey(group[0][0])
-                      ? this.maybeShortenFilePath(group[0][0], base)
-                      : group[0][0],
-                    group[0][1],
-                  ],
-                ]
-              : group,
+        return Object.assign(
+          hydrated,
+          Object.fromEntries(
+            [...groups.values()].flatMap((group) =>
+              group.length === 1
+                ? [
+                    [
+                      localOrigin && !refusedKey(group[0][0])
+                        ? this.maybeShortenFilePath(group[0][0], base)
+                        : group[0][0],
+                      group[0][1],
+                    ],
+                  ]
+                : group,
+            ),
           ),
         );
       };
@@ -2342,6 +2346,9 @@ export class FileHistoryService {
     const entries: Array<readonly [base: string, key: string]> = [];
     const grammar = getSnapshotPathGrammar(this.cwd);
     for (const snapshot of snapshots) {
+      if (snapshot.cwd && !areSnapshotOriginsEqual(snapshot.cwd, this.cwd)) {
+        continue;
+      }
       const base = snapshot.cwd ?? this.cwd;
       if (getSnapshotPathGrammar(base) !== grammar) continue;
       // Unknown Win32 drives must not become the reader's current drive.

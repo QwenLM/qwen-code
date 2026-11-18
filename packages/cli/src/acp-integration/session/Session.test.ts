@@ -13486,7 +13486,10 @@ describe('Session', () => {
       ]);
 
       expect(() => session.rewindToTurn(1)).toThrow(
-        /different working directory/,
+        expect.objectContaining({
+          message: expect.stringMatching(/different working directory/),
+          data: { errorKind: 'cross_directory_checkpoint' },
+        }),
       );
 
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
@@ -13556,16 +13559,21 @@ describe('Session', () => {
         vi.mocked(mockChat.getHistory).mockReturnValue(history);
         vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
-        expect(() => session.rewindToTurn(1)).toThrow(
-          /different working directory/,
+        const before = structuredClone(relocated.getSnapshots());
+        const replace = vi.spyOn(relocated, 'restoreFromSnapshots');
+        expect(() => session.rewindToTurn(0)).toThrow(
+          expect.objectContaining({
+            message: expect.stringMatching(/different working directory/),
+            data: { errorKind: 'cross_directory_checkpoint' },
+          }),
         );
 
         // The refusal happens before anything is truncated or restored.
         expect(mockChat.truncateHistory).not.toHaveBeenCalled();
-        expect(relocated.getSnapshots().map((s) => s.promptId)).toEqual([
-          'p1',
-          'p2',
-        ]);
+        expect(mockChat.stripThoughtsFromHistory).not.toHaveBeenCalled();
+        expect(mockChatRecordingService.rewindRecording).not.toHaveBeenCalled();
+        expect(replace).not.toHaveBeenCalled();
+        expect(relocated.getSnapshots()).toEqual(before);
         // Neither directory's file was touched.
         expect(await fs.readFile(fileA, 'utf-8')).toBe('captured-in-a');
         expect(await fs.readFile(fileB, 'utf-8')).toBe('unrelated-in-b');
@@ -13622,13 +13630,16 @@ describe('Session', () => {
           vi.mocked(mockChat.getHistory).mockReturnValue(history);
           vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
           await fs.writeFile(fileA, 'edited-in-a');
-          const before = current.getSnapshots();
+          const before = structuredClone(current.getSnapshots());
           const replace = vi.spyOn(current, 'restoreFromSnapshots');
           const precheck = vi.spyOn(current, 'getForeignSnapshotCwds');
 
           if (foreignSurvivor) {
             expect(() => session.rewindToTurn(0)).toThrow(
-              /different working directory/,
+              expect.objectContaining({
+                message: expect.stringMatching(/different working directory/),
+                data: { errorKind: 'cross_directory_checkpoint' },
+              }),
             );
             expect(mockChat.truncateHistory).not.toHaveBeenCalled();
             expect(mockChat.stripThoughtsFromHistory).not.toHaveBeenCalled();
@@ -13670,64 +13681,99 @@ describe('Session', () => {
       },
     );
 
-    it('refuses a file rewind whose discarded foreign checkpoint holds a baseline under the surviving root', async () => {
-      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'acp-fh-discard-'));
-      try {
-        const dirA = path.join(root, 'A');
-        const dirB = path.join(root, 'B');
-        await fs.mkdir(dirA);
-        await fs.mkdir(dirB);
-        const fileA = path.join(dirA, 'new.txt');
-
-        // p1 in A tracks nothing.
-        const first = new FileHistoryService('acp-discard', true, dirA);
-        await first.makeSnapshot('p1');
-
-        // The session relocates to B: p2 is labeled B and first-tracks the
-        // absolute A/new.txt path while the file does not exist yet, so p2
-        // holds the confirmed null first-version baseline — the only record
-        // that this file did not exist in p1's era.
-        const second = new FileHistoryService('acp-discard', true, dirB);
-        second.restoreFromSnapshots(first.getSnapshots());
-        await second.makeSnapshot('p2');
-        await second.trackEdit(fileA);
-
-        // Back in A, with the file created during p2's era.
-        const current = new FileHistoryService('acp-discard', true, dirA);
-        current.restoreFromSnapshots(second.getSnapshots());
-        vi.mocked(mockConfig.getFileHistoryService).mockReturnValue(current);
-        await fs.writeFile(fileA, 'created-during-p2-era');
-
-        const history: Content[] = [
-          { role: 'user', parts: [{ text: 'first' }] },
-          { role: 'model', parts: [{ text: 'first reply' }] },
-          { role: 'user', parts: [{ text: 'second' }] },
-          { role: 'model', parts: [{ text: 'second reply' }] },
-        ];
-        markApiHistoryPrompt(history[0]!, 'p1');
-        markApiHistoryPrompt(history[2]!, 'p2');
-        vi.mocked(mockChat.getHistory).mockReturnValue(history);
-        vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-
-        // The survivor slice [p1] is local, so the survivor foreign-cwd
-        // precheck passes; only the discard check can refuse. Without it,
-        // restoreFromSnapshots([p1]) drops p2, the tracked set becomes
-        // empty and the file restore reports an empty success while leaving
-        // the later-created file in place.
-        expect(() => session.rewindToTurn(0)).toThrow(
-          /hold the only restore record/,
+    it.each([true, false])(
+      'handles a discarded foreign baseline under the surviving root (rewindFiles=%s)',
+      async (rewindFiles) => {
+        const root = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'acp-fh-discard-'),
         );
+        try {
+          const dirA = path.join(root, 'A');
+          const dirB = path.join(root, 'B');
+          await fs.mkdir(dirA);
+          await fs.mkdir(dirB);
+          const fileA = path.join(dirA, 'new.txt');
 
-        expect(mockChat.truncateHistory).not.toHaveBeenCalled();
-        expect(current.getSnapshots().map((s) => s.promptId)).toEqual([
-          'p1',
-          'p2',
-        ]);
-        expect(await fs.readFile(fileA, 'utf-8')).toBe('created-during-p2-era');
-      } finally {
-        await fs.rm(root, { recursive: true, force: true });
-      }
-    });
+          // p1 in A tracks nothing.
+          const first = new FileHistoryService('acp-discard', true, dirA);
+          await first.makeSnapshot('p1');
+
+          // The session relocates to B: p2 is labeled B and first-tracks the
+          // absolute A/new.txt path while the file does not exist yet, so p2
+          // holds the confirmed null first-version baseline — the only record
+          // that this file did not exist in p1's era.
+          const second = new FileHistoryService('acp-discard', true, dirB);
+          second.restoreFromSnapshots(first.getSnapshots());
+          await second.makeSnapshot('p2');
+          await second.trackEdit(fileA);
+
+          // Back in A, with the file created during p2's era.
+          const current = new FileHistoryService('acp-discard', true, dirA);
+          current.restoreFromSnapshots(second.getSnapshots());
+          vi.mocked(mockConfig.getFileHistoryService).mockReturnValue(current);
+          await fs.writeFile(fileA, 'created-during-p2-era');
+
+          const history: Content[] = [
+            { role: 'user', parts: [{ text: 'first' }] },
+            { role: 'model', parts: [{ text: 'first reply' }] },
+            { role: 'user', parts: [{ text: 'second' }] },
+            { role: 'model', parts: [{ text: 'second reply' }] },
+          ];
+          markApiHistoryPrompt(history[0]!, 'p1');
+          markApiHistoryPrompt(history[2]!, 'p2');
+          vi.mocked(mockChat.getHistory).mockReturnValue(history);
+          vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+          // The survivor slice [p1] is local, so the survivor foreign-cwd
+          // precheck passes; only the discard check can refuse. Without it,
+          // restoreFromSnapshots([p1]) drops p2, the tracked set becomes
+          // empty and the file restore reports an empty success while leaving
+          // the later-created file in place.
+          const before = structuredClone(current.getSnapshots());
+          const foreign = vi.spyOn(current, 'getForeignSnapshotCwds');
+          const discarded = vi.spyOn(
+            current,
+            'getUnrestorableDiscardedCaptures',
+          );
+          const replace = vi.spyOn(current, 'restoreFromSnapshots');
+          if (rewindFiles) {
+            expect(() => session.rewindToTurn(0, { rewindFiles })).toThrow(
+              expect.objectContaining({
+                message: expect.stringMatching(/hold the only restore record/),
+                data: { errorKind: 'cross_directory_checkpoint' },
+              }),
+            );
+            expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+            expect(mockChat.stripThoughtsFromHistory).not.toHaveBeenCalled();
+            expect(
+              mockChatRecordingService.rewindRecording,
+            ).not.toHaveBeenCalled();
+            expect(replace).not.toHaveBeenCalled();
+            expect(current.getSnapshots()).toEqual(before);
+          } else {
+            expect(session.rewindToTurn(0, { rewindFiles })).toEqual({
+              targetTurnIndex: 0,
+              apiTruncateIndex: 0,
+            });
+            expect(foreign).not.toHaveBeenCalled();
+            expect(discarded).not.toHaveBeenCalled();
+            expect(mockChat.truncateHistory).toHaveBeenCalledExactlyOnceWith(0);
+            expect(replace).toHaveBeenCalledExactlyOnceWith([]);
+            expect(current.getSnapshots()).toEqual([]);
+            expect(
+              mockChatRecordingService.rewindRecording,
+            ).toHaveBeenCalledWith(0, { truncatedCount: 4 }, [], {
+              mode: ApprovalMode.DEFAULT,
+            });
+          }
+          expect(await fs.readFile(fileA, 'utf-8')).toBe(
+            'created-during-p2-era',
+          );
+        } finally {
+          await fs.rm(root, { recursive: true, force: true });
+        }
+      },
+    );
 
     it.skipIf(path.sep === '\\').each([false, true])(
       'refuses parent-sensitive discarded baseline before truncating history (missing=%s)',
@@ -13776,7 +13822,10 @@ describe('Session', () => {
           vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
           const before = current.getSnapshots().map(serializeSnapshot);
           expect(() => session.rewindToTurn(0)).toThrow(
-            /hold the only restore record/,
+            expect.objectContaining({
+              message: expect.stringMatching(/hold the only restore record/),
+              data: { errorKind: 'cross_directory_checkpoint' },
+            }),
           );
           expect(query).toHaveReturnedWith([expression]);
           expect(mockChat.truncateHistory).not.toHaveBeenCalled();
@@ -13846,7 +13895,10 @@ describe('Session', () => {
           // it, so its baseline is required and must not be exempted as
           // p2's own file.
           expect(() => session.rewindToTurn(0)).toThrow(
-            /hold the only restore record/,
+            expect.objectContaining({
+              message: expect.stringMatching(/hold the only restore record/),
+              data: { errorKind: 'cross_directory_checkpoint' },
+            }),
           );
 
           expect(mockChat.truncateHistory).not.toHaveBeenCalled();
@@ -13910,7 +13962,10 @@ describe('Session', () => {
         // forgets the external path before the restore, which then reports
         // an empty success while leaving the later-created file in place.
         expect(() => session.rewindToTurn(0)).toThrow(
-          /hold the only restore record/,
+          expect.objectContaining({
+            message: expect.stringMatching(/hold the only restore record/),
+            data: { errorKind: 'cross_directory_checkpoint' },
+          }),
         );
 
         expect(mockChat.truncateHistory).not.toHaveBeenCalled();
@@ -13977,7 +14032,10 @@ describe('Session', () => {
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
       expect(() => session.rewindToTurn(0)).toThrow(
-        /hold the only restore record/,
+        expect.objectContaining({
+          message: expect.stringMatching(/hold the only restore record/),
+          data: { errorKind: 'cross_directory_checkpoint' },
+        }),
       );
 
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();

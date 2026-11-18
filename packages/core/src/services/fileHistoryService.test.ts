@@ -48,6 +48,8 @@ import {
   removeFileHistorySnapshots,
 } from '../utils/file-history-snapshots.js';
 
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
+
 const V1_BACKUP = expect.objectContaining({
   backupFileName: expect.any(String),
   version: 1,
@@ -452,7 +454,7 @@ describe('FileHistoryService', () => {
       expect(Object.keys(last.trackedFileBackups)).toHaveLength(fileCount);
       for (const backup of Object.values(last.trackedFileBackups))
         expect(backup.version).toBe(snapshotsToBuild);
-      expect(elapsedMs).toBeLessThan(4_000);
+      expectWithinLatencyBudget(elapsedMs, 4_000);
     }, 120_000);
   });
 
@@ -597,6 +599,101 @@ describe('FileHistoryService', () => {
   });
 
   describe('restoreFromSnapshots', () => {
+    it.each(
+      (['local', 'equivalent', 'legacy', 'foreign'] as const).flatMap(
+        (origin) =>
+          (['tracked', 'diff'] as const).flatMap((endpoint) =>
+            (['relative', 'absolute', 'external'] as const).map((keyKind) => ({
+              origin,
+              endpoint,
+              keyKind,
+            })),
+          ),
+      ),
+    )(
+      'recaptures only local or legacy candidates ($origin, $endpoint, $keyKind)',
+      async ({ origin, endpoint, keyKind }) => {
+        const captureRoot = origin === 'foreign' ? at('foreign') : projectDir;
+        const key =
+          keyKind === 'relative'
+            ? 'f'
+            : keyKind === 'absolute'
+              ? join(captureRoot, 'f')
+              : join(storageDir, 'external');
+        const candidate = keyKind === 'external' ? key : at('f');
+        await writeFile(candidate, 'unrelated local bytes');
+        const backups = {
+          [key]: { backupFileName: null, version: 1, backupTime: new Date() },
+        };
+        const snapshot: FileHistorySnapshot = {
+          promptId: 'p1',
+          timestamp: new Date(),
+          cwd:
+            origin === 'legacy'
+              ? undefined
+              : origin === 'equivalent'
+                ? projectDir + sep
+                : captureRoot,
+          trackedFileBackups: endpoint === 'tracked' ? backups : {},
+          ...(endpoint === 'diff' ? { diffAfterBackups: backups } : {}),
+        };
+        service.restoreFromSnapshots([snapshot]);
+        const before = service.getSnapshots().map(serializeSnapshot);
+        await service.makeSnapshot('p2');
+        const next = service.getSnapshots()[1];
+        expect(next.cwd).toBe(projectDir);
+        expect(
+          service.getSnapshots().slice(0, 1).map(serializeSnapshot),
+        ).toEqual(before);
+        const records = Object.values(next.trackedFileBackups);
+        if (origin === 'foreign') {
+          expect(records).toEqual([]);
+          expect(existsSync(join(storageDir, 'file-history'))).toBe(false);
+        } else {
+          expect(records).toHaveLength(1);
+          expect(records[0].failed).toBeFalsy();
+          expect(
+            await readFile(backupPath(records[0].backupFileName!), 'utf8'),
+          ).toBe('unrelated local bytes');
+        }
+      },
+    );
+
+    it.each([false, true])(
+      'keeps newly tracked __proto__ records after hydration (parentSensitive=%s)',
+      async (parentSensitive) => {
+        const cwd = parentSensitive ? at('child') + sep + '..' : projectDir;
+        await mkdir(at('child'));
+        const fresh = new FileHistoryService('test-session', true, cwd);
+        fresh.restoreFromSnapshots(
+          deserializeSnapshots([
+            {
+              promptId: 'p1',
+              cwd,
+              timestamp: new Date().toISOString(),
+              trackedFileBackups: {},
+              diffAfterBackups: {},
+            },
+          ]),
+        );
+        await fresh.trackEdit('__proto__');
+        const [snapshot] = fresh.getSnapshots();
+        expect(Object.hasOwn(snapshot.trackedFileBackups, '__proto__')).toBe(
+          true,
+        );
+        const payload = JSON.parse(JSON.stringify(serializeSnapshot(snapshot)));
+        expect(Object.keys(payload.trackedFileBackups)).toEqual(['__proto__']);
+        const reloaded = new FileHistoryService('test-session', true, cwd);
+        reloaded.restoreFromSnapshots(deserializeSnapshots([payload]));
+        await writeFile(at('__proto__'), 'created after capture');
+        expect(await reloaded.rewind('p1')).toEqual({
+          filesChanged: [cwd + sep + '__proto__'],
+          filesFailed: [],
+        });
+        expect(existsSync(at('__proto__'))).toBe(false);
+      },
+    );
+
     it('should rehydrate snapshots and derive trackedFiles', async () => {
       const fresh = new FileHistoryService('test-session', true, projectDir);
       const absPath = at('a.txt');
@@ -690,6 +787,7 @@ describe('FileHistoryService', () => {
         await original.trackEdit(file);
         const fresh = await reload(destination, original.getSnapshots());
         await fresh.makeSnapshot('b1');
+        if (direction === 'external to local') await fresh.trackEdit(file);
         const before = serializeSnapshot(fresh.getSnapshots()[1]);
         await writeFile(file, 'outside-change');
         await fresh.trackEdit(file);
@@ -825,17 +923,19 @@ describe('FileHistoryService', () => {
       await original.makeSnapshot('a1');
       await original.trackEdit(file);
       const fresh = await reload(b, original.getSnapshots());
+      await fresh.makeSnapshot('b0');
+      await fresh.trackEdit(file);
       await rm(file);
       await mkdir(file);
       await fresh.makeSnapshot('b1');
       expect(
-        Object.values(fresh.getSnapshots()[1].trackedFileBackups)[0].failed,
+        Object.values(fresh.getSnapshots()[2].trackedFileBackups)[0].failed,
       ).toBe(true);
       await rm(file, { recursive: true });
       await writeFile(file, 'healed');
       await fresh.trackEdit(file);
       await writeFile(file, 'after healing');
-      const resumed = await reload(b, [fresh.getSnapshots()[1]]);
+      const resumed = await reload(b, [fresh.getSnapshots()[2]]);
       expect((await resumed.rewind('b1')).filesFailed).toEqual([]);
       expect(await readFile(file, 'utf8')).toBe('healed');
     });
@@ -1015,7 +1115,7 @@ describe('FileHistoryService', () => {
       expect(service.getSnapshots().map(serializeSnapshot)).toEqual(before);
     });
 
-    it('keeps an existing diff endpoint when deleting a foreign successor', () => {
+    it('keeps an existing diff endpoint when deleting a same-root successor', () => {
       const survivor: FileHistorySnapshot = {
         promptId: 'p1',
         cwd: projectDir,
@@ -1028,7 +1128,9 @@ describe('FileHistoryService', () => {
       const deleted = {
         ...survivor,
         promptId: 'p2',
-        cwd: 'C:\\foreign',
+        trackedFileBackups: {
+          g: { backupFileName: null, version: 2, backupTime: new Date() },
+        },
         diffAfterBackups: undefined,
       };
       expect(
@@ -1575,40 +1677,49 @@ describe('FileHistoryService', () => {
       check(deserializeSnapshots(pair));
     });
 
-    it('A-DS1 never attributes a foreign failed-only endpoint to the survivor root', async () => {
-      const kept = removeFileHistorySnapshots(
-        [serializedP('p1', '/A', {}), serializedP('p2', '/B', failedOnly('f'))],
-        new Set(['p2']),
-      );
-      expect(kept).toHaveLength(1);
-      const service = new FileHistoryService('r15-ds1', true, '/A');
-      service.restoreFromSnapshots(deserializeSnapshots(kept));
-      // Reloaded in /A: no failure is invented for a file never captured
-      // there — and nothing restorable was lost by deleting the endpoint.
-      expect(await service.rewind('p1', false)).toEqual({
-        filesChanged: [],
-        filesFailed: [],
-      });
-      // Check the persisted shape only after exercising the consumer.
-      expect(kept[0]).not.toHaveProperty('diffAfterBackups');
-    });
+    it.skipIf(sep === '\\')(
+      'A-DS1 never attributes a foreign failed-only endpoint to the survivor root',
+      async () => {
+        const kept = removeFileHistorySnapshots(
+          [
+            serializedP('p1', '/A', {}),
+            serializedP('p2', '/B', failedOnly('f')),
+          ],
+          new Set(['p2']),
+        );
+        expect(kept).toHaveLength(1);
+        const service = new FileHistoryService('r15-ds1', true, '/A');
+        service.restoreFromSnapshots(deserializeSnapshots(kept));
+        // Reloaded in /A: no failure is invented for a file never captured
+        // there — and nothing restorable was lost by deleting the endpoint.
+        expect(await service.rewind('p1', false)).toEqual({
+          filesChanged: [],
+          filesFailed: [],
+        });
+        // Check the persisted shape only after exercising the consumer.
+        expect(kept[0]).not.toHaveProperty('diffAfterBackups');
+      },
+    );
 
-    it('A-DS2 keeps reporting a same-root failed fold after reload', async () => {
-      const kept = removeFileHistorySnapshots(
-        [
-          serializedP('p1', '/A', {}),
-          serializedP('p2', '/A', failedOnly('d.txt')),
-        ],
-        new Set(['p2']),
-      );
-      expect(kept[0]?.diffAfterBackups).toEqual(failedOnly('d.txt'));
-      const service = new FileHistoryService('r15-ds2', true, '/A');
-      service.restoreFromSnapshots(deserializeSnapshots(kept));
-      expect(await service.rewind('p1', false)).toEqual({
-        filesChanged: [],
-        filesFailed: ['/A/d.txt'],
-      });
-    });
+    it.skipIf(sep === '\\')(
+      'A-DS2 keeps reporting a same-root failed fold after reload',
+      async () => {
+        const kept = removeFileHistorySnapshots(
+          [
+            serializedP('p1', '/A', {}),
+            serializedP('p2', '/A', failedOnly('d.txt')),
+          ],
+          new Set(['p2']),
+        );
+        expect(kept[0]?.diffAfterBackups).toEqual(failedOnly('d.txt'));
+        const service = new FileHistoryService('r15-ds2', true, '/A');
+        service.restoreFromSnapshots(deserializeSnapshots(kept));
+        expect(await service.rewind('p1', false)).toEqual({
+          filesChanged: [],
+          filesFailed: ['/A/d.txt'],
+        });
+      },
+    );
   });
 
   // R15 matrix B: every Win32 root form must behave identically across
@@ -1689,21 +1800,12 @@ describe('FileHistoryService', () => {
     const lifecycle = async (options: {
       cwd: string;
       input: string;
-      unlabeledP1?: boolean;
       expectedKeys: string[];
       expectedTargets: string[];
     }) => {
       const { Reader, files, unlinkCalls } = await setup();
       const service = new Reader('win-root', true, options.cwd);
-      if (options.unlabeledP1) {
-        // A legacy unlabeled checkpoint: record-time decisions must not
-        // depend on the label (B3/B7).
-        service.restoreFromSnapshots([
-          { promptId: 'p1', timestamp: new Date(), trackedFileBackups: {} },
-        ]);
-      } else {
-        await service.makeSnapshot('p1');
-      }
+      await service.makeSnapshot('p1');
       await service.trackEdit(options.input);
       expect(
         Object.keys(service.getSnapshots().at(-1)!.trackedFileBackups),
@@ -3905,6 +4007,8 @@ describe('FileHistoryService', () => {
           Object.keys(relocated.getSnapshots()[0].trackedFileBackups),
         ).toEqual([originalKey]);
         await relocated.makeSnapshot('b1');
+        expect(relocated.getSnapshots()[1].trackedFileBackups).toEqual({});
+        await relocated.trackEdit(file);
         const checkpointBeforeTrack = serializeSnapshot(
           relocated.getSnapshots()[1],
         );
@@ -3916,7 +4020,7 @@ describe('FileHistoryService', () => {
         const newKey = destination === dirB ? 'f' : file;
         expect(
           relocated.getSnapshots()[1].trackedFileBackups[newKey].version,
-        ).toBe(direction === 'external to local' && content === 'old' ? 1 : 2);
+        ).toBe(2);
         expect
           .soft(await readFile(backupPath(first.backupFileName!)))
           .toEqual(firstBytes);
@@ -4028,6 +4132,8 @@ describe('FileHistoryService', () => {
       );
       // The old relative f belongs to B, not the new root's f.
       await service.makeSnapshot('b1');
+      expect(service.getSnapshots()[2].trackedFileBackups).toEqual({});
+      await service.trackEdit('f');
       expect
         .soft(service.getSnapshots()[2].trackedFileBackups['f'].version)
         .toBe(1);

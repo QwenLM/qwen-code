@@ -234,8 +234,8 @@ function sameRootProven<
 function hasConfirmedCaptures<
   T extends FileHistorySnapshot | SerializedFileHistorySnapshot,
 >(snapshot: T): boolean {
-  return Object.values(snapshot.trackedFileBackups ?? {}).some(
-    (backup) => !backup.failed,
+  return [snapshot.trackedFileBackups, snapshot.diffAfterBackups].some(
+    (backups) => Object.values(backups ?? {}).some((backup) => !backup.failed),
   );
 }
 
@@ -263,54 +263,45 @@ export function deletionDropsRequiredEndpoint<
   return !sameRootProven(survivor, deleted);
 }
 
+export function foldFileHistoryEndpoint<
+  T extends FileHistorySnapshot | SerializedFileHistorySnapshot,
+>(survivor: T, deleted: T, preserveExistingEndpoint: boolean): T {
+  if (
+    (preserveExistingEndpoint && survivor.diffAfterBackups) ||
+    !sameRootProven(survivor, deleted) ||
+    isRefusedWin32CaptureRoot(survivor.cwd) ||
+    isRefusedWin32CaptureRoot(deleted.cwd)
+  ) {
+    return survivor;
+  }
+  // The closest pre-edit capture wins. Later endpoints supply baselines
+  // for additional files, including records retained by earlier deletions.
+  const endpoint = {
+    ...deleted.diffAfterBackups,
+    ...deleted.trackedFileBackups,
+    ...survivor.diffAfterBackups,
+  };
+  return Object.keys(endpoint).length > 0
+    ? { ...survivor, diffAfterBackups: endpoint }
+    : survivor;
+}
+
 export function removeFileHistorySnapshots<
   T extends FileHistorySnapshot | SerializedFileHistorySnapshot,
 >(snapshots: readonly T[], removedPromptIds: ReadonlySet<string>): T[] {
-  return snapshots.flatMap((snapshot, index) => {
-    if (removedPromptIds.has(snapshot.promptId)) return [];
-    const next = snapshots[index + 1];
-    // Keep the original diff endpoint, never a deleted turn's rewind identity.
-    if (
-      !snapshot.diffAfterBackups &&
-      next &&
-      removedPromptIds.has(next.promptId)
-    ) {
-      // Fold permission is a same-root question, deliberately independent
-      // of the refusal predicate above: an endpoint may be safely
-      // deletable (no confirmed capture, so deletionDropsRequiredEndpoint
-      // is false) while its records are still not graftable into the
-      // survivor. Folding records captured under another root — failed
-      // markers included — would reassign them to identities the survivor
-      // never captured: reloading in the survivor's directory would report
-      // those failures (or restore those captures) against unrelated local
-      // files. Records the fold cannot take go with the deleted snapshot.
-      // Unlabeled (legacy) deleted data keeps folding as before, and an
-      // empty endpoint has nothing to graft either way.
-      //
-      // R21 fold admission completes the same-root check with the
-      // raw-root policy (`isRefusedWin32CaptureRoot`): a deleted
-      // endpoint whose LABEL spells a refused Win32 capture root
-      // (`C:\w\C:f\..`, `C:/w/C:f/..`, `c:\w\d:x\…`) normalizes onto
-      // the survivor's ordinary root, so origin equality alone cannot
-      // see the refusal — yet grafting its records would relabel them
-      // into the survivor's root and make them executable after reload
-      // (rewind would dispatch unlink on a file the pre-fold timeline
-      // correctly left untouched). Those records were already excluded
-      // from every execution face under their own root; the fold must
-      // not launder them, so they go with the deleted checkpoint
-      // exactly like cross-root records. Refused KEY spellings need no
-      // gate here: they stay refused under the survivor's root at every
-      // execution face, so their folds stay inert.
-      const foldable =
-        Object.keys(next.trackedFileBackups ?? {}).length > 0 &&
-        sameRootProven(snapshot, next) &&
-        !isRefusedWin32CaptureRoot(next.cwd);
-      return [
-        foldable
-          ? { ...snapshot, diffAfterBackups: next.trackedFileBackups }
-          : snapshot,
-      ];
+  const folded = [...snapshots];
+  // Work backwards so a consecutive deleted run carries all of its
+  // endpoints through each provenance-checked link to the survivor.
+  for (let index = folded.length - 2; index >= 0; index--) {
+    const survivor = folded[index]!;
+    const deleted = folded[index + 1]!;
+    if (removedPromptIds.has(deleted.promptId)) {
+      folded[index] = foldFileHistoryEndpoint(
+        survivor,
+        deleted,
+        !removedPromptIds.has(survivor.promptId),
+      );
     }
-    return [snapshot];
-  });
+  }
+  return folded.filter((snapshot) => !removedPromptIds.has(snapshot.promptId));
 }

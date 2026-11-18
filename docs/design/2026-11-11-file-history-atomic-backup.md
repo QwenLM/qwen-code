@@ -219,10 +219,13 @@ The adjacent relocation observation — `/cd` (`cdCommand`) and ACP
   execution-directory validation is unchanged.
 - **Refusal semantics**: core `rewind` checks its complete checkpoint state
   before touching files or truncating history. ACP `rewindToTurn` checks the
-  exact surviving checkpoint slice before truncating the conversation;
-  foreign checkpoints in a discarded suffix do not block a local restore.
-  A foreign surviving checkpoint yields `cross_directory_checkpoint`, mapped
-  to non-retryable HTTP 409. Both `getDiffStats` and `getTurnDiff` return no
+  exact surviving checkpoint slice before truncating the conversation.
+  Foreign checkpoints in a discarded suffix do not block a local restore
+  unless they hold a required baseline that the surviving slice cannot
+  restore (including paths under the current root or outside both roots).
+  Either a foreign surviving checkpoint or such a required discarded
+  baseline yields `cross_directory_checkpoint`, mapped to non-retryable
+  HTTP 409. Both `getDiffStats` and `getTurnDiff` return no
   preview while their timeline contains a foreign checkpoint.
   Conversation-only rewind stays available, but its retained prefix can still
   contain foreign checkpoints: ordinary truncation does not necessarily

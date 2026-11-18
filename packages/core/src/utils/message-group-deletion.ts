@@ -18,6 +18,7 @@ import { prepareTranscriptRecords } from './transcript-records.js';
 import type { SerializedFileHistorySnapshot } from '../services/fileHistoryService.js';
 import {
   deletionDropsRequiredEndpoint,
+  foldFileHistoryEndpoint,
   removeFileHistorySnapshots,
 } from './file-history-snapshots.js';
 
@@ -505,24 +506,31 @@ export function deleteTranscriptMessageGroups(
       fileHistory.set(snapshot.promptId, snapshot);
   }
   const timelineSnapshots = [...fileHistory.values()];
-  // A deletion that `removeFileHistorySnapshots` answers by dropping (not
-  // folding) a survivor's only diff endpoint would let a later rewind
-  // silently skip restoring that turn's files: the dropped paths vanish
-  // from the rebuilt trackedFiles without even a filesFailed entry. Refuse
-  // before any transcript record is rewritten so the persisted history
-  // keeps the endpoint.
+  // Validate every link of a removed run before rewriting the transcript.
+  // Collapse backwards like the in-memory fold, including endpoints left
+  // by earlier deletions; an empty intermediate checkpoint must not hide
+  // a required foreign endpoint further along the run.
   for (let index = 0; index + 1 < timelineSnapshots.length; index++) {
     const survivor = timelineSnapshots[index]!;
-    const next = timelineSnapshots[index + 1]!;
-    if (
-      !removedPromptIds.has(survivor.promptId) &&
-      removedPromptIds.has(next.promptId) &&
-      deletionDropsRequiredEndpoint(survivor, next)
-    ) {
-      throw new MessageGroupDeletionError(
-        'invalid_history',
-        'Deleting these message groups would discard a file history checkpoint endpoint whose capture directory cannot be proven; refusing to keep file restoration safe',
-      );
+    if (removedPromptIds.has(survivor.promptId) || survivor.diffAfterBackups)
+      continue;
+    let end = index + 1;
+    while (
+      end < timelineSnapshots.length &&
+      removedPromptIds.has(timelineSnapshots[end]!.promptId)
+    )
+      end++;
+    if (end === index + 1) continue;
+    let endpoint = timelineSnapshots[end - 1]!;
+    for (let link = end - 2; link >= index; link--) {
+      const predecessor = timelineSnapshots[link]!;
+      if (deletionDropsRequiredEndpoint(predecessor, endpoint)) {
+        throw new MessageGroupDeletionError(
+          'invalid_history',
+          'Deleting these message groups would discard a file history checkpoint endpoint whose capture directory cannot be proven; refusing to keep file restoration safe',
+        );
+      }
+      endpoint = foldFileHistoryEndpoint(predecessor, endpoint, link === index);
     }
   }
   const survivingSnapshots = new Map(
