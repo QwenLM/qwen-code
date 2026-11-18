@@ -99,7 +99,7 @@ class ManagedSessionModelConfigTest {
                 registry, properties, new SdkHarnessRules(),
                 new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(),
                 new JdbcManagedSessionSkills(jdbc, json, new RequestDigests(), null),
-                null, null, null, null, null, null, configs);
+                null, null, null, null, null, configs);
         harness = mock(HarnessConnector.class);
         when(harness.supportsModelConfiguration()).thenReturn(true);
         when(harness.supportsModelSelection()).thenReturn(true);

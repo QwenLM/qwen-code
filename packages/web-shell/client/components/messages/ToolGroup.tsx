@@ -46,6 +46,7 @@ import { findWorkflowTaskForTool } from '../../utils/workflowTasks';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import { WorkflowExecutionView } from './WorkflowExecutionView';
 import { Markdown } from './Markdown';
+import { openSessionLink } from './session-link';
 import { ThinkingDoneIcon, ThinkingTranslateButton } from './AssistantMessage';
 import {
   formatDurationMs,
@@ -1270,7 +1271,7 @@ function renderWithSessionLinks(
     if (match.index > lastIndex) {
       parts.push(text.slice(lastIndex, match.index));
     }
-    const sessionId = match[2];
+    const target = match[2];
     parts.push(
       renderMode !== 'interactive' ? (
         <span key={match.index} style={{ textDecoration: 'underline' }}>
@@ -1285,9 +1286,7 @@ function renderWithSessionLinks(
           onClick={(e) => {
             e.preventDefault();
             e.stopPropagation();
-            window.dispatchEvent(
-              new CustomEvent('qwen:open-session', { detail: sessionId }),
-            );
+            openSessionLink(target);
           }}
         >
           {match[1]}
@@ -1990,7 +1989,7 @@ const ThoughtLineHeader = memo(function ThoughtLineHeader({
           {t(isStreaming ? 'thinking.running' : 'thinking.done')}
         </span>
       </button>
-      {language === 'zh-CN' &&
+      {(language === 'zh-CN' || language === 'zh-TW') &&
         translateContent !== undefined &&
         generateContent && (
           <ThinkingTranslateButton

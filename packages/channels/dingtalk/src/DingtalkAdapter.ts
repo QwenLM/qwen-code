@@ -28,6 +28,7 @@ import {
   extractTitle,
 } from './markdown.js';
 import { downloadMedia } from './media.js';
+import { withConnectLoggingSuppressed } from './connect-logging.js';
 import {
   DingTalkMediaUploadError,
   findImageMarkers,
@@ -644,7 +645,12 @@ const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text}
 const PROACTIVE_FILE_MSG_KEY = 'sampleFile';
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
-const ROBOT_MESSAGE_HOSTS = new Set(['api.dingtalk.com', 'oapi.dingtalk.com']);
+// Shared with the managed adapter's webhook send so both paths validate the
+// sessionWebhook host against the same allowlist.
+export const ROBOT_MESSAGE_HOSTS = new Set([
+  'api.dingtalk.com',
+  'oapi.dingtalk.com',
+]);
 /**
  * gettoken business errors a retry cannot fix: an invalid appkey/secret or a
  * missing app. Any other errcode (-1 system busy, 88 throttled, ...) is
@@ -900,32 +906,6 @@ type DingTalkClientInternals = DWClient & {
   onEvent(message: DWClientDownStream): void;
   onCallback(message: DWClientDownStream): void;
 };
-
-/* eslint-disable no-console -- swapping console.log out is the whole job here */
-let connectLogDepth = 0;
-let unsuppressedConsoleLog: typeof console.log | undefined;
-
-// Connects can overlap — a manager replacement starts while another is still
-// in flight, and either may settle first — so only the depth 1→0 transition
-// restores, to what the 0→1 transition saved. An inner scope restoring its own
-// capture would put the no-op back and leave logging off process-wide.
-async function withConnectLoggingSuppressed<T>(
-  connect: () => Promise<T>,
-): Promise<T> {
-  if (connectLogDepth++ === 0) {
-    unsuppressedConsoleLog = console.log;
-    console.log = () => {};
-  }
-  try {
-    return await connect();
-  } finally {
-    if (--connectLogDepth === 0 && unsuppressedConsoleLog) {
-      console.log = unsuppressedConsoleLog;
-      unsuppressedConsoleLog = undefined;
-    }
-  }
-}
-/* eslint-enable no-console */
 
 type DingtalkChannelConfig = ChannelConfig & {
   useConnectionManager?: unknown;

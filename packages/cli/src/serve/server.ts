@@ -27,6 +27,8 @@ import type {
   DaemonPerfSnapshot,
   DaemonStartupSnapshot,
 } from './daemon-status.js';
+import { resolveSseAdmissionCaps } from './daemon-status.js';
+import { getSseOccupancy } from './sse-occupancy.js';
 import type {
   ChannelWorkerSnapshot,
   ChannelWorkerSupervisor,
@@ -177,7 +179,10 @@ import {
   registerWorkspaceQualifiedScheduledTasksRoutes,
 } from './routes/scheduled-tasks.js';
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
-import { registerGoalsRoutes } from './routes/goals.js';
+import {
+  registerGoalsRoutes,
+  registerWorkspaceQualifiedGoalsRoutes,
+} from './routes/goals.js';
 import { registerWorkspaceAgentRoutes } from './routes/workspace-agents.js';
 import { registerSessionAgentSquadRoutes } from './routes/session-agent-squads.js';
 import {
@@ -193,6 +198,7 @@ import {
   collectBoundSessionIds,
   startScheduledTaskKeepalive,
   rehydrateScheduledTaskSessions,
+  type KeepaliveSessionResumeRequest,
 } from './scheduled-task-keepalive.js';
 import {
   registerWorkspaceDiagnosticStatusRoutes,
@@ -287,6 +293,7 @@ import {
   deleteDaemonSessionIfOrphan,
   SessionArchiveCoordinator,
 } from './server/session-archive.js';
+import { restoreSessionCore } from './server/session-restore.js';
 import {
   installSelfOriginStripMiddleware,
   installRemoteSelfOriginMiddleware,
@@ -949,6 +956,10 @@ export function createServeApp(
     tokenConfigured,
     requireAuth: opts.requireAuth === true,
   });
+  // Unified admission caps for every long-lived stream surface
+  // (issue #17554): one aggregate budget plus per-listener clamps, resolved
+  // once and threaded through each surface's route deps.
+  const sseAdmissionCaps = resolveSseAdmissionCaps(opts);
   let runtimeStopReady = false;
   let runtimeStopsClosing = false;
   const scheduledActivity = new WeakMap<WorkspaceRuntime, () => boolean>();
@@ -2400,7 +2411,8 @@ export function createServeApp(
   const healthRoutes = createHealthRoutes({
     opts,
     workspaceRegistry,
-    getActiveSseCount,
+    getStreamOccupancy: getSseOccupancy,
+    sseAdmissionCaps,
     getRateLimiter: () => rateLimiter,
   });
   if (healthRoutes.exposeHealthPreAuth) {
@@ -2649,6 +2661,7 @@ export function createServeApp(
       hostedHarness,
       primaryBoundWorkspace,
       broker,
+      { sseAdmissionCaps, daemonLog },
     );
     stopHostedPackagePreparation = registerHostedPackagePreparation(
       app,
@@ -2837,6 +2850,7 @@ export function createServeApp(
     getAcpHandle: () => acpHandleRef.current,
     getRateLimiter: () => rateLimiter,
     getRestSseActive: getActiveSseCount,
+    getStreamOccupancy: getSseOccupancy,
     currentServeFeatures,
     getSupportedDeviceFlowProviders,
     deviceFlowRegistry,
@@ -3214,6 +3228,8 @@ export function createServeApp(
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
+    sseAdmissionCaps,
+    daemonLog,
   });
   mountWorkspaceQualifiedAgentsRoutes(app, {
     workspaceRegistry,
@@ -3678,6 +3694,7 @@ export function createServeApp(
     mutate,
     sendBridgeError,
     daemonLog,
+    sseAdmissionCaps,
     channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
     promptDeadlineMs: opts.promptDeadlineMs,
     sessionShellCommandEnabled,
@@ -3947,6 +3964,12 @@ export function createServeApp(
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
+  // The qualified listing lets a multi-workspace Web Shell aggregate every
+  // registered project's goals, not just the primary's.
+  registerWorkspaceQualifiedGoalsRoutes(app, {
+    workspaceRegistry,
+    conversationRuntimeActivity,
+  });
 
   // The primary workspace's /autofix-pr watches, read from the clone's files
   // (as `qwen autofix-pr status` lists them). Read-only.
@@ -4027,6 +4050,8 @@ export function createServeApp(
       agentTokenBudgetFor,
       daemonLoopbackBaseUrl,
       standaloneSessionService: () => standaloneSessionService,
+      sseAdmissionCaps,
+      daemonLog,
     });
     // Squads: a leader agent that coordinates member agents in a session.
     registerSessionAgentSquadRoutes(app, {
@@ -4059,6 +4084,44 @@ export function createServeApp(
   // embeds that call createServeApp neither spawn sessions on boot nor hold a
   // heartbeat timer (both would read the bound workspace's real tasks file).
   if (deps.manageScheduledTaskSessions) {
+    const restoreScheduledSession = async (
+      runtime: WorkspaceRuntime,
+      request: KeepaliveSessionResumeRequest,
+    ) => {
+      const generation = workspaceRegistry.getManagedEntryByWorkspaceId(
+        runtime.workspaceId,
+      )?.current;
+      if (generation?.runtime !== runtime) {
+        throw new WorkspaceGenerationClosedError();
+      }
+      const assertOpen = () => generation.guard.assertOpen();
+      assertOpen();
+      const result = await restoreSessionCore({
+        action: 'resume',
+        runtime,
+        workspaceCwd: runtime.workspaceCwd,
+        sessionId: request.sessionId,
+        archiveCoordinator,
+        requestedSessionIdAdmission,
+        assertRuntimeGenerationOpen: assertOpen,
+        daemonLog,
+        materializeLiveConversationDirectory: undefined,
+        historyPageSize: undefined,
+        liveReplayMode: undefined,
+        compactedReplayMode: undefined,
+        clientId: undefined,
+        approvalMode: undefined,
+        restoreSource: {
+          sourceType: request.sourceType,
+          sourceId: request.sourceId,
+        },
+        isCancelled: () => runtimeStopsClosing,
+      });
+      if (result.kind !== 'restored') {
+        throw new Error('Scheduled session restore was cancelled');
+      }
+      return result.session;
+    };
     const registerScheduledTaskAuthorizations = (
       workspaceCwd: string,
       tasks: readonly DurableCronTask[],
@@ -4097,6 +4160,8 @@ export function createServeApp(
       void runWithWorkspaceRuntimeStorage(runtime, () =>
         rehydrateScheduledTaskSessions({
           bridge: runtime.bridge,
+          restoreSession: (request) =>
+            restoreScheduledSession(runtime, request),
           boundWorkspace: runtime.workspaceCwd,
           loadTimeoutMs: scheduledTaskRestoreTimeoutMs,
           onTasksRead: (tasks) =>
@@ -4138,6 +4203,7 @@ export function createServeApp(
       if (keepaliveStops.has(runtime.workspaceCwd)) return;
       const keepalive = startScheduledTaskKeepalive({
         bridge: runtime.bridge,
+        restoreSession: (request) => restoreScheduledSession(runtime, request),
         boundWorkspace: runtime.workspaceCwd,
         intervalMs: keepaliveIntervalMs,
         reviveTimeoutMs: scheduledTaskRestoreTimeoutMs,
@@ -4196,6 +4262,7 @@ export function createServeApp(
     workspaceRegistry,
     daemonLog,
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
+    admissionCaps: sseAdmissionCaps,
     sendBridgeError,
     virtualSubagentSessions,
     resolveSubagentSessionRuntime,
@@ -4213,6 +4280,7 @@ export function createServeApp(
     enabled: acpHttpEnabledAtBoot,
     boundWorkspace: primaryBoundWorkspace,
     daemonEnv: daemonEnvAtBoot,
+    sseAdmissionCaps,
     // Phase 4 (issue #6378): pass the registry so `/workspaces/:workspace/acp`
     // mounts a per-runtime ACP dispatcher for each registered workspace.
     workspaceRegistry,
