@@ -124,9 +124,12 @@ describe('DesktopRelayPanel', () => {
     expect(button('Connect this computer')).toBeDefined();
   });
 
-  it('uses the current Web Shell language', () => {
-    mount({ phase: 'idle' }, 'zh-CN');
-    expect(button('连接这台电脑')).toBeDefined();
+  it.each([
+    ['zh-CN', '连接这台电脑'],
+    ['zh-TW', '連線這臺電腦'],
+  ] as const)('uses the current Web Shell language (%s)', (language, label) => {
+    mount({ phase: 'idle' }, language);
+    expect(button(label)).toBeDefined();
   });
 });
 

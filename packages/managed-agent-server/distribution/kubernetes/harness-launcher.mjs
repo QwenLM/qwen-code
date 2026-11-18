@@ -13,6 +13,31 @@ import { URL } from 'node:url';
 const secrets = '/etc/qwen/secrets';
 const runtime = '/var/run/qwen';
 
+// Mirrors the canonical-host gate in managed-runtime-broker-url.ts so a pool
+// Secret cannot carry a spelling the Harness resolver refuses at child boot.
+const DECIMAL_OCTET = /^(?:0|[1-9]\d{0,2})$/;
+function canonicalBrokerHost(rawHost, parsedHostname) {
+  if (rawHost.startsWith('[')) {
+    const inner = rawHost.slice(1, -1).toLowerCase();
+    return /^[0-9a-f:.]+$/.test(inner) && inner.includes(':');
+  }
+  const lower = rawHost.toLowerCase();
+  if (lower.endsWith('.')) return false;
+  const labels = lower.split('.');
+  if (labels.some((label) => label.length === 0)) return false;
+  const last = labels[labels.length - 1] ?? '';
+  if (/^\d+$/.test(last) || /^0x[0-9a-f]*$/i.test(last)) {
+    return (
+      labels.length === 4 &&
+      labels.every(
+        (octet) => DECIMAL_OCTET.test(octet) && Number(octet) <= 255,
+      ) &&
+      lower === parsedHostname
+    );
+  }
+  return lower === parsedHostname;
+}
+
 async function secret(name) {
   const value = (await readFile(`${secrets}/${name}`, 'utf8')).trim();
   if (!value || /[\r\n\0]/u.test(value))
@@ -65,6 +90,25 @@ try {
   if (brokerUrl.pathname !== '/' && brokerUrl.pathname !== '')
     throw new Error(
       'The pool requires an origin-only Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
+    );
+  // The Harness resolver additionally requires a canonical spelling; refuse
+  // here (naming the variable) instead of letting the child exit at boot.
+  const canonical =
+    /^https:\/\/(\[[^\]/?#@\s]+\]|[^:/?#@[\]\s]+)(?::(\d+))?(\/.*)?$/i.exec(
+      brokerUrlText,
+    );
+  const canonicalPort = canonical?.[2];
+  if (
+    !canonical ||
+    !canonicalBrokerHost(canonical[1], brokerUrl.hostname) ||
+    (canonical[3] !== undefined && canonical[3] !== '/') ||
+    (canonicalPort !== undefined &&
+      (!Number.isInteger(Number(canonicalPort)) ||
+        Number(canonicalPort) < 1 ||
+        Number(canonicalPort) > 65535))
+  )
+    throw new Error(
+      'The pool requires a canonical Broker URL in QWEN_MANAGED_RUNTIME_BROKER_URL.',
     );
   await Promise.all(
     ['home', 'state', 'workspace'].map((name) =>

@@ -52,15 +52,14 @@ import {
 } from './useIsTouchComposer';
 import type { CommandInfo } from '../adapters/types';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
-import {
-  useOptionalWorkspace,
-  type UseDaemonFollowupSuggestionReturn,
-} from '@qwen-code/web-shell/daemon-react-sdk';
+import type { UseDaemonFollowupSuggestionReturn } from '@qwen-code/web-shell/daemon-react-sdk';
+import { useOptionalComposerWorkspace } from './useComposerWorkspace.js';
 import {
   getImplicitTabCompletion,
   getMissingSlashPrefixCompletion,
   getSlashCommandCompletionResult,
   type SkillInfo,
+  type SlashArgumentCompleter,
   type SlashCommandCompletionResult,
 } from '../completions/slashCompletion';
 import {
@@ -1212,6 +1211,8 @@ export interface UseComposerCoreOptions {
   commands: CommandInfo[];
   skills?: SkillInfo[];
   allowEmptySlashMenu?: boolean;
+  /** Completes arguments the static subcommand trees cannot (`/send`). */
+  slashArgumentCompleter?: SlashArgumentCompleter;
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   autoSubmitSlashCommands?: boolean;
   queuedMessages?: string[];
@@ -1648,6 +1649,7 @@ export function useComposerCore(
     commands,
     skills = [],
     allowEmptySlashMenu = false,
+    slashArgumentCompleter,
     slashCommandCategoryOrder,
     autoSubmitSlashCommands = false,
     queuedMessages = [],
@@ -1686,7 +1688,7 @@ export function useComposerCore(
 
   const persistFileReferencesRef = useRef(persistFileReferences);
   persistFileReferencesRef.current = persistFileReferences;
-  const workspace = useOptionalWorkspace();
+  const workspace = useOptionalComposerWorkspace();
   const { language, t } = useI18n();
   const portalRoot = useWebShellPortalRoot();
   const storageScopeKey = composerScopeKey ?? atWorkspaceCwd;
@@ -1806,6 +1808,8 @@ export function useComposerCore(
   commandsRef.current = commands;
   const allowEmptySlashMenuRef = useRef(allowEmptySlashMenu);
   allowEmptySlashMenuRef.current = allowEmptySlashMenu;
+  const slashArgumentCompleterRef = useRef(slashArgumentCompleter);
+  slashArgumentCompleterRef.current = slashArgumentCompleter;
   const skillsRef = useRef(skills);
   skillsRef.current = skills;
   const slashCommandCategoryOrderRef = useRef(slashCommandCategoryOrder);
@@ -2800,6 +2804,7 @@ export function useComposerCore(
   const autoTriggerRef = useRef<{ text: string; from: number } | null>(null);
   const [slashMenu, setSlashMenuState] = useState<SlashMenuState | null>(null);
   const slashMenuRef = useRef<SlashMenuState | null>(null);
+  const dismissedSlashMenuRef = useRef<EditorState['doc'] | null>(null);
 
   // True while the user is paging through input history with the arrow keys
   // and has not typed since. Unlike history.isNavigating() (which stays set
@@ -2945,8 +2950,10 @@ export function useComposerCore(
       tRef.current,
       slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
       allowEmptySlashMenuRef.current,
+      slashArgumentCompleterRef.current,
     );
     if (!result) return false;
+    dismissedSlashMenuRef.current = null;
     setSlashMenu({
       ...result,
       selectedIndex: 0,
@@ -2997,6 +3004,7 @@ export function useComposerCore(
         (key) => tRef.current(key),
         slashCommandCategoryOrderRef.current ?? DEFAULT_COMMAND_CATEGORY_ORDER,
         allowEmptySlashMenuRef.current,
+        slashArgumentCompleterRef.current,
       );
       if (!relativeResult) {
         setSlashMenu(null);
@@ -3019,7 +3027,25 @@ export function useComposerCore(
     [closeAtMenu, setSlashMenu],
   );
 
+  // New argument data (a workspace's sessions arrived): recompute the menu
+  // for a command being typed.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (
+      !view?.hasFocus ||
+      !slashArgumentCompleter ||
+      dismissedSlashMenuRef.current === view.state.doc
+    )
+      return;
+    const { head } = view.state.selection.main;
+    const line = view.state.doc.lineAt(head);
+    if (slashArgumentCompleter(line.text.slice(0, head - line.from))) {
+      refreshSlashMenuForView(view);
+    }
+  }, [refreshSlashMenuForView, slashArgumentCompleter]);
+
   const closeSlashMenu = useCallback(() => {
+    dismissedSlashMenuRef.current = viewRef.current?.state.doc ?? null;
     setSlashMenu(null);
   }, [setSlashMenu]);
 
