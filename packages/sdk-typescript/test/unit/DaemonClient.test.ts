@@ -364,10 +364,12 @@ describe('DaemonClient', () => {
         ],
       };
       const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const transportFetch = vi.fn();
       const client = new DaemonClient({
         baseUrl: 'http://daemon',
         token: 'token-1',
         fetch,
+        transport: { fetch: transportFetch } as unknown as DaemonTransport,
       });
 
       await expect(
@@ -376,6 +378,7 @@ describe('DaemonClient', () => {
           sinceMs: 3_600_000,
         }),
       ).resolves.toEqual(body);
+      expect(transportFetch).not.toHaveBeenCalled();
       expect(calls).toHaveLength(1);
       expect(calls[0]).toMatchObject({
         url: 'http://daemon/sessions/recovery',
@@ -413,7 +416,12 @@ describe('DaemonClient', () => {
         ],
       };
       const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
-      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const transportFetch = vi.fn();
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport: { fetch: transportFetch } as unknown as DaemonTransport,
+      });
 
       await expect(
         client.continueRestartRecoveries({
@@ -424,6 +432,7 @@ describe('DaemonClient', () => {
           confirmToolTurn: false,
         }),
       ).resolves.toEqual(body);
+      expect(transportFetch).not.toHaveBeenCalled();
       expect(calls).toHaveLength(1);
       expect(calls[0]).toMatchObject({
         url: 'http://daemon/sessions/recovery/continue',

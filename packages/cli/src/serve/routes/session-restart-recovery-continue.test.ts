@@ -49,7 +49,7 @@ interface Fixture {
   bridge: AcpSessionBridge;
   app: express.Express;
   sessionId: string;
-  seed(records: readonly PromptLedgerRecord[]): void;
+  seed(records: readonly PromptLedgerRecord[], sessionId?: string): void;
 }
 
 function makeFixture(trusted = true): Fixture {
@@ -113,8 +113,8 @@ function makeFixture(trusted = true): Fixture {
     bridge,
     app,
     sessionId,
-    seed(records) {
-      const ledgerPath = sessionService.getPromptLedgerPath(sessionId);
+    seed(records, seedSessionId = sessionId) {
+      const ledgerPath = sessionService.getPromptLedgerPath(seedSessionId);
       for (const record of records) {
         appendPromptLedgerRecord(ledgerPath, record);
       }
@@ -232,6 +232,10 @@ describe('POST /sessions/recovery/continue', () => {
       code: 'tool_turn',
     });
     expect(fixture.bridge.continueSession).not.toHaveBeenCalled();
+    expect(fixture.bridge.detachClient).toHaveBeenCalledWith(
+      'restored',
+      'batch-client',
+    );
 
     const withConfirmation = await request(fixture.app)
       .post('/sessions/recovery/continue')
@@ -264,6 +268,10 @@ describe('POST /sessions/recovery/continue', () => {
       code: 'cancellation_confirmation',
     });
     expect(fixture.bridge.continueSession).not.toHaveBeenCalled();
+    expect(fixture.bridge.detachClient).toHaveBeenCalledWith(
+      'restored',
+      'batch-client',
+    );
   });
 
   it('refuses degraded history and an active turn', async () => {
@@ -286,6 +294,10 @@ describe('POST /sessions/recovery/continue', () => {
       kind: 'degraded_history',
     });
     expect(fixture.bridge.continueSession).not.toHaveBeenCalled();
+    expect(fixture.bridge.detachClient).toHaveBeenCalledWith(
+      'restored',
+      'batch-client',
+    );
   });
 
   it('reports a continuation the bridge refuses to admit', async () => {
@@ -394,34 +406,40 @@ describe('POST /sessions/recovery/continue', () => {
 
   it('keeps processing after one session fails', async () => {
     const fixture = makeFixture();
-    fixture.seed([inFlight('p1', Date.now())]);
-    const missing = randomUUID();
+    const failed = randomUUID();
+    const continued = randomUUID();
+    fixture.seed([inFlight('p1', Date.now())], failed);
+    fixture.seed([inFlight('p1', Date.now())], continued);
     restoreMocks.restoreSessionCore
+      .mockRejectedValueOnce(new Error('load failed'))
       .mockResolvedValueOnce({
         kind: 'restored',
-        session: { sessionId: fixture.sessionId },
-      })
-      .mockRejectedValueOnce(new Error('load failed'));
+        session: { sessionId: continued, clientId: 'batch-client' },
+      });
 
     const response = await request(fixture.app)
       .post('/sessions/recovery/continue')
       .send({
         sessions: [
-          { workspace: fixture.runtime.workspaceId, sessionId: missing },
-          {
-            workspace: fixture.runtime.workspaceId,
-            sessionId: fixture.sessionId,
-          },
+          { workspace: fixture.runtime.workspaceId, sessionId: failed },
+          { workspace: fixture.runtime.workspaceId, sessionId: continued },
         ],
       });
 
     expect(response.body.results).toHaveLength(2);
     expect(response.body.results[0]).toMatchObject({
-      sessionId: missing,
-      status: 'not_continuable',
-      code: 'no_evidence',
+      sessionId: failed,
+      status: 'error',
+      code: 'continue_failed',
     });
-    expect(response.body.results[1].status).toBe('accepted');
+    expect(response.body.results[1]).toMatchObject({
+      sessionId: continued,
+      status: 'accepted',
+    });
+    expect(fixture.bridge.detachClient).toHaveBeenCalledWith(
+      continued,
+      'batch-client',
+    );
   });
 
   it('reports a load failure per session', async () => {

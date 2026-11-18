@@ -11329,6 +11329,16 @@ export function registerSessionRoutes(
           sessionService,
           sessionIds,
           sinceMs,
+          isSessionLiveActive: (sessionId) => {
+            try {
+              const summary = runtime.bridge.getSessionSummary(sessionId);
+              return (
+                summary.hasActivePrompt || (summary.pendingPromptCount ?? 0) > 0
+              );
+            } catch {
+              return false;
+            }
+          },
         });
         if (!isCurrent()) return unavailable();
         return {

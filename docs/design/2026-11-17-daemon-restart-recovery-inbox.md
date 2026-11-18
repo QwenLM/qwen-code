@@ -4,8 +4,8 @@
 
 Status: implemented in this change. The read-only scan, both recovery routes, the
 daemon SDK client methods, the Web Shell panel, and the REST reference/protocol
-entries are included here. Line references were verified at commit
-`5fc5a98ecc`.
+entries are included here. Code references below use symbol names rather than
+line numbers.
 
 ## Problem and scope
 
@@ -29,43 +29,45 @@ this slice and are tracked in Open questions.
 ## Current state
 
 - The recovery summary is built per session after a cold load. `Session`
-  derives it from the last turn (`packages/cli/src/acp-integration/session/Session.ts:6819`),
-  and the ACP status type exposes only `kind`, `canContinue`, and an optional
-  `cancellationConfirmationId` (`packages/acp-bridge/src/status.ts:681`).
+  derives it from the last turn in
+  `packages/cli/src/acp-integration/session/Session.ts`, and the ACP status
+  type exposes only `kind`, `canContinue`, and an optional
+  `cancellationConfirmationId` in `packages/acp-bridge/src/status.ts`.
 - Web Shell shows the action only inside a loaded conversation.
   `SessionRecoveryBanner` reads `connection.context.recovery` and calls the
-  session-bound `continueSession` action
-  (`packages/web-shell/client/components/SessionRecoveryBanner.tsx`).
+  session-bound `continueSession` action in
+  `packages/web-shell/client/components/SessionRecoveryBanner.tsx`.
 - The session list cannot answer which sessions were interrupted. Live state is
-  an in-memory snapshot: the capability comment says so
-  (`packages/cli/src/serve/capabilities.ts:577`), and
-  `DaemonSessionLiveState` contains only live flags
-  (`packages/sdk-typescript/src/daemon/types.ts:2129`). After a restart the
-  snapshot is empty.
+  an in-memory snapshot: the capability comment says so in
+  `packages/sdk-typescript/src/daemon/capabilities.ts`, and
+  `DaemonSessionLiveState` contains only live flags in
+  `packages/sdk-typescript/src/daemon/types.ts`. After a restart the snapshot is
+  empty.
 - Continuation requires a live session entry. The HTTP route
-  `POST /session/:id/continue` (`packages/cli/src/serve/routes/session.ts:8839`)
-  reaches `continueSession`, which throws `SessionNotFoundError` when
-  `byId` has no entry for the session
-  (`packages/acp-bridge/src/session-control-plane.ts:14716`). A cold load must
-  run first.
+  `POST /session/:id/continue` in `packages/cli/src/serve/routes/session.ts`
+  reaches `continueSession`, which throws `SessionNotFoundError` when `byId` has
+  no entry for the session in
+  `packages/acp-bridge/src/session-control-plane.ts`. A cold load must run
+  first.
 - The existing Web Shell continuation design explicitly excludes automatic
   resume and new daemon routes
   (`docs/design/web-shell-interrupted-session-continue.md`).
 - Core can already express a safe automatic continuation, but nothing enables
   it: `canAutoContinue` is set only from `allowAutoContinue`, and no caller
-  passes `true` (`packages/core/src/core/session-recovery.ts:222`).
+  passes `true` in `packages/core/src/core/session-recovery.ts`.
 - The prompt terminal ledger already persists the evidence needed to find
   interrupted sessions. Each session has an append-only
   `<sessionId>.ledger.jsonl` next to its transcript
-  (`packages/core/src/services/sessionService.ts:1169`). Records carry only
-  `promptId`, `state`, `at`, and an optional `tailUuid`; prompt content is
-  deliberately excluded (`packages/acp-bridge/src/prompt-ledger.ts:24`).
+  (`packages/core/src/services/sessionService.ts`, `getPromptLedgerPath`).
+  Records carry only `promptId`, `state`, `at`, and an optional `tailUuid`;
+  prompt content is deliberately excluded
+  (`packages/acp-bridge/src/prompt-ledger.ts`).
 - A normal daemon shutdown flushes a terminal record with
   `code: 'daemon_shutdown'` for a pending prompt
-  (`packages/acp-bridge/src/bridge-prompt-ledger.test.ts:147`). A crash leaves
-  the `in_flight` record without a terminal; a cold load reconciles it through
+  (`packages/acp-bridge/src/bridge-prompt-ledger.test.ts`). A crash leaves the
+  `in_flight` record without a terminal; a cold load reconciles it through
   `reconcileDanglingPromptTerminals`
-  (`packages/cli/src/serve/prompt-terminal-ledger.ts:101`).
+  (`packages/cli/src/serve/prompt-terminal-ledger.ts`).
 
 ## Goals
 
@@ -102,19 +104,27 @@ bodies. The ledger is small (roughly two records per prompt) and is already
 written at admission and at shutdown, so the scan costs one small read per
 session.
 
-Reduce each ledger to the last record of its newest prompt:
+Before emitting an item, the route checks the runtime's in-memory session
+summary and omits a session whose prompt is active or queued. That check does
+not load the session; it keeps a live turn from being mislabeled as a restart
+interruption when Web Shell scans while work is running.
 
-- No terminal record for that prompt: `interruption: 'in_flight'`. This is the
-  crash case.
+Reduce each ledger by `promptId` to that prompt's latest record. A session is
+interrupted when any prompt is still `in_flight`, even if a different prompt's
+terminal was appended later. Otherwise the newest terminal decides:
+
+- `in_flight`: `interruption: 'in_flight'`. This covers a crash and a queued
+  prompt whose predecessor has already settled.
 - Terminal `interrupted`: `interruption` is the record's `code` when present
   and shaped as a lowercase identifier of at most 64 characters
   (`daemon_shutdown`, `daemon_lost`, `channel_closed`, ...), otherwise
   `interrupted`.
-- Terminal `error` with `code: 'daemon_shutdown'` or `'daemon_lost'`: the
-  daemon or its child ended before the prompt completed, so the session is
-  listed with that code. Other `error` terminals, `completed`, and `cancelled`
-  are not listed. A completed or cancelled turn is not waiting for recovery,
-  and an errored turn already published its outcome.
+- Terminal `error` with `code: 'daemon_shutdown'`, `'daemon_lost'`, or
+  `'channel_closed'`: the daemon or its child ended before the prompt finished,
+  so the session is listed with that code. Other `error` terminals,
+  `completed`, and `cancelled` are not listed. A completed or cancelled turn is
+  not waiting for recovery, and an unrelated errored turn already published its
+  outcome.
 
 An unreadable ledger is skipped (fail closed). A torn tail loses only the
 partial line: earlier valid records still decide the result, so a crash that
@@ -123,17 +133,17 @@ sessions are never replaced with a guess. Skip the archive directory and drop
 entries older than the requested window. Keep at most 200 entries per
 workspace, newest first, and report `truncated: true` when more were present.
 
-The scan reports what the ledger proves: the newest prompt either never reached
-a terminal, reached an `interrupted` one, or ended with a
-`daemon_shutdown`/`daemon_lost` error. A record whose timestamp cannot form an
-ISO value is treated as unreadable and omitted. It does not claim that the
-session can be continued. The recovery kind and the `canContinue` decision still
-come from the existing classifier after a load.
+The scan reports what the ledger proves: a prompt either never reached a
+terminal, reached an `interrupted` one, or ended with a daemon-lifecycle error
+such as `daemon_shutdown` or `channel_closed`. A record whose timestamp cannot
+form an ISO value is treated as unreadable and omitted. It does not claim that
+the session can be continued. The recovery kind and the `canContinue` decision
+still come from the existing classifier after a load.
 
 ### Read-only batch route
 
 Mirror the existing workspace-scoped batch shape used by
-`POST /sessions/live-state` (`packages/cli/src/serve/routes/session.ts:10959`):
+`POST /sessions/live-state` (`packages/cli/src/serve/routes/session.ts`):
 1–20 workspace selectors, per-member results, and the same
 `workspace_not_found` / `untrusted_workspace` / `workspace_runtime_unavailable`
 errors. The route is advertised by the `restart_recovery` capability tag, which
@@ -208,7 +218,8 @@ each entry:
    includes `degraded_history` and a session with an active turn.
 6. If `cancellationConfirmationId` is present, return `confirmation_required`.
    A batch must never auto-confirm a turn that may have been cancelled on
-   purpose.
+   purpose; this batch cannot carry that confirmation, so the client directs
+   the user to the conversation.
 7. If `kind` is `interrupted_turn` and `confirmToolTurn` is not `true`, return
    `confirmation_required`. The caller can resubmit those sessions with
    `confirmToolTurn: true`.
@@ -272,7 +283,9 @@ later.
 - A row's Continue submits that session; Continue all submits the rows that do
   not need tool confirmation, in batches of 10. Rows that come back `accepted`
   leave the panel; rows that come back `confirmation_required` stay with a
-  confirmation action; failures stay with a reason.
+  confirmation action; failures stay with a reason. A cancellation
+  confirmation stays visible with a note to confirm it in the conversation,
+  because the batch never auto-confirms one.
 - The confirmation action resubmits only the tool-turn rows with
   `confirmToolTurn: true`, and explains that unfinished tool calls will be
   closed as failed before the model continues.
@@ -284,9 +297,12 @@ later.
   (default 32) and memory; the cap keeps a restart from loading every old
   session at once.
 - Only trusted workspaces are scanned; untrusted and unavailable members
-  return the same errors as live state.
+  return the same errors as live state. A session with an active or queued
+  prompt is omitted using the runtime's in-memory summary.
 - The scan reads no prompt content and the response carries none.
 - `degraded_history` is never continued.
+- A cancellation confirmation is never auto-confirmed; it stays in the panel
+  with a note to confirm it in the conversation.
 - A duplicate batch request cannot enqueue twice: the bridge admission check
   rejects a continuation while the session has an active prompt, and the
   ledger re-read drops a session that already moved on.
@@ -311,10 +327,10 @@ instead of falling back to another endpoint.
   keeps trust, ownership, and error semantics aligned with an existing route
   instead of inventing a global scan.
 - **Batch continuation runs on the server.** The Web Shell `loadSession` and
-  `resumeSession` actions switch the active conversation
-  (`packages/web-shell/client/daemon/session/actions.ts:2673`), so a client-side
-  loop would yank the user between sessions. The server-side loop also gives
-  other SDK clients the same capability.
+  `resumeSession` actions switch the active conversation in
+  `packages/web-shell/client/daemon/session/actions.ts`, so a client-side loop
+  would yank the user between sessions. The server-side loop also gives other
+  SDK clients the same capability.
 - **Tool turns need an explicit batch confirmation.** The single-session
   banner does not ask today; the batch path is unattended and can resume
   several sessions at once, so it asks before closing dangling tool calls and
@@ -359,26 +375,31 @@ instead of falling back to another endpoint.
 
 ## Validation plan
 
-1. Unit-test the scanner with: dangling `in_flight`; `interrupted` with
-   `daemon_shutdown`; `interrupted` with `daemon_lost`; terminal `error` with
-   `daemon_shutdown`; an unrelated terminal `error`; last prompt `completed`;
-   last prompt `cancelled`; multiple prompts where an older one is interrupted;
-   missing ledger; torn tail; oversized ledger tail; archived session; entry
-   outside the window.
-2. Route-test the scan batch: 1–20 selectors, unknown workspace, untrusted
-   workspace, unavailable runtime, per-member failure, stable ordering, and the
-   clamp on `sinceMs`.
+1. Unit-test the scanner with: dangling `in_flight`; a queued prompt whose
+   predecessor completed later; `interrupted` with `daemon_shutdown`;
+   `interrupted` with `daemon_lost`; terminal `error` with `daemon_shutdown`
+   and `channel_closed`; an unrelated terminal `error`; a live active prompt;
+   last prompt `completed`; last prompt `cancelled`; multiple prompts where an
+   older one is interrupted; missing ledger; torn tail; oversized ledger tail;
+   archived session; entry outside the window; and exactly the 200-item cap.
+2. Route-test the scan batch: 1–20 selectors, an over-limit batch, unknown
+   workspace, untrusted workspace, unavailable runtime, per-member failure,
+   stable ordering, the clamp on `sinceMs`, archived exclusion, live-active
+   exclusion, and a transcript whose record id is not a persisted id.
 3. Route-test the continuation batch: serial order, per-session results,
    `already_moved`, `degraded_history`, active turn, cancellation
    confirmation, `interrupted_turn` without and with `confirmToolTurn`, load
-   failure, and the 10-session cap.
+   failure, detach on non-accepted paths, and the 10-session cap.
 4. End-to-end: start a real daemon, start a turn, kill the daemon process,
    restart it, query the recovery batch, continue one session, and assert a new
-   turn appears in its transcript. Repeat with the daemon shut down normally
-   and assert the `daemon_shutdown` item appears.
+   turn appears in its transcript. The SIGKILL case is committed in
+   `integration-tests/cli/qwen-serve-restart-recovery.test.ts`; repeat with the
+   daemon shut down normally and assert the `daemon_shutdown` item appears.
 5. Web Shell test: banner appears only after availability returns, selection
    and confirmation paths work, successful rows leave the panel, failures stay
-   with a reason, and the active conversation does not change.
+   with a reason, cancellation confirmations point to the conversation,
+   unknown codes are localized, Continue all chunks at ten, and the active
+   conversation does not change.
 6. Run the package unit suites, build, typecheck, and the REST contract test.
 
 ## Acceptance criteria

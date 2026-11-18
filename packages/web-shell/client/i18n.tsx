@@ -1405,8 +1405,16 @@ const EN: Messages = {
     'This task stopped during a tool call. Continuing closes the unfinished call as failed before the model resumes.',
   'restartRecovery.inFlight': 'Process interrupted',
   'restartRecovery.daemonShutdown': 'Daemon restarted',
+  'restartRecovery.interrupted': 'Interrupted',
+  'restartRecovery.cancellationNeedsConversation':
+    'Open the conversation to confirm this cancellation.',
+  'restartRecovery.notContinuable':
+    'This task is no longer waiting for recovery.',
   'restartRecovery.failed': 'Could not continue',
   'restartRecovery.loadFailed': 'Could not read interrupted tasks',
+  'restartRecovery.retry': 'Retry',
+  'restartRecovery.scanFailedWorkspaces': (v) =>
+    `Could not scan: ${v?.workspaces ?? ''}`,
   'session.archived': 'This conversation is archived',
   'session.archivedDescription':
     'Unarchive it before opening the conversation.',
@@ -6786,8 +6794,14 @@ const ZH: Messages = {
     '任务在工具调用中中断；继续会先把未完成的调用标记为失败，再由模型接续。',
   'restartRecovery.inFlight': '进程中断',
   'restartRecovery.daemonShutdown': 'Daemon 重启',
+  'restartRecovery.interrupted': '已中断',
+  'restartRecovery.cancellationNeedsConversation': '请打开会话确认这次取消。',
+  'restartRecovery.notContinuable': '该任务已不再等待恢复。',
   'restartRecovery.failed': '无法继续',
   'restartRecovery.loadFailed': '无法读取中断任务',
+  'restartRecovery.retry': '重试',
+  'restartRecovery.scanFailedWorkspaces': (v) =>
+    `无法扫描：${v?.workspaces ?? ''}`,
   'session.archived': '该会话已归档',
   'session.archivedDescription': '需要先取消归档，才能打开该会话。',
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',

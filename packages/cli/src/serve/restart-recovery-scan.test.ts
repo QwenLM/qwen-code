@@ -96,6 +96,20 @@ describe('scanRestartRecoveries', () => {
     });
   });
 
+  it('omits a session whose live prompt is still running', () => {
+    const root = makeScanRoot();
+    writeLedger(root, 'running', [inFlight('p1', NOW)]);
+
+    expect(
+      scanRestartRecoveries({
+        sessionService: root.sessionService,
+        sessionIds: ['running'],
+        sinceMs: WINDOW_START,
+        isSessionLiveActive: (sessionId) => sessionId === 'running',
+      }).items,
+    ).toEqual([]);
+  });
+
   it.each([
     ['daemon_shutdown', 'daemon_shutdown'],
     ['daemon_lost', 'daemon_lost'],
@@ -166,24 +180,50 @@ describe('scanRestartRecoveries', () => {
     ]);
   });
 
-  it('lists a terminal error caused by a daemon shutdown', () => {
+  it.each(['daemon_shutdown', 'channel_closed'] as const)(
+    'lists a terminal error caused by %s',
+    (code) => {
+      const root = makeScanRoot();
+      writeLedger(root, 'lifecycle-error', [
+        inFlight('p1', NOW - 1000),
+        terminal('p1', NOW, 'error', code),
+      ]);
+
+      expect(
+        scanRestartRecoveries({
+          sessionService: root.sessionService,
+          sessionIds: ['lifecycle-error'],
+          sinceMs: WINDOW_START,
+        }).items,
+      ).toEqual([
+        {
+          sessionId: 'lifecycle-error',
+          lastActivityAt: new Date(NOW).toISOString(),
+          interruption: code,
+        },
+      ]);
+    },
+  );
+
+  it('keeps a queued prompt when an older prompt completes later', () => {
     const root = makeScanRoot();
-    writeLedger(root, 'shutdown-error', [
-      inFlight('p1', NOW - 1000),
-      terminal('p1', NOW, 'error', 'daemon_shutdown'),
+    writeLedger(root, 'queued-behind-completion', [
+      inFlight('p1', NOW - 3000),
+      inFlight('p2', NOW - 2000),
+      terminal('p1', NOW - 1000, 'completed'),
     ]);
 
     expect(
       scanRestartRecoveries({
         sessionService: root.sessionService,
-        sessionIds: ['shutdown-error'],
+        sessionIds: ['queued-behind-completion'],
         sinceMs: WINDOW_START,
       }).items,
     ).toEqual([
       {
-        sessionId: 'shutdown-error',
-        lastActivityAt: new Date(NOW).toISOString(),
-        interruption: 'daemon_shutdown',
+        sessionId: 'queued-behind-completion',
+        lastActivityAt: new Date(NOW - 2000).toISOString(),
+        interruption: 'in_flight',
       },
     ]);
   });
@@ -415,5 +455,13 @@ describe('scanRestartRecoveries', () => {
     expect(result.items.at(-1)?.sessionId).toBe(
       `s${MAX_RESTART_RECOVERY_ITEMS - 1}`,
     );
+
+    const exact = scanRestartRecoveries({
+      sessionService: root.sessionService,
+      sessionIds: sessionIds.slice(0, MAX_RESTART_RECOVERY_ITEMS),
+      sinceMs: WINDOW_START,
+    });
+    expect(exact.truncated).toBe(false);
+    expect(exact.items).toHaveLength(MAX_RESTART_RECOVERY_ITEMS);
   });
 });

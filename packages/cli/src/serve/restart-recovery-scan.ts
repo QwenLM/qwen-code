@@ -9,12 +9,17 @@ import {
   isPromptLedgerTerminalRecord,
   readPromptLedgerRecords,
   type PromptLedgerRecord,
+  type PromptLedgerTerminalRecord,
 } from '@qwen-code/acp-bridge/promptLedger';
 import type { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 
 const LEDGER_TAIL_BYTES = 64 * 1024;
 const TERMINAL_CODE_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
-const SHUTDOWN_INTERRUPTION_CODES = new Set(['daemon_shutdown', 'daemon_lost']);
+const LIFECYCLE_INTERRUPTION_CODES = new Set([
+  'daemon_shutdown',
+  'daemon_lost',
+  'channel_closed',
+]);
 
 export const DEFAULT_RESTART_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const MAX_RESTART_RECOVERY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -51,11 +56,18 @@ export interface ScanRestartRecoveriesInput {
   sessionIds: readonly string[];
   /** Only entries at or after this timestamp are returned. */
   sinceMs: number;
+  /**
+   * Optional memory-only live check. A session with an active or queued prompt
+   * is running now, not interrupted by a restart, so it is omitted.
+   */
+  isSessionLiveActive?: (sessionId: string) => boolean;
 }
 
 /**
- * Classifies one session from the newest record of its prompt ledger.
+ * Classifies one session from the latest record of each prompt in its ledger.
  *
+ * A session with any prompt still `in_flight` is interrupted even when another
+ * prompt's terminal was appended later. Otherwise the newest terminal decides.
  * `settled` covers a completed, cancelled, or unrelated errored turn and any
  * record older than `sinceMs`. `missing` means there is no readable evidence;
  * the caller must not guess an outcome from it.
@@ -72,51 +84,69 @@ export function readRestartRecoveryState(
   } catch {
     return { kind: 'missing' };
   }
-  const last = records[records.length - 1];
-  if (last === undefined) return { kind: 'missing' };
-  // `at` is only checked for finiteness by the ledger reader; a value
-  // outside the Date range cannot produce an ISO timestamp.
-  if (!Number.isFinite(last.at) || Math.abs(last.at) > 8.64e15) {
-    return { kind: 'missing' };
-  }
-  if (sinceMs !== undefined && last.at < sinceMs) return { kind: 'settled' };
-  if (isPromptLedgerTerminalRecord(last)) {
-    const code = last.code;
-    const interruptedByShutdown =
-      last.terminal === 'error' &&
-      typeof code === 'string' &&
-      SHUTDOWN_INTERRUPTION_CODES.has(code);
-    if (last.terminal !== 'interrupted' && !interruptedByShutdown) {
-      return { kind: 'settled' };
+  let newestInFlight: PromptLedgerRecord | undefined;
+  let newestTerminal: PromptLedgerTerminalRecord | undefined;
+  const seenPromptIds = new Set<string>();
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index]!;
+    if (seenPromptIds.has(record.promptId)) continue;
+    seenPromptIds.add(record.promptId);
+    // `at` is only checked for finiteness by the ledger reader; a value
+    // outside the Date range cannot produce an ISO timestamp.
+    if (!Number.isFinite(record.at) || Math.abs(record.at) > 8.64e15) {
+      continue;
     }
+    if (!isPromptLedgerTerminalRecord(record)) {
+      newestInFlight ??= record;
+    } else {
+      newestTerminal ??= record;
+    }
+  }
+
+  const chosen = newestInFlight ?? newestTerminal;
+  if (chosen === undefined) return { kind: 'missing' };
+  if (sinceMs !== undefined && chosen.at < sinceMs) return { kind: 'settled' };
+
+  if (newestInFlight !== undefined) {
     return {
       kind: 'interrupted',
-      interruption:
-        typeof code === 'string' && TERMINAL_CODE_PATTERN.test(code)
-          ? code
-          : 'interrupted',
-      lastActivityAt: new Date(last.at).toISOString(),
+      interruption: 'in_flight',
+      lastActivityAt: new Date(newestInFlight.at).toISOString(),
     };
+  }
+  if (newestTerminal === undefined) return { kind: 'missing' };
+
+  const code = newestTerminal.code;
+  const interruptedByLifecycle =
+    newestTerminal.terminal === 'error' &&
+    typeof code === 'string' &&
+    LIFECYCLE_INTERRUPTION_CODES.has(code);
+  if (newestTerminal.terminal !== 'interrupted' && !interruptedByLifecycle) {
+    return { kind: 'settled' };
   }
   return {
     kind: 'interrupted',
-    interruption: 'in_flight',
-    lastActivityAt: new Date(last.at).toISOString(),
+    interruption:
+      typeof code === 'string' && TERMINAL_CODE_PATTERN.test(code)
+        ? code
+        : 'interrupted',
+    lastActivityAt: new Date(newestTerminal.at).toISOString(),
   };
 }
 
 /**
- * Lists sessions whose newest prompt did not end in a settled turn.
+ * Lists sessions with a prompt whose latest ledger record did not settle.
  *
  * Reads only the bounded tail of each prompt ledger. The ledger is written at
- * admission and at every terminal, so the newest record is enough to tell a
- * crash (`in_flight`), an interrupted turn, or a settled turn apart. Sessions
- * with no readable evidence are skipped rather than guessed.
+ * admission and at every terminal, so reducing it by prompt id tells a crash
+ * (`in_flight`), an interrupted turn, or a settled turn apart. Sessions with
+ * no readable evidence are skipped rather than guessed.
  */
 export function scanRestartRecoveries({
   sessionService,
   sessionIds,
   sinceMs,
+  isSessionLiveActive,
 }: ScanRestartRecoveriesInput): RestartRecoveryScanResult {
   const items: RestartRecoveryItem[] = [];
   for (const sessionId of sessionIds) {
@@ -132,6 +162,7 @@ export function scanRestartRecoveries({
 
     const state = readRestartRecoveryState(ledgerPath, sinceMs);
     if (state.kind !== 'interrupted') continue;
+    if (isSessionLiveActive?.(sessionId)) continue;
 
     items.push({
       sessionId,

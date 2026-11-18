@@ -11,6 +11,7 @@ import type {
   DaemonRestartRecoveryItem,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
+import { formatTimestamp } from './MessageTimestamp';
 import { Button } from './ui/button';
 
 const BATCH_SIZE = 10;
@@ -25,6 +26,8 @@ interface RestartRecoveryRow extends DaemonRestartRecoveryItem {
   /** Absolute workspace path used for the continuation request. */
   workspace: string;
   needsToolConfirmation?: boolean;
+  /** The turn may have been cancelled intentionally; confirm it in chat. */
+  needsConversation?: boolean;
   errorCode?: string;
 }
 
@@ -65,6 +68,8 @@ export function RestartRecoveryPanel({
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
+  const [scanFailures, setScanFailures] = useState<string[]>([]);
+  const [scanNonce, setScanNonce] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
 
   const workspaceKey = useMemo(
@@ -80,15 +85,17 @@ export function RestartRecoveryPanel({
     if (!available || !supported || requestWorkspaces.length === 0) {
       setRows([]);
       setLoadFailed(false);
+      setScanFailures([]);
       return;
     }
     let cancelled = false;
     setRows([]);
     setLoadFailed(false);
+    setScanFailures([]);
     setNotice(null);
     void (async () => {
       const next: RestartRecoveryRow[] = [];
-      let memberFailed = false;
+      const failed: string[] = [];
       try {
         for (
           let index = 0;
@@ -104,7 +111,7 @@ export function RestartRecoveryPanel({
           if (cancelled) return;
           for (const member of result.workspaces) {
             if (!('items' in member)) {
-              memberFailed = true;
+              failed.push(member.workspace);
               continue;
             }
             for (const item of member.items) {
@@ -117,7 +124,8 @@ export function RestartRecoveryPanel({
             Date.parse(right.lastActivityAt) - Date.parse(left.lastActivityAt),
         );
         setRows(next);
-        setLoadFailed(memberFailed);
+        setScanFailures(failed);
+        setLoadFailed(failed.length > 0);
       } catch {
         if (!cancelled) setLoadFailed(true);
       }
@@ -125,7 +133,7 @@ export function RestartRecoveryPanel({
     return () => {
       cancelled = true;
     };
-  }, [available, client, requestWorkspaces, supported]);
+  }, [available, client, requestWorkspaces, scanNonce, supported]);
 
   const runBatch = useCallback(
     async (
@@ -143,6 +151,9 @@ export function RestartRecoveryPanel({
           })),
           ...(confirmToolTurn ? { confirmToolTurn: true } : {}),
         });
+        const hasNotContinuable = result.results.some(
+          (entry) => entry.status === 'not_continuable',
+        );
         setRows((current) => {
           const next = [...current];
           for (const entry of result.results) {
@@ -150,8 +161,20 @@ export function RestartRecoveryPanel({
             const index = next.findIndex((row) => rowKey(row) === key);
             if (index < 0) continue;
             const row = next[index]!;
-            if (entry.status === 'accepted') {
+            if (
+              entry.status === 'accepted' ||
+              entry.status === 'not_continuable'
+            ) {
               next.splice(index, 1);
+            } else if (
+              entry.status === 'confirmation_required' &&
+              entry.code === 'cancellation_confirmation'
+            ) {
+              next[index] = {
+                ...row,
+                needsConversation: true,
+                errorCode: undefined,
+              };
             } else if (
               entry.status === 'confirmation_required' &&
               entry.code === 'tool_turn'
@@ -170,6 +193,9 @@ export function RestartRecoveryPanel({
           }
           return next;
         });
+        if (hasNotContinuable) {
+          setNotice(t('restartRecovery.notContinuable'));
+        }
       } catch {
         setNotice(t('restartRecovery.failed'));
       } finally {
@@ -180,13 +206,17 @@ export function RestartRecoveryPanel({
   );
 
   const continueAll = useCallback(async () => {
-    const pending = rows.filter((row) => row.needsToolConfirmation !== true);
+    const pending = rows.filter(
+      (row) =>
+        row.needsToolConfirmation !== true && row.needsConversation !== true,
+    );
     for (let index = 0; index < pending.length; index += BATCH_SIZE) {
       await runBatch(pending.slice(index, index + BATCH_SIZE), false);
     }
   }, [rows, runBatch]);
 
-  if (rows.length === 0 && !loadFailed) return null;
+  if (rows.length === 0 && !loadFailed && scanFailures.length === 0)
+    return null;
 
   return (
     <div
@@ -196,17 +226,34 @@ export function RestartRecoveryPanel({
     >
       <div className="flex items-center justify-between gap-2">
         <span className="min-w-0 truncate">
-          {loadFailed
-            ? t('restartRecovery.loadFailed')
-            : t('restartRecovery.title', { count: rows.length })}
+          {scanFailures.length > 0
+            ? t('restartRecovery.scanFailedWorkspaces', {
+                workspaces: scanFailures.join(', '),
+              })
+            : loadFailed
+              ? t('restartRecovery.loadFailed')
+              : t('restartRecovery.title', { count: rows.length })}
         </span>
         <div className="flex shrink-0 gap-1">
-          {loadFailed && (
+          {(loadFailed || scanFailures.length > 0) && (
             <Button
               type="button"
               size="sm"
               variant="ghost"
-              onClick={() => setLoadFailed(false)}
+              onClick={() => setScanNonce((value) => value + 1)}
+            >
+              {t('restartRecovery.retry')}
+            </Button>
+          )}
+          {(loadFailed || scanFailures.length > 0) && (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setLoadFailed(false);
+                setScanFailures([]);
+              }}
             >
               {t('restartRecovery.hide')}
             </Button>
@@ -254,16 +301,23 @@ export function RestartRecoveryPanel({
                 </p>
                 <p className="text-xs text-muted-foreground">
                   {row.sessionId.slice(0, 8)} ·{' '}
-                  {row.lastActivityAt.slice(0, 16).replace('T', ' ')} ·{' '}
+                  {formatTimestamp(Date.parse(row.lastActivityAt))} ·{' '}
                   {row.interruption === 'in_flight'
                     ? t('restartRecovery.inFlight')
                     : row.interruption === 'daemon_shutdown'
                       ? t('restartRecovery.daemonShutdown')
-                      : row.interruption}
+                      : row.interruption === 'interrupted'
+                        ? t('restartRecovery.interrupted')
+                        : `${t('restartRecovery.interrupted')} (${row.interruption})`}
                 </p>
                 {row.needsToolConfirmation && (
                   <p className="mt-1 text-xs">
                     {t('restartRecovery.toolTurnHint')}
+                  </p>
+                )}
+                {row.needsConversation && (
+                  <p className="mt-1 text-xs">
+                    {t('restartRecovery.cancellationNeedsConversation')}
                   </p>
                 )}
                 {row.errorCode && (
@@ -276,7 +330,7 @@ export function RestartRecoveryPanel({
                 type="button"
                 size="sm"
                 variant="outline"
-                disabled={busy}
+                disabled={busy || row.needsConversation === true}
                 onClick={() =>
                   void runBatch([row], row.needsToolConfirmation === true)
                 }

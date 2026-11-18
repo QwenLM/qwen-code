@@ -3,7 +3,7 @@
 [English](2026-11-17-daemon-restart-recovery-inbox.md) | [简体中文](2026-11-17-daemon-restart-recovery-inbox.zh-CN.md)
 
 状态：本次改动已实现。包含只读扫描、两个恢复路由、daemon SDK 客户端方法、
-Web Shell 面板以及 REST 参考/协议条目。文中的行号已在提交 `5fc5a98ecc` 上核实。
+Web Shell 面板以及 REST 参考/协议条目。下文代码引用使用符号名，不使用行号。
 
 ## 问题与范围
 
@@ -21,35 +21,35 @@ daemon 重启后，正在运行的会话会留下被中断的最后一轮。Web 
 
 ## 现状
 
-- 恢复摘要按会话在冷加载后构建。`Session` 从最后一轮推导它
-  （`packages/cli/src/acp-integration/session/Session.ts:6819`），ACP 状态类型只暴露
-  `kind`、`canContinue` 和可选的 `cancellationConfirmationId`
-  （`packages/acp-bridge/src/status.ts:681`）。
+- 恢复摘要按会话在冷加载后构建。`Session` 从最后一轮推导它，见
+  `packages/cli/src/acp-integration/session/Session.ts`。ACP 状态类型只暴露
+  `kind`、`canContinue` 和可选的 `cancellationConfirmationId`，见
+  `packages/acp-bridge/src/status.ts`。
 - Web Shell 只在已加载的会话内显示操作。`SessionRecoveryBanner` 读取
-  `connection.context.recovery`，并调用绑定会话的 `continueSession`
-  （`packages/web-shell/client/components/SessionRecoveryBanner.tsx`）。
+  `connection.context.recovery`，并调用绑定会话的 `continueSession`，见
+  `packages/web-shell/client/components/SessionRecoveryBanner.tsx`。
 - 会话列表无法回答哪些会话被中断。live state 是内存快照：能力清单的注释已说明
-  这一点（`packages/cli/src/serve/capabilities.ts:577`），
-  `DaemonSessionLiveState` 只包含活跃标记
-  （`packages/sdk-typescript/src/daemon/types.ts:2129`）。重启后快照为空。
-- 继续操作要求会话已有内存条目。HTTP 路由 `POST /session/:id/continue`
-  （`packages/cli/src/serve/routes/session.ts:8839`）进入 `continueSession`，
-  当 `byId` 中没有该会话时抛出 `SessionNotFoundError`
-  （`packages/acp-bridge/src/session-control-plane.ts:14716`）。因此必须先冷加载。
+  这一点，见 `packages/sdk-typescript/src/daemon/capabilities.ts`；
+  `DaemonSessionLiveState` 只包含活跃标记，见
+  `packages/sdk-typescript/src/daemon/types.ts`。重启后快照为空。
+- 继续操作要求会话已有内存条目。HTTP 路由 `POST /session/:id/continue` 见
+  `packages/cli/src/serve/routes/session.ts`，它进入 `continueSession`，
+  当 `byId` 中没有该会话时抛出 `SessionNotFoundError`，见
+  `packages/acp-bridge/src/session-control-plane.ts`。因此必须先冷加载。
 - 现有 Web Shell 续接设计明确排除了自动续接和新 daemon 路由
   （`docs/design/web-shell-interrupted-session-continue.zh-CN.md`）。
 - core 已经能表达安全的自动续接，但没有任何地方启用它：`canAutoContinue` 只由
-  `allowAutoContinue` 赋值，而没有调用方传 `true`
-  （`packages/core/src/core/session-recovery.ts:222`）。
+  `allowAutoContinue` 赋值，而没有调用方传 `true`，见
+  `packages/core/src/core/session-recovery.ts`。
 - prompt 终端 ledger 已经持久化了查找中断会话所需的证据。每个会话在 transcript
-  旁边有一个只追加的 `<sessionId>.ledger.jsonl`
-  （`packages/core/src/services/sessionService.ts:1169`）。记录只包含 `promptId`、
-  `state`、`at` 和可选的 `tailUuid`；按设计不包含 prompt 内容
-  （`packages/acp-bridge/src/prompt-ledger.ts:24`）。
-- daemon 正常停机时会为待处理的 prompt 写入 `code: 'daemon_shutdown'` 的终态记录
-  （`packages/acp-bridge/src/bridge-prompt-ledger.test.ts:147`）。崩溃会留下没有终态的
-  `in_flight` 记录；冷加载时由 `reconcileDanglingPromptTerminals` 对账
-  （`packages/cli/src/serve/prompt-terminal-ledger.ts:101`）。
+  旁边有一个只追加的 `<sessionId>.ledger.jsonl`，见
+  `packages/core/src/services/sessionService.ts` 的 `getPromptLedgerPath`。记录只包含
+  `promptId`、`state`、`at` 和可选的 `tailUuid`；按设计不包含 prompt 内容，见
+  `packages/acp-bridge/src/prompt-ledger.ts`。
+- daemon 正常停机时会为待处理的 prompt 写入 `code: 'daemon_shutdown'` 的终态记录，
+  见 `packages/acp-bridge/src/bridge-prompt-ledger.test.ts`。崩溃会留下没有终态的
+  `in_flight` 记录；冷加载时由 `reconcileDanglingPromptTerminals` 对账，见
+  `packages/cli/src/serve/prompt-terminal-ledger.ts`。
 
 ## 目标
 
@@ -78,30 +78,38 @@ transcript 的首条记录以排除其他项目的会话；扫描本身从不读
 ledger 很小（每个 prompt 约两条记录），且在准入和停机时已经写入，因此扫描成本是
 每会话一次小读取。
 
-把每个 ledger 归约到最新 prompt 的最后一条记录：
+在产出条目前，路由会检查 runtime 的内存会话摘要，跳过 prompt 正在执行或排队的
+会话。该检查不加载会话；这样 Web Shell 在回合运行中打开时，不会把活动回合误标为
+重启中断。
 
-- 该 prompt 没有终态记录：`interruption: 'in_flight'`。这是崩溃情形。
+把每个 ledger 按 `promptId` 归约到该 prompt 的最新记录。只要任一 prompt 仍为
+`in_flight`，会话就算中断，即使另一个 prompt 的终态在文件里更晚追加。否则由最新的
+终态决定：
+
+- `in_flight`：`interruption: 'in_flight'`。这覆盖崩溃，也覆盖前一个 prompt 已结算、
+  后一个 prompt 仍在排队的会话。
 - 终态为 `interrupted`：`interruption` 取记录的 `code`（如 `daemon_shutdown`、
   `daemon_lost`、`channel_closed`），`code` 不存在或不是不超过 64 个字符的小写标识符时
   取 `interrupted`。
-- 终态为 `error` 且 `code` 为 `daemon_shutdown` 或 `daemon_lost`：daemon 或其子进程
-  在 prompt 完成前结束，按该 code 列出。其他 `error`、`completed` 和 `cancelled`
-  不列出。已完成或已取消的轮次不需要恢复，已报错的轮次已经发布了结果。
+- 终态为 `error` 且 `code` 为 `daemon_shutdown`、`daemon_lost` 或 `channel_closed`：
+  daemon 或其子进程在 prompt 完成前结束，按该 code 列出。其他 `error`、`completed`
+  和 `cancelled` 不列出。已完成或已取消的轮次不需要恢复，无关的报错轮次已经发布了
+  结果。
 
 不可读的 ledger 跳过（失败关闭）。尾部截断只丢失不完整的行：更早的有效记录仍能
 决定结果，因此崩溃在写入中断前留下 `in_flight` 记录时仍会列出。被跳过的会话绝不
 用猜测替代。跳过归档目录，丢弃早于请求时间窗的条目。每个 workspace 最多保留 200 条，
 按时间倒序；超过时返回 `truncated: true`。
 
-扫描只报告 ledger 能证明的事实：最新 prompt 要么从未到达终态，要么到达了
-`interrupted` 终态，要么以 `daemon_shutdown`/`daemon_lost` 错误结束。时间戳无法形成
-ISO 值的记录按不可读处理并省略。它不断言该会话可以继续。恢复类型和 `canContinue`
-判定仍在加载后由已有分类器给出。
+扫描只报告 ledger 能证明的事实：某个 prompt 要么从未到达终态，要么到达了
+`interrupted` 终态，要么以 `daemon_shutdown`、`channel_closed` 等 daemon 生命周期错误
+结束。时间戳无法形成 ISO 值的记录按不可读处理并省略。它不断言该会话可以继续。
+恢复类型和 `canContinue` 判定仍在加载后由已有分类器给出。
 
 ### 只读批量路由
 
 沿用 `POST /sessions/live-state` 已有的 workspace 批量形状
-（`packages/cli/src/serve/routes/session.ts:10959`）：1–20 个 workspace 选择器、
+（`packages/cli/src/serve/routes/session.ts`）：1–20 个 workspace 选择器、
 逐成员结果，以及相同的 `workspace_not_found`、`untrusted_workspace`、
 `workspace_runtime_unavailable` 错误。该路由由 `restart_recovery` 能力标签公布，
 该标签同时覆盖续接路由。
@@ -166,7 +174,8 @@ ISO 值的记录按不可读处理并省略。它不断言该会话可以继续�
 5. `canContinue` 为 false 时返回 `not_continuable` 和 `kind`。这包括
    `degraded_history` 以及仍在执行的会话。
 6. 存在 `cancellationConfirmationId` 时返回 `confirmation_required`。批量操作绝不能
-   自动确认一个可能被用户主动取消的轮次。
+   自动确认一个可能被用户主动取消的轮次；该批量请求不携带此确认，因此客户端引导
+   用户到会话内确认。
 7. `kind` 为 `interrupted_turn` 且 `confirmToolTurn` 不为 `true` 时返回
    `confirmation_required`。调用方可以带 `confirmToolTurn: true` 重新提交这些会话。
 8. 其余情况调用已有的 `continueSession` 路径。
@@ -221,7 +230,7 @@ ISO 值的记录按不可读处理并省略。它不断言该会话可以继续�
 - 每行显示 workspace 标签、缩短的会话 id、最后活动时间和中断徽标。当前会话永不切换。
 - 行内“继续”只提交该会话；“全部继续”按每批 10 个提交不需要工具确认的行。返回
   `accepted` 的行从面板移除；返回 `confirmation_required` 的行保留并显示确认操作；
-  失败的行保留并显示原因。
+  失败的行保留并显示原因。取消确认的行保留并提示到会话内确认；批量永不自动确认。
 - 确认操作只重新提交工具轮次的行，并带 `confirmToolTurn: true`；同时说明未完成的
   工具调用会在模型继续前被标记为失败。
 
@@ -231,8 +240,10 @@ ISO 值的记录按不可读处理并省略。它不断言该会话可以继续�
 - 只串行加载。加载会话会占用每 workspace 的会话名额（默认 32）和内存；上限避免
   一次重启把所有旧会话同时拉入内存。
 - 只扫描受信任的 workspace；不受信任和不可用的成员返回与 live state 相同的错误。
+  有活跃或排队 prompt 的会话通过 runtime 的内存摘要跳过。
 - 扫描不读取 prompt 内容，响应也不携带。
 - 永不继续 `degraded_history`。
+- 取消确认永不自动通过；该行保留并提示到会话内确认。
 - 重复的批量请求不会重复入队：会话有活跃 prompt 时，bridge 准入检查会拒绝续接；
   ledger 重读也会丢弃已经前进的会话。
 - “全部继续”把超过 10 个的合格行拆成连续批次。
@@ -253,7 +264,7 @@ ISO 值的记录按不可读处理并省略。它不断言该会话可以继续�
 - **批量查询沿用 live state 的形状。** 复用 workspace 批量形状可以让信任、归属和
   错误语义与已有路由保持一致，而不是另造一个全局扫描。
 - **批量继续在服务端执行。** Web Shell 的 `loadSession` 和 `resumeSession` 操作会切换
-  当前会话（`packages/web-shell/client/daemon/session/actions.ts:2673`），客户端循环
+  当前会话（见 `packages/web-shell/client/daemon/session/actions.ts`），客户端循环
   会把用户在不同会话之间来回拖动。服务端循环也让其他 SDK 客户端获得同样能力。
 - **工具轮次需要显式批量确认。** 单会话横幅目前不询问；批量路径是无人值守的，且
   可能一次恢复多个会话，因此在关闭悬空工具调用并让模型重试之前先询问。
@@ -289,21 +300,25 @@ ISO 值的记录按不可读处理并省略。它不断言该会话可以继续�
 
 ## 验证计划
 
-1. 用以下形状单测扫描器：悬空 `in_flight`；带 `daemon_shutdown` 的 `interrupted`；
-   带 `daemon_lost` 的 `interrupted`；带 `daemon_shutdown` 的 `error` 终态；无关的
-   `error` 终态；最后一个 prompt 为 `completed`；最后一个 prompt 为 `cancelled`；
-   多个 prompt 中较早的一个被中断；ledger 缺失；尾部截断；ledger 尾部过大；归档会话；
-   窗口之外的条目。
-2. 路由测试扫描批量：1–20 个选择器、未知 workspace、不受信任 workspace、runtime
-   不可用、逐成员失败、稳定排序，以及 `sinceMs` 的钳制。
+1. 用以下形状单测扫描器：悬空 `in_flight`；前一个 prompt 后来完成、后一个仍在排队的
+   prompt；带 `daemon_shutdown` 的 `interrupted`；带 `daemon_lost` 的 `interrupted`；
+   带 `daemon_shutdown`、`channel_closed` 的 `error` 终态；无关的 `error` 终态；
+   正在执行的活动 prompt；最后一个 prompt 为 `completed`；最后一个 prompt 为
+   `cancelled`；多个 prompt 中较早的一个被中断；ledger 缺失；尾部截断；ledger 尾部
+   过大；归档会话；窗口之外的条目；以及恰好 200 条的上限。
+2. 路由测试扫描批量：1–20 个选择器、超限批量、未知 workspace、不受信任 workspace、
+   runtime 不可用、逐成员失败、稳定排序、`sinceMs` 的钳制、归档排除、活动 prompt
+   排除，以及 transcript 记录 id 不符合持久化 id 的情况。
 3. 路由测试继续批量：串行顺序、逐会话结果、`already_moved`、`degraded_history`、
-   活跃轮次、取消确认、不带与带 `confirmToolTurn` 的 `interrupted_turn`、加载失败，
-   以及 10 个会话上限。
+   活跃轮次、取消确认、不带与带 `confirmToolTurn` 的 `interrupted_turn`、加载失败、
+   非 accepted 路径的 detach，以及 10 个会话上限。
 4. 端到端：启动真实 daemon，开始一轮，杀掉 daemon 进程，重启，查询恢复批量，继续
-   一个会话，并断言其 transcript 出现新轮次。再用正常停机重复一次，断言出现
-   `daemon_shutdown` 条目。
+   一个会话，并断言其 transcript 出现新轮次。SIGKILL 情形已提交在
+   `integration-tests/cli/qwen-serve-restart-recovery.test.ts`；再用正常停机重复一次，
+   断言出现 `daemon_shutdown` 条目。
 5. Web Shell 测试：横幅只在可用性恢复后出现，选择与确认路径可用，成功的行从面板
-   移除，失败的行保留并显示原因，当前会话不改变。
+   移除，失败的行保留并显示原因，取消确认引导到会话内，未知 code 有本地化回退，
+   “全部继续”按 10 条分批，当前会话不改变。
 6. 运行相关包的单测、构建、类型检查和 REST 契约测试。
 
 ## 验收标准

@@ -40,6 +40,7 @@ interface Fixture {
     sessionId: string,
     records: readonly PromptLedgerRecord[],
     cwd?: string,
+    recordSessionId?: string,
   ): void;
 }
 
@@ -86,7 +87,7 @@ function makeFixture(trusted = true): Fixture {
     runtime,
     app,
     sessionService,
-    seed(sessionId, records, cwd = workspaceDir) {
+    seed(sessionId, records, cwd = workspaceDir, recordSessionId = sessionId) {
       const transcriptPath = path.join(
         path.dirname(sessionService.getPromptLedgerPath(sessionId)),
         `${sessionId}.jsonl`,
@@ -95,7 +96,7 @@ function makeFixture(trusted = true): Fixture {
       const record: ChatRecord = {
         uuid: 'u1',
         parentUuid: null,
-        sessionId,
+        sessionId: recordSessionId,
         timestamp: new Date().toISOString(),
         type: 'user',
         provenance: 'real_user',
@@ -167,6 +168,46 @@ describe('POST /sessions/recovery', () => {
     expect(
       member.items.map((item: { interruption: string }) => item.interruption),
     ).toEqual(['daemon_shutdown', 'in_flight']);
+  });
+
+  it('omits a session whose live prompt is still running', async () => {
+    const fixture = makeFixture();
+    fixture.seed(randomUUID(), [inFlight('p1', Date.now())]);
+    Object.assign(fixture.runtime.bridge, {
+      getSessionSummary: (() => ({
+        hasActivePrompt: true,
+      })) as unknown as AcpSessionBridge['getSessionSummary'],
+    });
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery')
+      .send({ workspaces: [fixture.runtime.workspaceId] });
+
+    expect(response.status).toBe(200);
+    expect(response.body.workspaces[0].items).toEqual([]);
+  });
+
+  it('drops a transcript whose record id is not a persisted session id', async () => {
+    const fixture = makeFixture();
+    const fileId = randomUUID();
+    const invalidRecordId = 'not-a-persisted-session-id';
+    fixture.seed(
+      fileId,
+      [inFlight('p1', Date.now())],
+      undefined,
+      invalidRecordId,
+    );
+    appendPromptLedgerRecord(
+      fixture.sessionService.getPromptLedgerPath(invalidRecordId),
+      inFlight('p1', Date.now()),
+    );
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery')
+      .send({ workspaces: [fixture.runtime.workspaceId] });
+
+    expect(response.status).toBe(200);
+    expect(response.body.workspaces[0].items).toEqual([]);
   });
 
   it('omits sessions moved to the archive', async () => {
@@ -254,6 +295,21 @@ describe('POST /sessions/recovery', () => {
       workspace: fixture.runtime.workspaceId,
       error: { code: 'untrusted_workspace', status: 403 },
     });
+  });
+
+  it('rejects an over-limit workspace batch', async () => {
+    const fixture = makeFixture();
+    const response = await request(fixture.app)
+      .post('/sessions/recovery')
+      .send({
+        workspaces: Array.from(
+          { length: 21 },
+          () => fixture.runtime.workspaceId,
+        ),
+      });
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_restart_recovery_batch_request');
   });
 
   it('rejects an invalid batch body', async () => {

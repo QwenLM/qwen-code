@@ -4382,12 +4382,17 @@ export function App({
   const recoveryWorkspaceLabels = useMemo(
     () =>
       new Map(
-        recoveryWorkspaceCwds.map((cwd) => [
-          cwd,
-          cwd.split('/').filter(Boolean).at(-1) ?? cwd,
-        ]),
+        disambiguateWorkspaceLabels(
+          recoveryWorkspaceCwds.map((cwd) => ({
+            cwd,
+            label: workspaceLabelForCwd(
+              cwd,
+              workspace.capabilities?.workspaces,
+            ),
+          })),
+        ).map(({ cwd, label }) => [cwd, label]),
       ),
-    [recoveryWorkspaceCwds],
+    [recoveryWorkspaceCwds, workspace.capabilities?.workspaces],
   );
   // Daemon-authoritative "turn is running" signal for the connected session:
   // keeps the conversation indicator (and its cancel affordances) alive

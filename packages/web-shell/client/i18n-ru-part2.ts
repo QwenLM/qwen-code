@@ -345,8 +345,15 @@ export const RU_PART2: Record<
     'Задача прервана во время вызова инструмента. Продолжение сначала закроет незавершённый вызов как ошибку.',
   'restartRecovery.inFlight': 'Процесс прерван',
   'restartRecovery.daemonShutdown': 'Перезапуск daemon',
+  'restartRecovery.interrupted': 'Прервано',
+  'restartRecovery.cancellationNeedsConversation':
+    'Откройте разговор, чтобы подтвердить отмену.',
+  'restartRecovery.notContinuable': 'Задача больше не ждёт восстановления.',
   'restartRecovery.failed': 'Не удалось продолжить',
   'restartRecovery.loadFailed': 'Не удалось прочитать прерванные задачи',
+  'restartRecovery.retry': 'Повторить',
+  'restartRecovery.scanFailedWorkspaces': (v) =>
+    `Не удалось просканировать: ${v?.workspaces ?? ''}`,
   'session.archived': 'Этот разговор в архиве',
   'session.archivedDescription':
     'Сначала разархивируйте его, чтобы открыть разговор.',
