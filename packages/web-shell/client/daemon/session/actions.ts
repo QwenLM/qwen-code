@@ -3705,7 +3705,12 @@ export function createDaemonSessionActions({
       const session = sessionRef.current;
       if (!session) throw new Error('Daemon session is not connected');
       try {
-        return await withActionTimeout(session.tasks(), 'Get tasks timed out');
+        return await withActionTimeout(
+          session.tasks(
+            opts?.includeSubSessions ? { includeSubSessions: true } : {},
+          ),
+          'Get tasks timed out',
+        );
       } catch (error) {
         if (
           error instanceof Error &&
@@ -4148,6 +4153,54 @@ export function createDaemonSessionActions({
         );
       } finally {
         branchInFlight = false;
+      }
+    },
+
+    async createWorktreeBranch(name: string) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Create worktree branch failed',
+        'create_worktree_branch',
+      );
+      try {
+        return await withActionTimeout(
+          session.client.createWorktreeBranch(session.sessionId, name, {
+            workspaceCwd: session.workspaceCwd,
+          }),
+          'Create worktree branch timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Create worktree branch failed',
+          error,
+          'create_worktree_branch',
+        );
+      }
+    },
+
+    async handoffWorktree(to: 'local' | 'worktree') {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Worktree handoff failed',
+        'handoff_worktree',
+      );
+      try {
+        return await withActionTimeout(
+          session.client.handoffWorktreeSession(session.sessionId, to, {
+            workspaceCwd: session.workspaceCwd,
+          }),
+          'Worktree handoff timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Worktree handoff failed',
+          error,
+          'handoff_worktree',
+        );
       }
     },
 

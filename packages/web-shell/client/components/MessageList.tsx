@@ -864,6 +864,15 @@ function collectFinalAssistantTurnIds(
   return turnIdByAssistantId;
 }
 
+function isTurnFromSession(data: unknown): boolean {
+  if (!data || typeof data !== 'object' || !('backgroundTask' in data)) {
+    return false;
+  }
+  const task = (data as { backgroundTask?: { fromSession?: unknown } })
+    .backgroundTask;
+  return !!task?.fromSession;
+}
+
 /**
  * A turn's hideable "steps": tool activity, plans, mid-turn assistant text,
  * non-final background notifications, and background result markers. Final
@@ -887,6 +896,13 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
     case 'system':
       if (item.message.source === 'background_notification') {
         return !isFinalAnswer;
+      }
+      // A turn another session's reply started keeps its source in view.
+      if (
+        item.message.source === 'background_notification_turn_started' &&
+        isTurnFromSession(item.message.data)
+      ) {
+        return false;
       }
       return (
         item.message.source === 'background_notification_turn_started' ||
@@ -3112,7 +3128,7 @@ export const MessageList = memo(
       let lastId: string | undefined;
       let turnIndex = 0;
       for (const message of messages) {
-        if (message.role !== 'user') continue;
+        if (message.role !== 'user' || message.agentMessage?.sentTo) continue;
         turnIndexById.set(message.id, turnIndex);
         lastId = message.id;
         turnIndex += 1;

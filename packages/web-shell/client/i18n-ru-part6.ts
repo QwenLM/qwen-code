@@ -92,6 +92,15 @@ export const RU_PART6: Record<
     `${v?.count ?? 0} ${ruPlural(v?.count, 'локальный агент', 'локальных агента', 'локальных агентов')}`,
   'tasks.pill.agents': (v) =>
     `${v?.count ?? 0} ${ruPlural(v?.count, 'локальный агент', 'локальных агента', 'локальных агентов')}`,
+  'tasks.pill.session': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'другой сеанс', 'других сеанса', 'других сеансов')}`,
+  'tasks.pill.sessions': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'другой сеанс', 'других сеанса', 'других сеансов')}`,
+  'tasks.pill.sessionWaiting': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'сеанс ждёт', 'сеанса ждут', 'сеансов ждут')} вашего ответа`,
+  'tasks.waitingForInput': 'Ждёт вашего ответа',
+  'user.sentFrom': (v) => `Из ${v?.workspace ?? ''} · ${v?.session ?? ''}`,
+  'user.sentTo': (v) => `В ${v?.workspace ?? ''} · ${v?.session ?? ''}`,
   'tasks.pill.monitor': (v) =>
     `${v?.count ?? 0} ${ruPlural(v?.count, 'монитор', 'монитора', 'мониторов')}`,
   'tasks.pill.monitors': (v) =>
