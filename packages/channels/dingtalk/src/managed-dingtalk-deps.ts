@@ -12,10 +12,7 @@ import type {
   ManagedDingtalkStreamClient,
   DingtalkWebhookFailure,
 } from './managed-dingtalk-adapter.js';
-import {
-  withConnectLoggingSuppressed,
-  withConsoleLogSuppressedSync,
-} from './connect-logging.js';
+import { withConsoleLogSuppressedSync } from './connect-logging.js';
 import { splitChunks } from './markdown.js';
 import { isRetryableDingtalkStatus } from './interactive-card-client.js';
 import { ROBOT_MESSAGE_HOSTS } from './DingtalkAdapter.js';
@@ -23,14 +20,91 @@ import { ROBOT_MESSAGE_HOSTS } from './DingtalkAdapter.js';
 const WEBHOOK_TIMEOUT_MS = 30_000;
 const RECONNECT_RETRY_MS = 5_000;
 // The SDK's connect() resolves when the WebSocket is *constructed*, not when it
-// opens, and getEndpoint() has no timeout. Bound the whole attempt so a blocked
-// wss: upgrade or a hung endpoint call becomes a rejection, not a deaf start.
+// opens. Bound the whole attempt so a blocked wss: upgrade becomes a rejection,
+// not a deaf start; discovery below carries its own, shorter bound.
 const CONNECT_TIMEOUT_MS = 20_000;
+// Endpoint discovery is bounded on its own, below the attempt budget, so the
+// budget is left to cover the wss: upgrade. The SDK's own getEndpoint() has no
+// timeout at all, and it console.log()s the resolved config (clientSecret) and
+// the gateway response (endpoint/ticket) — which is why the connect path used
+// to mute console.log process-wide for as long as discovery stayed pending.
+// Owning discovery removes both the unbounded wait and the need to mute.
+const DISCOVERY_TIMEOUT_MS = 15_000;
+// The discovery contract, pinned against dingtalk-stream-sdk-nodejs 2.0.4
+// dist/client.mjs getEndpoint(); a bump that changes it must change these.
+const TOKEN_URL = 'https://oapi.dingtalk.com/gettoken';
+const GATEWAY_URL = 'https://api.dingtalk.com/v1.0/gateway/connections/open';
 const SOCKET_OPEN = 1; // ws.WebSocket.OPEN
 // Provider verdicts a retry can heal: system busy (-1), throttled (88), and the
 // send-rate limits (410100 / 130101). Classifying these definitive would settle
 // a rate-limited chunk's whole delivery rejected and never send the rest.
 const TRANSIENT_ERRCODES = new Set([-1, 88, 410100, 130101]);
+
+// Bounded, abortable and silent endpoint discovery. Every failure message is a
+// static string: the token URL carries the appsecret and the gateway response
+// carries the connect ticket, so neither the payload nor the transport error
+// may be echoed.
+async function discoverEndpoint(
+  config: {
+    clientId: string;
+    clientSecret: string;
+    ua?: string;
+    subscriptions: Array<{ type: string; topic: string }>;
+  },
+  signal: AbortSignal,
+): Promise<{ accessToken: string; endpoint: string; ticket: string }> {
+  const tokenUrl =
+    `${TOKEN_URL}?appkey=${encodeURIComponent(config.clientId)}` +
+    `&appsecret=${encodeURIComponent(config.clientSecret)}`;
+  // No redirect following on either leg: the token URL carries the appsecret
+  // and the gateway request carries the access token, so a redirect would
+  // hand that credential to another host. Same guard the webhook send applies.
+  const tokenResponse = await fetch(tokenUrl, { signal, redirect: 'error' });
+  if (!tokenResponse.ok) {
+    throw new Error(
+      'DingTalk endpoint discovery failed: token request refused.',
+    );
+  }
+  const token = (await tokenResponse.json()) as { access_token?: string };
+  if (!token?.access_token) {
+    throw new Error('DingTalk endpoint discovery failed: no access token.');
+  }
+  const gatewayResponse = await fetch(GATEWAY_URL, {
+    method: 'POST',
+    signal,
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'access-token': token.access_token,
+    },
+    body: JSON.stringify({
+      clientId: config.clientId,
+      clientSecret: config.clientSecret,
+      ua: config.ua,
+      subscriptions: config.subscriptions,
+    }),
+    redirect: 'error',
+  });
+  if (!gatewayResponse.ok) {
+    throw new Error(
+      'DingTalk endpoint discovery failed: gateway request refused.',
+    );
+  }
+  const gateway = (await gatewayResponse.json()) as {
+    endpoint?: string;
+    ticket?: string;
+  };
+  if (!gateway?.endpoint || !gateway?.ticket) {
+    throw new Error(
+      'DingTalk endpoint discovery failed: no endpoint or ticket.',
+    );
+  }
+  return {
+    accessToken: token.access_token,
+    endpoint: gateway.endpoint,
+    ticket: gateway.ticket,
+  };
+}
 
 function createStreamClient(
   settings: DingtalkSettings,
@@ -45,6 +119,8 @@ function createStreamClient(
     debug: boolean;
     onDownStream: (data: unknown) => void;
     connect: () => Promise<void>;
+    getEndpoint: () => Promise<unknown>;
+    dw_url: string;
     heartbeatIntervallId?: ReturnType<typeof setInterval>;
     socket?: {
       readyState: number;
@@ -59,6 +135,23 @@ function createStreamClient(
   // Assigned on the instance because the constructor's options type omits the
   // field, while the config it exposes carries it.
   client.config.autoReconnect = false;
+  // Replace the SDK's endpoint discovery with the bounded, silent one above.
+  // Its own getEndpoint() logs the resolved config and the gateway response and
+  // never times out, so wrapping it in a console suppression muted the whole
+  // process for as long as it stayed pending — past the attempt budget, which
+  // rejects the attempt without settling that promise (#17173 R11).
+  internals.getEndpoint = async () => {
+    const discovered = await discoverEndpoint(
+      client.config,
+      AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
+    );
+    client.config.access_token = discovered.accessToken;
+    // The SDK stores the whole gateway object here even though its published
+    // type says string; nothing reads it back, so store the endpoint itself.
+    client.config.endpoint = discovered.endpoint;
+    internals.dw_url = `${discovered.endpoint}?ticket=${discovered.ticket}`;
+    return client;
+  };
   // The SDK creates a heartbeat interval on every socket open but never
   // clears it on close, and the next open overwrites the only stored handle —
   // the old interval keeps pinging the replacement socket. Retire it on close,
@@ -168,7 +261,7 @@ function createStreamClient(
         client.disconnect();
         reject(new Error('DingTalk stream connect timed out.'));
       }, CONNECT_TIMEOUT_MS);
-      withConnectLoggingSuppressed(sdkConnect)
+      sdkConnect()
         .then(() => {
           // Each attempt constructs a fresh socket; arm the heartbeat retire
           // and the reconnect on its close, so a drop of a healthy socket is

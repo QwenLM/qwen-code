@@ -33,12 +33,39 @@ const mockState = vi.hoisted(() => ({
 
 vi.mock('dingtalk-stream-sdk-nodejs', () => {
   class DWClient {
-    config = { autoReconnect: true };
+    config: {
+      clientId?: string;
+      clientSecret?: string;
+      autoReconnect: boolean;
+      subscriptions: Array<{ type: string; topic: string }>;
+    };
     debug = false;
     socket: unknown = null;
     constructor(options?: unknown) {
       mockState.constructorOptions = options;
+      const opts = options as
+        | { clientId?: string; clientSecret?: string }
+        | undefined;
+      this.config = {
+        clientId: opts?.clientId,
+        clientSecret: opts?.clientSecret,
+        autoReconnect: true,
+        subscriptions: [],
+      };
       mockState.instance = this as unknown as typeof mockState.instance;
+    }
+    // Mirror the real SDK's structure: connect() awaits getEndpoint(), and the
+    // credential log lives in getEndpoint(), not in connect(). The wrapper
+    // replaces getEndpoint with its own silent discovery (#17173 R11), so this
+    // log is what must never run.
+    async getEndpoint(): Promise<this> {
+      if (mockState.logEndpoint) {
+        // eslint-disable-next-line no-console -- mirrors the real SDK credential log
+        console.log('getEndpoint config', {
+          clientSecret: this.config.clientSecret,
+        });
+      }
+      return this;
     }
     // Simulate the SDK dispatch: it console.log()s every raw frame (ungated by
     // its debug flag) and JSON.parse + routes with NO error boundary — the deps
@@ -62,16 +89,7 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => {
     }
     async connect(): Promise<void> {
       mockState.calls += 1;
-      if (mockState.logEndpoint) {
-        // Mirror the SDK getEndpoint(): it console.log()s the resolved config,
-        // clientSecret included, ungated by the debug flag (R12).
-        // eslint-disable-next-line no-console -- mirrors the real SDK credential log
-        console.log('getEndpoint config', {
-          clientSecret: (
-            mockState.constructorOptions as { clientSecret?: string } | null
-          )?.clientSecret,
-        });
-      }
+      await this.getEndpoint();
       if (mockState.connectGate) {
         await mockState.connectGate.promise;
       }
@@ -157,10 +175,22 @@ beforeEach(() => {
   mockState.socketOpen = true;
   mockState.socketFailEvent = null;
   mockState.socket = null;
+  // The wrapper's own endpoint discovery uses fetch (#17173 R11).
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) => ({
+      ok: true,
+      json: async () =>
+        String(url).includes('gettoken')
+          ? { access_token: 'token' }
+          : { endpoint: 'wss://fake.invalid', ticket: 'tk' },
+    })),
+  );
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
