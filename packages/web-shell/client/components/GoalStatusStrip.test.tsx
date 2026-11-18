@@ -8,6 +8,7 @@ import {
   GoalStatusStrip,
   getGoalActiveTimeMs,
   goalStatusTone,
+  hasVisibleGoal,
 } from './GoalStatusStrip';
 
 function snapshot(
@@ -381,5 +382,21 @@ describe('GoalStatusStrip', () => {
     expect(goalStatusTone('blocked')).toBe('attention');
     expect(goalStatusTone('usage_limited')).toBe('attention');
     expect(goalStatusTone('complete')).toBe('done');
+  });
+
+  it('hides only absent and completed goals from the list-facing surfaces', () => {
+    // The strip, the sidebar reservation and the marker guard all read this
+    // one predicate, so every non-complete state must stay visible.
+    for (const status of [
+      'active',
+      'paused',
+      'blocked',
+      'usage_limited',
+    ] as const) {
+      expect(hasVisibleGoal({ status })).toBe(true);
+    }
+    expect(hasVisibleGoal({ status: 'complete' })).toBe(false);
+    expect(hasVisibleGoal(null)).toBe(false);
+    expect(hasVisibleGoal(undefined)).toBe(false);
   });
 });

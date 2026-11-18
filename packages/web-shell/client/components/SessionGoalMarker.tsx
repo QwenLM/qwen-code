@@ -7,7 +7,7 @@
 import type { DaemonSessionGoalInfo } from '@qwen-code/sdk/daemon';
 import { Target } from 'lucide-react';
 import { useI18n } from '../i18n';
-import { goalStatusTone } from './GoalStatusStrip';
+import { goalStatusTone, hasVisibleGoal } from './GoalStatusStrip';
 import styles from './SessionGoalMarker.module.css';
 
 interface SessionGoalMarkerProps {
@@ -29,7 +29,7 @@ interface SessionGoalMarkerProps {
  */
 export function SessionGoalMarker({ goal, onOpen }: SessionGoalMarkerProps) {
   const { t } = useI18n();
-  if (goal.status === 'complete') return null;
+  if (!hasVisibleGoal(goal)) return null;
   const label = t('sidebar.sessionGoal', {
     status: t(`goal.status.${goal.status}`),
     objective: goal.objective,

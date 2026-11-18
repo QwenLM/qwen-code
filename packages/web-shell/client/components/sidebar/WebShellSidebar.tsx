@@ -161,6 +161,7 @@ import { sessionMatchesSource as matchesSessionSource } from './sessionSearch';
 import { SessionSearchDialog } from './SessionSearchDialog';
 import { useLivePresence } from '../../live/live-presence';
 import { SessionPrBadge, openableSessionPrs } from '../SessionPrBadge';
+import { hasVisibleGoal } from '../GoalStatusStrip';
 import { SessionGoalMarker } from '../SessionGoalMarker';
 import {
   hasWorkspaceExpansionPreference,
@@ -5519,9 +5520,7 @@ export function WebShellSidebar({
       ) : null;
       const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
       // Completed goals render no marker, matching the Goals listings' filter.
-      const hasGoalMarker = Boolean(
-        session.goal && session.goal.status !== 'complete',
-      );
+      const hasGoalMarker = hasVisibleGoal(session.goal);
       // Archived rows do not open on click, so their marker is a pure
       // indicator; the active row below renders the button variant.
       const goalMarker =

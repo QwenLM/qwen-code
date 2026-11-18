@@ -15,6 +15,7 @@ import {
   createSidebarMocks,
   DAEMON_APPROVAL_MODES,
   installSidebarDomShims,
+  makeSidebarSession,
   resolveWebShellSessions,
 } from '../../test/sidebarHarness';
 import { setLivePresence } from '../../live/live-presence';
@@ -8228,13 +8229,9 @@ describe('WebShellSidebar standalone grouping', () => {
 
 describe('WebShellSidebar goal markers', () => {
   const goalSession = (
-    goal: DaemonSessionSummary['goal'],
-  ): DaemonSessionSummary => ({
-    sessionId: 'goal-session',
-    workspaceCwd: '/tmp/project',
-    displayName: 'Goal session',
-    ...(goal ? { goal } : {}),
-  });
+    goal: NonNullable<DaemonSessionSummary['goal']>,
+  ): DaemonSessionSummary =>
+    makeSidebarSession('goal-session', { displayName: 'Goal session', goal });
 
   const rowFor = (label: string, root: ParentNode = container) =>
     Array.from(

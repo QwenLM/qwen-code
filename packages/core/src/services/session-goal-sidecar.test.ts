@@ -129,6 +129,42 @@ describe('session-goal-sidecar', () => {
     ).toBeNull();
   });
 
+  it('round-trips a projection when a live signal is supplied', async () => {
+    const file = path.join(dir, 's1.goal.json');
+    await writeSessionGoalSidecar(file, projection);
+    const controller = new AbortController();
+    expect(
+      await readSessionGoalSidecar(file, { signal: controller.signal }),
+    ).toEqual(projection);
+  });
+
+  it('reads an absent file as null through the signal path too', async () => {
+    const controller = new AbortController();
+    expect(
+      await readSessionGoalSidecar(path.join(dir, 'missing.goal.json'), {
+        signal: controller.signal,
+      }),
+    ).toBeNull();
+  });
+
+  it('rejects with the abort reason when the signal is already aborted', async () => {
+    const file = path.join(dir, 's1.goal.json');
+    await writeSessionGoalSidecar(file, projection);
+    await expect(
+      readSessionGoalSidecar(file, { signal: AbortSignal.abort() }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('rejects an already-aborted signal even when the file is absent', async () => {
+    // A cancelled read must reject even when the sidecar is absent: null here
+    // would report "no goal" for a catalog read that never completed.
+    await expect(
+      readSessionGoalSidecar(path.join(dir, 'missing.goal.json'), {
+        signal: AbortSignal.abort(),
+      }),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
   it('reads invalid JSON and failed shape checks as null', async () => {
     const file = path.join(dir, 's1.goal.json');
     await fs.writeFile(file, '{not json', 'utf-8');
