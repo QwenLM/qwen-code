@@ -206,21 +206,29 @@ export async function runSuspensionAttempt(
     return 'reverted';
   };
   if (suspension.gate !== 'open') return 'reverted';
-  if (await deps.pendingInputs()) return revert();
-  if (suspension.gate !== 'open') return 'reverted';
-  if (!deps.markClosing(attemptStart)) return revert();
-  // Admitted work finishes on its own clock, including work whose HTTP
-  // caller already disconnected; the response count proves nothing.
-  const deadline = now() + waitMs;
-  while (suspension.admittedWork > 0 && now() < deadline) {
-    await sleep(WORK_POLL_MS);
+  try {
+    if (await deps.pendingInputs()) return revert();
+    if (suspension.gate !== 'open') return 'reverted';
+    if (!deps.markClosing(attemptStart)) return revert();
+    // Admitted work finishes on its own clock, including work whose HTTP
+    // caller already disconnected; the response count proves nothing.
+    const deadline = now() + waitMs;
+    while (suspension.admittedWork > 0 && now() < deadline) {
+      await sleep(WORK_POLL_MS);
+    }
+    if (suspension.admittedWork > 0 || deps.liveWork()) return revert();
+    if (await deps.pendingInputs()) return revert();
+    // Read through the refusal helper: the mark and any external
+    // escalation happened inside calls TypeScript cannot narrow through.
+    if (suspensionRefusalCode(suspension) !== 'hosted_session_closing')
+      return 'reverted';
+  } catch (cause) {
+    // A failed eligibility dep must not strand the closing mark: before
+    // the irreversible boundary the attempt reverts and rearms like any
+    // other abandoned exit. The caller logs the rethrown cause.
+    revert();
+    throw cause;
   }
-  if (suspension.admittedWork > 0 || deps.liveWork()) return revert();
-  if (await deps.pendingInputs()) return revert();
-  // Read through the refusal helper: the mark and any external
-  // escalation happened inside calls TypeScript cannot narrow through.
-  if (suspensionRefusalCode(suspension) !== 'hosted_session_closing')
-    return 'reverted';
   markSuspensionTeardown(suspension);
   for (;;) {
     try {

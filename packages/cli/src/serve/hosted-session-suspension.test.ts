@@ -271,6 +271,50 @@ describe('suspension attempt driver', () => {
     expect(suspension.teardownStarted).toBe(false);
   });
 
+  it('reverts and rethrows when an eligibility dep fails before the mark', async () => {
+    const { suspension, deps, calls } = harness({
+      pendingInputs: async () => {
+        throw new Error('store gone');
+      },
+    });
+    await expect(runSuspensionAttempt(suspension, deps)).rejects.toThrow(
+      'store gone',
+    );
+    expect(suspension.gate).toBe('open');
+    expect(calls).toEqual(['rearm']);
+  });
+
+  it('reverts the closing mark when a dep fails after it', async () => {
+    let probes = 0;
+    const { suspension, deps, calls } = harness({
+      pendingInputs: async () => {
+        probes += 1;
+        if (probes === 2) throw new Error('store gone');
+        return false;
+      },
+    });
+    await expect(runSuspensionAttempt(suspension, deps)).rejects.toThrow(
+      'store gone',
+    );
+    expect(suspension.gate).toBe('open');
+    expect(suspension.teardownStarted).toBe(false);
+    expect(calls).toEqual(['markClosing:0', 'rearm']);
+  });
+
+  it('reverts when the live-work recheck throws', async () => {
+    const { suspension, deps, calls } = harness({
+      liveWork: () => {
+        throw new Error('authority gone');
+      },
+    });
+    await expect(runSuspensionAttempt(suspension, deps)).rejects.toThrow(
+      'authority gone',
+    );
+    expect(suspension.gate).toBe('open');
+    expect(suspension.teardownStarted).toBe(false);
+    expect(calls).toEqual(['markClosing:0', 'rearm']);
+  });
+
   it('retries the same teardown and suspends when it lands', async () => {
     let attempts = 0;
     const { suspension, deps, calls } = harness({
@@ -307,16 +351,21 @@ describe('suspension attempt driver', () => {
   });
 
   it('never reverts past the first teardown call', async () => {
+    // Observe inside the callback and assert after the attempt: an
+    // assertion thrown inside teardown is swallowed by the retry loop,
+    // which would let the guard's removal pass unnoticed.
+    const observations: Array<{ started: boolean; reverted: boolean }> = [];
     const { suspension, deps } = harness({
       teardown: async () => {
-        // A late admission check fails after the boundary: the gate must
-        // stay closed even though the teardown itself then succeeds.
-        expect(suspension.teardownStarted).toBe(true);
-        expect(revertSuspension(suspension, 99)).toBe(false);
+        observations.push({
+          started: suspension.teardownStarted,
+          reverted: revertSuspension(suspension, 99),
+        });
       },
     });
     const outcome = await runSuspensionAttempt(suspension, deps);
     expect(outcome).toBe('suspended');
+    expect(observations).toEqual([{ started: true, reverted: false }]);
   });
 
   it('leaves a concurrent attempt alone', async () => {

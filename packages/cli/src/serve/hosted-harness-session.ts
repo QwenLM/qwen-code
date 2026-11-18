@@ -4893,6 +4893,12 @@ export function registerHostedHarnessSessionRoutes(
       if (released.size > 256) released.delete(released.keys().next().value!);
       sessions.delete(sessionId);
       unresolvedOpenings.delete(sessionId);
+      if (
+        gated &&
+        suspensions.get(sessionId) === gated &&
+        !sessions.has(sessionId)
+      )
+        suspensions.delete(sessionId);
       return receipt;
     } catch (cause) {
       release.result = undefined;
@@ -5044,7 +5050,7 @@ export function registerHostedHarnessSessionRoutes(
             done.owners = true;
           }
           if (!done.lease) {
-            if (await releaseLeaseNow(session, false))
+            if (await releaseLeaseNow(session, false, true))
               throw new Error('Runtime lease release is unproven.');
             if (broker) await retryHostedCleanup(session, broker, true);
             else if (hasHostedCleanupDebt(session.managed))
@@ -5864,6 +5870,7 @@ export function registerHostedHarnessSessionRoutes(
         sessions.delete(sessionId);
         resident = undefined;
       } catch {
+        if (!sessions.has(sessionId)) suspensions.delete(sessionId);
         error(res, 503, 'hosted_turn_recovery_required');
         return;
       } finally {
@@ -6566,6 +6573,16 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     if (lifecycle) stores.setLifecycleAuthority(lifecycle);
+    // Refuse before the create publishes resources or registers its
+    // opening: a cap-refused create must leave no unreferenced resources
+    // and no unresolvedOpenings debt for the control plane's retry loop.
+    if (coldOpensInFlight >= coldOpenLimit) {
+      suspensionStats.openBusyRefusals += 1;
+      return error(res, 409, 'hosted_session_open_busy');
+    }
+    coldOpensInFlight += 1;
+    res.locals['coldOpenSlot'] = true;
+    res.locals['coldOpenStart'] = Date.now();
     opening.add(sessionId);
     let managed: ManagedSession | undefined;
     try {
@@ -6620,13 +6637,6 @@ export function registerHostedHarnessSessionRoutes(
             createdBy: 'hosted-harness',
           }
         : undefined;
-      if (coldOpensInFlight >= coldOpenLimit) {
-        suspensionStats.openBusyRefusals += 1;
-        return error(res, 409, 'hosted_session_open_busy');
-      }
-      coldOpensInFlight += 1;
-      res.locals['coldOpenSlot'] = true;
-      res.locals['coldOpenStart'] = Date.now();
       const storeRecoveryStart = Date.now();
       managed = await openManagedSession({
         runtimeBaseDir: cwd,
@@ -11211,10 +11221,14 @@ export function registerHostedHarnessSessionRoutes(
   // the drain arm may stop them. This exit swallows a refused release, so
   // the owed file-history retirement must go first. Answers whether it left a
   // reload-stable owner running, which a non-terminal close must report as an
-  // unproven stop rather than certify (R3-1).
+  // unproven stop rather than certify (R3-1). The suspension teardown passes
+  // rethrowOnFailure: it seals and drops the resident, so a swallowed refusal
+  // would certify a release nobody proved and delete the only record of the
+  // debt with the resident.
   const releaseLeaseNow = async (
     session: HostedSession,
     terminal: boolean,
+    rethrowOnFailure = false,
   ): Promise<boolean> => {
     await retireOwedFileHistory(session, 'at close');
     const lease = session.runtimeLeaseHeld;
@@ -11247,6 +11261,7 @@ export function registerHostedHarnessSessionRoutes(
         writeStderrLineSafe(
           `qwen serve: Hosted Harness release of recovered Runtime ${lease.runtimeSessionId} failed: ${String(cause)}`,
         );
+        if (rethrowOnFailure) throw cause;
       },
     );
     return unproven;
@@ -14529,6 +14544,7 @@ export function registerHostedHarnessSessionRoutes(
       if (closeSettled || session.managed.authority.writerSealed) {
         for (const stop of session.streams) stop();
         sessions.delete(req.params['id']);
+        suspensions.delete(req.params['id']);
       }
       session.mcpClosing = !!session.lifecycle;
       session.mcpBusy = false;
