@@ -101,6 +101,11 @@ import {
   type SessionTitleSidecar,
 } from './session-title-sidecar.js';
 import {
+  moveSessionBranchSidecar,
+  removeSessionBranchSidecar,
+  sessionBranchSidecarPath,
+} from './session-branch-sidecar.js';
+import {
   moveSessionArtifactSummarySidecar,
   readSessionArtifactSummarySidecar,
   removeSessionArtifactSummarySidecar,
@@ -1103,6 +1108,13 @@ export class SessionService {
     return sessionTitleSidecarPath(this.getChatsDirForState(state), sessionId);
   }
 
+  private getSessionBranchSidecarPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return sessionBranchSidecarPath(this.getChatsDirForState(state), sessionId);
+  }
+
   /**
    * Reads the list-label sidecar written when the session first got a name.
    * A missing or unreadable sidecar is normal — most legacy sessions never
@@ -1251,6 +1263,19 @@ export class SessionService {
     state: SessionArchiveState,
   ): string {
     return this.getPrSessionPathForState(sessionId, state);
+  }
+
+  /**
+   * Returns the absolute path to the sidecar JSON file that stores the
+   * immutable start commit recorded when a session was branched from a
+   * checkpoint. The file may not exist yet — consumers must handle ENOENT as
+   * "no recorded branch point".
+   */
+  getBranchSessionPathForArchiveState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return this.getSessionBranchSidecarPathForState(sessionId, state);
   }
 
   /**
@@ -1966,6 +1991,14 @@ export class SessionService {
     }
   }
 
+  private removeSessionBranchSidecars(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      removeSessionBranchSidecar(
+        this.getSessionBranchSidecarPathForState(sessionId, state),
+      );
+    }
+  }
+
   private removeArtifactSummarySidecars(sessionId: string): void {
     for (const state of ['active', 'archived'] as const) {
       removeSessionArtifactSummarySidecar(
@@ -2139,6 +2172,28 @@ export class SessionService {
     await deleteSessionGoalSidecar(dropped);
   }
 
+  /**
+   * The kept transcript's recorded branch point wins; mirror the title
+   * sidecar's conflict policy so a checkpoint-branch start commit follows the
+   * surviving transcript.
+   */
+  private reconcileBranchSidecarOnConflict(
+    sessionId: string,
+    keptState: SessionArchiveState,
+    droppedState: SessionArchiveState,
+  ): void {
+    const kept = this.getSessionBranchSidecarPathForState(sessionId, keptState);
+    const dropped = this.getSessionBranchSidecarPathForState(
+      sessionId,
+      droppedState,
+    );
+    if (fs.existsSync(kept)) {
+      removeSessionBranchSidecar(dropped);
+    } else {
+      moveSessionBranchSidecar(dropped, kept);
+    }
+  }
+
   private async moveArchiveSidecars(
     sessionId: string,
     action: 'archive' | 'unarchive',
@@ -2225,6 +2280,18 @@ export class SessionService {
       assertCleanupOwned?.();
       this.warn(
         `${action}Sessions: failed to move title sidecar for ${sessionId}: ${error}`,
+      );
+    }
+    try {
+      assertCleanupOwned?.();
+      moveSessionBranchSidecar(
+        this.getSessionBranchSidecarPathForState(sessionId, sourceState),
+        this.getSessionBranchSidecarPathForState(sessionId, destinationState),
+      );
+    } catch (error) {
+      assertCleanupOwned?.();
+      this.warn(
+        `${action}Sessions: failed to move branch sidecar for ${sessionId}: ${error}`,
       );
     }
     try {
@@ -4350,6 +4417,8 @@ export class SessionService {
     assertCleanupOwned?.();
     this.removeSessionTitleSidecars(sessionId);
     assertCleanupOwned?.();
+    this.removeSessionBranchSidecars(sessionId);
+    assertCleanupOwned?.();
     this.removeArtifactSummarySidecars(sessionId);
     assertCleanupOwned?.();
     this.removePromptLedgers(sessionId);
@@ -4453,6 +4522,19 @@ export class SessionService {
             options.assertCleanupOwned?.();
             this.warn(
               `archiveSessions: failed to reconcile title sidecar for ${sessionId}: ${titleSidecarError}`,
+            );
+          }
+          try {
+            options.assertCleanupOwned?.();
+            this.reconcileBranchSidecarOnConflict(
+              sessionId,
+              'archived',
+              'active',
+            );
+          } catch (branchSidecarError) {
+            options.assertCleanupOwned?.();
+            this.warn(
+              `archiveSessions: failed to reconcile branch sidecar for ${sessionId}: ${branchSidecarError}`,
             );
           }
           archived.push(sessionId);
@@ -4620,6 +4702,19 @@ export class SessionService {
             options.assertCleanupOwned?.();
             this.warn(
               `unarchiveSessions: failed to reconcile title sidecar for ${sessionId}: ${titleSidecarError}`,
+            );
+          }
+          try {
+            options.assertCleanupOwned?.();
+            this.reconcileBranchSidecarOnConflict(
+              sessionId,
+              'active',
+              'archived',
+            );
+          } catch (branchSidecarError) {
+            options.assertCleanupOwned?.();
+            this.warn(
+              `unarchiveSessions: failed to reconcile branch sidecar for ${sessionId}: ${branchSidecarError}`,
             );
           }
           unarchived.push(sessionId);
