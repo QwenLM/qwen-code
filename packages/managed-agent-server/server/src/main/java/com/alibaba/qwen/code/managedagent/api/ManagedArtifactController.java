@@ -85,11 +85,14 @@ public class ManagedArtifactController {
 
     @PostMapping(WEB + "/workspaces/artifacts/query")
     public ResponseEntity<WebShellPage<ArtifactResponse>> webWorkspaceArtifacts(TenantContext tenant,
-            @Valid @RequestBody WebShellWorkspaceArtifactQueryRequest request) {
-        // The workspace family's no-store convention: TenantContextFilter
-        // pre-sets it on /workspaces/ paths, so the session routes'
-        // private, no-store metadata() would leave two header values.
-        return ResponseEntity.ok().cacheControl(org.springframework.http.CacheControl.noStore())
+            @Valid @RequestBody WebShellWorkspaceArtifactQueryRequest request,
+            HttpServletResponse response) {
+        // TenantContextFilter pre-sets no-store on /workspaces/ paths.
+        // setHeader replaces that value; ResponseEntity.cacheControl()
+        // would add a second one, because Spring writes entity headers
+        // with addHeader.
+        response.setHeader("Cache-Control", "no-store");
+        return ResponseEntity.ok()
                 .body(service.workspacePage(tenant, request.workspaceId(), request.cursor(),
                         request.limit() == null ? 20 : request.limit()));
     }
