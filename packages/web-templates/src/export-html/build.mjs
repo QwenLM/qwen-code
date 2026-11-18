@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_145_100;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_148_000;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -138,7 +138,14 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_145_100;
 // against 2,144,387 with the new copy. CSS and third-party inputs are unchanged,
 // and the forbidden-input guard passes. Leave 713 bytes to the warning and
 // 1,713 to the ceiling.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_146_100;
+// Goal-in-sidebar copy (#17515: session rows carrying a Goal, two locales)
+// pushes the CI renderer past that ceiling: the merge ref of #17737 (a
+// test/docs-only diff on main 980bb332/a3918be) measures 2,146,529 bytes in
+// runs 44315150041 / 44315149370, 429 over; the same tree measures 2,147,812
+// locally on Node 22.22.2. CSS and third-party inputs are unchanged and the
+// forbidden-input guard passes. Raise both marks: the warning sits 188 above
+// the local measurement and the ceiling 1,188 above it.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_149_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
