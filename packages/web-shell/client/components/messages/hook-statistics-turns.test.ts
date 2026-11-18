@@ -75,3 +75,17 @@ it('keeps turns independent and ignores injected messages as new turn heads', ()
   expect(turns.get('answer')?.recordId).toBe('record');
   expect(turns.get('next')?.recordId).toBe('next-record');
 });
+
+it('does not take a message sent to another session as a turn', () => {
+  const sent: Message = {
+    ...user,
+    id: 'sent',
+    agentMessage: {
+      kind: 'agent_mention',
+      sentTo: { sessionId: 'target', workspaceCwd: '/work/b' },
+    },
+  };
+  expect([
+    ...collectHookStatisticsTurns([user, answer, sent], 'session').keys(),
+  ]).toEqual(['answer']);
+});

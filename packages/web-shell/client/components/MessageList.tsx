@@ -864,6 +864,36 @@ function collectFinalAssistantTurnIds(
   return turnIdByAssistantId;
 }
 
+// A passive completion can split one streamed answer into several rows.
+// Keep those segments, but stop at work or an automatic execution marker.
+function findAnswerStartIndex(
+  items: readonly DisplayItem[],
+  start: number,
+  answerIdx: number,
+): number {
+  let answerStartIdx = answerIdx;
+  if (answerIdx < 0 || !isFinalContentCandidate(items[answerIdx]!, false)) {
+    return answerStartIdx;
+  }
+  let crossedCompletion = false;
+  for (let i = answerIdx - 1; i > start; i--) {
+    const item = items[i]!;
+    if (item.type !== 'message') break;
+    if (
+      item.message.role === 'system' &&
+      item.message.source === 'background_task_completed'
+    ) {
+      crossedCompletion = true;
+    } else if (crossedCompletion && item.message.role === 'assistant') {
+      answerStartIdx = i;
+      crossedCompletion = false;
+    } else {
+      break;
+    }
+  }
+  return answerStartIdx;
+}
+
 function isTurnFromSession(data: unknown): boolean {
   if (!data || typeof data !== 'object' || !('backgroundTask' in data)) {
     return false;
@@ -2113,27 +2143,32 @@ export function applyTurnCollapse(
     );
 
     const answerIdx = findFinalAnswerIndex(items, start, end);
-    let answerStartIdx = answerIdx;
-    // A passive completion can split one streamed answer into several rows.
-    // Keep those segments, but stop at work or an automatic execution marker.
-    if (answerIdx >= 0 && isFinalContentCandidate(items[answerIdx]!, false)) {
-      let crossedCompletion = false;
-      for (let i = answerIdx - 1; i > start; i--) {
-        const item = items[i]!;
-        if (item.type !== 'message') break;
-        if (
-          item.message.role === 'system' &&
-          item.message.source === 'background_task_completed'
-        ) {
-          crossedCompletion = true;
-        } else if (crossedCompletion && item.message.role === 'assistant') {
-          answerStartIdx = i;
-          crossedCompletion = false;
-        } else {
-          break;
+    const answerStartIdx = findAnswerStartIndex(items, start, answerIdx);
+    // Each reply another session sent starts its own exchange, so the answer
+    // before its card stays in view too.
+    const exchangeAnswers: Array<[number, number]> = [];
+    let exchangeStart = start;
+    for (let i = start + 1; i <= end; i++) {
+      const item = items[i]!;
+      if (
+        item.type === 'message' &&
+        item.message.role === 'system' &&
+        item.message.source === 'background_notification_turn_started' &&
+        isTurnFromSession(item.message.data)
+      ) {
+        const idx = findFinalAnswerIndex(items, exchangeStart, i - 1);
+        if (idx >= 0) {
+          exchangeAnswers.push([
+            findAnswerStartIndex(items, exchangeStart, idx),
+            idx,
+          ]);
         }
+        exchangeStart = i;
       }
     }
+    const isAnswerAt = (i: number) =>
+      (i >= answerStartIdx && i <= answerIdx) ||
+      exchangeAnswers.some(([from, to]) => i >= from && i <= to);
     let hiddenCount = 0;
     let terminalTs: number | undefined;
     let cancelledElapsedMs: number | undefined;
@@ -2148,10 +2183,7 @@ export function applyTurnCollapse(
     let hasTurnError = false;
     for (let i = start + 1; i <= end; i++) {
       const item = items[i]!;
-      const isStep = isHideableStep(
-        item,
-        i >= answerStartIdx && i <= answerIdx,
-      );
+      const isStep = isHideableStep(item, isAnswerAt(i));
       if (isStep) {
         hiddenCount++;
       }
@@ -2330,8 +2362,7 @@ export function applyTurnCollapse(
         });
         continue;
       }
-      if (!isHideableStep(item, i >= answerStartIdx && i <= answerIdx))
-        result.push(item);
+      if (!isHideableStep(item, isAnswerAt(i))) result.push(item);
     }
   }
 

@@ -6885,7 +6885,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     [true, true],
     [false, false],
   ])(
-    'keeps the card of a turn another session started in view: from a session %s',
+    'keeps the card of a turn another session started, and the answer before it, in view: from a session %s',
     (fromSession, visible) => {
       const backgroundTurn = {
         turnId: 'turn-b',
@@ -6918,9 +6918,60 @@ describe('MessageList — turn collapse (DOM)', () => {
       ]);
       expect(isCollapsed(c, 'g1')).toBe(true);
       expect(has(c, 'card')).toBe(visible);
+      expect(has(c, 'a0')).toBe(visible);
       expect(has(c, 'a1')).toBe(true);
     },
   );
+
+  it('keeps every reply another session sent in view when the turn collapses', () => {
+    const replyCard = (id: string): SystemMessage => {
+      const backgroundTurn = {
+        turnId: `turn-${id}`,
+        taskId: id,
+        kind: 'agent' as const,
+        label: `projB · ${id}`,
+        startedAt: 10,
+      };
+      return {
+        id: `card-${id}`,
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification_turn_started',
+        content: backgroundTurn.label,
+        data: {
+          ...backgroundTurn,
+          backgroundTask: {
+            status: 'completed',
+            fromSession: { sessionId: id },
+          },
+        },
+        backgroundTurn,
+      };
+    };
+    const completed: SystemMessage = {
+      id: 'completed-b',
+      role: 'system',
+      variant: 'info',
+      source: 'background_task_completed',
+      content: 'b replied',
+    };
+    const c = mount([
+      userMsg('u1'),
+      replyCard('a'),
+      toolMsg('g1'),
+      asstMsg('a1'),
+      completed,
+      asstMsg('a1-rest'),
+      replyCard('b'),
+      toolMsg('g2'),
+      asstMsg('a2'),
+    ]);
+    expect(isCollapsed(c, 'g1')).toBe(true);
+    expect(has(c, 'g2')).toBe(false);
+    for (const id of ['card-a', 'a1', 'a1-rest', 'card-b', 'a2']) {
+      expect(has(c, id)).toBe(true);
+    }
+  });
 
   it('gives a turn of only an agent reply no final answer', () => {
     const c = mount([
