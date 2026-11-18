@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { RefreshCwIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
@@ -59,6 +59,49 @@ export function ChangeOverviewPanel({
   const selectedUnavailable =
     selected?.kind === 'pr' && selected.state === 'unavailable';
 
+  // The tablist only renders with units; the body must not advertise an orphan
+  // tabpanel in the loading/error/empty/non-git states (no tab to label it).
+  const hasTabs = gitAvailable && units.length > 0;
+
+  // Roving tabindex: only the selected tab is in the tab order; Arrow/Home/End
+  // move focus and selection together (automatic activation), wrapping at the
+  // ends, so the scope selector is a keyboard-operable tab widget (D4-1).
+  const tabRefs = useRef(new Map<string, HTMLButtonElement>());
+  const handleTabKeyDown = (
+    event: KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) => {
+    // Leave modified keys to the browser: Alt+Left/Right is Back/Forward and
+    // Ctrl+Home/End scrolls the document; swallowing them here would turn
+    // navigation into a scope change.
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    let next: number;
+    switch (event.key) {
+      case 'ArrowRight':
+        next = (index + 1) % units.length;
+        break;
+      case 'ArrowLeft':
+        next = (index - 1 + units.length) % units.length;
+        break;
+      case 'Home':
+        next = 0;
+        break;
+      case 'End':
+        next = units.length - 1;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    const unit = units[next];
+    setSelectedId(unit.id);
+    const tab = tabRefs.current.get(unit.id);
+    tab?.focus({ preventScroll: true });
+    // The chip row scrolls horizontally; bring the newly selected chip into
+    // view so keyboard navigation past the visible strip is not clipped.
+    tab?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  };
+
   // The toolbar (with Refresh) stays mounted in every state so a transient or
   // non-git verdict is always recoverable without closing the tab.
   return (
@@ -77,22 +120,35 @@ export function ChangeOverviewPanel({
         </button>
       </div>
 
-      {gitAvailable && units.length > 0 && (
-        <div className={styles.scopeRow} role="tablist">
-          {units.map((unit) => {
+      {hasTabs && (
+        <div
+          className={styles.scopeRow}
+          role="tablist"
+          aria-label={t('changeOverview.title')}
+        >
+          {units.map((unit, index) => {
             const badgeHidden =
               unit.kind === 'commit' ||
               (unit.kind === 'pr' && unit.state === 'unavailable');
+            const isSelected = selected?.id === unit.id;
             return (
               <button
                 key={unit.id}
+                ref={(el) => {
+                  if (el) tabRefs.current.set(unit.id, el);
+                  else tabRefs.current.delete(unit.id);
+                }}
                 type="button"
                 role="tab"
-                aria-selected={selected?.id === unit.id}
+                id={`change-overview-tab-${unit.id}`}
+                aria-selected={isSelected}
+                aria-controls="change-overview-tabpanel"
+                tabIndex={isSelected ? 0 : -1}
                 className={`${styles.scopeChip} ${
-                  selected?.id === unit.id ? styles.scopeChipActive : ''
+                  isSelected ? styles.scopeChipActive : ''
                 }`}
                 onClick={() => setSelectedId(unit.id)}
+                onKeyDown={(event) => handleTabKeyDown(event, index)}
                 title={
                   unit.kind === 'commit'
                     ? sanitizeControlChars(unit.subject)
@@ -119,7 +175,16 @@ export function ChangeOverviewPanel({
 
       {/* Keyed per selected unit so switching scope remounts the scroll region
           and resets its offset instead of inheriting the previous scroll. */}
-      <div className={styles.body} key={selected?.id ?? 'none'}>
+      <div
+        className={styles.body}
+        key={selected?.id ?? 'none'}
+        role={hasTabs ? 'tabpanel' : undefined}
+        id={hasTabs ? 'change-overview-tabpanel' : undefined}
+        aria-labelledby={
+          hasTabs && selected ? `change-overview-tab-${selected.id}` : undefined
+        }
+        tabIndex={hasTabs ? 0 : undefined}
+      >
         {!gitAvailable ? (
           <div className={styles.message}>{t('changeOverview.notGit')}</div>
         ) : loadFailed ? (
