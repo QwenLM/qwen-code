@@ -49,7 +49,7 @@ Then enter:
 
 > [!note]
 >
-> **Hot reload vs. restart:** `mcpServers` edits in `settings.json` are picked up by a running interactive session without a restart; a server added to project settings waits for your approval before it connects. A restart is required for edits made during a `--bare` or `--safe-mode` session, which never pick up ambient servers mid-session, and for sessions running inside a shell-execution sandbox, where hot reload is disabled.
+> **Hot reload vs. restart:** `mcpServers` edits in `settings.json` are picked up by a running interactive session without a restart; a server added to project settings waits for your approval before it connects. `--bare` and `--safe-mode` sessions only use MCP servers passed explicitly at invocation (e.g. `--mcp-config`); they ignore `settings.json` servers entirely, so these edits do not apply after a restart either. Sessions inside a shell-execution sandbox do not hot reload; restart to apply edits.
 
 ## Where configuration is stored (scopes)
 
