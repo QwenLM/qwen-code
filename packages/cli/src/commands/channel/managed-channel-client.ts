@@ -51,6 +51,22 @@ export class HttpManagedChannelControlPlane
     this.root = `${options.baseUrl.replace(/\/+$/, '')}/internal/managed-channels/v1/channels/${encodeURIComponent(options.channelId)}`;
   }
 
+  get destinationKey(): string {
+    const base = this.options.baseUrl.replace(/\/+$/, '');
+    // The full registration identity: a pending ledger must follow the owning
+    // actor/workspace/cwd-relative too, not just the tenant/channel, or a
+    // restart that re-registers the same channel under a different workspace
+    // would replay the prior owner's pending messages into the new Session.
+    return [
+      base,
+      this.options.tenantId,
+      this.options.channelId,
+      this.options.actorId,
+      this.options.workspaceId,
+      this.options.cwdRelative,
+    ].join(String.fromCharCode(0));
+  }
+
   async register(request: {
     platform: ManagedChannelAdapter;
     accountId: string;

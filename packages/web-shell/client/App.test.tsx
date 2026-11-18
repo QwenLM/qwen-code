@@ -312,6 +312,10 @@ type MockConnection = {
   capabilities: { qwenCodeVersion: string; features: string[] };
   loadingTranscript: boolean;
   catchingUp: boolean;
+  restoredArtifacts?: DaemonSessionArtifact[];
+  restoredArtifactsSessionId?: string;
+  artifactCountHint?: number;
+  artifactCountHintSessionId?: string;
   error?: string;
   errorStatus?: number;
   missingSession?: boolean;
@@ -2010,7 +2014,11 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       ) => Promise<boolean> | boolean | void;
       onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
       onOpenWorkspacesOverview?: () => void;
-      onLoadSession?: (sessionId: string) => Promise<void> | void;
+      onLoadSession?: (
+        sessionId: string,
+        workspaceCwd?: string,
+        artifactCount?: number,
+      ) => Promise<void> | void;
       onLoadStandaloneSession?: (
         sessionId: string,
         displayName?: string,
@@ -2179,6 +2187,16 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             onClick: () => props.onLoadSession?.('session-2'),
           },
           'load session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'load-session-with-count',
+            type: 'button',
+            onClick: () =>
+              props.onLoadSession?.('session-2', '/tmp/project', 3),
+          },
+          'load session with count',
         ),
         React.createElement(
           'button',
@@ -4459,6 +4477,100 @@ describe('task activity key', () => {
     expect(
       container.querySelector('[data-web-shell-artifacts-entry]'),
     ).toBeNull();
+  });
+
+  it('shows the header artifacts entry from the click-time hint before the load lands', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    const makeArtifact = (id: string): DaemonSessionArtifact => ({
+      id,
+      kind: 'html',
+      storage: 'workspace',
+      source: 'tool',
+      status: 'available',
+      title: id,
+      workspacePath: `${id}.html`,
+      clientRetained: false,
+      createdAt: '2026-09-07T00:00:00.000Z',
+      updatedAt: '2026-09-07T00:00:00.000Z',
+    });
+    // The gated fetch stays pending: no authoritative data exists yet, so
+    // the keyed click-time hint from the session-list summary must surface.
+    const pending = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    mockSessionActions.loadArtifacts.mockReturnValue(pending.promise);
+    mockConnection.artifactCountHint = 3;
+    mockConnection.artifactCountHintSessionId = mockConnection.sessionId;
+    try {
+      const { container } = renderApp();
+      await flush();
+
+      const entry = container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-artifacts-entry]',
+      );
+      expect(entry).not.toBeNull();
+      expect(entry!.getAttribute('aria-label')).toBe('Open artifacts (3)');
+
+      // The authoritative list supersedes the hint once it lands.
+      await act(async () => {
+        pending.resolve({ artifacts: [makeArtifact('report')] });
+        await pending.promise;
+      });
+      await flush();
+      expect(
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-artifacts-entry]')
+          ?.getAttribute('aria-label'),
+      ).toBe('Open artifacts (1)');
+    } finally {
+      mockConnection.artifactCountHint = undefined;
+      mockConnection.artifactCountHintSessionId = undefined;
+    }
+  });
+
+  it('withholds the click-time hint keyed to another session', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    const pending = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    mockSessionActions.loadArtifacts.mockReturnValue(pending.promise);
+    mockConnection.artifactCountHint = 3;
+    mockConnection.artifactCountHintSessionId = `${mockConnection.sessionId}-other`;
+    try {
+      const { container } = renderApp();
+      await flush();
+
+      expect(
+        container.querySelector('[data-web-shell-artifacts-entry]'),
+      ).toBeNull();
+    } finally {
+      mockConnection.artifactCountHint = undefined;
+      mockConnection.artifactCountHintSessionId = undefined;
+    }
+  });
+
+  it('forwards the clicked session artifact count into loadSession options', async () => {
+    // Pins the sidebar → App → loadSession wiring: the count the sidebar
+    // row carries must reach the action options, or the hint never lands
+    // on the connection and the entry reverts to load-response timing.
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="load-session-with-count"]',
+        )
+        ?.click();
+    });
+    await flush();
+
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+      'session-2',
+      expect.objectContaining({ artifactCountHint: 3 }),
+    );
   });
 
   it('exposes the artifact count and opener to a custom chat header', async () => {
@@ -50590,6 +50702,7 @@ describe('App session callbacks', () => {
     ['/language ui en --project', 'en', 'workspace'],
     ['/language ui --global ru', 'ru', 'user'],
     ['/language ui ru --global', 'ru', 'user'],
+    ['/language ui zh-TW', 'zh-TW', 'user'],
   ])(
     'accepts UI language scope flags in %s',
     async (command, language, scope) => {

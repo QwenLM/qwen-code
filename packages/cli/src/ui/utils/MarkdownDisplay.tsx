@@ -23,6 +23,7 @@ import {
   TABLE_ROW_RE,
   TABLE_SEPARATOR_RE,
   CODE_FENCE_RE,
+  isClosingCodeFence,
 } from './pending-rendered-height.js';
 // Minimum content lines to keep in a clipped live preview (own constant — not
 // coupled to MaxSizedBox's floor).
@@ -100,11 +101,7 @@ export function countMarkdownSourceBlocks(
     const line = lines[index];
     const codeFenceMatch = line.match(codeFenceRegex);
     if (activeCodeFence) {
-      if (
-        codeFenceMatch &&
-        codeFenceMatch[1].startsWith(activeCodeFence[0]) &&
-        codeFenceMatch[1].length >= activeCodeFence.length
-      ) {
+      if (isClosingCodeFence(codeFenceMatch, activeCodeFence)) {
         activeCodeFence = null;
         if (codeLanguage === 'mermaid') {
           onCopyableBlock?.(
@@ -315,11 +312,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         const line = lines[i]!;
         if (activeCodeFence) {
           const fenceMatch = line.match(codeFenceRegex);
-          if (
-            fenceMatch &&
-            fenceMatch[1]!.startsWith(activeCodeFence[0]!) &&
-            fenceMatch[1]!.length >= activeCodeFence.length
-          ) {
+          if (isClosingCodeFence(fenceMatch, activeCodeFence)) {
             activeCodeFence = '';
           }
           continue;
@@ -478,11 +471,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
 
     if (inCodeBlock) {
       const fenceMatch = line.match(codeFenceRegex);
-      if (
-        fenceMatch &&
-        fenceMatch[1].startsWith(codeBlockFence[0]) &&
-        fenceMatch[1].length >= codeBlockFence.length
-      ) {
+      if (isClosingCodeFence(fenceMatch, codeBlockFence)) {
         addContentBlock(
           <RenderCodeBlock
             key={key}
