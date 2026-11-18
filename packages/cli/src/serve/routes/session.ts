@@ -4552,6 +4552,21 @@ export function registerSessionRoutes(
                   ) {
                     throw new WorktreeResetActiveError(replacementId);
                   }
+                  // Carry the superseded session's recorded start onto the
+                  // resumed replacement too (R9-13): its worktree.baseCommit is
+                  // the creation tip T, and T..HEAD would hide the session's own
+                  // pre-handoff S..T commits.
+                  const supersededSummary = readSummary(sessionId);
+                  const priorStart =
+                    supersededSummary?.baseCommit ??
+                    supersededSummary?.branch?.baseCommit ??
+                    supersededSummary?.worktree?.baseCommit;
+                  if (priorStart) {
+                    runtime.bridge.setSessionBaseCommit?.(
+                      replacementId,
+                      priorStart,
+                    );
+                  }
                   runtime.bridge.clearSessionWorktree(sessionId);
                   const severCompleted =
                     await runtime.bridge.severSessionClients(sessionId);
@@ -4620,10 +4635,20 @@ export function registerSessionRoutes(
                 // same thread-scope, source and worktree metadata conventions
                 // as a fresh worktree creation, minus worktree creation. The
                 // worktree metadata also keeps it on the Legacy engine.
+                // Carry the superseded session's recorded start so the
+                // replacement keeps its pre-handoff commits: worktree.baseCommit
+                // below is the worktree's creation tip T, and T..HEAD would hide
+                // the session's own S..T work (R9-13). T stays on the worktree
+                // meta for the handoff rewind classification.
+                const priorStart =
+                  oldSummary?.baseCommit ??
+                  oldSummary?.branch?.baseCommit ??
+                  oldSummary?.worktree?.baseCommit;
                 const spawned = await runtime.bridge.spawnOrAttach({
                   workspaceCwd,
                   modelServiceId,
                   sessionScope: 'thread',
+                  ...(priorStart ? { baseCommit: priorStart } : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
                   ...(source.sourceType !== undefined
                     ? { sourceType: source.sourceType }
@@ -6462,6 +6487,11 @@ export function registerSessionRoutes(
                   path: worktreeResult.worktree.path,
                   branch: worktreeResult.worktree.branch,
                   baseCommit: base.headCommit,
+                  // Carry the base branch so the live summary has the same
+                  // base-branch exclusion the sidecar restores after restart
+                  // (R9-1); without it, integrating upstream re-lists foreign
+                  // commits as this session's loose work.
+                  baseBranch: base.branch || undefined,
                 };
                 await createWorktreeSessionMarker(
                   worktree.path,
@@ -6668,15 +6698,19 @@ export function registerSessionRoutes(
         // live arm too heals that arm's start commit across a daemon restart.
         // Best-effort: a durably committed fork must not fail on a sidecar write.
         if (branchBaseCommit) {
-          try {
-            writeSessionBranchSidecar(
-              createWorkspaceRuntimeSessionService(
-                runtime,
-              ).getBranchSessionPathForArchiveState(result.sessionId, 'active'),
-              branchBaseCommit,
-            );
-          } catch {
-            // Degraded to the pre-sidecar behavior; the fork stays committed.
+          // Best-effort: writeSessionBranchSidecar never throws (returns false
+          // on failure), so a failed persist degrades to the pre-sidecar
+          // behavior and the fork stays committed; surface it in the log.
+          const persisted = writeSessionBranchSidecar(
+            createWorkspaceRuntimeSessionService(
+              runtime,
+            ).getBranchSessionPathForArchiveState(result.sessionId, 'active'),
+            branchBaseCommit,
+          );
+          if (!persisted) {
+            daemonLog?.warn('branch point sidecar write failed', {
+              sessionId: result.sessionId,
+            });
           }
         }
         if (atRecordId === undefined) {

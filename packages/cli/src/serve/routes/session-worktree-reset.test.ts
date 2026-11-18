@@ -152,6 +152,14 @@ afterEach(() => {
 interface SessionSummaryStub {
   hasActivePrompt: boolean;
   pendingInteractionCount?: number;
+  baseCommit?: string;
+  branch?: { name: string; baseBranch: string; baseCommit?: string };
+  worktree?: {
+    slug: string;
+    path: string;
+    branch: string;
+    baseCommit?: string;
+  };
 }
 
 interface FakeBridge {
@@ -454,6 +462,35 @@ describe('POST /session/:id/worktree-reset', () => {
     expect(newSidecar?.supersededBy).toBeUndefined();
     await expectMarkerOwner(fixture, newId);
     expect(archiveMocks.deleteDaemonSessionIfOrphan).not.toHaveBeenCalled();
+  });
+
+  it('carries the superseded session start onto the replacement (R9-13)', async () => {
+    // The superseded plain session recorded start S; the worktree was created
+    // at a later tip T (sidecar worktreeBase 'abc123'). The replacement must
+    // carry S as its top-level start so its pre-handoff S..T commits stay in
+    // the overview; T stays on worktree.baseCommit for the rewind classification.
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId);
+    await fixture.createMarker(oldId);
+    fixture.fake.setSummary(oldId, {
+      hasActivePrompt: false,
+      pendingInteractionCount: 0,
+      baseCommit: 's'.repeat(40),
+    });
+
+    const res = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(fixture.fake.spawnOrAttach).toHaveBeenCalledWith(
+      expect.objectContaining({
+        baseCommit: 's'.repeat(40),
+        worktree: expect.objectContaining({ baseCommit: 'abc123' }),
+      }),
+    );
   });
 
   it('transfers a checkout recorded with a `..` over a missing directory', async () => {

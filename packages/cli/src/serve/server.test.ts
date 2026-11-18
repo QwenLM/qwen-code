@@ -30138,7 +30138,14 @@ describe('createServeApp', () => {
           sessionId: expect.any(String),
           workspaceCwd: repo,
           currentCwd: worktreePath,
-          worktree: { slug, path: worktreePath, branch: '' },
+          // baseBranch must ride the live meta too, so the base-branch
+          // exclusion matches what the sidecar restores after restart (R9-1).
+          worktree: {
+            slug,
+            path: worktreePath,
+            branch: '',
+            baseBranch: 'main',
+          },
         });
         // The dirty capture must target the session's own checkout, not
         // the placement root; dropping dirtyStateSource silently captures
@@ -31084,7 +31091,11 @@ describe('createServeApp', () => {
       }));
       const setSessionBaseCommit = vi.fn();
       bridge.setSessionBaseCommit = setSessionBaseCommit;
-      mockBranchOps.getHeadCommit = () => Promise.resolve('c'.repeat(40));
+      // Distinct SHAs: the branch point is 'c…', any later HEAD read is 'd…'.
+      // The restore must re-apply the sidecar's 'c…', not a fresh capture.
+      let headReads = 0;
+      mockBranchOps.getHeadCommit = () =>
+        Promise.resolve((headReads++ === 0 ? 'c' : 'd').repeat(40));
       const runtime = makeWorkspaceRuntimeForTest({
         workspaceId: 'r82-primary',
         workspaceCwd: workspace,

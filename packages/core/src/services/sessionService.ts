@@ -4309,15 +4309,23 @@ export class SessionService {
               'archived',
               'active',
             );
+          } catch (titleSidecarError) {
+            options.assertCleanupOwned?.();
+            this.warn(
+              `archiveSessions: failed to reconcile title sidecar for ${sessionId}: ${titleSidecarError}`,
+            );
+          }
+          try {
+            options.assertCleanupOwned?.();
             this.reconcileBranchSidecarOnConflict(
               sessionId,
               'archived',
               'active',
             );
-          } catch (titleSidecarError) {
+          } catch (branchSidecarError) {
             options.assertCleanupOwned?.();
             this.warn(
-              `archiveSessions: failed to reconcile title sidecar for ${sessionId}: ${titleSidecarError}`,
+              `archiveSessions: failed to reconcile branch sidecar for ${sessionId}: ${branchSidecarError}`,
             );
           }
           archived.push(sessionId);
@@ -4476,15 +4484,23 @@ export class SessionService {
               'active',
               'archived',
             );
+          } catch (titleSidecarError) {
+            options.assertCleanupOwned?.();
+            this.warn(
+              `unarchiveSessions: failed to reconcile title sidecar for ${sessionId}: ${titleSidecarError}`,
+            );
+          }
+          try {
+            options.assertCleanupOwned?.();
             this.reconcileBranchSidecarOnConflict(
               sessionId,
               'active',
               'archived',
             );
-          } catch (titleSidecarError) {
+          } catch (branchSidecarError) {
             options.assertCleanupOwned?.();
             this.warn(
-              `unarchiveSessions: failed to reconcile title sidecar for ${sessionId}: ${titleSidecarError}`,
+              `unarchiveSessions: failed to reconcile branch sidecar for ${sessionId}: ${branchSidecarError}`,
             );
           }
           unarchived.push(sessionId);

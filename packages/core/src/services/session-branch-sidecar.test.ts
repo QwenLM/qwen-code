@@ -10,6 +10,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -55,6 +56,16 @@ describe('session branch sidecar', () => {
     expect(
       readSessionBranchSidecar(path.join(dir, 'absent.branch.json')),
     ).toBeUndefined();
+  });
+
+  it('rejects malformed JSON, a wrong version, and a missing base commit', () => {
+    const filePath = sessionBranchSidecarPath(dir, sessionId);
+    writeFileSync(filePath, '{not json', 'utf8');
+    expect(readSessionBranchSidecar(filePath)).toBeUndefined();
+    writeFileSync(filePath, JSON.stringify({ version: 2, baseCommit }), 'utf8');
+    expect(readSessionBranchSidecar(filePath)).toBeUndefined();
+    writeFileSync(filePath, JSON.stringify({ version: 1 }), 'utf8');
+    expect(readSessionBranchSidecar(filePath)).toBeUndefined();
   });
 
   it('moves across archive states and removes best-effort', () => {

@@ -10057,6 +10057,7 @@ describe('Server Config (config.ts)', () => {
       '.worktree.json',
       '.pr.json',
       '.title.json',
+      '.branch.json',
     ]);
     mockProcessCwd(NEW_DIR);
     existingPaths(...from);
