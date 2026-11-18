@@ -833,9 +833,9 @@ test('@smoke keeps large source files readable without tokenizing the entire tex
   await expect
     .poll(async () => {
       const count = await source.locator('[data-line]').count();
-      return count > 0 && count < 500;
+      return count > 0 && count < 500 ? 'pruned' : `count=${count}`;
     })
-    .toBe(true);
+    .toBe('pruned');
 });
 
 for (const [cwd, absolutePath] of [
