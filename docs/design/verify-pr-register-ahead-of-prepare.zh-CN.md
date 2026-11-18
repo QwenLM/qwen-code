@@ -90,7 +90,13 @@ watch prompt 中实时 head 由下一次触发投递（gate 游标跟实时 head
 自行重新解析实时 head（`gh pr view … --json headRefOid`）并 `--start` 它；重启后的
 轮次现为 `<live>` 于 `<next>`，`--complete` 重复这两个值，而非原来的 `<H>` 与 `<r>`
 （第 6 轮）。不要在旧标记下 `git checkout` 点名的 head，否则会把点名 head 的证据记到
-所投递 head 的判定名下（R1-1 第 3 轮、R4-1）。prepare 段的错 HEAD checkout 补救以同一性（而非新旧）为判据（R5-1 第 8
+所投递 head 的判定名下（R1-1 第 3 轮、R4-1）。prepare **成功**时也要比对（维护者
+P1，第 14 轮）：prepare 拿树与实时 PR head 比对、而非与注册 head 比对，故
+force-push 回到树已停留的 head 时，即便本轮注册的是另一 head，prepare 仍会成功
+——拒绝分支的比对永不触发，完成就会把另一 head 的证据记到注册 head 名下。因此两条
+流程都在电池前把 prepare 打印的 `head`（可信快照的 `headRefOid`）与注册 head 比对；
+不同即 moved-head 情形（释放本轮标记；电池与 `--complete` 都不跑）。prepare 段的错
+HEAD checkout 补救以同一性（而非新旧）为判据（R5-1 第 8
 轮）：若本轮注册了 head，仅当 prepare 点名的 head **就是**该 head 时普通 checkout
 才是补救；点名的 head 不同（移动或 force-push——prepare 是精确相等判定、不含顺序
 信息）即 moved-head 情形（释放本轮标记；绝不在其下 checkout 点名 head）。未注册任何
@@ -131,7 +137,9 @@ release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的�
   轮把 prepare 点名 head 与注册 head 的比对写明、并把重置限定为无活轮（无在飞标记，
   而非仅未跑电池）；第 13 轮修正重建指引——register-ahead 之前的 watch 无法经标准安装
   重建，因步骤 3 被探针游标与 claim 共同阻挡、而 `--release` 只清 claim，故此类 watch
-  保留旧顺序直至手动迁移（残余），且不得删另一会话的活 watch 腾位。这些 prose 子句均在
+  保留旧顺序直至手动迁移（残余），且不得删另一会话的活 watch 腾位。第 14 轮（维护者
+  P1）把 prepare 成功后的 head 比对补进两条流程，并各钉在本节切片上（共享的「释放而
+  不完成」句按切片各钉，使一节副本不为另一节作不在场证明）。这些 prose 子句均在
   文本钉套件钉住。
 - `scripts/tests/verify-pr-watch-state.test.js`：新见证走 **CLI**（`run(root, …)`，
   演练本 PR 改动的助手代码——`parseArgs` 要求、`completeRound` 返回字段、`main`
@@ -144,7 +152,9 @@ release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的�
   head（无静默丢弃）。目录链的 CLI 见证也在此文件（而非文本钉文件）：显式完成目录
   覆盖不同的 start 目录（重排解析链即变红）；带显式目录的重放完成覆盖先前判定目录
   （prior 臂优先级）；完成会按所给目录登记活 head、随后拒绝再 start——即 checkout
-  补救是唯一防线所防的 certifies-falsely 危害（助手刻意不做树/证据校验）。
+  补救是唯一防线所防的 certifies-falsely 危害（助手刻意不做树/证据校验）。第 14 轮
+  见证覆盖 prepare 成功但 head 不符：注册某 head 后释放它（moved-head 恢复、绝不
+  完成）使其无判定，再以另一 head 的证据目录完成它会被拒绝——注册 head 不获得判定。
 
 ## 关键设计决定
 

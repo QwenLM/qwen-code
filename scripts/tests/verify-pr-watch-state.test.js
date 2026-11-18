@@ -3365,6 +3365,51 @@ describe('R17-2 register ahead of prepare', () => {
     ).toBe(3);
   });
 
+  // P1 (maintainer, round 14): prepare checks the tree against the LIVE PR head,
+  // not the registered one, so a force-push back to a head the tree already sits
+  // at prepares SUCCESSFULLY while the round registered a different head — the
+  // refusal-handler comparison never runs. The contract's post-success
+  // comparison routes that to the moved-head recovery: release this round's
+  // marker, never complete. This witnesses the recovery's effect — the
+  // registered head receives no verdict, and completing it with the other
+  // head's evidence directory is refused (contrast the witness above, where
+  // completing under the live marker files the wrong evidence).
+  it('a prepare-success head mismatch releases the round without a verdict', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    // Prepare succeeded for another head; the recovery releases this round's
+    // marker instead of completing it.
+    expect(
+      run(root, ['16866', '--release', '--head', HEAD, '--round', '11']).status,
+    ).toBe(0);
+    // The registered head received no verdict.
+    expect(
+      readState(root, 16866).verifiedHeads.find((e) =>
+        sameCommit(e.head, HEAD),
+      ),
+    ).toBeUndefined();
+    // Completing it with the other head's evidence directory is now refused
+    // (no marker, no prior verdict), so the wrong evidence cannot be filed.
+    expect(
+      run(root, [
+        '16866',
+        '--complete',
+        '--head',
+        HEAD,
+        '--round',
+        '11',
+        '--verdict',
+        'merge-ready',
+        '--artifact-dir',
+        'tmp/pr16866-verify-otherhead',
+      ]).status,
+    ).toBe(3);
+    // The head is not deduped away: a later genuine round can still start it.
+    expect(
+      run(root, ['16866', '--start', '--head', HEAD, '--round', '12']).status,
+    ).toBe(0);
+  });
+
   // R2-3: a replayed completion (no in-flight marker) inherits the prior
   // verdict's directory and prints no warning.
   it('a replayed completion inherits the prior verdict directory', () => {

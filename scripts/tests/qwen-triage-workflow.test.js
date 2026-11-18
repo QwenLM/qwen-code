@@ -6700,6 +6700,16 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(manualSlice).toContain(
       'classifies the delta and re-measures at `<live>` (the new head), not the original `H`',
     );
+    // P1 (maintainer, round 14): the manual flow also compares the prepared head
+    // with the registered one when prepare SUCCEEDS (the <H> twin of the watch
+    // pin); the shared release-without-complete sentence is pinned on this
+    // slice so the watch copy is not its alibi.
+    expect(manualSlice).toContain(
+      "When prepare succeeds, compare the `head` line it printed (the trusted snapshot's `headRefOid`) with `<H>` before the battery",
+    );
+    expect(manualSlice).toContain(
+      "A differing head is the moved-head case below: release this round's marker and run neither the battery nor `--complete`",
+    );
     // R1-2: a positional pin — registration precedes prepare in this section
     // (an order-insensitive toContain would stay green if --start moved back
     // below prepare). Round 13: scope it to manualSlice, not the whole flattened
@@ -6881,6 +6891,19 @@ describe('qwen-triage verify hardening round 2', () => {
     // transient prepare failure.
     expect(promptSlice).toContain(
       'a differing head is the moved-head case below, not a transient failure',
+    );
+    // P1 (maintainer, round 14): the comparison must also run when prepare
+    // SUCCEEDS — prepare checks the tree against the live PR head, not the
+    // registered one, so a force-push back to a head the tree already sits at
+    // prepares successfully while the round registered a different head; the
+    // refusal-handler comparison alone never fires, and completing would file
+    // the other head's evidence under the registered head. Removing the
+    // post-success comparison reds these pins.
+    expect(promptSlice).toContain(
+      "When prepare succeeds, compare the `head` line it printed (the trusted snapshot's `headRefOid`) with `<headSha>` before the battery",
+    );
+    expect(promptSlice).toContain(
+      "A differing head is the moved-head case below: release this round's marker and run neither the battery nor `--complete`",
     );
     // R1-1: the watch prompt's prepare-failure recovery carries the full
     // --release form with --repo (the <headSha> variant; the manual section

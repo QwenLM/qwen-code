@@ -754,7 +754,14 @@ rather than a silently dropped head (the probe cursor already advanced past the
 delivered head). `<r>` is this round's number — pick the next integer and
 **repeat the same value in `--complete`**; the completion is matched by head and
 round. Then run prepare (trusted host metadata); it creates and prints the
-artifact directory `<dir>`, which you record at `--complete`. If prepare
+artifact directory `<dir>`, which you record at `--complete`. When prepare
+succeeds, compare the `head` line it printed (the trusted snapshot's
+`headRefOid`) with `<headSha>` before the battery: prepare checks the tree
+against the live PR head, not the registered one, so a force-push back to a
+head the tree already sits at prepares successfully while this round
+registered `<headSha>` — completing would file that head's evidence under
+`<headSha>`. A differing head is the moved-head case below: release this
+round's marker and run neither the battery nor `--complete`. If prepare
 refuses, compare the head it names (the "not PR head …" in its refusal) with
 `<headSha>` — a differing head is the moved-head case below, not a transient
 failure. If prepare fails after `--start`, recover with
@@ -1023,7 +1030,14 @@ ambiguous rather than verify a guessed PR. Then, in order:
    — no `--artifact-dir`, because prepare has not printed the directory yet.
    `<r>` is this round's number; repeat the same value in `--complete`. Then run
    prepare; it creates and prints the artifact directory `<dir>`, which you
-   record at `--complete`. If prepare fails after `--start`, recover with
+   record at `--complete`. When prepare succeeds, compare the `head` line it
+   printed (the trusted snapshot's `headRefOid`) with `<H>` before the
+   battery: prepare checks the tree against the live PR head, not the
+   registered one, so a force-push back to a head the tree already sits at
+   prepares successfully while this round registered `<H>` — completing would
+   file that head's evidence under `<H>`. A differing head is the moved-head
+   case below: release this round's marker and run neither the battery nor
+   `--complete`. If prepare fails after `--start`, recover with
    `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> --round <r> --repo <owner>/<repo>`,
    then start the head again
    (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r+1> --repo <owner>/<repo>`)

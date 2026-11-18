@@ -117,8 +117,16 @@ headRefOid`) and `--start` it; the restarted round is now `<live>` at `<next>`,
 and `--complete` repeats those values, not the original `<H>` and `<r>` (round
 6). Do not `git checkout` the named head under the old marker, which would file
 the named head's evidence under the delivered head's verdict (R1-1 round 3,
-R4-1). The prepare paragraph's wrong-HEAD checkout
-remedy keys off identity, not recency (R5-1 round 8): if this round registered a
+R4-1). The comparison also runs when prepare **succeeds** (maintainer P1,
+round 14): prepare checks the tree against the live PR head, not the registered
+one, so a force-push back to a head the tree already sits at prepares
+successfully while the round registered a different head — the refusal-handler
+comparison never fires, and completing would file the other head's evidence
+under the registered head. Both flows therefore compare the `head` prepare
+printed (the trusted snapshot's `headRefOid`) with the registered head before
+the battery; a differing head is the moved-head case (release this round's
+marker; run neither the battery nor `--complete`). The prepare paragraph's
+wrong-HEAD checkout remedy keys off identity, not recency (R5-1 round 8): if this round registered a
 head, the plain checkout is the remedy only when the named head **is** that
 head; a head that differs (moved or force-pushed — prepare tests exact equality
 and states no ordering) is the moved-head case (release this round's marker;
@@ -185,8 +193,11 @@ existing dead-round recovery (`--release` for a round that died after
   through the standard install does not work, because step 3 is blocked by the
   probe cursor as well as the claim and `--release` clears only the claim, so
   such a watch keeps the old order until manually migrated (a residual), and
-  another session's live watch must not be deleted to make room. These prose
-  clauses are pinned in the text-pin suite.
+  another session's live watch must not be deleted to make room. Round 14
+  (maintainer P1) adds the post-prepare-success head comparison to both flows
+  and pins it on each section's slice (the shared release-without-complete
+  sentence is pinned per slice so one section's copy is not the other's alibi).
+  These prose clauses are pinned in the text-pin suite.
 - `scripts/tests/verify-pr-watch-state.test.js`: new witnesses driven through
   the **CLI** (`run(root, …)`, exercising the helper code this PR changes — the
   `parseArgs` requirement, `completeRound`'s return field, and `main`'s
@@ -206,7 +217,10 @@ existing dead-round recovery (`--release` for a round that died after
   (prior-arm precedence); and a completion files the live head with whatever
   directory it is given, then refuses a re-start — the certifies-falsely harm the
   checkout remedy is the only guard against (the helper carries no tree/evidence
-  check by design).
+  check by design). A round-14 witness covers the prepare-success head mismatch:
+  registering a head then releasing it (the moved-head recovery, never
+  completing) leaves it with no verdict, and completing it with another head's
+  evidence directory is refused — the registered head receives no verdict.
 
 ## Key design decisions
 
