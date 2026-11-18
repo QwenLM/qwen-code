@@ -21,6 +21,7 @@ import type {
   SlashMenuState,
 } from '../hooks/useComposerCore';
 import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
+import { MODEL_SHEET_QUERY } from '../hooks/useIsTouchComposer';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import type { VoiceButtonHandle } from '../voice/VoiceButton';
 import type {
@@ -140,7 +141,18 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
       },
       capabilities: { features: [] },
     }),
-    useOptionalWorkspace: () => uploadWorkspaceState.current,
+    useOptionalWorkspace: () => {
+      throw new Error('composer must not read the daemon workspace hook');
+    },
+  };
+});
+
+vi.mock('../hooks/useComposerWorkspace.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../hooks/useComposerWorkspace.js')>();
+  return {
+    ...actual,
+    useOptionalComposerWorkspace: () => uploadWorkspaceState.current,
   };
 });
 
@@ -178,7 +190,10 @@ const composerCoreState = vi.hoisted(() => ({
   workspaceUploadBusy: false,
 }));
 
-// Controllable `useOptionalWorkspace()` value for file-upload gating tests.
+// Controllable `useOptionalComposerWorkspace()` value for file-upload gating
+// tests, supplied through the neutral hook mock above. The daemon-barrel
+// `useOptionalWorkspace` entry throws, so re-coupling the composer to the
+// daemon hook reddens this suite instead of passing silently.
 // Defaults to undefined (upload disabled) so existing tests are unaffected.
 const uploadWorkspaceState = vi.hoisted(() => ({
   current: undefined as
@@ -5324,6 +5339,322 @@ describe('ChatEditor model picker host content', () => {
     );
     act(() => row(modelA.id).focus());
     expect(update.mock.lastCall?.[0].currentModelId).toBe(modelB.id);
+  });
+
+  it('opens the model picker as a bottom sheet on coarse pointers', async () => {
+    const media = vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === MODEL_SHEET_QUERY,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+    try {
+      const onSelectModel = vi.fn();
+      const props: ChatEditorRenderProps = {
+        visibleToolbarActions: ['model'],
+        currentModel: modelA.id,
+        availableModels: [modelA, modelB],
+        onSelectModel,
+        reasoning: { enabled: true, effort: 'high', efforts: ['low', 'high'] },
+      };
+      const container = renderChatEditor(props);
+      open(container);
+      const sheet = document.querySelector('[data-web-shell-model-sheet]')!;
+      expect(sheet).not.toBeNull();
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(sheet.contains(document.activeElement)).toBe(true);
+      expect(document.activeElement).not.toBe(sheet.querySelector('input'));
+      expect(
+        document.querySelector('[data-web-shell-model-submenu]'),
+      ).toBeNull();
+      const sectionTrigger = sheet.querySelector<HTMLButtonElement>(
+        '[data-web-shell-model-submenu-trigger]',
+      )!;
+      act(() => sectionTrigger.click());
+      const list = sheet.querySelector<HTMLElement>(
+        '[data-web-shell-model-sheet-list]',
+      )!;
+      expect(list.contains(document.activeElement)).toBe(true);
+      expect(
+        sectionTrigger.compareDocumentPosition(list) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(
+        sheet.querySelector(`[data-model-id="${modelA.id}"]`),
+      ).not.toBeNull();
+      expect(
+        sheet.querySelector(`[data-model-id="${modelB.id}"]`),
+      ).not.toBeNull();
+
+      const search = sheet.querySelector<HTMLInputElement>(
+        'input[type="search"]',
+      )!;
+      act(() => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(search, 'anthropic');
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      expect(sheet.querySelector(`[data-model-id="${modelA.id}"]`)).toBeNull();
+      expect(
+        sheet.querySelector(`[data-model-id="${modelB.id}"]`),
+      ).not.toBeNull();
+
+      act(() =>
+        sheet
+          .querySelector<HTMLButtonElement>(`[data-model-id="${modelB.id}"]`)!
+          .click(),
+      );
+      expect(onSelectModel).toHaveBeenCalledWith(modelB.id);
+      expect(document.activeElement).toBe(sectionTrigger);
+      expect(
+        document.querySelector('[data-web-shell-model-sheet]'),
+      ).not.toBeNull();
+      expect(
+        sheet.querySelector('[data-web-shell-model-sheet-list]'),
+      ).toBeNull();
+      rerenderChatEditor(container, { ...props, modelControlsDisabled: true });
+      expect(
+        document.querySelector('[data-web-shell-model-sheet]'),
+      ).not.toBeNull();
+      rerenderChatEditor(container, props);
+
+      act(() => sectionTrigger.click());
+      expect(
+        sheet.querySelector<HTMLInputElement>('input[type="search"]')!.value,
+      ).toBe('');
+      expect(
+        sheet.querySelector(`[data-model-id="${modelA.id}"]`),
+      ).not.toBeNull();
+      expect(
+        sheet.querySelector(`[data-model-id="${modelB.id}"]`),
+      ).not.toBeNull();
+      act(() => {
+        const search = sheet.querySelector<HTMLInputElement>(
+          'input[type="search"]',
+        )!;
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(search, 'anthropic');
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      act(() => sectionTrigger.click());
+      expect(sheet.querySelector('[data-model-id]')).toBeNull();
+      expect(document.activeElement).toBe(sectionTrigger);
+      act(() => sectionTrigger.click());
+      expect(
+        sheet.querySelector<HTMLInputElement>('input[type="search"]')!.value,
+      ).toBe('');
+      expect(
+        sheet.querySelector(`[data-model-id="${modelA.id}"]`),
+      ).not.toBeNull();
+      expect(
+        sheet.querySelector(`[data-model-id="${modelB.id}"]`),
+      ).not.toBeNull();
+      act(() => sectionTrigger.click());
+      expect(sheet.querySelector('[data-model-id]')).toBeNull();
+
+      await act(async () => {
+        sheet
+          .querySelector<HTMLButtonElement>(
+            '[data-web-shell-model-sheet-done]',
+          )!
+          .click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(document.querySelector('[data-web-shell-model-sheet]')).toBeNull();
+      await vi.waitFor(() => {
+        expect(document.activeElement).toBe(
+          document.querySelector('[data-web-shell-model-button]'),
+        );
+      });
+    } finally {
+      media.mockImplementation(
+        () =>
+          ({
+            matches: false,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+    }
+  });
+
+  it('keeps the mode picker as a popover on coarse pointers', () => {
+    const media = vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === MODEL_SHEET_QUERY,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+    try {
+      const container = renderChatEditor({
+        visibleToolbarActions: ['approvalMode'],
+        currentMode: 'default',
+        availableModes: ['default', 'auto-edit'],
+      });
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+          .click(),
+      );
+      expect(document.querySelector('[data-web-shell-model-sheet]')).toBeNull();
+      expect(
+        document.querySelector('[data-web-shell-mode-popover]'),
+      ).not.toBeNull();
+    } finally {
+      media.mockImplementation(
+        () =>
+          ({
+            matches: false,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+    }
+  });
+
+  it('keeps the bottom sheet open when interacting with host overlays', async () => {
+    const media = vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === MODEL_SHEET_QUERY,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+    try {
+      const hostAction = vi.fn();
+      const mountHeader = vi.fn<
+        WebShellModelPickerMount<WebShellModelPickerContext>
+      >((target, context) => {
+        const button = document.createElement('button');
+        button.textContent = 'Host overlay action';
+        button.addEventListener('click', hostAction);
+        context.overlayContainer.append(button);
+        return { update() {}, dispose() {} };
+      });
+      const container = renderChatEditor({
+        visibleToolbarActions: ['model'],
+        currentModel: modelA.id,
+        availableModels: [modelA, modelB],
+        reasoning: { enabled: true, effort: 'high', efforts: ['low', 'high'] },
+        customization: { modelPicker: { mountHeader } },
+      });
+      open(container);
+      act(() =>
+        document
+          .querySelector<HTMLButtonElement>(
+            '[data-web-shell-model-submenu-trigger]',
+          )!
+          .click(),
+      );
+      const overlayRoot = document.querySelector<HTMLElement>(
+        '[data-web-shell-model-picker-overlays]',
+      )!;
+      expect(overlayRoot.style.pointerEvents).toBe('auto');
+      const overlayButton =
+        overlayRoot.querySelector<HTMLButtonElement>('button')!;
+      expect(overlayButton).not.toBeNull();
+
+      const escapeEvent = new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => overlayButton.dispatchEvent(escapeEvent));
+      expect(escapeEvent.defaultPrevented).toBe(true);
+      expect(
+        document.querySelector('[data-web-shell-model-sheet]'),
+      ).not.toBeNull();
+
+      act(() =>
+        overlayButton.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            button: 0,
+            cancelable: true,
+          }),
+        ),
+      );
+      act(() =>
+        overlayButton.dispatchEvent(
+          new MouseEvent('click', { bubbles: true, button: 0 }),
+        ),
+      );
+      expect(hostAction).toHaveBeenCalledTimes(1);
+      expect(
+        document.querySelector('[data-web-shell-model-sheet]'),
+      ).not.toBeNull();
+
+      const sheet = document.querySelector<HTMLElement>(
+        '[data-web-shell-model-sheet]',
+      )!;
+      act(() =>
+        sheet.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }),
+        ),
+      );
+      await vi.waitFor(() => {
+        expect(
+          document.querySelector('[data-web-shell-model-sheet]'),
+        ).toBeNull();
+      });
+
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')!
+          .click(),
+      );
+      act(() =>
+        document
+          .querySelector<HTMLButtonElement>(
+            '[data-web-shell-model-submenu-trigger]',
+          )!
+          .click(),
+      );
+      const backdrop = document.querySelector<HTMLElement>(
+        '[data-slot="drawer-overlay"]',
+      )!;
+      act(() => {
+        backdrop.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            button: 0,
+            cancelable: true,
+          }),
+        );
+        backdrop.dispatchEvent(
+          new MouseEvent('click', { bubbles: true, button: 0 }),
+        );
+      });
+      await vi.waitFor(() => {
+        expect(
+          document.querySelector('[data-web-shell-model-sheet]'),
+        ).toBeNull();
+      });
+    } finally {
+      media.mockImplementation(
+        () =>
+          ({
+            matches: false,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+    }
   });
 });
 

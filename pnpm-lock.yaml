@@ -44,7 +44,7 @@ overrides:
   readdir-glob@1: 4.0.0
   openapi-typescript>supports-color: 7.2.0
 
-pnpmfileChecksum: sha256-L6WVIkt0aoaBgW0r43a/Cft0ZrggZAdngFMy5owyKJo=
+pnpmfileChecksum: sha256-SiA16Bb0bSLZDhJgrl1m/iYpL/RmOk0h1D5/8BGe0e0=
 
 importers:
 
@@ -570,6 +570,22 @@ importers:
         specifier: 5.8.3
         version: 5.8.3
 
+  packages/channels/generic-webhook:
+    dependencies:
+      '@qwen-code/channel-base':
+        specifier: workspace:*
+        version: link:../base
+      '@qwen-code/network-policy':
+        specifier: workspace:*
+        version: link:../../network-policy
+      undici:
+        specifier: 7.30.2
+        version: 7.30.2
+    devDependencies:
+      typescript:
+        specifier: 5.8.3
+        version: 5.8.3
+
   packages/channels/github:
     dependencies:
       '@octokit/rest':
@@ -581,7 +597,16 @@ importers:
       https-proxy-agent:
         specifier: ^7.0.6
         version: 7.0.6(supports-color@7.2.0)
+      proper-lockfile:
+        specifier: ^4.1.2
+        version: 4.1.2
+      undici:
+        specifier: 7.30.2
+        version: 7.30.2
     devDependencies:
+      '@types/proper-lockfile':
+        specifier: ^4.1.4
+        version: 4.1.4
       typescript:
         specifier: 5.8.3
         version: 5.8.3
@@ -741,6 +766,9 @@ importers:
       '@qwen-code/channel-feishu':
         specifier: workspace:*
         version: link:../channels/feishu
+      '@qwen-code/channel-generic-webhook':
+        specifier: workspace:*
+        version: link:../channels/generic-webhook
       '@qwen-code/channel-github':
         specifier: workspace:*
         version: link:../channels/github
@@ -1106,6 +1134,9 @@ importers:
       '@opentelemetry/semantic-conventions':
         specifier: ^1.36.0
         version: 1.36.0
+      '@qwen-code/network-policy':
+        specifier: workspace:*
+        version: link:../network-policy
       '@xterm/headless':
         specifier: 5.5.0
         version: 5.5.0
@@ -1413,6 +1444,12 @@ importers:
       typescript:
         specifier: 5.8.2
         version: 5.8.2
+
+  packages/network-policy:
+    devDependencies:
+      typescript:
+        specifier: 5.8.3
+        version: 5.8.3
 
   packages/node-repl:
     dependencies:

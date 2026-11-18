@@ -32,7 +32,7 @@ When the flag is on, the global `bearerAuth` middleware gates **every normal API
 
 **`--allow-origin <pattern>` (T2.4 [#4514](https://github.com/QwenLM/qwen-code/issues/4514)).** Browser clients hitting the daemon cross-origin are blocked by default — a request carrying an `Origin` header returns `403 {"error":"Request denied by CORS policy"}` because CLI/SDK clients never send `Origin` and the daemon treats its presence as a sign the request came from a browser context the operator has not opted into. One exception precedes the wall on a non-loopback bind with a token: a same-origin request (`Origin` equal to the direct socket scheme plus the normalized `Host` authority) is bearer-authenticated and its `Origin` stripped **on the primary listener** — with a valid bearer the route's own status follows, with a missing or invalid bearer a `401`, **except the pre-auth Web Shell document, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/mcp-app-sandbox` routes, which are served without a credential as in every other mode** — and only cross-origin or non-matching `Origin` values keep the `403` envelope. Pass `--allow-origin <pattern>` (repeatable) at boot to install an allowlist instead of the wall. Each pattern is either:
 
-- The literal `*` — admit any origin. **Risky**: boot refuses when `*` is configured but no bearer token resolves. The guard reads the _resolved_ token — `--token`, `QWEN_SERVER_TOKEN`, `--open-with-auth`'s generated loopback token, or the ephemeral bearer a non-loopback bind generates when neither configured source is present — so this refusal is loopback-only. The boot breadcrumb emits a stderr warning when `*` is in the list. **Recommendation**: pair with `--require-auth` on loopback binds so `/health` is also gated by the bearer — it's registered before the bearer middleware on loopback by default (so k8s/Compose probes can reach it without a token), and a `*` allowlist makes it reachable from any cross-origin browser. `--require-auth` still leaves the Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id`, `/plugins`, `/channels`, `/live`, `/scheduled-tasks`, `/goals`, and `/settings` document navigations) pre-auth on loopback by design — they are mounted before the bearer middleware — so under a `*` allowlist they remain readable from any cross-origin browser; `--no-web` removes that surface. On non-loopback binds the bearer is already mandatory at boot and `/health` is registered behind it. Normal API routes are bearer-gated, channel webhook ingress retains its own shared-secret gate, and Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id`, `/plugins`, `/channels`, `/live`, `/scheduled-tasks`, `/goals`, and `/settings` document navigations) remain pre-auth unless `--no-web` removes them.
+- The literal `*` — admit any origin. **Risky**: boot refuses when `*` is configured but no bearer token resolves. The guard reads the _resolved_ token — `--token`, `QWEN_SERVER_TOKEN`, `--open-with-auth`'s generated loopback token, or the ephemeral bearer a non-loopback bind generates when neither configured source is present — so this refusal is loopback-only. The boot breadcrumb emits a stderr warning when `*` is in the list. **Recommendation**: pair with `--require-auth` on loopback binds so `/health` is also gated by the bearer — it's registered before the bearer middleware on loopback by default (so k8s/Compose probes can reach it without a token), and a `*` allowlist makes it reachable from any cross-origin browser. `--require-auth` still leaves the Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id`, `/plugins`, `/channels`, `/channel-events`, `/live`, `/scheduled-tasks`, `/pr-watches`, `/goals`, and `/settings` document navigations) pre-auth on loopback by design — they are mounted before the bearer middleware — so under a `*` allowlist they remain readable from any cross-origin browser; `--no-web` removes that surface. On non-loopback binds the bearer is already mandatory at boot and `/health` is registered behind it. Normal API routes are bearer-gated, channel webhook ingress retains its own shared-secret gate, and Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id`, `/plugins`, `/channels`, `/channel-events`, `/live`, `/scheduled-tasks`, `/pr-watches`, `/goals`, and `/settings` document navigations) remain pre-auth unless `--no-web` removes them.
 - A canonical URL origin — `<scheme>://<host>[:<port>]`. **No trailing slash, no path, no userinfo, no query.** Boot refuses with `InvalidAllowOriginPatternError` if the entry fails the round-trip `new URL(pattern).origin === pattern`; the error message names the bad pattern and the canonical form. Strict-by-intent: silent normalization (e.g. trimming a trailing `/`) would let typos slip through and accept ambiguous input. Without a resolved token — which after generation means a loopback bind — HTTP(S) entries are limited to loopback hosts; a non-loopback browser origin requires a token because it can otherwise drive the full operator API, including code execution as the daemon user. Explicit browser-extension origins keep their existing tokenless local-automation path. Startup logs the authority granted to any tokenless allowed browser origin.
 
 Matched origins receive the standard CORS response headers on every request:
@@ -938,11 +938,12 @@ Response shape:
     "maxTotalSessions": 800,
     "maxPendingPromptsPerSession": 5,
     "listenerMaxConnections": 256,
+    "maxSseConnections": 204,
     "eventRingSize": 8000,
     "eventRingMaxBytes": 8388608,
     "compactedReplayMaxBytes": 4194304,
     "promptDeadlineMs": null,
-    "writerIdleTimeoutMs": null,
+    "writerIdleTimeoutMs": 60000,
     "channelIdleTimeoutMs": 0,
     "sessionIdleTimeoutMs": 1800000,
     "acpConnectionCap": 64
@@ -2871,6 +2872,22 @@ top-level session). Agents launched by the top-level session omit
 `parentAgentId` and `parentName`; clients should treat all three fields as
 optional and fall back to a flat list when they are absent.
 
+With `?includeSubSessions=true` (capability `session_sub_session_send`), the
+response also carries `subSessions`: the `sent` launches the daemon reports
+back to this session, from `POST /session/:id/sub-sessions` or from the
+model's `create_sub_session`. Each is `{ kind: "session", id, sessionId,
+workspaceCwd, label, status, startTime, endTime?, runtimeMs, byPerson,
+waitingForInput }`, where `id` is the completion's task id, `sessionId` and
+`workspaceCwd` name the target, and `status` changes from `running` to
+`completed`, `failed`, or `cancelled`. A 30-minute observation timeout
+produces `failed` and pauses while `waitingForInput` indicates a pending
+permission request or question in the target. The daemon keeps at most 20
+records per caller in memory and refuses another send while all 20 slots are
+active. A restart forgets them. When one starts, settles, or starts or stops
+waiting the daemon publishes `sub_session_task_changed` with `{ sessionId }` (the caller) on
+every session in the caller's workspace; clients filter by `sessionId` and
+re-read this route.
+
 ### `GET /session/:id/tasks/:taskId/runtime`
 
 On-demand detail for one shell task. `GET /session/:id/tasks` carries lifecycle
@@ -3087,8 +3104,9 @@ from the selected session's own MCP manager remain available.
 
 Saved view state for one Generated UI card, advertised by
 `generated_ui_state`. Both methods require a session-bound
-`X-Qwen-Client-Id` (403 otherwise) and a card id matching
-`^gc_[A-Za-z0-9_-]{16,64}$` (400 `invalid_card_id`).
+`X-Qwen-Client-Id` and a card id matching `^gc_[A-Za-z0-9_-]{16,64}$`
+(400 `invalid_card_id`). A missing client id returns 403; a malformed client
+id, or one bound to another session, returns 400 `invalid_client_id`.
 
 `GET` returns `{ "cardId", "revision", "value" }`; a card that was never saved
 has `revision: 0` and `value: null`. `PUT` takes
@@ -4137,6 +4155,29 @@ If queued prompts are unexpected in a multi-client deployment, first confirm
 whether callers are sharing a default `sessionScope: "single"` session. For
 independent per-thread conversations, create sessions with
 `sessionScope: "thread"` so prompts serialize only within that thread.
+
+### `POST /session/:id/sub-sessions`
+
+A person sends a prompt from the page of session `:id` to a new session or any existing one, in its own workspace or another registered one (capability `session_sub_session_send`). The daemon runs it as a `sent` launch of `create_sub_session` with `:id` as the caller: the same trust and cap checks, and the same completion notification, which `:id` takes as a turn of its own. Unlike the tool, picking the workspace is the approval, so nothing is asked separately; the target keeps its own approval mode; any session but `:id` itself can be the target, keeping its own parent and source; and the delegation depth limit does not apply.
+
+```bash
+curl -X POST http://127.0.0.1:4170/session/$SID/sub-sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Summarize the open issues","workspace":"/work/other"}'
+# → 202 {"sessionId":"…","workspaceCwd":"/work/other"}
+```
+
+- `prompt` (required): non-empty, at most the `create_sub_session` prompt limit.
+- `workspace`: a registered, trusted workspace path or id. Absent means the caller's own workspace.
+- `targetSessionId`: an existing session to send to instead of starting a new one. Pass `workspace` too when it lives in another workspace.
+
+The response carries `sessionId`, `workspaceCwd` when the session runs in another workspace, and `taskId` when the completion's task id is not the session id (a follow-up). Errors: `400` (`invalid_sub_session_prompt`, `invalid_sub_session_workspace`, `invalid_sub_session_target`), `409 sub_session_send_refused` with the launcher's reason (an untrusted or unknown workspace, an unknown session, `:id` itself as the target, a cap, or a caller that does not record its chat), `501 sub_session_send_unavailable` for a session whose runtime cannot start sub-sessions, and the usual owner-route errors (standalone sessions are refused).
+
+While the target runs, the send is listed in `GET /session/:id/tasks?includeSubSessions=true`.
+
+A destination workspace using the `consensus` permission policy returns `409 sub_session_send_refused` before launching work. Send the message directly from the destination session to use its consensus approvals.
+
+The message is written to `:id`'s conversation as an `agent_mention` record whose `_meta.qwenAgentMessage.sentTo` is `{ sessionId, workspaceCwd, title? }` (the target), without starting a turn. When the target's turn settles, `:id` receives the completion notification and runs a turn in which its model tells the person what the target replied; the notification's label is `<workspace> · <title>`, and `backgroundTask.fromSession` identifies `{ sessionId, workspaceCwd }` for the target. The prompt the target receives carries `{ type: "source", sessionId, workspaceCwd, title? }` (the caller) among `_meta.inputAnnotations` on its `user_message_chunk`, live and on replay; the model's `create_sub_session` launches carry it too. The TypeScript SDK exposes the sender on normalized delta metadata as `sourceAnnotation` and keeps `inputAnnotations` for reference annotations.
 
 ### `DELETE /session/:id`
 
