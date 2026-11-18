@@ -163,6 +163,17 @@ export function createDaemonChatIntents(): DaemonChatIntents {
       ...intent.operation,
       state: stateFor(kind, result.outcome),
     };
+    // An established decision is no longer pending: release its request
+    // identity here so both the settle and the in-flight evidence paths do it.
+    // A failed decision does not supersede its request, so it keeps the
+    // identity live and a retry can still establish.
+    if (
+      kind === 'approval' &&
+      target.requestId !== undefined &&
+      intent.operation.state === 'established'
+    ) {
+      liveApprovalRequests.delete(target.requestId);
+    }
     return result;
   };
 
@@ -237,16 +248,6 @@ export function createDaemonChatIntents(): DaemonChatIntents {
       // still in flight is applied once admission resolves, not discarded.
       intent.witness = witness;
       const result = applyEvidence(intent, witness);
-      // A settled approval is no longer pending: release its request identity
-      // so the live set does not grow with every answered request.
-      const { kind, target } = intent.operation;
-      if (
-        kind === 'approval' &&
-        target.requestId !== undefined &&
-        isTerminal(intent.operation.state)
-      ) {
-        liveApprovalRequests.delete(target.requestId);
-      }
       rebuild();
       return result;
     },

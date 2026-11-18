@@ -69,9 +69,11 @@ engine must source the witness from evidence, not from the transport promise.
   live: if the recorded `target.requestId` is absent or not in the live set, the
   positive witness is forced to `none` and the decision does not establish.
   Negative evidence is not rewritten, so a superseded decision that genuinely
-  failed still terminalizes as `failed`. Once an approval settles terminal the
-  engine releases its request identity, so the live set does not grow with every
-  answered request.
+  failed still terminalizes as `failed`. Once an approval settles `established`
+  the engine releases its request identity — in the single evidence-application
+  path, so the in-flight route releases too — and the live set does not grow with
+  every answered request. A `failed` decision is not a supersession: it keeps its
+  request live so a retry can still establish.
 - `abandon(operationId)` — gives an attempt whose admission can never be
   confirmed (a thrown transport leaves it `unknown`, which no witness can
   terminalize) an exit: it terminalizes the row as `failed`, never
@@ -151,11 +153,13 @@ failed still terminalizes instead of leaking a permanent `unsettled` row.
 being settled it is by definition no longer awaiting one, so clearing liveness
 when the user answers would make every approval `unsettled`. The caller marks a
 request live on arrival and not-live only on supersede/cancel; the engine itself
-releases the identity when the decision settles terminal, which both keeps the
-natural answer-then-settle ordering correct and bounds the set. The recorded
-target is a frozen snapshot, so a caller mutating the object it passed cannot
-retarget a dispatched attempt into a live request and revive a superseded
-decision.
+releases the identity when the decision settles `established` (in the shared
+evidence-application path, so an establishment via retained in-flight evidence
+releases too), which keeps the natural answer-then-settle ordering correct and
+bounds the set. A `failed` decision does not supersede its request, so the
+identity stays live and a retry can still establish. The recorded target is a
+frozen snapshot, so a caller mutating the object it passed cannot retarget a
+dispatched attempt into a live request and revive a superseded decision.
 
 A thrown transport leaves admission `unknown`, which the truth table keeps
 `unsettled` under any witness; without an exit it would hold the phase open for
@@ -219,6 +223,12 @@ an older one and retention does not grow without bound across distinct turns.
     while its POST is in flight terminalizes it; the transport then resolving
     `accepted` leaves the row `failed` and the phase `idle`, and a later settle is
     a no-op.
+14. **A retry after a failed decision still establishes.** A decision settling
+    `failed` does not supersede its request; a retry for the same still-live
+    request establishes (release happens only on `established`).
+15. **In-flight establishment releases the identity.** An approval established
+    via retained in-flight evidence releases its request identity, so a
+    re-delivered decision for the same request no longer establishes.
 
 Supporting cases pin rejected admission (no outcome, untracked, settling its id
 is a no-op), a failed witness, settling an unknown id (no-op), bounded retention,
@@ -240,7 +250,10 @@ the retained in-flight witness reds the in-flight-evidence case; removing the
 `unknown`-admission guard from `abandon` reds the live-turn case; removing the
 clear-on-settle release reds the answer-then-settle case; skipping the prune of
 superseded terminal rows in rebuild reds the acknowledge-retry case; dropping the
-abandoned check after `await transport()` reds the late-response case.
+abandoned check after `await transport()` reds the late-response case; releasing
+the identity on any terminal state (including `failed`) reds the retry-after-failed
+case; moving the release out of the shared evidence-application path reds the
+in-flight-release case.
 
 ## Constraints respected
 

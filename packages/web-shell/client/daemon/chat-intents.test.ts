@@ -471,4 +471,52 @@ describe('daemon intents: recorded-target and evidence boundaries', () => {
     expect(intents.phase('idle')).toBe('idle');
     expect(intents.settle(cancelId, 'settled')).toBeUndefined();
   });
+
+  it('a retry after a failed decision still establishes (failed is not supersession)', async () => {
+    const intents = createDaemonChatIntents();
+    intents.setApprovalRequestLive('r1', true);
+    const first = await intents.dispatch(
+      'approval',
+      approvalTarget('r1'),
+      accepted,
+    );
+    expect(intents.settle(first.operationId, 'failed')?.outcome).toBe('failed');
+    // The failed decision did not supersede r1; a retry can still establish.
+    const retry = await intents.dispatch(
+      'approval',
+      approvalTarget('r1'),
+      accepted,
+    );
+    expect(intents.settle(retry.operationId, 'settled')?.outcome).toBe(
+      'established',
+    );
+  });
+
+  it('an establishment via in-flight evidence also releases the request identity', async () => {
+    const intents = createDaemonChatIntents();
+    intents.setApprovalRequestLive('r1', true);
+    const gate = deferredAdmission();
+    const pending = intents.dispatch(
+      'approval',
+      approvalTarget('r1'),
+      () => gate.promise,
+    );
+    const id = intents.operations.find((op) => op.kind === 'approval')!.id;
+    intents.settle(id, 'settled');
+    gate.resolve('accepted');
+    await pending;
+    expect(intents.operations.find((op) => op.id === id)?.state).toBe(
+      'established',
+    );
+    // The in-flight path released the identity, so a re-delivered decision for
+    // the same request no longer establishes.
+    const again = await intents.dispatch(
+      'approval',
+      approvalTarget('r1'),
+      accepted,
+    );
+    expect(intents.settle(again.operationId, 'settled')?.outcome).toBe(
+      'unsettled',
+    );
+  });
 });
