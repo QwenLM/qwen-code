@@ -13,8 +13,10 @@ import { Storage } from '../../config/storage.js';
 import { mockCompromisedLock } from '../../test-utils/mock-compromised-lock.js';
 import {
   getAgentsFilePath,
+  getAgentHostsFilePath,
   getWorkspaceFilePath,
   AgentSchemaVersionError,
+  AgentHostReplacementProgramError,
   readWorkspaceAgents,
   readAgentWorkspace,
   removeAgentHost,
@@ -42,13 +44,14 @@ import {
 
 const renameFailure = vi.hoisted(() => ({
   path: undefined as string | undefined,
+  skip: 0,
 }));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
     rename: async (...args: Parameters<typeof actual.rename>) => {
-      if (args[1] === renameFailure.path) {
+      if (args[1] === renameFailure.path && renameFailure.skip-- <= 0) {
         throw new Error('binding write failed');
       }
       return actual.rename(...args);
@@ -482,7 +485,11 @@ describe('removing and replacing an Agent Host', () => {
     await fs.rm(runtimeDir, { recursive: true, force: true });
   });
 
-  const enroll = async (name: string, supersedesHostId?: string) => {
+  const enroll = async (
+    name: string,
+    supersedesHostId?: string,
+    providers = ['Qwen Code ACP'],
+  ) => {
     const { token } = await issueAgentHostEnrollment(
       PROJECT_ROOT,
       supersedesHostId,
@@ -491,7 +498,7 @@ describe('removing and replacing an Agent Host', () => {
       token,
       name,
       workspaceCwd: '/worker',
-      providers: ['Qwen Code ACP'],
+      providers,
     });
   };
 
@@ -556,6 +563,214 @@ describe('removing and replacing an Agent Host', () => {
       [sibling.host.id, replacement.host.id],
     );
   });
+
+  it.each(['claude', 'Claude Code ACP'])(
+    'refuses all incompatible pins before either file changes, then retries with %s',
+    async (provider) => {
+      const old = await enroll('old', undefined, ['claude', 'codex']);
+      await updateWorkspaceAgents(PROJECT_ROOT, () => [
+        {
+          ...ALICE,
+          enabled: false,
+          execution: {
+            mode: 'managed-host',
+            hostIds: [old.host.id],
+            provider: 'claude',
+          },
+        },
+        {
+          ...BOB,
+          retiredAt: 2,
+          execution: {
+            mode: 'managed-host',
+            hostIds: [old.host.id],
+            provider: 'codex',
+          },
+        },
+      ]);
+      const { token } = await issueAgentHostEnrollment(
+        PROJECT_ROOT,
+        old.host.id,
+      );
+      const input = {
+        token,
+        name: 'new',
+        workspaceCwd: '/worker',
+        providers: ['qwen'],
+        secret: 'r'.repeat(43),
+      };
+      const hostsBefore = await fs.readFile(
+        getAgentHostsFilePath(PROJECT_ROOT),
+      );
+      const agentsBefore = await fs.readFile(getAgentsFilePath(PROJECT_ROOT));
+
+      await expect(
+        enrollAgentHost(PROJECT_ROOT, { ...input, token: 'invalid' }),
+      ).rejects.toThrow('Invalid or expired Agent Host enrollment token.');
+      const error = await enrollAgentHost(PROJECT_ROOT, input).catch(
+        (failure: unknown) => failure,
+      );
+      expect(error).toBeInstanceOf(AgentHostReplacementProgramError);
+      expect((error as Error).message).toContain(`${ALICE.id}, ${BOB.id}`);
+      expect(isAgentHostEnrollmentRefusal(error)).toBe(true);
+      expect(await fs.readFile(getAgentHostsFilePath(PROJECT_ROOT))).toEqual(
+        hostsBefore,
+      );
+      expect(await fs.readFile(getAgentsFilePath(PROJECT_ROOT))).toEqual(
+        agentsBefore,
+      );
+
+      const replacement = await enrollAgentHost(PROJECT_ROOT, {
+        ...input,
+        providers: [provider, 'codex'],
+      });
+      expect(replacement.secret).toBe(input.secret);
+      expect(
+        (await readWorkspaceAgents(PROJECT_ROOT)).map((a) => a.execution),
+      ).toEqual([
+        {
+          mode: 'managed-host',
+          hostIds: [replacement.host.id],
+          provider: 'claude',
+        },
+        {
+          mode: 'managed-host',
+          hostIds: [replacement.host.id],
+          provider: 'codex',
+        },
+      ]);
+      await heartbeatAgentHost(
+        PROJECT_ROOT,
+        replacement.host.id,
+        input.secret,
+        {
+          workspaceCwd: '/worker',
+          providers: ['claude', 'codex'],
+          protocol: 2,
+          programs: [{ program: 'claude', available: false }],
+        },
+      );
+      expect(
+        hostOffersProgram((await readAgentHosts(PROJECT_ROOT))[0], 'claude'),
+      ).toBe(false);
+    },
+  );
+
+  it.each([true, false])(
+    'uses the surviving Host authoritative probe (available=%s)',
+    async (available) => {
+      const old = await enroll('old', undefined, ['claude']);
+      const sibling = await enroll('sibling', undefined, ['claude']);
+      await heartbeatAgentHost(PROJECT_ROOT, sibling.host.id, sibling.secret, {
+        workspaceCwd: '/worker',
+        providers: ['claude'],
+        protocol: 2,
+        programs: [{ program: 'claude', available }],
+      });
+      await updateWorkspaceAgents(PROJECT_ROOT, () => [
+        {
+          ...ALICE,
+          execution: {
+            mode: 'managed-host',
+            hostIds: [old.host.id, sibling.host.id],
+            provider: 'claude',
+          },
+        },
+      ]);
+      if (!available) {
+        await expect(enroll('new', old.host.id)).rejects.toBeInstanceOf(
+          AgentHostReplacementProgramError,
+        );
+        return;
+      }
+      const replacement = await enroll('new', old.host.id);
+      expect((await readWorkspaceAgents(PROJECT_ROOT))[0].execution).toEqual({
+        mode: 'managed-host',
+        hostIds: [replacement.host.id, sibling.host.id],
+        provider: 'claude',
+      });
+    },
+  );
+
+  it.each(['roster', 'final registry'])(
+    'checks staged identity and bindings after a failed %s write',
+    async (stage) => {
+      const old = await enroll('old', undefined, ['claude']);
+      await updateWorkspaceAgents(PROJECT_ROOT, () => [
+        {
+          ...ALICE,
+          execution: {
+            mode: 'managed-host',
+            hostIds: [old.host.id],
+            provider: 'claude',
+          },
+        },
+      ]);
+      const { token } = await issueAgentHostEnrollment(
+        PROJECT_ROOT,
+        old.host.id,
+      );
+      const input = {
+        token,
+        name: 'new',
+        workspaceCwd: '/worker',
+        providers: ['claude'],
+        secret: 'r'.repeat(43),
+      };
+      renameFailure.path =
+        stage === 'roster'
+          ? getAgentsFilePath(PROJECT_ROOT)
+          : getAgentHostsFilePath(PROJECT_ROOT);
+      renameFailure.skip = stage === 'roster' ? 0 : 1;
+      try {
+        await expect(enrollAgentHost(PROJECT_ROOT, input)).rejects.toThrow(
+          'binding write failed',
+        );
+      } finally {
+        renameFailure.path = undefined;
+        renameFailure.skip = 0;
+      }
+      const staged = (await readAgentHosts(PROJECT_ROOT)).find(
+        (h) => h.id !== old.host.id,
+      )!;
+      expect(
+        (await readWorkspaceAgents(PROJECT_ROOT))[0].execution,
+      ).toMatchObject({
+        hostIds: [stage === 'roster' ? old.host.id : staged.id],
+      });
+      const hostsBefore = await fs.readFile(
+        getAgentHostsFilePath(PROJECT_ROOT),
+      );
+      const agentsBefore = await fs.readFile(getAgentsFilePath(PROJECT_ROOT));
+      for (const secret of [input.secret, 's'.repeat(43), undefined]) {
+        const error = await enrollAgentHost(PROJECT_ROOT, {
+          ...input,
+          secret,
+          providers: ['qwen'],
+        }).catch((failure: unknown) => failure);
+        expect(error).toBeInstanceOf(AgentHostReplacementProgramError);
+        expect(isAgentHostEnrollmentRefusal(error)).toBe(
+          secret !== input.secret,
+        );
+        expect(await fs.readFile(getAgentHostsFilePath(PROJECT_ROOT))).toEqual(
+          hostsBefore,
+        );
+        expect(await fs.readFile(getAgentsFilePath(PROJECT_ROOT))).toEqual(
+          agentsBefore,
+        );
+      }
+      const replacement = await enrollAgentHost(PROJECT_ROOT, input);
+      expect(replacement.host.id).toBe(staged.id);
+      expect((await readAgentHosts(PROJECT_ROOT)).map((h) => h.id)).toEqual([
+        staged.id,
+      ]);
+      expect((await readWorkspaceAgents(PROJECT_ROOT))[0].execution).toEqual({
+        mode: 'managed-host',
+        hostIds: [staged.id],
+        provider: 'claude',
+      });
+    },
+  );
 
   it('keeps an interrupted replacement staged until it is retried', async () => {
     const old = await enroll('old');
