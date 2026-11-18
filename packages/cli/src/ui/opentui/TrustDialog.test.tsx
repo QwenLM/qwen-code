@@ -415,6 +415,8 @@ describe('OpenTuiTrustDialog', () => {
     paint();
     key('return', '\r');
     expect(mock.reveal).toHaveBeenLastCalledWith('trust-choice-DO_NOT_TRUST');
+    paint();
+    expect(mock.reveal).toHaveBeenLastCalledWith('trust-pending');
     mock.reveal.mockClear();
     key('pagedown', '\x1b[6~');
     expect(mock.scrollBy).toHaveBeenLastCalledWith(8);
@@ -430,13 +432,46 @@ describe('OpenTuiTrustDialog', () => {
     });
     expect(mock.reveal).not.toHaveBeenCalled();
     paint();
-    expect(mock.reveal).toHaveBeenCalledExactlyOnceWith(
-      'trust-choice-DO_NOT_TRUST',
-    );
+    expect(mock.reveal).toHaveBeenCalledExactlyOnceWith('trust-pending');
     paint();
     expect(mock.reveal).toHaveBeenCalledTimes(1);
     expect(mock.write).not.toHaveBeenCalled();
     expect(mock.restart).not.toHaveBeenCalled();
+  });
+
+  it('reveals the restart prompt on a short terminal when a choice defers', () => {
+    const props = fixture();
+    render(<OpenTuiTrustDialog {...props} availableTerminalHeight={12} />);
+    act(() => {
+      mock.after?.();
+    });
+    mock.reveal.mockClear();
+    chooseNotTrusted();
+    act(() => {
+      mock.after?.();
+    });
+    expect(mock.reveal).toHaveBeenLastCalledWith('trust-pending');
+  });
+
+  it('reveals the error row ahead of the pending prompt when the deferred write fails', () => {
+    const props = fixture();
+    render(<OpenTuiTrustDialog {...props} availableTerminalHeight={12} />);
+    act(() => {
+      mock.after?.();
+    });
+    chooseNotTrusted();
+    act(() => {
+      mock.after?.();
+    });
+    mock.reveal.mockClear();
+    mock.write.mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    key('r', 'r');
+    act(() => {
+      mock.after?.();
+    });
+    expect(mock.reveal).toHaveBeenCalledExactlyOnceWith('trust-error');
   });
 
   it('reports committed truth when relaunch itself rejects', async () => {

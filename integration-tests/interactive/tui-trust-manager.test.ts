@@ -11,6 +11,7 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { it } from 'vitest';
 import { InteractiveSession } from './interactive-session.js';
+import { createUntil, scaledWait } from './wait.js';
 import { startFakeOpenAIServer } from '../fake-openai-server.js';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 
@@ -40,6 +41,8 @@ const profile = override
 const outputRoot =
   process.env['QWEN_TUI_ACCEPTANCE_OUT'] ??
   path.join(root, '.qwen/e2e-tests/trust-manager');
+
+const until = createUntil(12_000);
 
 type RuntimeRecord = {
   pid: number;
@@ -224,16 +227,6 @@ it(
         trust: JSON.parse(fs.readFileSync(trust, 'utf8')),
         readOnly: readOnly(),
       });
-    };
-    const until = async (
-      check: () => Promise<boolean> | boolean,
-      label: string,
-    ) => {
-      const end = performance.now() + 12000;
-      while (!(await check())) {
-        assert(performance.now() < end, label);
-        await new Promise((done) => setTimeout(done, 100));
-      }
     };
     const screen = (label: string, texts: string[]) =>
       until(async () => {
@@ -457,7 +450,11 @@ it(
         workspace,
         sibling,
         trust,
-        budgets: { conditionSeconds: 12, testSeconds: 120, retry: 0 },
+        budgets: {
+          conditionSeconds: scaledWait(12_000) / 1000,
+          testSeconds: 120,
+          retry: 0,
+        },
         scope:
           'Public trust parent/cancel/cold-sibling plus two genuine r relaunches and independent cold reconstruction; no private restart call.',
       });

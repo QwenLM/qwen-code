@@ -12,7 +12,7 @@
 
 不直接修改 Config 内存信任、不授予批准、不改启动政策、不删除继承规则，也不跳过重启使信任变更立即生效。不增加 Core API、存储或通用所有权框架。
 
-原生 frame 内使用一个真实滚动区域，按传入 popup 高度减去已有四行边框/padding 分配。所有正文文字的宽度扣除 scrollbar 一列，避免遮住文件夹或提示字符；选项再扣除指示符和数字列后自然换行，不裁成单行。highlight 或 scrollbox 真实尺寸变化只标记一次待跟随；局部公开 renderAfter 在 native root 完成布局计算并更新全部后代坐标后消费标记，再调用已有 scrollChildIntoView，滚动结果在请求的下一帧绘制。不使用 label onSizeChange：TextBufferRenderable 重写 resize 而不调用该 base 回调。PageUp/PageDown 和鼠标滚动可查看完整文件夹、继承说明和待重启/错误文字；普通重渲染和用户滚动不重复抢回焦点。这只是 Trust 局部布局变化，不改 shared dialog 通用行为。
+原生 frame 内使用一个真实滚动区域，按传入 popup 高度减去已有四行边框/padding 分配。所有正文文字的宽度扣除 scrollbar 一列，避免遮住文件夹或提示字符；选项再扣除指示符和数字列后自然换行，不裁成单行。highlight、pending/error 状态或 scrollbox 真实尺寸变化只标记一次待跟随；局部公开 renderAfter 在 native root 完成布局计算并更新全部后代坐标后消费标记，再调用已有 scrollChildIntoView，优先滚入错误行，其次待重启提示，最后高亮选项，滚动结果在请求的下一帧绘制。不使用 label onSizeChange：TextBufferRenderable 重写 resize 而不调用该 base 回调。PageUp/PageDown 和鼠标滚动可查看完整文件夹、继承说明和待重启/错误文字；普通重渲染和用户滚动不重复抢回焦点。这只是 Trust 局部布局变化，不改 shared dialog 通用行为。
 
 ## 最小复用与所有权
 

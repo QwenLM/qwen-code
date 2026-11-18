@@ -282,7 +282,7 @@ function TrustView({
   useLayoutEffect(() => {
     revealPending.current = true;
     scroll.current?.requestRender();
-  }, [selectedIndex]);
+  }, [selectedIndex, pending, error]);
   const inherited =
     initial.effective?.isTrusted &&
     (initial.effective.source === 'file' ||
@@ -304,7 +304,11 @@ function TrustView({
           if (!revealPending.current) return;
           revealPending.current = false;
           scroll.current?.scrollChildIntoView(
-            `trust-choice-${items[selection.activeIndexRef.current].value}`,
+            error
+              ? 'trust-error'
+              : pending
+                ? 'trust-pending'
+                : `trust-choice-${items[selection.activeIndexRef.current].value}`,
           );
         }}
       >
@@ -341,12 +345,16 @@ function TrustView({
         />
         <text fg={C.dim}>(Use Enter to select; Esc to close)</text>
         {pending ? (
-          <text fg={C.yellow}>
+          <text id="trust-pending" fg={C.yellow}>
             To apply the trust changes, Qwen Code must be restarted. Press
             &apos;r&apos; to restart CLI now.
           </text>
         ) : null}
-        {error ? <text fg={C.red}>{error}</text> : null}
+        {error ? (
+          <text id="trust-error" fg={C.red}>
+            {error}
+          </text>
+        ) : null}
       </scrollbox>
     </DialogFrame>
   );
