@@ -864,11 +864,13 @@ Harness or Runtime Broker credentials.
 
 ### Native macOS Workspace development
 
-The Java Broker can run the existing local Node.js tool worker on macOS with verified Workspace registration and durable same-boot worker adoption. Set `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`; whole-host reboot recovery remains Linux-only. Keep durable local mode and verified Workspace recovery enabled. Use the local directory import below for automatic registration, or register storage offline using the maintenance command and configure the same mount in the Java service. A missing registration still refuses tool execution.
+The Java Broker can run the existing local Node.js tool worker on macOS with verified Workspace registration and durable worker adoption. Keep durable local mode and verified Workspace recovery enabled. Whole-host writer-stop recovery is opt-in with `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=true`; the local serve launcher keeps its existing disabled default. Use the local directory import below for automatic registration, or register storage offline using the maintenance command and configure the same mount in the Java service. A missing registration still refuses tool execution.
 
 For the Vite entry, set `VITE_MANAGED_AGENT_WORKSPACE_BINDING=true` and `VITE_MANAGED_AGENT_ACTOR_ID` to your development actor. On the loopback Java service, set `QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER=X-Qwen-Actor-Id`; local directory import grants the importing actor automatically, while offline registration requires a separate Workspace grant. Configure `VITE_MANAGED_AGENT_MODEL_PRESETS` with published AgentDefinition IDs for new-task model choices; the server's `model-catalog` supplies model choices within bound Sessions. These settings supplement the Broker and Hosted Harness wiring below; enabling selectors alone does not enable tools.
 
-macOS storage identity combines `IOPlatformUUID` with the original device, inode and nanosecond birth time from native `stat`, cross-checked against the JDK directory identity. Worker identity also checks `kern.bootsessionuuid` and the exact process start instant before re-attestation. Preserve the SQL database, private Runtime state directory and credential key across Broker restarts. macOS handles use explicit `macos` namespace labels; older Java readers refuse them. A different boot is refused even for operator stop attestation. Background Shell, Monitor and command Hooks retain their existing platform restrictions. The published reference distribution's Linux qualification is unchanged.
+New macOS storage registrations combine `IOPlatformUUID` with the persistent native volume UUID, inode and nanosecond birth time. Session worktree anchors also use volume UUIDs. Runtime file access still checks the current numeric device and inode. Worker identity checks `kern.bootsessionuuid` and the exact process start instant. With trusted reboot recovery enabled, a changed kernel boot ID on the same hardware and platform proves that the original boot's writers stopped; it never authorizes replay of uncertain tools. Preserve the SQL database, private Runtime state directory and credential key across restarts. macOS handles use explicit `macos` namespace labels; older Java readers refuse them. Background Shell, Monitor and command Hooks retain their existing platform restrictions. The published reference distribution's Linux qualification is unchanged.
+
+Legacy registrations contain only the numeric device. Ordinary startup preserves their full comparison and never infers a historical volume UUID. If the device changed after reboot, stop every service sharing the catalog/root, preserve a clean database/state/files backup, and use the private `WorkspaceIdentityReattestationMain` entry through `PropertiesLauncher`. Set `W1_JDBC_URL`, `W1_JDBC_USER`, `W1_JDBC_PASSWORD`, `W1_STATE_DIRECTORY`, and, for retirement, `W1_RUNTIME_CREDENTIAL_KEY_ID`/`W1_RUNTIME_CREDENTIAL_KEY`; `W1_WORKSPACE_CREATION_ROOT` must match the service when configured. Start with a request containing `type: same-path-identity-reattest/1`, a new `operationId`, the original `tenantId`, `storageId`, `physicalKey`, storage `hostId`, expected 32-character `volumeUuid`, and original/current native `previousBootId`/`currentBootId`. `plan <request.json>` prints an exact inventory; save and inspect that output privately. Execute `begin`, `retire`, then `complete` with that saved inventory and `--offline-confirmed`. These commands fence all aliases, retire original bindings through Broker proof, and upgrade the original markers/registration without changing Session ID, branch, dirty files or journal. A blocked attempt preserves its fences and resumes only with the identical request. A different/overlapping owner, changed inode/birth/Git registration, active control-plane work or unproven writer remains blocked. This explicitly establishes a new volume baseline; it does not prove an unrecorded old UUID. See the [design](../../docs/design/2026-11-16-local-macos-reboot-identity.md) ([简体中文](../../docs/design/2026-11-16-local-macos-reboot-identity.zh-CN.md)).
 
 ## Embedded Runtime Broker
 
@@ -1355,7 +1357,7 @@ persisted Runtime seeds and static Runtime credentials with AES-256-GCM. New
 writes use only the active key; reads select the exact key ID stored with the
 ciphertext. By default, local worker ownership is durable:
 the Broker registers every launch and a restarted Broker adopts the same live
-worker. This requires Linux and fails startup elsewhere; on such hosts set
+worker. This requires Linux or macOS; on other hosts set
 `QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS=false` together with
 `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false` to keep
 worker ownership ephemeral (a restarted Broker then cannot adopt it). The state directory
@@ -1369,7 +1371,9 @@ state directory and worker command stable across Broker restarts. Shutdown and
 late lease discard detach from registered workers instead of killing them.
 `/etc/machine-id` must be nonempty and stable, and Linux must expose the PID
 and time namespaces (`/proc/self/ns/pid` and `/proc/self/ns/time`; the latter
-requires Linux 5.6 or newer with `CONFIG_TIME_NS`). An empty or malformed
+requires Linux 5.6 or newer with `CONFIG_TIME_NS`). On macOS the host identity
+is the `IOPlatformUUID` and the boot identity is `kern.bootsessionuuid`, with
+explicit `macos` namespace labels. An empty or malformed
 identity fails startup the same way as an absent one, naming both opt-out
 switches. The service
 manager must let workers survive a Broker exit: systemd's default
@@ -1388,10 +1392,10 @@ for it. Physical cleanup needs an evidence-preserving lifecycle;
 do not delete records to reclaim capacity.
 See the [adoption design](../../docs/design/2026-09-27-local-runtime-adoption.md).
 
-Trusted same-host Linux reboot recovery is also on by default. It requires
+Trusted same-host reboot recovery is also on by default on Linux and macOS. It requires
 durable local mode with the `local-process` provisioner, so a deployment that
 opts out of durable local workers or uses another provisioner must set
-`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`. A changed kernel boot ID on the original machine can prove
+`QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY=false`. A changed boot identity on the original machine (the kernel boot ID on Linux, the boot session UUID on the same macOS hardware) can prove
 that original local writers stopped; worker-only death still cannot. The
 service scans eight saved bindings every five seconds, independently of current
 Session grants, and clears only the original SQL holder after all execution
@@ -1553,7 +1557,7 @@ for record capacity and rewind semantics.
 
 ### Verified original-mount recovery (W1a)
 
-The current fresh 38-table baseline requires this physical mount guard for LOCAL tool and child Git execution in a trusted, single-host OpenJDK 21 `local-process` deployment on Linux or macOS with a persistent, unambiguous root birth time. Enable `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` and complete offline registration before admitting that work. Text-only Turns can run without registration; LOCAL tool acquisition fails with `409 workspace_unavailable` when the physical mapping is absent. Taking the next tool Turn after a Broker restart also requires `durable-local-process=true`. macOS requires `trusted-local-reboot-recovery=false` and supports same-boot adoption only. Linux whole-host restart succeeds only while the registered physical identity still matches. The shared V1 baseline stores registration, independent `mount_birth_time` and mount fence in `ma_storage` and `ma_storage_owner`. An unregistered mount is never registered from the directory found at startup.
+The current fresh 38-table baseline requires this physical mount guard for LOCAL tool and child Git execution in a trusted, single-host OpenJDK 21 `local-process` deployment on Linux or macOS with a persistent, unambiguous root birth time. Enable `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` and complete offline registration before admitting that work. Text-only Turns can run without registration; LOCAL tool acquisition fails with `409 workspace_unavailable` when the physical mapping is absent. Taking the next tool Turn after a Broker restart also requires `durable-local-process=true`. macOS supports same-boot adoption and, with trusted reboot recovery, whole-host reboot recovery on the same hardware; when a reboot changes the numeric device of a legacy registration, upgrade it with the offline `workspace-identity-reattest` maintenance flow described in the macOS storage identity section above. Linux whole-host restart succeeds only while the registered physical identity still matches. The shared V1 baseline stores registration, independent `mount_birth_time` and mount fence in `ma_storage` and `ma_storage_owner`. An unregistered mount is never registered from the directory found at startup.
 
 Marker v2 stores birth time as a canonical `Instant` string. Linux reads creation time, mtime, device and inode in one JDK `unix` attribute snapshot and rejects creation time at/before epoch or equal to mtime, which OpenJDK 21 may return when birth time is unsupported. A real Linux birth time equal to mtime is also conservatively refused; prepare the project layout or update the root's mtime offline before retrying. macOS reads native nanosecond birth time with `stat` and cross-checks its device/inode against the JDK canonical-directory snapshot, because JDK 21 truncates macOS birth time to seconds. A positive native macOS birth time is independent even when it equals mtime; fresh empty roots keep their original birth time. Mtime is not an identity field, and ordinary mtime changes do not invalidate an unchanged birth time. The marker contains an application-specific HMAC-SHA256 host ID with `Qwen-Code/verified-workspace/v2` as input. Its key is the trimmed machine-id UTF-8 bytes on Linux or the original `IOPlatformUUID` UTF-8 bytes on macOS; neither raw identity is stored in the marker.
 
@@ -1780,6 +1784,8 @@ After first-stage self-service is available, enable `qwen.managed-agent.extensio
 Applications can supply Spring Beans implementing `ManagedExtensionSource` and `ExtensionArchiveStorage` from `com.alibaba:qwen-managed-agent-contracts`. Source IDs must be stable and unique; duplicate IDs fail startup. The default directory backend backs off when custom storage is present, so an embedding application using OSS does not need `extensions.artifact-directory`.
 
 The source adapter implements `id()`, `resolve(Context, Reference)` and `open(Context, Resolved)`. Resolve must authorize the trusted tenant/Actor against the requested exact business revision on every call. Return a canonical resource ID and a private archive handle; never return partial materials or substitute a current revision for a missing historical revision. `open` returns the original ZIP/tar.gz stream; Managed closes it, computes `sourceDigest` from actual bytes and compiles through Hosted `managed-package-preparation/1`. Providers enforce finite database/network timeouts within the context deadline. The resolved handle is never a public response or persisted credential.
+
+A source can also implement `ManagedSkillCatalogSource.catalog(Context)`. Each entry supplies an authorized exact Skill reference, compilation target, display name, description and `preinstall` flag. A Workspace Session with omitted or empty static skills and omitted `extensionPins` imports the defaults under the caller's existing extension permissions. Supplying `extensionPins: []` disables defaults. Failed default resolution refuses creation. Replaying an admitted request preserves its original pins. Only explicit package publication updates the Workspace catalog. The slash-command catalog shows the initial pins throughout first installation and follows the installed bundle after activation. See the [Skill defaults design](../../docs/design/2026-11-18-managed-skill-defaults.md).
 
 `ExtensionArchiveStorage` implements `validateConfiguration()`, `putIfAbsent(Key, byteLength, InputStream)` and `open(Key)`. Bind it to a private deployment-specific prefix separate from raw business packages. Include the tenant, Workspace and digest in object identity. Writes must be atomic, immutable and readable on success; identical writes may be replayed. A timeout has an unknown outcome, so adapters must not blindly retry writes. Return streams rather than signed URLs or local paths. Managed stages and verifies packages with bounded temporary files, and retains their leases through actual HTTP streaming or asynchronous Runtime upload completion. Existing execution packages remain retained; no automatic GC is added.
 
@@ -2106,22 +2112,24 @@ npm run test:e2e:managed-big-output
 It streams a long answer, verifies the complete public text and stored record,
 deletes the original Harness and Runtime homes, and checks the complete answer
 in a cold replacement's model context. A short answer remains inline. This
-mode executes no tools and has no Runtime binding to reclaim, so it keeps
+mode executes no tools and does not test Runtime takeover, so it keeps
 `durable-local-process` disabled and does not require Linux.
 
 A zero-delay run checks the real-model path as shown above; a controlled
-cold-start delay additionally tests output before Runtime readiness:
+cold-start delay additionally tests serial preparation before model output:
 
 ```bash
 npm run test:e2e:managed-agent-server -- \
   --model moonshot/kimi-k3 \
-  --runtime-delay-ms 45000
+  --runtime-delay-ms 15000
 ```
 
-That run additionally requires the first model event to precede Runtime
-readiness whenever the delay reaches the 15 seconds the acceptance criterion
-names. A deterministic controlled-model proof of the same ordering is tracked
-in #12941.
+The normal and delayed cold-start runs require Runtime readiness before the first model event.
+An unsubmitted Turn waits for preparation before loading and submitting to the
+Harness, without spending admission retries while preparation remains pending.
+Keep the injected delay below the selected provider's startup deadline; the
+local-process provider currently allows 30 seconds. The preparation wait also
+uses `qwen.managed-agent.harness.load-timeout`, which defaults to 120 seconds.
 
 The real-model check extracts only the selected model provider, its referenced
 environment credential, the selected model, and the authentication policy

@@ -51,16 +51,19 @@ import {
   fetchCurrentBranchPullRequest,
   fetchGitHubPullRequests,
   fetchGitHubPullRequestView,
+  fetchGitHubPullRequestFiles,
   fetchPullRequestByReference,
   fetchRemoteWebUrl,
   normalizeRemoteToWebUrl,
   parseGhPrList,
   parseGhPrView,
+  parseGhPrFiles,
   pullRequestViewUrl,
   repoKeyFromWebUrl,
   resolveGhBinary,
   GITHUB_PR_LIST_LIMIT,
   GITHUB_PR_VIEW_FAILING_CHECKS_MAX,
+  GITHUB_PR_FILES_MAX,
 } from './github-prs.js';
 
 const mockExecFile = vi.mocked(execFile);
@@ -937,6 +940,331 @@ describe('fetchGitHubPullRequestView', () => {
       HOME: home,
     });
     expect(result).toMatchObject({ kind: 'failed', reason: 'unparsable' });
+    expect(result).not.toHaveProperty('binary');
+  });
+});
+
+describe('parseGhPrFiles', () => {
+  const ghPrFiles = (overrides: Record<string, unknown> = {}) => ({
+    files: [
+      { path: 'src/a.ts', additions: 10, deletions: 2 },
+      { path: 'src/b.ts', additions: 0, deletions: 5 },
+    ],
+    additions: 10,
+    deletions: 7,
+    headRefOid: 'abc1234',
+    ...overrides,
+  });
+  const parse = (overrides: Record<string, unknown> = {}) =>
+    parseGhPrFiles(JSON.stringify(ghPrFiles(overrides)));
+
+  it('maps files, totals and head sha', () => {
+    expect(parse()).toEqual({
+      files: [
+        { path: 'src/a.ts', additions: 10, deletions: 2 },
+        { path: 'src/b.ts', additions: 0, deletions: 5 },
+      ],
+      hiddenCount: 0,
+      additions: 10,
+      deletions: 7,
+      headSha: 'abc1234',
+    });
+  });
+
+  it('caps the file list and reports hiddenCount while keeping PR-wide totals', () => {
+    const files = Array.from({ length: GITHUB_PR_FILES_MAX + 5 }, (_, i) => ({
+      path: `src/f${i}.ts`,
+      additions: 1,
+      deletions: 0,
+    }));
+    const result = parse({ files, additions: 9999, deletions: 8888 });
+    expect(result.files).toHaveLength(GITHUB_PR_FILES_MAX);
+    expect(result.hiddenCount).toBe(5);
+    expect(result.additions).toBe(9999);
+    expect(result.deletions).toBe(8888);
+  });
+
+  it('reports hiddenCount from changedFiles when gh truncates below the code cap', () => {
+    // gh itself caps the files array (100 rows on current CLI) well below
+    // GITHUB_PR_FILES_MAX, so the hidden count must come from changedFiles,
+    // not from the parsed row count. Reproduces a 165-file PR listing 100.
+    const files = Array.from({ length: 100 }, (_, i) => ({
+      path: `src/f${i}.ts`,
+      additions: 1,
+      deletions: 0,
+    }));
+    const result = parse({ files, changedFiles: 165, additions: 12291 });
+    expect(result.files).toHaveLength(100);
+    expect(result.hiddenCount).toBe(65);
+    expect(result.additions).toBe(12291);
+  });
+
+  it('sums parsed rows when gh omits the PR-wide totals', () => {
+    const result = parse({ additions: undefined, deletions: undefined });
+    expect(result.additions).toBe(10);
+    expect(result.deletions).toBe(7);
+  });
+
+  it('skips malformed rows and normalizes negative or non-numeric counts', () => {
+    const result = parse({
+      files: [
+        null,
+        { path: '', additions: 1, deletions: 1 },
+        { additions: 1, deletions: 1 },
+        { path: 'ok.ts', additions: -3, deletions: 'x' },
+      ],
+      additions: undefined,
+      deletions: undefined,
+    });
+    expect(result.files).toEqual([
+      { path: 'ok.ts', additions: 0, deletions: 0 },
+    ]);
+  });
+
+  it('defaults a missing head sha to an empty string', () => {
+    const result = parse({ headRefOid: undefined });
+    expect(result.headSha).toBe('');
+  });
+
+  it.each([
+    ['a JSON array', '[]'],
+    ['null', 'null'],
+    ['a missing files array', JSON.stringify({ additions: 1 })],
+    ['invalid JSON', 'not json'],
+  ])('throws on %s', (_label, stdout) => {
+    expect(() => parseGhPrFiles(stdout)).toThrow();
+  });
+});
+
+describe('fetchGitHubPullRequestFiles', () => {
+  const tmp = useTmpDir('github-prs-files-');
+
+  it('returns not_a_repo outside a git repository', async () => {
+    const result = await fetchGitHubPullRequestFiles(tmp.dir, 1);
+    expect(result).toEqual({ kind: 'not_a_repo' });
+  });
+
+  it('rejects a non-positive or non-integer number before spawning', async () => {
+    const repo = tmp.repo();
+    for (const bad of [0, -1, 1.5, Number.NaN]) {
+      const result = await fetchGitHubPullRequestFiles(repo, bad);
+      expect(result).toMatchObject({ kind: 'failed' });
+    }
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('requests the files field set by number and parses the result', async () => {
+    const repo = tmp.repo();
+    mockGhSuccess(
+      {
+        files: [{ path: 'a.ts', additions: 3, deletions: 1 }],
+        additions: 3,
+        deletions: 1,
+        headRefOid: 'deadbee',
+      },
+      [
+        'pr',
+        'view',
+        '7',
+        '--json',
+        'files,additions,deletions,headRefOid,changedFiles',
+      ],
+    );
+    const result = await fetchGitHubPullRequestFiles(repo, 7);
+    expect(result).toMatchObject({
+      kind: 'ok',
+      files: {
+        files: [{ path: 'a.ts', additions: 3, deletions: 1 }],
+        additions: 3,
+        deletions: 1,
+        headSha: 'deadbee',
+      },
+    });
+  });
+
+  it('resolves the number in the bound PR repository via --repo', async () => {
+    const repo = tmp.repo();
+    mockGhSuccess({ files: [], additions: 0, deletions: 0, changedFiles: 0 }, [
+      'pr',
+      'view',
+      '7',
+      '--json',
+      'files,additions,deletions,headRefOid,changedFiles',
+      '--repo',
+      'other/repo',
+    ]);
+    const result = await fetchGitHubPullRequestFiles(
+      repo,
+      7,
+      undefined,
+      'other/repo',
+    );
+    expect(result).toMatchObject({ kind: 'ok' });
+  });
+
+  it('carries the Enterprise host through to gh --repo', async () => {
+    const repo = tmp.repo();
+    mockGhSuccess({ files: [], additions: 0, deletions: 0, changedFiles: 0 }, [
+      'pr',
+      'view',
+      '7',
+      '--json',
+      'files,additions,deletions,headRefOid,changedFiles',
+      '--repo',
+      'ghe.corp/other/repo',
+    ]);
+    const result = await fetchGitHubPullRequestFiles(
+      repo,
+      7,
+      undefined,
+      'ghe.corp/other/repo',
+    );
+    expect(result).toMatchObject({ kind: 'ok' });
+  });
+
+  it('accepts a host:port slug in gh --repo', async () => {
+    const repo = tmp.repo();
+    mockGhSuccess({ files: [], additions: 0, deletions: 0, changedFiles: 0 }, [
+      'pr',
+      'view',
+      '7',
+      '--json',
+      'files,additions,deletions,headRefOid,changedFiles',
+      '--repo',
+      'ghe.corp:8443/other/repo',
+    ]);
+    const result = await fetchGitHubPullRequestFiles(
+      repo,
+      7,
+      undefined,
+      'ghe.corp:8443/other/repo',
+    );
+    expect(result).toMatchObject({ kind: 'ok' });
+  });
+
+  it('rejects a malformed repo slug before spawning gh', async () => {
+    const repo = tmp.repo();
+    for (const bad of [
+      '--upload-pack=evil',
+      '-owner/repo',
+      '-ghe.corp/o/r',
+      'owner/repo/extra',
+      'ghe.corp/o/r/extra',
+      'ghe.corp:80:90/o/r',
+      'owner repo',
+      'https://github.com/o/r',
+      'https://ghe.corp/o/r',
+      'owner/',
+    ]) {
+      const result = await fetchGitHubPullRequestFiles(repo, 7, undefined, bad);
+      expect(result).toMatchObject({
+        kind: 'failed',
+        message: 'invalid pull request repository',
+        reason: 'invalid_repo',
+      });
+    }
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('maps a missing gh binary to cli_unavailable', async () => {
+    const repo = tmp.repo();
+    mockExecError('spawn gh ENOENT', { code: 'ENOENT' });
+    const result = await fetchGitHubPullRequestFiles(repo, 7);
+    expect(result).toEqual({ kind: 'cli_unavailable' });
+  });
+
+  it('maps a gh failure to failed with the redacted message', async () => {
+    const repo = tmp.repo();
+    mockExecError('Command failed: gh pr view 7', {
+      stderr: 'could not resolve to a Pull Request',
+    });
+    const result = await fetchGitHubPullRequestFiles(repo, 7);
+    expect(result).toMatchObject({
+      kind: 'failed',
+      message: 'could not resolve to a Pull Request',
+      gitRoot: repo,
+    });
+  });
+
+  it('maps a timeout to failed naming the timeout', async () => {
+    const repo = tmp.repo();
+    mockExecError('Command failed: gh pr view 7', { killed: true });
+    const result = await fetchGitHubPullRequestFiles(repo, 7);
+    expect(result).toMatchObject({
+      kind: 'failed',
+      message: 'gh pr view timed out after 10s',
+    });
+  });
+
+  it('maps output it cannot parse to failed', async () => {
+    const repo = tmp.repo();
+    mockStdout('not json');
+    const result = await fetchGitHubPullRequestFiles(repo, 7);
+    expect(result).toMatchObject({ kind: 'failed', gitRoot: repo });
+  });
+
+  it('runs gh at the git root with the scrubbed workspace env', async () => {
+    const repo = tmp.repo();
+    const seen: {
+      cwd?: string;
+      env?: Record<string, string | undefined>;
+    } = {};
+    mockExec((cb, _args, opts) => {
+      const options = opts as {
+        cwd?: string;
+        env?: Record<string, string | undefined>;
+      };
+      seen.cwd = options.cwd;
+      seen.env = options.env;
+      cb(
+        null,
+        JSON.stringify({
+          files: [],
+          additions: 0,
+          deletions: 0,
+          changedFiles: 0,
+        }),
+        '',
+      );
+    });
+
+    await fetchGitHubPullRequestFiles(repo, 7, {
+      GH_TOKEN: 'workspace-token',
+      GH_REPO: 'other/repo',
+    });
+
+    expect(seen.cwd).toBe(repo);
+    expect(seen.env).toBeDefined();
+    expect(seen.env?.['GH_TOKEN']).toBe('workspace-token');
+    // ghEnv strips repository selectors: only --repo names the repository.
+    expect(seen.env).not.toHaveProperty('GH_REPO');
+  });
+
+  it('reports the fallback binary on a files spawn failure', async () => {
+    const repo = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    const binary = fakeGh(path.join(home, '.local', 'bin'));
+    mockExecError('spawn EACCES', { code: 'EACCES' });
+
+    const result = await fetchGitHubPullRequestFiles(repo, 7, {
+      PATH: '/nonexistent',
+      HOME: home,
+    });
+
+    expect(result).toMatchObject({ kind: 'failed', binary });
+  });
+
+  it('fails on output it cannot parse without naming the binary', async () => {
+    // A fallback binary is in play, so only the parse path can omit it.
+    const repo = tmp.repo();
+    const home = path.join(tmp.dir, 'home');
+    fakeGh(path.join(home, '.local', 'bin'));
+    mockStdout('not json');
+    const result = await fetchGitHubPullRequestFiles(repo, 7, {
+      PATH: '/nonexistent',
+      HOME: home,
+    });
+    expect(result).toMatchObject({ kind: 'failed', gitRoot: repo });
     expect(result).not.toHaveProperty('binary');
   });
 });

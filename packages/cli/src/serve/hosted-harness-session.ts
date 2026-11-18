@@ -19,7 +19,10 @@ import {
   HostedContextCompression,
   HostedCompressionRefusal,
 } from './hosted-context-compression.js';
-import { extensionInstructionText } from './hosted-extension-tool-context.js';
+import {
+  extensionInstructionText,
+  managedSkillCatalogEntry,
+} from '@qwen-code/qwen-code-core/extension/managed-skill-content.js';
 import { parseHostedTodoState } from './hosted-todo-session.js';
 import {
   parseHostedModelConfig,
@@ -230,6 +233,9 @@ import {
   sanitizeDaemonLogLine,
   writeStderrLineSafe,
 } from '../utils/stdioHelpers.js';
+import type { DaemonLogger } from './daemon-logger.js';
+import type { SseAdmissionCaps } from './daemon-status.js';
+import { checkSseAdmission, countSseStream } from './sse-occupancy.js';
 import { markAccessLogError } from './server/access-log.js';
 import {
   HostedModelUnavailableError,
@@ -607,14 +613,9 @@ function extensionSkillCatalog(
     [
       ...(base?.entries() ?? []),
       ...packages.flatMap((entry) =>
-        entry.contributions.skills.map((skill) => ({
-          name: skill.name,
-          description: skill.description,
-          body: extensionInstructionText(skill.body, entry.extensionId),
-          model_invocable: skill.model_invocable,
-          user_invocable: skill.user_invocable,
-          asset_directory: `extension://${entry.extensionId}/${skill.assetDirectory.replace(/\/$/u, '')}/`,
-        })),
+        entry.contributions.skills.map((skill) =>
+          managedSkillCatalogEntry(skill, entry.extensionId),
+        ),
       ),
     ],
     packages.flatMap((entry) =>
@@ -4576,6 +4577,10 @@ export function registerHostedHarnessSessionRoutes(
   contract: HostedHarnessContract,
   cwd: string,
   brokerOptions?: HostedWorkspaceBrokerOptions,
+  deps?: {
+    sseAdmissionCaps?: SseAdmissionCaps;
+    daemonLog?: DaemonLogger;
+  },
 ): {
   owns: (id: string) => boolean;
   accepting: () => boolean;
@@ -13255,6 +13260,19 @@ export function registerHostedHarnessSessionRoutes(
       after > session.managed.authority.committedSequence
     )
       return error(res, 400, 'invalid_event_cursor');
+    if (
+      !checkSseAdmission({
+        surface: 'hostedEvents',
+        req,
+        res,
+        caps: deps?.sseAdmissionCaps,
+        daemonLog: deps?.daemonLog,
+        logContext: { sessionId: req.params['id'] },
+      })
+    ) {
+      return;
+    }
+    countSseStream('hostedEvents', req, res);
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-store');
     // Disable proxy buffering (nginx): the keepalives below exist to put

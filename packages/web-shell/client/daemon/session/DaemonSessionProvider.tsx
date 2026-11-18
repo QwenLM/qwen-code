@@ -26,6 +26,7 @@ import {
   type SetStateAction,
   useSyncExternalStore,
 } from 'react';
+import { flushSync } from 'react-dom';
 import {
   DAEMON_APPROVAL_MODES,
   type DaemonClient,
@@ -44,6 +45,8 @@ import {
   isUnrecognizedDiagnosticReason,
   matchTurnEvent,
   normalizeDaemonEvent,
+  parseQwenAgentMessageMeta,
+  QWEN_AGENT_MESSAGE_META_KEY,
   type CreateSessionRequest,
   type DaemonApprovalMode,
   type DaemonEvent,
@@ -268,6 +271,7 @@ type TranscriptHistoryAdmission =
 
 const SESSION_TRANSCRIPT_PAGINATION_FEATURE = 'session_transcript_pagination';
 const CLIENT_IDENTITY_FEATURE = 'client_identity';
+const GENERATED_UI_STATE_FEATURE = 'generated_ui_state';
 const WORKSPACE_ACP_PREHEAT_FEATURE = 'workspace_acp_preheat';
 const WORKSPACE_ACP_STATUS_FEATURE = 'workspace_acp_status';
 const WORKSPACE_SKILLS_CONFIG_RUNTIME_FEATURE =
@@ -2747,6 +2751,24 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             if (previousSessionId !== nextSession.sessionId) {
               clearNotices();
             }
+            // Commit the load-embedded artifact snapshot in its own render
+            // before the replay injects, so the session-level header entry
+            // paints ahead of the conversation body. Only the artifact fields
+            // are touched; catchingUp and the rest of the connection state are
+            // left to the existing replay/attach logic below.
+            if (nextSession.restoredArtifacts !== undefined) {
+              flushSync(() => {
+                setConnection((current) => ({
+                  ...current,
+                  sessionId: nextSession.sessionId,
+                  restoredArtifacts: nextSession.restoredArtifacts,
+                  restoredArtifactsSessionId: nextSession.sessionId,
+                  // Authoritative data landed; the click-time hint is retired.
+                  artifactCountHint: undefined,
+                  artifactCountHintSessionId: undefined,
+                }));
+              });
+            }
             // Defer store.reset() until right before replay dispatch
             // (after the await below) so that reset + dispatch share a
             // single queueMicrotask notification. Without deferral, the
@@ -3499,6 +3521,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               current.sessionId === activeSession.sessionId
                 ? current.goalState
                 : undefined,
+            restoredArtifacts: activeSession.restoredArtifacts,
+            restoredArtifactsSessionId: activeSession.sessionId,
+            artifactCountHint: undefined,
+            artifactCountHintSessionId: undefined,
             loadingTranscript: undefined,
             catchingUp: replayInjected
               ? current.catchingUp
@@ -4139,6 +4165,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 addNotice,
                 dismissNotice,
               );
+              // A `/send` message is recorded here without a turn here, so it
+              // never says this session is working.
+              const turnEvents = uiEvents.filter((e) => !isSentMessageEvent(e));
               if (
                 event.type === 'model_switched' &&
                 isRecord(event.data) &&
@@ -4162,8 +4191,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               if (
                 recoveryEventCurrent &&
                 (event.type === 'pending_prompt_started' ||
-                  hasActiveGenerationSignal(uiEvents) ||
-                  uiEvents.some((item) => item.type === 'user.text.delta'))
+                  hasActiveGenerationSignal(turnEvents) ||
+                  turnEvents.some((item) => item.type === 'user.text.delta'))
               ) {
                 advanceSessionRecoveryGeneration(
                   sessionRecoveryGenerationRef.current,
@@ -4300,8 +4329,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   ? activeProductSessionContext.cwd
                   : undefined,
               );
-              if (uiEvents.length > 0) {
-                const hasGenerationSignal = hasActiveGenerationSignal(uiEvents);
+              if (turnEvents.length > 0) {
+                const hasGenerationSignal =
+                  hasActiveGenerationSignal(turnEvents);
                 setPromptStatus((current) =>
                   current === 'waiting' ||
                   (current === 'idle' && hasGenerationSignal)
@@ -4461,12 +4491,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 !restoredPromptSettled &&
                 !hasSessionActivePrompt();
               if (isObserver) {
-                const hasUserMsg = uiEvents.some(
+                const hasUserMsg = turnEvents.some(
                   (e) => e.type === 'user.text.delta',
                 );
                 if (hasUserMsg) {
                   setPromptStatus('waiting');
-                } else if (hasActiveGenerationSignal(uiEvents)) {
+                } else if (hasActiveGenerationSignal(turnEvents)) {
                   setPromptStatus((current) =>
                     current === 'idle' ? 'streaming' : current,
                   );
@@ -4495,7 +4525,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   assistantDoneFromTurnEvent(event, 'error'),
                 );
                 setPromptStatus('idle');
-              } else if (isObserver && hasActiveGenerationSignal(uiEvents)) {
+              } else if (isObserver && hasActiveGenerationSignal(turnEvents)) {
                 schedulePassiveAssistantDone(
                   store,
                   passiveAssistantDoneTimerRef,
@@ -6211,6 +6241,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       return undefined;
     return { sessionId: appSession.sessionId, status: generatedUi };
   }, [appSession, connection.sessionId, connection.status, generatedUi]);
+  const viewStateSupported =
+    knownCapabilities?.features.includes(GENERATED_UI_STATE_FEATURE) === true;
   const mcpAppTools = useMemo(() => {
     const session = appSession;
     if (
@@ -6237,8 +6269,36 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           signal,
         );
       },
+      ...(viewStateSupported
+        ? {
+            viewState: {
+              get: (cardId: string) => {
+                if (sessionRef.current !== session || !session.clientId)
+                  return Promise.reject(new Error('MCP App session changed'));
+                return session.client.getGeneratedUiState(
+                  session.sessionId,
+                  cardId,
+                  session.clientId,
+                );
+              },
+              set: (
+                cardId: string,
+                write: { baseRevision: number; value: unknown },
+              ) => {
+                if (sessionRef.current !== session || !session.clientId)
+                  return Promise.reject(new Error('MCP App session changed'));
+                return session.client.setGeneratedUiState(
+                  session.sessionId,
+                  cardId,
+                  write,
+                  session.clientId,
+                );
+              },
+            },
+          }
+        : {}),
     };
-  }, [appSession, connection.sessionId]);
+  }, [appSession, connection.sessionId, viewStateSupported]);
 
   return (
     <GeneratedUiScopeContext.Provider value={generatedUiScopeContext}>
@@ -6802,6 +6862,18 @@ export function useDaemonSessionNotices(): {
   return value;
 }
 
+/**
+ * The message a person sent to another session with `/send`, as recorded in
+ * this one. It is not a turn of this session.
+ */
+function isSentMessageEvent(event: DaemonUiEvent): boolean {
+  if (event.type !== 'user.text.delta') return false;
+  return (
+    parseQwenAgentMessageMeta(event.meta?.[QWEN_AGENT_MESSAGE_META_KEY])
+      ?.sentTo !== undefined
+  );
+}
+
 function hasActiveGenerationSignal(
   events: ReadonlyArray<DaemonUiEvent>,
 ): boolean {
@@ -6950,8 +7022,16 @@ function bumpSessionEventSignals(
     | undefined;
   let init = 0;
   let auth = 0;
+  const subSessionTasks = new Map<string, number>();
 
   for (const event of events) {
+    if (event.type === 'session.sub_session_task.changed') {
+      subSessionTasks.set(
+        event.sessionId,
+        (subSessionTasks.get(event.sessionId) ?? 0) + 1,
+      );
+      continue;
+    }
     if (event.type === 'session.source.changed') {
       if (includeArtifactEvents) sources += 1;
       continue;
@@ -7027,7 +7107,8 @@ function bumpSessionEventSignals(
       init +
       auth ===
       0 &&
-    skillMutations.length === 0
+    skillMutations.length === 0 &&
+    subSessionTasks.size === 0
   )
     return;
 
@@ -7051,9 +7132,15 @@ function bumpSessionEventSignals(
         init +
         auth ===
         0 &&
-      newSkillMutations.length === 0
+      newSkillMutations.length === 0 &&
+      subSessionTasks.size === 0
     ) {
       return current;
+    }
+    const subSessionTaskVersions = { ...current.subSessionTaskVersions };
+    for (const [sessionId, count] of subSessionTasks) {
+      subSessionTaskVersions[sessionId] =
+        (subSessionTaskVersions[sessionId] ?? 0) + count;
     }
     return {
       memoryVersion: current.memoryVersion + memory,
@@ -7081,6 +7168,9 @@ function bumpSessionEventSignals(
           ? { skillMutationsByCwd: current.skillMutationsByCwd }
           : {}),
       ...(lastExtensionChange ? { lastExtensionChange } : {}),
+      ...(Object.keys(subSessionTaskVersions).length > 0
+        ? { subSessionTaskVersions }
+        : {}),
       initVersion: current.initVersion + init,
       authVersion: current.authVersion + auth,
     };

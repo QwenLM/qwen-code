@@ -1,4 +1,11 @@
 import { expect, it } from 'vitest';
+import {
+  createDaemonTranscriptState,
+  normalizeDaemonEvent,
+  reduceDaemonTranscriptEvents,
+  type DaemonTextTranscriptBlock,
+} from '@qwen-code/sdk/daemon';
+import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
 import type { Message } from '../../adapters/types';
 import { collectHookStatisticsTurns } from './hook-statistics-turns';
 
@@ -75,3 +82,141 @@ it('keeps turns independent and ignores injected messages as new turn heads', ()
   expect(turns.get('answer')?.recordId).toBe('record');
   expect(turns.get('next')?.recordId).toBe('next-record');
 });
+
+it('does not take a message sent to another session as a turn', () => {
+  const sent: Message = {
+    ...user,
+    id: 'sent',
+    agentMessage: {
+      kind: 'agent_mention',
+      sentTo: { sessionId: 'target', workspaceCwd: '/work/b' },
+    },
+  };
+  expect([
+    ...collectHookStatisticsTurns([user, answer, sent], 'session').keys(),
+  ]).toEqual(['answer']);
+});
+
+it.each([false, true])(
+  'keeps hook statistics on the prompt answer after a cross-session relay (sent before answer: %s)',
+  (sentBeforeAnswer) => {
+    const textBlock = (
+      id: string,
+      kind: 'user' | 'assistant',
+      promptId: string,
+    ): DaemonTextTranscriptBlock => ({
+      id,
+      kind,
+      text: id,
+      promptId,
+      streaming: false,
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const sent: DaemonTextTranscriptBlock = {
+      ...textBlock('sent', 'user', 'send-record'),
+      meta: {
+        source: 'agent_mention',
+        qwenAgentMessage: {
+          kind: 'agent_mention',
+          sentTo: { sessionId: 'target', workspaceCwd: '/work/b' },
+        },
+      },
+    };
+    const promptAnswer = textBlock('prompt-answer', 'assistant', 'admission');
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('prompt', 'user', 'admission'),
+      ...(sentBeforeAnswer ? [sent, promptAnswer] : [promptAnswer, sent]),
+      {
+        ...textBlock('relay', 'assistant', 'notification'),
+        backgroundTurn: {
+          turnId: 'notification',
+          taskId: 'send-task',
+          kind: 'agent',
+          startedAt: 2,
+        },
+      },
+    ]);
+    expect([...collectHookStatisticsTurns(messages, 'session')]).toEqual([
+      [
+        'prompt-answer',
+        expect.objectContaining({
+          promptId: 'admission',
+          sessionId: 'session',
+        }),
+      ],
+    ]);
+  },
+);
+
+it.each([false, true])(
+  'keeps tracking the local prompt when a background turn starts first (answered: %s)',
+  (answered) => {
+    const backgroundTurn = {
+      turnId: 'background',
+      taskId: 'task',
+      kind: 'shell' as const,
+      startedAt: 2,
+    };
+    const localPrompt: DaemonTextTranscriptBlock = {
+      id: 'local-prompt',
+      kind: 'user',
+      text: 'Question',
+      promptId: 'admission',
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const events = [
+      ...normalizeDaemonEvent({
+        v: 1,
+        type: 'session_update',
+        promptId: backgroundTurn.turnId,
+        data: {
+          sessionId: 'session',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Processing a background result' },
+            _meta: {
+              source: 'background_notification_turn_started',
+              backgroundTurn,
+            },
+          },
+        },
+      }),
+      ...normalizeDaemonEvent({
+        v: 1,
+        type: 'prompt_cancelled',
+        promptId: backgroundTurn.turnId,
+        data: { sessionId: 'session' },
+      }),
+      ...(answered
+        ? [
+            {
+              type: 'assistant.text.delta' as const,
+              text: 'Answer',
+              promptId: 'admission',
+            },
+          ]
+        : []),
+    ];
+    const { blocks } = reduceDaemonTranscriptEvents(
+      { ...createDaemonTranscriptState(), blocks: [localPrompt] },
+      events,
+    );
+    const messages = transcriptBlocksToDaemonMessages(blocks);
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: 'prompt_cancelled' }),
+      ]),
+    );
+    const target = answered
+      ? messages.find((message) => message.role === 'assistant')?.id
+      : localPrompt.id;
+    expect(target).toBeDefined();
+    expect([...collectHookStatisticsTurns(messages, 'session').keys()]).toEqual(
+      [target],
+    );
+  },
+);
