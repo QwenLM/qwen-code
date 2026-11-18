@@ -124,11 +124,18 @@ daemon 同时保留至多 64 个待处理授权请求。在 `r2` 也在等待时
 
 抛错的 transport 留下 admission `unknown`，真值表使其在任何 witness 下都保持
 `unsettled`；若无出路，它会在引擎整个生命周期内把 phase 钉死。`abandon` 把这种
-尝试终态化为 `failed`（绝不 `established`），且仅限 `unknown` admission，故不会
-杀死真实证据仍须落地的存活已准入 turn。被弃尝试打上标记，迟到的 transport 响应
-（即使在飞时 abandon、随后才 resolve）无法复活其终态。`acknowledge` 让界面释放已
-消费的终态行，且每次 rebuild 会从内部日志裁剪被取代的终态行，故确认最新终态行不会
-让旧行复现，保留不会跨不同 turn 无限增长。
+尝试终态化为 `failed`（绝不 `established`）。它拒绝 admission 已确认、或已持有
+`settled` 证据的尝试，故不会杀死存活 turn、也不会丢弃权威结算证据；没有 settled
+证据的在飞尝试可被 abandon，迟到的 accepted 响应随之被丢弃（迟到的 `rejected`
+响应仍删除该行，因为被拒请求绝不进入 operations）。被弃尝试打上标记，迟到的
+transport 响应无法复活其终态。被取代的 approval 决定（正向见证被强制为 `none`）
+获得终态 `failed` 出口，避免泄漏永久非终态行，而其返回 outcome 仍为 `unsettled`、
+绝不认证。
+
+保留**按 kind 与 target 有界**——至多最新一条终态——终态行由 `acknowledge` 释放，
+而非跨不同 target 自动释放：slice-2c 界面必须对每个已消费的终态行调用 acknowledge，
+否则 `operations` 会按每个不同 turn／已应答 approval 各增一行。每次 rebuild 从内部
+日志裁剪同一 kind 与 target 下被取代的终态行，故确认最新终态行不会让旧行复现。
 
 ## 负向测试（随 daemon 适配器落地）
 
@@ -158,8 +165,9 @@ daemon 同时保留至多 64 个待处理授权请求。在 `r2` 也在等待时
    到存活请求：被取代决定保持 `unsettled`，该行仍声称派发时的身份。
 9. **在飞证据不被丢弃。** transport 在飞期间送达的结算，在 admission 解析后被应用，
    建立该尝试并清除 phase，无需重投。
-10. **abandon 不能杀死存活 turn。** 对已 accepted、运行中的尝试 `abandon` 是空操作；
-    其真实证据仍能建立它。
+10. **abandon 不能杀死存活 turn 或丢弃已持证据。** 对 admission 已确认、或已持有
+    `settled` 证据的尝试，`abandon` 是空操作；其真实证据仍能建立它。没有 settled
+    证据的在飞尝试可被 abandon，迟到的 accepted 响应被丢弃。
 11. **先应答后结算的顺序。** approval 在其请求存活时结算为 `established`，尽管应答
     意味着它已不再等待决定；引擎在结算时释放身份，故对同一已结算请求重投的决定不再
     建立。
@@ -172,10 +180,21 @@ daemon 同时保留至多 64 个待处理授权请求。在 `r2` 也在等待时
     请求的重试可建立（仅在 `established` 时释放）。
 15. **在飞建立也释放身份。** 经保留的在飞证据建立的 approval 释放其请求身份，故对同一
     请求重投的决定不再建立。
+16. **被取代决定获得终态出口。** 被取代 approval 结算为 `unsettled`，但该行终态化为
+    `failed`，故 `acknowledge` 可释放它，而非泄漏永久非终态行。
+17. **在飞被弃后 rejected 不跟踪。** 在飞时 abandon、随后 resolve `rejected` 会删除该行
+    （被拒请求绝不进入 operations）。
+18. **在飞时效于 settle 时冻结。** 被取代时结算的决定，即使其请求在 admission 前重新
+    存活也不建立；存活时结算的决定，即使其请求在 admission 前被取代仍建立。
+19. **pending submit 在 admission 前保持 submitting。** 对 pending submit 的在飞证据
+    只保留见证、不离开 `pending`/`submitting`；dispatch 在 admission 解析后应用。
+20. **`phase('failed')` 透传。** settled-phase 参数不被硬编码为 `idle`。
+21. **记录 target 冻结。** `Object.isFrozen(operations[i].target)` 为 true，且经其写入
+    抛错，故暴露的行无法被重定向。
 
 配套用例钉住：rejected 准入（无 outcome、不跟踪，结算其 id 为空操作）、failed
-witness、对未知 id settle（空操作）、有界保留、状态变化之间 `operations` 快照身份
-稳定、以及 `acknowledge` 释放已消费的终态行而保留其他行与非终态行。
+witness、对未知 id settle（空操作）、按 kind 与 target 有界保留、状态变化之间
+`operations` 快照身份稳定、以及 `acknowledge` 释放已消费的终态行而保留其他行与非终态行。
 
 变异见证（可通过编辑引擎并从 `packages/web-shell` 运行
 `npx vitest run client/daemon/chat-intents.test.ts` 复现）：把 dispatch 的 witness
@@ -189,7 +208,11 @@ target 而非冻结快照会令记录 target 用例转红；忽略保留的在�
 的时效释放会令先应答后结算用例转红；rebuild 时不裁剪被取代终态行会令确认重试用例
 转红；去掉 `await transport()` 后的 abandoned 检查会令迟到响应用例转红；在任意终态
 （含 `failed`）都释放身份会令失败后重试用例转红；把释放移出共享证据应用路径会令
-在飞释放用例转红。
+在飞释放用例转红；去掉被取代终态出口会令被取代确认用例转红；去掉 abandoned 分支的
+rejected 清理会令在飞被弃 rejected 用例转红；在证据应用时重新收窄见证（而非 settle
+时冻结）会令存活时结算的在飞用例转红；对 pending 行应用在飞证据会令 pending submit
+用例转红；去掉 `abandon` 的已持证据守卫会令已持证据用例转红；把 `phase` 硬编码为
+`idle` 会令 failed-phase 用例转红；移除 `Object.freeze` 会令冻结 target 用例转红。
 
 ## 遵守的约束
 

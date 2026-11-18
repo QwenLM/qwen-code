@@ -164,13 +164,24 @@ dispatched attempt into a live request and revive a superseded decision.
 A thrown transport leaves admission `unknown`, which the truth table keeps
 `unsettled` under any witness; without an exit it would hold the phase open for
 the engine's lifetime. `abandon` terminalizes such an attempt as `failed` (never
-`established`) and is limited to `unknown` admission, so it cannot kill a live
-accepted turn whose real evidence must still land. An abandoned attempt is
-flagged so a late transport response — even one that resolves after an in-flight
-abandon — cannot revive its terminal state. `acknowledge` lets the surface release
-terminal rows it has consumed, and every rebuild prunes superseded terminal rows
-from the internal log, so acknowledging the latest terminal row cannot resurrect
-an older one and retention does not grow without bound across distinct turns.
+`established`). It refuses an attempt with a confirmed admission or with held
+`settled` evidence, so it cannot kill a live turn or discard authoritative
+settlement evidence; an in-flight attempt with no settled evidence may be
+abandoned, and a late accepted response is then discarded (a late `rejected`
+response still drops the row, since rejected requests are never tracked). An
+abandoned attempt is flagged so a late transport response cannot revive its
+terminal state. A superseded approval decision (positive witness forced to
+`none`) is given a terminal `failed` exit so it does not leak a permanent
+non-terminal row, while its returned outcome stays `unsettled` and it never
+certifies.
+
+Retention is bounded **per kind and target** — at most the latest terminal entry
+— and terminal rows are released by `acknowledge`, not automatically across
+distinct targets: a slice-2c surface must acknowledge every consumed terminal
+row, or `operations` grows by one row per distinct turn / answered approval.
+Every rebuild prunes superseded terminal rows for the same kind and target from
+the internal log, so acknowledging the latest terminal row cannot resurrect an
+older one.
 
 ## Negative tests (land with the daemon adapter)
 
@@ -209,8 +220,10 @@ an older one and retention does not grow without bound across distinct turns.
 9. **In-flight evidence is not discarded.** A settlement delivered while the
    transport is in flight is applied once admission resolves, establishing the
    attempt and clearing the phase without re-delivery.
-10. **Abandon cannot kill a live turn.** `abandon` on an accepted, running
-    attempt is a no-op; its real evidence still establishes it.
+10. **Abandon cannot kill a live turn or discard held evidence.** `abandon` on an
+    attempt with a confirmed admission, or with held `settled` evidence, is a
+    no-op; its real evidence still establishes it. An in-flight attempt with no
+    settled evidence may be abandoned and a late accepted response is discarded.
 11. **Answer-then-settle ordering.** An approval settles `established` while its
     request is live even though answering means it is no longer awaiting a
     decision; the engine releases the identity on settle, so a re-delivered
@@ -229,11 +242,28 @@ an older one and retention does not grow without bound across distinct turns.
 15. **In-flight establishment releases the identity.** An approval established
     via retained in-flight evidence releases its request identity, so a
     re-delivered decision for the same request no longer establishes.
+16. **A superseded decision gets a terminal exit.** A superseded approval settles
+    `unsettled` but the row terminalizes `failed`, so `acknowledge` releases it
+    instead of leaking a permanent non-terminal row.
+17. **An abandoned in-flight reject is not tracked.** Abandoning mid-flight then
+    resolving `rejected` drops the row (rejected requests are never operations).
+18. **In-flight currency is frozen at settle.** A decision settled while
+    superseded stays unestablished even if its request becomes live again before
+    admission; a decision settled while live still establishes even if its
+    request is superseded before admission.
+19. **A pending submit stays submitting until admission.** In-flight evidence on
+    a pending submit retains the witness without leaving `pending`/`submitting`;
+    dispatch applies it once admission resolves.
+20. **`phase('failed')` passes through.** The settled-phase argument is not
+    hardcoded to `idle`.
+21. **The recorded target is frozen.** `Object.isFrozen(operations[i].target)` is
+    true and a write through it throws, so an exposed row cannot be retargeted.
 
 Supporting cases pin rejected admission (no outcome, untracked, settling its id
-is a no-op), a failed witness, settling an unknown id (no-op), bounded retention,
-a stable `operations` snapshot identity between state changes, and `acknowledge`
-releasing a consumed terminal row while keeping other and non-terminal rows.
+is a no-op), a failed witness, settling an unknown id (no-op), bounded retention
+per kind and target, a stable `operations` snapshot identity between state
+changes, and `acknowledge` releasing a consumed terminal row while keeping other
+and non-terminal rows.
 
 Mutation witnesses (reproducible by editing the engine and running
 `npx vitest run client/daemon/chat-intents.test.ts` from `packages/web-shell`):
@@ -253,7 +283,14 @@ superseded terminal rows in rebuild reds the acknowledge-retry case; dropping th
 abandoned check after `await transport()` reds the late-response case; releasing
 the identity on any terminal state (including `failed`) reds the retry-after-failed
 case; moving the release out of the shared evidence-application path reds the
-in-flight-release case.
+in-flight-release case; removing the superseded terminal exit reds the
+superseded-acknowledge case; dropping the rejected cleanup in the abandoned
+branch reds the abandoned-reject case; re-narrowing the witness at evidence
+application (instead of freezing it at settle) reds the settled-while-live
+in-flight case; applying in-flight evidence to a pending row reds the
+pending-submit case; removing the held-evidence guard from `abandon` reds the
+held-evidence case; hardcoding `phase` to `idle` reds the failed-phase case;
+removing `Object.freeze` reds the frozen-target case.
 
 ## Constraints respected
 

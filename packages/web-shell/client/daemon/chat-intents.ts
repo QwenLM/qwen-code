@@ -44,6 +44,10 @@ interface TrackedIntent {
   // Set when the attempt is abandoned; a late transport response must not
   // revive a terminalized attempt.
   abandoned?: boolean;
+  // Set when an approval's positive witness was forced to 'none' because its
+  // request is not live; such a decision can never establish and is given a
+  // terminal exit so it does not leak a permanent non-terminal row.
+  superseded?: boolean;
 }
 
 export interface DaemonChatIntents {
@@ -143,26 +147,35 @@ export function createDaemonChatIntents(): DaemonChatIntents {
   };
   const find = (operationId: string): TrackedIntent | undefined =>
     tracked.find((intent) => intent.operation.id === operationId);
+  // A superseded approval never establishes on positive evidence: the decision
+  // must apply to a request that is still live. Negative evidence is not
+  // rewritten, so a decision that genuinely failed terminalizes. Currency is
+  // judged when the evidence settles, not when the transport later resolves.
+  const narrowWitness = (
+    intent: TrackedIntent,
+    witness: OutcomeWitness,
+  ): OutcomeWitness => {
+    const { kind, target } = intent.operation;
+    return kind === 'approval' &&
+      witness === 'settled' &&
+      (target.requestId === undefined ||
+        !liveApprovalRequests.has(target.requestId))
+      ? 'none'
+      : witness;
+  };
+  // Applies an already-narrowed witness; the caller freezes the currency
+  // judgment at settle time so the in-flight path cannot re-judge it later.
   const applyEvidence = (
     intent: TrackedIntent,
     witness: OutcomeWitness,
   ): IntentResult => {
     const { kind, target } = intent.operation;
-    // A superseded approval never establishes on positive evidence: the
-    // decision must apply to a request that is still live. Negative evidence
-    // is not rewritten, so a decision that genuinely failed terminalizes.
-    const effective =
-      kind === 'approval' &&
-      witness === 'settled' &&
-      (target.requestId === undefined ||
-        !liveApprovalRequests.has(target.requestId))
-        ? 'none'
-        : witness;
-    const result = resolveIntent(intent.admission, effective, target);
-    intent.operation = {
-      ...intent.operation,
-      state: stateFor(kind, result.outcome),
-    };
+    const result = resolveIntent(intent.admission, witness, target);
+    // A superseded decision can never establish; give it a terminal exit so it
+    // does not leak a permanent non-terminal row. The returned outcome stays
+    // unsettled, so the decision still never certifies.
+    const state = intent.superseded ? 'failed' : stateFor(kind, result.outcome);
+    intent.operation = { ...intent.operation, state };
     // An established decision is no longer pending: release its request
     // identity here so both the settle and the in-flight evidence paths do it.
     // A failed decision does not supersede its request, so it keeps the
@@ -215,7 +228,18 @@ export function createDaemonChatIntents(): DaemonChatIntents {
       }
       if (intent.abandoned) {
         // A late transport response must not revive an attempt that was
-        // abandoned while the POST was in flight; keep its terminal state.
+        // abandoned while the POST was in flight. A rejected response still
+        // drops the row: rejected requests are never tracked as operations.
+        if (admission === 'rejected') {
+          tracked = tracked.filter(
+            (entry) => entry.operation.id !== operationId,
+          );
+          rebuild();
+          return {
+            operationId,
+            result: resolveIntent('rejected', 'none', recordedTarget),
+          };
+        }
         rebuild();
         return {
           operationId,
@@ -244,10 +268,29 @@ export function createDaemonChatIntents(): DaemonChatIntents {
       const intent = find(operationId);
       if (!intent) return undefined;
       if (isTerminal(intent.operation.state)) return undefined;
-      // Retain the evidence so a settlement delivered while the transport is
-      // still in flight is applied once admission resolves, not discarded.
-      intent.witness = witness;
-      const result = applyEvidence(intent, witness);
+      // Freeze the currency judgment now and retain the narrowed witness, so a
+      // settlement delivered in flight is applied once admission resolves
+      // without re-judging currency or being discarded.
+      const narrowed = narrowWitness(intent, witness);
+      intent.witness = narrowed;
+      if (
+        intent.operation.kind === 'approval' &&
+        witness === 'settled' &&
+        narrowed === 'none'
+      ) {
+        intent.superseded = true;
+      }
+      // While the POST is in flight the row stays pending: the evidence is
+      // retained and applied by dispatch once admission resolves, so a submit
+      // does not leave 'submitting' before it was admitted.
+      if (intent.operation.state === 'pending') {
+        return resolveIntent(
+          intent.admission,
+          narrowed,
+          intent.operation.target,
+        );
+      }
+      const result = applyEvidence(intent, narrowed);
       rebuild();
       return result;
     },
@@ -255,8 +298,14 @@ export function createDaemonChatIntents(): DaemonChatIntents {
       const intent = find(operationId);
       if (!intent) return undefined;
       if (isTerminal(intent.operation.state)) return undefined;
-      // Only an unconfirmable admission may be abandoned; an accepted attempt
-      // is a live turn whose real evidence must still be able to land.
+      // Authoritative settlement evidence already held must still be able to
+      // land; abandoning would discard it and report a failed send for a turn
+      // the daemon is running.
+      if (intent.witness === 'settled') return undefined;
+      // Only an unconfirmable admission may be abandoned; an attempt with a
+      // confirmed admission is a live turn whose evidence must still land. An
+      // in-flight attempt without settled evidence may be abandoned, and a late
+      // accepted response is then discarded.
       if (intent.admission !== 'unknown') return undefined;
       intent.abandoned = true;
       intent.operation = { ...intent.operation, state: 'failed' };

@@ -367,7 +367,9 @@ describe('daemon intents: observable snapshot and retention', () => {
 describe('daemon intents: recorded-target and evidence boundaries', () => {
   it('a caller mutating its target object cannot revive a superseded approval', async () => {
     const intents = createDaemonChatIntents();
-    const mutableTarget: IntentTarget = { sessionId: 's1', requestId: 'r1' };
+    // A mutable fixture: the scenario guards a caller mutating the object it
+    // passed, so it must not be typed as the readonly IntentTarget.
+    const mutableTarget = { sessionId: 's1', requestId: 'r1' };
     intents.setApprovalRequestLive('r1', true);
     const { operationId } = await intents.dispatch(
       'approval',
@@ -518,5 +520,113 @@ describe('daemon intents: recorded-target and evidence boundaries', () => {
     expect(intents.settle(again.operationId, 'settled')?.outcome).toBe(
       'unsettled',
     );
+  });
+
+  it('a superseded approval decision gets a terminal exit and can be acknowledged', async () => {
+    const intents = createDaemonChatIntents();
+    intents.setApprovalRequestLive('r1', true);
+    const { operationId } = await intents.dispatch(
+      'approval',
+      approvalTarget('r1'),
+      accepted,
+    );
+    intents.setApprovalRequestLive('r1', false);
+    expect(intents.settle(operationId, 'settled')?.outcome).toBe('unsettled');
+    intents.acknowledge(operationId);
+    expect(intents.operations.some((op) => op.id === operationId)).toBe(false);
+  });
+
+  it('an abandoned in-flight attempt whose POST rejects is not tracked', async () => {
+    const intents = createDaemonChatIntents();
+    const gate = deferredAdmission();
+    const pending = intents.dispatch('submit', target, () => gate.promise);
+    const id = intents.operations.find((op) => op.kind === 'submit')!.id;
+    intents.abandon(id);
+    gate.resolve('rejected');
+    const { result } = await pending;
+    expect(result.admission).toBe('rejected');
+    expect(intents.operations.some((op) => op.id === id)).toBe(false);
+  });
+
+  it('in-flight approval currency is frozen at settle time', async () => {
+    const intents = createDaemonChatIntents();
+    intents.setApprovalRequestLive('r1', true);
+    const gate = deferredAdmission();
+    const pending = intents.dispatch(
+      'approval',
+      approvalTarget('r1'),
+      () => gate.promise,
+    );
+    const id = intents.operations.find((op) => op.kind === 'approval')!.id;
+    intents.setApprovalRequestLive('r1', false);
+    intents.settle(id, 'settled');
+    // Re-marking the request live after the settle must not revive the decision.
+    intents.setApprovalRequestLive('r1', true);
+    gate.resolve('accepted');
+    const { result } = await pending;
+    expect(result.outcome).toBe('unsettled');
+    expect(intents.operations.find((op) => op.id === id)?.state).not.toBe(
+      'established',
+    );
+  });
+
+  it('an in-flight establishment settled while live survives a later supersede', async () => {
+    const intents = createDaemonChatIntents();
+    intents.setApprovalRequestLive('r1', true);
+    const gate = deferredAdmission();
+    const pending = intents.dispatch(
+      'approval',
+      approvalTarget('r1'),
+      () => gate.promise,
+    );
+    const id = intents.operations.find((op) => op.kind === 'approval')!.id;
+    // Settled while the request is live: currency is frozen at settle time.
+    intents.settle(id, 'settled');
+    // Superseding after the settle must not discard the legitimate establishment.
+    intents.setApprovalRequestLive('r1', false);
+    gate.resolve('accepted');
+    const { result } = await pending;
+    expect(result.outcome).toBe('established');
+  });
+
+  it('in-flight evidence keeps a pending submit in submitting until admission', async () => {
+    const intents = createDaemonChatIntents();
+    const gate = deferredAdmission();
+    const pending = intents.dispatch('submit', target, () => gate.promise);
+    const id = intents.operations.find((op) => op.kind === 'submit')!.id;
+    intents.settle(id, 'settled');
+    expect(intents.phase('idle')).toBe('submitting');
+    expect(intents.operations.find((op) => op.id === id)?.state).toBe(
+      'pending',
+    );
+    gate.resolve('accepted');
+    const { result } = await pending;
+    expect(result.outcome).toBe('established');
+  });
+
+  it('abandon cannot discard held settlement evidence', async () => {
+    const intents = createDaemonChatIntents();
+    const gate = deferredAdmission();
+    const pending = intents.dispatch('submit', target, () => gate.promise);
+    const id = intents.operations.find((op) => op.kind === 'submit')!.id;
+    intents.settle(id, 'settled');
+    expect(intents.abandon(id)).toBeUndefined();
+    gate.resolve('accepted');
+    const { result } = await pending;
+    expect(result.outcome).toBe('established');
+  });
+
+  it('phase passes the failed settled state through', () => {
+    expect(createDaemonChatIntents().phase('failed')).toBe('failed');
+  });
+
+  it('the recorded target is frozen against writes through operations', async () => {
+    const intents = createDaemonChatIntents();
+    await intents.dispatch('approval', approvalTarget('r1'), accepted);
+    const recorded = intents.operations[0].target;
+    expect(Object.isFrozen(recorded)).toBe(true);
+    expect(() => {
+      (recorded as { requestId?: string }).requestId = 'r2';
+    }).toThrow();
   });
 });
