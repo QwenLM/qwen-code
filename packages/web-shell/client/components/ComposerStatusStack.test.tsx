@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -93,8 +95,10 @@ describe('ComposerStatusStack', () => {
   it('wraps the queue and the goal strip in the shared status root', () => {
     render({ queued: queuedProps, goal: goalProps });
     const node = stack();
-    // The root class is the only source of the border/width/radius; assert the
-    // imported class name so a CSS-module rename cannot make this meaningless.
+    // The component must apply the module's root class (the only source of the
+    // border/width/radius). This pins the component's usage of it; that the
+    // stylesheet actually defines `.root` is pinned by reading the file below,
+    // because this package's vitest config emulates CSS modules (no test.css).
     expect(node.className).toContain(styles.root);
     expect(container.textContent).toContain('排队消息一');
     // Both children stay direct and in this order: the stylesheet selects
@@ -139,5 +143,17 @@ describe('ComposerStatusStack', () => {
       true,
     );
     expect(node.querySelector('[data-web-shell-queued-prompts]')).toBeNull();
+  });
+
+  it('defines the root class in the stylesheet the component imports', () => {
+    // Without test.css, vitest resolves `styles.<key>` from an emulated map
+    // regardless of the file's contents, so the className assertion above
+    // cannot see a stylesheet-only rename. Read the file to pin that `.root`
+    // is actually defined — a production build needs it for the root styles.
+    const css = readFileSync(
+      resolve(__dirname, 'ComposerStatusStack.module.css'),
+      'utf8',
+    );
+    expect(css).toMatch(/^\.root\s*\{/m);
   });
 });

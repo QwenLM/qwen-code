@@ -70,6 +70,18 @@ describe('GoalStatusStrip', () => {
     return handlers;
   }
 
+  it('keeps the goal-status attribute on the outermost element for the stack CSS', () => {
+    render('active');
+    // ComposerStatusStack.module.css selects `.root > [data-web-shell-goal-status]`
+    // and the adjacent-sibling divider, so the attribute must ride on the strip's
+    // outermost element — the stack renders the strip as a direct child.
+    expect(
+      container
+        .querySelector('[data-testid="goal-status-strip"]')
+        ?.hasAttribute('data-web-shell-goal-status'),
+    ).toBe(true);
+  });
+
   it('shows pause for an active Goal and wires actions', () => {
     const handlers = render('active');
     expect(container.textContent).toContain('In progress');
