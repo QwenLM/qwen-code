@@ -302,7 +302,9 @@ documented as-is.
   holds its slot until the client disconnects or the surface's own lifecycle
   ends; the cap bounds how many such slots can exist at once. Shutdown is
   the backstop: the listener close force-closes remaining connections after
-  the close timeout, releasing their slots (pinned by the shutdown test).
+  the close timeout — including upgraded sockets, which
+  `closeAllConnections()` alone does not reach — releasing their slots
+  (pinned by the shutdown tests).
 
 ## Files affected
 
@@ -396,6 +398,8 @@ documented as-is.
   (users guide scope note and Constraints above). The `remote-access`
   pairing listener now carries the same end-to-end admission pin as
   `local-control` (clamp, listener-scoped refusal, access-log attribution,
-  deep-health pair), and shutdown drain coverage for the counted non-REST
-  surfaces is pinned (open generation/ACP streams neither hang
-  `handle.close()` nor leak their slots).
+  deep-health pair), and shutdown drain coverage is pinned for the
+  generation and ACP surfaces (open streams neither hang `handle.close()`
+  nor leak their slots, including an upgraded peer that never answers a
+  close frame); the remaining counted surfaces share the same release hook
+  but have no shutdown pin yet.

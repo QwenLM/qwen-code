@@ -51971,6 +51971,54 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
     );
   }, 20_000);
 
+  it('shutdown reclaims an upgraded ACP socket whose peer never answers close (issue #17712)', async () => {
+    // closeAllConnections() does not reach upgraded sockets; without the
+    // lifecycle force timer destroying them, a non-reading WS peer makes
+    // handle.close() reject with "did not confirm shutdown" (review R1-1).
+    const before = getSseOccupancy();
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const clientSocket = await new Promise<import('node:net').Socket>(
+      (resolve, reject) => {
+        const req = httpRequest({
+          hostname: '127.0.0.1',
+          port,
+          path: '/acp',
+          headers: {
+            Connection: 'Upgrade',
+            Upgrade: 'websocket',
+            'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+            'Sec-WebSocket-Version': '13',
+          },
+        });
+        req.on('upgrade', (_res, socket) => resolve(socket));
+        req.on('error', reject);
+        req.end();
+      },
+    );
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().bySurface.acpWs).toBe(
+          before.bySurface.acpWs + 1,
+        );
+      },
+      { timeout: 5_000 },
+    );
+    // The peer never reads and never answers the close frame.
+    await handle.close();
+    handle = undefined;
+    clientSocket.destroy();
+    await vi.waitFor(
+      () => {
+        expect(getSseOccupancy().total).toBe(before.total);
+      },
+      { timeout: 5_000 },
+    );
+  }, 20_000);
+
   it('clamps the pairing listener independently of the primary listener', async () => {
     // runQwenServe always boots its own logger, so the access-log
     // attribution is asserted against the real log file (review R3-5).
