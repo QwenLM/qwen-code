@@ -4590,7 +4590,7 @@ describe('task activity key', () => {
         '[data-web-shell-artifacts-entry]',
       );
       expect(entry).not.toBeNull();
-      expect(entry!.getAttribute('aria-label')).toBe('Open artifacts (3)');
+      expect(entry!.getAttribute('aria-label')).toBe('Artifacts (3)');
 
       // The authoritative list supersedes the hint once it lands.
       await act(async () => {
@@ -4602,7 +4602,7 @@ describe('task activity key', () => {
         container
           .querySelector<HTMLButtonElement>('[data-web-shell-artifacts-entry]')
           ?.getAttribute('aria-label'),
-      ).toBe('Open artifacts (1)');
+      ).toBe('Artifacts (1)');
     } finally {
       mockConnection.artifactCountHint = undefined;
       mockConnection.artifactCountHintSessionId = undefined;
