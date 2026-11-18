@@ -482,7 +482,7 @@ export const ToolConfirmationMessage: React.FC<
         <Box paddingX={1} marginLeft={1}>
           <MaxSizedBox
             maxHeight={bodyContentHeight}
-            maxWidth={Math.max(contentWidth, 1)}
+            maxWidth={warningContentWidth}
             overflowDirection="bottom"
           >
             <Box>

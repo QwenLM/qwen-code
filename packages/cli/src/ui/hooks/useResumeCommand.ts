@@ -258,7 +258,7 @@ export function useResumeCommand(
         setSessionName?.(customTitle ?? null);
         clearPendingState?.();
         clearItems();
-        loadHistory(uiHistoryItems);
+        loadHistory(uiHistoryItems, sessionId);
         if (recoveredBackgroundAgentsNotice) {
           addItem(
             {

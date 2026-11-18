@@ -371,15 +371,14 @@ public final class ToolPublicationAdmissionStore {
         }
         return transactions.execute(status -> {
             boolean placement = data.lockPublicationPlacement(key, publicationId, authority != null);
-            sessions.lockCsiOriginal(text(key, "tenantId"), text(key, "sessionId"));
-            boolean csi = data.lockOriginalSettledResult(key, publicationId, finished);
+            data.lockOriginalSettledResult(key, publicationId, finished);
             // An ordinary receipt without lifecycle authority skips the tenant
             // publication guard: the journal commit below takes none, and the
-            // lane locks root, head, publication row, as collection does. A CSI
-            // original or a lifecycle-authority commit (which takes the guard
-            // in checkLifecycleWriter) keeps it where it was (design
+            // lane locks root, head, publication row, as collection does. A
+            // lifecycle-authority commit (which takes the guard in
+            // checkLifecycleWriter) keeps it (design
             // 2026-11-04-managed-publication-tenant-guards, C2).
-            boolean guard = csi || authority != null;
+            boolean guard = authority != null;
             if (guard) {
                 lockTenant(key);
             }
@@ -524,9 +523,19 @@ public final class ToolPublicationAdmissionStore {
         long revision = ((Number) publication.get("receipt_revision")).longValue();
         long sequence = ((Number) publication.get("receipt_sequence")).longValue();
         require(revision > 0 && sequence > 0, "Original receipt pointer is invalid");
-        byte[] records = jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
-                + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
-                byte[].class, text(key, "tenantId"), text(key, "sessionId"), revision);
+        var journalRows = jdbc.query("SELECT record_bytes, record_digest, byte_length FROM"
+                + " ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
+                (row, index) -> ManagedSchemaRows.read(row),
+                text(key, "tenantId"), text(key, "sessionId"), revision);
+        require(journalRows.size() == 1, "Original receipt is missing");
+        byte[] records = (byte[]) journalRows.getFirst().get("record_bytes");
+        if (records == null) {
+            JdbcJournalPacks packs = sessions.journalPacks();
+            records = packs == null ? null : packs.resolveBytes(text(key, "tenantId"),
+                    text(key, "sessionId"), revision,
+                    (String) journalRows.getFirst().get("record_digest"),
+                    ((Number) journalRows.getFirst().get("byte_length")).longValue());
+        }
         require(records != null, "Original receipt is missing");
         JsonNode event = null;
         for (String line : new String(records, StandardCharsets.UTF_8).split("\n")) {
@@ -555,9 +564,7 @@ public final class ToolPublicationAdmissionStore {
 
     private void lockTenant(JsonNode key) {
         // This lane's publication-guard acquisition, bounded with the shared
-        // named-failure mapping (#13800). For a CSI-pinned Session,
-        // lockCsiOriginal above already took the same row with the same
-        // bound, and this re-lock returns at once.
+        // named-failure mapping (#13800).
         JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc,
                 text(key, "tenantId"), JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
     }

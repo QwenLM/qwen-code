@@ -18,6 +18,7 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
 @EnableConfigurationProperties(ManagedAgentProperties.class)
 @EnableScheduling
 @EnableTransactionManagement(proxyTargetClass = true)
+@org.springframework.boot.autoconfigure.ImportAutoConfiguration(ExtensionArchiveStorageAutoConfiguration.class)
 @Import({
     ManagedAgentConfiguration.PersistenceImport.class,
     ExecutionConfiguration.class,
@@ -119,6 +120,11 @@ public class ManagedAgentConfiguration {
     public com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository managedChannelDeliveries(
             @org.springframework.beans.factory.annotation.Qualifier("managedJdbcTemplate") org.springframework.jdbc.core.JdbcTemplate jdbc) {
         return new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelDeliveryRepository(jdbc);
+    }
+    @org.springframework.context.annotation.Bean
+    public com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository managedChannelSegments(
+            @org.springframework.beans.factory.annotation.Qualifier("managedJdbcTemplate") org.springframework.jdbc.core.JdbcTemplate jdbc) {
+        return new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelSegmentRepository(jdbc);
     }
 
     @org.springframework.context.annotation.Bean

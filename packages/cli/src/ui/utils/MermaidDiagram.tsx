@@ -18,7 +18,7 @@ import { useTerminalOutput } from '../contexts/TerminalOutputContext.js';
 
 interface MermaidDiagramProps {
   source: string;
-  sourceCopyCommand: string;
+  sourceCopyCommand?: string;
   contentWidth: number;
   isPending: boolean;
   availableTerminalHeight?: number;
@@ -130,7 +130,7 @@ const MermaidDiagramInternal: React.FC<MermaidDiagramProps> = ({
   }, [kittySequence, writeRaw]);
 
   const titleWithSourceHint = (title: string) =>
-    `${title} · source: ${sourceCopyCommand}`;
+    sourceCopyCommand ? `${title} · source: ${sourceCopyCommand}` : title;
 
   if (
     image?.kind === 'terminal-image' &&

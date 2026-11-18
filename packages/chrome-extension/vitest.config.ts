@@ -11,6 +11,10 @@ export default defineConfig({
     include: ['src/**/*.test.ts', 'scripts/**/*.test.js'],
     environment: 'jsdom',
     globals: true,
+    reporters: ['default', 'junit'],
+    outputFile: {
+      junit: 'junit.xml',
+    },
     // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
     dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
     // Shared-pool ceiling; see scripts/tests/unit-vitest-configs.test.ts.

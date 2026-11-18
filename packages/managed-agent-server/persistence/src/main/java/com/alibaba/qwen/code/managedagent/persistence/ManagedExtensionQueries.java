@@ -7,7 +7,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.TaskTarget;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -52,8 +52,8 @@ final class ManagedExtensionQueries {
     static String readRevision(JdbcTemplate jdbc, String tenant, String session) {
         return jdbc.query("SELECT journal_revision FROM ma_session_head WHERE tenant_key = ?"
                         + " AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
-                (row, index) -> row.getString("journal_revision"), JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
-                JdbcRuntimeBindingRepository.harnessDrainKey(session), tenant, session).stream().findFirst().orElse(null);
+                (row, index) -> row.getString("journal_revision"), RuntimeAdmissionFences.harnessDrainKey(tenant),
+                RuntimeAdmissionFences.harnessDrainKey(session), tenant, session).stream().findFirst().orElse(null);
     }
 
     static Optional<JsonNode> configRef(JdbcTemplate jdbc, String tenant, String session) {

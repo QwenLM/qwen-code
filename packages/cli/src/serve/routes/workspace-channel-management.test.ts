@@ -84,6 +84,18 @@ function service(): ChannelManagementService {
     start: vi.fn(async (name) => result(name)),
     stop: vi.fn(async (name) => result(name)),
     restart: vi.fn(async (name) => result(name)),
+    startQrLogin: vi.fn(async (name: string) => ({
+      view: {
+        loginId: 'login-1',
+        channelType: 'qq',
+        channelName: name,
+        status: 'pending' as const,
+        expiresAt: 2_000,
+      },
+      attached: false,
+    })),
+    qrLoginState: vi.fn(() => undefined),
+    cancelQrLogin: vi.fn(() => false),
     pairingRequests: vi.fn(async () => ({ requests: [] })),
     approvePairing: vi.fn(async (_name, code) => ({
       approved: {

@@ -545,16 +545,16 @@ export const useSlashCommandProcessor = (
           return historyRef.current;
         },
         addItem,
-        clear: () => {
+        clear: (sessionId) => {
           cancelBtw();
           actions.clearPendingState();
-          clearItems();
+          clearItems(sessionId);
           clearScreen();
           refreshStatic();
           setSessionName?.(null);
         },
         clearPendingState: actions.clearPendingState,
-        loadHistory,
+        loadHistory: (history) => loadHistory(history),
         refreshStatic,
         setDebugMessage: actions.setDebugMessage,
         pendingItem,

@@ -2853,6 +2853,7 @@ describe('ScheduledTasksDialog Channel delivery', () => {
 
   beforeEach(() => {
     useDaemonChannels.mockReturnValue({
+      catalog: [],
       data: {
         catalog: [],
         snapshot: { revision: '1', instances: channelInstances },
@@ -2932,6 +2933,91 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     );
   });
 
+  function useConfiguredWebhook(type = 'dingtalk-webhook') {
+    const instances = {
+      ...channelInstances,
+      'ops-bot': {
+        ...channelInstances['ops-bot'],
+        config: { type },
+      },
+    };
+    const catalog = [
+      {
+        type,
+        defaultDeliveryTarget: { type: 'chat', id: 'default' },
+      },
+    ];
+    useDaemonChannels.mockReturnValue({
+      catalog,
+      data: { catalog, snapshot: { revision: '1', instances } },
+      channels: instances,
+      loading: false,
+      error: undefined,
+    });
+  }
+
+  it.each(['dingtalk-webhook', 'feishu-webhook', 'wecom-webhook'])(
+    'creates a task with the %s configured destination without contacts or a manual ID',
+    async (type) => {
+      useConfiguredWebhook(type);
+      await mount([], options);
+      await openCreate();
+      select(findSessionModeSelect()!, 'dedicated');
+      select(channelSelect(), 'ops-bot');
+      await flush();
+      expect(targetInput()).toBeNull();
+      expect(suggestionSelect()).toBeNull();
+      expect(actions.listChannelObservedContacts).not.toHaveBeenCalled();
+      click(findButton('Create'));
+      await flush();
+      expect(actions.createScheduledTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionMode: 'persistent',
+          delivery: {
+            kind: 'channel',
+            target: { channelName: 'ops-bot', type: 'chat', id: 'default' },
+          },
+        }),
+        undefined,
+      );
+    },
+  );
+
+  it.each(['dingtalk-webhook', 'feishu-webhook', 'wecom-webhook'])(
+    'preserves an unsupported %s saved destination when editing another task field',
+    async (type) => {
+      useConfiguredWebhook(type);
+      const saved: DaemonChannelDelivery = {
+        kind: 'channel',
+        target: {
+          channelName: 'ops-bot',
+          type: 'user',
+          id: ' unsupported-id ',
+        },
+      };
+      await mount([baseTask({ delivery: saved })], options);
+      click(document.querySelector('[aria-label="Edit"]'));
+      await flush();
+      expect(targetInput().value).toBe(' unsupported-id ');
+      expect(document.body.textContent).toContain(
+        'This saved destination differs from the Channel’s configured destination.',
+      );
+      expect(findButton('Use configured destination')).toBeDefined();
+      input(
+        document.querySelector<HTMLInputElement>('input[maxlength="200"]')!,
+        'Renamed webhook task',
+      );
+      click(findButton('Save'));
+      await flush();
+      expect(actions.updateScheduledTask.mock.calls[0]?.[1]).toMatchObject({
+        name: 'Renamed webhook task',
+      });
+      expect(actions.updateScheduledTask.mock.calls[0]?.[1]).not.toHaveProperty(
+        'delivery',
+      );
+    },
+  );
+
   it('closes a primary-only draft when the primary cwd changes', async () => {
     const primaryOptions = {
       ...options,
@@ -3007,6 +3093,7 @@ describe('ScheduledTasksDialog Channel delivery', () => {
     'does not mark an undiscovered saved Channel missing when $label',
     async ({ loading, error }) => {
       useDaemonChannels.mockReturnValue({
+        catalog: [],
         data: undefined,
         channels: {},
         loading,
@@ -3068,6 +3155,29 @@ describe('ScheduledTasksDialog Channel delivery', () => {
       'delivery',
     );
   });
+
+  it.each(['chat', 'user'] as const)(
+    'identifies a %s delivery card by Channel name and destination ID',
+    async (type) => {
+      await mount(
+        [
+          baseTask({
+            delivery: {
+              kind: 'channel',
+              target: { channelName: 'receiver', type, id: 'destination-42' },
+            },
+          }),
+        ],
+        options,
+      );
+      const row = container?.querySelector(
+        '[data-testid="scheduled-task-delivery"]',
+      );
+      expect(row?.textContent).toContain('receiver · destination-42');
+      expect(row?.textContent).not.toMatch(/ · (Chat|User) · /);
+      expect(row?.getAttribute('title')).toBe(row?.textContent);
+    },
+  );
 
   it('only warns about per-run delivery while a target is selected', async () => {
     const warning =
@@ -3184,6 +3294,7 @@ describe('ScheduledTasksDialog Channel delivery', () => {
 
   it('explains an empty Channel list without opting the task into delivery', async () => {
     useDaemonChannels.mockReturnValue({
+      catalog: [],
       data: { catalog: [], snapshot: { revision: '1', instances: {} } },
       channels: {},
       loading: false,
@@ -3491,6 +3602,7 @@ describe('ScheduledTasksDialog Channel delivery', () => {
 
   it('keeps existing configuration when Channels and contact discovery fail', async () => {
     useDaemonChannels.mockReturnValue({
+      catalog: [],
       channels: {},
       loading: false,
       error: new Error('Channels unavailable'),
@@ -3682,6 +3794,7 @@ describe('ScheduledTasksDialog Channel delivery', () => {
 
   it('marks a saved Channel unavailable only after discovery confirms it is missing', async () => {
     useDaemonChannels.mockReturnValue({
+      catalog: [],
       data: { catalog: [], snapshot: { revision: '1', instances: {} } },
       channels: {},
       loading: false,
