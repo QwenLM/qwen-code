@@ -796,6 +796,7 @@ export class ManagedWecomAdapter {
     for (const segment of delivery.segments) {
       if (!this.running) return;
       const messageId = randomUUID();
+      const previousOutbound = state.outbound;
       state.outbound = [
         ...state.outbound,
         {
@@ -804,7 +805,19 @@ export class ManagedWecomAdapter {
           messageId,
         },
       ].slice(-MANAGED_OUTBOUND_LIMIT);
-      this.persist();
+      try {
+        this.persist();
+      } catch (error) {
+        // The ledger entry is the double-send guard: without it on disk, a
+        // crash after the send would re-send on restart. Roll back and abandon
+        // this delivery before the side effect; the lease reconciler settles
+        // it unknown. The rest of the claimed batch is still attempted.
+        state.outbound = previousOutbound;
+        this.log(
+          `Managed WeCom could not persist the outbound ledger for ${delivery.deliveryId}: ${String(error)}; the send is abandoned and the lease reconciler settles it.`,
+        );
+        return;
+      }
       let outcome: ManagedReceipt;
       try {
         await this.deps.sendMessage(chatId, segment.text);
@@ -829,7 +842,17 @@ export class ManagedWecomAdapter {
           candidate.ordinal === segment.ordinal,
       );
       if (entry) entry.receipt = outcome;
-      this.persist();
+      try {
+        this.persist();
+      } catch (error) {
+        // The send already happened: report the outcome to the control plane
+        // even if the local write failed — the server-side settle is the
+        // durable record, and the orphan re-drive replays the in-memory
+        // receipt until the local write lands.
+        this.log(
+          `Managed WeCom could not persist the receipt for ${delivery.deliveryId}: ${String(error)}; it is still reported and re-driven locally.`,
+        );
+      }
       try {
         await this.controlPlane.receipt(delivery.deliveryId, outcome);
       } catch (error) {
@@ -850,7 +873,15 @@ export class ManagedWecomAdapter {
             candidate.ordinal === segment.ordinal
           ),
       );
-      this.persist();
+      try {
+        this.persist();
+      } catch (error) {
+        // The receipt is already reported; disk keeps the entry, so the next
+        // tick's orphan re-drive replays the receipt and removes it again.
+        this.log(
+          `Managed WeCom could not persist the settled segment of ${delivery.deliveryId}: ${String(error)}; the orphan re-drive removes it on the next tick.`,
+        );
+      }
       if (outcome.outcome !== 'accepted') return;
     }
   }
@@ -914,7 +945,15 @@ export class ManagedWecomAdapter {
       state.outbound = state.outbound.filter(
         (candidate) => candidate !== entry,
       );
-      this.persist();
+      try {
+        this.persist();
+      } catch (error) {
+        // Disk keeps the entry; the next tick replays the same idempotent
+        // receipt and retries the removal. Never abort the remaining orphans.
+        this.log(
+          `Managed WeCom could not persist the orphan removal of ${entry.deliveryId}: ${String(error)}; it re-drives on the next tick.`,
+        );
+      }
     }
   }
 

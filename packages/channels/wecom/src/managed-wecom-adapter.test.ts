@@ -2533,3 +2533,141 @@ describe('ManagedWecomAdapter — round-4 review fixes', () => {
     await second.disconnect();
   });
 });
+
+describe('ManagedWecomAdapter — outbound save-failure guards (P1)', () => {
+  const storeOf = (a: ManagedWecomAdapter) =>
+    (a as unknown as { store: { save: (s: unknown) => void } }).store;
+  const stateOf = (a: ManagedWecomAdapter) =>
+    (a as unknown as { state: { outbound: Array<{ receipt?: unknown }> } })
+      .state;
+
+  it('a failed ledger persist abandons the send before the side effect', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (l) => lines.push(l),
+    });
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      if ((state as { outbound: unknown[] }).outbound.length > 0)
+        throw new Error('disk full');
+      realSave(state);
+    });
+    plane.enqueue([delivery('d-1', 1)]);
+    await adapter.tick();
+    // No ledger on disk means no send may happen: the entry is the double-send
+    // guard, and the rollback must clear memory too.
+    expect(fake.sent).toHaveLength(0);
+    expect(stateOf(adapter).outbound).toHaveLength(0);
+    expect(
+      JSON.parse(readFileSync(adapter.stateFile, 'utf8')).outbound,
+    ).toHaveLength(0);
+    expect(lines.some((l) => l.includes('outbound ledger'))).toBe(true);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed receipt persist still reports the accepted outcome', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (l) => lines.push(l),
+    });
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      const outbound = (state as { outbound: Array<{ receipt?: unknown }> })
+        .outbound;
+      if (outbound.some((entry) => entry.receipt)) throw new Error('disk full');
+      realSave(state);
+    });
+    plane.enqueue([delivery('d-1', 1)]);
+    await adapter.tick();
+    // The send already happened: the server-side settle is the durable record,
+    // so the accepted outcome must still be reported (never lost to unknown).
+    expect(fake.sent).toHaveLength(1);
+    expect(plane.receipts).toHaveLength(1);
+    expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
+      'accepted',
+    );
+    expect(lines.some((l) => l.includes('could not persist the receipt'))).toBe(
+      true,
+    );
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed settled-segment removal persist logs and keeps going', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (l) => lines.push(l),
+    });
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    let saves = 0;
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      saves += 1;
+      // For a one-segment delivery the tick saves the ledger append (1), the
+      // post-send receipt (2), then the settled-segment removal (3).
+      if (saves === 3) throw new Error('disk full');
+      realSave(state);
+    });
+    plane.enqueue([delivery('d-1', 1)]);
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(1);
+    expect(plane.receipts).toHaveLength(1);
+    expect(
+      lines.some((l) => l.includes('could not persist the settled segment')),
+    ).toBe(true);
+    // The receipt is reported; disk keeps the entry for the orphan re-drive.
+    expect(
+      JSON.parse(readFileSync(adapter.stateFile, 'utf8')).outbound,
+    ).toHaveLength(1);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed orphan removal persist never aborts the remaining orphans', async () => {
+    const lines: string[] = [];
+    const { adapter, plane } = await connectedAdapter(tempCwd(), {
+      log: (l) => lines.push(l),
+    });
+    const priv = adapter as unknown as {
+      state: { outbound: unknown[] };
+      store: { save: (s: unknown) => void };
+    };
+    priv.state.outbound = [
+      {
+        deliveryId: 'd1',
+        ordinal: 0,
+        messageId: 'm1',
+        receipt: {
+          outcome: 'accepted',
+          ordinal: 0,
+          providerMessageId: 'p1',
+          acceptedAt: 1_750_000_000_000,
+        },
+      },
+      {
+        deliveryId: 'd2',
+        ordinal: 0,
+        messageId: 'm2',
+        receipt: {
+          outcome: 'accepted',
+          ordinal: 0,
+          providerMessageId: 'p2',
+          acceptedAt: 1_750_000_000_000,
+        },
+      },
+    ];
+    priv.store.save(priv.state);
+    const spy = vi.spyOn(priv.store, 'save').mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    await adapter.tick();
+    // Both orphan receipts are reported despite every removal persist failing.
+    expect(plane.receipts.map((r) => r.deliveryId)).toEqual(['d1', 'd2']);
+    expect(lines.some((l) => l.includes('orphan removal'))).toBe(true);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+});
