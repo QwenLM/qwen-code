@@ -7954,6 +7954,7 @@ export class Config {
       // different image support must update them, or the vision-bridge gate and
       // image-stripping read the previous model's modalities.
       this.contentGeneratorConfig.modalities = config.modalities;
+      this.contentGeneratorConfig.imageDetail = config.imageDetail;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
@@ -7961,6 +7962,10 @@ export class Config {
       if ('modalities' in sources) {
         this.contentGeneratorConfigSources['modalities'] =
           sources['modalities'];
+      }
+      if ('imageDetail' in sources) {
+        this.contentGeneratorConfigSources['imageDetail'] =
+          sources['imageDetail'];
       }
       if ('samplingParams' in sources) {
         this.contentGeneratorConfigSources['samplingParams'] =
@@ -8182,6 +8187,9 @@ export class Config {
       `${this.sessionId}.worktree.json`,
       `${this.sessionId}.pr.json`,
       `${this.sessionId}.title.json`,
+      `${this.sessionId}.branch.json`,
+      `${this.sessionId}.artifacts.json`,
+      `${this.sessionId}.goal.json`,
     ].map((fileName) => ({
       from: path.join(oldChatsDir, fileName),
       to: path.join(newChatsDir, fileName),
@@ -8365,10 +8373,17 @@ export class Config {
     // later `gh pr create` in this session must still reach the bridge.
     const sessionPrBoundCallback =
       this.sessionService?.getSessionPrBoundCallback();
+    const sessionGoalChangedCallback =
+      this.sessionService?.getSessionGoalChangedCallback();
     this.sessionService = undefined;
     if (sessionPrBoundCallback) {
       this.getSessionService().setSessionPrBoundCallback(
         sessionPrBoundCallback,
+      );
+    }
+    if (sessionGoalChangedCallback) {
+      this.getSessionService().setSessionGoalChangedCallback(
+        sessionGoalChangedCallback,
       );
     }
     this.fileHistoryService = undefined;
@@ -12937,7 +12952,14 @@ export class Config {
         .restore(records ?? [])
         .then(() => runtime);
     }
-    void this.goalRuntimeReady.catch(() => undefined);
+    // Restore itself writes nothing (the runtime's invariant); refresh the
+    // list-facing goal projection once it settles, so a session journaled
+    // before the sidecar existed gains its sidebar marker on this load.
+    void this.goalRuntimeReady
+      .then((restoredRuntime) => {
+        recorder.refreshGoalProjection(restoredRuntime.getSnapshot().goal);
+      })
+      .catch(() => undefined);
   }
 
   /**

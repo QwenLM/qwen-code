@@ -7,16 +7,31 @@
 import { gradeActiveWorkCoverage } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { Application, Request, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { sseMaxConnections, type SseAdmissionCaps } from '../daemon-status.js';
 import { isDeepHealthQuery } from '../health-query.js';
+import { listenerIdentityOf } from '../local-control/listener-identity.js';
 import { isLoopbackBind } from '../loopback-binds.js';
 import type { RateLimiterInstance } from '../rate-limit.js';
+import type { StreamOccupancySnapshot } from '../sse-occupancy.js';
 import type { ServeOptions } from '../types.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 interface CreateHealthRoutesDeps {
-  opts: Pick<ServeOptions, 'hostname' | 'requireAuth'>;
+  opts: Pick<
+    ServeOptions,
+    'hostname' | 'requireAuth' | 'maxConnections' | 'maxSseConnections'
+  >;
   workspaceRegistry: WorkspaceRegistry;
-  getActiveSseCount: () => number;
+  /**
+   * Long-lived stream occupancy (issue #17554). The aggregate total pairs
+   * with the daemon-wide cap; the arriving listener's pair counts the
+   * population its governing bound caps — the daemon total when the
+   * aggregate cap binds, the listener's own count when its clamp binds —
+   * against the tighter of the aggregate cap and that clamp, since a
+   * lower aggregate binds first (review R1-6).
+   */
+  getStreamOccupancy: () => StreamOccupancySnapshot;
+  sseAdmissionCaps?: SseAdmissionCaps;
   getRateLimiter: () => RateLimiterInstance | undefined;
 }
 
@@ -26,7 +41,13 @@ interface HealthRoutes {
 }
 
 export function createHealthRoutes(deps: CreateHealthRoutesDeps): HealthRoutes {
-  const { opts, workspaceRegistry, getActiveSseCount, getRateLimiter } = deps;
+  const {
+    opts,
+    workspaceRegistry,
+    getStreamOccupancy,
+    sseAdmissionCaps,
+    getRateLimiter,
+  } = deps;
 
   // `/health` is exempted from `bearerAuth` ONLY on loopback binds —
   // the canonical liveness-probe case (k8s/Compose probes don't
@@ -116,6 +137,35 @@ export function createHealthRoutes(deps: CreateHealthRoutesDeps): HealthRoutes {
 
       const now = Date.now();
       const rateLimiter = getRateLimiter();
+      const occupancy = getStreamOccupancy();
+      const aggregateCap = sseMaxConnections(
+        opts.maxConnections,
+        opts.maxSseConnections,
+      );
+      const listener = listenerIdentityOf(req).kind;
+      // The bound that governs this listener's admissions: the tighter of
+      // the aggregate cap and its own clamp. The gate tests the aggregate
+      // first, so an aggregate below the pairing clamp binds on every
+      // listener and must be the reported max (review R1-6, round 2).
+      // null = unlimited on both sides.
+      const listenerClamp = sseAdmissionCaps?.byListener[listener] ?? null;
+      const listenerMax =
+        aggregateCap === null
+          ? listenerClamp
+          : listenerClamp === null
+            ? aggregateCap
+            : Math.min(aggregateCap, listenerClamp);
+      // The population that bound governs: when the aggregate cap is the
+      // governing bound (always on the primary listener, and on pairing
+      // listeners under a low explicit cap) the gate sheds on the daemon
+      // total, so the pair must count the total — a listener-local
+      // numerator would read as free headroom on a listener that is
+      // already refusing (review R1-6, round 3). Only a binding pairing
+      // clamp governs a listener-local population.
+      const listenerOccupancy =
+        listenerMax === aggregateCap
+          ? occupancy.total
+          : occupancy.byListener[listener];
       res.status(200).json({
         status: 'ok',
         workspaceCount: runtimes.length,
@@ -133,7 +183,17 @@ export function createHealthRoutes(deps: CreateHealthRoutesDeps): HealthRoutes {
         // its own freshness floor. `oldestReportAt` is the oldest *covered*
         // report, so this never disagrees with the grade above.
         activeWorkStaleMs: oldestReportAt === null ? 0 : now - oldestReportAt,
-        connectedClients: getActiveSseCount(),
+        connectedClients: occupancy.total,
+        // Effective SSE admission cap paired with the live occupancy above
+        // so a probe can see saturation approaching (null = unlimited).
+        connectedClientsMax: aggregateCap,
+        // The arriving listener's governing pair (review R1-6): the
+        // occupancy of the population its bound governs — the daemon
+        // total when the aggregate cap binds (primary always; pairing
+        // under a low explicit cap), the listener's own count when its
+        // 51-stream clamp binds — and that bound (null = unlimited).
+        listenerConnectedClients: listenerOccupancy,
+        listenerConnectedClientsMax: listenerMax,
         channelAlive,
         lastActivityAt:
           lastActivity !== null ? new Date(lastActivity).toISOString() : null,
