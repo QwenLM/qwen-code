@@ -43,19 +43,26 @@ Then enter:
 /mcp
 ```
 
-3. Ask the model to use tools from that server. A running interactive session
-   picks up `mcpServers` changes without a restart (hot reload). If the tools
-   do not appear, restart Qwen Code in the same project.
+3. Once `/mcp` shows the server is connected, ask the model to use its tools.
+   Interactive sessions that load servers from `settings.json` pick up
+   `mcpServers` changes without a restart (hot reload).
 
 > [!note]
 >
-> Servers added to project settings need your approval before they connect,
-> except in YOLO mode.
+> Servers from a project's `.mcp.json` or `.qwen/settings.json` require
+> approval before connecting, except in YOLO mode. If `qwen mcp list` shows
+> “Pending approval”, run `qwen mcp approve <name>` in that project and
+> start a new interactive session. To deny the server, run
+> `qwen mcp reject <name>`.
 >
 > With `--bare` or `--safe-mode`, Qwen Code ignores servers in `settings.json`
 > even after a restart. To use a server in these modes, pass it at startup with
 > `--mcp-config`. The [Linux tool execution sandbox](./sandbox.md#linux-tool-execution-sandbox)
 > disables MCP entirely.
+
+If the session supports settings-based servers and an eligible server still
+does not appear in `/mcp` after a settings change, restart Qwen Code in the
+same project.
 
 ## Where configuration is stored (scopes)
 

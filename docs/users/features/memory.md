@@ -327,10 +327,9 @@ qwen mcp add deja-context deja mcp --context-search --timeout 8000 --include-too
 }
 ```
 
-3. Run `/mcp` to confirm `deja-context` is connected (see
-   [MCP Servers](./mcp.md)). A running interactive session picks up the new
-   `mcpServers` entry without a restart; if it does not appear, restart Qwen
-   Code.
+3. Run `/mcp` to confirm `deja-context` is connected. A normal interactive
+   session picks up the new entry without a restart. If the server is
+   missing, check the [MCP session mode restrictions](./mcp.md#add-your-first-server).
 
 To remove the server later, run `qwen mcp remove deja-context` (or delete the
 `deja-context` entry from `mcpServers` in `~/.qwen/settings.json`); a running
