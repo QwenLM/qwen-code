@@ -76,6 +76,11 @@ export function ScheduledTaskDeliveryFields({
   };
   const configuredTarget =
     canDiscover && target ? getConfiguredTarget(target.channelName) : undefined;
+  const isGenericWebhook =
+    canDiscover &&
+    !!target &&
+    Object.hasOwn(channels.channels, target.channelName) &&
+    channels.channels[target.channelName]?.config.type === 'generic-webhook';
   const usesConfiguredTarget =
     !!configuredTarget &&
     !!target &&
@@ -138,7 +143,7 @@ export function ScheduledTaskDeliveryFields({
     (suggestion) => suggestion.channelName === target?.channelName,
   );
   const identity = (value: Target) =>
-    `${value.channelName} · ${t(`scheduledTasks.delivery.${value.type}`)} · ${value.id}`;
+    `${value.channelName} · ${t(`scheduledTasks.delivery.${isGenericWebhook && value.type === 'chat' ? 'endpoint' : value.type}`)} · ${value.id}`;
   const suggestionKey = (value: Target) =>
     JSON.stringify({
       channelName: value.channelName,
@@ -252,9 +257,11 @@ export function ScheduledTaskDeliveryFields({
               {usesConfiguredTarget && (
                 <FieldDescription className={styles.fieldHint}>
                   {t(
-                    configuredTarget.type === 'chat'
-                      ? 'scheduledTasks.delivery.configuredGroupHint'
-                      : 'scheduledTasks.delivery.configuredHint',
+                    isGenericWebhook
+                      ? 'scheduledTasks.delivery.configuredEndpointHint'
+                      : configuredTarget.type === 'chat'
+                        ? 'scheduledTasks.delivery.configuredGroupHint'
+                        : 'scheduledTasks.delivery.configuredHint',
                   )}
                 </FieldDescription>
               )}
@@ -370,7 +377,11 @@ export function ScheduledTaskDeliveryFields({
                     {t('scheduledTasks.delivery.user')}
                   </option>
                   <option value="chat">
-                    {t('scheduledTasks.delivery.chat')}
+                    {t(
+                      isGenericWebhook
+                        ? 'scheduledTasks.delivery.endpoint'
+                        : 'scheduledTasks.delivery.chat',
+                    )}
                   </option>
                 </select>
               </Field>
