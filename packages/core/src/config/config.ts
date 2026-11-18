@@ -2499,6 +2499,9 @@ export interface SubSessionSpawnRequest {
    * absent means the caller's workspace. */
   workspace?: string;
   workspaceGeneration?: string;
+  /** A sub-session this caller created earlier, to send the prompt to
+   * instead of creating one. It lives in `workspace`. */
+  sessionId?: string;
 }
 
 export interface SubSessionWorkspaceBinding {
@@ -7951,6 +7954,7 @@ export class Config {
       // different image support must update them, or the vision-bridge gate and
       // image-stripping read the previous model's modalities.
       this.contentGeneratorConfig.modalities = config.modalities;
+      this.contentGeneratorConfig.imageDetail = config.imageDetail;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
@@ -7958,6 +7962,10 @@ export class Config {
       if ('modalities' in sources) {
         this.contentGeneratorConfigSources['modalities'] =
           sources['modalities'];
+      }
+      if ('imageDetail' in sources) {
+        this.contentGeneratorConfigSources['imageDetail'] =
+          sources['imageDetail'];
       }
       if ('samplingParams' in sources) {
         this.contentGeneratorConfigSources['samplingParams'] =
@@ -8179,6 +8187,7 @@ export class Config {
       `${this.sessionId}.worktree.json`,
       `${this.sessionId}.pr.json`,
       `${this.sessionId}.title.json`,
+      `${this.sessionId}.artifacts.json`,
     ].map((fileName) => ({
       from: path.join(oldChatsDir, fileName),
       to: path.join(newChatsDir, fileName),

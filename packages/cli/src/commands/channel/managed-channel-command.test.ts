@@ -8,9 +8,11 @@ import { describe, expect, it } from 'vitest';
 import yargs, { type CommandModule } from 'yargs';
 import { managedDingtalkCommand } from './managed-dingtalk.js';
 import { managedEmailCommand } from './managed-email.js';
+import { managedGithubCommand } from './managed-github.js';
+import { managedWecomCommand } from './managed-wecom.js';
 import type { ManagedChannelArgs } from './managed-channel-command.js';
 
-// #17173 R1-4: the consolidated builder owns the option contract of both
+// #17173 R1-4: the consolidated builder owns the option contract of the
 // managed commands, but the handler-level suites pass a hand-built argv and
 // never exercise it. Drive the real builder through yargs so a dropped
 // demandOption, default, or the hidden-from-help flag reds a case.
@@ -20,6 +22,8 @@ type ManagedCommand = CommandModule<unknown, ManagedChannelArgs>;
 const cases: Array<[string, ManagedCommand]> = [
   ['managed-dingtalk', managedDingtalkCommand],
   ['managed-email', managedEmailCommand],
+  ['managed-github', managedGithubCommand],
+  ['managed-wecom', managedWecomCommand],
 ];
 
 const requiredPairs: Array<[string, string]> = [

@@ -167,7 +167,8 @@ class Query:
     async def _wait_initialized(self) -> None:
         if self._initialize_task is None:
             return
-        await self._initialize_task
+        # A caller's cancellation must not cancel the shared handshake.
+        await asyncio.shield(self._initialize_task)
 
     async def _message_router(self) -> None:
         try:
@@ -475,6 +476,8 @@ class Query:
                 raise RuntimeError("Query is closed")
 
             await self._wait_initialized()
+            if self._closed:
+                return
 
             async for message in messages:
                 if self._cancel_event.is_set() or self._closed:
