@@ -366,6 +366,37 @@ describe('DeleteSessionDialog selection', () => {
     ]);
   });
 
+  it('refuses a non-attached row whose only activity is background work', async () => {
+    // The sidebar row already refuses this session and the delete route has no
+    // idle guard, so the dialog must not be the way around it.
+    deleteSessionsMock.mockResolvedValue({
+      removed: ['s1'],
+      notFound: [],
+      errors: [],
+    });
+    const busyFirst = {
+      ...initialSessions[0],
+      hasRunningBackgroundTasks: true,
+      activeWorkState: 'idle' as const,
+    };
+    sessions = initialSessions.slice();
+    mount();
+    clickRow(0);
+    clickRow(1);
+    expect(dangerButton().disabled).toBe(false);
+
+    sessions = [busyFirst, initialSessions[1], initialSessions[2]];
+    rerender();
+    expect(rows()[0]!.getAttribute('aria-disabled')).toBe('true');
+    expect(isChecked(rows()[0]!)).toBe(false);
+    expect(hint()).toContain('1');
+    expect(hint()).not.toContain('2');
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(deleteSessionsMock).toHaveBeenCalledWith(['s1']);
+  });
+
   it('clears checked rows and disarms delete when the filter changes', () => {
     mount();
 

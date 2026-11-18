@@ -74,14 +74,16 @@ Reuse the existing trailing busy marker instead of adding a new indicator:
   holds no active-work category and grades the row idle.
 - The same predicate replaces every other copy of that question on the action
   side: the sidebar's archive and delete eligibility checks, its standalone
-  archive handler, the recent rows' archive gate, the delete dialog's
-  current-session block, the Session Overview card actions, and the Activity
-  archive confirmation (which previously spelled the same disjunction out
-  twice). A row that says it is busy must not offer the action that ends the
-  work, and no two entry points may disagree.
-- The row's Delete refuses background work on any row, not just the attached
-  one: the delete route has no idle guard, so confirming would kill work the
-  row advertises, and the Session Overview card already refuses that session.
+  archive handler, the recent rows' archive gate, the delete dialog's refusal
+  guard, the Session Overview card actions, and the Activity archive
+  confirmation (which previously spelled the same disjunction out twice). A
+  row that says it is busy must not offer the action that ends the work, and no
+  two entry points may disagree.
+- Delete refuses background work on any row, not just the attached one, in
+  both the sidebar and the delete dialog: the delete route has no idle guard,
+  so confirming would kill work the row advertises, and the Session Overview
+  card already refuses that session. The dialog's refusal message only says
+  "the current session" when the row really is the attached one.
   An idle attached session stays deletable (#12619).
 - Three staleness holes close with it. Selection mode keeps its own copy of
   each ticked session, so its refresh contract now carries the background flag

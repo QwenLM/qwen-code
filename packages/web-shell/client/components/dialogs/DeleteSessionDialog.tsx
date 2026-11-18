@@ -97,16 +97,19 @@ export function DeleteSessionDialog({
 
   // The current session is deletable (issue #12619), but deleting the session
   // the client is attached to tears its runtime down, so it is only offered
-  // once nothing is running — the same predicate the sidebar row reads.
-  const blocksCurrentDelete = useCallback(
+  // once nothing is running. Background work blocks any row, attached or not:
+  // the delete route has no idle guard, so confirming would kill work the
+  // sidebar row advertises and already refuses to delete.
+  const blocksDelete = useCallback(
     (session: DaemonSessionSummary) =>
-      session.sessionId === currentSessionId && hasLiveWork(session),
+      session.hasRunningBackgroundTasks === true ||
+      (session.sessionId === currentSessionId && hasLiveWork(session)),
     [currentSessionId],
   );
 
   const toggleSelection = useCallback(
     (session: DaemonSessionSummary) => {
-      if (blocksCurrentDelete(session)) return;
+      if (blocksDelete(session)) return;
       const sessionId = session.sessionId;
       setSelectedIds((prev) => {
         const next = new Set(prev);
@@ -118,7 +121,7 @@ export function DeleteSessionDialog({
         return next;
       });
     },
-    [blocksCurrentDelete],
+    [blocksDelete],
   );
 
   useEffect(() => {
@@ -127,13 +130,13 @@ export function DeleteSessionDialog({
     // ticked. A blocked row cannot be unchecked by hand, so leaving it in the
     // set would show a checked, counted row that the request silently omits.
     const keep = new Set(
-      filtered.filter((s) => !blocksCurrentDelete(s)).map((s) => s.sessionId),
+      filtered.filter((s) => !blocksDelete(s)).map((s) => s.sessionId),
     );
     setSelectedIds((prev) => {
       const pruned = new Set([...prev].filter((id) => keep.has(id)));
       return pruned.size === prev.size ? prev : pruned;
     });
-  }, [blocksCurrentDelete, filtered, selectedIds.size]);
+  }, [blocksDelete, filtered, selectedIds.size]);
 
   useEffect(() => {
     if (selectedIdx >= filtered.length && filtered.length > 0) {
@@ -170,9 +173,9 @@ export function DeleteSessionDialog({
   const deletableSelectedIds = useMemo(
     () =>
       filtered
-        .filter((s) => selectedIds.has(s.sessionId) && !blocksCurrentDelete(s))
+        .filter((s) => selectedIds.has(s.sessionId) && !blocksDelete(s))
         .map((s) => s.sessionId),
-    [blocksCurrentDelete, filtered, selectedIds],
+    [blocksDelete, filtered, selectedIds],
   );
 
   const handleDelete = useCallback(() => {
@@ -240,8 +243,13 @@ export function DeleteSessionDialog({
 
     const session = filtered[selectedIdx];
     if (!session) return;
-    if (blocksCurrentDelete(session)) {
-      setMessage(t('delete.cannotCurrent'));
+    if (blocksDelete(session)) {
+      // Only the attached-session refusal may say "the current session".
+      setMessage(
+        session.sessionId === currentSessionId
+          ? t('delete.cannotCurrent')
+          : t('sidebar.deleteRunningDisabled'),
+      );
       return;
     }
     setDeleting(true);
@@ -264,7 +272,7 @@ export function DeleteSessionDialog({
         setDeleting(false);
       });
   }, [
-    blocksCurrentDelete,
+    blocksDelete,
     currentSessionId,
     deletableSelectedIds,
     deleteSession,
@@ -349,7 +357,7 @@ export function DeleteSessionDialog({
           filtered.map((s, i) => {
             const isCurrent = s.sessionId === currentSessionId;
             const isChecked = selectedIds.has(s.sessionId);
-            const deleteBlocked = blocksCurrentDelete(s);
+            const deleteBlocked = blocksDelete(s);
             return (
               <SessionRow
                 key={s.sessionId}
