@@ -311,14 +311,25 @@ function stripHeredocBodies(command: string): string | undefined {
         }
       } else {
         while (j < command.length && !/[\s;|&<>()]/.test(command[j]!)) {
-          if (command[j] === "'" || command[j] === '"') return undefined;
-          delim += command[j];
-          j++;
+          const char = command[j]!;
+          if (char === "'" || char === '"') return undefined;
+          if (char !== '\\') {
+            delim += char;
+            j++;
+            continue;
+          }
+
+          const escaped = command[j + 1];
+          if (escaped === undefined) return undefined;
+          j += 2;
+          if (escaped === '\n') continue;
+          if (escaped === '\r' && command[j] === '\n') {
+            j++;
+            continue;
+          }
+          quoted = true;
+          delim += escaped;
         }
-        // A backslash before/within the delimiter quotes it (<<\EOF is <<'EOF'):
-        // the delimiter word itself has the backslashes removed.
-        quoted = delim.includes('\\');
-        delim = delim.replace(/\\/g, '');
       }
       if (delim === '' && dq !== "'" && dq !== '"') return undefined;
       pending.push({ delimiter: delim, stripTabs, quoted });

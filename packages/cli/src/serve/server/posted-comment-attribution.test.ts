@@ -273,6 +273,31 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual([]);
   });
 
+  it('does not end a heredoc at a delimiter missing its literal backslash', () => {
+    const command = 'gh pr comment 1 --body-file - <<END\\\\MARK\nENDMARK';
+    const delimiter = 'END\\MARK';
+    const header = '\nDirectory: (root)\nOutput (stdout and stderr combined): ';
+    const footer =
+      '\nExecution Error: (none)\nExit Code: 0\nSignal: (none)\nProcess Group PGID: (none)';
+    const exampleUrl = 'https://github.com/o/r/pull/1#issuecomment-99';
+    const postedUrl = 'https://github.com/o/r/pull/1#issuecomment-42';
+    const entry = shellResult(
+      command,
+      '',
+      'Command: ' +
+        command +
+        header +
+        exampleUrl +
+        footer +
+        '\n\nEnd of example.\n' +
+        delimiter +
+        header +
+        postedUrl +
+        footer,
+    );
+    expect(extractPostedCommentIds(entry)).toEqual([]);
+  });
+
   it.each([
     String.raw`gh pr comment 1 --body 'It'\''s fixed; ready'`,
     String.raw`gh pr comment 1 --body "The \"Output; stderr\" section is fixed"`,
@@ -298,6 +323,9 @@ describe('extractPostedCommentIds', () => {
     'cat > note.md <<"END\\MARK"\nbody\nEND\\MARK',
     "cat > note.md <<'NOTE'\n# trailing \\\nNOTE",
     'cat > note.md <<NOTE\nbody\nNO\\\nTE',
+    'cat > note.md <<END\\\\MARK\nbody\nEND\\MARK',
+    'cat > note.md <<END\\ MARK\\;\nbody\nEND MARK;',
+    'cat > note.md <<NO\\\nTE\nbody\nNO\\\nTE',
   ])('preserves backslashes according to heredoc quoting (%j)', (setup) => {
     const entry = shellResult(
       `${setup}\ngh pr comment 1 --body-file note.md`,
