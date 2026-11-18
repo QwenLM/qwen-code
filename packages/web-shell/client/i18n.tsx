@@ -104,6 +104,7 @@ import {
   MANAGED_MCP_MESSAGES_RU,
   MANAGED_MCP_MESSAGES_ZH,
 } from './components/managed/managed-mcp-messages.js';
+import { ZH_TW } from './i18n-zh-tw.js';
 // The Russian catalog is split so `--mode transcript` can stub these
 // modules (see vite.lib.config.ts). Exported HTML would otherwise ship a
 // third full UI dictionary to every reader.
@@ -115,7 +116,7 @@ import { RU_PART5 } from './i18n-ru-part5.js';
 import { RU_PART6 } from './i18n-ru-part6.js';
 import { RU_REMAINDER } from './i18n-ru-remainder.js';
 
-export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN', 'ru'] as const;
+export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN', 'zh-TW', 'ru'] as const;
 
 export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
 
@@ -1763,6 +1764,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'daemon.runtime.memory': 'Memory (RSS / heap)',
   'daemon.transport.title': 'Transport',
   'daemon.transport.restSse': 'REST SSE streams',
+  'daemon.transport.sseAdmission': 'SSE admission (used / cap)',
   'daemon.transport.acpDisabled': 'ACP transport disabled',
   'daemon.transport.acpConnections': 'ACP connections',
   'daemon.transport.acpStreams': 'ACP streams (session/SSE/WS)',
@@ -2798,6 +2800,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.archiveCurrentDisabled': 'The current session cannot be archived',
   'sidebar.archiveRunningDisabled':
     'A running session cannot be archived; archiving would stop its work',
+  'sidebar.deleteRunningDisabled':
+    'A session with background work cannot be deleted; deleting would stop it',
   'sidebar.archivedTitle': 'Archived',
   'sidebar.standaloneLoadFailed': 'Failed to load recent conversations',
   'sidebar.standaloneActionFailed': 'Conversation action failed',
@@ -2828,6 +2832,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.sessionPr': (v) => `Pull Request #${v?.number ?? ''}`,
   'sidebar.sessionPrMultiple': (v) =>
     `Pull Request #${v?.number ?? ''} (${v?.count ?? 0} total)`,
+  'sidebar.sessionGoal': (v) =>
+    `Goal: ${v?.status ?? ''} — ${v?.objective ?? ''}`,
   'sidebar.sessionPrStateMerged': 'Merged',
   'sidebar.sessionPrStateClosed': 'Closed',
   'sidebar.sessionIssue': (v) => `Issue #${v?.number ?? ''}`,
@@ -7117,6 +7123,7 @@ const ZH: Messages = {
   'daemon.runtime.memory': '内存 (RSS / 堆)',
   'daemon.transport.title': '传输',
   'daemon.transport.restSse': 'REST SSE 流',
+  'daemon.transport.sseAdmission': 'SSE 准入（占用 / 上限）',
   'daemon.transport.acpDisabled': 'ACP 传输未启用',
   'daemon.transport.acpConnections': 'ACP 连接',
   'daemon.transport.acpStreams': 'ACP 流 (会话/SSE/WS)',
@@ -8069,6 +8076,8 @@ const ZH: Messages = {
   'sidebar.archiveCurrentDisabled': '不能归档当前会话',
   'sidebar.archiveRunningDisabled':
     '不能归档运行中的会话，归档会终止其正在执行的工作',
+  'sidebar.deleteRunningDisabled':
+    '不能删除有后台工作的会话，删除会终止这份工作',
   'sidebar.archivedTitle': '已归档',
   'sidebar.standaloneLoadFailed': '最近会话加载失败',
   'sidebar.standaloneActionFailed': '会话操作失败',
@@ -8097,6 +8106,8 @@ const ZH: Messages = {
   'sidebar.sessionPr': (v) => `合并请求 #${v?.number ?? ''}`,
   'sidebar.sessionPrMultiple': (v) =>
     `合并请求 #${v?.number ?? ''}（共 ${v?.count ?? 0} 个）`,
+  'sidebar.sessionGoal': (v) =>
+    `目标：${v?.status ?? ''} — ${v?.objective ?? ''}`,
   'sidebar.sessionPrStateMerged': '已合入',
   'sidebar.sessionPrStateClosed': '已关闭',
   'sidebar.sessionIssue': (v) => `议题 #${v?.number ?? ''}`,
@@ -10559,12 +10570,14 @@ const RU: Messages = {
 const MESSAGES: Record<WebShellLanguage, Messages> = {
   en: EN,
   'zh-CN': ZH,
+  'zh-TW': ZH_TW,
   ru: RU,
 };
 
 const LANGUAGE_LABELS: Record<WebShellLanguage, string> = {
   en: 'English [en]',
   'zh-CN': '中文 [zh-CN]',
+  'zh-TW': '繁體中文 [zh-TW]',
   ru: 'Русский [ru]',
 };
 
@@ -10576,14 +10589,39 @@ const Context = createContext<{
   t: (key) => key,
 });
 
+function isTraditionalChineseTag(normalized: string): boolean {
+  return (
+    normalized === 'zh-tw' ||
+    normalized.startsWith('zh-tw-') ||
+    normalized === 'zh-hant' ||
+    normalized.startsWith('zh-hant-') ||
+    normalized === 'zh-hk' ||
+    normalized.startsWith('zh-hk-') ||
+    normalized === 'zh-mo' ||
+    normalized.startsWith('zh-mo-')
+  );
+}
+
+function isSimplifiedChineseTag(normalized: string): boolean {
+  return (
+    normalized === 'zh' ||
+    normalized === 'zh-cn' ||
+    normalized.startsWith('zh-cn-') ||
+    normalized === 'zh-hans' ||
+    normalized.startsWith('zh-hans-') ||
+    normalized === 'zh-sg' ||
+    normalized.startsWith('zh-sg-')
+  );
+}
+
 export function normalizeLanguage(
   value: string | undefined | null,
 ): WebShellLanguage {
-  const normalized = value?.trim().toLowerCase();
+  const normalized = value?.trim().toLowerCase().replace(/_/g, '-');
   if (!normalized) return 'en';
-  if (normalized === 'zh' || normalized === 'zh-cn' || normalized === 'zh_cn') {
-    return 'zh-CN';
-  }
+  // zh-TW is a full catalog. Do not fold it into zh-CN or English.
+  if (isTraditionalChineseTag(normalized)) return 'zh-TW';
+  if (isSimplifiedChineseTag(normalized)) return 'zh-CN';
   // Prefix match: ru, region-qualified ru (ru-RU, ru-UA, ru-KZ, …) and the
   // underscore form all resolve to ru — region-qualified Russian speakers
   // must not fall through to en.
@@ -10605,8 +10643,14 @@ export function languageSettingToWebShellLanguage(
     );
   }
   if (
-    normalized === 'zh' ||
-    normalized === 'zh-cn' ||
+    isTraditionalChineseTag(normalized) ||
+    normalized === '繁體中文' ||
+    normalized === '繁体中文'
+  ) {
+    return 'zh-TW';
+  }
+  if (
+    isSimplifiedChineseTag(normalized) ||
     normalized === 'chinese' ||
     normalized === '中文'
   ) {
