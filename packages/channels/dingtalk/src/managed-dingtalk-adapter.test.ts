@@ -65,6 +65,7 @@ function fakeControlPlane(destinationKey = 'cp|tenant-a|chan-1') {
   let queue: ManagedClaimedDelivery[] = [];
   let disconnectCalls = 0;
   let submitError: (Error & { status?: number; code?: string }) | undefined;
+  let registerError: (Error & { status?: number; code?: string }) | undefined;
   let refuseSubmit: { status: number; code?: string } | undefined;
   let submitErrorFor:
     | ((
@@ -80,6 +81,11 @@ function fakeControlPlane(destinationKey = 'cp|tenant-a|chan-1') {
   const controlPlane: ManagedChannelControlPlane = {
     destinationKey,
     register: async (request) => {
+      if (registerError) {
+        const error = registerError;
+        registerError = undefined;
+        throw error;
+      }
       register.push(request);
     },
     disconnect: async () => {
@@ -126,6 +132,9 @@ function fakeControlPlane(destinationKey = 'cp|tenant-a|chan-1') {
     },
     failNextSubmit: (error: Error & { status?: number; code?: string }) => {
       submitError = error;
+    },
+    failNextRegister: (error: Error & { status?: number; code?: string }) => {
+      registerError = error;
     },
     submitAttempts: () => submitAttempts,
     // Simulate an admission the server committed but whose answer was lost:
@@ -2660,7 +2669,9 @@ describe('managed DingTalk adapter registration-identity isolation', () => {
       }),
     );
     await adapter.connect();
-    const stranded = lines.filter((l) => l.includes('stranded'));
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
     expect(stranded).toHaveLength(1);
     // The notice names the legacy path and both consequences separately:
     // inbound claims lost AND outbound segments dropped (R2-1 split clauses).
@@ -2690,11 +2701,16 @@ describe('managed DingTalk adapter registration-identity isolation', () => {
     );
     expect(archivedState.pending).toHaveLength(2);
     expect(archivedState.outbound).toHaveLength(3);
+    // A log line names the archived path, so an operator following the notice
+    // (which names the pre-rename path) can still find the claims (R4-1).
+    expect(lines.some((l) => l.includes(join(dir, archived[0])))).toBe(true);
     await adapter.disconnect();
     lines.length = 0;
     const adapter2 = adapterFor(cwd, plane, fake);
     await adapter2.connect();
-    expect(lines.filter((l) => l.includes('stranded'))).toHaveLength(0);
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(0);
     await adapter2.disconnect();
   });
 
@@ -2718,7 +2734,9 @@ describe('managed DingTalk adapter registration-identity isolation', () => {
       }),
     );
     await adapter.connect();
-    const stranded = lines.filter((l) => l.includes('stranded'));
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
     // The design doc requires one line naming the path and counts even for a
     // quiescent upgrade, but nothing was lost, so no loss alarm (R2-1).
     expect(stranded).toHaveLength(1);
@@ -2739,7 +2757,9 @@ describe('managed DingTalk adapter registration-identity isolation', () => {
     // The entry already upgraded once: a keyed ledger exists.
     await adapter.connect();
     await adapter.disconnect();
-    expect(lines.filter((l) => l.includes('stranded'))).toHaveLength(0);
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(0);
     // A rollback stages fresh legacy claims; the next upgrade must report them
     // even though the keyed ledger exists (R2-6).
     lines.length = 0;
@@ -2761,10 +2781,18 @@ describe('managed DingTalk adapter registration-identity isolation', () => {
     );
     const adapter2 = adapterFor(cwd, plane, fake);
     await adapter2.connect();
-    const stranded = lines.filter((l) => l.includes('stranded'));
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
     expect(stranded).toHaveLength(1);
     expect(stranded[0]).toContain('1 pending');
     expect(stranded[0]).toContain('are lost');
+    // A pending-only strand staged no outbound segment, so the outbound
+    // consequence must be absent — the symmetric negative of the outbound-only
+    // case, killing an `if (true)` outbound guard (R4-2).
+    expect(stranded[0]).not.toContain(
+      'un-receipted outbound segments were dropped',
+    );
     expect(pendingOf(adapter2)).toEqual([]);
     await adapter2.disconnect();
   });
@@ -2780,7 +2808,9 @@ describe('managed DingTalk adapter registration-identity isolation', () => {
     // A crash-truncated legacy: the parse fails, so the counts are unknown.
     writeFileSync(join(dir, 'managed-state.json'), '{not json');
     await adapter.connect();
-    const stranded = lines.filter((l) => l.includes('stranded'));
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
     expect(stranded).toHaveLength(1);
     // Not rendered as a quiescent "0 pending / 0 outbound, nothing lost"
     // (R3-1): the counts are unknown and a possible loss is named.
@@ -2815,7 +2845,9 @@ describe('managed DingTalk adapter registration-identity isolation', () => {
       }),
     );
     await adapter.connect();
-    const stranded = lines.filter((l) => l.includes('stranded'));
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
     expect(stranded).toHaveLength(1);
     expect(stranded[0]).toContain('0 pending');
     expect(stranded[0]).toContain('3 outbound');
@@ -2863,7 +2895,51 @@ describe('managed DingTalk adapter registration-identity isolation', () => {
     // The strand was reported, but the archive is deferred until the start
     // succeeds (R3-2): the legacy file is still present so a rollback to the
     // pre-upgrade build can recover it.
-    expect(lines.filter((l) => l.includes('stranded'))).toHaveLength(1);
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(1);
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+    expect(
+      readdirSync(dir).filter((f) =>
+        f.startsWith('managed-state.json.stranded-'),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('a register-refused first start also leaves the legacy ledger unarchived', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [
+          {
+            eventId: 'dingtalk:legacy',
+            event: { platformEventId: 'dingtalk:legacy' },
+          },
+        ],
+        outbound: [],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    // The stream connects, but the control plane refuses registration. The
+    // archive must stay deferred past ensureRegistered, not just past
+    // stream.connect — hoisting it above registration would red this (R4-3).
+    plane.failNextRegister(
+      Object.assign(new Error('channel_disconnected'), {
+        status: 409,
+        code: 'channel_disconnected',
+      }),
+    );
+    await expect(adapter.connect()).rejects.toThrow('channel_disconnected');
     expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
     expect(
       readdirSync(dir).filter((f) =>

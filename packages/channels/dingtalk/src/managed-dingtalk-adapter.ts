@@ -313,7 +313,17 @@ export class ManagedDingtalkAdapter {
       // entry is not told the first registration's claims were its own (R2-6).
       // A failed start above leaves it untouched for a rollback to recover
       // (R3-2); the notice then simply repeats on the retry.
-      if (legacy) this.store.archiveStrandedLegacy();
+      if (legacy) {
+        const archived = this.store.archiveStrandedLegacy();
+        // The notice above names the legacy path, which this rename moves; name
+        // the archived path too so an operator following the notice can still
+        // find the preserved claims instead of hitting ENOENT (R4-1).
+        if (archived) {
+          this.log(
+            `Managed DingTalk archived the legacy ledger to ${archived}; the claims it held are preserved there for inspection.`,
+          );
+        }
+      }
       if (this.pollLoop) this.loop = this.runLoop();
     } catch (error) {
       this.stop();
