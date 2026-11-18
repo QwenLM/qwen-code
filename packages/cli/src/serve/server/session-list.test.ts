@@ -119,6 +119,75 @@ describe('merged session catalog pagination', () => {
   }
 
   it.each([undefined, 'organized'] as const)(
+    'reads sidecars only for the selected page (%s)',
+    async (view) => {
+      const first = summary(2);
+      const second = summary(1);
+      const live = summary(0);
+      await persist(first);
+      await persist(second);
+      const { bridge } = bridgeFor([live]);
+      const options = { size: 1, ...(view ? { view } : {}) };
+      const readOptions = { runtimeBaseDir, paginateMerged: true };
+      const worktree = vi.spyOn(
+        SessionService.prototype,
+        'getWorktreeSessionPathForArchiveState',
+      );
+      const pr = vi.spyOn(
+        SessionService.prototype,
+        'getPrSessionPathForArchiveState',
+      );
+      const artifact = vi.spyOn(
+        SessionService.prototype,
+        'getArtifactSummaryPathForArchiveState',
+      );
+
+      const firstPage = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        options,
+        readOptions,
+      );
+      expect(firstPage.sessions.map((row) => row.sessionId)).toEqual([
+        first.sessionId,
+      ]);
+      for (const reader of [worktree, pr, artifact]) {
+        expect(reader.mock.calls).toEqual([[first.sessionId, 'active']]);
+      }
+
+      const secondPage = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { ...options, cursor: firstPage.nextCursor },
+        readOptions,
+      );
+      const lastPage = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { ...options, cursor: secondPage.nextCursor },
+        readOptions,
+      );
+      expect(secondPage.sessions.map((row) => row.sessionId)).toEqual([
+        second.sessionId,
+      ]);
+      expect(lastPage.sessions.map((row) => row.sessionId)).toEqual([
+        live.sessionId,
+      ]);
+      expect(lastPage.nextCursor).toBeUndefined();
+      const persistedReads = [
+        [first.sessionId, 'active'],
+        [second.sessionId, 'active'],
+      ];
+      expect(worktree.mock.calls).toEqual(persistedReads);
+      expect(artifact.mock.calls).toEqual(persistedReads);
+      expect(pr.mock.calls).toEqual([
+        ...persistedReads,
+        [live.sessionId, 'active'],
+      ]);
+    },
+  );
+
+  it.each([undefined, 'organized'] as const)(
     'sorts the complete set by question time before paging (%s)',
     async (view) => {
       for (let index = 0; index < 4; index++) await persist(summary(index));
@@ -1041,7 +1110,7 @@ describe('merged session catalog pagination', () => {
       expect(hit?.session.artifactCount).toBe(3);
     });
 
-    it('rejects when the signal aborts mid-scan, after the first sidecar read', async () => {
+    it('rejects when the signal aborts during page enrichment', async () => {
       const first = summary(0);
       const second = summary(1);
       const third = summary(2);
@@ -1063,23 +1132,18 @@ describe('merged session catalog pagination', () => {
           { runtimeBaseDir, signal: abortHarness.controller.signal },
         ),
       ).rejects.toMatchObject({ name: 'AbortError' });
-      // The third session discriminates the per-iteration abort checks
-      // from the post-enrichment one: without the loop-top/catch checks
-      // the swallowed abort lets the scan read a third sidecar before
-      // the later check rejects.
+      // The request stops at the interrupted row.
       expect(abortHarness.reads).toBe(2);
 
-      // A scan interrupted mid-way must not cache a snapshot: the next
-      // request re-scans (three more sidecar reads). A synchronous scan
-      // never calls the async reader, so it never observes the abort,
-      // completes the page, and serves the retry from the cache.
+      // The first row's sidecars completed before cancellation. Keep that
+      // result and read the interrupted and unvisited rows on retry.
       const retry = await listWorkspaceSessionsForResponse(
         bridge,
         workspaceCwd,
         { view: 'organized' },
         { runtimeBaseDir },
       );
-      expect(abortHarness.reads).toBe(5);
+      expect(abortHarness.reads).toBe(4);
       expect(
         retry.sessions.map((session) => session.artifactCount).sort(),
       ).toEqual([3, 4, 5]);
