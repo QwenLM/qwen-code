@@ -389,6 +389,13 @@ describe('AddMenu', () => {
     expect(menuItem('composer-add-menu-plan')).toBeNull();
   });
 
+  it('hides a host-supplied Plan entry in the simple desktop menu', async () => {
+    renderWith(baseProps({ simpleMode: true, plan: planControl() }));
+    await openMenu();
+    expect(menuItem('composer-add-menu-file')).not.toBeNull();
+    expect(menuItem('composer-add-menu-plan')).toBeNull();
+  });
+
   it('keeps the Plan entry when no add action is available', async () => {
     renderWith(
       baseProps({
@@ -1117,6 +1124,20 @@ describe('mobile AddMenu', () => {
       expect(menuItem('composer-add-menu-reference-file')).not.toBeNull();
     },
   );
+  it('hides a host-supplied Plan entry in the simple mobile drawer', async () => {
+    renderWith(
+      mobileProps({
+        simpleMode: true,
+        plan: { checked: false, onToggle: vi.fn() },
+      }),
+    );
+    await openMenu();
+    expect(
+      portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
+    ).not.toBeNull();
+    expect(menuItem('composer-add-menu-plan')).toBeNull();
+  });
+
   it('uses the scoped bottom drawer and supports reference search and back', async () => {
     const props = mobileProps({
       getWorkspaceActions: () => ({
