@@ -130,8 +130,12 @@ clicked, using the list data the sidebar already holds.
   restore funnel reads selectively via `readRestoreProjection` and never
   calls `loadSession`, so the projection read runs the same seed for
   conversation-less transcripts (a missing projection is a candidate too —
-  the index builder rejects them); sessions with a conversation keep the
-  selective read's zero-extra-I/O contract. Both funnels share one seed
+  the index builder rejects them); creation-time metadata counts as side
+  records for the gate — every daemon session carries a `session_source`
+  record before its first prompt. The auxiliary read is capped at the same
+  64 MiB as the library mutation read, and sessions with a conversation
+  keep the selective read's zero-extra-I/O contract (pinned by a read
+  spy). Both funnels share one seed
   method and one record-composition helper with the library guard. The
   seed also requires an authoritative journal: no history gap (a broken chain
   can orphan artifact events off the active branch and undercount) and no

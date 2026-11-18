@@ -108,9 +108,11 @@
   库守卫接受的 transcript 形状相同）即使没有可加载的对话，也在首次打开时
   获得数量。daemon/ACP 恢复漏斗经 `readRestoreProjection` 选择性读取、
   从不调用 `loadSession`，因此投影读取对无对话的 transcript 执行同一播种
-  （投影缺失也是候选——索引构建器会拒绝这类 transcript）；有对话的会话
-  保持选择性读取的零额外 I/O 契约。两个漏斗与库守卫共用同一个播种方法
-  和同一个记录组合助手。播种还要求 journal
+  （投影缺失也是候选——索引构建器会拒绝这类 transcript）；创建期元数据
+  算作侧记录——每个 daemon 会话在首个 prompt 前都带一条 `session_source`
+  记录。辅助读取与库变更读取同样以 64 MiB 为上限；有对话的会话保持选择性
+  读取的零额外 I/O 契约（由读取 spy 钉住）。两个漏斗与库守卫共用同一个
+  播种方法和同一个记录组合助手。播种还要求 journal
   具备权威性：无历史链缺口（断链会把 artifact 事件孤儿化出活跃分支而少计），
   且无记录级损坏警告——与库变更守卫同一判定
   （`hasDisqualifyingArtifactJournalWarning`）；单产物级跳过仍被容忍。两处
