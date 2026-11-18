@@ -74,12 +74,12 @@ describe('GoalStatusStrip', () => {
     render('active');
     // ComposerStatusStack.module.css selects `.root > [data-web-shell-goal-status]`
     // and the adjacent-sibling divider, so the attribute must ride on the strip's
-    // outermost element — the stack renders the strip as a direct child.
-    expect(
-      container
-        .querySelector('[data-testid="goal-status-strip"]')
-        ?.hasAttribute('data-web-shell-goal-status'),
-    ).toBe(true);
+    // outermost element. I18nProvider renders no DOM node, so the container's
+    // first element child is the strip itself; querySelector would match at any
+    // depth and miss an extra wrapper that breaks the direct-child contract.
+    const strip = container.firstElementChild as HTMLElement | null;
+    expect(strip?.getAttribute('data-testid')).toBe('goal-status-strip');
+    expect(strip?.hasAttribute('data-web-shell-goal-status')).toBe(true);
   });
 
   it('shows pause for an active Goal and wires actions', () => {

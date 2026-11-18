@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import postcss, { type Rule } from 'postcss';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -145,15 +146,39 @@ describe('ComposerStatusStack', () => {
     expect(node.querySelector('[data-web-shell-queued-prompts]')).toBeNull();
   });
 
-  it('defines the root class in the stylesheet the component imports', () => {
+  it('defines a live root rule and the child-coupling selectors in the stylesheet', () => {
     // Without test.css, vitest resolves `styles.<key>` from an emulated map
     // regardless of the file's contents, so the className assertion above
-    // cannot see a stylesheet-only rename. Read the file to pin that `.root`
-    // is actually defined — a production build needs it for the root styles.
+    // cannot see the stylesheet. Parse it (as ChatEditor.css.test.ts does) to
+    // pin a live `.root` rule that still carries declarations, plus the two
+    // selectors coupling the strip to the stack root: an emptied or
+    // commented-out rule, or a renamed coupling attribute, must fail here.
     const css = readFileSync(
       resolve(__dirname, 'ComposerStatusStack.module.css'),
       'utf8',
     );
-    expect(css).toMatch(/^\.root\s*\{/m);
+    const sheet = postcss.parse(css);
+    const root = sheet.nodes?.find(
+      (node): node is Rule =>
+        node.type === 'rule' && node.selector.trim() === '.root',
+    );
+    expect(root).toBeDefined();
+    expect(
+      (root?.nodes ?? []).filter((node) => node.type === 'decl').length,
+    ).toBeGreaterThan(0);
+    const selectors: string[] = [];
+    sheet.walkRules((rule) => {
+      selectors.push(
+        ...rule.selectors.map((selector) =>
+          selector.replace(/\s+/g, ' ').trim(),
+        ),
+      );
+    });
+    expect(selectors).toContain('.root > [data-web-shell-goal-status]');
+    expect(
+      selectors.some((selector) =>
+        selector.endsWith('+ [data-web-shell-goal-status]'),
+      ),
+    ).toBe(true);
   });
 });
