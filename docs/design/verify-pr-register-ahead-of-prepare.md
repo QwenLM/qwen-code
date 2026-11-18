@@ -131,8 +131,8 @@ fresh round and missed force-push, and its else arm endorsed checking out the
 named head under another round's live marker — `completeRound` matches the
 marker by head and round alone, so the named head's evidence would be filed
 under the registered head's verdict and `duplicateHead` would refuse to
-re-examine it. Both moved-head release forms carry `[--round <r>]` like the
-sibling recovery form.
+re-examine it. Both moved-head release forms pass `--round <r>` (this round's
+own marker), like the sibling recovery form.
 The completion form's `--artifact-dir` is optional: a replayed completion omits
 it to inherit the directory already recorded for the head rather than
 overwriting it. The dead-marker bullet's `--round` is the
@@ -163,16 +163,12 @@ existing dead-round recovery (`--release` for a round that died after
   prepare. Round 7 makes the wrong-HEAD remedy registration-aware (replacing the
   round-6 three-state form whose in-flight arm wedged on this round's own
   marker), pins the transient retry-without-release recovery in each section and
-  the watch moved-head completion re-binding, documents the mistyped-`--repo`
-  reset, and adds a CLI witness that an explicit completion directory overrides a
-  different start directory (reordering the resolution chain reds it). Round 8
-  refines the remedy to identity (the plain checkout only when the named head IS
-  this round's registered head; a differing head is the moved-head case; a fresh
-  round reads the state's in-flight entry and defers to a live marker), pins that
-  wording so reverting to "newer than" reds it, adds the reset's re-register step,
-  and witnesses the prior-arm dir precedence and that a completion files the live
-  head with whatever directory it is given (the checkout remedy is the only
-  guard). Round 10 carries the identity criterion into the watch and manual
+  the watch moved-head completion re-binding, and documents the mistyped-`--repo`
+  reset. Round 8 refines the remedy to identity (the plain checkout only when the
+  named head IS this round's registered head; a differing head is the moved-head
+  case; a fresh round reads the state's in-flight entry and defers to a live
+  marker), pins that wording so reverting to "newer than" reds it, and adds the
+  reset's re-register step. Round 10 carries the identity criterion into the watch and manual
   moved-head branches themselves (the watch prompt reads only the gate JSON, so
   the prepare-paragraph rule alone never reached them): the branch now fires on
   any head differing from the registered one — forward or force-pushed — the
@@ -193,7 +189,14 @@ existing dead-round recovery (`--release` for a round that died after
   no-evidence-directory warning (dropping the warning's directory conjunct reds
   the no-warning assertions, R2-3); a start-before-prepare round with no
   `--complete` (a prepare kill) then `--release` **and a restart** through the
-  CLI recovers the head (no silent drop).
+  CLI recovers the head (no silent drop). The directory-chain CLI witnesses also
+  live here (not in the text-pin file): an explicit completion directory overrides
+  a different start directory (reordering the resolution chain reds it); a
+  replayed completion with an explicit dir overrides the prior verdict's dir
+  (prior-arm precedence); and a completion files the live head with whatever
+  directory it is given, then refuses a re-start — the certifies-falsely harm the
+  checkout remedy is the only guard against (the helper carries no tree/evidence
+  check by design).
 
 ## Key design decisions
 
@@ -236,7 +239,7 @@ existing dead-round recovery (`--release` for a round that died after
 - None blocking. The liveness gain is observability/recoverability: a head
   delivered then killed in prepare now leaves an in-flight marker an operator
   or the next head move can recover, instead of vanishing. The fix **narrows**
-  the silent-drop window; it does not eliminate it. Two residuals remain, tracked
+  the silent-drop window; it does not eliminate it. Three residuals remain, tracked
   in #17371: (1) the gate writes its cursor before it prints the event
   (`packages/cli/src/commands/autofix-pr/snapshot.ts`), so a session killed
   between the gate's delivery and the first `--start` still leaves the head
@@ -245,7 +248,11 @@ existing dead-round recovery (`--release` for a round that died after
   `headSha`); (2) the watch prompt is a persisted task snapshot, so a watch
   installed before this change keeps the prepare-then-register order until its
   task is re-created — and `--start --artifact-dir` remains accepted, so nothing
-  forces re-creation. A watch only wakes on head moves, so a killed round on the
+  forces re-creation; (3) the dead-round recovery pairs `--release` with a
+  restart, and a kill between those two commands leaves the head unregistered —
+  the transient path avoids this by retrying prepare against the intact marker
+  without releasing, but a dead round's recovery still carries that window. A
+  watch only wakes on head moves, so a killed round on the
   _last_ head still awaits a new move, or a manual
   `--release --head <H> [--round <r>] --repo <owner>/<repo>` **followed by a
   restart** (`--start … --round <r+1>`) — a release alone leaves the head

@@ -6701,10 +6701,14 @@ describe('qwen-triage verify hardening round 2', () => {
     ).toBeLessThan(flat.indexOf('Then run prepare; it creates'));
     // Deferred (round 10): the heading pin above is not enough — guard the
     // --start COMMAND's position too, so moving the command below prepare (while
-    // the heading stays above) reds this per-section assertion.
-    expect(manualSlice.indexOf('--start --head <H>')).toBeLessThan(
-      manualSlice.indexOf('Then run prepare; it creates'),
-    );
+    // the heading stays above) reds this per-section assertion. Presence guards
+    // (round 11): if either placeholder spelling changes, indexOf returns -1 and
+    // the ordering comparison would go vacuous — assert both are found first.
+    const manualStartAt = manualSlice.indexOf('--start --head <H>');
+    const manualPrepareAt = manualSlice.indexOf('Then run prepare; it creates');
+    expect(manualStartAt).toBeGreaterThan(-1);
+    expect(manualPrepareAt).toBeGreaterThan(-1);
+    expect(manualStartAt).toBeLessThan(manualPrepareAt);
     expect(flat).toContain(
       'Exit 3 means the file already records `H` as verified or in flight',
     );
@@ -6851,7 +6855,12 @@ describe('qwen-triage verify hardening round 2', () => {
       'A round that registered nothing (a fresh `/verify-pr <n>`) has no marker of its own',
     );
     expect(flat).toContain(
-      "read the state file's in-flight entry first, and while another round's marker is live, let that round answer — never check out under a live marker",
+      "read the state file's in-flight entry first — while another round's marker is live, let that round answer, never checking out under a live marker",
+    );
+    // Deferred (round 11): the fresh-round case also needs the dead-marker branch
+    // (recover a dead round's marker, then check out), not only the live case.
+    expect(flat).toContain(
+      'if that round is dead, recover its marker per the dead-round recovery below, then check out',
     );
     expect(flat).not.toContain("newer than this round's registered head");
     expect(flat).not.toContain(
@@ -6927,6 +6936,12 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(promptSlice).toContain(
       'and then re-register the delivered head — and any deferred head you still want covered — with the correct slug (`--start`)',
     );
+    // Deferred (round 11): a watch created before register-ahead keeps the old
+    // prepare-then-register prompt (a persisted snapshot); the contract must say
+    // to re-create it, since --start --artifact-dir is still accepted.
+    expect(flat).toContain(
+      're-create such a watch to pick up registration ahead of prepare',
+    );
     // R2-1: the watch prompt's exit-3 dead-marker bullet carries the full
     // --release form with --repo (anchored on the watch-only continuation, so
     // the manual twin cannot satisfy it). Removing --repo reds it.
@@ -6948,9 +6963,15 @@ describe('qwen-triage verify hardening round 2', () => {
     ).toBeLessThan(flat.indexOf('Then run prepare (trusted host metadata)'));
     // Deferred (round 10): guard the --start COMMAND's position too, so moving
     // the command below prepare (while the heading stays above) reds this.
-    expect(promptSlice.indexOf('--start --head <headSha>')).toBeLessThan(
-      promptSlice.indexOf('Then run prepare (trusted host metadata)'),
+    // Presence guards (round 11) keep the comparison from going vacuous if a
+    // placeholder spelling changes (indexOf would return -1).
+    const watchStartAt = promptSlice.indexOf('--start --head <headSha>');
+    const watchPrepareAt = promptSlice.indexOf(
+      'Then run prepare (trusted host metadata)',
     );
+    expect(watchStartAt).toBeGreaterThan(-1);
+    expect(watchPrepareAt).toBeGreaterThan(-1);
+    expect(watchStartAt).toBeLessThan(watchPrepareAt);
     // The completion and release forms carry --repo too: the guard
     // refuses a registered round's completion without it (D9-1).
     expect(flat).toContain(

@@ -99,7 +99,7 @@ head 的轮次（全新 `/verify-pr <n>`，从不调用 `--start`）没有自己
 head 更新」的写法对全新轮次无定义、也漏掉 force-push，其 else 分支认可在另一轮活
 标记下 checkout 点名 head——`completeRound` 只按 head+round 匹配标记，点名 head 的
 证据会被记到注册 head 的判定名下、`duplicateHead` 从此拒绝再查。两个 moved-head
-release 形式都像兄弟恢复形式一样带 `[--round <r>]`。完成形式的 `--artifact-dir` 可选：重放完成省略它
+release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的标记）。完成形式的 `--artifact-dir` 可选：重放完成省略它
 以继承该 head 已记录的目录，而非覆盖。死标记条目的 `--round` 是
 阻塞标记的轮次，从状态文件的在飞条目读出并传入（读状态允许，只有手写 JSON 被
 禁止）：省略 `--round` 会跳过比对，重试的 release 会删掉同 head 较新轮次的活
@@ -119,11 +119,9 @@ release 形式都像兄弟恢复形式一样带 `[--round <r>]`。完成形式�
   条目钉到 prepare 块（注册是 watch/复验程序），边界节则限定注册先于 prepare。
   第 7 轮把错 HEAD 补救改为注册感知（取代第 6 轮三态写法——其在飞分支会在本轮自己
   的标记上卡死），各节钉瞬时「重试不 release」恢复与 watch moved-head 完成重绑定，
-  写明误拼 `--repo` 的重置，并新增 CLI 见证：显式完成目录覆盖不同的 start 目录
-  （重排解析链即变红）。第 8 轮把补救细化为同一性判据（仅当点名 head 就是本轮注册
+  写明误拼 `--repo` 的重置。第 8 轮把补救细化为同一性判据（仅当点名 head 就是本轮注册
   head 才普通 checkout；不同即 moved-head；全新轮次读状态在飞条目、对活标记让该轮
-  作答），钉住该措辞使改回「比…更新」变红，补重置的重注册步骤，并见证 prior 臂目录
-  优先级、以及完成会按所给目录登记活 head（checkout 补救是唯一防线）。第 10 轮把同一性
+  作答），钉住该措辞使改回「比…更新」变红，补重置的重注册步骤。第 10 轮把同一性
   判据带进 watch 与手动 moved-head 分支本身（watch prompt 只读闸门 JSON，prepare 段
   规则单独到不了它们）：分支现对任何不同于注册 head 的点名 head 触发——前移或
   force-push；所投递 head 称「实时 head」（`<live>`），逐节 moved-head 钉随措辞迁移，
@@ -137,7 +135,10 @@ release 形式都像兄弟恢复形式一样带 `[--round <r>]`。完成形式�
   （向后兼容）；重放完成继承先前判定目录；非 inconclusive 的 `--complete` 无解析
   目录时打印无产物目录警告（删警告的目录合取项使无警告断言变红，R2-3）；先注册
   后 prepare 无 `--complete`（prepare 被杀）再经 CLI `--release` **并重启**恢复
-  head（无静默丢弃）。
+  head（无静默丢弃）。目录链的 CLI 见证也在此文件（而非文本钉文件）：显式完成目录
+  覆盖不同的 start 目录（重排解析链即变红）；带显式目录的重放完成覆盖先前判定目录
+  （prior 臂优先级）；完成会按所给目录登记活 head、随后拒绝再 start——即 checkout
+  补救是唯一防线所防的 certifies-falsely 危害（助手刻意不做树/证据校验）。
 
 ## 关键设计决定
 
@@ -171,12 +172,14 @@ release 形式都像兄弟恢复形式一样带 `[--round <r>]`。完成形式�
 
 - 无阻塞项。活性收益是可观测/可恢复性：投递后在 prepare 被杀的 head 现在留下
   在飞标记，操作者或下一次 head move 可恢复，而非消失。修复**收窄**静默丢弃窗口，
-  并未消除。两条残余仍存，跟踪于 #17371：(1) 闸门先写游标再打印事件
+  并未消除。三条残余仍存，跟踪于 #17371：(1) 闸门先写游标再打印事件
   （`packages/cli/src/commands/autofix-pr/snapshot.ts`），故会话在闸门投递与首次
   `--start` 之间被杀仍使 head 无记录——窗口收窄到该「投递→--start」区间，并未
   闭合（闭合需把标记写在闸门侧，那里本就握着 headSha）；(2) watch prompt 是任务上
   的持久快照，故本改动前安装的 watch 仍按 prepare→register 旧顺序，直到任务重建
-  ——而 `--start --artifact-dir` 仍被接受，无机制强制重建。watch 只在 head move 时
-  醒来，故*最后一个* head 上被杀的轮仍等待新 move，或手动
+  ——而 `--start --artifact-dir` 仍被接受，无机制强制重建；(3) 死轮恢复把
+  `--release` 与重启成对，两命令之间被杀会使 head 失去记录——瞬时路径通过对完好
+  标记重试 prepare、不 release 来避免此窗口，但死轮恢复仍带该窗口。watch 只在
+  head move 时醒来，故*最后一个* head 上被杀的轮仍等待新 move，或手动
   `--release --head <H> [--round <r>] --repo <owner>/<repo>` **后再重启**
   （`--start … --round <r+1>`）——单独 release 会让 head 失去记录。

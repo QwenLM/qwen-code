@@ -272,9 +272,10 @@ only when the named head **is** that head; a head that differs is the moved-head
 case below (release this round's marker; never check out the named head under
 it, which would file its evidence under the registered head's verdict). A round
 that registered nothing (a fresh `/verify-pr <n>`) has no marker of its own:
-read the state file's in-flight entry first, and while another round's marker is
-live, let that round answer — never check out under a live marker; uncommitted
-changes name the entries and a stash
+read the state file's in-flight entry first — while another round's marker is
+live, let that round answer, never checking out under a live marker; if that
+round is dead, recover its marker per the dead-round recovery below, then check
+out; uncommitted changes name the entries and a stash
 form that clears them; index flags that hide tracked state — a sparse checkout's
 skip-worktree, assume-unchanged — are refused too; the script never stashes
 for you),
@@ -734,6 +735,11 @@ Build the task in this order and stop at the first failure:
    `recurring: true`, `durable: true`, `sessionMode: "current"`, and
    `gate: "node <clone>/scripts/verify-pr-watch-gate.mjs <n> --repo <owner>/<repo> --cli <absolute qwen>"`
    (the gate is capped at 2048 characters). The prompt is the contract below.
+   The prompt is a **persisted snapshot** of that contract: a watch created
+   before the register-ahead change (R17-2) keeps the old prepare-then-register
+   order until its task is re-created, and `--start --artifact-dir` is still
+   accepted, so nothing forces the upgrade — re-create such a watch to pick up
+   registration ahead of prepare.
 
 The prompt consumes the gate's JSON and nothing else. On
 `head_moved_externally`, take `headSha` and run the round for that sha.
