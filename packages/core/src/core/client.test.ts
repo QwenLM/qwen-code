@@ -1738,6 +1738,36 @@ describe('Gemini Client (client.ts)', () => {
         hasAsyncBlock(mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>),
       ).toBe(false);
     });
+
+    it('a side query Stop-hook continuation does not drain the owning turn block', async () => {
+      // The side answer ends in a client-initiated Hook continuation (blocking
+      // Stop hook via hostContinuationOptions), which is neither flagged nor a
+      // ToolResult unless the flag is carried through. It must not drain the
+      // owning turn's pending block.
+      await run([{ text: 'main task' }], 'prompt-r8-owner', {
+        type: SendMessageType.UserQuery,
+      });
+      installAsyncOutput('owned hook output');
+      installMessageBus(blockStopOnce(), 'Stop');
+      installChat({
+        getHistory: vi.fn().mockReturnValue([modelText('not done')]),
+      });
+      await run([{ text: '/btw question' }], 'prompt-r8-side', {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+      });
+      // The owning turn's ToolResult continuation still receives the block.
+      await run(
+        [fnResponse('read_file', { ok: true }, 'call-r8-owner')],
+        'prompt-r8-owner',
+        { type: SendMessageType.ToolResult },
+      );
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      expect(hasAsyncBlock(parts)).toBe(true);
+      expect((parts.find(isAsyncHookPart) as Part).text).toContain(
+        'owned hook output',
+      );
+    });
   });
 
   describe('DW04: explicit workflow mode eligibility', () => {

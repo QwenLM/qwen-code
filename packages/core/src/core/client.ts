@@ -299,6 +299,12 @@ function hostContinuationOptions(
     }),
     ...(options?.skipMemoryExtraction && { skipMemoryExtraction: true }),
     ...(options?.stopPolicies && { stopPolicies: options.stopPolicies }),
+    // A side query's client-initiated continuation (Stop-hook / stop-policy)
+    // must keep the flag: it is a Hook send, so without it the async-drain gate
+    // would not recognise it as a side query and it would drain the owning
+    // turn's pending block. The owning turn's own continuations carry no flag
+    // and keep draining.
+    ...(options?.isConcurrentSideQuery && { isConcurrentSideQuery: true }),
     // A Goal turn's continuation runs under the same permit.
     ...(options?.goalPermit && {
       goalPermit: options.goalPermit,
