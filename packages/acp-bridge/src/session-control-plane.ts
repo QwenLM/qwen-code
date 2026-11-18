@@ -183,6 +183,7 @@ import {
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
+  DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_MAX_UPDATES,
@@ -1685,6 +1686,7 @@ const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'session_metadata_updated',
   'session_cwd_changed',
   'artifact_changed',
+  'sub_session_task_changed',
   'source_changed',
   'settings_changed',
   'extensions_changed',
@@ -1693,6 +1695,7 @@ const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'mcp_server_removed',
   'user_shell_command',
   'user_shell_result',
+  'mod_log',
   // Workspace-level fan-out (workspace service, git watcher, memory /
   // agent CRUD, device-flow registry) reaches every session bus via
   // `publishWorkspaceEvent` while idle. The `auth_device_flow_*` members
@@ -1746,9 +1749,25 @@ function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
   const meta = updateRecord['_meta'];
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
   const metaRecord = meta as Record<string, unknown>;
-  return (
+  if (
     metaRecord['source'] === 'user-shell' ||
     metaRecord['hookLifecycle'] !== undefined
+  ) {
+    return true;
+  }
+  // A /send receipt records a message without starting a new turn here.
+  // Ordinary agent mentions still count as turn content.
+  if (subtype !== 'user_message_chunk') return false;
+  const agentMessage = metaRecord['qwenAgentMessage'];
+  if (!agentMessage || typeof agentMessage !== 'object') return false;
+  const { kind, sentTo } = agentMessage as Record<string, unknown>;
+  if (kind !== 'agent_mention' || !sentTo || typeof sentTo !== 'object') {
+    return false;
+  }
+  const target = sentTo as Record<string, unknown>;
+  return (
+    typeof target['sessionId'] === 'string' &&
+    typeof target['workspaceCwd'] === 'string'
   );
 }
 
@@ -4559,6 +4578,14 @@ export function createSessionControlPlane(
         isWaitingForPermission = true;
       }
     }
+    // While a restore is in flight the store is repopulated across awaits,
+    // so any count read here is partial (or zero). Treat it as unknown:
+    // emit only the marker, never a partial count the list merge would
+    // overlay onto the sidecar-enriched one.
+    const artifactCountPending =
+      channelInfoForEntry(entry)?.pendingRestoreIds.has(entry.sessionId) ===
+      true;
+    const artifactCount = artifactCountPending ? 0 : entry.artifacts.count();
     return {
       sessionId: entry.sessionId,
       workspaceCwd: entry.workspaceCwd,
@@ -4588,6 +4615,18 @@ export function createSessionControlPlane(
       ...(entry.branch ? { branch: entry.branch } : {}),
       ...(entry.baseCommit ? { baseCommit: entry.baseCommit } : {}),
       ...(entry.prs && entry.prs.length > 0 ? { prs: entry.prs } : {}),
+      // session/load registers the entry before it awaits
+      // artifacts.restore(), and rewind restores into a live entry; both
+      // windows mark the session pending. Carry the ambiguity explicitly
+      // so the list merge keeps the sidecar-enriched count instead of
+      // reading the omission as zero — while live-state, occupancy and
+      // live-only consumers still see the session (the accessor's
+      // contract is "all live sessions", not "all settled sessions").
+      ...(artifactCountPending
+        ? { artifactCountPending: true }
+        : artifactCount > 0
+          ? { artifactCount }
+          : {}),
     };
   };
   // Pending + resolved permission state lives in
@@ -9342,6 +9381,11 @@ export function createSessionControlPlane(
                         [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
                       }
                     : {}),
+                  ...(req.deferAutomaticWorkUntilCwdRestore
+                    ? {
+                        [DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY]: true,
+                      }
+                    : {}),
                 },
               });
               return await restoreChannel.connection.loadSession(request);
@@ -9369,6 +9413,11 @@ export function createSessionControlPlane(
                 ...(req.suppressWorktreeContextRestore
                   ? {
                       [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+                    }
+                  : {}),
+                ...(req.deferAutomaticWorkUntilCwdRestore
+                  ? {
+                      [DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY]: true,
                     }
                   : {}),
               },
@@ -12651,6 +12700,12 @@ export function createSessionControlPlane(
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       return entry.events.lastEventId;
+    },
+
+    getSessionPendingPermissionIds(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return [...entry.pendingPermissionIds];
     },
 
     getSessionEventEpoch(sessionId) {
@@ -16784,16 +16839,26 @@ export function createSessionControlPlane(
         const shouldRestoreArtifactSnapshot =
           artifactSnapshot !== undefined &&
           artifactSnapshotUnavailable === undefined;
-        const artifactRestoreWarnings =
-          artifactSnapshotUnavailable !== undefined
-            ? [
-                `artifact snapshot rebuild unavailable during rewind: ${artifactSnapshotUnavailable}`,
-              ]
-            : shouldRestoreArtifactSnapshot
-              ? await entry.artifacts.restore(artifactSnapshot, {
-                  preserveLiveEphemeral: true,
-                })
-              : [];
+        // Rewind restores into a live entry across awaits; mark the
+        // session pending so summaries withhold the partial count (the
+        // same marker the load path uses) instead of publishing it.
+        const rewindChannel = channelInfoForEntry(entry);
+        rewindChannel?.pendingRestoreIds.add(entry.sessionId);
+        let artifactRestoreWarnings: string[];
+        try {
+          artifactRestoreWarnings =
+            artifactSnapshotUnavailable !== undefined
+              ? [
+                  `artifact snapshot rebuild unavailable during rewind: ${artifactSnapshotUnavailable}`,
+                ]
+              : shouldRestoreArtifactSnapshot
+                ? await entry.artifacts.restore(artifactSnapshot, {
+                    preserveLiveEphemeral: true,
+                  })
+                : [];
+        } finally {
+          rewindChannel?.pendingRestoreIds.delete(entry.sessionId);
+        }
         const artifactRestoreFailed =
           entry.artifacts.consumeLegacyOnlyRestore() ||
           artifactRestoreWarnings.some(isArtifactRestoreFailureWarning);

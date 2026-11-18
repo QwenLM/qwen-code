@@ -312,6 +312,10 @@ type MockConnection = {
   capabilities: { qwenCodeVersion: string; features: string[] };
   loadingTranscript: boolean;
   catchingUp: boolean;
+  restoredArtifacts?: DaemonSessionArtifact[];
+  restoredArtifactsSessionId?: string;
+  artifactCountHint?: number;
+  artifactCountHintSessionId?: string;
   error?: string;
   errorStatus?: number;
   missingSession?: boolean;
@@ -355,6 +359,7 @@ function activeGoalSnapshot(
 }
 
 type ChatEditorTestProps = {
+  slashArgumentCompleter?: import('./completions/slashCompletion').SlashArgumentCompleter;
   btwEnabled?: boolean;
   contextChipPlacement?: 'toolbar' | 'below' | 'header';
   liveVoicePortalContainer?: HTMLElement | null;
@@ -578,6 +583,7 @@ const {
   const qualifiedSetWorkspaceSetting = vi.fn();
   const runtimeStop = vi.fn();
   const workspaceClient = {
+    sendToSubSession: vi.fn(),
     runtimeStopOptions: vi.fn(),
     liveSetupStatus: vi
       .fn()
@@ -2008,7 +2014,11 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       ) => Promise<boolean> | boolean | void;
       onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
       onOpenWorkspacesOverview?: () => void;
-      onLoadSession?: (sessionId: string) => Promise<void> | void;
+      onLoadSession?: (
+        sessionId: string,
+        workspaceCwd?: string,
+        artifactCount?: number,
+      ) => Promise<void> | void;
       onLoadStandaloneSession?: (
         sessionId: string,
         displayName?: string,
@@ -2177,6 +2187,16 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             onClick: () => props.onLoadSession?.('session-2'),
           },
           'load session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'load-session-with-count',
+            type: 'button',
+            onClick: () =>
+              props.onLoadSession?.('session-2', '/tmp/project', 3),
+          },
+          'load session with count',
         ),
         React.createElement(
           'button',
@@ -4457,6 +4477,100 @@ describe('task activity key', () => {
     expect(
       container.querySelector('[data-web-shell-artifacts-entry]'),
     ).toBeNull();
+  });
+
+  it('shows the header artifacts entry from the click-time hint before the load lands', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    const makeArtifact = (id: string): DaemonSessionArtifact => ({
+      id,
+      kind: 'html',
+      storage: 'workspace',
+      source: 'tool',
+      status: 'available',
+      title: id,
+      workspacePath: `${id}.html`,
+      clientRetained: false,
+      createdAt: '2026-09-07T00:00:00.000Z',
+      updatedAt: '2026-09-07T00:00:00.000Z',
+    });
+    // The gated fetch stays pending: no authoritative data exists yet, so
+    // the keyed click-time hint from the session-list summary must surface.
+    const pending = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    mockSessionActions.loadArtifacts.mockReturnValue(pending.promise);
+    mockConnection.artifactCountHint = 3;
+    mockConnection.artifactCountHintSessionId = mockConnection.sessionId;
+    try {
+      const { container } = renderApp();
+      await flush();
+
+      const entry = container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-artifacts-entry]',
+      );
+      expect(entry).not.toBeNull();
+      expect(entry!.getAttribute('aria-label')).toBe('Open artifacts (3)');
+
+      // The authoritative list supersedes the hint once it lands.
+      await act(async () => {
+        pending.resolve({ artifacts: [makeArtifact('report')] });
+        await pending.promise;
+      });
+      await flush();
+      expect(
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-artifacts-entry]')
+          ?.getAttribute('aria-label'),
+      ).toBe('Open artifacts (1)');
+    } finally {
+      mockConnection.artifactCountHint = undefined;
+      mockConnection.artifactCountHintSessionId = undefined;
+    }
+  });
+
+  it('withholds the click-time hint keyed to another session', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    const pending = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    mockSessionActions.loadArtifacts.mockReturnValue(pending.promise);
+    mockConnection.artifactCountHint = 3;
+    mockConnection.artifactCountHintSessionId = `${mockConnection.sessionId}-other`;
+    try {
+      const { container } = renderApp();
+      await flush();
+
+      expect(
+        container.querySelector('[data-web-shell-artifacts-entry]'),
+      ).toBeNull();
+    } finally {
+      mockConnection.artifactCountHint = undefined;
+      mockConnection.artifactCountHintSessionId = undefined;
+    }
+  });
+
+  it('forwards the clicked session artifact count into loadSession options', async () => {
+    // Pins the sidebar → App → loadSession wiring: the count the sidebar
+    // row carries must reach the action options, or the hint never lands
+    // on the connection and the entry reverts to load-response timing.
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="load-session-with-count"]',
+        )
+        ?.click();
+    });
+    await flush();
+
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+      'session-2',
+      expect.objectContaining({ artifactCountHint: 3 }),
+    );
   });
 
   it('exposes the artifact count and opener to a custom chat header', async () => {
@@ -12848,6 +12962,95 @@ async function clickSubmit(container: HTMLElement): Promise<void> {
     await Promise.resolve();
   });
 }
+
+describe('App /send', () => {
+  const callerCwd = '/tmp/project';
+  const targetCwd = '/tmp/backend';
+
+  beforeEach(() => {
+    mockConnection.capabilities.features = ['session_sub_session_send'];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'caller-id',
+          cwd: callerCwd,
+          displayName: targetCwd,
+          primary: true,
+          trusted: true,
+        },
+        { id: 'target-id', cwd: targetCwd, primary: false, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspace.client.sendToSubSession.mockReset();
+  });
+
+  it('only clears the submitted draft after the daemon accepts it', async () => {
+    const send = deferred<{ sessionId: string }>();
+    mockWorkspace.client.sendToSubSession.mockReturnValue(send.promise);
+    const { container } = renderApp();
+    testState.prompt = '/send hello';
+    await clickSubmit(container);
+    await clickSubmit(container);
+    expect(
+      mockWorkspace.client.sendToSubSession,
+    ).toHaveBeenCalledExactlyOnceWith(
+      'session-1',
+      { prompt: 'hello' },
+      'client-1',
+    );
+    expect(editorCommit).not.toHaveBeenCalled();
+
+    await act(async () => send.resolve({ sessionId: 'target' }));
+    expect(editorCommit).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the draft if the host refuses the outgoing prompt', async () => {
+    const onSubmitBefore = vi.fn().mockRejectedValue(new Error('host refusal'));
+    const { container } = renderApp({ onSubmitBefore });
+    testState.prompt = '/send --workspace target-id hello';
+    await clickSubmit(container);
+    expect(onSubmitBefore).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      prompt: 'hello',
+    });
+    expect(mockWorkspace.client.sendToSubSession).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('/send --workspace target-id hello');
+  });
+
+  it('does not restore a late refusal into another session', async () => {
+    const send = deferred<never>();
+    mockWorkspace.client.sendToSubSession.mockReturnValue(send.promise);
+    const { container, rerender } = renderApp();
+    testState.prompt = '/send hello';
+    await clickSubmit(container);
+    expect(mockWorkspace.client.sendToSubSession).toHaveBeenCalledOnce();
+
+    mockConnection.sessionId = 'session-2';
+    testState.prompt = '';
+    rerender();
+    await act(async () => send.reject(new Error('target refused')));
+    expect(testState.prompt).toBe('');
+    expect(editorCommit).not.toHaveBeenCalled();
+  });
+
+  it('offers a stable selector for a colliding workspace name and honors the lock', async () => {
+    const { container } = renderApp({ lockedWorkspaceCwd: callerCwd });
+    await flush();
+    const result =
+      testState.latestChatEditorProps?.slashArgumentCompleter?.(
+        '/send --workspace ',
+      );
+    expect(result?.items).toMatchObject([
+      { detail: callerCwd, apply: '/send --workspace caller-id ' },
+    ]);
+
+    testState.prompt = `/send --workspace ${targetCwd} hello`;
+    await clickSubmit(container);
+    expect(mockWorkspace.client.sendToSubSession).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+  });
+});
 
 function deferred<T>(): {
   promise: Promise<T>;
@@ -50499,6 +50702,7 @@ describe('App session callbacks', () => {
     ['/language ui en --project', 'en', 'workspace'],
     ['/language ui --global ru', 'ru', 'user'],
     ['/language ui ru --global', 'ru', 'user'],
+    ['/language ui zh-TW', 'zh-TW', 'user'],
   ])(
     'accepts UI language scope flags in %s',
     async (command, language, scope) => {

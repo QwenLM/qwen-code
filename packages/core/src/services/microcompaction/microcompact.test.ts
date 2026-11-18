@@ -2155,7 +2155,7 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
         pendingContent: fileResult(
           'rf2',
           'read_file',
-          '[File big.ts unchanged since last read in this session]',
+          'Wasted call — file big.ts unchanged since it was last read in this conversation.',
         ),
       },
     );

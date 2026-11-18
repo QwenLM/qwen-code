@@ -103,6 +103,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         this.poolBootId = negotiated.capabilities().getBootId();
         this.sslContext = tls;
         this.sessionSkills = skills;
+        negotiated.onAttachmentRetirement(this::retireNotifiedAttachment);
         this.client = negotiated;
     }
 
@@ -220,6 +221,25 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 pendingRecovery.remove(key);
             }
             return held;
+        });
+    }
+
+    // The SDK client retires attachments on its own (a heartbeat's
+    // definitive 404, a proven generation change). The notice carries only
+    // the retired reference, while the caches are keyed by tenant, Session
+    // and placement epoch, so find the keys holding that exact reference
+    // and remove each under the same per-key identity rule as evictVanished:
+    // a notice that arrives after a newer publication leaves it alone.
+    private void retireNotifiedAttachment(HarnessSessionRef ref) {
+        attachments.forEach((key, held) -> {
+            if (held == ref) {
+                removeAttachment(key, ref);
+            }
+        });
+        mcpManagementAttachments.forEach((key, held) -> {
+            if (held == ref) {
+                mcpManagementAttachments.remove(key, ref);
+            }
         });
     }
 
@@ -2657,6 +2677,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 .loadTimeout(properties.getLoadTimeout())
                 .heartbeatInterval(properties.getHeartbeatInterval())
                 .build();
+        created.onAttachmentRetirement(this::retireNotifiedAttachment);
         if (poolEndpoint != null && (!poolBootId.equals(created.capabilities().getBootId())
                 || !poolEndpoint.instanceId().equals(created.capabilities().getInstanceId()))) {
             created.close();

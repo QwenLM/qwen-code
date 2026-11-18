@@ -1109,11 +1109,19 @@ export interface DaemonStatusReport {
     maxPendingPromptsPerSession: number | null;
     listenerMaxConnections: number | null;
     /**
-     * Effective admission cap for concurrent REST SSE streams; the live
-     * occupancy is `runtime.transport.restSseActive`. `null` = unlimited.
-     * Additive — older daemons omit this field.
+     * Effective admission cap for concurrent long-lived streams across every
+     * surface; the live occupancy is `runtime.transport.streamOccupancy.total`
+     * (`restSseActive` remains the REST event surface alone). `null` =
+     * unlimited. Additive — older daemons omit this field.
      */
     maxSseConnections?: number | null;
+    /**
+     * Per-listener admission clamps paired with `maxSseConnections`
+     * (issue #17554): `primary`, `local-control`, `remote-access`. Each
+     * pairing listener keeps its own short-request headroom. `null` =
+     * unlimited. Additive — older daemons omit this field.
+     */
+    maxSseConnectionsPerListener?: Record<string, number | null>;
     eventRingSize: number;
     eventRingMaxBytes?: number;
     promptDeadlineMs: number | null;
@@ -1220,6 +1228,20 @@ export interface DaemonStatusReport {
     channelWorkers?: DaemonChannelWorkerGroupSnapshot[];
     transport: {
       restSseActive: number;
+      /**
+       * Listener-slot occupancy across every long-lived stream surface
+       * (issue #17554), by surface (`restEvents`, `agentEvents`,
+       * `generation`, `artifactLibrary`, `hostedEvents`, `acpSse`, `acpWs`)
+       * and by listener (`primary`, `local-control`, `remote-access`).
+       * Includes ACP WebSocket connections: the gauge measures slots, not
+       * frames. Keys are widened to string per the SDK convention.
+       * Additive — older daemons omit this field.
+       */
+      streamOccupancy?: {
+        total: number;
+        bySurface: Record<string, number>;
+        byListener: Record<string, number>;
+      };
       acp: {
         enabled: boolean;
         connections: number;
@@ -1794,6 +1816,26 @@ export interface DaemonForkSessionResult {
 }
 
 /**
+ * A person's send from the open session to another session
+ * (`POST /session/:id/sub-sessions`, capability `session_sub_session_send`).
+ */
+export interface SendToSubSessionRequest {
+  prompt: string;
+  /** Registered workspace path or id; absent means the session's own. */
+  workspace?: string;
+  /** Any other active session, to send to instead of starting one. */
+  targetSessionId?: string;
+}
+
+export interface DaemonSubSessionSendResult {
+  sessionId: string;
+  /** Set when the target runs in another workspace. */
+  workspaceCwd?: string;
+  /** The completion's task id, set for a follow-up. */
+  taskId?: string;
+}
+
+/**
  * Wire-format mirror of `BridgePendingInteraction*` in
  * `packages/acp-bridge/src/bridgeTypes.ts`; keep fields synchronized.
  * Session runtime interaction details returned by live session endpoints.
@@ -1903,6 +1945,42 @@ export interface DaemonSessionSummary {
   baseCommit?: string;
   /** Present when GitHub PRs have been bound to the session (last = latest). */
   prs?: DaemonSessionPrInfo[];
+  /**
+   * Session artifact count, present when non-zero. Live sessions carry the
+   * live public count; there, absent means ZERO — the in-memory store is
+   * authoritative, and the list merge drops a stale sidecar-derived count
+   * when the live entry omits the field — EXCEPT while
+   * `artifactCountPending` is true (see there). Cold sessions carry the
+   * restorable count hydrated best-effort from the artifact summary
+   * sidecar; there, absent means unknown (older daemon or no sidecar yet),
+   * not zero.
+   */
+  artifactCount?: number;
+  /**
+   * True while the session's artifact restore is still in flight: the
+   * session is live, but its store is not hydrated yet, so `artifactCount`
+   * is omitted and MUST NOT be read as zero. The list merge keeps the
+   * sidecar-enriched count for such rows. Absent once the restore settles.
+   */
+  artifactCountPending?: boolean;
+  /**
+   * List-facing projection of the session's Goal, read from the goal
+   * sidecar on disk. Present for unloaded and archived sessions too,
+   * unlike the live-only Goals listing; absent when the session has no
+   * goal. Older daemons omit it.
+   */
+  goal?: DaemonSessionGoalInfo;
+}
+
+/**
+ * The goal sidecar's wire projection: identity + lifecycle state. Budgets
+ * and spend stay on the Goals page's live listing.
+ */
+export interface DaemonSessionGoalInfo {
+  status: GoalStatus;
+  objective: string;
+  /** ISO time of the goal's last transition. */
+  updatedAt: string;
 }
 
 export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
@@ -3939,6 +4017,34 @@ export interface DaemonSessionTasksStatus {
   sessionId: string;
   now: number;
   tasks: DaemonSessionTaskStatus[];
+  /** Present when requested with `includeSubSessions`. */
+  subSessions?: DaemonSessionSubSessionTaskStatus[];
+}
+
+/**
+ * A `sent` launch whose result the daemon reports back to this session:
+ * a person's send from its page, or the model's `create_sub_session`.
+ * Kept in daemon memory, so a daemon restart forgets it.
+ */
+export interface DaemonSessionSubSessionTaskStatus {
+  kind: 'session';
+  /** The completion's task id. */
+  id: string;
+  /** The session the message went to. */
+  sessionId: string;
+  workspaceCwd: string;
+  label: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startTime: number;
+  endTime?: number;
+  runtimeMs: number;
+  /** A person sent it from the session page, not the session's model. */
+  byPerson: boolean;
+  /**
+   * The target is waiting on a permission or a question. Absent from daemons
+   * that predate it.
+   */
+  waitingForInput?: boolean;
 }
 
 /**

@@ -6219,6 +6219,52 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('sendToSubSession', () => {
+    it('posts the send to the sub-sessions route of the caller', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(202, { sessionId: 'kid', workspaceCwd: '/work/b' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.sendToSubSession(
+        'main-1',
+        { prompt: 'look', workspace: '/work/b', targetSessionId: 'kid' },
+        'client-1',
+      );
+
+      expect(result).toEqual({ sessionId: 'kid', workspaceCwd: '/work/b' });
+      expect(calls[0]?.url).toBe('http://daemon/session/main-1/sub-sessions');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        prompt: 'look',
+        workspace: '/work/b',
+        targetSessionId: 'kid',
+      });
+    });
+
+    it('asks the tasks route for the sends it reports back', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          sessionId: 'main-1',
+          now: 1,
+          tasks: [],
+          subSessions: [],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.sessionTasks('main-1', undefined, {
+        includeSubSessions: true,
+      });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/main-1/tasks?includeSubSessions=true',
+      );
+    });
+  });
+
   describe('cancel', () => {
     it('POSTs /cancel and tolerates 204', async () => {
       const { fetch, calls } = recordingFetch(
