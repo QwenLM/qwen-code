@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import type { IntentResult, IntentTarget } from '../chat-core/contract.js';
+import type {
+  Admission,
+  IntentResult,
+  IntentTarget,
+} from '../chat-core/contract.js';
 import { createDaemonChatIntents } from './chat-intents.js';
 
 const target: IntentTarget = { sessionId: 's1', turnId: 't1' };
@@ -9,6 +13,14 @@ const approvalTarget = (requestId: string): IntentTarget => ({
 });
 const accepted = async () => 'accepted' as const;
 
+function deferredAdmission() {
+  let resolve!: (admission: Admission) => void;
+  const promise = new Promise<Admission>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
 describe('daemon intents: admission is not establishment', () => {
   it('a resolved submit transport alone stays unsettled until the turn settles', async () => {
     const intents = createDaemonChatIntents();
@@ -17,14 +29,12 @@ describe('daemon intents: admission is not establishment', () => {
       target,
       accepted,
     );
-    // Transport success is admission only — never an established outcome.
     expect(result.admission).toBe('accepted');
     expect(result.outcome).toBe('unsettled');
     expect(intents.operations.some((op) => op.kind === 'submit')).toBe(true);
     expect(intents.phase('idle')).toBe('running');
 
-    const settled = intents.settle(operationId, 'settled');
-    expect(settled?.outcome).toBe('established');
+    expect(intents.settle(operationId, 'settled')?.outcome).toBe('established');
     expect(intents.phase('idle')).toBe('idle');
   });
 
@@ -36,37 +46,36 @@ describe('daemon intents: admission is not establishment', () => {
       accepted,
     );
     expect(result.outcome).toBe('unsettled');
-    // The cancel promise resolving does not end the cancelling phase.
     expect(intents.phase('idle')).toBe('cancelling');
 
-    const settled = intents.settle(operationId, 'settled');
-    expect(settled?.outcome).toBe('established');
+    expect(intents.settle(operationId, 'settled')?.outcome).toBe('established');
     expect(intents.phase('idle')).toBe('idle');
   });
 
-  it('a superseded approval decision never establishes', async () => {
+  it('a superseded approval decision never establishes on positive evidence', async () => {
     const intents = createDaemonChatIntents();
-    intents.setCurrentApprovalRequest('r1');
+    intents.setApprovalRequestLive('r1', true);
     const first = await intents.dispatch(
       'approval',
       approvalTarget('r1'),
       accepted,
     );
-    // A newer request supersedes r1 before its decision is confirmed.
-    intents.setCurrentApprovalRequest('r2');
+    // r2 supersedes r1: r1 is no longer awaiting a decision.
+    intents.setApprovalRequestLive('r1', false);
+    intents.setApprovalRequestLive('r2', true);
 
-    const superseded = intents.settle(first.operationId, 'settled');
-    expect(superseded?.outcome).not.toBe('established');
-    expect(superseded?.outcome).toBe('unsettled');
+    expect(intents.settle(first.operationId, 'settled')?.outcome).toBe(
+      'unsettled',
+    );
 
-    // Positive control: the still-current request does establish.
     const second = await intents.dispatch(
       'approval',
       approvalTarget('r2'),
       accepted,
     );
-    const current = intents.settle(second.operationId, 'settled');
-    expect(current?.outcome).toBe('established');
+    expect(intents.settle(second.operationId, 'settled')?.outcome).toBe(
+      'established',
+    );
   });
 
   it('an approval whose request identity is unknown never establishes', async () => {
@@ -76,8 +85,49 @@ describe('daemon intents: admission is not establishment', () => {
       { sessionId: 's1' },
       accepted,
     );
-    // Currency cannot be verified without the request it applies to.
     expect(intents.settle(operationId, 'settled')?.outcome).toBe('unsettled');
+  });
+
+  it('concurrently live approval requests each establish on their own decision', async () => {
+    const intents = createDaemonChatIntents();
+    // The daemon keeps several permission requests pending at once.
+    intents.setApprovalRequestLive('r1', true);
+    intents.setApprovalRequestLive('r2', true);
+    const first = await intents.dispatch(
+      'approval',
+      approvalTarget('r1'),
+      accepted,
+    );
+    const second = await intents.dispatch(
+      'approval',
+      approvalTarget('r2'),
+      accepted,
+    );
+
+    expect(intents.settle(first.operationId, 'settled')?.outcome).toBe(
+      'established',
+    );
+    expect(intents.settle(second.operationId, 'settled')?.outcome).toBe(
+      'established',
+    );
+  });
+
+  it('a superseded decision that genuinely failed still terminalizes', async () => {
+    const intents = createDaemonChatIntents();
+    intents.setApprovalRequestLive('r1', true);
+    const first = await intents.dispatch(
+      'approval',
+      approvalTarget('r1'),
+      accepted,
+    );
+    intents.setApprovalRequestLive('r1', false);
+    intents.setApprovalRequestLive('r2', true);
+
+    // Negative evidence is not rewritten by the supersede guard.
+    expect(intents.settle(first.operationId, 'failed')?.outcome).toBe('failed');
+    expect(
+      intents.operations.find((op) => op.id === first.operationId)?.state,
+    ).toBe('failed');
   });
 });
 
@@ -88,25 +138,27 @@ describe('daemon intents: witness correlation', () => {
     intents.settle(finished.operationId, 'failed');
     const retry = await intents.dispatch('submit', target, accepted);
 
-    // Evidence from the finished attempt arrives late, after the retry began.
     expect(intents.settle(finished.operationId, 'settled')).toBeUndefined();
     expect(
       intents.operations.find((op) => op.id === retry.operationId)?.state,
     ).toBe('running');
-
-    // The retry's own evidence still establishes it.
     expect(intents.settle(retry.operationId, 'settled')?.outcome).toBe(
       'established',
     );
   });
 
+  it('an already-established attempt cannot be re-settled to failed', async () => {
+    const intents = createDaemonChatIntents();
+    const { operationId } = await intents.dispatch('submit', target, accepted);
+    intents.settle(operationId, 'settled');
+    expect(intents.settle(operationId, 'failed')).toBeUndefined();
+    expect(intents.operations.find((op) => op.id === operationId)?.state).toBe(
+      'established',
+    );
+  });
+
   it('out-of-order evidence keeps its effect on its own attempt', async () => {
-    const settleInOrder = async (
-      order: readonly ('first' | 'second')[],
-    ): Promise<{
-      first?: IntentResult['outcome'];
-      second?: IntentResult['outcome'];
-    }> => {
+    const settleInOrder = async (order: readonly ('first' | 'second')[]) => {
       const intents = createDaemonChatIntents();
       const dispatched = {
         first: (await intents.dispatch('submit', target, accepted)).operationId,
@@ -122,8 +174,6 @@ describe('daemon intents: witness correlation', () => {
           name,
           intents.settle(dispatched[name], witnessFor[name])?.outcome,
         );
-        // Each attempt's state must follow the witness that named it, not the
-        // attempt whose evidence happened to arrive first.
         if (index === 0) {
           const states = new Map(
             intents.operations.map((op) => [op.id, op.state]),
@@ -133,8 +183,6 @@ describe('daemon intents: witness correlation', () => {
           expect(states.get(dispatched[other])).toBe('running');
         }
       }
-      // Once both attempts are terminal, retention keeps the later-dispatched
-      // row; the outcomes above show each attempt kept its own witness.
       expect(intents.operations.map((op) => [op.id, op.state])).toEqual([
         [dispatched.second, 'established'],
       ]);
@@ -144,6 +192,91 @@ describe('daemon intents: witness correlation', () => {
     const expected = { first: 'failed', second: 'established' };
     expect(await settleInOrder(['first', 'second'])).toEqual(expected);
     expect(await settleInOrder(['second', 'first'])).toEqual(expected);
+  });
+});
+
+describe('daemon intents: dispatch order and in-flight identity', () => {
+  it('records a pending attempt before the transport resolves', async () => {
+    const intents = createDaemonChatIntents();
+    const gate = deferredAdmission();
+    const pending = intents.dispatch('submit', target, () => gate.promise);
+    // The row exists and the phase is submitting while the request is in flight.
+    expect(intents.operations.some((op) => op.state === 'pending')).toBe(true);
+    expect(intents.phase('idle')).toBe('submitting');
+    gate.resolve('accepted');
+    await pending;
+    expect(intents.phase('idle')).toBe('running');
+  });
+
+  it('retention keeps the later-dispatched attempt, not the later-resolved one', async () => {
+    const intents = createDaemonChatIntents();
+    const slow = deferredAdmission();
+    const firstPromise = intents.dispatch('submit', target, () => slow.promise);
+    // A second submit on the same target completes while the first is in flight.
+    const second = await intents.dispatch('submit', target, accepted);
+    slow.resolve('accepted');
+    const first = await firstPromise;
+
+    intents.settle(first.operationId, 'failed');
+    intents.settle(second.operationId, 'settled');
+    expect(intents.operations.map((op) => [op.id, op.state])).toEqual([
+      [second.operationId, 'established'],
+    ]);
+  });
+});
+
+describe('daemon intents: unknown admission has an exit', () => {
+  it('a thrown submit transport can be abandoned so the phase does not latch', async () => {
+    const intents = createDaemonChatIntents();
+    const { result, operationId } = await intents.dispatch(
+      'submit',
+      target,
+      async () => {
+        throw new Error('daemon restarting');
+      },
+    );
+    expect(result.admission).toBe('unknown');
+    expect(result.outcome).toBe('unsettled');
+    expect(intents.phase('idle')).toBe('running');
+    // No witness can terminalize an unknown admission through settle.
+    expect(intents.settle(operationId, 'settled')?.outcome).toBe('unsettled');
+    expect(intents.settle(operationId, 'failed')?.outcome).toBe('unsettled');
+
+    intents.abandon(operationId);
+    expect(intents.phase('idle')).toBe('idle');
+    expect(
+      intents.operations.some(
+        (op) =>
+          op.kind === 'submit' &&
+          op.state !== 'failed' &&
+          op.state !== 'established',
+      ),
+    ).toBe(false);
+  });
+
+  it('a thrown cancel transport can be abandoned so cancelling clears', async () => {
+    const intents = createDaemonChatIntents();
+    const { operationId } = await intents.dispatch(
+      'cancel',
+      target,
+      async () => {
+        throw new Error('daemon restarting');
+      },
+    );
+    expect(intents.phase('idle')).toBe('cancelling');
+    intents.abandon(operationId);
+    expect(intents.phase('idle')).toBe('idle');
+  });
+
+  it('abandon never establishes and is a no-op on terminal or unknown ids', async () => {
+    const intents = createDaemonChatIntents();
+    const { operationId } = await intents.dispatch('submit', target, accepted);
+    intents.settle(operationId, 'settled');
+    expect(intents.abandon(operationId)).toBeUndefined();
+    expect(intents.abandon('daemon-intent-404')).toBeUndefined();
+    expect(intents.operations.find((op) => op.id === operationId)?.state).toBe(
+      'established',
+    );
   });
 });
 
@@ -162,27 +295,10 @@ describe('daemon intents: admission handling', () => {
     expect(intents.settle(operationId, 'settled')).toBeUndefined();
   });
 
-  it('a transport failure is an unknown admission that never establishes', async () => {
-    const intents = createDaemonChatIntents();
-    const { result, operationId } = await intents.dispatch(
-      'submit',
-      target,
-      async () => {
-        throw new Error('transport down');
-      },
-    );
-    expect(result.admission).toBe('unknown');
-    expect(result.outcome).toBe('unsettled');
-    // Even a settled witness cannot establish an unknown admission.
-    const settled = intents.settle(operationId, 'settled');
-    expect(settled?.outcome).toBe('unsettled');
-  });
-
   it('a failed witness produces a failed outcome', async () => {
     const intents = createDaemonChatIntents();
     const { operationId } = await intents.dispatch('submit', target, accepted);
-    const failed = intents.settle(operationId, 'failed');
-    expect(failed?.outcome).toBe('failed');
+    expect(intents.settle(operationId, 'failed')?.outcome).toBe('failed');
     expect(intents.operations.find((op) => op.id === operationId)?.state).toBe(
       'failed',
     );
@@ -194,7 +310,18 @@ describe('daemon intents: admission handling', () => {
   });
 });
 
-describe('daemon intents: bounded retention', () => {
+describe('daemon intents: observable snapshot and retention', () => {
+  it('keeps a stable operations snapshot identity between state changes', async () => {
+    const intents = createDaemonChatIntents();
+    expect(intents.operations).toBe(intents.operations);
+    const { operationId } = await intents.dispatch('submit', target, accepted);
+    const snapshot = intents.operations;
+    expect(intents.operations).toBe(snapshot);
+    intents.settle(operationId, 'settled');
+    expect(intents.operations).not.toBe(snapshot);
+    expect(intents.operations).toBe(intents.operations);
+  });
+
   it('keeps at most the latest terminal submit per target', async () => {
     const intents = createDaemonChatIntents();
     const first = await intents.dispatch('submit', target, accepted);
@@ -204,5 +331,35 @@ describe('daemon intents: bounded retention', () => {
     const submits = intents.operations.filter((op) => op.kind === 'submit');
     expect(submits).toHaveLength(1);
     expect(submits[0].state).toBe('failed');
+  });
+
+  it('acknowledge releases a consumed terminal row and keeps the rest', async () => {
+    const intents = createDaemonChatIntents();
+    const first = await intents.dispatch(
+      'submit',
+      { sessionId: 's1', turnId: 't1' },
+      accepted,
+    );
+    const second = await intents.dispatch(
+      'submit',
+      { sessionId: 's1', turnId: 't2' },
+      accepted,
+    );
+    intents.settle(first.operationId, 'settled');
+    intents.settle(second.operationId, 'settled');
+    expect(intents.operations).toHaveLength(2);
+
+    intents.acknowledge(first.operationId);
+    expect(intents.operations.map((op) => op.id)).toEqual([second.operationId]);
+    // Acknowledging a non-terminal row keeps it.
+    const third = await intents.dispatch(
+      'submit',
+      { sessionId: 's1', turnId: 't3' },
+      accepted,
+    );
+    intents.acknowledge(third.operationId);
+    expect(intents.operations.some((op) => op.id === third.operationId)).toBe(
+      true,
+    );
   });
 });

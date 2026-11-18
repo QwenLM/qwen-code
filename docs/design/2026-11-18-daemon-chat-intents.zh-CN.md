@@ -43,20 +43,29 @@ cancel、被取代的 approval），以及一条见证关联测试，使每份�
 
 `createDaemonChatIntents()` 返回一个跟踪器，含：
 
-- `dispatch(kind, target, transport)`——执行意图的 transport，导出 admission
-  （`accepted`/`rejected`；抛错的 transport 记为 `unknown`），记录一个
-  `ChatOperation`，并返回 `{ operationId, result }`。该操作 id 就是结算证据必须
-  点名的身份。outcome 以 witness `none` 解析，故已准入的意图在证据到达前保持
-  `unsettled`。`rejected` 准入不携带 outcome，也不被跟踪，故结算其 id 是空操作。
+- `dispatch(kind, target, transport)`——先铸造操作 id、并在执行 transport **之前**
+  把该尝试记为 `pending`，使请求在飞时该行已存在（证据可绑定到它），且各行保持
+  派发顺序。随后导出 admission（`accepted`/`rejected`；抛错的 transport 记为
+  `unknown`），返回 `{ operationId, result }`。该操作 id 就是结算证据必须点名的
+  身份。outcome 以 witness `none` 解析，故已准入的意图在证据到达前保持
+  `unsettled`。`rejected` 准入不携带 outcome 并移除该行，故结算其 id 是空操作。
 - `settle(operationId, witness)`——把权威证据只作用于该 id 所标识的那次尝试，并
   重算其 outcome。未知或已终态的 id 是空操作，因此证据无法结算它并非为之下发的
-  尝试。对 approval，决定**仅在仍作用于当前请求时**才建立：若记录下来的
-  `target.requestId` 缺失或不再是 `currentApprovalRequestId`，witness 被强制为
-  `none`，该决定绝不建立（被取代的 approval 是待处理项状态，而非已应用的结果）。
-- `setCurrentApprovalRequest(requestId)`——跟踪哪个 approval 请求仍当前，使取代
-  可被检测。
+  尝试，已结束的尝试也绝不被再次结算。对 approval，**settled** 决定仅在其请求仍
+  存活时才建立：若记录下来的 `target.requestId` 缺失或不在存活集合内，正向 witness
+  被强制为 `none`，该决定不建立。否定证据不被改写，故确实失败的被取代决定仍终态化
+  为 `failed`。
+- `abandon(operationId)`——给 admission 永远无法被确认的尝试（抛错的 transport 留
+  下 `unknown`，任何 witness 都无法使其终态化）一条出路：把该行终态化为 `failed`、
+  绝不 `established`，使失败的 transport 不会把 phase 钉死。已终态或未知 id 是空操作。
+- `acknowledge(operationId)`——在界面消费完一条终态行后释放它（委托 slice 1
+  `acknowledgeOperation`）；非终态行保留，终态行在被确认前保持可读。
+- `setApprovalRequestLive(requestId, live)`——跟踪仍在等待决定的 approval 请求
+  **集合**。daemon 同时保留多个待处理授权请求，故时效是「在该集合内」，而非单一
+  「最新」id；决定在其请求存活期间适用。
 - `operations`——保留后的操作列表（slice 1 `retainOperations`：每个非终态条目，
-  每个 kind+target 至多一个最新终态）。
+  每个 kind+target 至多一个最新终态，按派发顺序取最新）。快照在每次状态变化时物化
+  一次，故其身份在变化之间稳定，可支撑 `useSyncExternalStore` 缓存。
 - `phase(settled)`——slice 1 `deriveChatPhase`；一个未建立的 cancel 操作产生
   `cancelling`，与 cancel promise 是否 resolve 无关。
 
@@ -85,6 +94,24 @@ session/turn 上的重试会复用该 target，于是已结束尝试的迟到 wi
 记在请求的后端身份旁，使到来的事件能点名它所属的尝试。适配器无法绑定的证据保持
 未验证，而不是宣告新尝试已完成。
 
+尝试在 transport 执行**之前**就被记录，原因有二。其一，各行按派发顺序排列，而
+保留逻辑按位置取每个 kind+target 的最新终态行——当同一 target 上两次发送重叠时，
+留下的是较晚**派发**的尝试，而非较晚**解析**的尝试。其二，请求在飞时该行（连同其
+id）已存在，phase 读作 `submitting`，POST 期间到达的证据也有 id 可绑定。
+
+### 时效是集合，失败的 transport 有出路
+
+单一「当前请求」槽位混淆了两个问题——哪个请求最新、这个决定是否仍适用——而
+daemon 同时保留至多 64 个待处理授权请求。在 `r2` 也在等待时批准仍待处理的 `r1`，
+是后端确实应用的决定，必须建立；因此时效是「在存活请求集合内」，于 `settle` 时
+判定。守卫只收窄正向证据，故确实失败的被取代决定仍终态化，而不是泄漏一条永久的
+`unsettled` 行。
+
+抛错的 transport 留下 admission `unknown`，真值表使其在任何 witness 下都保持
+`unsettled`；若无出路，它会在引擎整个生命周期内把 phase 钉死。`abandon` 把这种
+尝试终态化为 `failed`（绝不 `established`）；`acknowledge` 让界面释放已消费的终态
+行，使保留不会跨不同 turn 无限增长。
+
 ## 负向测试（随 daemon 适配器落地）
 
 1. **延迟的 turn 结果。** `dispatch('submit', …)` 配以 resolve 为 `accepted` 的
@@ -93,23 +120,34 @@ session/turn 上的重试会复用该 target，于是已结束尝试的迟到 wi
 2. **未决的 cancel。** `dispatch('cancel', …)` resolve 为 `accepted` 仍保持 phase
    `cancelling`；已 resolve 的 cancel promise 并不结束它。只有结算证据才建立 cancel
    并清除 `cancelling`。
-3. **被取代的 approval。** 当请求 `r1` 当前时，一个在 `r2` 取代它之后才被确认的
-   `r1` approval 决定绝不建立；仍当前的 `r2` 决定则可以（正向对照）。承载不了
-   请求身份的 approval 同样绝不建立：没有该决定所作用的请求，就无法核实其时效。
-4. **见证关联。** 尝试 A 结算为 `failed` 后，A 的迟到见证绝不能建立同一可见 target
+3. **被取代的 approval。** `r1` 存活时，一个在 `r1` 离开存活集合后才被确认的 `r1`
+   approval 决定，正向证据下绝不建立；仍存活的 `r2` 决定则可以（正向对照）。承载
+   不了请求身份的 approval 同样绝不建立。被报为 `failed` 的被取代决定仍终态化为
+   `failed`。
+4. **并发 approval。** `r1` 与 `r2` 都存活时，分别结算两个决定都建立——单一「当前」
+   槽位会把第二个误报为 `unsettled`。
+5. **见证关联。** 尝试 A 结算为 `failed` 后，A 的迟到见证绝不能建立同一可见 target
    上的重试 B；B 自己的见证则可以。同一组两份见证无论以何种到达顺序应用，结果都
-   是 A `failed`、B `established`，故乱序证据无法互换尝试。
+   是 A `failed`、B `established`。已 `established` 的尝试再被结算 `failed` 是空操作，
+   仍保持 `established`。
+6. **派发顺序与在飞身份。** transport 解析前已存在 pending 行、phase 为
+   `submitting`；同一 target 上一慢一快两次发送重叠时，保留留下第二次（较晚派发）
+   尝试。
+7. **unknown admission 有出路。** 抛错的 submit/cancel transport 会钉死 phase，直到
+   `abandon` 将其终态化，之后 phase 为 `idle`；`abandon` 绝不建立，对已终态/未知 id
+   是空操作。
 
-配套用例钉住：rejected 准入（无 outcome、不跟踪，结算其 id 为空操作）、抛错的
-transport（`unknown`，即便有 settled witness 也绝不建立）、failed witness、
-对未知 id settle（空操作）、以及有界保留。
+配套用例钉住：rejected 准入（无 outcome、不跟踪，结算其 id 为空操作）、failed
+witness、对未知 id settle（空操作）、有界保留、状态变化之间 `operations` 快照身份
+稳定、以及 `acknowledge` 释放已消费的终态行而保留其他行与非终态行。
 
 变异见证（可通过编辑引擎并从 `packages/web-shell` 运行
 `npx vitest run client/daemon/chat-intents.test.ts` 复现）：把 dispatch 的 witness
 取自 transport（用 `'settled'` 而非 `'none'`）会令延迟 turn 与 cancel 用例转红；
-移除 approval 取代守卫会令被取代 approval 用例转红；按 kind 加 target 而非操作 id
-结算会令两条关联用例转红；允许重复结算已终态尝试会令迟到见证用例转红；把缺失的
-`requestId` 当作当前会令无身份 approval 用例转红。
+把取代守卫扩到否定证据会令被取代失败用例转红；把存活集合塌缩为单槽会令并发
+approval 用例转红；把记录移到 `await transport()` 之后会令派发顺序与在飞用例转红；
+把 `abandon` 变为空操作会令出路用例转红；去掉终态守卫的 `established` 半会令重结算
+用例转红；按 kind 加 target 而非操作 id 结算会令关联用例转红。
 
 ## 遵守的约束
 

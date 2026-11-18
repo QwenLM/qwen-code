@@ -50,25 +50,41 @@ engine must source the witness from evidence, not from the transport promise.
 
 `createDaemonChatIntents()` returns a tracker with:
 
-- `dispatch(kind, target, transport)` — runs the intent's transport, derives
-  admission (`accepted` / `rejected`; a thrown transport is `unknown`), records
-  a `ChatOperation`, and returns `{ operationId, result }`. The operation id is
-  the identity its settlement evidence must name. The outcome is resolved with
-  witness `none`, so an admitted intent is `unsettled` until evidence arrives. A
-  `rejected` admission carries no outcome and is not tracked, so settling its id
-  is a no-op.
+- `dispatch(kind, target, transport)` — mints an operation id and records the
+  attempt as `pending` **before** running the transport, so the row exists (and
+  evidence can bind to it) while the request is in flight and rows stay in
+  dispatch order. It then derives admission (`accepted` / `rejected`; a thrown
+  transport is `unknown`) and returns `{ operationId, result }`. The operation
+  id is the identity its settlement evidence must name. The outcome is resolved
+  with witness `none`, so an admitted intent is `unsettled` until evidence
+  arrives. A `rejected` admission carries no outcome and drops the row, so
+  settling its id is a no-op.
 - `settle(operationId, witness)` — applies authoritative evidence to the one
   attempt that id identifies and recomputes its outcome. Unknown or
   already-terminal ids are a no-op, so evidence can never settle an attempt it
-  was not dispatched for. For approvals the decision establishes **only while
-  it still applies to the current request**: if the recorded `target.requestId`
-  is absent or no longer `currentApprovalRequestId`, the witness is forced to
-  `none` and the decision never establishes (a superseded approval is a
-  pending-item state, not an applied outcome).
-- `setCurrentApprovalRequest(requestId)` — tracks which approval request is
-  still current, so supersede is detectable.
+  was not dispatched for, and a finished attempt can never be re-settled. For
+  approvals a **settled** decision establishes only while its request is still
+  live: if the recorded `target.requestId` is absent or not in the live set, the
+  positive witness is forced to `none` and the decision does not establish.
+  Negative evidence is not rewritten, so a superseded decision that genuinely
+  failed still terminalizes as `failed`.
+- `abandon(operationId)` — gives an attempt whose admission can never be
+  confirmed (a thrown transport leaves it `unknown`, which no witness can
+  terminalize) an exit: it terminalizes the row as `failed`, never
+  `established`, so a failed transport does not latch the phase open. Terminal
+  or unknown ids are a no-op.
+- `acknowledge(operationId)` — releases a terminal row once the surface has
+  consumed it (delegates to slice 1 `acknowledgeOperation`); non-terminal rows
+  are kept, and terminal rows stay readable until acknowledged.
+- `setApprovalRequestLive(requestId, live)` — tracks the **set** of approval
+  requests still awaiting a decision. The daemon keeps several permission
+  requests pending at once, so currency is membership in that set, not a single
+  "newest" id; a decision applies while its request is live.
 - `operations` — the retained operation list (slice 1 `retainOperations`:
-  every non-terminal entry, at most the latest terminal per kind and target).
+  every non-terminal entry, at most the latest terminal per kind and target,
+  latest by dispatch order). The snapshot is materialized once per state change,
+  so its identity is stable between changes and can back a
+  `useSyncExternalStore` cache.
 - `phase(settled)` — slice 1 `deriveChatPhase`; an unestablished cancel
   operation yields `cancelling`, independent of the cancel promise resolving.
 
@@ -104,6 +120,29 @@ just made, so an incoming event names the attempt it belongs to. An event the
 adapter cannot bind stays unverified instead of declaring a new attempt
 complete.
 
+The attempt is recorded **before** the transport runs, for two reasons. Rows
+then sit in dispatch order, and retention — which keeps the latest terminal row
+per kind and target by position — keeps the later-_dispatched_ attempt rather
+than the later-_resolved_ one when two sends on the same target overlap. And the
+row (with its id) exists while the request is in flight, so the phase reads
+`submitting` and evidence arriving during the POST has an id to bind to.
+
+### Currency is a set, and a failed transport has an exit
+
+A single "current request" slot conflates two questions — which request is
+newest, and does this decision still apply — and the daemon keeps up to 64
+permission requests pending at once. Answering a still-pending `r1` while `r2`
+is also open is a decision the backend applies, so it must establish; currency
+is therefore membership in the live-request set, judged at `settle` time. The
+guard narrows to positive evidence only, so a superseded decision that genuinely
+failed still terminalizes instead of leaking a permanent `unsettled` row.
+
+A thrown transport leaves admission `unknown`, which the truth table keeps
+`unsettled` under any witness; without an exit it would hold the phase open for
+the engine's lifetime. `abandon` terminalizes such an attempt as `failed` (never
+`established`), and `acknowledge` lets the surface release terminal rows it has
+consumed so retention does not grow without bound across distinct turns.
+
 ## Negative tests (land with the daemon adapter)
 
 1. **Delayed turn outcome.** `dispatch('submit', …)` with a transport that
@@ -113,29 +152,42 @@ complete.
 2. **Unsettled cancel.** `dispatch('cancel', …)` resolving `accepted` keeps the
    phase `cancelling`; the resolved cancel promise does not end it. Only
    settlement evidence establishes the cancel and clears `cancelling`.
-3. **Superseded approval.** With request `r1` current, an approval decision for
-   `r1` that is confirmed after `r2` supersedes it never establishes; the
-   still-current `r2` decision does (positive control). An approval whose target
-   carries no request identity never establishes either: currency cannot be
-   verified without the request the decision applies to.
-4. **Witness correlation.** After attempt A settles `failed`, a late witness for
+3. **Superseded approval.** With `r1` live, an approval decision for `r1`
+   confirmed after `r1` leaves the live set never establishes on positive
+   evidence; a still-live `r2` decision does (positive control). An approval
+   whose target carries no request identity never establishes either. A
+   superseded decision reported `failed` still terminalizes as `failed`.
+4. **Concurrent approvals.** With `r1` and `r2` both live, settling each decision
+   establishes both — a single "current" slot would wrongly report the second
+   `unsettled`.
+5. **Witness correlation.** After attempt A settles `failed`, a late witness for
    A must not establish retry B on the same visible target; B's own witness
    does. Applying the same two witnesses in either arrival order keeps A
-   `failed` and B `established`, so out-of-order evidence cannot swap attempts.
+   `failed` and B `established`. An already-`established` attempt re-settled
+   `failed` is a no-op and stays `established`.
+6. **Dispatch order and in-flight identity.** A pending row exists and the phase
+   is `submitting` before the transport resolves; when a slow first send and a
+   fast second send overlap on one target, retention keeps the second
+   (later-dispatched) attempt.
+7. **Unknown admission has an exit.** A thrown submit/cancel transport latches
+   the phase until `abandon` terminalizes it, after which the phase is `idle`;
+   `abandon` never establishes and is a no-op on terminal/unknown ids.
 
 Supporting cases pin rejected admission (no outcome, untracked, settling its id
-is a no-op), a thrown transport (`unknown`, never establishes even with a
-settled witness), a failed witness, settling an unknown id (no-op), and bounded
-retention.
+is a no-op), a failed witness, settling an unknown id (no-op), bounded retention,
+a stable `operations` snapshot identity between state changes, and `acknowledge`
+releasing a consumed terminal row while keeping other and non-terminal rows.
 
 Mutation witnesses (reproducible by editing the engine and running
 `npx vitest run client/daemon/chat-intents.test.ts` from `packages/web-shell`):
 sourcing the dispatch witness from the transport (`'settled'` instead of
-`'none'`) reds the delayed-turn and cancel cases; removing the approval
-supersede guard reds the superseded-approval case; settling by kind plus target
-instead of the operation id reds both correlation cases; allowing a terminal
-attempt to be settled again reds the late-witness case; treating a missing
-`requestId` as current reds the unknown-identity approval case.
+`'none'`) reds the delayed-turn and cancel cases; widening the supersede guard
+to negative evidence reds the superseded-failed case; collapsing the live set to
+a single slot reds the concurrent-approvals case; recording the attempt after
+`await transport()` reds the dispatch-order and in-flight cases; making
+`abandon` a no-op reds the exit cases; dropping the `established` half of the
+terminal guard reds the re-settle case; settling by kind plus target instead of
+the operation id reds the correlation cases.
 
 ## Constraints respected
 
