@@ -38,9 +38,20 @@ async def test_cancelled_requests_preserve_independent_replies() -> None:
         assert all(p.future.cancelled() for _, p in requests[:-1])
         assert not result.is_closed()
 
-        for request_id, _ in reversed(requests):
+        for request_id, _ in requests[:-1]:
             transport.push(_reply(request_id))
-        assert await tasks[-1] == {"commands": ["independent"]}
+        transport.push(_reply(requests[-1][0]))
+        assert await asyncio.wait_for(tasks[-1], timeout=1) == {
+            "commands": ["independent"]
+        }
+        assert not result._pending_control_requests
+
+        tasks.append(asyncio.create_task(result.supported_commands()))
+        await _wait_for(lambda: len(result._pending_control_requests) == 1)
+        transport.push(_reply(next(iter(result._pending_control_requests))))
+        assert await asyncio.wait_for(tasks[-1], timeout=1) == {
+            "commands": ["independent"]
+        }
         assert not result._pending_control_requests
     finally:
         for task in tasks:
