@@ -15,7 +15,7 @@ def _reply(request_id: str) -> dict[str, Any]:
         "response": {
             "subtype": "success",
             "request_id": request_id,
-            "response": {"commands": ["independent"]},
+            "response": {"commands": [request_id]},
         },
     }
 
@@ -42,15 +42,16 @@ async def test_cancelled_requests_preserve_independent_replies() -> None:
             transport.push(_reply(request_id))
         transport.push(_reply(requests[-1][0]))
         assert await asyncio.wait_for(tasks[-1], timeout=1) == {
-            "commands": ["independent"]
+            "commands": [requests[-1][0]]
         }
         assert not result._pending_control_requests
 
         tasks.append(asyncio.create_task(result.supported_commands()))
         await _wait_for(lambda: len(result._pending_control_requests) == 1)
-        transport.push(_reply(next(iter(result._pending_control_requests))))
+        request_id = next(iter(result._pending_control_requests))
+        transport.push(_reply(request_id))
         assert await asyncio.wait_for(tasks[-1], timeout=1) == {
-            "commands": ["independent"]
+            "commands": [request_id]
         }
         assert not result._pending_control_requests
     finally:
@@ -99,8 +100,9 @@ async def test_failed_write_releases_request_without_delayed_warning(
 
         task = asyncio.create_task(result.supported_commands())
         await _wait_for(lambda: len(result._pending_control_requests) == 1)
-        transport.push(_reply(next(iter(result._pending_control_requests))))
-        assert await task == {"commands": ["independent"]}
+        request_id = next(iter(result._pending_control_requests))
+        transport.push(_reply(request_id))
+        assert await task == {"commands": [request_id]}
     finally:
         await result.close()
         loop.set_exception_handler(previous_handler)
