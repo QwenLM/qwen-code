@@ -392,7 +392,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public String creationToolProfile(String tenantId, String actorId,
             String agentId, String requestedRevision, String workspaceId) {
-        return sessionPolicies.creationToolProfile(tenantId, actorId, agentId, requestedRevision, workspaceId);
+        return sessionAdmissions.creationToolProfile(tenantId, actorId, agentId, requestedRevision, workspaceId);
     }
 
     @Override
