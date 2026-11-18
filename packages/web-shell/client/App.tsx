@@ -5305,6 +5305,7 @@ export function App({
     error: artifactsError,
     refresh: refreshArtifacts,
     hydrated: artifactsHydrated,
+    artifactCountHint,
   } = useSessionArtifacts();
   const sourcesState = useSessionSources();
   const refreshSources = sourcesState.refresh;
@@ -12397,7 +12398,6 @@ export function App({
   useEffect(() => {
     if (!modelManagementPolicy.allowAdd) setShowAuthDialog(false);
   }, [modelManagementPolicy.allowAdd, showAuthDialog]);
-  const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
   const [externalInteractionBlockCount, setExternalInteractionBlockCount] =
     useState(0);
@@ -18290,6 +18290,7 @@ export function App({
       sessionId: string,
       workspaceCwd?: string,
       sessionContext?: DaemonProductSessionContext,
+      artifactCountHint?: number,
     ) => {
       setManagedHome(false);
       pendingManualTitleRef.current = undefined;
@@ -18336,6 +18337,7 @@ export function App({
                 ? undefined
                 : workspaceCwd,
           sessionContext: targetContext,
+          artifactCountHint,
         });
         if (
           sessionOpenInvocationRef.current === invocation &&
@@ -20652,9 +20654,7 @@ export function App({
           }
           if (cmd === 'memory') {
             const memoryArg = text.slice(match[0].length).trim().toLowerCase();
-            if (memoryArg === 'refresh') {
-              setMemoryRefreshSignal((signal) => signal + 1);
-            } else if (memoryArg === 'add' || memoryArg.startsWith('add ')) {
+            if (memoryArg === 'add' || memoryArg.startsWith('add ')) {
               const addTarget = memoryArg.slice('add'.length).trim();
               setMemoryAddScope(
                 addTarget === 'user' || addTarget === 'global'
@@ -23467,7 +23467,11 @@ export function App({
     environmentPanelItems.includes('artifacts') &&
     connection.sessionId
       ? {
-          artifactCount: artifacts.length,
+          // The live list wins once present; before it lands, the click-time
+          // hint from the session-list summary shows the count early. The
+          // hook retires the hint when authoritative data arrives.
+          artifactCount:
+            artifacts.length > 0 ? artifacts.length : (artifactCountHint ?? 0),
           onOpenArtifacts: () => {
             handleEnvironmentPanelOpenChange(true);
             setArtifactsExpandSignal((value) => value + 1);
@@ -24210,7 +24214,6 @@ export function App({
               onClose={() => setShowMemoryDialog(false)}
             >
               <MemoryMessage
-                refreshSignal={memoryRefreshSignal}
                 addSignal={memoryAddSignal}
                 addScope={memoryAddScope}
                 onMessage={(text, type = 'status') => {
@@ -24721,9 +24724,14 @@ export function App({
                     createNewSession({ kind: 'global' })
                   }
                   standaloneSessionsReloadToken={standaloneSessionsReloadToken}
-                  onLoadSession={(sessionId, workspaceCwd) => {
+                  onLoadSession={(sessionId, workspaceCwd, artifactCount) => {
                     showChat();
-                    return loadSidebarSession(sessionId, workspaceCwd);
+                    return loadSidebarSession(
+                      sessionId,
+                      workspaceCwd,
+                      undefined,
+                      artifactCount,
+                    );
                   }}
                   onOpenHostSession={handleOpenHostSession}
                   onLoadStandaloneSession={(sessionId, displayName) => {
