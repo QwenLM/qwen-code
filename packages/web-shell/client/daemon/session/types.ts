@@ -8,6 +8,8 @@ import type { ReactNode } from 'react';
 import type {
   CreateSessionRequest,
   DaemonBranchSessionRequest,
+  DaemonWorktreeBranchResult,
+  DaemonWorktreeHandoffResult,
   DaemonCapabilities,
   DaemonBackgroundTurn,
   DaemonEvent,
@@ -390,6 +392,8 @@ export type DaemonNoticeOperation =
   | 'generate_session_content'
   | 'btw_session'
   | 'branch_session'
+  | 'create_worktree_branch'
+  | 'handoff_worktree'
   | 'fork_session'
   | 'record_session'
   | 'stream'
@@ -495,6 +499,8 @@ export interface PendingPromptActionOptions {
 
 export interface GetTasksActionOptions {
   silent?: boolean;
+  /** Also list the sends the daemon reports back to this session. */
+  includeSubSessions?: boolean;
 }
 
 export interface DaemonPromptImage {
@@ -868,6 +874,12 @@ export interface DaemonSessionActions {
     switchStarted: boolean;
     sourceWarnings?: string[];
   }>;
+  /** "Create branch here" on the session's detached managed worktree. */
+  createWorktreeBranch(name: string): Promise<DaemonWorktreeBranchResult>;
+  /** "Hand off" between the managed worktree and the local checkout. */
+  handoffWorktree(
+    to: 'local' | 'worktree',
+  ): Promise<DaemonWorktreeHandoffResult>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
 
@@ -890,6 +902,11 @@ export interface DaemonWorkspaceEventSignals {
   extensionsVersion: number;
   artifactsVersion: number;
   sourcesVersion?: number;
+  /**
+   * Per caller session: how many times a send it made that the daemon
+   * reports back started or settled. Re-read its sub-session tasks on change.
+   */
+  subSessionTaskVersions?: Record<string, number>;
   lastExtensionChange?: {
     status?:
       | 'installed'

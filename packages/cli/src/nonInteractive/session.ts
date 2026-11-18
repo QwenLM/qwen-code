@@ -59,6 +59,7 @@ const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 const EOF_MEMORY_WAIT_TIMEOUT_MS = 5_000;
 
 interface TaskStartedQueueItem {
+  monitorId?: string;
   task_id: string;
   tool_use_id?: string;
   description: string;
@@ -85,6 +86,7 @@ interface TaskNotificationQueueItem {
 class Session {
   private userMessageQueue: CLIUserMessage[] = [];
   private taskStartedQueue: TaskStartedQueueItem[] = [];
+  private drainTaskStartedQueue: TaskStartedQueueItem[] = [];
   private taskNotificationQueue: TaskNotificationQueueItem[] = [];
   private drainNotifications: TaskNotificationQueueItem[] | null = null;
   private pendingContinueTurn: boolean = false;
@@ -309,6 +311,7 @@ class Session {
         return;
       }
       this.enqueueTaskStarted({
+        monitorId: entry.monitorId,
         task_id: entry.monitorId,
         tool_use_id: entry.toolUseId,
         description: entry.description,
@@ -879,7 +882,7 @@ class Session {
 
       const started = this.taskStartedQueue.shift();
       if (started) {
-        this.outputAdapter.emitSystemMessage('task_started', started);
+        this.emitTaskStarted(started);
         continue;
       }
 
@@ -916,6 +919,30 @@ class Session {
   private enqueueTaskStarted(started: TaskStartedQueueItem): void {
     this.taskStartedQueue.push(started);
     this.ensureProcessingStarted();
+  }
+
+  private emitTaskStarted(
+    started: TaskStartedQueueItem,
+    finalDrain = false,
+  ): void {
+    const { monitorId, ...notification } = started;
+    if (
+      monitorId &&
+      this.drainNotifications !== null &&
+      ![...this.taskNotificationQueue, ...this.drainNotifications].some(
+        (item) =>
+          item.monitorId === monitorId &&
+          item.sdkNotification.status !== 'running',
+      )
+    ) {
+      // Only announce an unpublished monitor during drain when its captured
+      // terminal notification can pair with the start.
+      if (!finalDrain) {
+        this.drainTaskStartedQueue.push(started);
+      }
+      return;
+    }
+    this.outputAdapter.emitSystemMessage('task_started', notification);
   }
 
   private enqueueTaskNotification(
@@ -1124,8 +1151,11 @@ class Session {
   }
 
   private flushDrainNotifications(): void {
-    for (const started of this.taskStartedQueue.splice(0)) {
-      this.outputAdapter.emitSystemMessage('task_started', started);
+    for (const started of [
+      ...this.drainTaskStartedQueue.splice(0),
+      ...this.taskStartedQueue.splice(0),
+    ]) {
+      this.emitTaskStarted(started, true);
     }
     const notifications = [
       ...this.taskNotificationQueue.splice(0),

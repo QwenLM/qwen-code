@@ -778,27 +778,47 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       name: 'approvals at the tool budget edge',
       messages: [
         message('Write both files.'),
-        message('Describe the outcome.'),
+        message('Spend one fresh tool call.'),
       ],
       args: ['--input-format', 'stream-json', '--max-tool-calls', '1'],
       approve: true,
-      reply: (messages, dir) =>
-        toolResults(messages) === 0
-          ? {
-              toolCalls: [
-                fakeToolCall(
-                  'write_file',
-                  { file_path: join(dir, 'one.txt'), content: 'one\n' },
-                  'call_one',
-                ),
-                fakeToolCall(
-                  'write_file',
-                  { file_path: join(dir, 'two.txt'), content: 'two\n' },
-                  'call_two',
-                ),
-              ],
-            }
-          : { content: 'Turn accepted after budget failure.' },
+      reply: (messages, dir) => {
+        const resumed = messages.some(
+          (item) =>
+            item['role'] === 'user' &&
+            JSON.stringify(item['content']).includes(
+              'Spend one fresh tool call.',
+            ),
+        );
+        if (!resumed) {
+          return {
+            toolCalls: [
+              fakeToolCall(
+                'write_file',
+                { file_path: join(dir, 'one.txt'), content: 'one\n' },
+                'call_one',
+              ),
+              fakeToolCall(
+                'write_file',
+                { file_path: join(dir, 'two.txt'), content: 'two\n' },
+                'call_two',
+              ),
+            ],
+          };
+        }
+        if (!messages.some((item) => item['tool_call_id'] === 'call_three')) {
+          return {
+            toolCalls: [
+              fakeToolCall(
+                'write_file',
+                { file_path: join(dir, 'three.txt'), content: 'three\n' },
+                'call_three',
+              ),
+            ],
+          };
+        }
+        return { content: 'Turn accepted after budget failure.' };
+      },
     };
 
     const { current, shared, kernel } = await arms(scenario);
@@ -825,8 +845,29 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     // The current loop asks for each call right before it runs, so the call
     // past the budget is never asked. The shared loop asks for the whole batch
     // first, and the budget then stops the second call before it runs.
-    expect(current.approvals).toEqual(['call_one']);
-    expect(shared.approvals).toEqual(['call_one', 'call_two']);
+    expect(current.approvals).toEqual(['call_one', 'call_three']);
+    expect(shared.approvals).toEqual(['call_one', 'call_two', 'call_three']);
+    const firstTerminal = current.frames.findIndex(
+      (frame) => (frame as JsonObject)['type'] === 'result',
+    );
+    const freshResult = current.frames.findIndex((frame) => {
+      const item = frame as JsonObject;
+      return (
+        item['type'] === 'user' &&
+        (item['content'] as JsonObject[]).some(
+          (block) =>
+            block['type'] === 'tool_result' &&
+            block['tool_use_id'] === 'call_three' &&
+            block['is_error'] === false,
+        )
+      );
+    });
+    const secondTerminal = current.frames.findIndex(
+      (frame, index) =>
+        index > firstTerminal && (frame as JsonObject)['type'] === 'result',
+    );
+    expect(freshResult).toBeGreaterThan(firstTerminal);
+    expect(secondTerminal).toBeGreaterThan(freshResult);
     expect(kernel.exitCode).toBe(shared.exitCode);
     expect(kernel.requests).toEqual(shared.requests);
     expect(output(kernel.frames)).toEqual(output(shared.frames));

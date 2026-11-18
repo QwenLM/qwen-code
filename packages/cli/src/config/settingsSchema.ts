@@ -1933,7 +1933,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: -1,
         description:
-          'Run-level wall-clock budget for headless / unattended runs, in seconds. -1 means unlimited; otherwise must be in [1, ~2,147,483] (sub-second values and values above ~24 days are rejected as typos). Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1.5h).',
+          'Wall-clock budget per headless interaction, in seconds (fresh for each user turn and notification batch in stream-json input sessions). -1 means unlimited; otherwise must be in [1, ~2,147,483] (sub-second values and values above ~24 days are rejected as typos). Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1.5h).',
         showInDialog: false,
       },
       goalTokenBudget: {
@@ -1991,7 +1991,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: -1,
         description:
-          'Cumulative tool-call budget for a run (counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.',
+          'Tool-call budget per headless interaction (fresh for each user turn and notification batch in stream-json input sessions; counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.',
         showInDialog: false,
       },
       maxSubagentDepth: {
@@ -2212,7 +2212,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: undefined as 'ephemeral' | '1h' | undefined,
             description:
-              "Default Anthropic cache_control retention. 'ephemeral' uses the spec 5-minute default (no ttl on the wire). '1h' requests the extended cache tier (ttl: '1h') -- note the 1h tier writes at 2x base input token cost (vs 1.25x for the 5-minute default; cached reads stay 0.1x for both), so it only pays off when a prefix survives long enough between requests to outlast several 5-minute windows.",
+              "Default cache_control retention. Applies to Anthropic cache anchors and to qwen4 DashScope cache breakpoints. 'ephemeral' uses the spec 5-minute default (no ttl on the wire). '1h' requests the extended cache tier (ttl: '1h') -- note the 1h tier writes at 2x base input token cost (vs 1.25x for the 5-minute default; cached reads stay 0.1x for both), so it only pays off when a prefix survives long enough between requests to outlast several 5-minute windows.",
             parentKey: 'generationConfig',
             showInDialog: false,
             options: [
@@ -2243,6 +2243,22 @@ const SETTINGS_SCHEMA = {
               },
               additionalProperties: false,
             },
+          },
+          imageDetail: {
+            type: 'enum',
+            label: 'Image Detail',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as 'low' | 'high' | 'auto' | undefined,
+            description:
+              "Detail level stamped on each image_url part for providers that read the OpenAI `detail` field. Undefined leaves the decision to the server (qwen4-max defaults to 'high', ~16K image tokens per image); 'low' trades resolution for tokens (~2.5K on qwen4-max), 'high' forces full resolution, 'auto' lets the provider choose.",
+            parentKey: 'generationConfig',
+            showInDialog: false,
+            options: [
+              { value: 'low', label: 'Low (fewer tokens)' },
+              { value: 'high', label: 'High (full resolution)' },
+              { value: 'auto', label: 'Auto' },
+            ],
           },
           splitToolMedia: {
             type: 'boolean',
@@ -4856,10 +4872,26 @@ const SETTINGS_SCHEMA = {
     description:
       'Configuration for general-purpose git worktrees created by the ' +
       'CLI (the `enter_worktree` tool, the `agent isolation: "worktree"` ' +
-      'parameter, and the startup `--worktree` flag). Does NOT affect ' +
-      'Agent Arena worktrees — see `agents.arena.worktreeBaseDir` for those.',
+      'parameter, and the startup `--worktree` flag) and for Web Shell ' +
+      'session worktrees. Does NOT affect Agent Arena worktrees — see ' +
+      '`agents.arena.worktreeBaseDir` for those.',
     showInDialog: false,
     properties: {
+      defaultForNewSessions: {
+        type: 'boolean',
+        label: 'Default Worktree For New Web Shell Sessions',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: true,
+        description:
+          'When true (the default), a new Web Shell session in a trusted ' +
+          'Git workspace starts in an isolated worktree: the composer ' +
+          'defaults to Worktree mode and the worktree is created when the ' +
+          'first message is sent. Set to false to default to the current ' +
+          'branch instead. Only affects the Web Shell composer default; ' +
+          'explicit mode selection and the daemon API are unchanged.',
+        showInDialog: false,
+      },
       symlinkDirectories: {
         type: 'array',
         label: 'Symlink Directories Into Worktrees',

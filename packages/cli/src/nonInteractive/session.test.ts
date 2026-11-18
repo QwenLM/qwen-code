@@ -2260,7 +2260,7 @@ describe('runNonInteractiveStreamJson', () => {
     );
   });
 
-  it('stops accepting new monitor events before EOF drain', async () => {
+  it('retains a queued terminal notification while stopping new monitor events before EOF drain', async () => {
     const initRequest = createControlRequest('initialize');
     const userMessage = createUserMessage('Start a monitor');
     let closeInput: (() => void) | undefined;
@@ -2299,12 +2299,12 @@ describe('runNonInteractiveStreamJson', () => {
         description: 'before eof',
       });
       notificationCallback?.(
-        'Monitor "before eof" event #1: ready',
+        'Monitor "before eof" completed',
         '<task-notification>before-eof</task-notification>',
         {
           monitorId: 'mon_before_eof',
           toolUseId: 'tool_mon_before_eof',
-          status: 'running',
+          status: 'completed',
         },
       );
       await new Promise<void>((resolve) => {
@@ -2371,7 +2371,7 @@ describe('runNonInteractiveStreamJson', () => {
       {
         task_id: 'mon_before_eof',
         tool_use_id: 'tool_mon_before_eof',
-        status: 'running',
+        status: 'completed',
       },
     );
     expect(mockOutputAdapter.emitSystemMessage).not.toHaveBeenCalledWith(
@@ -3098,7 +3098,8 @@ describe('runNonInteractiveStreamJson', () => {
     await session;
     const emitted = mockOutputAdapter.emitSystemMessage.mock.calls.filter(
       ([sub, payload]) =>
-        sub === 'task_notification' && payload.task_id === 'late-monitor',
+        (sub === 'task_started' || sub === 'task_notification') &&
+        payload.task_id === 'late-monitor',
     );
     expect(monitorStatus).toBe('cancelled');
     expect(emitted).toEqual([]);

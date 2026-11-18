@@ -195,8 +195,13 @@ export function detectCredentialSignals(
   for (const name of CREDENTIAL_ENV) {
     if (env[name]) signals.push(name);
   }
-  for (const [relative, label] of CREDENTIAL_PATHS) {
-    if (exists(join(home, relative))) signals.push(label);
+  // An unresolvable home (null/empty) has no credential paths to scan; the
+  // gate fails on it at the nonce write below. join(home, …) on a non-string
+  // would throw, and on '' would scan the PR-writable CWD instead (R5-1).
+  if (typeof home === 'string' && home !== '') {
+    for (const [relative, label] of CREDENTIAL_PATHS) {
+      if (exists(join(home, relative))) signals.push(label);
+    }
   }
   return signals;
 }
@@ -874,8 +879,13 @@ function main(argv) {
     'The path is the in-container one: the gate runs from the read-only',
     "/trusted-scripts mount, never the PR head's own copy of the script,",
     'and the record lands in the mounted artifact directory so it survives',
-    'the container. A VM boundary runs the same file from its trusted copy',
-    'with its own artifact path. The gate writes boundary-gate.json into',
+    'the container. A VM boundary takes the same trusted copy but runs',
+    'NO --require-isolation gate (a VM carries no observed container marker):',
+    'there is no in-boundary gate command and no boundary-gate.json for a VM.',
+    'Declare mode:"vm" per the VM bullet above with by (the maintainer),',
+    'reason, attestation (what the operator confirmed: nothing mounted,',
+    "no host credentials), and approval (a permalink to the maintainer's",
+    'approval comment). The container gate writes boundary-gate.json into',
     'the artifact directory; the checker requires that record alongside',
     'the container declaration.',
   ]);
@@ -895,7 +905,23 @@ function main(argv) {
  * operator who skipped the gate — the incident's shape — not against PR
  * code that forges it; the CI publisher writes its own lane record.)
  */
-function requireBoundary(artifactDir = null) {
+export function requireBoundary(artifactDir = null, options = {}) {
+  const env = options.env ?? process.env;
+  const exists = options.exists ?? existsSync;
+  // Resolve home lazily and defensively: os.homedir() throws SystemError when
+  // the UID has no passwd entry and HOME is unset (the arbitrary-UID container
+  // shape --user <uid>:<gid> invites), and returns '' when HOME is set but
+  // empty. Evaluating it in a default parameter let the throw escape as exit 1
+  // before invalidateRecord could run, leaving a stale pass record behind;
+  // both shapes must reach the gate's exit-3 refusal below (R5-1).
+  let home = options.home;
+  if (home === undefined) {
+    try {
+      home = homedir();
+    } catch {
+      home = null;
+    }
+  }
   const recordPath = artifactDir
     ? join(artifactDir, 'boundary-gate.json')
     : null;
@@ -910,9 +936,9 @@ function requireBoundary(artifactDir = null) {
       // Best-effort; the refusal exit is the contract.
     }
   };
-  const isolation = detectIsolation();
-  const credentials = detectCredentialSignals();
-  const attested = process.env[CREDENTIAL_FREE_ATTESTATION] === '1';
+  const isolation = detectIsolation(env, exists);
+  const credentials = detectCredentialSignals(env, exists, home);
+  const attested = env[CREDENTIAL_FREE_ATTESTATION] === '1';
 
   // A refusal from OUTSIDE any boundary does not contradict a record minted
   // INSIDE one: a host-side sanity re-run must not destroy the in-container
@@ -963,14 +989,15 @@ function requireBoundary(artifactDir = null) {
   }
   if (artifactDir) {
     // A per-round nonce ties the declaration to execution inside THIS
-    // container (R16-1). It is written to a container-local path (the
-    // process home, NOT the shared artifact mount) so the round must read
-    // it from inside the container and echo it into its raw harness logs;
-    // step 7 refuses mode:"container" unless the logs carry it. The nonce
-    // also rides the gate record so the host check can read it after the
-    // container stops. Like the record itself, this corroborates an
-    // operator who ran the round in the container — it is not proof
-    // against a round that forges both.
+    // container (R16-1). The plaintext is written to a container-local path
+    // (the process home, NOT the shared artifact mount) so the round must
+    // read it from inside the container and echo it into its raw harness
+    // logs; the checker refuses mode:"container" unless a log line's sha256
+    // matches the record. Only the HASH rides the gate record: a host
+    // battery cannot recover the plaintext from the hash, so it cannot copy
+    // it out of the PR-writable record into a forged log line. Like the
+    // record itself, this corroborates an operator who ran the round in the
+    // container — it is not proof against a round that forges both.
     const nonce = randomBytes(16).toString('hex');
     const record = {
       gate: 'require-isolation',
@@ -981,13 +1008,35 @@ function requireBoundary(artifactDir = null) {
       // the checker requires one to back a container claim.
       observed: isolation.observed,
       credentialFree: true,
-      nonce,
+      nonceSha256: createHash('sha256').update(nonce).digest('hex'),
     };
+    // An unresolvable $HOME (no passwd entry for this UID with HOME unset, or
+    // HOME set but empty) cannot host the container-local plaintext:
+    // join('', …) would write it into the PR-writable CWD instead, and a
+    // homedir() throw would escape as exit 1. Refuse with exit 3 and
+    // invalidate any stale record before the pass line (R5-1).
+    if (typeof home !== 'string' || home === '') {
+      invalidateRecord();
+      return fail(
+        3,
+        'could not resolve a container-local $HOME (no passwd entry for this UID and HOME unset or empty): the nonce plaintext cannot be written outside the PR-writable mount, so the round cannot declare mode:"container"',
+      );
+    }
+    // The plaintext must exist somewhere the battery can read it, or the
+    // record's hash binds a nonce nobody can echo and the round is silently
+    // uncertifiable after the whole battery ran (R1-4). Fail the gate now,
+    // before the pass line, naming $HOME. This refusal is reached only inside
+    // the boundary (a host re-run exits 4 above), so invalidating the record
+    // here does not contradict a record minted inside one.
+    const noncePath = join(home, '.qwen-verify-nonce');
     try {
-      writeFileSync(join(homedir(), '.qwen-verify-nonce'), `${nonce}\n`);
-    } catch {
-      // Best-effort: the record still carries the nonce; a home that
-      // cannot be written does not fail the gate.
+      writeFileSync(noncePath, `${nonce}\n`);
+    } catch (error) {
+      invalidateRecord();
+      return fail(
+        3,
+        `could not write the container-local nonce to ${noncePath} ($HOME unwritable or absent): the round cannot declare mode:"container" without it: ${error.message}`,
+      );
     }
     const tmp = `${recordPath}.${process.pid}.tmp`;
     // A filesystem failure here is the documented exit-3 path, not an
