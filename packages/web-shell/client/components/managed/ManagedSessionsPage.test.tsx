@@ -5218,6 +5218,13 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(onSelect).toHaveBeenCalledWith('s2', 'ws-a');
+    // Feed the selection back into the page: the content is keyed by
+    // provider identity alone, so this re-render changes sessionId without
+    // remounting — only a sessionId-sensitive clear would close the dialog.
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      id === 's2' ? bound('s2') : bound('s1'),
+    );
+    await render('s2', 'en', provider, slot);
     expect(document.body.textContent).toContain('Artifact library · Project');
     expect(listWorkspaceArtifacts).toHaveBeenCalledTimes(1);
   });
