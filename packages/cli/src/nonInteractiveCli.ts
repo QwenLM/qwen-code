@@ -3100,7 +3100,7 @@ export async function runNonInteractive(
         } else {
           sendType = SendMessageType.ToolResult;
         }
-        if (isTeammateTurn) {
+        if (isTeammateTurn && sendType === SendMessageType.Teammate) {
           selectActiveInteraction(currentPromptId);
           endActiveInteraction('ok');
           currentPromptId = `${prompt_id}/teammate/${turnCount}`;
@@ -3108,6 +3108,10 @@ export async function runNonInteractive(
         } else if (!teammateTurnActive) {
           // Foreground turn (or a continuation of one): restore the base id so
           // a prior teammate turn's registered id does not exclude this send.
+          // A foreground Goal first segment that coincides with a teammate
+          // batch keeps the base id too — it is a Goal/UserQuery send, not a
+          // Teammate send, so it must not wear (or rotate the ledger key to)
+          // the teammate id (R14 deferred).
           currentPromptId = prompt_id;
         }
         selectActiveInteraction(

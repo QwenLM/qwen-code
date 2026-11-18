@@ -1053,7 +1053,12 @@ describe('useLlmStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledWith(
         '<task-notification>done</task-notification>',
         expect.any(AbortSignal),
-        expect.any(String),
+        // Pin the minted id itself (the observable mint state), not only the
+        // shared startNewPrompt call count: the id is sessionId + '########' +
+        // getPromptCount() (mocked to 5), so a mint that stopped advancing the
+        // counter or reused a stale id would fail here even if a sibling
+        // consumer satisfied the call-count assertion.
+        'test-session-id########5',
         expect.objectContaining({ type: SendMessageType.Notification }),
       );
     });
@@ -1078,7 +1083,9 @@ describe('useLlmStream', () => {
       expect(streamMock).toHaveBeenCalledWith(
         'retry the last prompt',
         expect.any(AbortSignal),
-        expect.any(String),
+        // Pin the minted id (sessionId + '########' + getPromptCount(), mocked
+        // to 5), not only the shared startNewPrompt call count.
+        'test-session-id########5',
         expect.objectContaining({ type: SendMessageType.Retry }),
       );
     });
@@ -1132,7 +1139,9 @@ describe('useLlmStream', () => {
       expect(streamMock).toHaveBeenCalledWith(
         expect.any(String),
         expect.any(AbortSignal),
-        expect.any(String),
+        // Pin the minted id (sessionId + '########' + getPromptCount(), mocked
+        // to 5), not only the shared startNewPrompt call count.
+        'test-session-id########5',
         expect.objectContaining({ type: SendMessageType.Goal }),
       );
     });
