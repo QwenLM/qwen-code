@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
+  fitInboundText,
   MANAGED_OUTBOUND_LIMIT,
   resolvePrivatePolicy,
 } from '@qwen-code/channel-base';
@@ -111,13 +112,6 @@ const INSTANCE_SCOPED_REFUSALS = new Set([
 ]);
 const INSTANCE_REFUSAL_DROP_LIMIT = 1;
 const CHANNEL_NOT_FOUND = 'channel_not_found';
-// The wire's text bound (the control plane's Jakarta @Size) and the Harness
-// envelope's byte line, mirrored locally to keep this package free of core
-// imports; the overhead allowance covers the event's JSON metadata around the
-// text. Both match the DingTalk reference adapter's clamp.
-const MAX_WIRE_TEXT_CHARS = 32_000;
-const ENVELOPE_BYTE_LIMIT = 64 * 1024;
-const TEXT_ENVELOPE_OVERHEAD_BYTES = 4096;
 
 export function wecomSettings(
   config: Readonly<Record<string, unknown>>,
@@ -1024,40 +1018,4 @@ function extractText(parsed: Record<string, unknown>): string | undefined {
   const text = getRecord(parsed, 'text');
   const content = text ? str(text['content']) : undefined;
   return content;
-}
-
-/**
- * The wire admits at most MAX_WIRE_TEXT_CHARS characters and the Harness
- * envelope at most ENVELOPE_BYTE_LIMIT bytes of event JSON. Clamp to both so
- * an over-long message is admitted truncated instead of meeting a
- * deterministic 400 and being dropped whole — the same choice the DingTalk
- * reference makes (a local copy; lifting it into channel-base would touch the
- * published package and the DingTalk adapter for no behavior gain). A CJK
- * message can sit under the character line yet overflow the byte envelope, so
- * the byte cut lands on a code-point boundary.
- */
-function fitInboundText(text: string): string {
-  // The cap counts UTF-16 units (the server's maxTextChars does too), so a
-  // code-point cap could overshoot it; but a UTF-16 slice can land inside a
-  // surrogate pair, so back off a trailing high surrogate to keep the text
-  // well-formed.
-  let bounded = text.slice(0, MAX_WIRE_TEXT_CHARS);
-  if (/[\uD800-\uDBFF]$/.test(bounded)) bounded = bounded.slice(0, -1);
-  const byteLimit = ENVELOPE_BYTE_LIMIT - TEXT_ENVELOPE_OVERHEAD_BYTES;
-  // The bound is enforced on the JSON-serialized envelope, where a control
-  // character costs six bytes and a quote/backslash two — not on the raw UTF-8
-  // length. Budget the escaped length and cut by code points until it fits, so
-  // escape-heavy text is admitted truncated instead of refused whole.
-  const encodedBytes = (s: string): number =>
-    Buffer.byteLength(JSON.stringify(s), 'utf8') - 2;
-  if (encodedBytes(bounded) <= byteLimit) return bounded;
-  const chars = Array.from(bounded);
-  let lo = 0;
-  let hi = chars.length;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (encodedBytes(chars.slice(0, mid).join('')) <= byteLimit) lo = mid;
-    else hi = mid - 1;
-  }
-  return chars.slice(0, lo).join('');
 }

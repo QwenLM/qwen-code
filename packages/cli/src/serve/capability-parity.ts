@@ -406,6 +406,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_github_pr_files: NO_MANAGED_EQUIVALENT(
     'no Managed GitHub PR files route',
   ),
+  workspace_git_log_exclude_refs: NO_MANAGED_EQUIVALENT(
+    'no Managed git log exclude-refs route',
+  ),
   workspace_git_worktrees: NO_MANAGED_EQUIVALENT(
     'no Managed worktree management route',
   ),
