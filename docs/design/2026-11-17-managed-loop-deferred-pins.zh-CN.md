@@ -43,7 +43,7 @@
 
 ## 验收标准
 
-- core parity 套件绿（33 测试），含 bundled 与各 shell 的 Parsing 库存、allow-list 与调用点测试、sidecar 集合钉、Java 提供集合与 profile→key 路由映射、解析器派生的 caveat 子句、双求值器一致性，及重生 sidecar 逐字节 parity。
+- core parity 套件绿（34 测试），含 bundled 与各 shell 的 Parsing 库存、allow-list 与调用点测试、sidecar 集合钉、Java 提供集合与 profile→key 路由映射、解析器派生的 caveat 子句、双求值器一致性，及重生 sidecar 逐字节 parity。
 - scripts 元套件绿（183 测试），含 fake createdId 钉、可执行分类器收窄、可执行 minted-id 提取与被执行的分类器接线扫描器。
 - 变异见证：additive-fallback 分类器变异使非 block 方向红；deny-list 哨兵回退使新哨兵方向红；伪造 fake createdId 使其钉红；删除 Parsing 规则使库存钉红；门后 sibling fallback（第二绑定、换 call id 或手搭 tool call）使分类器接线钉红；`let` 决策在门后重赋值为内联 allow 使构造点集合红；对决策的 `??=` 改写使重赋值集合红；伪造 schema-properties 初始化式使来源集合红；caveat 上界改 N ≤ 45 使派生断言红，调低 Managed 编译器日域上界同样红；删 Java `SHELL_V3` 路由分支使路由目标集合红。含绑定名、allow 字面量与工具名的注释保持绿。各字节级还原复绿。
 - 真实打包栈 `--loop-skill` 与 `--loop-fire` 臂以重生 sidecar 绿（jar 重建）。
