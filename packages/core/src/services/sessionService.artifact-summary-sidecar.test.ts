@@ -14,7 +14,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChatRecord } from './chatRecordingService.js';
 import { SessionService } from './sessionService.js';
 import {
@@ -677,6 +677,118 @@ describe('SessionService - artifact summary sidecar', () => {
     expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
       2,
     );
+  });
+
+  it('seeds a side-records-only session carrying the creation-time session_source record', async () => {
+    // Every daemon/Web Shell session persists session_source at creation,
+    // before any prompt — the shape gate must admit it (review round-2
+    // arm A: the real production shape, not a hand-built artifact-only one).
+    const a = persistedArtifact('https://example.com/source-a');
+    const b = persistedArtifact('https://example.com/source-b');
+    const sourceRecord: ChatRecord = {
+      uuid: 'source-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'session_source',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        sourceType: 'web_shell',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([
+      sourceRecord,
+      { ...artifactEventRecord([a, b]), parentUuid: null },
+    ]);
+
+    const projection = await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+
+    expect(projection?.runtime.apiHistory.length).toBe(0);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      2,
+    );
+  });
+
+  it('seeds a session_source-bearing side-records transcript through loadSession too', async () => {
+    const a = persistedArtifact('https://example.com/source-load');
+    const sourceRecord: ChatRecord = {
+      uuid: 'source-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'session_source',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        sourceType: 'web_shell',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([
+      sourceRecord,
+      { ...artifactEventRecord([a]), parentUuid: null },
+    ]);
+
+    const loaded = await service.loadSession(SESSION_ID);
+
+    expect(loaded).toBeDefined();
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      1,
+    );
+  });
+
+  it('reads the transcript in the projection funnel only for conversation-less sessions', async () => {
+    // Pin the auxiliary read's cost directly: a conversation projection
+    // must not pay the full parse, and the defined-projection/empty-
+    // apiHistory branch (title-bearing side-only) must take it.
+    const readSpy = vi.spyOn(
+      service as unknown as {
+        readAllRecords: (
+          filePath: string,
+          onIncompleteRead?: () => void,
+        ) => Promise<ChatRecord[]>;
+      },
+      'readAllRecords',
+    );
+    const a = persistedArtifact('https://example.com/spy-a');
+
+    writeTranscript([userRecord(), artifactEventRecord([a])]);
+    readSpy.mockClear();
+    await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+    expect(readSpy).not.toHaveBeenCalled();
+    expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
+
+    const title: ChatRecord = {
+      uuid: 'title-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'custom_title',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        title: 'Pre-prompt session',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([title, { ...artifactEventRecord([a]), parentUuid: null }]);
+    readSpy.mockClear();
+    const projection = await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+    expect(projection).toBeDefined();
+    expect(projection?.runtime.apiHistory.length).toBe(0);
+    expect(readSpy).toHaveBeenCalled();
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      1,
+    );
+    readSpy.mockRestore();
   });
 
   it('does not seed through the projection for a session with a conversation', async () => {

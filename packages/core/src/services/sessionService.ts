@@ -3359,7 +3359,7 @@ export class SessionService {
       throw new SessionTranscriptChangedError();
     }
     const identity = physical.identities[0];
-    const maxBytes = 64 * 1024 * 1024;
+    const maxBytes = MAX_TRANSCRIPT_READ_BYTES;
     if (identity.size > maxBytes) {
       throw new SessionTranscriptTooLargeError(
         sessionId,
@@ -3674,33 +3674,42 @@ export class SessionService {
     // contract; the shape and ownership checks below confine the auxiliary
     // full read's effect to local side-records-only transcripts.
     if (!projection || projection.runtime.apiHistory.length === 0) {
-      let sourceReadComplete = true;
-      const records = await this.readAllRecords(
-        this.getSessionFilePath(sessionId, 'active'),
-        () => {
+      const filePath = this.getSessionFilePath(sessionId, 'active');
+      // Same cap as the library mutation read: the auxiliary parse is
+      // best-effort and must not read an unbounded transcript on the
+      // restore path. A missing file simply skips the seed.
+      let size: number | undefined;
+      try {
+        size = (await fs.promises.stat(filePath)).size;
+      } catch {
+        size = undefined;
+      }
+      if (size !== undefined && size <= MAX_TRANSCRIPT_READ_BYTES) {
+        let sourceReadComplete = true;
+        const records = await this.readAllRecords(filePath, () => {
           sourceReadComplete = false;
-        },
-      );
-      const firstRecord = records[0];
-      if (
-        firstRecord &&
-        (await this.sessionBelongsToCurrentProject(
-          firstRecord.sessionId,
-          firstRecord.cwd,
-        )) &&
-        isSideRecordsOnlyTranscript(records)
-      ) {
-        const { messages, gaps } = this.reconstructHistory(records, {
-          detectGaps: true,
         });
-        this.seedArtifactSummaryFromRecords(
-          sessionId,
-          'active',
-          records,
-          messages,
-          gaps,
-          sourceReadComplete,
-        );
+        const firstRecord = records[0];
+        if (
+          firstRecord &&
+          (await this.sessionBelongsToCurrentProject(
+            firstRecord.sessionId,
+            firstRecord.cwd,
+          )) &&
+          isSideRecordsOnlyTranscript(records)
+        ) {
+          const { messages, gaps } = this.reconstructHistory(records, {
+            detectGaps: true,
+          });
+          this.seedArtifactSummaryFromRecords(
+            sessionId,
+            'active',
+            records,
+            messages,
+            gaps,
+            sourceReadComplete,
+          );
+        }
       }
     }
     return projection;
@@ -5721,10 +5730,20 @@ function isForkSideRecord(record: ChatRecord): boolean {
 }
 
 /**
+ * Transcript size cap shared by the library mutation read and the
+ * best-effort seed's auxiliary read: neither parses an unbounded
+ * transcript on a live path.
+ */
+const MAX_TRANSCRIPT_READ_BYTES = 64 * 1024 * 1024;
+
+/**
  * Artifacts can be registered before the first prompt; these valid
- * sessions have only side records and no conversation chain. Shared by
- * the library mutation guard and the load-time sidecar seed so both
- * accept the same transcript shape.
+ * sessions have only side records and no user/assistant conversation.
+ * Creation-time metadata counts as side records here: every daemon/Web
+ * Shell session persists a `session_source` record at creation, and a
+ * `custom_title` may arrive before the first prompt too. Shared by the
+ * library mutation guard and the load-time sidecar seed so both accept
+ * the same transcript shape.
  */
 function isSideRecordsOnlyTranscript(records: ChatRecord[]): boolean {
   return records.every(
@@ -5732,6 +5751,7 @@ function isSideRecordsOnlyTranscript(records: ChatRecord[]): boolean {
       isSessionArtifactRecord(record) ||
       (record.type === 'system' &&
         (record.subtype === 'custom_title' ||
+          record.subtype === 'session_source' ||
           record.subtype === 'session_sources_snapshot')),
   );
 }
