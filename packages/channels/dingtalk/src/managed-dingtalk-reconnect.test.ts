@@ -25,6 +25,9 @@ vi.mock('ws', () => {
     ping = vi.fn();
     terminate = vi.fn();
     close = vi.fn(() => {
+      // ws ignores close() on an already-closed socket; emitting a second
+      // close here would hand the wrapper a reconnect trigger it never gets.
+      if (this.readyState === 3) return;
       this.readyState = 3;
       this.emit('close');
     });
@@ -39,6 +42,7 @@ vi.mock('ws', () => {
       this.listeners.get(event)?.delete(cb);
     }
     emit(event: string, ...args: unknown[]): void {
+      if (event === 'close') this.readyState = 3;
       this.listeners.get(event)?.forEach((cb) => cb(...args));
     }
     open(): void {
@@ -77,6 +81,9 @@ const SETTINGS = {
 // The wrapper's own reconnect interval (RECONNECT_RETRY_MS). The SDK's 1s
 // reconnectInterval is deliberately no longer in play: autoReconnect is off.
 const RETRY_MS = 5_000;
+// The wrapper's per-attempt budget (CONNECT_TIMEOUT_MS). With the SDK's own
+// reconnect off it is the only exit from an attempt that never opens.
+const CONNECT_TIMEOUT_MS = 20_000;
 
 const latest = (): FakeSocket =>
   wsState.instances[wsState.instances.length - 1] as FakeSocket;
@@ -185,6 +192,36 @@ describe('managed DingTalk reconnect arbitration (#17173 R11)', () => {
     expect(sockets()).toBe(2);
     expect(vi.getTimerCount()).toBe(1);
 
+    stream.disconnect();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a reconnect attempt that never opens times out and re-arms instead of going deaf', async () => {
+    const stream = await startOpen();
+    latest().emit('close');
+
+    // Hang the next attempt inside getEndpoint, before it builds any socket:
+    // no close event can then re-arm the retry, so the attempt budget's error
+    // path is the only thing that can. A blocked upgrade would close a socket
+    // and mask that path.
+    const { default: axios } = await import('axios');
+    (
+      axios as unknown as { get: ReturnType<typeof vi.fn> }
+    ).get.mockImplementationOnce(() => new Promise(() => {}));
+
+    await vi.advanceTimersByTimeAsync(RETRY_MS);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sockets()).toBe(1); // the attempt is stuck before the socket exists
+
+    await vi.advanceTimersByTimeAsync(CONNECT_TIMEOUT_MS);
+    expect(vi.getTimerCount()).toBe(1); // one retry re-armed by the error path
+
+    await vi.advanceTimersByTimeAsync(RETRY_MS);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sockets()).toBe(2); // recovery continues on the same single chain
+
+    latest().emit('close');
+    await vi.advanceTimersByTimeAsync(0); // let that attempt settle
     stream.disconnect();
     expect(vi.getTimerCount()).toBe(0);
   });
