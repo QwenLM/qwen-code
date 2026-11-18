@@ -109,6 +109,18 @@
 
 见证（各字节级还原）：成员写入、`Object.assign`、计算工具名、模板字面量 sibling、gap 对调、路由 key 对调、删 cron 的 `No interval` 规则、令 `parseCron` 分歧，各使对应断言红；拼写 `key = "wakeup";` 的 Java 注释保持绿；此前形态（第二绑定、换 call id、手搭 tool call、`let` + 内联 allow、`??=`、伪造来源、usage 行 `??`、门改宽为 `blockProperties !== undefined`）全部仍红，提到绑定名的注释保持绿。扫描器返回的每份库存都至少有一条自己的见证。被执行的扫描器正向控制携带全部**扫描器侧**形态——伪造来源、成员写入、`Object.assign`、`delete`、`??=` 改写、内联 allow、计算工具名与模板字面量 sibling，故无库存空转——外加一个无关回调，其 `respond_in_schema` 回答被证明在域外。core 侧形态（gap 对调、路由 key 对调、shell 规则删除、解析器分歧）则如上所列，通过变异真实源并重生来见证。core 33/33、scripts 元 183/183、eslint/prettier/core typecheck 净。
 
+## Round-8：第三轮验证的存活缺口
+
+第三轮独立验证把第二轮的四个存活缺口全部复测为已闭、并逐个确认新钉承重，随后又测出三个同属「原地写入 / 手搭 tool call」家族的兄弟形状。三条连同本地实测的别名写入，全部在**本 PR**关闭，不转后续。
+
+- **写入者集合不是全集。** helper 调用前的 `Reflect.set(blockProperties, 'shouldBlock', …)` 与 `Object.defineProperties(blockProperties, …)` 使两套套件全绿。调用型写入分支现按名集判定——`Object.assign` / `defineProperty` / `defineProperties` 与 `Reflect.set` / `defineProperty`——仍要求首参解析到决策或其输入。
+- **别名携带同一个值。** `const propsAlias = blockProperties; propsAlias['shouldBlock'] = …` 不动任何库存，因为写入以两个绑定名为键。被跟踪集合现随别名声明增长，故经决策或其输入的别名写入都会入账，按源码顺序支持任意长度链。
+- **计算名的手搭 tool call 不可见。** 手搭覆盖原依赖 `respond_in_schema` 字面量计数，故不经 `fakeToolCall`、且名字为计算值的元素不动任何库存。现记录 `toolCalls` 数组中每个非 `fakeToolCall` 元素及其回调，loop 钉要求为零。
+
+每种形态都进入被执行的敌意控制（故无库存空转），并注入真实 fire 回调实测：`Reflect.set`、`Object.defineProperties`、计算名手搭调用、别名写入各使钉红（1 失败 / 87 通过）；此前全部形态仍红——第二绑定、换 call id、拼写名字的手搭调用、`let` + 内联 allow、`??=`、伪造来源、usage 行 `??`、计算工具名、门改宽、成员写入、模板字面量 sibling、`Object.assign`、短 `fakeToolCall`——而提到绑定名的注释保持绿。全部字节级还原。
+
+**为何反复出现、什么能终结它。** 这些兄弟形状都是「写同一个值或发同一个答案，但不按扫描器寻找的拼写来写」。扫描器是对内联判定的拼写级守卫，故 evasion 面无界。打包 `--loop-fire` 臂端到端驱动 fake 的真实回答，因而是行为级守卫，而这些结构钉是快速层的尽力近似；「该臂在每个具体兄弟形状下会失败」是从变异对 fake 的作用推断的，此处未单独实测。持久修复是把接缝画在整个判定之外——schema 查找、收窄、门、answer——每臂执行一个纯函数并退役库存。该重构、`CronSlots.java` fixture 绑定、与形态无关的 Java 路由断言、唯一导出的 Parsing 语法，以及派生退化阈值，均记于 #17673。
+
 ## 开放问题
 
 无阻塞项。

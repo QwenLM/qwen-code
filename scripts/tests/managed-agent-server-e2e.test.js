@@ -120,6 +120,11 @@ const fencedShellBlocks = (text) =>
 // see comments, so prose naming a binding moves nothing. Tool-name sites carry
 // their fake-model callback so loopClassifierScope can confine the loop pin to
 // the loop fakes and leave an unrelated arm's respond_in_schema answer alone.
+const IN_PLACE_WRITERS = {
+  Object: new Set(['assign', 'defineProperty', 'defineProperties']),
+  Reflect: new Set(['set', 'defineProperty']),
+};
+
 const loopClassifierWiring = (text) => {
   const file = createSourceFile('runner.ts', text, ScriptTarget.Latest, true);
   const definitions = [];
@@ -131,7 +136,11 @@ const loopClassifierWiring = (text) => {
   const helperCalls = [];
   const schemaNameSites = [];
   const dynamicToolNames = [];
-  const DECISION_BINDINGS = ['blockAnswer', 'blockProperties'];
+  const handBuiltToolCalls = [];
+  // An alias of the decision or its input carries the same value, so a write
+  // through it is the same in-place mutation. The set grows as aliases are
+  // declared, which covers chains of any length in source order.
+  const decisionBindings = new Set(['blockAnswer', 'blockProperties']);
   const enclosingFunction = (node) => {
     for (let current = node.parent; current; current = current.parent) {
       if (isFunctionDeclaration(current)) {
@@ -168,12 +177,12 @@ const loopClassifierWiring = (text) => {
   // touching any identifier the other inventories record.
   const writtenBinding = (node) => {
     if (isIdentifier(node)) {
-      return DECISION_BINDINGS.includes(node.text) ? node.text : undefined;
+      return decisionBindings.has(node.text) ? node.text : undefined;
     }
     if (
       (isElementAccessExpression(node) || isPropertyAccessExpression(node)) &&
       isIdentifier(node.expression) &&
-      DECISION_BINDINGS.includes(node.expression.text)
+      decisionBindings.has(node.expression.text)
     ) {
       return node.expression.text;
     }
@@ -190,6 +199,12 @@ const loopClassifierWiring = (text) => {
     ) {
       if (node.name.text === 'blockProperties') {
         definitions.push(node.initializer.getText(file));
+      }
+      if (
+        isIdentifier(node.initializer) &&
+        decisionBindings.has(node.initializer.text)
+      ) {
+        decisionBindings.add(node.name.text);
       }
       if (
         node.name.text === 'blockAnswer' &&
@@ -227,13 +242,33 @@ const loopClassifierWiring = (text) => {
       isCallExpression(node) &&
       isPropertyAccessExpression(node.expression) &&
       isIdentifier(node.expression.expression) &&
-      node.expression.expression.text === 'Object' &&
-      (node.expression.name.text === 'assign' ||
-        node.expression.name.text === 'defineProperty') &&
+      IN_PLACE_WRITERS[node.expression.expression.text]?.has(
+        node.expression.name.text,
+      ) &&
       node.arguments.length > 0 &&
       writtenBinding(node.arguments[0]) !== undefined
     ) {
       reassignments.push(node.getText(file));
+    }
+    // A tool call assembled without fakeToolCall is invisible to the answer
+    // and tool-name inventories, so record every such element of a toolCalls
+    // array; the loop pin requires none.
+    if (
+      isPropertyAssignment(node) &&
+      isIdentifier(node.name) &&
+      node.name.text === 'toolCalls' &&
+      isArrayLiteralExpression(node.initializer)
+    ) {
+      const callback = fakeCallback(node);
+      for (const element of node.initializer.elements) {
+        const isFakeCall =
+          isCallExpression(element) &&
+          isIdentifier(element.expression) &&
+          element.expression.text === 'fakeToolCall';
+        if (!isFakeCall) {
+          handBuiltToolCalls.push({ callback, text: element.getText(file) });
+        }
+      }
     }
     if (isObjectLiteralExpression(node)) {
       for (const property of node.properties) {
@@ -295,6 +330,7 @@ const loopClassifierWiring = (text) => {
     helperCalls,
     schemaNameSites,
     dynamicToolNames,
+    handBuiltToolCalls,
   };
 };
 
@@ -316,6 +352,7 @@ const loopClassifierScope = (wiring) => {
     answers: wiring.answers.filter(inScope),
     schemaNameSites: wiring.schemaNameSites.filter(inScope),
     dynamicToolNames: wiring.dynamicToolNames.filter(inScope),
+    handBuiltToolCalls: wiring.handBuiltToolCalls.filter(inScope),
   };
 };
 
@@ -3760,6 +3797,10 @@ describe('managed-agent-server e2e runner', () => {
       ).toHaveLength(2);
     }
     expect(scope.dynamicToolNames).toEqual([]);
+    // Every tool call the loop fakes emit goes through fakeToolCall: an
+    // element assembled by hand is invisible to the answer and tool-name
+    // inventories whatever its name spells, so none is allowed.
+    expect(scope.handBuiltToolCalls).toEqual([]);
     // The allow is constructed exactly once, inside the helper; an inline
     // `{ shouldBlock: false }` on either answer path reddens here.
     expect(wiring.allowSites).toEqual(['classifierBlockAnswer']);
@@ -3850,11 +3891,12 @@ describe('managed-agent-server e2e runner', () => {
 
   // The wiring scanner and its loop scoping are executed against hostile fakes
   // so neither can be vacuous: a fabricated provenance, an in-place member
-  // write, an Object.assign and a delete on the input, a `??=` rewrite of the
-  // decision, an inline allow, a computed tool name, and a template-literal
-  // sibling answering from a fabricated schema must each move an inventory —
-  // while prose naming the bindings moves none, and an unrelated arm's
-  // respond_in_schema answer stays out of the loop scope.
+  // write, an Object.assign, a delete, Reflect.set and Object.defineProperties
+  // on the input, a write through an alias of it, a `??=` rewrite of the
+  // decision, an inline allow, a computed tool name, a hand-built tool call,
+  // and a template-literal sibling answering from a fabricated schema must
+  // each move an inventory — while prose naming the bindings moves none, and
+  // an unrelated arm's respond_in_schema answer stays out of the loop scope.
   it('executes the classifier wiring scanner against hostile rewiring', () => {
     const fakeCallback = (lines) =>
       [
@@ -3869,12 +3911,17 @@ describe('managed-agent-server e2e runner', () => {
       "if (blockProperties !== undefined) blockProperties['shouldBlock'] = { type: 'boolean' };",
       "Object.assign(blockProperties, { shouldBlock: { type: 'boolean' } });",
       'delete blockProperties.shouldBlock;',
+      "Reflect.set(blockProperties, 'shouldBlock', { type: 'boolean' });",
+      "Object.defineProperties(blockProperties, { shouldBlock: { value: { type: 'boolean' } } });",
+      'const propsAlias = blockProperties;',
+      "propsAlias['shouldBlock'] = { type: 'boolean' };",
       'let blockAnswer = classifierBlockAnswer(blockProperties);',
       'blockAnswer ??= { shouldBlock: false };',
       'if (blockAnswer !== undefined) {',
       "  return { toolCalls: [fakeToolCall('respond_in_schema', blockAnswer, 'loop-classifier')] };",
       '}',
       "return { toolCalls: [fakeToolCall(['respond', 'in', 'schema'].join('_'), blockAnswer, 'loop-fire-computed')] };",
+      "return { toolCalls: [{ id: 'hb', type: 'function', function: { name: ['respond', 'in', 'schema'].join('_'), arguments: '{}' } }] };",
       "return { toolCalls: [fakeToolCall(`respond_in_schema`, classifierBlockAnswer({ shouldBlock: { type: 'boolean' } }), 'loop-fire-sibling')] };",
     ]);
     const unrelatedFake = fakeCallback([
@@ -3896,6 +3943,9 @@ describe('managed-agent-server e2e runner', () => {
       "blockProperties['shouldBlock'] = { type: 'boolean' }",
       "Object.assign(blockProperties, { shouldBlock: { type: 'boolean' } })",
       'delete blockProperties.shouldBlock',
+      "Reflect.set(blockProperties, 'shouldBlock', { type: 'boolean' })",
+      "Object.defineProperties(blockProperties, { shouldBlock: { value: { type: 'boolean' } } })",
+      "propsAlias['shouldBlock'] = { type: 'boolean' }",
       'blockAnswer ??= { shouldBlock: false }',
     ]);
     // The sibling's fabricated schema is a second helper call, visible even
@@ -3919,6 +3969,10 @@ describe('managed-agent-server e2e runner', () => {
     // A computed tool name hides the answer from every name-based inventory,
     // so it is recorded on its own and the loop pin requires none.
     expect(scope.dynamicToolNames).toHaveLength(1);
+    // A tool call assembled without fakeToolCall is recorded whatever its
+    // name spells, including a computed one.
+    expect(scope.handBuiltToolCalls).toHaveLength(1);
+    expect(wiring.handBuiltToolCalls).toHaveLength(1);
   });
 
   // The fake-side minted-id extraction is executed, not counted as source
