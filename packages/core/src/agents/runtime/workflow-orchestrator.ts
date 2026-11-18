@@ -1882,6 +1882,9 @@ async function cleanupWorkflowWorktree(
   try {
     const result = await wtService.removeUserWorktree(isolation.slug, {
       deleteBranch: true,
+      // Isolation worktrees are created named, so the slug ref is theirs
+      // even if the agent switched branches.
+      branchOwned: true,
     });
     if (!result.success) {
       debugLogger.warn(
@@ -1889,16 +1892,17 @@ async function cleanupWorkflowWorktree(
       );
       return { path: isolation.path, branch: isolation.branch };
     }
-    if (result.branchPreserved) {
-      // Directory removed, but a safe `git branch -d` refused — race where
-      // commits landed between the unmerged check and the delete. Surface
-      // the branch only; the directory is already gone, so reporting a
-      // preservedPath here would point the script at a missing location.
+    if (result.branchPreserved || result.keptBranch) {
+      // Directory removed, but a branch survived (a safe `git branch -d`
+      // refused, or the checkout's own branch). Surface the branch only;
+      // the directory is already gone, so reporting a preservedPath here
+      // would point the script at a missing location.
+      const kept = result.keptBranch ?? isolation.branch;
       debugLogger.warn(
         `[Workflow] Removed worktree directory ${isolation.path} but kept ` +
-          `branch ${isolation.branch} (unmerged commits at delete time)`,
+          `branch ${kept}`,
       );
-      return { branch: isolation.branch };
+      return { branch: kept };
     }
   } catch (error) {
     debugLogger.warn(

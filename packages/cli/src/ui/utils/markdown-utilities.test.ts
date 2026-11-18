@@ -31,14 +31,14 @@ describe('markdown-utilities', () => {
     });
 
     it('should return content.length if the only \n\n is inside a code block and the end of content is not', () => {
-      const content = '```\nignore this\n\nnewline\n```KeepThis';
+      const content = '```\nignore this\n\nnewline\n```\nKeepThis';
       expect(findLastSafeSplitPoint(content)).toBe(content.length);
     });
 
     it('should not split at a \n\n inside a tilde (~~~) fenced code block', () => {
       // Same as the backtick case but with ~~~ fences: the internal blank line
       // must not be chosen as a split point.
-      const content = '~~~\nignore this\n\nnewline\n~~~KeepThis';
+      const content = '~~~\nignore this\n\nnewline\n~~~\nKeepThis';
       expect(findLastSafeSplitPoint(content)).toBe(content.length);
     });
 
@@ -46,7 +46,7 @@ describe('markdown-utilities', () => {
       // A 6-backtick fence must count as ONE delimiter. Matching only the first
       // three characters would produce a phantom close-then-reopen, mark the
       // internal blank line as outside the block, and split there.
-      const content = '``````\nignore this\n\nnewline\n``````KeepThis';
+      const content = '``````\nignore this\n\nnewline\n``````\nKeepThis';
       expect(findLastSafeSplitPoint(content)).toBe(content.length);
     });
 
@@ -94,7 +94,7 @@ describe('markdown-utilities', () => {
     });
 
     it('re-arms the closed-block walk for the single-newline fallback', () => {
-      const content = '```a\nx\n\ny\n```\n```b\nz\n```TAIL';
+      const content = '```a\nx\n\ny\n```\n```b\nz\n```\nTAIL';
       expect(findLastSafeSplitPoint(content, 22)).toBe(14);
     });
 
@@ -305,6 +305,10 @@ describe('markdown-utilities', () => {
   });
 
   describe('getEnclosingFenceInfo', () => {
+    it('closes a fence when the buffer ends between CR and LF', () => {
+      expect(getEnclosingFenceInfo('```ts\r\ncode\r\n```\r', 17)).toBeNull();
+    });
+
     it('returns null when the index is not inside a fence', () => {
       const content = 'plain intro\n\n```ts\ncode\n```\n\nafter';
       expect(getEnclosingFenceInfo(content, 3)).toBeNull(); // in the intro
@@ -337,6 +341,77 @@ describe('markdown-utilities', () => {
   });
 
   describe('fence recognition', () => {
+    it.each(
+      [
+        ['```', 'not-a-close'],
+        ['~~~', 'still code'],
+        ['```', '\u00a0'],
+      ].flatMap(([fence, trailing]) =>
+        ['\n', '\r\n'].map((eol) => ({ fence, trailing, eol })),
+      ),
+    )(
+      'keeps $fence$trailing inside the block under $eol line endings',
+      ({ fence, trailing, eol }) => {
+        const content = [
+          `${fence}ts`,
+          'code',
+          `${fence}${trailing}`,
+          '',
+          'still inside',
+          fence,
+          '',
+          'prose',
+        ].join(eol);
+        const inside = content.indexOf('still inside');
+        const afterBlock = content.indexOf('prose');
+
+        expect(getEnclosingFenceInfo(content, inside)).toEqual({
+          lang: 'ts',
+          startLine: 1,
+        });
+        expect(getEnclosingFenceInfo(content, afterBlock)).toBeNull();
+        expect(findLastSafeSplitPoint(content, afterBlock)).toBe(afterBlock);
+        expect(splitFencedMarkdown(content, inside)).toEqual({
+          before: `${content.slice(0, inside)}${fence}\n`,
+          after: `${fence}ts qwen-code:start-line=4\n${content.slice(inside)}`,
+        });
+      },
+    );
+
+    it.each([16385, 16386, 16387])(
+      'does not reopen a closed fence when a %s-character buffer ends at CR',
+      (length) => {
+        const cap = 16384;
+        const opening = '```js\r\n';
+        const closing = '\r\n```\r';
+        const content =
+          opening +
+          'x'.repeat(length - opening.length - closing.length) +
+          closing;
+        const splitPoint = findLastSafeSplitPoint(content, cap);
+        const { before, after } = splitFencedMarkdown(content, splitPoint);
+        expect(before).toBe(content.slice(0, splitPoint));
+        expect(after).toBe(content.slice(splitPoint));
+        const continued = `${after}\n\nFollowing prose`;
+        expect(
+          getEnclosingFenceInfo(continued, continued.indexOf('Following')),
+        ).toBeNull();
+      },
+    );
+
+    it.each(['\n', '\r\n'])(
+      'closes a longer fence with spaces and tabs under %j line endings',
+      (eol) => {
+        const before = ['```ts', 'code', '```` \t', ''].join(eol);
+        const content = `${before}After`;
+        expect(getEnclosingFenceInfo(content, before.length)).toBeNull();
+        expect(splitFencedMarkdown(content, before.length)).toEqual({
+          before,
+          after: 'After',
+        });
+      },
+    );
+
     it.each([
       ['~~~', '```'],
       ['```', '~~~'],

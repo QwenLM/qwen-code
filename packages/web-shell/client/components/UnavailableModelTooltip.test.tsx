@@ -119,4 +119,32 @@ describe('UnavailableModelTooltip', () => {
     ).toBe('Qwen Max');
     expect(hint?.textContent).toContain('Need Pro');
   });
+
+  it('stays open when focus is re-asserted on the anchor row', async () => {
+    // WebKit re-focuses the tapped row after the card mounts. The card hangs
+    // off a PopoverAnchor (no PopoverTrigger), so Radix would otherwise read
+    // that focusin as focus-outside and dismiss the hint immediately.
+    const mount = vi.fn<WebShellUnavailableModelTooltipMount>((host) => {
+      host.textContent = 'Authorize';
+      return { update: vi.fn(), dispose: vi.fn() };
+    });
+    renderTooltip({ mount });
+    const trigger = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="trigger"]',
+    )!;
+    await act(async () => {
+      trigger.focus();
+    });
+    expect(
+      document.querySelector('[data-web-shell-unavailable-model-tooltip]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      trigger.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    });
+    expect(
+      document.querySelector('[data-web-shell-unavailable-model-tooltip]'),
+    ).not.toBeNull();
+    expect(mount).toHaveBeenCalledTimes(1);
+  });
 });

@@ -23,6 +23,7 @@ import {
   TABLE_ROW_RE,
   TABLE_SEPARATOR_RE,
   CODE_FENCE_RE,
+  isClosingCodeFence,
 } from './pending-rendered-height.js';
 // Minimum content lines to keep in a clipped live preview (own constant — not
 // coupled to MaxSizedBox's floor).
@@ -45,6 +46,7 @@ interface MarkdownDisplayProps {
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
   /** Original Markdown when the row displays a rewrite. */
   sourceCopyText?: string;
+  showSourceCopyHints?: boolean;
   /**
    * When true, enforce the rendered-height budget from `availableTerminalHeight`
    * even for non-pending content. Normally the height-aware pre-slice
@@ -109,11 +111,7 @@ export function countMarkdownSourceBlocks(
     const line = lines[index];
     const codeFenceMatch = line.match(codeFenceRegex);
     if (activeCodeFence) {
-      if (
-        codeFenceMatch &&
-        codeFenceMatch[1].startsWith(activeCodeFence[0]) &&
-        codeFenceMatch[1].length >= activeCodeFence.length
-      ) {
+      if (isClosingCodeFence(codeFenceMatch, activeCodeFence)) {
         activeCodeFence = null;
         if (codeLanguage === 'mermaid') {
           onCopyableBlock?.(
@@ -204,17 +202,17 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   textColor = theme.text.primary,
   sourceCopyIndexOffsets,
   sourceCopyText,
+  showSourceCopyHints = true,
   enforceHeightBudget = false,
   constrainBlockWidth = false,
 }) => {
   const { renderMode } = useRenderMode();
-  const copyHint = React.useMemo(
-    () =>
-      sourceCopyText === undefined
-        ? undefined
-        : originalCopyHint(sourceCopyText, sourceCopyIndexOffsets),
-    [sourceCopyText, sourceCopyIndexOffsets],
-  );
+  const copyHint = React.useMemo(() => {
+    if (!showSourceCopyHints) return () => undefined;
+    return sourceCopyText === undefined
+      ? undefined
+      : originalCopyHint(sourceCopyText, sourceCopyIndexOffsets);
+  }, [showSourceCopyHints, sourceCopyText, sourceCopyIndexOffsets]);
   if (!text) return <></>;
 
   const renderVisualBlocks = renderMode === 'render';
@@ -329,11 +327,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         const line = lines[i]!;
         if (activeCodeFence) {
           const fenceMatch = line.match(codeFenceRegex);
-          if (
-            fenceMatch &&
-            fenceMatch[1]!.startsWith(activeCodeFence[0]!) &&
-            fenceMatch[1]!.length >= activeCodeFence.length
-          ) {
+          if (isClosingCodeFence(fenceMatch, activeCodeFence)) {
             activeCodeFence = '';
           }
           continue;
@@ -492,11 +486,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
 
     if (inCodeBlock) {
       const fenceMatch = line.match(codeFenceRegex);
-      if (
-        fenceMatch &&
-        fenceMatch[1].startsWith(codeBlockFence[0]) &&
-        fenceMatch[1].length >= codeBlockFence.length
-      ) {
+      if (isClosingCodeFence(fenceMatch, codeBlockFence)) {
         addContentBlock(
           <RenderCodeBlock
             key={key}

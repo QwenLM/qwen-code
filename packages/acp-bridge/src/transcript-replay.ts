@@ -5,6 +5,11 @@
  */
 
 import {
+  parseHookLifecycle,
+  type HookLifecycleEvent,
+} from '@qwen-code/qwen-code-core/telemetry/hook-lifecycle-contract.js';
+
+import {
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   parseBackgroundNotificationTurn,
 } from './bridgeTypes.js';
@@ -475,9 +480,25 @@ export function createAgentRecordTranscriptUpdate(
     typeof payload['error'] === 'string' && payload['error'].length > 0
       ? payload['error']
       : undefined;
+  const sentTo = isObjectRecord(payload['sentTo'])
+    ? payload['sentTo']
+    : undefined;
   const mentionMeta: QwenAgentMessageMeta = {
     kind: 'agent_mention',
     mentionedAgentIds,
+    ...(sentTo &&
+    typeof sentTo['sessionId'] === 'string' &&
+    typeof sentTo['workspaceCwd'] === 'string'
+      ? {
+          sentTo: {
+            sessionId: sentTo['sessionId'],
+            workspaceCwd: sentTo['workspaceCwd'],
+            ...(typeof sentTo['title'] === 'string'
+              ? { title: sentTo['title'] }
+              : {}),
+          },
+        }
+      : {}),
     ...(mentionedSquadIds.length > 0 ? { mentionedSquadIds } : {}),
     ...(mentionError ? { error: mentionError } : {}),
     ...(author ? { author } : {}),
@@ -843,6 +864,20 @@ export function parseExecutionLifecycle(
       ? { reason: 'consumer_closed' as const }
       : {}),
   };
+}
+
+export function createTranscriptHookLifecycleUpdate(
+  hookLifecycle: HookLifecycleEvent,
+  options: UpdateMetaOptions = {},
+): SessionUpdate {
+  return {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '' },
+    _meta: buildUpdateMeta({
+      ...options,
+      extra: { ...(options.extra ?? {}), hookLifecycle },
+    }),
+  } as SessionUpdate;
 }
 
 export function createTranscriptExecutionLifecycleUpdate(
@@ -1738,6 +1773,15 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       if (!this.options.includeTiming) return;
       const payload = record.systemPayload;
       const uiEvent = isObjectRecord(payload) ? payload['uiEvent'] : undefined;
+      if (
+        isObjectRecord(uiEvent) &&
+        uiEvent['event.name'] === 'hook_lifecycle'
+      ) {
+        const lifecycle = parseHookLifecycle(uiEvent);
+        if (lifecycle)
+          yield emit(createTranscriptHookLifecycleUpdate(lifecycle, meta));
+        return;
+      }
       if (
         isObjectRecord(uiEvent) &&
         uiEvent['event.name'] === 'request_lifecycle'

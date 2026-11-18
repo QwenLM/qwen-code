@@ -269,11 +269,11 @@ class ManagedModelSelectionTest {
 
     // A model change only affects later admissions, so the live path exempts
     // unsettled SESSION_COMMAND receipts. No producer reaches that state today
-    // (RENAME_SESSION is held by hasPendingRenameDelivery, UNARCHIVE by the
-    // ACTIVE status gate), so this pins the exemption policy for later
-    // commands rather than a daily path: it must fail if the gate tightens
-    // back to hasOpenOperation. The change must also leave the receipt
-    // belonging to the pending command unsettled.
+    // (RENAME_SESSION settles synchronously in one transaction, UNARCHIVE is
+    // held by the ACTIVE status gate), so this pins the exemption policy for
+    // later commands rather than a daily path: it must fail if the gate
+    // tightens back to hasOpenOperation. The change must also leave the
+    // receipt belonging to the pending command unsettled.
     @Test
     void pendingSessionCommandReceiptDoesNotBlockFutureModelSelectionOrSettleTheReceipt() {
         change("actor", "first", "model-a", 0);

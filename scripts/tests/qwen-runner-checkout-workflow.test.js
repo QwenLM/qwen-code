@@ -82,11 +82,23 @@ const jobs = [
     name,
   ]),
   ...['classify', 'act'].map((name) => ['qwen-ci-flaky-rerun', name]),
+  // The managed lanes joined the persistent fleet with the trusted-PR
+  // routing split (#17279). The fleet reuses workspaces between jobs, so
+  // they inherit the same leftovers as the lanes above: the kernel leg's
+  // first fleet run (43621213542) died in checkout's recreate path on
+  // root-owned files.
+  ['managed-agent-loop', 'managed-loop', true],
+  ['web-shell-managed-host', 'build', true],
+  // tui-parity was already fleet-routed but only healed ownership: a
+  // leftover sparse index from qwen-triage's non-cone publisher checkout
+  // still broke its checkout (runs 43621213523 and 43621721648 lost the
+  // parity job with no .github/actions/self-hosted-node on disk).
+  ...['parity', 'noflicker'].map((name) => ['tui-parity', name, true]),
 ];
 
 it.each(jobs)(
   '%s / %s replaces runner Git metadata before checkout without following links',
-  (workflow, name) => {
+  (workflow, name, healAbove) => {
     const { steps } = parse(
       readFileSync(`.github/workflows/${workflow}.yml`, 'utf8'),
     ).jobs[name];
@@ -96,6 +108,19 @@ it.each(jobs)(
     expect(index).toBeGreaterThanOrEqual(0);
     expect(steps[index].if).toBe("${{ runner.environment == 'self-hosted' }}");
     expect(steps[index + 1].uses).toMatch(/^actions\/checkout@/);
+    // The reset covers index state; the heal covers permissions, and only the
+    // pair clears both leftovers. The managed rows therefore ask for the heal
+    // directly above the reset as well — deleting it keeps the reset green and
+    // lets run 43621213542's failure return, because root-owned files fail
+    // `git clean` before the reset can help. Opt-in per row: qwen-triage heals
+    // after its reset, and desktop-release and the flaky-rerun rows carry no
+    // heal step at all, so a global assertion would red them.
+    if (healAbove) {
+      expect(
+        steps[index - 1].name,
+        `${workflow} / ${name} must heal ownership directly above the metadata reset`,
+      ).toBe('Restore workspace ownership');
+    }
 
     const root = mkdtempSync(join(tmpdir(), 'qwen-checkout-'));
     try {

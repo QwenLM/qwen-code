@@ -2,6 +2,7 @@
 import { act, StrictMode } from 'react';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
+import { WebShellPortalRootContext } from '../portalRoot';
 import { requestToast } from '../components/ToastHost';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -293,6 +294,7 @@ describe('useReportedArtifactRegistration', () => {
     expect(requestToast).toHaveBeenCalledWith(
       'error',
       '无法添加导出文件：Access denied',
+      null,
     );
   });
 
@@ -395,7 +397,75 @@ describe('useReportedArtifactRegistration', () => {
     expect(requestToast).toHaveBeenCalledWith(
       'error',
       'Could not add exported artifact: offline',
+      null,
     );
+  });
+
+  it('scopes the failure toast to the shell portal root (F1)', async () => {
+    // An unscoped dispatch is dropped when a host page mounts several shells
+    // and nothing holds focus; the hook must pass its own shell root.
+    const shellRoot = document.createElement('div');
+    shellRoot.setAttribute('data-web-shell-root', '');
+    document.body.append(shellRoot);
+    try {
+      sdk.blocks = [transcriptBlock('assistant', [exportedArtifact])];
+      sdk.addArtifact.mockRejectedValue(new Error('offline'));
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <WebShellPortalRootContext.Provider value={shellRoot}>
+              <Host />
+            </WebShellPortalRootContext.Provider>
+          </I18nProvider>,
+        );
+      });
+      expect(requestToast).toHaveBeenCalledWith(
+        'error',
+        'Could not add exported artifact: offline',
+        shellRoot,
+      );
+    } finally {
+      shellRoot.remove();
+    }
+  });
+
+  it('re-reads a portal root that appears after mount (F1)', async () => {
+    // The scope must be read per render, not captured once at mount: a host
+    // can mount the shell tree before its portal-root provider resolves.
+    const shellRoot = document.createElement('div');
+    shellRoot.setAttribute('data-web-shell-root', '');
+    document.body.append(shellRoot);
+    try {
+      sdk.blocks = [transcriptBlock('assistant', [exportedArtifact])];
+      sdk.addArtifact.mockRejectedValue(new Error('offline'));
+      await render();
+      expect(requestToast).toHaveBeenCalledWith(
+        'error',
+        'Could not add exported artifact: offline',
+        null,
+      );
+      // A reconnect resets the per-path attempt latch, so the retry fails
+      // again — now under a provider that appeared after the first render.
+      sdk.connection.status = 'disconnected';
+      await render();
+      sdk.connection.status = 'connected';
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <WebShellPortalRootContext.Provider value={shellRoot}>
+              <Host />
+            </WebShellPortalRootContext.Provider>
+          </I18nProvider>,
+        );
+      });
+      expect(requestToast).toHaveBeenLastCalledWith(
+        'error',
+        'Could not add exported artifact: offline',
+        shellRoot,
+      );
+    } finally {
+      shellRoot.remove();
+    }
   });
 
   it('stays out of the way without the artifact capability', async () => {
