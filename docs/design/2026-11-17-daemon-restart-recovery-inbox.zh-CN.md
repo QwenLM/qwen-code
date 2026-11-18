@@ -195,7 +195,7 @@ ledger 很小（每个 prompt 约两条记录），且在准入和停机时已�
       "sessionId": "…",
       "workspace": "qwen-code-x9",
       "status": "error",
-      "code": "load_failed"
+      "code": "continue_failed"
     }
   ]
 }

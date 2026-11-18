@@ -42,6 +42,7 @@ import {
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
+import type { SubSessionLauncher } from './create-sub-session.js';
 import * as toolCallsReader from './session-tool-calls.js';
 import { withSessionWorkflowWriteLock } from './routes/workspace-settings.js';
 import {
@@ -700,6 +701,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_info',
   'session_source_metadata',
   'session_side_task',
+  'session_sub_session_send',
   'session_prompt',
   'session_turn_status',
   'session_attachments',
@@ -962,6 +964,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_archived_session_export' &&
       f !== 'workspace_session_live_state' &&
       f !== 'workspace_session_live_state_batch' &&
+      f !== 'restart_recovery' &&
       f !== 'workspace_session_metadata' &&
       f !== 'session_worktree_persistence_v1' &&
       f !== 'session_worktree_reset_v1' &&
@@ -4806,6 +4809,7 @@ describe('createServeApp', () => {
       '/channel-events',
       '/live',
       '/scheduled-tasks',
+      '/pr-watches',
       '/goals',
       '/settings',
     ])(
@@ -31204,6 +31208,172 @@ describe('createServeApp', () => {
         sessionId: 'session-A',
       });
       expect(res.headers['retry-after']).toBe('5');
+    });
+  });
+
+  describe('GET /session/:id/tasks?includeSubSessions=true', () => {
+    const appWithOutgoing = (
+      listOutgoing: SubSessionLauncher['listOutgoing'],
+    ) => {
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge({
+          sessionTasksImpl: async (sessionId) => ({
+            v: 1,
+            sessionId,
+            now: 5_000,
+            tasks: [],
+          }),
+        }),
+      });
+      (
+        app.locals as {
+          subSessionLauncherFor?: () => Partial<SubSessionLauncher> | undefined;
+        }
+      ).subSessionLauncherFor = () => ({ listOutgoing });
+      return app;
+    };
+    const get = (app: ReturnType<typeof createServeApp>, query = '') =>
+      request(app)
+        .get(`/session/session-A/tasks${query}`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+    it('lists the sends the daemon reports back beside the child tasks', async () => {
+      const listOutgoing = vi.fn(() => [
+        {
+          id: 'kid',
+          sessionId: 'kid',
+          workspaceCwd: '/work/b',
+          label: 'look',
+          status: 'running' as const,
+          startTime: 1_000,
+          byPerson: true,
+        },
+        {
+          id: 'kid:p2',
+          sessionId: 'kid',
+          workspaceCwd: '/work/b',
+          label: 'again',
+          status: 'completed' as const,
+          startTime: 2_000,
+          endTime: 2_500,
+          byPerson: false,
+        },
+      ]);
+      const res = await get(
+        appWithOutgoing(listOutgoing),
+        '?includeSubSessions=true',
+      );
+      expect(res.status).toBe(200);
+      expect(listOutgoing).toHaveBeenCalledWith('session-A');
+      expect(res.body.tasks).toEqual([]);
+      expect(res.body.subSessions).toEqual([
+        expect.objectContaining({
+          kind: 'session',
+          id: 'kid',
+          runtimeMs: 4_000,
+        }),
+        expect.objectContaining({ id: 'kid:p2', runtimeMs: 500 }),
+      ]);
+    });
+
+    it('leaves them out unless asked', async () => {
+      const listOutgoing = vi.fn(() => []);
+      const res = await get(appWithOutgoing(listOutgoing));
+      expect(res.status).toBe(200);
+      expect(res.body).not.toHaveProperty('subSessions');
+      expect(listOutgoing).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('POST /session/:id/sub-sessions', () => {
+    const appWithLauncher = (
+      launchForPerson: SubSessionLauncher['launchForPerson'] | undefined,
+    ) => {
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge(),
+      });
+      (
+        app.locals as {
+          subSessionLauncherFor?: () => Partial<SubSessionLauncher> | undefined;
+        }
+      ).subSessionLauncherFor = () =>
+        launchForPerson ? { launchForPerson } : undefined;
+      return app;
+    };
+    const post = (app: ReturnType<typeof createServeApp>, body: object) =>
+      request(app)
+        .post('/session/session-A/sub-sessions')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send(body);
+
+    it('202 runs the send on the caller launcher with the open session as caller', async () => {
+      const launchForPerson = vi.fn(async () => ({
+        sessionId: 'kid',
+        workspaceCwd: '/work/b',
+        taskId: 'kid:p1',
+        result: 'not returned',
+      }));
+      const res = await post(appWithLauncher(launchForPerson), {
+        prompt: '  look  ',
+        workspace: '/work/b',
+        targetSessionId: 'kid',
+      });
+      expect(res.status).toBe(202);
+      expect(res.body).toEqual({
+        sessionId: 'kid',
+        workspaceCwd: '/work/b',
+        taskId: 'kid:p1',
+      });
+      expect(launchForPerson).toHaveBeenCalledWith({
+        callerSessionId: 'session-A',
+        prompt: 'look',
+        workspace: '/work/b',
+        sessionId: 'kid',
+      });
+    });
+
+    it.each([
+      [{}, 'invalid_sub_session_prompt'],
+      [{ prompt: '   ' }, 'invalid_sub_session_prompt'],
+      [{ prompt: 'p', workspace: 'a\nb' }, 'invalid_sub_session_workspace'],
+      [{ prompt: 'p', workspace: 7 }, 'invalid_sub_session_workspace'],
+      [{ prompt: 'p', targetSessionId: '' }, 'invalid_sub_session_target'],
+    ])('400 for %j', async (body, code) => {
+      const launchForPerson = vi.fn();
+      const res = await post(appWithLauncher(launchForPerson), body);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe(code);
+      expect(launchForPerson).not.toHaveBeenCalled();
+    });
+
+    it("409 carries the launcher's refusal", async () => {
+      const res = await post(
+        appWithLauncher(async () => {
+          throw new Error('Workspace /work/b is not trusted.');
+        }),
+        { prompt: 'p', workspace: '/work/b' },
+      );
+      expect(res.status).toBe(409);
+      expect(res.body).toEqual({
+        code: 'sub_session_send_refused',
+        error: 'Workspace /work/b is not trusted.',
+      });
+    });
+
+    it('keeps the usual status for typed errors', async () => {
+      const res = await post(
+        appWithLauncher(async () => {
+          throw new SessionNotFoundError('session-A');
+        }),
+        { prompt: 'p' },
+      );
+      expect(res.status).toBe(404);
+    });
+
+    it('501 when the runtime has no launcher', async () => {
+      const res = await post(appWithLauncher(undefined), { prompt: 'p' });
+      expect(res.status).toBe(501);
+      expect(res.body.code).toBe('sub_session_send_unavailable');
     });
   });
 

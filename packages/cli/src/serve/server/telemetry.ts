@@ -51,6 +51,18 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/sessions/recovery',
+    attribution: 'handler_resolved',
+    route: 'POST /sessions/recovery',
+  },
+  {
+    method: 'POST',
+    path: '/sessions/recovery/continue',
+    attribution: 'handler_resolved',
+    route: 'POST /sessions/recovery/continue',
+  },
+  {
+    method: 'POST',
     path: '/sessions/catalog',
     attribution: 'handler_resolved',
     route: 'POST /sessions/catalog',
@@ -108,6 +120,12 @@ export const legacySessionTelemetryRoutes = [
     path: '/session/:id/side-task',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/side-task',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/sub-sessions',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/sub-sessions',
   },
   {
     method: 'POST',

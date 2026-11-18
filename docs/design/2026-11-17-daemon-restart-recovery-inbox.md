@@ -237,7 +237,7 @@ The result is per session:
       "sessionId": "…",
       "workspace": "qwen-code-x9",
       "status": "error",
-      "code": "load_failed"
+      "code": "continue_failed"
     }
   ]
 }
