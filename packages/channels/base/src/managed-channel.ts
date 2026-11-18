@@ -16,6 +16,17 @@
 /** The adapters the managed path enables. */
 export type ManagedChannelAdapter = 'email' | 'dingtalk' | 'github' | 'wecom';
 
+/**
+ * What a managed adapter can render beyond plain text segments (H5e of
+ * #12827). An adapter that declares `cards` renders one delivery as a single
+ * provider-native card and edits it per segment; an adapter that declares
+ * nothing keeps the text path. The declaration is a gate the adapter's own
+ * send path consumes, not a field the control plane reads.
+ */
+export interface ManagedChannelCapabilities {
+  cards: boolean;
+}
+
 /** The route policy pinned with the first binding of each route. */
 export interface ManagedChannelPolicy {
   adapter: ManagedChannelAdapter;

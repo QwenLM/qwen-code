@@ -240,6 +240,7 @@ export { matchMessageRoute } from './message-routes.js';
 export type { MatchedMessageRoute } from './message-routes.js';
 export type {
   ManagedChannelAdapter,
+  ManagedChannelCapabilities,
   ManagedChannelPolicy,
   ManagedInboundEvent,
   ManagedClaimedDelivery,

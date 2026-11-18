@@ -4,25 +4,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
   MANAGED_OUTBOUND_LIMIT,
   resolvePrivatePolicy,
 } from '@qwen-code/channel-base';
 import type {
+  ManagedChannelCapabilities,
   ManagedChannelPolicy,
   ManagedInboundEvent,
   ManagedClaimedDelivery,
   ManagedChannelControlPlane,
 } from '@qwen-code/channel-base';
 import {
+  MANAGED_CARD_PROGRESS_LIMIT,
   MANAGED_DINGTALK_PENDING_LIMIT,
   ManagedDingtalkStateStore,
   RECENT_LIMIT,
   WEBHOOK_LIMIT,
 } from './managed-state.js';
-import type { ManagedDingtalkState, ManagedReceipt } from './managed-state.js';
+import type {
+  ManagedDingtalkCardProgress,
+  ManagedDingtalkState,
+  ManagedReceipt,
+} from './managed-state.js';
 
 export type { ManagedReceipt } from './managed-state.js';
 
@@ -71,6 +77,20 @@ export interface ManagedDingtalkAdapterDeps {
     onMessage: (messageId: string, data: string) => boolean,
   ) => ManagedDingtalkStreamClient;
   readonly sendWebhook: (webhook: string, text: string) => Promise<void>;
+  /**
+   * Render one segment into the delivery's provider-native card (H5e).
+   * `create` selects createAndDeliver versus a full-snapshot updateInstance
+   * edit. Failures carry `.definitive` exactly like sendWebhook, so the
+   * adapter's rejected/unknown arm is surface-agnostic. Optional: an adapter
+   * without card deps keeps the text path.
+   */
+  readonly sendCardSegment?: (input: {
+    outTrackId: string;
+    templateId: string;
+    target: { chatId: string; isGroup: boolean };
+    body: string;
+    create: boolean;
+  }) => Promise<void>;
   readonly lock: (
     directory: string,
     onCompromised: () => void,
@@ -112,10 +132,53 @@ const MAX_WIRE_TEXT_CHARS = 32_000;
 const ENVELOPE_BYTE_LIMIT = 64 * 1024;
 const TEXT_ENVELOPE_OVERHEAD_BYTES = 4096;
 
+// H5e of #12827: the card body bound, in UTF-16 units, mirroring the Legacy
+// status card's CONTENT_LIMIT. A ledger segment can be 48 KiB of UTF-8 and a
+// reply up to 64 of them, so a card cannot carry every reply; the overflow
+// falls back to the text path rather than truncating content the receipts
+// would then claim as delivered.
+export const MANAGED_CARD_CONTENT_LIMIT = 20_000;
+
+/**
+ * The deterministic provider-side handle of one delivery's card. A pure
+ * function of the delivery identity, so a restart re-derives the same handle
+ * and never creates a second card, while a resend (a new deliveryId) gets its
+ * own. 45 characters, inside the provider's 64-character outTrackId bound; the
+ * prefix mirrors the Legacy qwen-status-/qwen-result- convention.
+ */
+export function managedCardOutTrackId(deliveryId: string): string {
+  return `qwen-managed-${createHash('sha256')
+    .update(deliveryId)
+    .digest('hex')
+    .slice(0, 32)}`;
+}
+
+/**
+ * The operator-authored card template id from the channel config, or undefined
+ * when absent. Trimmed and refused when it carries CR/LF/NUL (the credential
+ * rule), so a copy-paste artifact cannot reach the card API as a template id.
+ */
+export function dingtalkCardTemplateId(
+  config: Readonly<Record<string, unknown>>,
+): string | undefined {
+  const raw = config['cardTemplateId'];
+  if (typeof raw !== 'string' || /[\r\n\0]/.test(raw)) return undefined;
+  return raw.trim() || undefined;
+}
+
 interface InboxItem {
   messageId: string;
   data: string;
 }
+
+/**
+ * The surface one segment renders into. A text decision carries the prior card
+ * progress when the text is an overflow fallback, so the loop persists the
+ * `mode: 'text'` switch; a plain text decision (no card engaged) carries none.
+ */
+type CardDecision =
+  | { render: 'text'; fallback?: ManagedDingtalkCardProgress }
+  | { render: 'card'; outTrackId: string; body: string; create: boolean };
 
 export function dingtalkSettings(
   config: Readonly<Record<string, unknown>>,
@@ -150,6 +213,9 @@ function validCredential(value: unknown): value is string {
 export class ManagedDingtalkAdapter {
   readonly settings: DingtalkSettings;
   readonly policy: ManagedChannelPolicy;
+  /** H5e: DingTalk renders one delivery as one card, edited per segment. */
+  readonly capabilities: ManagedChannelCapabilities = { cards: true };
+  private readonly cardTemplateId?: string;
   private readonly store: ManagedDingtalkStateStore;
   private readonly controlPlane: ManagedChannelControlPlane;
   private readonly deps: ManagedDingtalkAdapterDeps;
@@ -171,6 +237,7 @@ export class ManagedDingtalkAdapter {
 
   constructor(options: ManagedDingtalkAdapterOptions) {
     this.settings = dingtalkSettings(options.config);
+    this.cardTemplateId = dingtalkCardTemplateId(options.config);
     const senderPolicy = resolvePrivatePolicy(options.config);
     if (senderPolicy === 'pairing') {
       // The managed policy shape has no pairing arm; silently coercing it to
@@ -820,6 +887,95 @@ export class ManagedDingtalkAdapter {
     this.persist();
   }
 
+  /**
+   * Decide the surface for one segment (H5e). Card mode engages only when the
+   * adapter declares cards, a template is configured and the deps provide the
+   * card send. The first segment creates the card; later segments edit it with
+   * the accumulated body. An overflow — or a missing progress entry for a
+   * non-first segment, which is what makes eviction safe — falls back to text
+   * rather than re-creating a card the provider may already hold.
+   */
+  private cardDecision(
+    deliveryId: string,
+    segment: { ordinal: number; text: string },
+  ): CardDecision {
+    if (
+      !this.capabilities.cards ||
+      !this.cardTemplateId ||
+      !this.deps.sendCardSegment
+    ) {
+      return { render: 'text' };
+    }
+    const progress = this.cardProgress(deliveryId);
+    if (progress?.mode === 'text') return { render: 'text' };
+    if (segment.ordinal === 0) {
+      if (segment.text.length > MANAGED_CARD_CONTENT_LIMIT) {
+        return { render: 'text', fallback: progress };
+      }
+      return {
+        render: 'card',
+        outTrackId: managedCardOutTrackId(deliveryId),
+        body: segment.text,
+        create: !progress,
+      };
+    }
+    if (progress?.mode === 'card') {
+      const body = progress.body + segment.text;
+      if (body.length > MANAGED_CARD_CONTENT_LIMIT) {
+        return { render: 'text', fallback: progress };
+      }
+      return {
+        render: 'card',
+        outTrackId: progress.outTrackId,
+        body,
+        create: false,
+      };
+    }
+    return { render: 'text' };
+  }
+
+  /** Own-key read of one delivery's card progress, never an inherited member. */
+  private cardProgress(
+    deliveryId: string,
+  ): ManagedDingtalkCardProgress | undefined {
+    const cards = this.state!.cards;
+    return cards && Object.hasOwn(cards, deliveryId)
+      ? cards[deliveryId]
+      : undefined;
+  }
+
+  /**
+   * Record a delivery's card progress as most-recently-touched, evicting the
+   * least-recently-touched entry over the bound (the touchWebhook discipline:
+   * delete, redefine as an own enumerable key, evict the first key). An evicted
+   * in-flight delivery is safe — cardDecision reads its absence as text.
+   */
+  private touchCardProgress(
+    deliveryId: string,
+    progress: ManagedDingtalkCardProgress,
+  ): void {
+    const state = this.state!;
+    const cards = state.cards ?? {};
+    delete cards[deliveryId];
+    Object.defineProperty(cards, deliveryId, {
+      value: progress,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+    const keys = Object.keys(cards);
+    if (keys.length > MANAGED_CARD_PROGRESS_LIMIT) delete cards[keys[0]!];
+    state.cards = cards;
+  }
+
+  private pruneCardProgress(deliveryId: string): void {
+    const cards = this.state!.cards;
+    if (cards && Object.hasOwn(cards, deliveryId)) {
+      delete cards[deliveryId];
+      if (Object.keys(cards).length === 0) this.state!.cards = undefined;
+    }
+  }
+
   private async send(delivery: ManagedClaimedDelivery): Promise<void> {
     const state = this.state!;
     const context =
@@ -856,8 +1012,16 @@ export class ManagedDingtalkAdapter {
     }
     for (const segment of delivery.segments) {
       if (!this.running) return;
-      const messageId = randomUUID();
+      const card = this.cardDecision(delivery.deliveryId, segment);
+      // A card segment's provider handle is the card's outTrackId — the durable
+      // key that resolves it for editing — shared by every segment rendered
+      // into the same card. A text segment keeps a local id, as before.
+      const messageId = card.render === 'card' ? card.outTrackId : randomUUID();
       const previousOutbound = state.outbound;
+      // touchCardProgress mutates the live map in place, so the rollback
+      // snapshot must be a copy — a bare reference would already carry the
+      // new entry when the persist fails.
+      const previousCards = state.cards && { ...state.cards };
       state.outbound = [
         ...state.outbound,
         {
@@ -866,14 +1030,30 @@ export class ManagedDingtalkAdapter {
           messageId,
         },
       ].slice(-MANAGED_OUTBOUND_LIMIT);
+      if (card.render === 'card') {
+        this.touchCardProgress(delivery.deliveryId, {
+          outTrackId: card.outTrackId,
+          body: card.body,
+          mode: 'card',
+        });
+      } else if (card.fallback) {
+        // The overflow switch is persisted so the whole tail stays text after
+        // the first segment that no longer fits, in order, across a restart.
+        this.touchCardProgress(delivery.deliveryId, {
+          ...card.fallback,
+          mode: 'text',
+        });
+      }
       try {
         this.persist();
       } catch (error) {
         // The ledger entry is the double-send guard: without it on disk, a
-        // crash after the webhook send would re-send on restart. Roll back
-        // and abandon this delivery before the side effect; the lease
-        // reconciler settles it unknown (#17173 R10).
+        // crash after the send would re-send on restart. Roll back both the
+        // outbound entry and the card progress and abandon this delivery
+        // before the side effect; the lease reconciler settles it unknown
+        // (#17173 R10).
         state.outbound = previousOutbound;
+        state.cards = previousCards;
         this.log(
           `Managed DingTalk could not persist the outbound ledger for ${delivery.deliveryId}: ${persistErrorText(error)}; the send is abandoned and the lease reconciler settles it.`,
         );
@@ -881,7 +1061,17 @@ export class ManagedDingtalkAdapter {
       }
       let outcome: ManagedReceipt;
       try {
-        await this.deps.sendWebhook(webhook, segment.text);
+        if (card.render === 'card') {
+          await this.deps.sendCardSegment!({
+            outTrackId: card.outTrackId,
+            templateId: this.cardTemplateId!,
+            target: { chatId: context!.senderId!, isGroup: false },
+            body: card.body,
+            create: card.create,
+          });
+        } else {
+          await this.deps.sendWebhook(webhook, segment.text);
+        }
         outcome = {
           outcome: 'accepted',
           ordinal: segment.ordinal,
@@ -895,8 +1085,10 @@ export class ManagedDingtalkAdapter {
         // answered into a dead target — the next frame must re-commit a fresh
         // webhook. Only evict the entry this send actually used; a fresher
         // webhook committed mid-send stays (#17173 round 5). The receipt
-        // persist below carries the eviction to disk.
+        // persist below carries the eviction to disk. A card refusal is the
+        // card API's verdict, not the webhook's, so it never evicts the webhook.
         if (
+          card.render === 'text' &&
           definitive &&
           conversationId &&
           this.cachedWebhook(conversationId) === webhook
@@ -910,6 +1102,13 @@ export class ManagedDingtalkAdapter {
           );
         }
         outcome = definitive ? { outcome: 'rejected' } : { outcome: 'unknown' };
+      }
+      if (outcome.outcome !== 'accepted') {
+        // The delivery is terminal server-side once this receipt lands; no
+        // later segment renders into its card. Drop the progress so the map
+        // does not retain a dead delivery's body. The receipt persist below
+        // carries the prune to disk.
+        this.pruneCardProgress(delivery.deliveryId);
       }
       const entry = state.outbound.find(
         (candidate) =>

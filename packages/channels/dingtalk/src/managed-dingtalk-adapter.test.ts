@@ -23,10 +23,14 @@ import {
 import {
   ManagedDingtalkAdapter,
   dingtalkSettings,
+  dingtalkCardTemplateId,
+  managedCardOutTrackId,
+  MANAGED_CARD_CONTENT_LIMIT,
   type ManagedDingtalkAdapterDeps,
   type DingtalkWebhookFailure,
 } from './managed-dingtalk-adapter.js';
 import {
+  MANAGED_CARD_PROGRESS_LIMIT,
   MANAGED_DINGTALK_PENDING_LIMIT,
   RECENT_LIMIT,
   WEBHOOK_LIMIT,
@@ -2483,5 +2487,457 @@ describe('managed DingTalk persist-failure guards (#17173 R10)', () => {
     expect(lines.some((line) => line.includes('tick failed'))).toBe(false);
     spy.mockRestore();
     await adapter.disconnect();
+  });
+});
+
+describe('managed DingTalk card surfaces (H5e, #17716)', () => {
+  type CardCall = {
+    create: boolean;
+    outTrackId: string;
+    templateId: string;
+    target: { chatId: string; isGroup: boolean };
+    body: string;
+  };
+  type StoreLike = { save: (s: unknown) => void; file: string };
+  const storeOf = (adapter: ManagedDingtalkAdapter): StoreLike =>
+    (adapter as unknown as { store: StoreLike }).store;
+  const fileOf = (adapter: ManagedDingtalkAdapter): string =>
+    storeOf(adapter).file;
+  const stateOf = (
+    adapter: ManagedDingtalkAdapter,
+  ): { outbound: unknown[]; cards?: Record<string, { mode: string }> } =>
+    (
+      adapter as unknown as {
+        state: {
+          outbound: unknown[];
+          cards?: Record<string, { mode: string }>;
+        };
+      }
+    ).state;
+  const persistedOf = (adapter: ManagedDingtalkAdapter) =>
+    JSON.parse(readFileSync(fileOf(adapter), 'utf8')) as {
+      outbound: Array<{ receipt?: { outcome: string } }>;
+      cards?: Record<
+        string,
+        { outTrackId: string; body: string; mode: string }
+      >;
+    };
+
+  function cardSink() {
+    const calls: CardCall[] = [];
+    let behavior: 'ok' | 'definitive' | 'transient' = 'ok';
+    const sendCardSegment: NonNullable<
+      ManagedDingtalkAdapterDeps['sendCardSegment']
+    > = async (input) => {
+      calls.push({
+        create: input.create,
+        outTrackId: input.outTrackId,
+        templateId: input.templateId,
+        target: input.target,
+        body: input.body,
+      });
+      if (behavior !== 'ok') {
+        const error = new Error(
+          behavior === 'definitive' ? 'card refused' : 'card timeout',
+        ) as DingtalkWebhookFailure;
+        error.definitive = behavior === 'definitive';
+        throw error;
+      }
+    };
+    return {
+      sendCardSegment,
+      calls,
+      setBehavior: (value: 'ok' | 'definitive' | 'transient') => {
+        behavior = value;
+      },
+    };
+  }
+
+  const CARD_CONFIG = { ...CONFIG, cardTemplateId: 'tpl-1.schema' };
+
+  function cardDelivery(
+    deliveryId: string,
+    segments: Array<{ ordinal: number; text: string }>,
+  ): ManagedClaimedDelivery {
+    return {
+      deliveryId,
+      replyContext: {
+        conversationId: 'conv-1',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/sendBySession?session=abc',
+        senderId: 'staff-1',
+        robotCode: 'robot-app',
+      },
+      segments: segments.map((segment) => ({
+        ordinal: segment.ordinal,
+        segmentId: `${deliveryId}:${segment.ordinal}`,
+        text: segment.text,
+      })),
+    };
+  }
+
+  async function connectedCardAdapter(
+    cwd = tempCwd(),
+    config: Readonly<Record<string, unknown>> = CARD_CONFIG,
+    hooks: { log?: (line: string) => void } = {},
+  ) {
+    const plane = fakeControlPlane();
+    const fake = fakeDeps(hooks);
+    const card = cardSink();
+    const adapter = new ManagedDingtalkAdapter({
+      name: 'ding-card',
+      cwd,
+      config,
+      controlPlane: plane.controlPlane,
+      deps: { ...fake.deps, sendCardSegment: card.sendCardSegment },
+      pollLoop: false,
+    });
+    await adapter.connect();
+    return { adapter, plane, fake, card };
+  }
+
+  it('A1 renders a single-segment delivery as one card and receipts the outTrackId', async () => {
+    const { adapter, plane, fake, card } = await connectedCardAdapter();
+    plane.enqueue([delivery('d-1', 1)]);
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(0);
+    expect(card.calls).toHaveLength(1);
+    expect(card.calls[0]).toMatchObject({
+      create: true,
+      templateId: 'tpl-1.schema',
+      target: { chatId: 'staff-1', isGroup: false },
+      body: 'segment 0',
+    });
+    expect(card.calls[0]!.outTrackId).toBe(managedCardOutTrackId('d-1'));
+    expect(plane.receipts).toHaveLength(1);
+    expect(plane.receipts[0]!.receipt).toMatchObject({
+      outcome: 'accepted',
+      ordinal: 0,
+      providerMessageId: managedCardOutTrackId('d-1'),
+    });
+    await adapter.disconnect();
+  });
+
+  it('A2/A4 creates once, edits per later segment, and the body concatenates back to the reply', async () => {
+    const { adapter, plane, fake, card } = await connectedCardAdapter();
+    plane.enqueue([delivery('d-1', 3)]);
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(0);
+    expect(card.calls.map((call) => call.create)).toEqual([true, false, false]);
+    expect(card.calls.map((call) => call.body)).toEqual([
+      'segment 0',
+      'segment 0segment 1',
+      'segment 0segment 1segment 2',
+    ]);
+    // The concatenation invariant: the final card body is the joined reply.
+    expect(card.calls[2]!.body).toBe('segment 0segment 1segment 2');
+    expect(
+      plane.receipts.map(
+        (entry) => (entry.receipt as { ordinal: number }).ordinal,
+      ),
+    ).toEqual([0, 1, 2]);
+    expect(
+      plane.receipts.every(
+        (entry) =>
+          (entry.receipt as { providerMessageId: string }).providerMessageId ===
+          managedCardOutTrackId('d-1'),
+      ),
+    ).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('A3 accumulates the body across claims under the same outTrackId', async () => {
+    const { adapter, plane, card } = await connectedCardAdapter();
+    plane.enqueue([cardDelivery('d-1', [{ ordinal: 0, text: 'alpha' }])]);
+    await adapter.tick();
+    plane.enqueue([cardDelivery('d-1', [{ ordinal: 1, text: 'beta' }])]);
+    await adapter.tick();
+    expect(card.calls.map((call) => call.create)).toEqual([true, false]);
+    expect(card.calls[1]!.body).toBe('alphabeta');
+    expect(
+      card.calls.every(
+        (call) => call.outTrackId === managedCardOutTrackId('d-1'),
+      ),
+    ).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('A5 sends an over-bound first segment as text and creates no card', async () => {
+    const { adapter, plane, fake, card } = await connectedCardAdapter();
+    const big = 'x'.repeat(MANAGED_CARD_CONTENT_LIMIT + 1);
+    plane.enqueue([cardDelivery('d-1', [{ ordinal: 0, text: big }])]);
+    await adapter.tick();
+    expect(card.calls).toHaveLength(0);
+    expect(fake.sent.map((entry) => entry.text)).toEqual([big]);
+    expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
+      'accepted',
+    );
+    await adapter.disconnect();
+  });
+
+  it('A6 switches the tail to text on overflow and persists mode text', async () => {
+    const { adapter, plane, fake, card } = await connectedCardAdapter();
+    const seg0 = 'x'.repeat(MANAGED_CARD_CONTENT_LIMIT - 10);
+    const seg1 = 'y'.repeat(20);
+    const seg2 = 'z'.repeat(5);
+    plane.enqueue([
+      cardDelivery('d-1', [
+        { ordinal: 0, text: seg0 },
+        { ordinal: 1, text: seg1 },
+        { ordinal: 2, text: seg2 },
+      ]),
+    ]);
+    await adapter.tick();
+    expect(card.calls).toHaveLength(1);
+    expect(card.calls[0]!.body).toBe(seg0);
+    expect(fake.sent.map((entry) => entry.text)).toEqual([seg1, seg2]);
+    expect(persistedOf(adapter).cards?.['d-1']?.mode).toBe('text');
+    expect(
+      plane.receipts.map(
+        (entry) => (entry.receipt as { ordinal: number }).ordinal,
+      ),
+    ).toEqual([0, 1, 2]);
+    await adapter.disconnect();
+  });
+
+  it('A7 resumes the accumulated body and the same outTrackId after a restart', async () => {
+    const cwd = tempCwd();
+    const first = await connectedCardAdapter(cwd);
+    first.plane.enqueue([cardDelivery('d-1', [{ ordinal: 0, text: 'alpha' }])]);
+    await first.adapter.tick();
+    await first.adapter.disconnect();
+    const second = await connectedCardAdapter(cwd);
+    second.plane.enqueue([cardDelivery('d-1', [{ ordinal: 1, text: 'beta' }])]);
+    await second.adapter.tick();
+    expect(second.card.calls).toHaveLength(1);
+    expect(second.card.calls[0]).toMatchObject({
+      create: false,
+      body: 'alphabeta',
+      outTrackId: managedCardOutTrackId('d-1'),
+    });
+    await second.adapter.disconnect();
+  });
+
+  it('A8 sends the tail as text when the progress was evicted, never re-creating the card', async () => {
+    const { adapter, plane, fake, card } = await connectedCardAdapter();
+    plane.enqueue([cardDelivery('d-1', [{ ordinal: 0, text: 'alpha' }])]);
+    await adapter.tick();
+    // Simulate least-recently-touched eviction of the in-flight progress.
+    delete stateOf(adapter).cards?.['d-1'];
+    plane.enqueue([cardDelivery('d-1', [{ ordinal: 1, text: 'beta' }])]);
+    await adapter.tick();
+    expect(card.calls).toHaveLength(1);
+    expect(fake.sent.map((entry) => entry.text)).toEqual(['beta']);
+    await adapter.disconnect();
+  });
+
+  it('A9 receipts a definitive card refusal rejected and never re-sends', async () => {
+    const { adapter, plane, fake, card } = await connectedCardAdapter();
+    card.setBehavior('definitive');
+    plane.setReceiptError(() =>
+      Object.assign(new Error('answer lost'), { status: 503 }),
+    );
+    plane.enqueue([delivery('d-1', 2)]);
+    await adapter.tick();
+    expect(card.calls).toHaveLength(1);
+    expect(fake.sent).toHaveLength(0);
+    expect(plane.receipts).toHaveLength(0);
+    expect(persistedOf(adapter).outbound[0]!.receipt?.outcome).toBe('rejected');
+    plane.setReceiptError(undefined);
+    await adapter.tick();
+    // The orphan re-drive replays the persisted receipt, never a second card.
+    expect(card.calls).toHaveLength(1);
+    expect(plane.receipts).toHaveLength(1);
+    expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
+      'rejected',
+    );
+    await adapter.disconnect();
+  });
+
+  it('A10 receipts an ambiguous card failure unknown and never re-sends', async () => {
+    const { adapter, plane, card } = await connectedCardAdapter();
+    card.setBehavior('transient');
+    plane.enqueue([delivery('d-1', 2)]);
+    await adapter.tick();
+    expect(card.calls).toHaveLength(1);
+    expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
+      'unknown',
+    );
+    await adapter.tick();
+    expect(card.calls).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
+  it('A11 abandons the delivery when the pre-send persist fails, with no card call', async () => {
+    const { adapter, plane, fake, card } = await connectedCardAdapter();
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      if ((state as { outbound: unknown[] }).outbound.length > 0) {
+        throw new Error('disk full');
+      }
+      realSave(state);
+    });
+    plane.enqueue([delivery('d-1', 1)]);
+    await adapter.tick();
+    expect(card.calls).toHaveLength(0);
+    expect(fake.sent).toHaveLength(0);
+    expect(plane.receipts).toHaveLength(0);
+    expect(stateOf(adapter).outbound).toHaveLength(0);
+    expect(stateOf(adapter).cards).toBeUndefined();
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('A11b rolls back to the prior card map when a pre-send persist fails', async () => {
+    const { adapter, plane, card } = await connectedCardAdapter();
+    plane.enqueue([delivery('d-1', 1)]);
+    await adapter.tick();
+    expect(persistedOf(adapter).cards?.['d-1']).toBeDefined();
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      const s = state as { outbound: Array<{ deliveryId: string }> };
+      if (s.outbound.some((entry) => entry.deliveryId === 'd-2')) {
+        throw new Error('disk full');
+      }
+      realSave(state);
+    });
+    plane.enqueue([delivery('d-2', 1)]);
+    await adapter.tick();
+    // No side effect for d-2; d-1's progress survives the rollback intact.
+    expect(card.calls).toHaveLength(1);
+    expect(stateOf(adapter).cards?.['d-1']).toBeDefined();
+    expect(stateOf(adapter).cards?.['d-2']).toBeUndefined();
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('A12 replays an unproved card segment as unknown after a restart', async () => {
+    const cwd = tempCwd();
+    const first = await connectedCardAdapter(cwd);
+    first.card.setBehavior('transient');
+    first.plane.setReceiptError(() =>
+      Object.assign(new Error('answer lost'), { status: 503 }),
+    );
+    first.plane.enqueue([delivery('d-1', 1)]);
+    await first.adapter.tick();
+    expect(first.card.calls).toHaveLength(1);
+    await first.adapter.disconnect();
+    const second = await connectedCardAdapter(cwd);
+    await second.adapter.tick();
+    expect(second.card.calls).toHaveLength(0);
+    expect(second.plane.receipts).toHaveLength(1);
+    expect(
+      (second.plane.receipts[0]!.receipt as { outcome: string }).outcome,
+    ).toBe('unknown');
+    await second.adapter.disconnect();
+  });
+
+  it('A13 prunes the card progress on a non-accepted receipt', async () => {
+    const { adapter, plane, card } = await connectedCardAdapter();
+    card.setBehavior('definitive');
+    plane.enqueue([delivery('d-1', 1)]);
+    await adapter.tick();
+    expect(persistedOf(adapter).cards?.['d-1']).toBeUndefined();
+    await adapter.disconnect();
+  });
+
+  it('A14 keeps the text path byte-for-byte without a template', async () => {
+    const { adapter, plane, fake, card } = await connectedCardAdapter(
+      tempCwd(),
+      CONFIG,
+    );
+    plane.enqueue([delivery('d-1', 2)]);
+    await adapter.tick();
+    expect(card.calls).toHaveLength(0);
+    expect(fake.sent.map((entry) => entry.text)).toEqual([
+      'segment 0',
+      'segment 1',
+    ]);
+    await adapter.disconnect();
+  });
+
+  it('A15 keeps the text path when the adapter declares cards false', async () => {
+    const { adapter, plane, fake, card } = await connectedCardAdapter();
+    (
+      adapter as unknown as { capabilities: { cards: boolean } }
+    ).capabilities.cards = false;
+    plane.enqueue([delivery('d-1', 1)]);
+    await adapter.tick();
+    expect(card.calls).toHaveLength(0);
+    expect(fake.sent).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
+  it('A16 keeps the text path when the card deps are absent', async () => {
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    const adapter = new ManagedDingtalkAdapter({
+      name: 'ding-card',
+      cwd: tempCwd(),
+      config: CARD_CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: fake.deps,
+      pollLoop: false,
+    });
+    await adapter.connect();
+    plane.enqueue([delivery('d-1', 1)]);
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
+  it('A17 derives a distinct card for a resend delivery', async () => {
+    const { adapter, plane, card } = await connectedCardAdapter();
+    expect(managedCardOutTrackId('d-1')).not.toBe(
+      managedCardOutTrackId('d-1:r1'),
+    );
+    plane.enqueue([cardDelivery('d-1:r1', [{ ordinal: 0, text: 'resend' }])]);
+    await adapter.tick();
+    expect(card.calls[0]!.outTrackId).toBe(managedCardOutTrackId('d-1:r1'));
+    expect(card.calls[0]!.create).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('bounds the card progress map and keeps the state loadable at the cap', async () => {
+    const cwd = tempCwd();
+    const { adapter, plane } = await connectedCardAdapter(cwd);
+    plane.setReceiptError(() =>
+      Object.assign(new Error('answer lost'), { status: 503 }),
+    );
+    plane.enqueue(
+      Array.from({ length: MANAGED_CARD_PROGRESS_LIMIT + 1 }, (_, i) =>
+        delivery(`d-${i}`, 1),
+      ),
+    );
+    await adapter.tick();
+    const persisted = persistedOf(adapter);
+    expect(Object.keys(persisted.cards ?? {}).length).toBeLessThanOrEqual(
+      MANAGED_CARD_PROGRESS_LIMIT,
+    );
+    // Writer and validator share the cap, so a fresh process loads the state.
+    const second = await connectedCardAdapter(cwd);
+    await second.adapter.disconnect();
+    await adapter.disconnect();
+  });
+
+  it('parses the card template id with the credential rule', () => {
+    expect(dingtalkCardTemplateId({ cardTemplateId: '  tpl.schema  ' })).toBe(
+      'tpl.schema',
+    );
+    expect(dingtalkCardTemplateId({})).toBeUndefined();
+    expect(dingtalkCardTemplateId({ cardTemplateId: '' })).toBeUndefined();
+    expect(dingtalkCardTemplateId({ cardTemplateId: 'a\nb' })).toBeUndefined();
+    expect(dingtalkCardTemplateId({ cardTemplateId: 'tpl\n' })).toBeUndefined();
+    expect(dingtalkCardTemplateId({ cardTemplateId: 'a\0b' })).toBeUndefined();
+    expect(dingtalkCardTemplateId({ cardTemplateId: 42 })).toBeUndefined();
+  });
+
+  it('derives a deterministic outTrackId inside the provider bound', () => {
+    const id = managedCardOutTrackId('chin-abc:reply');
+    expect(id).toBe(managedCardOutTrackId('chin-abc:reply'));
+    expect(id.startsWith('qwen-managed-')).toBe(true);
+    expect(id.length).toBeLessThanOrEqual(64);
   });
 });

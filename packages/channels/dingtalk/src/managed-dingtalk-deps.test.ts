@@ -669,3 +669,205 @@ describe('managed DingTalk webhook sends are never truncated (#17529 R2-1)', () 
     }
   });
 });
+
+describe('managed DingTalk card transport (H5e, #17716)', () => {
+  const CREDS = { clientId: 'robot-app', clientSecret: 'secret' };
+  const CARD_INPUT = {
+    outTrackId: 'ot-1',
+    templateId: 'tpl.schema',
+    target: { chatId: 'user-1', isGroup: false },
+    body: 'hello',
+    create: true,
+  };
+  const TOKEN_PREFIX = 'https://oapi.dingtalk.com/gettoken';
+
+  function cardRoutes(
+    overrides: {
+      token?: () => Response;
+      card?: (url: string, init?: RequestInit) => Response;
+    } = {},
+  ) {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({ url, init: init ?? {} });
+      if (url.startsWith(TOKEN_PREFIX)) {
+        return (
+          overrides.token?.() ??
+          jsonResponse({ access_token: 'tok-1', expires_in: 7200 })
+        );
+      }
+      return (
+        overrides.card?.(url, init) ??
+        jsonResponse({ result: { deliverResults: [{ success: true }] } })
+      );
+    });
+    return { fetchMock, calls };
+  }
+
+  const cardCallOf = (
+    calls: Array<{ url: string; init: RequestInit }>,
+    suffix: string,
+  ) => calls.find((call) => call.url.endsWith(suffix))!;
+  const tokenCallsOf = (calls: Array<{ url: string }>) =>
+    calls.filter((call) => call.url.startsWith(TOKEN_PREFIX));
+
+  it('B1 creates and delivers a card to the sender IM_ROBOT space with a token', async () => {
+    const { fetchMock, calls } = cardRoutes();
+    vi.stubGlobal('fetch', fetchMock);
+    const deps = createManagedDingtalkDeps(undefined, CREDS);
+    await deps.sendCardSegment!(CARD_INPUT);
+    const card = cardCallOf(calls, '/v1.0/card/instances/createAndDeliver');
+    expect(card.init.method).toBe('POST');
+    expect(JSON.parse(String(card.init.body))).toMatchObject({
+      cardTemplateId: 'tpl.schema',
+      outTrackId: 'ot-1',
+      openSpaceId: 'dtv1.card//IM_ROBOT.user-1',
+      cardData: { cardParamMap: { content: 'hello' } },
+      imRobotOpenDeliverModel: {
+        spaceType: 'IM_ROBOT',
+        robotCode: 'robot-app',
+      },
+    });
+    expect(
+      (card.init.headers as Record<string, string>)[
+        'x-acs-dingtalk-access-token'
+      ],
+    ).toBe('tok-1');
+    const token = tokenCallsOf(calls)[0]!;
+    expect(token.url).toContain('appkey=robot-app');
+    expect(token.url).toContain('appsecret=secret');
+  });
+
+  it('B2 edits the card with a full-snapshot updateInstance', async () => {
+    const { fetchMock, calls } = cardRoutes();
+    vi.stubGlobal('fetch', fetchMock);
+    const deps = createManagedDingtalkDeps(undefined, CREDS);
+    await deps.sendCardSegment!({ ...CARD_INPUT, create: false });
+    const card = cardCallOf(calls, '/v1.0/card/instances');
+    expect(card.init.method).toBe('PUT');
+    expect(JSON.parse(String(card.init.body))).toMatchObject({
+      outTrackId: 'ot-1',
+      cardData: { cardParamMap: { content: 'hello' } },
+      cardUpdateOptions: { updateCardDataByKey: true },
+    });
+  });
+
+  it('B3 caches the access token across card calls', async () => {
+    const { fetchMock, calls } = cardRoutes();
+    vi.stubGlobal('fetch', fetchMock);
+    const deps = createManagedDingtalkDeps(undefined, CREDS);
+    await deps.sendCardSegment!(CARD_INPUT);
+    await deps.sendCardSegment!({ ...CARD_INPUT, create: false });
+    expect(tokenCallsOf(calls)).toHaveLength(1);
+  });
+
+  it('B4 invalidates the token and retries once on a 401', async () => {
+    let cardHits = 0;
+    const { fetchMock, calls } = cardRoutes({
+      card: () => {
+        cardHits += 1;
+        return cardHits === 1
+          ? jsonResponse({}, 401)
+          : jsonResponse({ result: { deliverResults: [{ success: true }] } });
+      },
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const deps = createManagedDingtalkDeps(undefined, CREDS);
+    await deps.sendCardSegment!(CARD_INPUT);
+    expect(cardHits).toBe(2);
+    expect(tokenCallsOf(calls)).toHaveLength(2);
+  });
+
+  it('B5 classifies a permanent token errcode as definitive', async () => {
+    const { fetchMock } = cardRoutes({
+      token: () => jsonResponse({ errcode: 40001, errmsg: 'invalid appkey' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const deps = createManagedDingtalkDeps(undefined, CREDS);
+    await expect(deps.sendCardSegment!(CARD_INPUT)).rejects.toMatchObject({
+      definitive: true,
+    });
+  });
+
+  it('B6 classifies a transient token errcode as ambiguous', async () => {
+    const { fetchMock } = cardRoutes({
+      token: () => jsonResponse({ errcode: -1, errmsg: 'system busy' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const deps = createManagedDingtalkDeps(undefined, CREDS);
+    await expect(deps.sendCardSegment!(CARD_INPUT)).rejects.toMatchObject({
+      definitive: false,
+    });
+  });
+
+  it('B7 classifies card HTTP statuses by retryability', async () => {
+    for (const [status, definitive] of [
+      [429, false],
+      [500, false],
+      [400, true],
+      [403, true],
+    ] as const) {
+      const { fetchMock } = cardRoutes({
+        card: () => jsonResponse({}, status),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      const deps = createManagedDingtalkDeps(undefined, CREDS);
+      await expect(deps.sendCardSegment!(CARD_INPUT)).rejects.toMatchObject({
+        definitive,
+      });
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('B8 classifies a network failure as ambiguous', async () => {
+    const { fetchMock } = cardRoutes({
+      card: () => {
+        throw new Error('connection reset');
+      },
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const deps = createManagedDingtalkDeps(undefined, CREDS);
+    await expect(deps.sendCardSegment!(CARD_INPUT)).rejects.toMatchObject({
+      definitive: false,
+    });
+  });
+
+  it('B9 routes token and card calls through the proxy dispatcher and destroys it', async () => {
+    const { EnvHttpProxyAgent } = await import('undici');
+    const destroySpy = vi
+      .spyOn(EnvHttpProxyAgent.prototype, 'destroy')
+      .mockResolvedValue(undefined);
+    const { fetchMock } = cardRoutes();
+    vi.stubGlobal('fetch', fetchMock);
+    const deps = createManagedDingtalkDeps('http://proxy.internal:8080', CREDS);
+    await deps.sendCardSegment!(CARD_INPUT);
+    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+    for (const call of fetchMock.mock.calls) {
+      expect((call[1] as { dispatcher?: unknown }).dispatcher).toBeDefined();
+    }
+    expect(destroySpy).toHaveBeenCalledTimes(fetchMock.mock.calls.length);
+    destroySpy.mockRestore();
+  });
+
+  it('B10 classifies a failed deliverResult as definitive', async () => {
+    const { fetchMock } = cardRoutes({
+      card: () =>
+        jsonResponse({
+          result: {
+            deliverResults: [{ success: false, errorMsg: 'no permission' }],
+          },
+        }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const deps = createManagedDingtalkDeps(undefined, CREDS);
+    await expect(deps.sendCardSegment!(CARD_INPUT)).rejects.toMatchObject({
+      definitive: true,
+    });
+  });
+
+  it('provides no card send when no credential is given', () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const deps = createManagedDingtalkDeps();
+    expect(deps.sendCardSegment).toBeUndefined();
+  });
+});
