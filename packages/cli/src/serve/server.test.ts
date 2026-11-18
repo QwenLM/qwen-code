@@ -29183,7 +29183,7 @@ describe('createServeApp', () => {
       port = (server.address() as AddressInfo).port;
       const before = getSseOccupancy();
       const controller = new AbortController();
-      const submit = (requestId: string) =>
+      const submit = (requestId: string, question = 'Why?', resume = false) =>
         fetch(`http://127.0.0.1:${port}/session/session-A/btw/stream`, {
           method: 'POST',
           headers: {
@@ -29192,7 +29192,7 @@ describe('createServeApp', () => {
             Authorization: 'Bearer btw-cap-token',
             'X-Qwen-Client-Id': 'client-1',
           },
-          body: JSON.stringify({ question: 'Why?', requestId }),
+          body: JSON.stringify({ question, requestId, resume }),
           signal: controller.signal,
         });
       try {
@@ -29224,6 +29224,25 @@ describe('createServeApp', () => {
           active: 1,
           scope: 'daemon',
         });
+
+        // Terminal outcomes survive saturation (review R1-5): a duplicate
+        // requestId with a different question is a permanent 409, and an
+        // unknown resume a permanent 410 — neither may degrade into the
+        // retryable 503 that would loop the client forever.
+        const conflict = await submit('request-cap', 'Different?');
+        expect(conflict.status).toBe(409);
+        expect(((await conflict.json()) as { code: string }).code).toBe(
+          'btw_request_conflict',
+        );
+        const expired = await submit('request-unknown', 'Why?', true);
+        expect(expired.status).toBe(410);
+        expect(((await expired.json()) as { code: string }).code).toBe(
+          'btw_expired',
+        );
+        // Cheap-refusal invariant: none of the refused attempts started the
+        // bridge side request (which holds generation alive independently
+        // of HTTP) — only the first, admitted stream did.
+        expect(bridge.generateSessionBtwStream).toHaveBeenCalledTimes(1);
       } finally {
         finish();
         controller.abort();
@@ -51661,5 +51680,146 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       'local-control': null,
       'remote-access': null,
     });
+  }, 20_000);
+
+  it('deep health reports the arriving listener pair on pairing listeners (review R1-6)', async () => {
+    // A probe on the pairing listener is governed by that listener's 51
+    // clamp, not the aggregate: its listenerConnectedClients/Max pair must
+    // read the LAN-only occupancy and the LAN clamp while the aggregate
+    // pair stays daemon-wide. The fixture keeps the two readings apart
+    // (2 LAN + 1 primary streams; 51 vs 204) so an aggregate-only report
+    // cannot pass.
+    const lanInterfaces = await import('./local-control/lan-interfaces.js');
+    const candidate = { interfaceName: 'en0', address: '127.0.0.1' };
+    const selectSpy = vi
+      .spyOn(lanInterfaces, 'selectLanAddress')
+      .mockReturnValue(candidate);
+    const listSpy = vi
+      .spyOn(lanInterfaces, 'listLanCandidates')
+      .mockReturnValue([candidate]);
+    const { sleepInhibitor } = await import('@qwen-code/qwen-code-core');
+    const sleepSpy = vi
+      .spyOn(sleepInhibitor, 'acquire')
+      .mockReturnValue({ release: vi.fn() } as never);
+    let service: ReturnType<RunHandle['getLocalControl']> | undefined;
+    try {
+      handle = await runQwenServe(
+        { ...baseOpts, port: 0, maxConnections: 256 },
+        { bridge: parkedBridge() },
+      );
+      await handle.runtimeReady;
+      service = handle.getLocalControl();
+      expect(service).toBeDefined();
+      const lanStatus = await service!.enable();
+      expect(lanStatus.active).toBe(true);
+      const pairingSecret = decodeURIComponent(
+        new URL(lanStatus.url!).hash.match(/token=([^&]+)/)![1]!,
+      );
+      const lanBase = `http://${lanStatus.address}:${lanStatus.port}`;
+      const lanAuth = { Authorization: `Bearer ${pairingSecret}` };
+      const primaryPort = (handle.server.address() as AddressInfo).port;
+      const before = getSseOccupancy();
+
+      const lanStreams: Response[] = [];
+      for (let i = 0; i < 2; i++) {
+        const res = await fetch(`${lanBase}/session/sess-hp-lan-${i}/events`, {
+          headers: lanAuth,
+        });
+        expect(res.status).toBe(200);
+        lanStreams.push(res);
+      }
+      const primaryStream = await fetch(
+        `http://127.0.0.1:${primaryPort}/session/sess-hp-primary/events`,
+      );
+      expect(primaryStream.status).toBe(200);
+
+      type DeepProbe = {
+        connectedClients: number;
+        connectedClientsMax: number | null;
+        listenerConnectedClients: number;
+        listenerConnectedClientsMax: number | null;
+      };
+      const deepOf = async (base: string, headers?: Record<string, string>) =>
+        (await (
+          await fetch(`${base}/health?deep=1`, { headers })
+        ).json()) as DeepProbe;
+      const primaryDeep = await deepOf(`http://127.0.0.1:${primaryPort}`);
+      const lanDeep = await deepOf(lanBase, lanAuth);
+      const total = before.total + 3;
+      expect(primaryDeep.connectedClients).toBe(total);
+      expect(primaryDeep.connectedClientsMax).toBe(204);
+      expect(lanDeep.connectedClients).toBe(total);
+      expect(lanDeep.connectedClientsMax).toBe(204);
+      expect(primaryDeep.listenerConnectedClients).toBe(
+        before.byListener.primary + 1,
+      );
+      expect(primaryDeep.listenerConnectedClientsMax).toBe(204);
+      expect(lanDeep.listenerConnectedClients).toBe(
+        before.byListener['local-control'] + 2,
+      );
+      expect(lanDeep.listenerConnectedClientsMax).toBe(51);
+
+      for (const stream of lanStreams) await stream.body!.cancel();
+      await primaryStream.body!.cancel();
+      await vi.waitFor(
+        () => {
+          expect(getSseOccupancy().total).toBe(before.total);
+        },
+        { timeout: 5_000 },
+      );
+    } finally {
+      await service?.disable().catch(() => {});
+      selectSpy.mockRestore();
+      listSpy.mockRestore();
+      sleepSpy.mockRestore();
+    }
+  }, 30_000);
+
+  it('attributes HTTP saturation refusals in the access log (review R1-7)', async () => {
+    // The shared gate must mark the {error, code} branch so the access log
+    // records WHY the 503 happened, not just the status. Without the mark
+    // the line carries no code and the refusal is unattributable.
+    const daemonLog = fakeDaemonLog();
+    // The host allowlist reads getPort lazily; it must see the real bound
+    // port, not baseOpts.port, or every request 403s at the Host gate.
+    let port = 0;
+    const app = createServeApp(
+      { ...baseOpts, maxConnections: 10, maxSseConnections: 1 },
+      () => port,
+      { bridge: parkedBridge(), daemonLog },
+    );
+    const server = createServer(app);
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    port = (server.address() as AddressInfo).port;
+    try {
+      const first = await fetch(
+        `http://127.0.0.1:${port}/session/sess-log/events`,
+      );
+      expect(first.status).toBe(200);
+      const refused = await fetch(
+        `http://127.0.0.1:${port}/session/sess-log-overflow/events`,
+      );
+      expect(refused.status).toBe(503);
+      await vi.waitFor(
+        () => {
+          expect(daemonLog.warn).toHaveBeenCalledWith(
+            'request completed',
+            expect.objectContaining({
+              route: 'GET /session/sess-log-overflow/events',
+              status: 503,
+              code: 'sse_connection_limit_exceeded',
+              reason: 'daemon',
+            }),
+          );
+        },
+        { timeout: 5_000 },
+      );
+      await first.body!.cancel();
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   }, 20_000);
 });

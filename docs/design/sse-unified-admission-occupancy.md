@@ -50,16 +50,25 @@ Two gaps follow:
 
 ## Goals
 
-- One occupancy accounting shared by every surface above, broken down by
-  surface and by listener, surfaced together in daemon status and deep health.
+- One occupancy accounting shared by every surface above. The by-surface /
+  by-listener breakdown lives on `/daemon/status`
+  (`runtime.transport.streamOccupancy`); deep health carries the aggregate
+  pair (`connectedClients` / `connectedClientsMax`) plus the arriving
+  listener's own pair (`listenerConnectedClients` /
+  `listenerConnectedClientsMax`), not the full breakdown.
 - The existing `--max-sse-connections` admission cap gates **all** these
   surfaces with the same explicit `503 + Retry-After: 5`
-  (`sse_connection_limit_exceeded`) refusal the REST stream uses.
+  (`sse_connection_limit_exceeded`) refusal the REST stream uses (ACP
+  WebSocket upgrades get a body-less 503 before the upgrade).
 - Per-listener admission clamps so the pairing listeners get the same 80%
   headroom guarantee as the primary listener.
 - Additive wire changes only; existing fields keep their names. The REST
-  stream's observable behavior (rejection body, log lines, counting timing)
-  is unchanged.
+  stream's rejection body, log lines, and counting timing are preserved
+  EXCEPT for the deliberate changes this design documents: the additive
+  `scope` (and listener-scoped `listener`) refusal fields, the new
+  pairing-listener clamp (a REST stream arriving on a pairing listener is
+  refused at that listener's 51-stream clamp), and the `connectedClients`
+  re-scope from REST-only to the aggregate.
 
 ## Non-goals
 
@@ -157,16 +166,16 @@ logged through the existing upgrade-rejection log line with the cap details
 
 ### Surface wiring
 
-| Surface                  | Gate placement                                                                                                       | Count / release                                                                                                    |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `restEvents`             | existing early check, replaced by the shared gate                                                                    | existing late count site with the `res` close-hook/destroyed backstop; explicit release in `finalize` (idempotent) |
-| `agentEvents`            | after runtime/session-id validation, before 200 headers                                                              | close-hooked release                                                                                               |
-| `generation` (session)   | after bridge capability check, before 200 headers                                                                    | close-hooked release                                                                                               |
-| `generation` (workspace) | same                                                                                                                 | close-hooked release                                                                                               |
-| `artifactLibrary`        | before `new ArtifactLibraryStream(res)` at both call sites (artifact-library read route, `streamBtwSnapshots`)       | close-hooked release                                                                                               |
-| `hostedEvents`           | after identity/epoch/cursor validation, before headers                                                               | close-hooked release                                                                                               |
-| `acpSse`                 | in `handleAcpGet` after connection validation, before either stream branch                                           | close-hooked release                                                                                               |
-| `acpWs`                  | before `wss.handleUpgrade` on the ACP path (extra WS routes keep their own gates); refusal written on the raw socket | counted in the upgrade callback, released in the existing `ws.on('close')`                                         |
+| Surface                  | Gate placement                                                                                                                                                     | Count / release                                                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `restEvents`             | existing early check, replaced by the shared gate                                                                                                                  | existing late count site with the `res` close-hook/destroyed backstop; explicit release in `finalize` (idempotent) |
+| `agentEvents`            | after runtime/session-id validation, before 200 headers                                                                                                            | close-hooked release                                                                                               |
+| `generation` (session)   | after bridge capability check, before 200 headers                                                                                                                  | close-hooked release                                                                                               |
+| `generation` (workspace) | same                                                                                                                                                               | close-hooked release                                                                                               |
+| `artifactLibrary`        | before `new ArtifactLibraryStream(res)` at the read route; for the BTW stream, terminal 409/410 precheck first, then the gate immediately before `btwStreams.open` | close-hooked release                                                                                               |
+| `hostedEvents`           | after identity/epoch/cursor validation, before headers                                                                                                             | close-hooked release                                                                                               |
+| `acpSse`                 | in `handleAcpGet` after connection validation AND the session-ownership 403 (authorization keeps its terminal code at saturation), before either stream branch     | close-hooked release                                                                                               |
+| `acpWs`                  | before `wss.handleUpgrade` on the ACP path (extra WS routes keep their own gates); refusal written on the raw socket                                               | counted in the upgrade callback, released in the existing `ws.on('close')`                                         |
 
 Caps flow from `createServeApp` (`resolveSseAdmissionCaps(opts)`) through each
 route registrar's deps. Every deps entry is optional: direct embeds and unit
@@ -187,7 +196,15 @@ fixtures that omit caps keep today's unlimited behavior.
   probe must see ACP/generation saturation against the same cap that refuses
   it. `connectedClients` was introduced by #17502 with the REST-only scope;
   this design widens it deliberately and documents the change.
-  `connectedClientsMax` stays the aggregate cap.
+  `connectedClientsMax` stays the aggregate cap. Additive
+  `listenerConnectedClients` / `listenerConnectedClientsMax` report the
+  arriving listener's own occupancy and clamp (resolved through the same
+  `caps.byListener` the gate uses), so a probe on a pairing listener reads
+  the pair that governs its requests instead of the aggregate (review R1-6).
+- Every HTTP saturation refusal calls `markAccessLogError` with
+  `sse_connection_limit_exceeded` so the access log attributes the branch
+  (the `{error, code}` convention); the ACP WS refusal writes the raw socket
+  pre-upgrade and has no access-log line (review R1-7).
 - `run-qwen-serve.ts` bootstrap status gains `maxSseConnectionsPerListener`
   next to the existing `maxSseConnections`.
 - SDK mirror (`sdk-typescript/src/daemon/types.ts`): additive optional
@@ -201,8 +218,12 @@ Same-PR updates everywhere the "REST events only" scope claim appears:
 `docs/users/qwen-serve.md` (flag table, threat-model scope note),
 `docs/developers/daemon/17-configuration.md`,
 `docs/developers/daemon/20-quickstart-operations.md`,
-`docs/developers/qwen-serve-protocol.md` (status example). The reaper's
-REST-only scope stays documented as-is.
+`docs/developers/qwen-serve-protocol.md` (status and deep-health examples),
+the public `ServeOptions.maxSseConnections` JSDoc and the
+`--max-sse-connections` `--help` copy, and the two earlier design records
+(`daemon-global-deep-health.md`, `daemon-idle-detection-api.md` — updated
+rows plus superseded-by notes). The reaper's REST-only scope stays
+documented as-is.
 
 ## Design decisions and rationale
 
@@ -328,9 +349,18 @@ REST-only scope stays documented as-is.
   with the listener-scoped body while other listeners still admit.
 - `daemon/status` reports `streamOccupancy` and `maxSseConnectionsPerListener`;
   deep health's `connectedClients` equals `streamOccupancy.total` and pairs
-  with `connectedClientsMax`.
-- The REST stream's existing rejection body, log lines, and counting timing
-  are unchanged; all #17502 test pins stay green without retargeting.
+  with `connectedClientsMax`, and the arriving listener's
+  `listenerConnectedClients` / `listenerConnectedClientsMax` pair matches the
+  clamp that governs it.
+- The REST stream's rejection body, log lines, and counting timing are
+  preserved except the documented additive `scope`/`listener` fields, the
+  pairing-listener clamp, and the `connectedClients` re-scope; all #17502
+  test pins stay green without retargeting.
+- Terminal authorization/outcomes keep their status codes at saturation:
+  a foreign ACP session id still gets 403, and BTW duplicate/expired requests
+  still get 409/410 (the gate decides resource admission only).
+- Every HTTP saturation refusal is attributed in the access log with
+  `code: sse_connection_limit_exceeded`.
 - Disabled sentinels and explicit overrides behave exactly as the existing
   `sseMaxConnections` contract, extended per listener.
 

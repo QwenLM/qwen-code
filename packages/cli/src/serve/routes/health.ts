@@ -7,10 +7,12 @@
 import { gradeActiveWorkCoverage } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { Application, Request, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { sseMaxConnections } from '../daemon-status.js';
+import { sseMaxConnections, type SseAdmissionCaps } from '../daemon-status.js';
 import { isDeepHealthQuery } from '../health-query.js';
+import { listenerIdentityOf } from '../local-control/listener-identity.js';
 import { isLoopbackBind } from '../loopback-binds.js';
 import type { RateLimiterInstance } from '../rate-limit.js';
+import type { StreamOccupancySnapshot } from '../sse-occupancy.js';
 import type { ServeOptions } from '../types.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 
@@ -21,11 +23,13 @@ interface CreateHealthRoutesDeps {
   >;
   workspaceRegistry: WorkspaceRegistry;
   /**
-   * Aggregate long-lived stream occupancy (every surface, issue #17554) —
-   * the same scope as the admission cap paired below, so a probe sees
-   * ACP/generation saturation against the cap that refuses it.
+   * Long-lived stream occupancy (issue #17554). The aggregate total pairs
+   * with the daemon-wide cap; the arriving listener's share pairs with its
+   * own clamp, so a probe on a pairing listener reads the pair that governs
+   * the request that fetched it (review R1-6).
    */
-  getConnectedClients: () => number;
+  getStreamOccupancy: () => StreamOccupancySnapshot;
+  sseAdmissionCaps?: SseAdmissionCaps;
   getRateLimiter: () => RateLimiterInstance | undefined;
 }
 
@@ -35,7 +39,13 @@ interface HealthRoutes {
 }
 
 export function createHealthRoutes(deps: CreateHealthRoutesDeps): HealthRoutes {
-  const { opts, workspaceRegistry, getConnectedClients, getRateLimiter } = deps;
+  const {
+    opts,
+    workspaceRegistry,
+    getStreamOccupancy,
+    sseAdmissionCaps,
+    getRateLimiter,
+  } = deps;
 
   // `/health` is exempted from `bearerAuth` ONLY on loopback binds —
   // the canonical liveness-probe case (k8s/Compose probes don't
@@ -125,6 +135,12 @@ export function createHealthRoutes(deps: CreateHealthRoutesDeps): HealthRoutes {
 
       const now = Date.now();
       const rateLimiter = getRateLimiter();
+      const occupancy = getStreamOccupancy();
+      const aggregateCap = sseMaxConnections(
+        opts.maxConnections,
+        opts.maxSseConnections,
+      );
+      const listener = listenerIdentityOf(req).kind;
       res.status(200).json({
         status: 'ok',
         workspaceCount: runtimes.length,
@@ -142,13 +158,17 @@ export function createHealthRoutes(deps: CreateHealthRoutesDeps): HealthRoutes {
         // its own freshness floor. `oldestReportAt` is the oldest *covered*
         // report, so this never disagrees with the grade above.
         activeWorkStaleMs: oldestReportAt === null ? 0 : now - oldestReportAt,
-        connectedClients: getConnectedClients(),
+        connectedClients: occupancy.total,
         // Effective SSE admission cap paired with the live occupancy above
         // so a probe can see saturation approaching (null = unlimited).
-        connectedClientsMax: sseMaxConnections(
-          opts.maxConnections,
-          opts.maxSseConnections,
-        ),
+        connectedClientsMax: aggregateCap,
+        // The arriving listener's own pair (review R1-6): the pairing
+        // listeners refuse at their 51-stream clamp, not at the aggregate,
+        // so a probe there must read the pair that governs its requests.
+        listenerConnectedClients: occupancy.byListener[listener],
+        listenerConnectedClientsMax: sseAdmissionCaps
+          ? (sseAdmissionCaps.byListener[listener] ?? null)
+          : aggregateCap,
         channelAlive,
         lastActivityAt:
           lastActivity !== null ? new Date(lastActivity).toISOString() : null,

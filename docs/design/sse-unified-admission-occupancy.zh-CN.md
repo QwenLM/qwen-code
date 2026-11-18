@@ -44,15 +44,22 @@ Risk & Scope 所述，cap、回收器与占用计数**仅覆盖
 
 ## 目标
 
-- 上表所有表面共享同一占用核算，按表面与按 listener 分解，一并上报到
-  daemon status 与 deep health。
+- 上表所有表面共享同一占用核算。按表面 / 按 listener 的分解位于
+  `/daemon/status`（`runtime.transport.streamOccupancy`）；deep health
+  携带聚合对（`connectedClients` / `connectedClientsMax`）与到达 listener
+  自身的对（`listenerConnectedClients` / `listenerConnectedClientsMax`），
+  而非完整分解。
 - 既有 `--max-sse-connections` 准入 cap 约束**所有**这些表面，拒绝形态与
   REST 流相同：显式 `503 + Retry-After: 5`
-  （`sse_connection_limit_exceeded`）。
+  （`sse_connection_limit_exceeded`）（ACP WebSocket upgrade 在升级前
+  得到无 body 的 503）。
 - 按 listener 的准入钳制，使配对 listener 获得与主 listener 相同的 80%
   余量保证。
-- wire 变更全部 additive；既有字段保留原名。REST 流的可观测行为（拒绝
-  正文、日志行、计数时机）不变。
+- wire 变更全部 additive；既有字段保留原名。REST 流的拒绝正文、日志行、
+  计数时机保留，**但排除本设计明确文档化的变更**：additive 的 `scope`
+  （listener 范围另加 `listener`）拒绝字段、新的配对 listener 钳制
+  （到达配对 listener 的 REST 流在该 listener 的 51 流钳制处被拒），以及
+  `connectedClients` 从仅 REST 改义为聚合。
 
 ## 非目标
 
@@ -140,16 +147,16 @@ destroy，经既有 upgrade-rejection 日志行记录 cap 细节
 
 ### 表面接线
 
-| 表面                   | 门位置                                                                                           | 计数 / 释放                                                                       |
-| ---------------------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- |
-| `restEvents`           | 既有早检查替换为共享门                                                                           | 既有晚计数点，带 `res` close 挂钩/destroyed 兜底；`finalize` 显式 release（幂等） |
-| `agentEvents`          | runtime/session-id 校验后、200 头前                                                              | close 挂钩释放                                                                    |
-| `generation`（会话）   | bridge 能力检查后、200 头前                                                                      | close 挂钩释放                                                                    |
-| `generation`（工作区） | 同上                                                                                             | close 挂钩释放                                                                    |
-| `artifactLibrary`      | 两处调用点（artifact-library 读路由、`streamBtwSnapshots`）`new ArtifactLibraryStream(res)` 之前 | close 挂钩释放                                                                    |
-| `hostedEvents`         | identity/epoch/cursor 校验后、头前                                                               | close 挂钩释放                                                                    |
-| `acpSse`               | `handleAcpGet` 连接校验后、两个流分支之前                                                        | close 挂钩释放                                                                    |
-| `acpWs`                | ACP 路径 `wss.handleUpgrade` 之前（extra WS 路由保留各自的门）；拒绝写在裸 socket 上             | upgrade 回调内计数，既有 `ws.on('close')` 内释放                                  |
+| 表面                   | 门位置                                                                                                | 计数 / 释放                                                                       |
+| ---------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `restEvents`           | 既有早检查替换为共享门                                                                                | 既有晚计数点，带 `res` close 挂钩/destroyed 兜底；`finalize` 显式 release（幂等） |
+| `agentEvents`          | runtime/session-id 校验后、200 头前                                                                   | close 挂钩释放                                                                    |
+| `generation`（会话）   | bridge 能力检查后、200 头前                                                                           | close 挂钩释放                                                                    |
+| `generation`（工作区） | 同上                                                                                                  | close 挂钩释放                                                                    |
+| `artifactLibrary`      | 读路由在 `new ArtifactLibraryStream(res)` 之前；BTW 流先判终态 409/410，门紧接 `btwStreams.open` 之前 | close 挂钩释放                                                                    |
+| `hostedEvents`         | identity/epoch/cursor 校验后、头前                                                                    | close 挂钩释放                                                                    |
+| `acpSse`               | `handleAcpGet` 连接校验与会话归属 403 之后（饱和时鉴权保留终态码）、两个流分支之前                    | close 挂钩释放                                                                    |
+| `acpWs`                | ACP 路径 `wss.handleUpgrade` 之前（extra WS 路由保留各自的门）；拒绝写在裸 socket 上                  | upgrade 回调内计数，既有 `ws.on('close')` 内释放                                  |
 
 caps 由 `createServeApp`（`resolveSseAdmissionCaps(opts)`）经各路由注册器
 deps 下发。每个 deps 项均可选：省略 caps 的直嵌与单元夹具保持今天的不限
@@ -169,7 +176,14 @@ deps 下发。每个 deps 项均可选：省略 caps 的直嵌与单元夹具保
   `streamOccupancy.total`，使占用/cap 对共享同一口径——探针必须能对着
   拒绝它的那个 cap 看到 ACP/生成流的饱和。`connectedClients` 由 #17502
   引入、当时口径仅 REST；本设计有意扩展并文档化该变化。
-  `connectedClientsMax` 仍为聚合 cap。
+  `connectedClientsMax` 仍为聚合 cap。additive 的
+  `listenerConnectedClients` / `listenerConnectedClientsMax` 上报到达
+  listener 自身的占用与钳制（经门禁所用的同一 `caps.byListener` 解析），
+  使配对 listener 上的探针读到管辖其请求的那一对，而非聚合（评审 R1-6）。
+- 每个 HTTP 饱和拒绝调用 `markAccessLogError` 记录
+  `sse_connection_limit_exceeded`，使访问日志归因该分支（`{error, code}`
+  约定）；ACP WS 拒绝在 upgrade 前写裸 socket，本就没有访问日志行
+  （评审 R1-7）。
 - `run-qwen-serve.ts` bootstrap status 在既有 `maxSseConnections` 旁新增
   `maxSseConnectionsPerListener`。
 - SDK 镜像（`sdk-typescript/src/daemon/types.ts`）：additive optional 的
@@ -183,7 +197,10 @@ deps 下发。每个 deps 项均可选：省略 caps 的直嵌与单元夹具保
 `docs/users/qwen-serve.md`（flag 表、威胁模型范围注记）、
 `docs/developers/daemon/17-configuration.md`、
 `docs/developers/daemon/20-quickstart-operations.md`、
-`docs/developers/qwen-serve-protocol.md`（status 示例）。回收器仅 REST 的
+`docs/developers/qwen-serve-protocol.md`（status 与 deep-health 示例）、公开的
+`ServeOptions.maxSseConnections` JSDoc 与 `--max-sse-connections`
+`--help` 文案，以及两篇早期设计记录（`daemon-global-deep-health.md`、
+`daemon-idle-detection-api.md`——更新行 + 取代注记）。回收器仅 REST 的
 范围按原样保留文档化。
 
 ## 设计决策与理由
@@ -289,9 +306,16 @@ deps 下发。每个 deps 项均可选：省略 caps 的直嵌与单元夹具保
   其他 listener 仍准入。
 - `daemon/status` 上报 `streamOccupancy` 与
   `maxSseConnectionsPerListener`；deep health 的 `connectedClients` 等于
-  `streamOccupancy.total` 并与 `connectedClientsMax` 配对。
-- REST 流既有拒绝正文、日志行、计数时机不变；全部 #17502 测试钉不改靶
-  保持绿。
+  `streamOccupancy.total` 并与 `connectedClientsMax` 配对，且到达 listener
+  的 `listenerConnectedClients` / `listenerConnectedClientsMax` 对与管辖
+  它的钳制一致。
+- REST 流拒绝正文、日志行、计数时机保留，但排除文档化的 additive
+  `scope`/`listener` 字段、配对 listener 钳制与 `connectedClients` 改义；
+  全部 #17502 测试钉不改靶保持绿。
+- 终态鉴权/结果在饱和时保留其状态码：他人 ACP session id 仍得 403，
+  BTW 重复/过期请求仍得 409/410（门只决定资源准入）。
+- 每个 HTTP 饱和拒绝在访问日志中以
+  `code: sse_connection_limit_exceeded` 归因。
 - 禁用哨兵与显式覆盖的行为与既有 `sseMaxConnections` 契约完全一致，
   按 listener 扩展。
 
