@@ -108,7 +108,7 @@ function createStreamClient(
   let stopped = false;
   let everConnected = false;
   let loggedReconnectFailure = false;
-  let inFlight = false;
+  let pending: Promise<void> | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
   const scheduleReconnect = () => {
     // Before the first successful connect a failure must surface to the
@@ -119,7 +119,7 @@ function createStreamClient(
       if (stopped) return;
       // An attempt still running owns the socket; try again later rather than
       // dropping this reconnect on the floor.
-      if (inFlight) {
+      if (pending !== undefined) {
         scheduleReconnect();
         return;
       }
@@ -195,11 +195,14 @@ function createStreamClient(
         );
     });
   const guardedConnect = (): Promise<void> => {
-    if (stopped || inFlight) return Promise.resolve();
-    inFlight = true;
-    return attempt().then(
+    if (stopped) return Promise.resolve();
+    // A concurrent caller joins the running attempt and settles with its real
+    // outcome. Resolving early would report a healthy start while the only
+    // socket is still opening — and the attempt it joined may yet fail.
+    if (pending !== undefined) return pending;
+    pending = attempt().then(
       (result) => {
-        inFlight = false;
+        pending = undefined;
         everConnected = true;
         loggedReconnectFailure = false;
         // A stale retry armed by an earlier failure must not fire after the
@@ -215,7 +218,7 @@ function createStreamClient(
         return result;
       },
       (error) => {
-        inFlight = false;
+        pending = undefined;
         // The first failure must surface (it tells the operator the credential
         // or network is wrong), but never rethrow the SDK's error object: an
         // AxiosError serializes its config.url, which carries the gettoken
@@ -240,6 +243,7 @@ function createStreamClient(
         return undefined;
       },
     );
+    return pending;
   };
   return {
     connect: () => guardedConnect(),

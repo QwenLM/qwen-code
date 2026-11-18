@@ -183,6 +183,42 @@ describe('managed DingTalk reconnect arbitration (#17173 R11)', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('a concurrent connect joins the running attempt instead of reporting a fake success', async () => {
+    const { createStreamClient } = createManagedDingtalkDeps();
+    const stream = createStreamClient(SETTINGS, () => true);
+    const first = stream.connect();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sockets()).toBe(1); // built, never opened
+
+    let settled = false;
+    const second = stream.connect().then(
+      () => {
+        settled = true;
+        return 'resolved';
+      },
+      () => {
+        settled = true;
+        return 'rejected';
+      },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    // The only socket is still opening: the second caller must not be told
+    // "connected", and must not open a socket of its own.
+    expect(settled).toBe(false);
+    expect(sockets()).toBe(1);
+
+    latest().emit('close'); // the attempt fails before the socket opens
+    await expect(first).rejects.toThrow(
+      /check the clientId\/clientSecret and network/,
+    );
+    // Joining means sharing the outcome, not just the socket count.
+    await expect(second).resolves.toBe('rejected');
+    expect(sockets()).toBe(1);
+
+    stream.disconnect();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('a first connect that never opens surfaces and arms no retry', async () => {
     const { createStreamClient } = createManagedDingtalkDeps();
     const stream = createStreamClient(SETTINGS, () => true);
