@@ -10,7 +10,8 @@ import { execFile } from 'node:child_process';
 import {
   createServer,
   request as httpRequest,
-  type ServerResponse,
+  ServerResponse,
+  type Server,
 } from 'node:http';
 import https from 'node:https';
 import type { AddressInfo } from 'node:net';
@@ -42174,6 +42175,130 @@ describe('runQwenServe', () => {
   });
 });
 
+// ── Shared SSE reaper fixtures (issue #17554, follow-up 4) ──────────
+// The reaper suites used to paste near-identical write spies, deadline
+// read loops, and slot-release polls; these helpers are the single copy.
+
+type SseWriteCallback = (error?: Error | null) => void;
+type SseWriteFn = (
+  this: ServerResponse,
+  chunk: string | Uint8Array,
+  encodingOrCb?: BufferEncoding | SseWriteCallback,
+  cb?: SseWriteCallback,
+) => boolean;
+const originalSseWrite = ServerResponse.prototype
+  .write as unknown as SseWriteFn;
+
+/**
+ * Forced-stall write spy: the first write containing `stallMarker` reports
+ * backpressure and is swallowed (the kernel buffer stays empty, so no
+ * natural drain can clear the stall stamp); every later write except the
+ * terminal eviction frame keeps returning false. The eviction frame either
+ * passes through to the real write ('pass', so a reading client sees it) or
+ * throws EPIPE ('throw', driving the immediate-RST branch).
+ */
+function spyOnForcedSseStall(opts: {
+  stallMarker: string;
+  evicted?: 'pass' | 'throw';
+}) {
+  const evicted = opts.evicted ?? 'pass';
+  const writeSpy = vi.spyOn(ServerResponse.prototype, 'write');
+  let stalled = false;
+  writeSpy.mockImplementation(function (
+    this: ServerResponse,
+    chunk: string | Uint8Array,
+    encodingOrCb?: BufferEncoding | SseWriteCallback,
+    cb?: SseWriteCallback,
+  ): boolean {
+    const text = typeof chunk === 'string' ? chunk : chunk.toString();
+    if (!stalled && text.includes(opts.stallMarker)) {
+      stalled = true;
+      return false;
+    }
+    if (stalled && !text.includes('event: client_evicted')) {
+      return false;
+    }
+    if (stalled && evicted === 'throw') {
+      throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    }
+    return typeof encodingOrCb === 'function'
+      ? originalSseWrite.call(this, chunk, encodingOrCb)
+      : originalSseWrite.call(this, chunk, encodingOrCb, cb);
+  });
+  return { writeSpy, isStalled: () => stalled };
+}
+
+/**
+ * Deadline-protected SSE reader: reads until every marker appears in the
+ * accumulated text, the stream ends, or the deadline passes. Keeps ONE
+ * pending read across wake ticks — a timed-out race reuses the same read
+ * next iteration instead of abandoning it, so no frame is swallowed by a
+ * dangling read promise.
+ */
+async function readSseUntilMarker(
+  body: ReadableStream<Uint8Array>,
+  markers: string[],
+  deadlineMs: number,
+): Promise<{ sawMarker: boolean; ended: boolean; text: string }> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const deadline = Date.now() + deadlineMs;
+  const WAKE = Symbol('wake');
+  let pending: Promise<{ value?: Uint8Array; done: boolean }> | undefined;
+  let text = '';
+  let sawMarker = false;
+  let ended = false;
+  try {
+    while (Date.now() < deadline && !sawMarker && !ended) {
+      pending ??= reader.read();
+      const chunk = await Promise.race([
+        pending,
+        new Promise<typeof WAKE>((r) => setTimeout(() => r(WAKE), 200)),
+      ]);
+      if (chunk === WAKE) continue;
+      pending = undefined;
+      if (chunk.done) {
+        ended = true;
+        break;
+      }
+      text += decoder.decode(chunk.value, { stream: true });
+      if (markers.every((marker) => text.includes(marker))) sawMarker = true;
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return { sawMarker, ended, text };
+}
+
+/**
+ * Poll until the shared SSE slot count returns to baseline and, when a
+ * server is given, all its connections are gone. A leaked slot never
+ * converges; the final expectations fail with the actual counts.
+ */
+async function expectSseSlotReleased(
+  beforeActive: number,
+  server?: Server,
+): Promise<void> {
+  const connectionCount = async () =>
+    server
+      ? new Promise<number>((resolve) =>
+          server.getConnections((_err, count) => resolve(count)),
+        )
+      : 0;
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    if (
+      getActiveSseCount() === beforeActive &&
+      (await connectionCount()) === 0
+    ) {
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  expect(getActiveSseCount()).toBe(beforeActive);
+  expect(await connectionCount()).toBe(0);
+}
+
 describe('GET /session/:id/events (SSE)', () => {
   let handle: RunHandle | undefined;
 
@@ -42986,6 +43111,7 @@ describe('GET /session/:id/events (SSE)', () => {
     });
 
     try {
+      const beforeActive = getActiveSseCount();
       const daemonLog = fakeDaemonLog();
       const bridge = fakeBridge({
         async *subscribeImpl() {
@@ -43020,6 +43146,9 @@ describe('GET /session/:id/events (SSE)', () => {
       expect(
         (closed?.[1] as { maxDrainWaitMs: number }).maxDrainWaitMs,
       ).toBeGreaterThan(0);
+      // The eviction must also free the shared occupancy slot
+      // (issue #17554 follow-up 4).
+      await expectSseSlotReleased(beforeActive);
     } finally {
       writeSpy.mockRestore();
     }
@@ -46951,41 +47080,16 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
     // queue a FIN a stalled peer never ACKs (FIN-WAIT-1 linger). The
     // buffered-frame case (write returns false) is covered by the
     // paused-resume regression below.
-    const http = await import('node:http');
     const net = await import('node:net');
-    type WriteCallback = (error?: Error | null) => void;
-    const originalWrite = http.ServerResponse.prototype.write as unknown as (
-      this: ServerResponse,
-      chunk: string | Uint8Array,
-      encodingOrCb?: BufferEncoding | WriteCallback,
-      cb?: WriteCallback,
-    ) => boolean;
-    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
-    const resetSpy = vi.spyOn(net.Socket.prototype, 'resetAndDestroy');
-    let forcedStall = false;
-    writeSpy.mockImplementation(function (
-      this: ServerResponse,
-      chunk: string | Uint8Array,
-      encodingOrCb?: BufferEncoding | WriteCallback,
-      cb?: WriteCallback,
-    ): boolean {
-      const text = typeof chunk === 'string' ? chunk : chunk.toString();
-      if (!forcedStall && text.includes('event: session_update')) {
-        forcedStall = true;
-        return false;
-      }
-      if (forcedStall) {
-        // The terminal frame cannot be queued at all: the write throws
-        // (socket already errored). That is the immediate-RST branch.
-        if (text.includes('event: client_evicted')) {
-          throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
-        }
-        return false;
-      }
-      return typeof encodingOrCb === 'function'
-        ? originalWrite.call(this, chunk, encodingOrCb)
-        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    // The shared fixture's 'throw' mode is this test's stall model: the
+    // terminal frame's write throws EPIPE, driving the immediate-RST
+    // branch. Keep evicted: 'throw' — the resetSpy pin below depends on
+    // the throw, not the helper's default 'pass' (review R1-1).
+    const { writeSpy, isStalled } = spyOnForcedSseStall({
+      stallMarker: 'event: session_update',
+      evicted: 'throw',
     });
+    const resetSpy = vi.spyOn(net.Socket.prototype, 'resetAndDestroy');
     try {
       const beforeActive = getActiveSseCount();
       const bridge = fakeBridge({
@@ -47011,7 +47115,7 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
       // Past the 200ms budget + the 250ms polling floor.
       await new Promise((r) => setTimeout(r, 800));
 
-      expect(forcedStall).toBe(true);
+      expect(isStalled()).toBe(true);
       expect(resetSpy).toHaveBeenCalled();
       expect(getActiveSseCount()).toBe(beforeActive);
       await res.body!.cancel().catch(() => undefined);
@@ -47047,42 +47151,16 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
 
     const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
     expect(res.status).toBe(200);
-    const reader = res.body!.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    let sawFirstEvent = false;
-    let sawEviction = false;
-    const deadline = Date.now() + 700;
-    while (Date.now() < deadline) {
-      const readPromise = reader.read();
-      const wakeup = new Promise<{ value: undefined; done: false }>((r) => {
-        setTimeout(
-          () => r({ value: undefined, done: false }),
-          Math.max(0, deadline - Date.now() + 10),
-        );
-      });
-      const { value, done } = (await Promise.race([readPromise, wakeup])) as {
-        value: Uint8Array | undefined;
-        done: boolean;
-      };
-      if (done) break;
-      if (value === undefined) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buf.indexOf('\n\n')) !== -1) {
-        const raw = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        if (!raw || raw.startsWith(':') || raw.startsWith('retry:')) continue;
-        for (const line of raw.split('\n')) {
-          if (line.startsWith('event: session_update')) sawFirstEvent = true;
-          if (line.startsWith('event: client_evicted')) sawEviction = true;
-        }
-      }
-    }
-    await reader.cancel().catch(() => undefined);
-
-    expect(sawFirstEvent).toBe(true);
-    expect(sawEviction).toBe(false);
+    const { sawMarker, text } = await readSseUntilMarker(
+      res.body!,
+      ['event: client_evicted'],
+      700,
+    );
+    // A complete frame, not a substring: a writer that drops the \n\n
+    // terminator (EventSource dispatches nothing) or hides the event name
+    // in a comment/data payload must red this pin (review R1-2).
+    expect(text).toMatch(/event: session_update\ndata: [^\n]*\n\n/);
+    expect(sawMarker).toBe(false);
   });
 
   it('does not evict a healthy stream when the flag is unset (default reaper targets stalls only)', async () => {
@@ -47103,44 +47181,15 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
 
     const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
     expect(res.status).toBe(200);
-    const reader = res.body!.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    let sawFirstEvent = false;
-    let sawEviction = false;
-    const deadline = Date.now() + 600;
-    while (Date.now() < deadline) {
-      const readPromise = reader.read();
-      const wakeup = new Promise<{ value: undefined; done: false }>((r) => {
-        setTimeout(
-          () => r({ value: undefined, done: false }),
-          deadline - Date.now() + 10,
-        );
-      });
-      const { value, done } = (await Promise.race([readPromise, wakeup])) as {
-        value: Uint8Array | undefined;
-        done: boolean;
-      };
-      if (done) break;
-      if (value === undefined) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buf.indexOf('\n\n')) !== -1) {
-        const raw = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        if (!raw || raw.startsWith(':') || raw.startsWith('retry:')) continue;
-        let eventName = '';
-        for (const line of raw.split('\n')) {
-          if (line.startsWith('event: ')) eventName = line.slice(7);
-        }
-        if (eventName === 'session_update') sawFirstEvent = true;
-        if (eventName === 'client_evicted') sawEviction = true;
-      }
-    }
-    await reader.cancel().catch(() => undefined);
-
-    expect(sawFirstEvent).toBe(true);
-    expect(sawEviction).toBe(false);
+    const { sawMarker, text } = await readSseUntilMarker(
+      res.body!,
+      ['event: client_evicted'],
+      600,
+    );
+    // Frame-aware pin, same contract as the explicit-budget case above
+    // (review R1-2).
+    expect(text).toMatch(/event: session_update\ndata: [^\n]*\n\n/);
+    expect(sawMarker).toBe(false);
   });
 
   it('does NOT evict while real writes keep flushing without backpressure (#4514 T2.9 wenshao review)', async () => {
@@ -50616,31 +50665,6 @@ describe('HTTPS SSE eviction force-close (TLS regression)', () => {
     });
   }
 
-  async function serverConnectionCount(): Promise<number> {
-    return new Promise((resolve) => {
-      handle!.server.getConnections((_err, count) => resolve(count));
-    });
-  }
-
-  async function expectCountsReleased(beforeActive: number): Promise<void> {
-    // The client sees the RST before the server-side TLSSocket 'close'
-    // propagates to finalize(), so poll for convergence instead of
-    // asserting synchronously. A leaked slot never converges and the
-    // final expectations fail with the actual counts.
-    const deadline = Date.now() + 1500;
-    while (Date.now() < deadline) {
-      if (
-        getActiveSseCount() === beforeActive &&
-        (await serverConnectionCount()) === 0
-      ) {
-        return;
-      }
-      await new Promise((r) => setTimeout(r, 20));
-    }
-    expect(getActiveSseCount()).toBe(beforeActive);
-    expect(await serverConnectionCount()).toBe(0);
-  }
-
   it('writer-timeout eviction closes the TLS socket and frees the slot', async () => {
     // Write-throw simulation: after the first stalled write, the reaper's
     // terminal-frame write THROWS (socket already errored), so eviction
@@ -50648,37 +50672,10 @@ describe('HTTPS SSE eviction force-close (TLS regression)', () => {
     // ERR_INVALID_HANDLE_TYPE on TLSSocket. The buffered-frame case (write
     // returning false) takes the graceful branch and is covered by the
     // paused-resume regression below.
-    const http = await import('node:http');
-    type WriteCallback = (error?: Error | null) => void;
-    const originalWrite = http.ServerResponse.prototype.write as unknown as (
-      this: ServerResponse,
-      chunk: string | Uint8Array,
-      encodingOrCb?: BufferEncoding | WriteCallback,
-      cb?: WriteCallback,
-    ) => boolean;
-    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
-    let forcedStall = false;
-    writeSpy.mockImplementation(function (
-      this: ServerResponse,
-      chunk: string | Uint8Array,
-      encodingOrCb?: BufferEncoding | WriteCallback,
-      cb?: WriteCallback,
-    ): boolean {
-      const text = typeof chunk === 'string' ? chunk : chunk.toString();
-      if (!forcedStall && text.includes('event: session_update')) {
-        forcedStall = true;
-        return false;
-      }
-      if (forcedStall) {
-        // Terminal frame write throws → immediate-RST branch on TLS.
-        if (text.includes('event: client_evicted')) {
-          throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
-        }
-        return false;
-      }
-      return typeof encodingOrCb === 'function'
-        ? originalWrite.call(this, chunk, encodingOrCb)
-        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    // Terminal frame write throws → immediate-RST branch on TLS.
+    const { writeSpy, isStalled } = spyOnForcedSseStall({
+      stallMarker: 'event: session_update',
+      evicted: 'throw',
     });
     try {
       const beforeActive = getActiveSseCount();
@@ -50693,10 +50690,10 @@ describe('HTTPS SSE eviction force-close (TLS regression)', () => {
         port,
         '/session/sess-A/events',
       );
-      expect(forcedStall).toBe(true);
+      expect(isStalled()).toBe(true);
       expect(outcome).not.toBe('timeout');
       expect(outcome).not.toMatch(/^status:/);
-      await expectCountsReleased(beforeActive);
+      await expectSseSlotReleased(beforeActive, handle!.server);
     } finally {
       writeSpy.mockRestore();
     }
@@ -50732,7 +50729,7 @@ describe('HTTPS SSE eviction force-close (TLS regression)', () => {
       const outcome = await outcomePromise;
       expect(outcome).not.toBe('timeout');
       expect(outcome).not.toMatch(/^status:/);
-      await expectCountsReleased(beforeActive);
+      await expectSseSlotReleased(beforeActive, handle!.server);
     } finally {
       bus.close();
     }
@@ -50791,7 +50788,7 @@ describe('HTTPS SSE eviction force-close (TLS regression)', () => {
       // does not process the RST until it resumes, so its close/error is not
       // asserted here.
       expect(parentReset()).toBe(true);
-      await expectCountsReleased(beforeActive);
+      await expectSseSlotReleased(beforeActive, handle!.server);
       // Let the paused client settle so it does not leak into the next test.
       await outcomePromise;
     } finally {
@@ -50809,15 +50806,6 @@ describe('SSE reaper arming and eviction frame delivery (review R1-6/R1-7)', () 
     }
     vi.restoreAllMocks();
   });
-
-  async function expectCountReleased(beforeActive: number): Promise<void> {
-    const deadline = Date.now() + 2000;
-    while (Date.now() < deadline) {
-      if (getActiveSseCount() === beforeActive) return;
-      await new Promise((r) => setTimeout(r, 20));
-    }
-    expect(getActiveSseCount()).toBe(beforeActive);
-  }
 
   it('delivers the terminal eviction frame to a client that pauses then resumes', async () => {
     // Real kernel backpressure: an 8MiB event fills the send buffer while
@@ -50902,7 +50890,7 @@ describe('SSE reaper arming and eviction frame delivery (review R1-6/R1-7)', () 
     expect(outcome.error).toBeUndefined();
     expect(outcome.done).toBe(true);
     expect(outcome.sawEvicted).toBe(true);
-    await expectCountReleased(beforeActive);
+    await expectSseSlotReleased(beforeActive);
   });
 
   it('frees the slot via the 5s RST fallback when a buffered-frame eviction peer never resumes', async () => {
@@ -50997,12 +50985,7 @@ describe('SSE reaper arming and eviction frame delivery (review R1-6/R1-7)', () 
       // slot. Removing the fallback leaves the socket in FIN-WAIT-1 and
       // these counts held (red).
       expect(outcome).not.toMatch(/^status:/);
-      await expectCountReleased(beforeActive);
-      await expect(
-        new Promise<number>((resolve) =>
-          handle!.server.getConnections((_err, count) => resolve(count)),
-        ),
-      ).resolves.toBe(0);
+      await expectSseSlotReleased(beforeActive, handle!.server);
     } finally {
       writeSpy.mockRestore();
     }
@@ -51014,33 +50997,8 @@ describe('SSE reaper arming and eviction frame delivery (review R1-6/R1-7)', () 
     // (60000/4 = 5000ms), and ticking it under a permanent stall must
     // evict. Reverting the arm gate to explicit-flag-only ships green
     // without this test (review R1-6 revert 1).
-    const http = await import('node:http');
-    type WriteCallback = (error?: Error | null) => void;
-    const originalWrite = http.ServerResponse.prototype.write as unknown as (
-      this: ServerResponse,
-      chunk: string | Uint8Array,
-      encodingOrCb?: BufferEncoding | WriteCallback,
-      cb?: WriteCallback,
-    ) => boolean;
-    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
-    let forcedStall = false;
-    writeSpy.mockImplementation(function (
-      this: ServerResponse,
-      chunk: string | Uint8Array,
-      encodingOrCb?: BufferEncoding | WriteCallback,
-      cb?: WriteCallback,
-    ): boolean {
-      const text = typeof chunk === 'string' ? chunk : chunk.toString();
-      if (!forcedStall && text.includes('event: session_update')) {
-        forcedStall = true;
-        return false;
-      }
-      if (forcedStall && !text.includes('event: client_evicted')) {
-        return false;
-      }
-      return typeof encodingOrCb === 'function'
-        ? originalWrite.call(this, chunk, encodingOrCb)
-        : originalWrite.call(this, chunk, encodingOrCb, cb);
+    const { isStalled } = spyOnForcedSseStall({
+      stallMarker: 'event: session_update',
     });
     const intervalSpy = vi.spyOn(globalThis, 'setInterval');
     const beforeActive = getActiveSseCount();
@@ -51062,12 +51020,11 @@ describe('SSE reaper arming and eviction frame delivery (review R1-6/R1-7)', () 
 
     const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
     expect(res.status).toBe(200);
-    const reader = res.body!.getReader();
     const stallDeadline = Date.now() + 2000;
-    while (!forcedStall && Date.now() < stallDeadline) {
+    while (!isStalled() && Date.now() < stallDeadline) {
       await new Promise((r) => setTimeout(r, 20));
     }
-    expect(forcedStall).toBe(true);
+    expect(isStalled()).toBe(true);
 
     const new5k = intervalSpy.mock.calls
       .slice(idxBeforeOpen)
@@ -51090,60 +51047,26 @@ describe('SSE reaper arming and eviction frame delivery (review R1-6/R1-7)', () 
       nowSpy.mockRestore();
     }
 
-    let sawEvicted = false;
-    const readDeadline = Date.now() + 2000;
-    let buf = '';
-    const WAKE = Symbol('wake');
-    while (Date.now() < readDeadline && !sawEvicted) {
-      const chunk = await Promise.race([
-        reader.read(),
-        new Promise<typeof WAKE>((r) => setTimeout(() => r(WAKE), 200)),
-      ]);
-      if (chunk === WAKE) continue;
-      if (chunk.done) break;
-      buf += new TextDecoder().decode(chunk.value);
-      if (buf.includes('event: client_evicted')) sawEvicted = true;
-    }
-    await reader.cancel().catch(() => undefined);
-    expect(sawEvicted).toBe(true);
-    await expectCountReleased(beforeActive);
+    const { sawMarker } = await readSseUntilMarker(
+      res.body!,
+      ['event: client_evicted'],
+      2000,
+    );
+    expect(sawMarker).toBe(true);
+    await expectSseSlotReleased(beforeActive);
   });
 
   it('evicts a heartbeat-only stall when no events are ever yielded', async () => {
     // For a phantom client that yields no events, the 15s heartbeat is
     // the only write that can ever observe the stall. Routing the
     // heartbeat through a plain write that bypasses backpressure would
-    // ship green without this test (review R1-6 revert 2).
-    const http = await import('node:http');
-    type WriteCallback = (error?: Error | null) => void;
-    const originalWrite = http.ServerResponse.prototype.write as unknown as (
-      this: ServerResponse,
-      chunk: string | Uint8Array,
-      encodingOrCb?: BufferEncoding | WriteCallback,
-      cb?: WriteCallback,
-    ) => boolean;
-    const writeSpy = vi.spyOn(http.ServerResponse.prototype, 'write');
-    let forcedStall = false;
-    writeSpy.mockImplementation(function (
-      this: ServerResponse,
-      chunk: string | Uint8Array,
-      encodingOrCb?: BufferEncoding | WriteCallback,
-      cb?: WriteCallback,
-    ): boolean {
-      const text = typeof chunk === 'string' ? chunk : chunk.toString();
-      if (!forcedStall && text.startsWith(': heartbeat')) {
-        // Heartbeat reports backpressure and is swallowed: the stall
-        // stamp must be set by the heartbeat itself.
-        forcedStall = true;
-        return false;
-      }
-      if (forcedStall && !text.includes('event: client_evicted')) {
-        return false;
-      }
-      return typeof encodingOrCb === 'function'
-        ? originalWrite.call(this, chunk, encodingOrCb)
-        : originalWrite.call(this, chunk, encodingOrCb, cb);
-    });
+    // ship green without this test (review R1-6 revert 2). The heartbeat
+    // interval callback is captured and ticked manually so the test does
+    // not burn the real 15s wait (issue #17554 follow-up 4); the property
+    // is unchanged — the heartbeat write itself must set the stall stamp
+    // via the backpressure path, or no eviction follows and this is red.
+    const { isStalled } = spyOnForcedSseStall({ stallMarker: ': heartbeat' });
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval');
     const beforeActive = getActiveSseCount();
     const bridge = fakeBridge({
       // eslint-disable-next-line require-yield
@@ -51161,41 +51084,29 @@ describe('SSE reaper arming and eviction frame delivery (review R1-6/R1-7)', () 
       { bridge },
     );
     const port = (handle.server.address() as { port: number }).port;
+    const idxBeforeOpen = intervalSpy.mock.calls.length;
     const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
     expect(res.status).toBe(200);
-    const reader = res.body!.getReader();
-    let sawEvicted = false;
-    let streamEnded = false;
-    let buf = '';
-    // First heartbeat at 15s; eviction within the next poll window.
-    const deadline = Date.now() + 18_000;
-    const WAKE = Symbol('wake');
-    while (Date.now() < deadline && !sawEvicted) {
-      const chunk = await Promise.race([
-        reader.read(),
-        new Promise<typeof WAKE>((r) => setTimeout(() => r(WAKE), 500)),
-      ]);
-      if (chunk === WAKE) continue;
-      if (chunk.done) {
-        streamEnded = true;
-        break;
-      }
-      buf += new TextDecoder().decode(chunk.value);
-      if (
-        buf.includes('event: client_evicted') &&
-        buf.includes('writer_idle_timeout')
-      ) {
-        sawEvicted = true;
-      }
+    // Tick this stream's own 15s heartbeat callback once (no real wait).
+    const heartbeat = intervalSpy.mock.calls
+      .slice(idxBeforeOpen)
+      .find((c) => c[1] === 15_000);
+    expect(heartbeat).toBeDefined();
+    (heartbeat![0] as () => void)();
+    const stallDeadline = Date.now() + 2000;
+    while (!isStalled() && Date.now() < stallDeadline) {
+      await new Promise((r) => setTimeout(r, 20));
     }
-    await reader.cancel().catch(() => undefined);
-    // The heartbeat stall must trigger the reaper: the stream closes
-    // (frame delivery to a reading client is pinned by the
-    // paused-resume regression) and the SSE slot is released.
-    expect(forcedStall).toBe(true);
-    expect(sawEvicted || streamEnded).toBe(true);
-    await expectCountReleased(beforeActive);
-  }, 25_000);
+    expect(isStalled()).toBe(true);
+    // The 200ms budget polls at 250ms; eviction lands within a few ticks.
+    const { sawMarker, ended } = await readSseUntilMarker(
+      res.body!,
+      ['event: client_evicted', 'writer_idle_timeout'],
+      3000,
+    );
+    expect(sawMarker || ended).toBe(true);
+    await expectSseSlotReleased(beforeActive);
+  }, 10_000);
 
   it('honors maxSseConnections: 0 as unlimited', async () => {
     // The documented opt-out must not start enforcing a cap of 1
@@ -51991,4 +51902,267 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   }, 20_000);
+});
+
+describe('Deferred #17502 review pins (issue #17554, follow-up 4)', () => {
+  let handle: RunHandle | undefined;
+  const servers: Server[] = [];
+  afterEach(async () => {
+    if (handle) {
+      await handle.close();
+      handle = undefined;
+    }
+    for (const server of servers.splice(0)) {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    vi.restoreAllMocks();
+  });
+
+  async function listen(app: ReturnType<typeof createServeApp>) {
+    const server = createServer(app);
+    servers.push(server);
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    return (server.address() as AddressInfo).port;
+  }
+
+  function parkedBridge() {
+    return fakeBridge({
+      async *subscribeImpl(_sessionId, _opts) {
+        yield { id: 1, v: 1, type: 'session_update', data: { tick: 1 } };
+        await new Promise(() => {});
+      },
+    });
+  }
+
+  it('does not arm the reaper when a direct embed passes writerIdleTimeoutMs: 0', async () => {
+    // runQwenServe boot rejects 0, so the opt-out is only reachable through
+    // a direct createServeApp embed. The resolver direction (0 → 0) is
+    // pinned in sse-writer-idle-budget.test.ts; this pins the ARM GATE
+    // behaviorally: no idle polling interval is registered, and a stalled
+    // writer is never evicted.
+    const { isStalled } = spyOnForcedSseStall({
+      stallMarker: 'event: session_update',
+    });
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const beforeActive = getActiveSseCount();
+    let port = 0;
+    const app = createServeApp(
+      { ...baseOpts, writerIdleTimeoutMs: 0 },
+      () => port,
+      { bridge: parkedBridge() },
+    );
+    port = await listen(app);
+    const idxBeforeOpen = intervalSpy.mock.calls.length;
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(res.status).toBe(200);
+    const stallDeadline = Date.now() + 2000;
+    while (!isStalled() && Date.now() < stallDeadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(isStalled()).toBe(true);
+    // Only the 15s heartbeat may be armed; any idle polling interval
+    // (250ms…5000ms) means the arm gate ignored the zero budget.
+    const newIntervals = intervalSpy.mock.calls
+      .slice(idxBeforeOpen)
+      .map((c) => c[1]);
+    expect(newIntervals.every((ms) => ms === 15_000)).toBe(true);
+    // Well past where a small positive budget would have evicted.
+    await new Promise((r) => setTimeout(r, 700));
+    expect(getActiveSseCount()).toBe(beforeActive + 1);
+    const { sawMarker, ended } = await readSseUntilMarker(
+      res.body!,
+      ['event: client_evicted'],
+      300,
+    );
+    expect(sawMarker).toBe(false);
+    expect(ended).toBe(false);
+    await expectSseSlotReleased(beforeActive);
+  }, 15_000);
+
+  it('does not evict while the stall is younger than the budget, then evicts', async () => {
+    // Pins the `< budget` comparison branch: at a tick where
+    // 0 < idleForMs < budget the reaper must stand down; past the budget it
+    // must evict. Deleting the comparison (evict on any unresolved stall)
+    // turns the first assertion red.
+    const { isStalled } = spyOnForcedSseStall({
+      stallMarker: 'event: session_update',
+    });
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const beforeActive = getActiveSseCount();
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        writerIdleTimeoutMs: 2000,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const idxBeforeOpen = intervalSpy.mock.calls.length;
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(res.status).toBe(200);
+    const stallDeadline = Date.now() + 2000;
+    while (!isStalled() && Date.now() < stallDeadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(isStalled()).toBe(true);
+    // The 2000ms budget polls at 500ms; tick it manually at idleForMs≈500.
+    const reaper = intervalSpy.mock.calls
+      .slice(idxBeforeOpen)
+      .find((c) => c[1] === 500);
+    expect(reaper).toBeDefined();
+    const nowSpy = vi
+      .spyOn(performance, 'now')
+      .mockReturnValue(performance.now() + 500);
+    try {
+      (reaper![0] as () => void)();
+    } finally {
+      nowSpy.mockRestore();
+    }
+    // Within budget: no eviction, the slot is still held.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(getActiveSseCount()).toBe(beforeActive + 1);
+    // Past budget: the next tick must evict.
+    const pastSpy = vi
+      .spyOn(performance, 'now')
+      .mockReturnValue(performance.now() + 2500);
+    try {
+      (reaper![0] as () => void)();
+    } finally {
+      pastSpy.mockRestore();
+    }
+    const { sawMarker } = await readSseUntilMarker(
+      res.body!,
+      ['event: client_evicted', 'writer_idle_timeout'],
+      2000,
+    );
+    expect(sawMarker).toBe(true);
+    await expectSseSlotReleased(beforeActive);
+  }, 15_000);
+
+  it('enforces an explicit maxSseConnections override at the 503 site', async () => {
+    // The override was previously asserted only in the status payload;
+    // this pins the enforcement site and the deep-health pairing.
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: 10,
+        maxSseConnections: 5,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const streams: Response[] = [];
+    for (let i = 0; i < 5; i++) {
+      const res = await fetch(
+        `http://127.0.0.1:${port}/session/sess-cap-${i}/events`,
+      );
+      expect(res.status).toBe(200);
+      streams.push(res);
+    }
+    const overflow = await fetch(
+      `http://127.0.0.1:${port}/session/sess-overflow/events`,
+    );
+    expect(overflow.status).toBe(503);
+    expect(overflow.headers.get('retry-after')).toBe('5');
+    expect(await overflow.json()).toEqual({
+      error:
+        'Daemon SSE connection limit reached (5/5). ' +
+        'Retry after the Retry-After interval.',
+      code: 'sse_connection_limit_exceeded',
+      limit: 5,
+      active: 5,
+      scope: 'daemon',
+    });
+    const deep = (await (
+      await fetch(`http://127.0.0.1:${port}/health?deep=1`)
+    ).json()) as { connectedClients: number; connectedClientsMax: number };
+    expect(deep.connectedClients).toBe(5);
+    expect(deep.connectedClientsMax).toBe(5);
+    await streams[0]!.body!.cancel();
+    await vi.waitFor(
+      async () => {
+        const readmitted = await fetch(
+          `http://127.0.0.1:${port}/session/sess-readmitted/events`,
+        );
+        expect(readmitted.status).toBe(200);
+        await readmitted.body!.cancel();
+      },
+      { timeout: 5_000 },
+    );
+    for (const stream of streams.slice(1)) await stream.body!.cancel();
+  }, 20_000);
+
+  it('logs the admission refusal WARN with surface, scope, and session context', async () => {
+    const daemonLog = fakeDaemonLog();
+    let port = 0;
+    const app = createServeApp(
+      { ...baseOpts, maxConnections: 10, maxSseConnections: 1 },
+      () => port,
+      { bridge: parkedBridge(), daemonLog },
+    );
+    port = await listen(app);
+    const first = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(first.status).toBe(200);
+    const second = await fetch(
+      `http://127.0.0.1:${port}/session/sess-B/events`,
+    );
+    expect(second.status).toBe(503);
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'SSE connection limit reached',
+      expect.objectContaining({
+        surface: 'restEvents',
+        listener: 'primary',
+        scope: 'daemon',
+        activeSseCount: 1,
+        limit: 1,
+        sessionId: 'sess-B',
+      }),
+    );
+    await first.body!.cancel();
+  }, 15_000);
+
+  it('clears the idle timer when the stream closes', async () => {
+    // A closed stream must not leave its reaper interval armed; deleting
+    // clearInterval(idleTimer) from the cleanup turns this red.
+    const intervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const clearSpy = vi.spyOn(globalThis, 'clearInterval');
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        writerIdleTimeoutMs: 200,
+      },
+      { bridge: parkedBridge() },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const idxBeforeOpen = intervalSpy.mock.calls.length;
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(res.status).toBe(200);
+    const armed = intervalSpy.mock.calls.slice(idxBeforeOpen);
+    const idleIdx = armed.findIndex((c) => c[1] === 250);
+    const heartbeatIdx = armed.findIndex((c) => c[1] === 15_000);
+    expect(idleIdx).toBeGreaterThanOrEqual(0);
+    expect(heartbeatIdx).toBeGreaterThanOrEqual(0);
+    const idleId = intervalSpy.mock.results[idxBeforeOpen + idleIdx]!.value;
+    const heartbeatId =
+      intervalSpy.mock.results[idxBeforeOpen + heartbeatIdx]!.value;
+    await res.body!.cancel();
+    await vi.waitFor(
+      () => {
+        expect(clearSpy.mock.calls.some((c) => c[0] === idleId)).toBe(true);
+        expect(clearSpy.mock.calls.some((c) => c[0] === heartbeatId)).toBe(
+          true,
+        );
+      },
+      { timeout: 5_000 },
+    );
+  }, 15_000);
 });
