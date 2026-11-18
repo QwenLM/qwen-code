@@ -31069,6 +31069,58 @@ describe('createServeApp', () => {
       }
     });
 
+    it('persists the checkpoint branch point and re-applies it on restore (R8-2)', async () => {
+      // A checkpoint branch (atRecordId) is persist-only: no live entry exists
+      // at branch time, so the route cannot setSessionBaseCommit there. The
+      // branch point must ride a sidecar and be re-applied when the session is
+      // restored, or its commit fallback is suppressed for life.
+      const workspace = await fsp.mkdtemp(path.join(os.tmpdir(), 'r82-ws-'));
+      const runtimeDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'r82-rt-'));
+      const bridge = fakeBridge();
+      bridge.branchSession = vi.fn(async () => ({
+        sessionId: 'checkpoint-session',
+        displayName: 'Checkpoint branch',
+        forkedFrom: { sessionId: 'source-session', displayName: 'Source' },
+      }));
+      const setSessionBaseCommit = vi.fn();
+      bridge.setSessionBaseCommit = setSessionBaseCommit;
+      mockBranchOps.getHeadCommit = () => Promise.resolve('c'.repeat(40));
+      const runtime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'r82-primary',
+        workspaceCwd: workspace,
+        sessionRuntimeBaseDir: runtimeDir,
+        primary: true,
+        bridge,
+      });
+      const app = createServeApp({ ...baseOpts, workspace }, undefined, {
+        workspaceRegistry: createWorkspaceRegistry([runtime]),
+      });
+
+      try {
+        const branched = await request(app)
+          .post('/session/source-session/branch')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ atRecordId: '11111111-1111-4111-8111-111111111111' });
+        expect(branched.status).toBe(201);
+        // Persist-only: no live entry, so nothing is set at branch time.
+        expect(setSessionBaseCommit).not.toHaveBeenCalled();
+
+        const loaded = await request(app)
+          .post('/session/checkpoint-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
+        expect(loaded.status).toBe(200);
+        expect(setSessionBaseCommit).toHaveBeenCalledWith(
+          'checkpoint-session',
+          'c'.repeat(40),
+        );
+      } finally {
+        mockBranchOps.getHeadCommit = undefined;
+        await fsp.rm(workspace, { recursive: true, force: true });
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+      }
+    });
+
     it('returns 409 when the checkpoint is no longer active', async () => {
       const bridge = fakeBridge();
       bridge.branchSession = vi.fn(async () => {

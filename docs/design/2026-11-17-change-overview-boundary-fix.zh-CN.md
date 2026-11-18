@@ -84,6 +84,12 @@ search }`；log 路由（`workspace-git-log.ts`）转发 `range`/`search`。无�
   （仅 `worktree.baseCommit`，不被门控，因提升先于 `clearSessionWorktree`），回本地
   时仍由此补上边界。`worktreeBase` 保持物理语义（worktree 自身的创建基线，供
   handoff 回退分类与孤儿清理使用），与会话起点不同。
+- checkpoint 分支（R8-2）：带 `atRecordId` 的 `POST /session/:id/branch` 为
+  persist-only——建分支时无 live entry，内存起点捕获够不到它。分支路由把分支点
+  持久化到 `<id>.branch.json` sidecar（按新会话 id 键控，best-effort），恢复流程
+  经 fill-only 的 `setSessionBaseCommit` 重新应用。该 sidecar 随 transcript 跨
+  archive/unarchive 移动、删除时清理，仿 title/PR sidecar。live 分支臂也写它，
+  顺带治愈该臂起点 commit 跨 daemon 重启即丢的缺口。
 - status 路由水合与摘要投影转发新字段；无此字段的 legacy 会话保持 `undefined`。
 
 ### 层 2——log 路由的可达性排除（core + cli + SDK）

@@ -17,6 +17,7 @@ import {
   withDaemonSpan,
 } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import { GENERATED_UI_CARD_ID_PATTERN } from '@qwen-code/qwen-code-core/services/generated-ui-state.js';
+import { writeSessionBranchSidecar } from '@qwen-code/qwen-code-core/services/session-branch-sidecar.js';
 import {
   APPROVAL_MODES,
   AGENT_WORKTREE_SLUG_PATTERN,
@@ -6660,6 +6661,24 @@ export function registerSessionRoutes(
           },
           { clientId },
         );
+        // Persist the branch point next to the new transcript. A checkpoint
+        // branch (atRecordId) is persist-only — no live entry exists at branch
+        // time, so the in-memory setter below cannot reach it; the restore flow
+        // re-applies this sidecar as the start commit (R8-2). Writing it for the
+        // live arm too heals that arm's start commit across a daemon restart.
+        // Best-effort: a durably committed fork must not fail on a sidecar write.
+        if (branchBaseCommit) {
+          try {
+            writeSessionBranchSidecar(
+              createWorkspaceRuntimeSessionService(
+                runtime,
+              ).getBranchSessionPathForArchiveState(result.sessionId, 'active'),
+              branchBaseCommit,
+            );
+          } catch {
+            // Degraded to the pre-sidecar behavior; the fork stays committed.
+          }
+        }
         if (atRecordId === undefined) {
           const restored = result as BridgeBranchedSession;
           if (branchBaseCommit) {

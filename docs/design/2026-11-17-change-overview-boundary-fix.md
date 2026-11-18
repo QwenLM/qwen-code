@@ -106,6 +106,14 @@ _every_ bound head, not intersection against one arbitrarily-ordered head.
   still gains its boundary on hand-back. `worktreeBase` keeps its physical
   meaning (the worktree's own creation base, used by the handoff rewind
   classification and orphan cleanup), distinct from the session start.
+- Checkpoint branches (R8-2): `POST /session/:id/branch` with `atRecordId` is
+  persist-only — no live entry exists at branch time, so the in-memory start
+  capture cannot reach it. The branch route persists the branch point in a
+  `<id>.branch.json` sidecar (keyed by the new session id, best-effort), and the
+  restore flow re-applies it through the fill-only `setSessionBaseCommit`. The
+  sidecar follows the transcript across archive/unarchive and is cleaned up on
+  delete, mirroring the title/PR sidecars. Writing it for the live branch arm
+  too heals that arm's start commit across a daemon restart.
 - The status-route hydration and summary projection forward the new fields;
   legacy sessions without them stay `undefined`.
 

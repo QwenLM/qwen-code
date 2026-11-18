@@ -95,6 +95,11 @@ import {
   type SessionTitleSidecar,
 } from './session-title-sidecar.js';
 import {
+  moveSessionBranchSidecar,
+  removeSessionBranchSidecar,
+  sessionBranchSidecarPath,
+} from './session-branch-sidecar.js';
+import {
   deleteArtifactSnapshot,
   retainArtifactSnapshot,
 } from '../tools/artifact/artifact-snapshots.js';
@@ -1059,6 +1064,13 @@ export class SessionService {
     return sessionTitleSidecarPath(this.getChatsDirForState(state), sessionId);
   }
 
+  private getSessionBranchSidecarPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return sessionBranchSidecarPath(this.getChatsDirForState(state), sessionId);
+  }
+
   /**
    * Reads the list-label sidecar written when the session first got a name.
    * A missing or unreadable sidecar is normal — most legacy sessions never
@@ -1207,6 +1219,19 @@ export class SessionService {
     state: SessionArchiveState,
   ): string {
     return this.getPrSessionPathForState(sessionId, state);
+  }
+
+  /**
+   * Returns the absolute path to the sidecar JSON file that stores the
+   * immutable start commit recorded when a session was branched from a
+   * checkpoint. The file may not exist yet — consumers must handle ENOENT as
+   * "no recorded branch point".
+   */
+  getBranchSessionPathForArchiveState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return this.getSessionBranchSidecarPathForState(sessionId, state);
   }
 
   /**
@@ -1876,6 +1901,14 @@ export class SessionService {
     }
   }
 
+  private removeSessionBranchSidecars(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      removeSessionBranchSidecar(
+        this.getSessionBranchSidecarPathForState(sessionId, state),
+      );
+    }
+  }
+
   private removePromptLedgers(sessionId: string): void {
     for (const state of ['active', 'archived'] as const) {
       const ledger = this.getPromptLedgerPathForState(sessionId, state);
@@ -2020,6 +2053,28 @@ export class SessionService {
     }
   }
 
+  /**
+   * The kept transcript's recorded branch point wins; mirror the title
+   * sidecar's conflict policy so a checkpoint-branch start commit follows the
+   * surviving transcript.
+   */
+  private reconcileBranchSidecarOnConflict(
+    sessionId: string,
+    keptState: SessionArchiveState,
+    droppedState: SessionArchiveState,
+  ): void {
+    const kept = this.getSessionBranchSidecarPathForState(sessionId, keptState);
+    const dropped = this.getSessionBranchSidecarPathForState(
+      sessionId,
+      droppedState,
+    );
+    if (fs.existsSync(kept)) {
+      removeSessionBranchSidecar(dropped);
+    } else {
+      moveSessionBranchSidecar(dropped, kept);
+    }
+  }
+
   private async moveArchiveSidecars(
     sessionId: string,
     action: 'archive' | 'unarchive',
@@ -2094,6 +2149,18 @@ export class SessionService {
       assertCleanupOwned?.();
       this.warn(
         `${action}Sessions: failed to move title sidecar for ${sessionId}: ${error}`,
+      );
+    }
+    try {
+      assertCleanupOwned?.();
+      moveSessionBranchSidecar(
+        this.getSessionBranchSidecarPathForState(sessionId, sourceState),
+        this.getSessionBranchSidecarPathForState(sessionId, destinationState),
+      );
+    } catch (error) {
+      assertCleanupOwned?.();
+      this.warn(
+        `${action}Sessions: failed to move branch sidecar for ${sessionId}: ${error}`,
       );
     }
   }
@@ -4148,6 +4215,8 @@ export class SessionService {
     assertCleanupOwned?.();
     this.removeSessionTitleSidecars(sessionId);
     assertCleanupOwned?.();
+    this.removeSessionBranchSidecars(sessionId);
+    assertCleanupOwned?.();
     this.removePromptLedgers(sessionId);
     assertCleanupOwned?.();
     this.removeFileHistoryBackups(sessionId);
@@ -4236,6 +4305,11 @@ export class SessionService {
           try {
             options.assertCleanupOwned?.();
             this.reconcileTitleSidecarOnConflict(
+              sessionId,
+              'archived',
+              'active',
+            );
+            this.reconcileBranchSidecarOnConflict(
               sessionId,
               'archived',
               'active',
@@ -4398,6 +4472,11 @@ export class SessionService {
           try {
             options.assertCleanupOwned?.();
             this.reconcileTitleSidecarOnConflict(
+              sessionId,
+              'active',
+              'archived',
+            );
+            this.reconcileBranchSidecarOnConflict(
               sessionId,
               'active',
               'archived',
