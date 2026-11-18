@@ -6,11 +6,13 @@
 
 import { afterEach, describe, it, expect, onTestFinished, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
+import { getEventListeners } from 'node:events';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { format } from 'node:util';
 import {
+  AGENT_METHODS,
   AgentSideConnection,
   PROTOCOL_VERSION,
   RequestError,
@@ -112,6 +114,9 @@ import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
+  DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY,
+  DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
+  DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   WORKTREE_MCP_DEFER_META_KEY,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
@@ -6539,12 +6544,19 @@ describe('createAcpSessionBridge', () => {
         .catch((error: unknown) => error);
       await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
 
+      const dispatched = vi.fn();
       await expect(
-        bridge.sendPrompt(second.sessionId, {
-          sessionId: second.sessionId,
-          prompt: [{ type: 'text', text: 'second' }],
-        }),
+        bridge.sendPrompt(
+          second.sessionId,
+          {
+            sessionId: second.sessionId,
+            prompt: [{ type: 'text', text: 'second' }],
+          },
+          undefined,
+          { onPromptDispatched: dispatched },
+        ),
       ).rejects.toBeDefined();
+      expect(dispatched).not.toHaveBeenCalled();
       expect(fail).toHaveBeenCalledWith(
         expect.objectContaining({ code: 'ndjson_queue_limit_exceeded' }),
       );
@@ -7119,6 +7131,7 @@ describe('createAcpSessionBridge', () => {
       sessionId: 'persisted-1',
       workspaceCwd: WS_A,
       suppressWorktreeContextRestore: true,
+      deferAutomaticWorkUntilCwdRestore: true,
     });
 
     expect(loaded).toEqual({
@@ -7139,6 +7152,7 @@ describe('createAcpSessionBridge', () => {
       {
         _meta: {
           [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+          [DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY]: true,
         },
         sessionId: 'persisted-1',
         cwd: WS_A,
@@ -7298,6 +7312,9 @@ describe('createAcpSessionBridge', () => {
     expect(loaded.artifactWarnings).toEqual([
       'skipped corrupt artifact record',
     ]);
+    expect(loaded.artifacts).toMatchObject([
+      { id: artifactId, title: 'Restored link', url: artifactUrl },
+    ]);
 
     await expect(
       bridge.getSessionArtifacts(loaded.sessionId),
@@ -7311,6 +7328,18 @@ describe('createAcpSessionBridge', () => {
         },
       ],
     });
+
+    // A warm re-attach (page reload / second tab on the still-live session)
+    // takes the already-live restore branch; it must carry the same snapshot
+    // so the header entry is early on the most common re-open path too.
+    const reattached = await bridge.loadSession({
+      sessionId,
+      workspaceCwd: WS_A,
+    });
+    expect(reattached.attached).toBe(true);
+    expect(reattached.artifacts).toMatchObject([
+      { id: artifactId, title: 'Restored link', url: artifactUrl },
+    ]);
 
     await bridge.shutdown();
   });
@@ -7345,6 +7374,7 @@ describe('createAcpSessionBridge', () => {
       'skipped artifact without id/title',
       'kept warning',
     ]);
+    expect(loaded).not.toHaveProperty('artifacts');
     await expect(
       bridge.getSessionArtifacts(loaded.sessionId),
     ).resolves.toMatchObject({
@@ -8837,6 +8867,7 @@ describe('createAcpSessionBridge', () => {
     'session_metadata_updated',
     'session_cwd_changed',
     'artifact_changed',
+    'sub_session_task_changed',
     'settings_changed',
     'extensions_changed',
     'mcp_server_changed',
@@ -9051,6 +9082,7 @@ describe('createAcpSessionBridge', () => {
         bookkeepingType === 'agent_changed' ||
         bookkeepingType === 'git_status_changed' ||
         bookkeepingType === 'git_branch_changed' ||
+        bookkeepingType === 'sub_session_task_changed' ||
         bookkeepingType === 'github_setup_completed'
       ) {
         // The workspace service, git watcher, memory / agent CRUD, and the
@@ -9778,7 +9810,32 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('drops the stale turn error when a queued terminal folds newer automatic-turn content', async () => {
+  it.each([
+    ['agent_message_chunk', undefined, false],
+    [
+      'user_message_chunk',
+      { kind: 'agent_mention', mentionedAgentIds: [] },
+      false,
+    ],
+    [
+      'user_message_chunk',
+      {
+        kind: 'agent_mention',
+        mentionedAgentIds: [],
+        sentTo: { sessionId: 'other-session', workspaceCwd: WS_A },
+      },
+      true,
+    ],
+  ] as const)(
+    'refreshes after a queued terminal folds %s (%j)',
+    verifyQueuedTerminalRefresh,
+  );
+
+  async function verifyQueuedTerminalRefresh(
+    subtype: 'agent_message_chunk' | 'user_message_chunk',
+    qwenAgentMessage: Record<string, unknown> | undefined,
+    keepsError: boolean,
+  ) {
     // A queued terminal is a turn boundary on the bus: ingesting it folds
     // and resets the live journal. When newer turn content was journaled
     // after the pending loop terminal, that content supersedes the stale
@@ -9836,7 +9893,7 @@ describe('createAcpSessionBridge', () => {
         if (
           !sawContent &&
           event.type === 'session_update' &&
-          JSON.stringify(event.data).includes('automatic turn content')
+          JSON.stringify(event.data).includes('later transcript content')
         ) {
           sawContent = true;
           continue;
@@ -9894,45 +9951,49 @@ describe('createAcpSessionBridge', () => {
     );
     await expect(first).rejects.toThrow('Loop protection stopped this turn');
 
-    // An automatic turn journals content after the loop terminal; the
-    // queued terminal that follows folds it.
+    // The queued terminal folds this update, even when it came from an
+    // out-of-turn /send receipt.
     await handle.agentConnection.sessionUpdate({
       sessionId: session.sessionId,
       update: {
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'automatic turn content' },
+        sessionUpdate: subtype,
+        content: { type: 'text', text: 'later transcript content' },
+        ...(qwenAgentMessage ? { _meta: { qwenAgentMessage } } : {}),
       },
     });
 
+    const assertRefresh = async () => {
+      const refreshed = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        clientId: session.clientId,
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      const compactedReplay = refreshed.compactedReplay ?? [];
+      expect(compactedReplay[0]).toMatchObject({
+        type: 'session_update',
+        data: expect.objectContaining({
+          content: { type: 'text', text: 'persisted turn content' },
+        }),
+      });
+      expect(
+        compactedReplay.some(
+          (event) =>
+            event.type === 'turn_error' &&
+            (event.data as { errorKind?: string }).errorKind ===
+              'loop_detected',
+        ),
+      ).toBe(keepsError);
+    };
+    await assertRefresh();
     expect(
       bridge.removePendingPrompt(session.sessionId, 'prompt-queued'),
     ).toEqual({ removed: true });
     await sawContentThenQueuedTerminal;
-
-    const refreshed = await bridge.loadSession({
-      sessionId: session.sessionId,
-      workspaceCwd: WS_A,
-      clientId: session.clientId,
-      historyReplay: 'response',
-      historyPageSize: 100,
-    });
-
-    const compactedReplay = refreshed.compactedReplay ?? [];
-    expect(compactedReplay[0]).toMatchObject({
-      type: 'session_update',
-      data: expect.objectContaining({
-        content: { type: 'text', text: 'persisted turn content' },
-      }),
-    });
-    expect(
-      compactedReplay.some(
-        (event) =>
-          event.type === 'turn_error' &&
-          (event.data as { errorKind?: string }).errorKind === 'loop_detected',
-      ),
-    ).toBe(false);
-    // The supersede only drops the refresh-replay record; the session
-    // summary still carries the active turn's failure.
+    await assertRefresh();
+    // The session summary still carries the active turn's failure.
     expect(bridge.getSessionSummary(session.sessionId).turnError).toMatchObject(
       { code: 'LOOP_DETECTED' },
     );
@@ -9940,7 +10001,7 @@ describe('createAcpSessionBridge', () => {
     abort.abort();
     releaseCancel();
     await bridge.shutdown();
-  });
+  }
 
   it('drops the turn error on refresh after a subsequent successful interactive turn', async () => {
     // Loop reject, then a successful prompt, then refresh: the newer turn's
@@ -12203,6 +12264,7 @@ describe('createAcpSessionBridge', () => {
       sessionId: 'persisted-2',
       workspaceCwd: WS_A,
       suppressWorktreeContextRestore: true,
+      deferAutomaticWorkUntilCwdRestore: true,
     });
 
     expect(resumed).toEqual({
@@ -12221,6 +12283,7 @@ describe('createAcpSessionBridge', () => {
       {
         _meta: {
           [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+          [DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY]: true,
         },
         sessionId: 'persisted-2',
         cwd: WS_A,
@@ -12377,13 +12440,67 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('embeds the artifact snapshot when a restore loses the registration race', async () => {
+    const load = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: () => load.promise,
+      newSessionImpl: () => ({ sessionId: 'raced-artifacts' }),
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      maxSessions: 5,
+      channelFactory: async () => handle.channel,
+    });
+
+    const restoring = bridge.loadSession({
+      sessionId: 'raced-artifacts',
+      workspaceCwd: WS_A,
+    });
+    await vi.waitFor(() => {
+      expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    });
+    // Another caller registers the session while the restore is in flight.
+    await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    await bridge.addSessionArtifact(
+      'raced-artifacts',
+      {
+        title: 'Raced artifact',
+        kind: 'link',
+        storage: 'external_url',
+        source: 'client',
+        url: 'https://example.com/raced',
+        retention: 'restorable',
+        clientRetained: true,
+      },
+      {},
+    );
+
+    load.resolve({});
+    const restored = await restoring;
+
+    // The raced attach return must carry the live snapshot, like the fresh
+    // restore and warm re-attach returns do.
+    expect(restored.attached).toBe(true);
+    expect(restored.artifacts).toMatchObject([
+      { title: 'Raced artifact', url: 'https://example.com/raced' },
+    ]);
+
+    await bridge.shutdown();
+  });
+
   it('coalesces response restores with the same history page', async () => {
+    const sessionId = '5328e914-58a7-4a31-a966-e32e7fe9ef1a';
+    const requestedSessionId = sessionId.toUpperCase();
     const load = deferred<LoadSessionResponse>();
     const handle = makeChannel({ loadSessionImpl: () => load.promise });
     const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    expect(bridge.hasSessionOrPendingRegistration(sessionId)).toBe(false);
 
     const first = bridge.loadSession({
-      sessionId: 'coalesce-page',
+      sessionId: requestedSessionId,
       workspaceCwd: WS_A,
       historyReplay: 'response',
       historyPageSize: 100,
@@ -12391,8 +12508,12 @@ describe('createAcpSessionBridge', () => {
     for (let i = 0; i < 50 && handle.agent.loadSessionCalls.length !== 1; i++) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+    expect(() => bridge.getSessionSummary(requestedSessionId)).toThrow(
+      SessionNotFoundError,
+    );
+    expect(bridge.hasSessionOrPendingRegistration(sessionId)).toBe(true);
     const second = bridge.loadSession({
-      sessionId: 'coalesce-page',
+      sessionId: requestedSessionId,
       workspaceCwd: WS_A,
       historyReplay: 'response',
       historyPageSize: 100,
@@ -17235,6 +17356,8 @@ describe('createAcpSessionBridge', () => {
             'qwen-code/invocation': forgedInvocation,
             'qwen-code/private-parent-capability': 'forged-capability',
             [DAEMON_MODEL_PROMPT_META_KEY]: forgedModelPrompt,
+            [DAEMON_EXPECTED_APPROVAL_MODE_META_KEY]: 'yolo',
+            [DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY]: 'auto',
           },
         },
         undefined,
@@ -17242,6 +17365,8 @@ describe('createAcpSessionBridge', () => {
           clientId: session.clientId,
           promptId: 'server-prompt',
           modelPrompt: trustedModelPrompt,
+          expectedApprovalMode: ApprovalMode.DEFAULT,
+          approvalModeBeforeStart: ApprovalMode.YOLO,
         },
       );
 
@@ -17254,6 +17379,8 @@ describe('createAcpSessionBridge', () => {
           originatorClientId: session.clientId,
         },
         [DAEMON_MODEL_PROMPT_META_KEY]: trustedModelPrompt,
+        [DAEMON_EXPECTED_APPROVAL_MODE_META_KEY]: ApprovalMode.DEFAULT,
+        [DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY]: ApprovalMode.YOLO,
       });
       expect(
         handle.agent.promptCalls[0]?._meta?.['qwen-code/invocation'],
@@ -17272,13 +17399,27 @@ describe('createAcpSessionBridge', () => {
         {
           sessionId: session.sessionId,
           prompt: [{ type: 'text', text: 'spoof-only' }],
-          _meta: { [DAEMON_MODEL_PROMPT_META_KEY]: forgedModelPrompt },
+          _meta: {
+            [DAEMON_MODEL_PROMPT_META_KEY]: forgedModelPrompt,
+            [DAEMON_EXPECTED_APPROVAL_MODE_META_KEY]: 'yolo',
+            [DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY]: 'auto',
+          },
         },
         undefined,
         { clientId: session.clientId, promptId: 'spoof-only-prompt' },
       );
       expect(
         handle.agent.promptCalls[1]?._meta?.[DAEMON_MODEL_PROMPT_META_KEY],
+      ).toBeUndefined();
+      expect(
+        handle.agent.promptCalls[1]?._meta?.[
+          DAEMON_EXPECTED_APPROVAL_MODE_META_KEY
+        ],
+      ).toBeUndefined();
+      expect(
+        handle.agent.promptCalls[1]?._meta?.[
+          DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY
+        ],
       ).toBeUndefined();
 
       await bridge.shutdown();
@@ -19698,37 +19839,251 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('signals prompt admission only after the pending queue owns the prompt', async () => {
-      const factory: ChannelFactory = async () => makeChannel().channel;
-      const bridge = makeBridge({ channelFactory: factory });
-      const admitted = vi.fn();
+    it.each(['accepts', 'rejects'] as const)(
+      'waits until the ACP stream %s the prompt write',
+      async (writeOutcome) => {
+        const response = deferred<PromptResponse>();
+        const { channel } = makeChannel({ promptImpl: () => response.promise });
+        const writing = deferred<void>();
+        const writeGate = deferred<void>();
+        const transport = channel.stream.writable;
+        channel.stream.writable = new WritableStream({
+          async write(message) {
+            if (
+              'method' in message &&
+              message.method === AGENT_METHODS.session_prompt
+            ) {
+              writing.resolve();
+              await writeGate.promise;
+            }
+            const writer = transport.getWriter();
+            try {
+              await writer.write(message);
+            } finally {
+              writer.releaseLock();
+            }
+          },
+        });
+        const bridge = makeBridge({ channelFactory: async () => channel });
+        onTestFinished(() => {
+          writeGate.resolve();
+          response.resolve({ stopReason: 'cancelled' });
+          return bridge.shutdown();
+        });
+        const admitted = vi.fn();
+        const writeStarted = vi.fn();
+        const dispatchAbort = new AbortController();
+        const forwarded = deferred<void>();
+        const dispatched = vi.fn(() => forwarded.resolve());
 
-      expect(() =>
-        bridge.sendPrompt(
-          'missing-session',
+        expect(() =>
+          bridge.sendPrompt(
+            'missing-session',
+            {
+              sessionId: 'missing-session',
+              prompt: [{ type: 'text', text: 'not admitted' }],
+            },
+            undefined,
+            { onPromptAdmitted: admitted, onPromptDispatched: dispatched },
+          ),
+        ).toThrow(SessionNotFoundError);
+        expect(admitted).not.toHaveBeenCalled();
+        expect(dispatched).not.toHaveBeenCalled();
+
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const turn = bridge.sendPrompt(
+          session.sessionId,
           {
-            sessionId: 'missing-session',
-            prompt: [{ type: 'text', text: 'not admitted' }],
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'admitted' }],
           },
           undefined,
-          { onPromptAdmitted: admitted },
-        ),
-      ).toThrow(SessionNotFoundError);
-      expect(admitted).not.toHaveBeenCalled();
+          {
+            onPromptAdmitted: admitted,
+            dispatchSignal: dispatchAbort.signal,
+            onPromptWriteStarted: writeStarted,
+            onPromptDispatched: dispatched,
+          },
+        );
+        expect(admitted).toHaveBeenCalledOnce();
+        await writing.promise;
+        expect(writeStarted).toHaveBeenCalledOnce();
+        expect(dispatched).not.toHaveBeenCalled();
 
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      await bridge.sendPrompt(
-        session.sessionId,
+        if (writeOutcome === 'accepts') {
+          writeGate.resolve();
+          await forwarded.promise;
+          expect(dispatched).toHaveBeenCalledOnce();
+          expect(getEventListeners(dispatchAbort.signal, 'abort')).toEqual([]);
+          dispatchAbort.abort();
+          response.resolve({ stopReason: 'end_turn' });
+          await expect(turn).resolves.toMatchObject({ stopReason: 'end_turn' });
+        } else {
+          writeGate.reject(new Error('ACP transport write failed'));
+          await expect(turn).rejects.toThrow('ACP transport write failed');
+          expect(dispatched).not.toHaveBeenCalled();
+          expect(getEventListeners(dispatchAbort.signal, 'abort')).toEqual([]);
+        }
+      },
+    );
+
+    it.each(['authorization change', 'dispatch cancellation'] as const)(
+      'skips a fenced ACP write on %s and releases the outbound reservation',
+      async (failure) => {
+        const { channel, agent } = makeChannel();
+        const writing = deferred<void>();
+        const releaseWrite = deferred<void>();
+        const transport = channel.stream.writable;
+        let paused = false;
+        channel.stream.writable = new WritableStream({
+          async write(message) {
+            if (
+              !paused &&
+              'method' in message &&
+              message.method === AGENT_METHODS.session_prompt
+            ) {
+              paused = true;
+              writing.resolve();
+              await releaseWrite.promise;
+            }
+            const writer = transport.getWriter();
+            try {
+              await writer.write(message);
+            } finally {
+              writer.releaseLock();
+            }
+          },
+        });
+        const reserved = vi.fn();
+        const released = vi.fn();
+        const reserveOutboundOperation = vi.fn<(args: unknown) => () => void>(
+          () => () => {},
+        );
+        channel.transportGuard = {
+          maxActiveHandlers: 8,
+          maxActiveHandlerBytes: 8192,
+          reserveOutboundOperation,
+          reservePreparedResponse: vi.fn(),
+          fail: vi.fn(),
+        };
+        const bridge = makeBridge({
+          channelFactory: async () => channel,
+          sessionScope: 'thread',
+        });
+        onTestFinished(() => {
+          releaseWrite.resolve();
+          return bridge.shutdown();
+        });
+        const { sessionId: blockerId } = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+        });
+        const { sessionId: guardedId } = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+        });
+        reserveOutboundOperation.mockImplementation((args) => {
+          const params: unknown = Array.isArray(args) ? args[0] : undefined;
+          if (
+            typeof params === 'object' &&
+            params !== null &&
+            'sessionId' in params &&
+            params.sessionId === guardedId &&
+            'prompt' in params
+          ) {
+            reserved();
+            return released;
+          }
+          return () => {};
+        });
+        const prompt = (sessionId: string) => ({
+          sessionId,
+          prompt: [{ type: 'text' as const, text: 'hello' }],
+        });
+        const blocker = bridge.sendPrompt(blockerId, prompt(blockerId));
+        await writing.promise;
+
+        let authorized = true;
+        const refusal = new Error(failure);
+        const dispatchAbort = new AbortController();
+        const writeStarted = vi.fn();
+        const guarded = bridge.sendPrompt(
+          guardedId,
+          prompt(guardedId),
+          undefined,
+          {
+            assertCanDispatch() {
+              if (!authorized) throw refusal;
+            },
+            dispatchSignal: dispatchAbort.signal,
+            onPromptWriteStarted: writeStarted,
+          },
+        );
+        const result = guarded.catch((error: unknown) => error);
+        await vi.waitFor(() => expect(reserved).toHaveBeenCalledOnce());
+        if (failure === 'dispatch cancellation') {
+          dispatchAbort.abort(refusal);
+          await expect(result).resolves.toBe(refusal);
+          expect(released).not.toHaveBeenCalled();
+        } else {
+          authorized = false;
+        }
+        releaseWrite.resolve();
+        await expect(result).resolves.toBe(refusal);
+        await blocker;
+        await vi.waitFor(() => expect(released).toHaveBeenCalledOnce());
+        expect(writeStarted).not.toHaveBeenCalled();
+        expect(agent.promptCalls.map((call) => call.sessionId)).toEqual([
+          blockerId,
+        ]);
+        await expect(
+          bridge.sendPrompt(guardedId, prompt(guardedId)),
+        ).resolves.toMatchObject({ stopReason: 'end_turn' });
+      },
+    );
+
+    it('checks trusted prompt authorization again after queue admission', async () => {
+      const { channel, agent } = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => channel });
+      const { sessionId } = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const caller = new AbortController();
+      let active = true;
+      const dispatched = vi.fn();
+      const prompt = bridge.sendPrompt(
+        sessionId,
+        { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
+        caller.signal,
         {
-          sessionId: session.sessionId,
-          prompt: [{ type: 'text', text: 'admitted' }],
+          onPromptAdmitted: () => {
+            active = false;
+          },
+          onPromptDispatched: dispatched,
+          assertCanDispatch: () => {
+            if (!active) throw new Error('Runtime is no longer active');
+          },
         },
-        undefined,
-        { onPromptAdmitted: admitted },
       );
-      expect(admitted).toHaveBeenCalledOnce();
-
+      await expect(prompt).rejects.toThrow('Runtime is no longer active');
+      expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
+      expect(agent.promptCalls).toEqual([]);
+      expect(dispatched).not.toHaveBeenCalled();
       await bridge.shutdown();
+    });
+
+    it('detaches the caller abort listener when the prompt completes', async () => {
+      const { channel } = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => channel });
+      onTestFinished(() => bridge.shutdown());
+      const { sessionId } = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const caller = new AbortController();
+      const prompt = bridge.sendPrompt(
+        sessionId,
+        { sessionId, prompt: [{ type: 'text', text: 'hello' }] },
+        caller.signal,
+      );
+      expect(getEventListeners(caller.signal, 'abort')).toHaveLength(1);
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'end_turn' });
+      expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
     });
 
     it('FIFO-serializes concurrent prompts on the same session', async () => {
@@ -21415,6 +21770,150 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('publishes a terminal and releases the Guard when queued dispatch expires', async () => {
+      let releaseFirst!: () => void;
+      const firstDone = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const handle = makeChannel({
+        promptImpl: async () => {
+          await firstDone;
+          return { stopReason: 'end_turn' };
+        },
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionTurnStatus
+            ? { v: 1, sessionId: 'ignored', turnResult: null }
+            : {},
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const { sessionId } = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const first = bridge.sendPrompt(
+        sessionId,
+        { sessionId, prompt: [{ type: 'text', text: 'first' }] },
+        undefined,
+        { promptId: 'running' },
+      );
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+
+      const dispatch = new AbortController();
+      const second = bridge.sendPrompt(
+        sessionId,
+        { sessionId, prompt: [{ type: 'text', text: 'second' }] },
+        undefined,
+        { promptId: 'queued', dispatchSignal: dispatch.signal },
+      );
+      const claim = () =>
+        handle.agentConnection.extMethod(
+          TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+          { sessionId, promptId: 'running' },
+        );
+      await expect(claim()).resolves.toEqual({
+        claimed: false,
+        hasQueuedPrompt: true,
+      });
+
+      const timeout = new DOMException('Dispatch timed out', 'TimeoutError');
+      dispatch.abort(timeout);
+      expect(bridge.getPendingPrompts(sessionId)).toMatchObject([
+        { promptId: 'running', state: 'running' },
+      ]);
+      await expect(
+        bridge.getSessionTurnStatus(sessionId, undefined, 'queued'),
+      ).resolves.toMatchObject({
+        state: 'error',
+        error: { message: timeout.message },
+      });
+      await vi.waitFor(() => {
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+          params: { sessionId, promptId: 'running' },
+        });
+      });
+      await expect(claim()).resolves.toEqual({
+        claimed: true,
+        hasQueuedPrompt: false,
+      });
+      releaseFirst();
+      await expect(first).resolves.toEqual({ stopReason: 'end_turn' });
+      await expect(second).rejects.toBe(timeout);
+      expect(handle.agent.promptCalls).toHaveLength(1);
+      await bridge.shutdown();
+    });
+
+    it.each(['dispatch guard', 'ACP rejection'] as const)(
+      'releases the Guard wait owner when a promoted prompt fails at %s',
+      async (failure) => {
+        let releaseFirst!: () => void;
+        const firstDone = new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+        const refusal = 'Follow-up rejected';
+        const handle = makeChannel({
+          promptImpl: async (request) => {
+            if ((request.prompt[0] as { text?: string }).text === 'second') {
+              throw new RequestError(-32000, refusal, {
+                errorKind: 'approval_mode_changed',
+              });
+            }
+            await firstDone;
+            return { stopReason: 'end_turn' };
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const { sessionId } = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+        });
+        const first = bridge.sendPrompt(
+          sessionId,
+          { sessionId, prompt: [{ type: 'text', text: 'first' }] },
+          undefined,
+          { promptId: 'running' },
+        );
+        await vi.waitFor(() =>
+          expect(handle.agent.promptCalls).toHaveLength(1),
+        );
+        const second = bridge.sendPrompt(
+          sessionId,
+          { sessionId, prompt: [{ type: 'text', text: 'second' }] },
+          undefined,
+          {
+            promptId: 'queued',
+            ...(failure === 'dispatch guard'
+              ? {
+                  assertCanDispatch() {
+                    throw new Error(refusal);
+                  },
+                }
+              : {}),
+          },
+        );
+        void second.catch(() => {});
+        await expect(
+          handle.agentConnection.extMethod(
+            TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
+            { sessionId, promptId: 'running' },
+          ),
+        ).resolves.toEqual({ claimed: false, hasQueuedPrompt: true });
+
+        releaseFirst();
+        await first;
+        await expect(second).rejects.toThrow(refusal);
+        await vi.waitFor(() => {
+          expect(handle.agent.extMethodCalls).toContainEqual({
+            method: TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+            params: { sessionId, promptId: 'running' },
+          });
+        });
+        expect(bridge.getPendingPrompts(sessionId)).toEqual([]);
+        expect(handle.agent.promptCalls).toHaveLength(
+          failure === 'dispatch guard' ? 1 : 2,
+        );
+        await bridge.shutdown();
+      },
+    );
+
     it('removePendingPrompt aborts a queued prompt and removes it from the list', async () => {
       let resolveFirst: (() => void) | undefined;
       const firstDone = new Promise<void>((r) => {
@@ -21454,13 +21953,14 @@ describe('createAcpSessionBridge', () => {
         undefined,
         { promptId: 'prompt-running' },
       );
+      const caller = new AbortController();
       const p2 = bridge.sendPrompt(
         session.sessionId,
         {
           sessionId: session.sessionId,
           prompt: [{ type: 'text', text: 'to be removed' }],
         },
-        undefined,
+        caller.signal,
         { promptId: 'prompt-removed' },
       );
 
@@ -21495,6 +21995,7 @@ describe('createAcpSessionBridge', () => {
       try {
         const result = bridge.removePendingPrompt(session.sessionId, queuedId!);
         expect(result.removed).toBe(true);
+        expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
         expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
         await vi.waitFor(() => {
           expect(handle.agent.extMethodCalls).toContainEqual({
@@ -30592,6 +31093,77 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('invalidates a captured approval-mode guard only for the changing session', async () => {
+      let markChangeStarted!: () => void;
+      const changeStarted = new Promise<void>((resolve) => {
+        markChangeStarted = resolve;
+      });
+      let finishChange!: () => void;
+      const changeFinished = new Promise<void>((resolve) => {
+        finishChange = resolve;
+      });
+      const { channel, agent } = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method !== 'qwen/control/session/approval_mode') return {};
+          markChangeStarted();
+          await changeFinished;
+          return { previous: 'default', current: 'yolo' };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => channel,
+        persistApprovalMode: async () => {},
+      });
+      onTestFinished(() => bridge.shutdown());
+      const { sessionId } = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const peer = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const guard = bridge.captureSessionApprovalModeGuard(sessionId);
+      const peerGuard = bridge.captureSessionApprovalModeGuard(peer.sessionId);
+      const request = {
+        sessionId,
+        prompt: [{ type: 'text' as const, text: 'hello' }],
+      };
+      const modeChanged = 'The session approval mode changed during delegation';
+
+      const change = bridge.setSessionApprovalMode(
+        sessionId,
+        ApprovalMode.YOLO,
+        {
+          persist: true,
+        },
+      );
+      try {
+        await changeStarted;
+        expect(() => bridge.captureSessionApprovalModeGuard(sessionId)).toThrow(
+          modeChanged,
+        );
+        await expect(
+          bridge.sendPrompt(sessionId, request, undefined, {
+            assertCanDispatch: guard,
+          }),
+        ).rejects.toThrow(modeChanged);
+        expect(agent.promptCalls).toEqual([]);
+      } finally {
+        finishChange();
+      }
+
+      await expect(change).resolves.toMatchObject({ persisted: true });
+      expect(guard).toThrow(modeChanged);
+      expect(peerGuard).not.toThrow();
+      const freshGuard = bridge.captureSessionApprovalModeGuard(sessionId);
+      await expect(
+        bridge.sendPrompt(sessionId, request, undefined, {
+          assertCanDispatch: freshGuard,
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+    });
+
     it('serializes concurrent approval-mode changes through the per-session queue (A3)', async () => {
       // doudouOUC #4484 post-merge review (A3): two concurrent
       // `setSessionApprovalMode` calls must not interleave their ACP
@@ -35573,10 +36145,11 @@ describe('createAcpSessionBridge', () => {
           bridge.getSessionSummary(session.sessionId).prs?.map((p) => p.number),
         ).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
         // …until the route reconciles the entry to the persisted list.
-        const reconciled = persisted.map(({ number, url, state }) => ({
+        const reconciled = persisted.map(({ number, url, state, source }) => ({
           number,
           url,
           ...(state ? { state } : {}),
+          ...(source ? { source } : {}),
         }));
         expect(bridge.getSessionSummary(session.sessionId).prs).not.toEqual(
           reconciled,

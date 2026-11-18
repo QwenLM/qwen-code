@@ -17,6 +17,7 @@ import {
   fetchGitLog,
   fetchGitCommitDetail,
   getGitWorkingTreeStatus,
+  isGitAncestorOfHead,
   MAX_DIFF_SIZE_BYTES,
   MAX_FILES,
   MAX_LINES_PER_FILE,
@@ -1242,7 +1243,12 @@ describe('fetchGitDiff untracked counting', () => {
 });
 
 describe('parseStatusBranchLine', () => {
-  const main = { branch: 'main', detached: false, hasUpstream: true };
+  const main = {
+    branch: 'main',
+    detached: false,
+    hasHead: true,
+    hasUpstream: true,
+  };
   it.each([
     [
       'parses branch with upstream and ahead/behind',
@@ -1275,12 +1281,12 @@ describe('parseStatusBranchLine', () => {
     [
       'detects a detached HEAD',
       '## HEAD (no branch)',
-      { branch: null, detached: true, hasUpstream: false },
+      { branch: null, detached: true, hasHead: true, hasUpstream: false },
     ],
     [
       'returns empty for a non-header line',
       ' M src/foo.ts',
-      { branch: null, detached: false, hasUpstream: false },
+      { branch: null, detached: false, hasHead: false, hasUpstream: false },
     ],
   ])('%s', (_title, line, expected) => {
     expect(parseStatusBranchLine(line)).toEqual({
@@ -1300,13 +1306,17 @@ describe('parseStatusBranchLine', () => {
   });
 
   it('reads the branch from an unborn / initial-commit header', () => {
+    // hasHead:false is the single fact the worktree-eligibility gate rests
+    // on; pin it explicitly so flipping the arm cannot stay green.
     expect(parseStatusBranchLine('## No commits yet on main')).toMatchObject({
       branch: 'main',
       detached: false,
+      hasHead: false,
     });
     expect(parseStatusBranchLine('## Initial commit on dev')).toMatchObject({
       branch: 'dev',
       detached: false,
+      hasHead: false,
     });
   });
 });
@@ -1378,6 +1388,7 @@ describe('getGitWorkingTreeStatus', () => {
     expect(status).toEqual({
       branch: 'main',
       detached: false,
+      hasHead: true,
       hasUpstream: false,
       ahead: 0,
       behind: 0,
@@ -1952,5 +1963,58 @@ describe('getGitWorkingTreeStatus in a caller’s environment', () => {
       await rmDir(asked);
       await rmDir(elsewhere);
     }
+  });
+});
+
+describe('isGitAncestorOfHead', () => {
+  useFreshRepo({ 'a.txt': 'a' });
+
+  it('is true for a commit reachable from HEAD', async () => {
+    const first = await headSha(repo);
+    await commit(repo, { 'b.txt': 'b' }, 'second');
+    expect(await isGitAncestorOfHead(repo, first)).toBe(true);
+    expect(await isGitAncestorOfHead(repo, 'HEAD')).toBe(true);
+  });
+
+  it('is false for a divergent branch head', async () => {
+    const base = await headSha(repo);
+    await git(repo, 'checkout', '-q', '-b', 'side');
+    await commit(repo, { 'side.txt': 's' }, 'side work');
+    const side = await headSha(repo);
+    await git(repo, 'checkout', '-q', 'main');
+    await commit(repo, { 'main.txt': 'm' }, 'main work');
+    expect(await isGitAncestorOfHead(repo, side)).toBe(false);
+    expect(await isGitAncestorOfHead(repo, base)).toBe(true);
+  });
+
+  it('is false for a squash-merged PR head (the merged-PR shape)', async () => {
+    // A squash merge absorbs the work into a NEW commit on main; the PR's
+    // original head stays reachable in the object database but is not an
+    // ancestor of HEAD — exactly the boundary the fallback must refuse.
+    await git(repo, 'checkout', '-q', '-b', 'pr');
+    await commit(repo, { 'pr.txt': 'p' }, 'PR work');
+    const prHead = await headSha(repo);
+    await git(repo, 'checkout', '-q', 'main');
+    await git(repo, 'merge', '-q', '--squash', 'pr');
+    await git(repo, 'commit', '-qm', 'squash-merge PR');
+    expect(await isGitAncestorOfHead(repo, prHead)).toBe(false);
+    expect(await isGitAncestorOfHead(repo, 'HEAD')).toBe(true);
+  });
+
+  it('is false for an unknown or unsafe ref', async () => {
+    expect(
+      await isGitAncestorOfHead(
+        repo,
+        'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+      ),
+    ).toBe(false);
+    expect(await isGitAncestorOfHead(repo, '--upload-pack=evil')).toBe(false);
+    expect(await isGitAncestorOfHead(repo, 'HEAD;rm')).toBe(false);
+  });
+
+  it('is false outside a git repository', async () => {
+    await inPlainDir(async (dir) => {
+      expect(await isGitAncestorOfHead(dir, 'HEAD')).toBe(false);
+    });
   });
 });

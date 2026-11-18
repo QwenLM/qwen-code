@@ -67,6 +67,8 @@ import { Checkbox } from './ui/checkbox';
 import type { MessageDeletionControls } from '../hooks/useMessageDeletion';
 import { summaryRunFirstMemberId, summaryRunId } from './summaryRunId';
 import type { SessionContentGenerator } from './messages/AssistantMessage';
+import type { HookStatisticsTurn } from './messages/hook-statistics-context';
+import { collectHookStatisticsTurns } from './messages/hook-statistics-turns';
 import { MessageTimestamp } from './MessageTimestamp';
 import {
   TurnOutputs,
@@ -107,6 +109,7 @@ export interface MessageListProps {
   deletion?: MessageDeletionControls;
   messages: Message[];
   frozenViewport?: boolean;
+  hookStatisticsSessionId?: string;
   terminalBackgroundShellTaskIds?: ReadonlySet<string>;
   pendingApproval: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
@@ -962,6 +965,45 @@ export function collectFinalAssistantTurnIds(
   return turnIdByAssistantId;
 }
 
+// A passive completion can split one streamed answer into several rows.
+// Keep those segments, but stop at work or an automatic execution marker.
+function findAnswerStartIndex(
+  items: readonly DisplayItem[],
+  start: number,
+  answerIdx: number,
+): number {
+  let answerStartIdx = answerIdx;
+  if (answerIdx < 0 || !isFinalContentCandidate(items[answerIdx]!, false)) {
+    return answerStartIdx;
+  }
+  let crossedCompletion = false;
+  for (let i = answerIdx - 1; i > start; i--) {
+    const item = items[i]!;
+    if (item.type !== 'message') break;
+    if (
+      item.message.role === 'system' &&
+      item.message.source === 'background_task_completed'
+    ) {
+      crossedCompletion = true;
+    } else if (crossedCompletion && item.message.role === 'assistant') {
+      answerStartIdx = i;
+      crossedCompletion = false;
+    } else {
+      break;
+    }
+  }
+  return answerStartIdx;
+}
+
+function isTurnFromSession(data: unknown): boolean {
+  if (!data || typeof data !== 'object' || !('backgroundTask' in data)) {
+    return false;
+  }
+  const task = (data as { backgroundTask?: { fromSession?: unknown } })
+    .backgroundTask;
+  return !!task?.fromSession;
+}
+
 /**
  * A turn's hideable "steps": tool activity, plans, mid-turn assistant text,
  * non-final background notifications, and background result markers. Final
@@ -985,6 +1027,13 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
     case 'system':
       if (item.message.source === 'background_notification') {
         return !isFinalAnswer;
+      }
+      // A turn another session's reply started keeps its source in view.
+      if (
+        item.message.source === 'background_notification_turn_started' &&
+        isTurnFromSession(item.message.data)
+      ) {
+        return false;
       }
       return (
         item.message.source === 'background_notification_turn_started' ||
@@ -2195,27 +2244,39 @@ export function applyTurnCollapse(
     );
 
     const answerIdx = findFinalAnswerIndexForDisplay(items, start, end);
-    let answerStartIdx = answerIdx;
-    // A passive completion can split one streamed answer into several rows.
-    // Keep those segments, but stop at work or an automatic execution marker.
-    if (answerIdx >= 0 && isFinalContentCandidate(items[answerIdx]!, false)) {
-      let crossedCompletion = false;
-      for (let i = answerIdx - 1; i > start; i--) {
-        const item = items[i]!;
-        if (item.type !== 'message') break;
-        if (
-          item.message.role === 'system' &&
-          item.message.source === 'background_task_completed'
-        ) {
-          crossedCompletion = true;
-        } else if (crossedCompletion && item.message.role === 'assistant') {
-          answerStartIdx = i;
-          crossedCompletion = false;
-        } else {
-          break;
-        }
+    const answerStartIdx = findAnswerStartIndex(items, start, answerIdx);
+    const exchangeAnswers: Array<[number, number]> = [];
+    const keepExchangeAnswer = (from: number, to: number) => {
+      const idx = findFinalAnswerIndex(items, from, to);
+      if (idx >= 0) {
+        exchangeAnswers.push([findAnswerStartIndex(items, from, idx), idx]);
       }
+    };
+    let promptAnswerEnd: number | undefined;
+    let exchangeStart = start;
+    let exchangeFromSession = false;
+    for (let i = start + 1; i <= end; i++) {
+      const item = items[i]!;
+      if (
+        item.type !== 'message' ||
+        item.message.role !== 'system' ||
+        item.message.source !== 'background_notification_turn_started'
+      ) {
+        continue;
+      }
+      const nextFromSession = isTurnFromSession(item.message.data);
+      if (exchangeStart === start) promptAnswerEnd = i - 1;
+      if (nextFromSession && promptAnswerEnd !== undefined) {
+        keepExchangeAnswer(start, promptAnswerEnd);
+        promptAnswerEnd = undefined;
+      }
+      if (exchangeFromSession) keepExchangeAnswer(exchangeStart, i - 1);
+      exchangeStart = i;
+      exchangeFromSession = nextFromSession;
     }
+    const isAnswerAt = (i: number) =>
+      (i >= answerStartIdx && i <= answerIdx) ||
+      exchangeAnswers.some(([from, to]) => i >= from && i <= to);
     let hiddenCount = 0;
     let terminalTs: number | undefined;
     let cancelledElapsedMs: number | undefined;
@@ -2230,10 +2291,7 @@ export function applyTurnCollapse(
     let hasTurnError = false;
     for (let i = start + 1; i <= end; i++) {
       const item = items[i]!;
-      const isStep = isHideableStep(
-        item,
-        i >= answerStartIdx && i <= answerIdx,
-      );
+      const isStep = isHideableStep(item, isAnswerAt(i));
       if (isStep) {
         hiddenCount++;
       }
@@ -2412,8 +2470,7 @@ export function applyTurnCollapse(
         });
         continue;
       }
-      if (!isHideableStep(item, i >= answerStartIdx && i <= answerIdx))
-        result.push(item);
+      if (!isHideableStep(item, isAnswerAt(i))) result.push(item);
     }
   }
 
@@ -3140,6 +3197,7 @@ export const MessageList = memo(
       messages,
       deletion,
       frozenViewport = false,
+      hookStatisticsSessionId,
       sessionKey,
       terminalBackgroundShellTaskIds,
       pendingApproval,
@@ -3209,7 +3267,7 @@ export const MessageList = memo(
       let lastId: string | undefined;
       let turnIndex = 0;
       for (const message of messages) {
-        if (message.role !== 'user') continue;
+        if (message.role !== 'user' || message.agentMessage?.sentTo) continue;
         turnIndexById.set(message.id, turnIndex);
         lastId = message.id;
         turnIndex += 1;
@@ -3859,6 +3917,17 @@ export const MessageList = memo(
       }
       return heads;
     }, [messages]);
+    const hookTurns = useMemo<ReadonlyMap<string, HookStatisticsTurn>>(() => {
+      const sessionId = hookStatisticsSessionId ?? sourceSessionId;
+      return sessionId && transcriptRenderMode !== 'document'
+        ? collectHookStatisticsTurns(messages, sessionId)
+        : new Map();
+    }, [
+      messages,
+      hookStatisticsSessionId,
+      sourceSessionId,
+      transcriptRenderMode,
+    ]);
     const assistantFeedbackEnabled = shouldOfferAssistantFeedback({
       renderMode: transcriptRenderMode,
       sessionId: sourceSessionId,
@@ -6066,6 +6135,7 @@ export const MessageList = memo(
           return (
             <MessageItem
               message={displayItem.message}
+              hookTurn={hookTurns.get(displayItem.message.id)}
               onLocateBackgroundSource={
                 displayItem.message.role === 'system' &&
                 displayItem.message.source ===
@@ -6225,6 +6295,7 @@ export const MessageList = memo(
         latestFinalAssistantTurnId,
         assistantFeedbackEnabled,
         assistantFeedbackHeadById,
+        hookTurns,
         assistantFeedbackRatings,
         handleAssistantFeedbackRate,
         frozenViewport,

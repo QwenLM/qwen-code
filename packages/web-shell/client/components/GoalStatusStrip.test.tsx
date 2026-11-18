@@ -4,7 +4,11 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GoalSnapshotV2 } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
-import { GoalStatusStrip, getGoalActiveTimeMs } from './GoalStatusStrip';
+import {
+  GoalStatusStrip,
+  getGoalActiveTimeMs,
+  goalStatusTone,
+} from './GoalStatusStrip';
 
 function snapshot(
   status: NonNullable<GoalSnapshotV2['goal']>['status'],
@@ -292,5 +296,90 @@ describe('GoalStatusStrip', () => {
     expect(
       container.querySelector('[data-testid="goal-checkpoint-stalls"]'),
     ).toBeNull();
+  });
+
+  it('opens the goals page when the affordance is wired', () => {
+    const onOpenGoals = vi.fn();
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GoalStatusStrip
+            snapshot={snapshot('active')}
+            onEdit={vi.fn()}
+            onPause={vi.fn()}
+            onResume={vi.fn()}
+            onClear={vi.fn()}
+            onOpenGoals={onOpenGoals}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-open-goals"]',
+    );
+    expect(button).not.toBeNull();
+    // Navigation wears the link cue, not the grey control class: the blue
+    // tint itself is painted-proofed in the goals E2E; here pin the class
+    // wiring so dropping it reds a unit case too.
+    expect(button!.className).toContain('goalsAction');
+    act(() => button!.click());
+    expect(onOpenGoals).toHaveBeenCalledOnce();
+  });
+
+  it('hides the goals-page affordance when the page is unavailable', () => {
+    render('active');
+
+    expect(
+      container.querySelector('[data-testid="goal-open-goals"]'),
+    ).toBeNull();
+  });
+
+  it('keeps the Goals jump enabled while a control is in flight', () => {
+    // Navigation is not a control: the busy gate that locks edit/pause/
+    // clear must never lock the jump to the Goals page.
+    const onOpenGoals = vi.fn();
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GoalStatusStrip
+            snapshot={snapshot('active')}
+            busy
+            onEdit={vi.fn()}
+            onPause={vi.fn()}
+            onResume={vi.fn()}
+            onClear={vi.fn()}
+            onOpenGoals={onOpenGoals}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      container.querySelector<HTMLButtonElement>('[aria-label="Edit goal"]')
+        ?.disabled,
+    ).toBe(true);
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-open-goals"]',
+    );
+    expect(button?.disabled).toBe(false);
+    act(() => button!.click());
+    expect(onOpenGoals).toHaveBeenCalledOnce();
+  });
+
+  it('tones the status text by lifecycle state', () => {
+    render('active');
+    expect(container.querySelector('[data-status="running"]')).not.toBeNull();
+
+    render('paused');
+    expect(container.querySelector('[data-status="attention"]')).not.toBeNull();
+  });
+
+  it('maps every lifecycle state onto the shared status tones', () => {
+    expect(goalStatusTone('active')).toBe('running');
+    expect(goalStatusTone('paused')).toBe('attention');
+    expect(goalStatusTone('blocked')).toBe('attention');
+    expect(goalStatusTone('usage_limited')).toBe('attention');
+    expect(goalStatusTone('complete')).toBe('done');
   });
 });
