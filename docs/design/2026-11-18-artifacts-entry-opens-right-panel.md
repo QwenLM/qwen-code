@@ -27,7 +27,7 @@ problems follow:
 2. **State asymmetry.** The environment toggle highlights when open
    (`.action[aria-pressed='true']`); the artifacts button never highlights, even
    when it just opened the panel. In docked mode a second click on the artifacts
-   button is a no-op, and the only way to close the panel is the *other* button.
+   button is a no-op, and the only way to close the panel is the _other_ button.
 3. **Floating-mode flicker.** The floating environment panel dismisses on
    outside `pointerdown`, exempting only `data-web-shell-environment-toggle`.
    The artifacts entry (`data-web-shell-artifacts-entry`) is not exempt, so
@@ -40,7 +40,7 @@ problems follow:
   artifacts entry (no `aria-pressed`, shown only when `artifactCount > 0`).
 - `App.tsx` `artifactsHeaderEntry` gates on
   `artifactsHeaderItemVisible && mainView === 'chat' &&
-  environmentPanelItems.includes('artifacts') && connection.sessionId`, and its
+environmentPanelItems.includes('artifacts') && connection.sessionId`, and its
   `onOpenArtifacts` opens the environment panel.
 - `EnvironmentPanel.tsx` lists artifacts in its `artifacts` section; clicking a
   row calls `onOpenArtifact` → `openArtifactPanel`, which opens an `artifact:`
@@ -105,12 +105,12 @@ tabs.
 - `ArtifactPanel.tsx`: add a `PackageIcon` tab-bar icon for `kind: 'artifacts'`;
   add a content branch rendering `ArtifactsListPanel` from the existing
   `artifacts` / `loading` props; add a top-level `onOpenArtifact?: (artifactId:
-  string) => void` prop wired to `openArtifactPanel` at the call site.
+string) => void` prop wired to `openArtifactPanel` at the call site.
 
 ### Persistence
 
 - Add `Pick<Extract<ArtifactPanelTab, { kind: 'artifacts' }>, 'id' | 'kind' |
-  'title' | 'sessionId'>` to `PersistedArtifactPanelTab`, and a matching case in
+'title' | 'sessionId'>` to `PersistedArtifactPanelTab`, and a matching case in
   `parsePersistedArtifactPanelTab`. Restore needs no rewiring because the list
   comes from the live `artifacts` prop.
 

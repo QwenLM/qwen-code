@@ -34,7 +34,7 @@
   `aria-pressed`，仅在 `artifactCount > 0` 时显示）。
 - `App.tsx` 的 `artifactsHeaderEntry` 门控为
   `artifactsHeaderItemVisible && mainView === 'chat' &&
-  environmentPanelItems.includes('artifacts') && connection.sessionId`，其
+environmentPanelItems.includes('artifacts') && connection.sessionId`，其
   `onOpenArtifacts` 打开环境面板。
 - `EnvironmentPanel.tsx` 在 `artifacts` 小节列出产物；点击某行调用
   `onOpenArtifact` → `openArtifactPanel`，在右侧面板打开一个 `artifact:` tab。
@@ -95,7 +95,7 @@
 
 - 在 `PersistedArtifactPanelTab` 增加
   `Pick<Extract<ArtifactPanelTab, { kind: 'artifacts' }>, 'id' | 'kind' |
-  'title' | 'sessionId'>`，并在 `parsePersistedArtifactPanelTab` 增加对应 case。
+'title' | 'sessionId'>`，并在 `parsePersistedArtifactPanelTab` 增加对应 case。
   恢复无需重新接线，因为列表来自实时 `artifacts` prop。
 
 ### 头部接线与状态

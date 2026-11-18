@@ -1058,5 +1058,4 @@ describe('EnvironmentPanel', () => {
       view.querySelectorAll('[data-testid="environment-file-list-skeleton"]'),
     ).toHaveLength(2);
   });
-
 });
