@@ -491,6 +491,23 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       expect((out[1] as { text: string }).text).not.toContain('~1200');
     });
 
+    it('marks only the original count when only that count is estimated', () => {
+      const map = createEventMapper({ getModelName: () => 'm' });
+      const out = map({
+        type: 'chat_compressed',
+        value: {
+          originalTokenCount: 1200,
+          originalTokenCountIsEstimated: true,
+          newTokenCount: 300,
+          newTokenCountIsEstimated: false,
+        },
+      } as unknown as AnyEv);
+      expect(out[1]).toEqual({
+        type: 'info',
+        text: expect.stringContaining('compressed from: ~1200 to 300 tokens'),
+      });
+    });
+
     it('maps model_fallback to a retry clear + info notice', () => {
       const map = createEventMapper();
       const out = map({
