@@ -4,7 +4,7 @@ Bind the development server to loopback and open the shell in a browser that can
 
 ## Exercise an older daemon's capability fallback
 
-Run the scenario once with the daemon's advertised capabilities. For the second run, register a Playwright route for `/capabilities` before the page loads. Fetch the real response with `route.fetch()`, remove only the feature under test, then return the edited response with `route.fulfill()`. Record which capability you removed. In [the secondary-workspace status check](https://github.com/QwenLM/qwen-code/pull/12943#issuecomment-5988053379), removing `workspace_session_live_state` exercised the fallback while the real daemon handled the session. Describe this run as an emulation of the older capability set.
+Run the scenario once with the daemon's advertised capabilities. For the second run, open a fresh page and register `page.route('**/capabilities', handler)` before the first navigation. In the handler, count the request, fetch the real response with `route.fetch()`, remove only the feature under test, and return the edited response with `route.fulfill()`. Verify that the handler ran at least once and that the browser received the edited feature list before reporting an emulated older daemon. In [the secondary-workspace status check](https://github.com/QwenLM/qwen-code/pull/12943#issuecomment-5988053379), removing `workspace_session_live_state` exercised the fallback while the real daemon handled the session.
 
 ## Verify a partially applied settings change
 
