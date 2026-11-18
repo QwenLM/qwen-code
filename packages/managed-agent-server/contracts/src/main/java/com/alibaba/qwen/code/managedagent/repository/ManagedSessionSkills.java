@@ -21,4 +21,9 @@ public interface ManagedSessionSkills {
             List<ManagedExtensionPackages.Pin> pins);
 
     public void save(String tenant, String session, List<Map<String, Object>> skills);
+
+    public void save(String tenant, String session, List<Map<String, Object>> skills,
+            boolean serverLoopInjected);
+
+    public boolean serverLoopInjected(String tenant, String session);
 }

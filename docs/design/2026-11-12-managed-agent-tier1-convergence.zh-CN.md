@@ -51,6 +51,10 @@ K1 provisioner；修复 `sessionWorktreeScheduler` 默认候选；在各 managed
   `retriesTransientGetAndRechecksTheOriginalGuard` 断言一次重试读取中 guard 执行
   三次：versioning 探针前一次、两次 `getObject` 尝试前各一次。去除读探针后该计数
   变为两次。
+- `verification/.../persistence/AliyunToolPublicationReadRetryTest`
+  `transientReadsRecoverWithTheRealSdk` 的 versioning 行期望三次 `versioning`
+  请求：构造器探针失败及其重试，加上 `open` 的复探测。去除读探针后该计数变为
+  两次。
 - `verification/.../persistence/O4OssGate.java` 委托真实 store，不计数探针；其
   受限身份跳过 `validateConfiguration`，因为探针本身即一次存储操作。保留删除探针
   可保住其断言的 `ACCESS_DENIED` 语义。
@@ -95,9 +99,10 @@ K1 provisioner；修复 `sessionWorktreeScheduler` 默认候选；在各 managed
   被拒绝而不可达，但无害。`RuntimeProviderRegistry` 中的保留守卫是活的且文档化。
   `HarnessConfiguration` 与 `HarnessPoolConnector` 中的 `"kubernetes"` 字符串是
   Harness pool discovery 模式，与 Runtime provisioner 无关。
-- **`JdbcRuntimeBrokerSchema` 不可删除。** 它在 `src/main` 零调用，但被 13+ 个
-  verification 测试类用作 schema 初始化器，并在 `docs/runtime-broker.md` 中被
-  文档化为 Broker schema 入口。评审「生产未使用，删除」的结论不正确。
+- **`JdbcRuntimeBrokerSchema` 是冗余别名。** 它是一行透传到 `ManagedSchema.initialize`
+  的壳，`src/main` 零调用；8 个 verification 测试类调用它，而其余 133 个直接调用
+  `ManagedSchema`。删除该壳并把这 8 个测试指向 `ManagedSchema`——不删任何测试、
+  不丢覆盖。
 - `ManagedArtifactConfiguration.sessionWorktreeScheduler` 是该类中唯一缺少
   `defaultCandidate = false` 的调度器 bean。模块内全部 24 个 `@Scheduled` 方法都
   指定了显式 `scheduler=` 限定符；没有一个依赖默认候选解析。在嵌入模式下，缺失该
@@ -166,9 +171,8 @@ K1 provisioner；修复 `sessionWorktreeScheduler` 默认候选；在各 managed
 ## 非目标
 
 - 去除 `putIfAbsent` 或 `deleteIfPresent` 的每调用探针（正确性不变量：漂移后的
-  版本控制 bucket 上拒绝 forbid-overwrite 与物理删除；由删除回归测试锁定）。
+  版本控制 bucket 上拒绝 forbid-overwrite 与物理删除；由删除与 put 回归测试锁定）。
 - 删除 `validateConfiguration()` SPI 方法或其两处显式生产调用点。
-- 删除 `JdbcRuntimeBrokerSchema`（仅测试用但承重；搬去 verification 是另行决策）。
 - 删除 `kubernetes` 保留守卫，或触碰无关的 Harness pool-discovery `"kubernetes"`
   字符串。
 - 将 `W1_JDBC_*` / `K2_JDBC_*` / `SPRING_DATASOURCE_*` 统一为单一方言（admin-launcher
@@ -188,8 +192,10 @@ K1 provisioner；修复 `sessionWorktreeScheduler` 默认候选；在各 managed
 
 guarded read loop 仍在每次 `getObject` 尝试与重试前运行 guard，因此接口契约
 「在每次新存储请求（含实现重试）前检查授权」得以保留。更新
-`retriesTransientGetAndRechecksTheOriginalGuard`，期望两次 guard 运行而非三次。
-`deletionRejectsVersioningEnabledAfterConstruction` 与所有请求计数测试保持绿。
+`retriesTransientGetAndRechecksTheOriginalGuard`，期望两次 guard 运行而非三次；
+并将 `AliyunToolPublicationReadRetryTest` `transientReadsRecoverWithTheRealSdk`
+的 versioning 行改为期望两次 versioning 请求而非三次。
+`deletionRejectsVersioningEnabledAfterConstruction` 与其余请求计数测试保持绿。
 构造后版本控制漂移的 bucket 上的读取，在下一次校验、GC 页或删除时被发现；每次
 外部读取仍校验长度与 SHA-256 并在不匹配时 fail-closed。
 
@@ -237,9 +243,12 @@ provisioner。保留 `RuntimeProviderRegistry` 保留守卫。`ManagedAgentPrope
 `EmbeddedRuntimeBroker` 中不可达的 `"kubernetes"` 析取项维持原样（无害，受保留
 守卫保护）。
 
-### 2b. JdbcRuntimeBrokerSchema
+### 2b. 删除 JdbcRuntimeBrokerSchema
 
-不变。保留该类及其文档。将搬去 verification fixture 记录为另行未来决策，而非删除。
+删除 `JdbcRuntimeBrokerSchema` 壳（一行透传到 `ManagedSchema.initialize`），把 8 个
+verification 测试类中的 14 处调用替换为 `ManagedSchema.initialize`，与已直接使用
+`ManagedSchema` 的 133 个测试一致。不删任何测试，覆盖不变。更新
+`docs/runtime-broker.md`，以 `ManagedSchema.initialize` 为 schema 入口。
 
 ### 2c. sessionWorktreeScheduler 默认候选
 
@@ -301,13 +310,15 @@ execution（`workspace-bundle`、`workspace-migration`、
 ## 设计决策与理由
 
 - **仅去读探针**：删除探针被一个安全回归测试与文档化擦除不变量锁定；put 探针保住
-  forbid-overwrite 拒绝。读是高频路径且校验 digest，故去除其探针是无安全损失的纯
-  性能收益。put/delete 探针是正确性而非兼容，即便 pre-production 也保留。
+  forbid-overwrite 拒绝，并由自身的回归测试锁定。读是高频路径且校验 digest，故去除
+  其探针是无安全损失的纯性能收益。put/delete 探针是正确性而非兼容，即便
+  pre-production 也保留。
 - **中性 object-storage 开关并默认跟随 `tool-publication.enabled`**：复用既有
   `application.yml` 模式并保住自定义 store 的失败模式；OSS 属性仍留
   `tool-publication.oss-*`（无迁移）。
-- **保留 `JdbcRuntimeBrokerSchema`**：评审「生产未使用」仅对 `src/main` 成立；
-  13+ 测试与模块文档依赖它。
+- **删除 `JdbcRuntimeBrokerSchema` 别名**：它相对 `ManagedSchema.initialize` 毫无
+  增益；用它的 8 个测试迁移到生产初始化器而非被删除，故生产未使用的类消失且不丢
+  覆盖。
 - **保留 K1 保留守卫与活的 `KubernetesRuntimeClient` SPI**：只有未注册的 K1
   provisioner 及其仅测试用 fixture 是死的。
 - **统一 strict mode**：pre-production 去掉了「让 standalone 与维护调用方自行配置
@@ -376,7 +387,9 @@ acceptance 处于 pending。
 ## 验收标准
 
 - `open`/`openRange` 不再发每调用 `getBucketVersioning`；`putIfAbsent`/
-  `deleteIfPresent` 仍拒绝版本控制 bucket；删除回归测试绿；guard 计数测试期望两次。
+  `deleteIfPresent` 仍拒绝版本控制 bucket；删除与 put 回归测试绿；guard 计数与
+  versioning 请求计数测试期望两次，range 读取测试验证 `openRange` 不发
+  versioning 探针。
 - `object-storage.enabled=true` 且 `tool-publication.enabled=false` 产出 store bean
   且无发布 bean；现有 tool-publication 部署经跟随默认无需变更即可工作。
 - K1 provisioner 及其仅测试用 fixture 已删除；全模块编译；`KubernetesRuntimeClient`
@@ -395,7 +408,6 @@ acceptance 处于 pending。
 - 可选：将 `AliyunToolPublicationStorageAutoConfiguration` 及其 bean 名重命名为
   中性 object-storage 名（触碰自动装配 imports、嵌入 `@Import`、hosted fixture 与
   配置测试）。
-- 可选：将 `JdbcRuntimeBrokerSchema` 搬去 verification fixture。
 - 可选：简化不可达的 `"kubernetes"` 析取项。
 - 可选：OSS 连接属性改用中性 `object-storage.*` 前缀（当前 `tool-publication.oss-*`）；
   因 churn 大于收益而延期。

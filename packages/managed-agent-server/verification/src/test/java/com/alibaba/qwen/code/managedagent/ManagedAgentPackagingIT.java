@@ -42,7 +42,7 @@ class ManagedAgentPackagingIT {
                 + System.getProperty("managed.artifact.version") + "-exec.jar");
         try (var executable = new ZipFile(jar.toFile())) {
             for (var backend : Map.of("external", "external.ExternalRuntimeProviderFactory",
-                    "kubernetes", "kubernetes.KubernetesRuntimeProviderFactory", "local", "local.LocalRuntimeProviderFactory",
+                    "local", "local.LocalRuntimeProviderFactory",
                     "ssh", "ssh.SshRuntimeProviderFactory", "static", "staticruntime.StaticRuntimeProviderFactory").entrySet()) {
                 var entry = executable.getEntry("BOOT-INF/lib/qwen-managed-agent-runtime-" + backend.getKey() + "-"
                         + System.getProperty("managed.artifact.version") + ".jar");
@@ -57,27 +57,6 @@ class ManagedAgentPackagingIT {
                     }
                 }
                 assertThat(registration).as(backend.getKey()).isEqualTo("com.alibaba.qwen.code.runtimebroker.provisioning." + backend.getValue());
-            }
-        }
-    }
-
-    @Test
-    void retirementLauncherLoadsFromExecutableJar() throws Exception {
-        Path jar = Path.of(System.getProperty("managed.artifact.directory") + "/qwen-managed-agent-server-" + System.getProperty("managed.artifact.version")
-                + "-exec.jar").toAbsolutePath();
-        Path log = directory.resolve("retirement.log");
-        Process process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
-                "-Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.ResidentWorkspaceRetirementMain",
-                "-cp", jar.toString(), "org.springframework.boot.loader.launch.PropertiesLauncher")
-                .redirectErrorStream(true).redirectOutput(log.toFile()).start();
-        try {
-            assertThat(process.waitFor(30, TimeUnit.SECONDS)).isTrue();
-            assertThat(process.exitValue()).isNotZero();
-            assertThat(Files.readString(log)).contains("Resident Workspace retirement could not be completed");
-            assertThat(Files.readString(log)).doesNotContain("NoClassDefFoundError", "ClassNotFoundException");
-        } finally {
-            if (process.isAlive()) {
-                process.destroyForcibly();
             }
         }
     }

@@ -1,30 +1,13 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.SealWriterRequest;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
-import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
-import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.maintenance.WorkspaceCsiSessionMain;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedToolResultStore;
-import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationRetentionStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
-import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
-import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
-import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
-import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flywaydb.core.Flyway;
@@ -32,10 +15,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DelegatingDataSource;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.DefaultTransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -44,22 +25,17 @@ import javax.sql.DataSource;
 import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
-import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
-import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -71,14 +47,12 @@ import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITE
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
 import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ToolPublicationLockOrderMySqlIT {
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void projectionCompletionSkipsTheTenantGuardAndRefusesPrivateSessions(boolean privateSession) throws Exception {
+    @Test
+    void projectionCompletionSkipsTheTenantGuard() throws Exception {
         String url = System.getProperty("mysql.url");
         if (url == null || !url.matches("jdbc:mysql://[^/]+/[^?]+(?:\\?.*)?")) {
             throw new IllegalArgumentException("A MySQL test database URL is required");
@@ -103,9 +77,6 @@ class ToolPublicationLockOrderMySqlIT {
             jdbc.update("UPDATE ma_operation SET state = 'PENDING', available_at = 0"
                     + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION'");
             var claim = fixture.results().claim().orElseThrow();
-            if (privateSession) {
-                jdbc.update("UPDATE ma_session SET runtime_request_key = 'projection-private'");
-            }
             jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain)"
                             + " VALUES (?, ?, 'output_publication') ON DUPLICATE KEY UPDATE tenant_key = tenant_key",
                     com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("tenant-1"), "tenant-1");
@@ -118,7 +89,7 @@ class ToolPublicationLockOrderMySqlIT {
                         .isEqualTo("tenant-1");
                 long before = System.nanoTime();
                 assertThat(pool.submit(() -> fixture.results().complete(claim, projection, fixture.policy().version()))
-                        .get(15, TimeUnit.SECONDS)).isEqualTo(!privateSession);
+                        .get(15, TimeUnit.SECONDS)).isTrue();
                 assertThat((System.nanoTime() - before) / 1_000_000).isLessThan(15_000);
             } finally {
                 fixture.manager().rollback(hold);
@@ -127,12 +98,12 @@ class ToolPublicationLockOrderMySqlIT {
             }
             assertThat(jdbc.queryForObject("SELECT state FROM ma_operation"
                             + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION'", String.class))
-                    .isEqualTo(privateSession ? "LEASED" : "READY");
+                    .isEqualTo("READY");
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_public_event"
                             + " WHERE event_type = 'item.tool_result.updated'", Integer.class))
-                    .isEqualTo(privateSession ? 0 : 1);
+                    .isEqualTo(1);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_artifact", Integer.class))
-                    .isEqualTo(privateSession ? 0 : artifacts.size());
+                    .isEqualTo(artifacts.size());
         } finally {
             admin.execute("DROP DATABASE " + schema);
         }
@@ -302,135 +273,6 @@ class ToolPublicationLockOrderMySqlIT {
     }
 
     /**
-     * The CSI writer lane takes root → placement → retention on a pinned
-     * Session (#13800), while every other lane, the retention lane through
-     * {@code ToolPublicationRetentionStore.lockSessionHead} among them,
-     * takes the tenant CAS row before the root. On one pinned Session the
-     * two orders close an InnoDB cycle (#13800 R1-1). The subject here is
-     * the heavier transaction, so InnoDB rolls back the retention owner at
-     * its root wait: that victim must answer the named, retryable
-     * tenant_guard_contended like the guard side, never a raw deadlock,
-     * and the seal then completes (its answer on the pinned original
-     * itself is csi_finalize_required). Dropping the root-side mapping
-     * turns the owner's failure back into a DeadlockLoserDataAccessException.
-     */
-    @Test
-    void pinnedSessionDeadlockNamesTheRetentionVictim() throws Exception {
-        String url = System.getProperty("mysql.url");
-        if (url == null || !url.matches("jdbc:mysql://[^/]+/[^?]+(?:\\?.*)?")) {
-            throw new IllegalArgumentException("A MySQL test database URL is required");
-        }
-        String user = System.getProperty("mysql.user");
-        String password = System.getProperty("mysql.password", "");
-        var admin = new JdbcTemplate(new DriverManagerDataSource(url, user, password));
-        String schema = "seal_lock_order_" + UUID.randomUUID().toString().replace("-", "");
-        admin.execute("CREATE DATABASE " + schema);
-        try {
-            var source = new OwnerPauseDataSource(new DriverManagerDataSource(
-                    url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password));
-            Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
-            var jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
-            var manager = new DataSourceTransactionManager(source);
-            var registration = new WorkspaceCsiRegistration("tenant", "storage", "cluster", "ns",
-                    "pvc", "pvc-uid", "pv", "pv-uid", "disk.csi.example.com", "volume", "backend",
-                    "disk-serial", "/workspace", 7);
-            var reservations = new WorkspaceCsiReservationStore(jdbc, manager, JSON);
-            reservations.register(registration);
-            jdbc.update(
-                    "INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
-                        + " storage_id, display_name, config_ref, policy_ref, state) VALUES"
-                        + " ('tenant', 'workspace', 3, 'storage', 'CSI', ?, ?, 'ACTIVE')",
-                    CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
-            jdbc.update(
-                    "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                        + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')",
-                    ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
-            var properties = new ManagedAgentProperties();
-            properties.setAgentRevision("reviewed-agent/1");
-            // A full pinned original: the seal below walks the whole CSI
-            // lane (root → placement → retention) before the contract
-            // names its own refusal, csi_finalize_required.
-            String sessionId = createCsiOriginal(jdbc, manager, JSON, properties, registration);
-            var bindings = new JdbcRuntimeBindingRepository(source,
-                    new AesGcmSecretProtector("test", new byte[32]));
-            var managed = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), ignored -> {},
-                    new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
-            var transaction = new TransactionTemplate(manager);
-            var request = transaction.execute(status ->
-                    requireCsiRequest(managed, registration, sessionId));
-            var binding = bindings.findOrCreate(request);
-            binding = bindings.claimOperation(binding.getBindingId(), "operator",
-                    Duration.ofSeconds(120));
-            reservations.reserve(registration, bindings, binding, UUID.randomUUID().toString());
-            var seed = binding.getProvisionSeed();
-            bindings.compareAndSet(binding, binding.withAttestation(
-                    new RuntimeLease(seed.getProvisionalRuntimeId(),
-                            URI.create("https://original.example.invalid"), seed.getToken(),
-                            seed.getLeaseId(), seed.getEpoch()),
-                    new RuntimeResourceHandle("kubernetes-workspace", 3,
-                            Map.of("podUid", "fixture-original")),
-                    Instant.now(), Instant.now()));
-            var sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc);
-            transaction.executeWithoutResult(status -> sessions.acquireWriter("tenant", sessionId,
-                    WRITER_TOKEN, new AcquireWriterRequest("workspace", "writer", 60_000L)));
-            // InnoDB rolls back the transaction with the smaller undo log;
-            // these rows make the seal the heavier side of the cycle.
-            jdbc.execute("CREATE TABLE deadlock_weight (id INT PRIMARY KEY)");
-            long deadlocksBefore = MySqlLockProbe.innodbDeadlocks(admin);
-            var owners = Executors.newSingleThreadExecutor(task -> new Thread(task, "owner"));
-            var subjects = Executors.newSingleThreadExecutor(task -> new Thread(task, "subject"));
-            try {
-                source.enabled = true;
-                source.pauseOwnerOnFirstInsert = true;
-                var owner = owners.submit(() -> transaction.executeWithoutResult(
-                        status -> lockSessionHead(jdbc, "tenant", sessionId)));
-                assertThat(source.ownerFirstLock.await(10, TimeUnit.SECONDS))
-                        .as("Retention owner holds the tenant CAS row").isTrue();
-                var subject = subjects.submit(() -> transaction.execute(status -> {
-                    for (int row = 0; row < 200; row++) {
-                        jdbc.update("INSERT INTO deadlock_weight (id) VALUES (?)", row);
-                    }
-                    return sessions.sealWriter("tenant", sessionId, WRITER_TOKEN,
-                            new SealWriterRequest("workspace", "writer", 1), null);
-                }));
-                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-                while (MySqlLockProbe.lockWaits(admin, schema) == 0 && !subject.isDone()) {
-                    assertThat(System.nanoTime()).isLessThan(deadline);
-                    Thread.sleep(200);
-                }
-                source.releaseOwner.countDown();
-                assertThatThrownBy(() -> owner.get(30, TimeUnit.SECONDS))
-                        .as("The retention owner is the deadlock victim at its root wait")
-                        .isInstanceOf(ExecutionException.class)
-                        .cause().isInstanceOfSatisfying(ManagedAgentException.class, error -> {
-                            assertThat(error.getStatus()).isEqualTo(503);
-                            assertThat(error.getCode()).isEqualTo("tenant_guard_contended");
-                        });
-                assertThatThrownBy(() -> subject.get(30, TimeUnit.SECONDS))
-                        .isInstanceOf(ExecutionException.class)
-                        .cause().isInstanceOfSatisfying(ManagedAgentException.class, error ->
-                                assertThat(error.getCode()).isEqualTo("csi_finalize_required"));
-                assertThat(source.subjectPlacementLocks.get())
-                        .as("Sealed CSI writer walked root → placement → retention"
-                            + " (the second placement is lockManagedSession's own domain)")
-                        .containsExactly("root", "placement", "retention", "placement");
-                assertThat(MySqlLockProbe.innodbDeadlocks(admin) - deadlocksBefore)
-                        .as("The two orders formed an InnoDB cycle").isPositive();
-            } finally {
-                source.releaseOwner.countDown();
-                source.enabled = false;
-                // Let both transactions end before the schema is dropped.
-                owners.shutdown();
-                subjects.shutdown();
-                assertThat(owners.awaitTermination(60, TimeUnit.SECONDS)
-                        && subjects.awaitTermination(60, TimeUnit.SECONDS)).isTrue();
-            }
-        } finally {
-            admin.execute("DROP DATABASE " + schema);
-        }
-    }
-
-    /**
      * On an ordinary Session every lane that holds the tenant CAS row
      * reaches the Session root only after it, and the ordinary apply lane
      * (reserve, renew) no longer takes the CAS row at all: a renew takes
@@ -488,53 +330,6 @@ class ToolPublicationLockOrderMySqlIT {
             }
         } finally {
             admin.execute("DROP DATABASE " + schema);
-        }
-    }
-
-    /**
-     * {@code WorkspaceCsiSessionMain.create} is package-scoped like the
-     * retention entry point; the arm drives the production fixture path
-     * reflectively rather than through a test-only API.
-     */
-    private static String createCsiOriginal(JdbcTemplate jdbc,
-            PlatformTransactionManager manager, ObjectMapper json,
-            ManagedAgentProperties properties, WorkspaceCsiRegistration registration) {
-        try {
-            var create = WorkspaceCsiSessionMain.class.getDeclaredMethod("create",
-                    JdbcTemplate.class, PlatformTransactionManager.class, ObjectMapper.class,
-                    ManagedAgentProperties.class, com.alibaba.qwen.code.managedagent.contracts.workspace.PrivateCsiSession.Request.class);
-            create.setAccessible(true);
-            var created = create.invoke(null, jdbc, manager, json, properties,
-                    new com.alibaba.qwen.code.managedagent.contracts.workspace.PrivateCsiSession.Request(registration, "actor", "create", null, null,
-                            new WorkspaceSelection("workspace", ".")));
-            var sessionId = created.getClass().getDeclaredMethod("sessionId");
-            sessionId.setAccessible(true);
-            return (String) sessionId.invoke(created);
-        } catch (InvocationTargetException error) {
-            if (error.getCause() instanceof RuntimeException runtime) {
-                throw runtime;
-            }
-            throw new AssertionError(error.getCause());
-        } catch (ReflectiveOperationException error) {
-            throw new AssertionError(error);
-        }
-    }
-
-    /** Same package-scoped entry, for the reservation's provision request. */
-    private static RuntimeProvisionRequest requireCsiRequest(ManagedAgentStore managed,
-            WorkspaceCsiRegistration registration, String sessionId) {
-        try {
-            var method = ManagedAgentStore.class.getDeclaredMethod("requireCsiRequest",
-                    WorkspaceCsiRegistration.class, String.class);
-            method.setAccessible(true);
-            return (RuntimeProvisionRequest) method.invoke(managed, registration, sessionId);
-        } catch (InvocationTargetException error) {
-            if (error.getCause() instanceof RuntimeException runtime) {
-                throw runtime;
-            }
-            throw new AssertionError(error.getCause());
-        } catch (ReflectiveOperationException error) {
-            throw new AssertionError(error);
         }
     }
 

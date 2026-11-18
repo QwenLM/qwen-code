@@ -241,3 +241,17 @@ export type {
 } from './types.js';
 export { matchMessageRoute } from './message-routes.js';
 export type { MatchedMessageRoute } from './message-routes.js';
+export type {
+  ManagedChannelAdapter,
+  ManagedChannelPolicy,
+  ManagedInboundEvent,
+  ManagedClaimedDelivery,
+  ManagedReceipt,
+  ManagedChannelControlPlane,
+} from './managed-channel.js';
+export {
+  MANAGED_OUTBOUND_LIMIT,
+  validManagedReceipt,
+  CHANNEL_INBOUND_TRUNCATION_NOTICE,
+  fitInboundText,
+} from './managed-channel.js';

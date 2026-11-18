@@ -369,6 +369,24 @@
   color: var(--warning-color, #f59e0b);
 }
 
+/* Block variant for sentence-length hints rendered inside the action
+   list (the inline badge variant nowrap-ellipsizes at 55% width). */
+.actionHintBlock {
+  display: block;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  padding: 2px 10px 6px 32px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted-foreground, #888);
+}
+
+.actionHintBlock[data-tone='info'] {
+  color: var(--foreground, #e0e0e0);
+  opacity: 0.8;
+}
+
 .remotesHeader {
   display: flex;
   align-items: center;

@@ -4415,6 +4415,62 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('session/list carries the artifact count and the pending-restore marker', async () => {
+    bridge.workspaceSessions = [
+      {
+        sessionId: '11111111-bbbb-cccc-dddd-eeeeeeeeeeee',
+        workspaceCwd: TEST_WORKSPACE,
+        createdAt: '2026-06-30T00:00:00.000Z',
+        updatedAt: '2026-06-30T00:01:00.000Z',
+        displayName: 'Counted Session',
+        clientCount: 1,
+        hasActivePrompt: false,
+        isArchived: false,
+        artifactCount: 3,
+      },
+      {
+        sessionId: '22222222-bbbb-cccc-dddd-eeeeeeeeeeee',
+        workspaceCwd: TEST_WORKSPACE,
+        createdAt: '2026-06-30T00:00:00.000Z',
+        updatedAt: '2026-06-30T00:02:00.000Z',
+        displayName: 'Restoring Session',
+        clientCount: 1,
+        hasActivePrompt: false,
+        isArchived: false,
+        artifactCountPending: true,
+      },
+    ];
+
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 13,
+      method: 'session/list',
+      params: { workspaceCwd: TEST_WORKSPACE },
+    });
+
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: { sessions: Array<Record<string, unknown>> };
+    }>;
+    expect(frame.id).toBe(13);
+    const counted = frame.result.sessions.find(
+      (session) =>
+        session['sessionId'] === '11111111-bbbb-cccc-dddd-eeeeeeeeeeee',
+    );
+    expect(counted).toMatchObject({ artifactCount: 3 });
+    expect(counted).not.toHaveProperty('artifactCountPending');
+    const restoring = frame.result.sessions.find(
+      (session) =>
+        session['sessionId'] === '22222222-bbbb-cccc-dddd-eeeeeeeeeeee',
+    );
+    expect(restoring).toMatchObject({ artifactCountPending: true });
+    expect(restoring).not.toHaveProperty('artifactCount');
+  });
+
   it('cancels session/list without buffering an error when the connection is destroyed', async () => {
     let loadSignal: AbortSignal | undefined;
     const listSessionsSpy = vi
@@ -6590,7 +6646,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ) as
         | {
             result?: {
-              prs?: Array<{ number: number; url: string; state?: string }>;
+              prs?: Array<{
+                number: number;
+                url: string;
+                state?: string;
+                source?: string;
+              }>;
             };
           }
         | undefined;
@@ -6602,6 +6663,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           number: 9101,
           url: 'https://github.com/o/r/pull/9101',
           state: 'merged',
+          source: 'create',
         },
       ]);
       // The entry must be re-hydrated from the sidecar BEFORE the mutation

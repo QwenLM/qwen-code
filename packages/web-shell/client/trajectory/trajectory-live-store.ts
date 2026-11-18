@@ -7,6 +7,10 @@
 import {
   createExecutionLifecycleState,
   createToolLifecycleState,
+  createHookLifecycleState,
+  extractHookLifecycle,
+  reduceHookLifecycle,
+  type HookLifecycleState,
   extractExecutionLifecycle,
   extractToolLifecycle,
   getSessionUpdatePayload,
@@ -26,6 +30,8 @@ export interface TrajectoryLiveSnapshot {
   readonly reason?: string;
   readonly requests: ExecutionLifecycleState;
   readonly tools: ToolLifecycleState;
+  readonly hooks: HookLifecycleState;
+  readonly hookPromptIds: ReadonlyMap<string, string>;
   readonly incomplete: boolean;
   readonly truncated: boolean;
 }
@@ -54,6 +60,8 @@ function emptySnapshot(): TrajectoryLiveSnapshot {
     status: 'unavailable',
     requests: createExecutionLifecycleState(),
     tools: createToolLifecycleState(),
+    hooks: createHookLifecycleState(),
+    hookPromptIds: new Map(),
     incomplete: false,
     truncated: false,
   };
@@ -62,6 +70,16 @@ function emptySnapshot(): TrajectoryLiveSnapshot {
 function unknownRunning(state: TrajectoryLiveSnapshot): TrajectoryLiveSnapshot {
   return {
     ...state,
+    hooks: {
+      entries: new Map(
+        [...state.hooks.entries].map(([key, entry]) => [
+          key,
+          entry.status === 'running'
+            ? { ...entry, status: 'unknown' as const }
+            : entry,
+        ]),
+      ),
+    },
     requests: {
       entries: new Map(
         [...state.requests.entries].map(([key, entry]) => [
@@ -89,6 +107,7 @@ function applyLifecycleUnchecked(
   state: TrajectoryLiveSnapshot,
   event: DaemonEvent,
   source: 'live' | 'replay',
+  hookUpdates?: unknown[],
 ): TrajectoryLiveSnapshot {
   if (event.type === 'history_truncated') {
     return { ...state, incomplete: true, truncated: true };
@@ -97,6 +116,20 @@ function applyLifecycleUnchecked(
   const update = getSessionUpdatePayload(event.data);
   const request = extractExecutionLifecycle(update);
   const tool = extractToolLifecycle(update);
+  const hook = extractHookLifecycle(update);
+  if (hookUpdates && hook) hookUpdates.push({ _meta: { hookLifecycle: hook } });
+  const hooks = hookUpdates
+    ? state.hooks
+    : reduceHookLifecycle(state.hooks, update, { source });
+  let hookPromptIds = state.hookPromptIds;
+  if (
+    hook?.phase === 'started' &&
+    event.promptId &&
+    hook.sessionId === state.sessionId &&
+    !hookPromptIds.has(event.promptId)
+  ) {
+    hookPromptIds = new Map(hookPromptIds).set(event.promptId, hook.promptId);
+  }
   const keyOf = (item: {
     sessionId: string;
     subagentId?: string;
@@ -110,7 +143,13 @@ function applyLifecycleUnchecked(
   const tools = reduceToolLifecycle(state.tools, update, {
     source: tool && state.tools.entries.has(keyOf(tool)) ? 'replay' : source,
   });
-  if (requests === state.requests && tools === state.tools) return state;
+  if (
+    requests === state.requests &&
+    tools === state.tools &&
+    hooks === state.hooks &&
+    hookPromptIds === state.hookPromptIds
+  )
+    return state;
   const evicted =
     !state.truncated &&
     ((request !== undefined &&
@@ -119,16 +158,24 @@ function applyLifecycleUnchecked(
       (tool !== undefined &&
         state.tools.entries.size === 256 &&
         !state.tools.entries.has(keyOf(tool))));
-  return { ...state, requests, tools, truncated: state.truncated || evicted };
+  return {
+    ...state,
+    requests,
+    tools,
+    hooks,
+    hookPromptIds,
+    truncated: state.truncated || evicted,
+  };
 }
 
 function applyLifecycle(
   state: TrajectoryLiveSnapshot,
   event: DaemonEvent,
   source: 'live' | 'replay',
+  hookUpdates?: unknown[],
 ): TrajectoryLiveSnapshot {
   try {
-    return applyLifecycleUnchecked(state, event, source);
+    return applyLifecycleUnchecked(state, event, source, hookUpdates);
   } catch {
     // Match transcript replay's per-frame isolation: bad metadata must not
     // prevent later replay or the shared chat subscription from being consumed.
@@ -176,8 +223,15 @@ export function createTrajectoryLiveStore(): TrajectoryLiveStore {
         status: 'catching-up',
         incomplete: input.incomplete,
       };
+      const hookUpdates: unknown[] = [];
       for (const event of input.events)
-        next = applyLifecycle(next, event, 'replay');
+        next = applyLifecycle(next, event, 'replay', hookUpdates);
+      next = {
+        ...next,
+        hooks: reduceHookLifecycle(next.hooks, hookUpdates, {
+          source: 'replay',
+        }),
+      };
       publish(next);
     },
     reconnect(candidate, nextLiveOnly = false) {

@@ -100,6 +100,9 @@ final class AgentSessionCommands {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         if (session.workspace() != null) {
+            if (workspaces.isExternal(session.workspace()) || WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())) {
+                sessionPolicies.requireExternalTurnAllowed(tenantId, actorId, sessionId, session, input);
+            }
             if (sessionPolicies.isSshWorkspace(session.workspace())) {
                 AgentSessionPolicies.requireSshToolProfile(session.toolProfile());
                 if (sessionPolicies.hasMcpServers(session)) {
@@ -251,8 +254,9 @@ final class AgentSessionCommands {
      */
     SyncRename settleRenameSync(String tenantId, String key, String digest,
             String sessionId, String title, String actorId) {
-        // Empty operation ranges can share an InnoDB gap even across Session scopes.
-        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        // No tenant guard, as in changeSessionModel: settlement writes no delivery row, so no
+        // operation range is locked. The Session lock comes first, so the replay probe's snapshot
+        // follows it; a racing Session reusing the key loses on the receipt's unique key.
         SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
         Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
         if (previous.isPresent() && sessionId.equals(previous.get().sessionId())) {
@@ -635,6 +639,13 @@ final class AgentSessionCommands {
                         row.sessionStatusBefore(), row.actorKey(), row.createdAt(), row.updatedAt()));
     }
 
+    private static final String TURN_SESSION_PROJECTION_GUARD = " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
+            + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
+            + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
+            + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-shell/4','hosted-workspace-files/3','hosted-workspace-files/4','hosted-workspace-external-files/1')"
+            + " AND (tool_profile <> 'hosted-workspace-external-files/1' OR"
+            + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))";
+
     void insertTurn(String tenantId, String sessionId,
             String turnId, String promptId, List<Map<String, Object>> input,
             String payloadDigest, long now) {
@@ -643,25 +654,13 @@ final class AgentSessionCommands {
                         + " status, gmt_create, gmt_modified, model_id, model_revision, approval_mode, approval_revision, is_plan_enabled, permission_rules_json) SELECT"
                         + " ?, ?, ?, ?, ?, ?, 'ACCEPTED', ?, ?, model_id,"
                         + " CASE WHEN model_id IS NULL THEN NULL ELSE model_revision END,"
-                        + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
-                        + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
-                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-files/3')"
+                        + TURN_SESSION_PROJECTION_GUARD
                         + " THEN COALESCE(selected_approval_mode, approval_mode) ELSE NULL END,"
-                        + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
-                        + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
-                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-files/3')"
+                        + TURN_SESSION_PROJECTION_GUARD
                         + " THEN approval_revision ELSE NULL END,"
-                        + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
-                        + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
-                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-files/3')"
-                        + " THEN is_plan_enabled ELSE NULL END,"
-                        + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
-                        + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
-                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-files/3')"
+                        + TURN_SESSION_PROJECTION_GUARD
+                        + " THEN CASE WHEN tool_profile = 'hosted-workspace-external-files/1' THEN FALSE ELSE is_plan_enabled END ELSE NULL END,"
+                        + TURN_SESSION_PROJECTION_GUARD
                         + " THEN permission_rules_json ELSE NULL END"
                         + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId, turnId, promptId, storeRows.writeJson(input),

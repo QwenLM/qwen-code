@@ -2,9 +2,10 @@
 
 [English](2026-11-07-ephemeral-container-runners.md) | [简体中文](2026-11-07-ephemeral-container-runners.zh-CN.md)
 
-Date: 2026-11-07. Status: runner lifecycle implemented; thirty fixed slots are
-deployed on hz4. Direct external-PR routing still needs default-branch
-deployment and real CI acceptance.
+Date: 2026-11-07. Status: runner lifecycle implemented. When this was written
+hz4 deployed thirty fixed slots; as of 2026-11-15 hz4 and hz5 run twenty slots
+each, see the capacity update below. Direct external-PR routing still needs
+default-branch deployment and real CI acceptance.
 
 Ten slots registering and running ten keyless test jobs of a private repository
 at the same time on the Hangzhou shared test machine; containers, networks and
@@ -56,7 +57,7 @@ Each container
 ```
 
 The manager keeps a configured number of slots, at most one container per slot.
-The Hangzhou trial ran ten slots at once; the hz4 deployment now maintains thirty slots. It takes no webhook, schedules no PR
+The Hangzhou trial ran ten slots at once; the hz4 deployment maintained thirty slots when this was written, and the capacity update below supersedes that count. It takes no webhook, schedules no PR
 itself, and introduces neither Kubernetes nor a database. GitHub assigns work by
 runner label. Each ECS runs its own manager against its local Docker socket,
 with a unique `poolId` and a per-host `slots` count. Hosts share the scheduling
@@ -331,6 +332,60 @@ fixed capacity, with two levers: `MAINTAINER_ECS_RUNNER_DISABLED=true` returns
 the same-repo lanes to hosted and frees the pool for forks, and capacity is a
 manual configuration change. Queue-depth observation and any priority scheme
 stay with #16514.
+
+Update 2026-11-15: the asymmetry recorded above is now addressed with capacity
+routing rather than a priority scheme. Two lanes stop treating "is a PR" as
+"belongs on the disposable pool": the Managed loop lane and the credential-free
+Managed Host Build lane split PR events by the same trust rule the Linux CI
+lanes already use. A PR whose head lives in this repository, or whose author
+association is OWNER, MEMBER or COLLABORATOR, joins the persistent x64 fleet
+that the rest of its CI already runs on. Every other PR keeps
+`ecs-qwen-ephemeral`, which stays the only self-hosted home an untrusted fork
+can reach. Push and manual runs are unchanged, and the repository kill switch
+still returns every affected PR job to GitHub-hosted runners.
+
+This is a capacity split, not a new trust boundary. Both arms were already
+credential-free with a read-only token, so moving trusted PRs onto the
+persistent fleet does not widen what PR code can reach, and it removes the
+queueing that made a burst of maintainer PRs delay fork PRs with nowhere else
+to go. The Managed Host ceiling follows the arm it now describes: 90 minutes
+prices a cold container install and applies only to the disposable arm, while
+the persistent fleet has a warm store and keeps the same 20-minute ceiling as
+push and manual runs. That expression repeats the selector's own trust terms
+verbatim, because the runner's own environment is not available when the
+ceiling is evaluated; the routing tests model both expressions with one set of
+substitutions so a drift between them fails a test rather than a job.
+
+Joining the fleet also means inheriting its workspace reuse. The disposable
+pool starts every job in a fresh container; a fleet runner's workspace survives
+between jobs, and a previous lane can leave root-owned files that fail
+`git clean`, or a sparse index that leaves the excluded paths off disk even
+after checkout's `sparse-checkout disable` runs. Both rerouted lanes therefore
+adopt the fleet's standard pre-checkout pair — restore workspace ownership,
+then drop `.git` so checkout clones fresh — and join the checkout matrix pinned
+by `scripts/tests/qwen-runner-checkout-workflow.test.js`. The first live run
+proved the need: the loop's kernel leg died in checkout's recreate path on a
+dirty fleet workspace, and the same day two pull requests lost their tui-parity
+checkout to a leftover sparse index. That lane was already on the fleet and had
+the ownership heal but not the metadata reset, so it gains the reset in the
+same change.
+
+Web-shell Visuals capture deliberately keeps the pool for every PR, including
+same-repository ones. Its capture job is pinned that way by its own tests and
+by the decision above, and it is the lane whose egress exposure is already
+accepted, so it is left out of this change.
+
+The pool's own capacity moved at the same time, as host configuration rather
+than a workflow change: hz4 and hz5 each run twenty slots instead of fifteen.
+Resizing costs a drain window, and the first attempt drained both hosts at once
+and left the pool empty for roughly twenty-five minutes; the second host was
+then drained on its own while the first stayed at full strength, which is the
+procedure to keep. The host-load gate on the Linux unit-test lane was sampled
+across the increase without a single breach, so the higher slot count did not
+need to be walked back. A slot count is read once at manager start, so any
+further resize still costs a drain window; a second manager instance on the
+same host with its own pool identity and state directory is the zero-downtime
+path, and remains unimplemented work under #16514.
 
 The pool label is `ecs-qwen-ephemeral`; the initial deployment registered ten
 ARM64 runners, and the 2026-11-08 live query showed 22 online slot
