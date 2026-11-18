@@ -31,3 +31,18 @@ export const ARTIFACT_LIBRARY_MESSAGES_ZH: Record<string, string> = {
   'managed.artifactLibrary.refresh': '刷新',
   'managed.artifactLibrary.close': '关闭',
 };
+
+export const ARTIFACT_LIBRARY_MESSAGES_RU: Record<string, string> = {
+  'managed.artifactLibrary.title': 'Библиотека артефактов',
+  'managed.artifactLibrary.description':
+    'Артефакты, созданные в сессиях этого Workspace, новые сверху.',
+  'managed.artifactLibrary.empty': 'В этом Workspace ещё нет артефактов.',
+  'managed.artifactLibrary.unavailable':
+    'Библиотека артефактов недоступна на этом сервере.',
+  'managed.artifactLibrary.loadFailed':
+    'Не удалось загрузить библиотеку артефактов:',
+  'managed.artifactLibrary.unavailableBadge': 'Недоступно',
+  'managed.artifactLibrary.sessionFallback': 'Сессия',
+  'managed.artifactLibrary.refresh': 'Обновить',
+  'managed.artifactLibrary.close': 'Закрыть',
+};

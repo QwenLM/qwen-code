@@ -285,10 +285,12 @@ options)` posts `/workspaces/artifacts/query` with
   declares `artifactLibrary` and the provider exposes `workspaceArtifacts`
   and `toolResults`. It calls a new `onOpenArtifactLibrary(workspaceId)` prop.
 - `ManagedSessionsPage`: one new state `artifactLibraryWorkspace`, cleared on
-  provider/session identity changes like `outputTarget`; the nav callback sets
-  it, and the panel area renders the library dialog while it is set. Both the
-  Managed-only shell and the hybrid App reach it through the shared page, so
-  no `App.tsx` panel union change is needed.
+  provider identity change. Unlike the session-scoped `outputTarget`, it
+  deliberately survives session selection because the library belongs to the
+  workspace, not the open session; the nav callback sets it, and the panel
+  area renders the library dialog while it is set. Both the Managed-only shell
+  and the hybrid App reach it through the shared page, so no `App.tsx` panel
+  union change is needed.
 - `ManagedArtifactLibraryPage.tsx`: a shadcn dialog listing the workspace's
   artifacts. Each row shows the stream role, byte length, projection time,
   availability badge, and the source session's title resolved from the

@@ -236,10 +236,11 @@ options)` 经共享 JSON RPC 路径 POST `/workspaces/artifacts/query`，body
 - `ManagedWorkspaceNavigation`：工作区分组头在既有 new-task 按钮旁增加产物库
   按钮，当工作区页声明 `artifactLibrary` 且 provider 暴露 `workspaceArtifacts`
   与 `toolResults` 时显示，调用新 prop `onOpenArtifactLibrary(workspaceId)`。
-- `ManagedSessionsPage`：新增状态 `artifactLibraryWorkspace`，随 provider/
-  会话身份变化清空，与 `outputTarget` 一致；导航回调设置它，面板区在其置位
-  期间渲染产物库对话框。Managed-only shell 与混合 App 都经共享页面到达，
-  无需改 `App.tsx` 面板联合。
+- `ManagedSessionsPage`：新增状态 `artifactLibraryWorkspace`，随 provider
+  身份变化清空。与会话级的 `outputTarget` 不同，它刻意跨会话选择保留——
+  产物库属于工作区而非打开的会话；导航回调设置它，面板区在其置位期间渲染
+  产物库对话框。Managed-only shell 与混合 App 都经共享页面到达，无需改
+  `App.tsx` 面板联合。
 - `ManagedArtifactLibraryPage.tsx`：shadcn 对话框，列出工作区产物。每行显示
   流角色、字节长度、投影时间、可用性徽标、来源会话标题（从页面已持有的会话
   summary 解析；回退为缩短的会话 id——已删除或子会话可能不在列表中）。选中
