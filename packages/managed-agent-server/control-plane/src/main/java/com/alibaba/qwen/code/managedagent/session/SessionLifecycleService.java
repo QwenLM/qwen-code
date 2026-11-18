@@ -274,15 +274,6 @@ public class SessionLifecycleService {
     }
 
     private String principalDigest(SessionPrincipal principal) {
-        if (principal == null) {
-            // An anonymous caller admitted to a legacy no-row Session has no
-            // principal identity; the operation is scoped to the tenant-wide
-            // anonymous actor rather than refused — the SAME empty digest the
-            // pre-ownership code stored, so a rolling deploy still replays
-            // rows recorded before it (R7-4). A row-present Session never
-            // reaches here anonymously — its authority gate answers 404 first.
-            return "";
-        }
         if (!principal.actorPresent()) {
             // No business actor: keep the pre-ownership {actorId} digest so
             // idempotency rows written before this deploy still replay. The

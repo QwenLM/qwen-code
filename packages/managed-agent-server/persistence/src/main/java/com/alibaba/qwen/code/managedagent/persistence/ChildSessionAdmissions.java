@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -33,12 +34,14 @@ final class ChildSessionAdmissions {
     private final ManagedSessionModelConfigs modelConfigs;
     private final JdbcManagedSessionSkills creationSkills;
     private final boolean workspaceFilesEnabled;
+    private final JdbcManagedAgentDefinitionStore definitions;
 
     ChildSessionAdmissions(JdbcTemplate jdbc, Clock clock, AgentStoreRows storeRows,
             AgentEventJournal eventJournal, AgentSessionCommands sessionCommands,
             JdbcManagedExtensionRecordStore configRecords, ManagedSessionModelConfigs modelConfigs,
             JdbcManagedSessionSkills creationSkills,
-            boolean workspaceFilesEnabled) {
+            boolean workspaceFilesEnabled,
+            JdbcManagedAgentDefinitionStore definitions) {
         this.jdbc = jdbc;
         this.clock = clock;
         this.storeRows = storeRows;
@@ -48,6 +51,7 @@ final class ChildSessionAdmissions {
         this.modelConfigs = modelConfigs;
         this.creationSkills = creationSkills;
         this.workspaceFilesEnabled = workspaceFilesEnabled;
+        this.definitions = definitions;
     }
 
     static String childActorOf(String parentSessionId) {
@@ -252,9 +256,14 @@ final class ChildSessionAdmissions {
                 idempotencyKey, requestDigest, sessionId, turnId, now);
         var inheritedSkills = snapshot == null ? creationSkills.snapshot(tenantId, parentSessionId)
                 : creationSkills.fromLaunchReference(tenantId, parentSessionId, snapshot.path("skillsRef"));
-        if (inheritedSkills != null) {
-            creationSkills.save(tenantId, sessionId, inheritedSkills);
-        }
+        boolean parentDefinitionHasLoop = toolProfile != null
+                && parent.agentDefinitionDigest() != null
+                && AgentDefinitionExtensions.skills(definitions.pinnedContent(parent).get("skills"), true).stream()
+                        .anyMatch(skill -> ManagedLoopSkill.NAME.equals(skill.get("name")));
+        boolean parentServerLoop = creationSkills.serverLoopInjected(tenantId, parentSessionId);
+        boolean childServerLoop = toolProfile == null && parentServerLoop;
+        java.util.Optional.ofNullable(ManagedLoopSkill.childCatalog(inheritedSkills, toolProfile, parentDefinitionHasLoop, parentServerLoop))
+                .ifPresent(skills -> creationSkills.save(tenantId, sessionId, skills, childServerLoop));
         eventJournal.appendEvent(tenantId, sessionId, null, "session.created",
                 Map.of("sessionId", sessionId), false, null, now);
         if (turnId != null) {

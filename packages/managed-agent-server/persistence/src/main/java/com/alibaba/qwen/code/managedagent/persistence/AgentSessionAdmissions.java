@@ -18,6 +18,7 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
+
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
@@ -95,7 +96,7 @@ final class AgentSessionAdmissions {
         this.managedExtensionExecutionEnabled = managedExtensionExecutionEnabled;
         this.workspaceMounts = workspaceMounts;
         this.createdRoots = createdRoots;
-        this.childSessionAdmissions = new ChildSessionAdmissions(jdbc, clock, storeRows, eventJournal, sessionCommands, configRecords, modelConfigs, creationSkills, workspaceFilesEnabled);
+        this.childSessionAdmissions = new ChildSessionAdmissions(jdbc, clock, storeRows, eventJournal, sessionCommands, configRecords, modelConfigs, creationSkills, workspaceFilesEnabled, definitions);
     }
 
     ChildSessionAdmissions childSessionAdmissions() {
@@ -317,13 +318,9 @@ final class AgentSessionAdmissions {
                         || !sshWorkspace && !external && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
-        List<Map<String, Object>> merged = new ArrayList<>();
-        if (!skills.isEmpty() && pin.digest() != null) {
-            merged.addAll(AgentDefinitionExtensions.skills(storeRows.readMap(definitions.find(tenantId, agentId,
-                    Long.parseLong(pin.revision())).orElseThrow().definitionJson()).get("skills"), true));
-        }
-        merged.addAll(skills);
-        var effectiveSkills = AgentDefinitionExtensions.sessionSkills(merged);
+        List<Map<String, Object>> merged = new ArrayList<>(pin.skills());
+        var injectedCatalog = ManagedLoopSkill.mergeInto(merged, skills, pin.toolProfile(), command.sessionSkillsSupported());
+        var effectiveSkills = injectedCatalog != null ? injectedCatalog : AgentDefinitionExtensions.sessionSkills(merged);
         if (worktree != null && sessionWorktrees == null) {
             throw new ManagedAgentException(409, "worktree_unavailable", "Session worktrees are unavailable.");
         }
@@ -344,8 +341,8 @@ final class AgentSessionAdmissions {
             jdbc.update("UPDATE ma_session SET public_child_agents_version=1 WHERE tenant_id=? AND session_id=?",
                     tenantId, admission.sessionId());
         }
-        if (!skills.isEmpty()) {
-            creationSkills.save(tenantId, admission.sessionId(), effectiveSkills);
+        if (!effectiveSkills.isEmpty() && (!skills.isEmpty() || injectedCatalog != null)) {
+            creationSkills.save(tenantId, admission.sessionId(), effectiveSkills, injectedCatalog != null);
         }
         if (extensionPins != null) {
             creationSkills.saveInitialSelection(tenantId, admission.sessionId(), extensionPins);

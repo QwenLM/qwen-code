@@ -2857,14 +2857,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
     }
 
-    private Admission replayForCreator(String tenantId, String operation,
-            String idempotencyKey, String requestDigest,
-            SessionRecord session, SessionPrincipal principal) {
-        return replayForCreator(tenantId, operation, idempotencyKey,
-                requestDigest, session, principal,
-                principal == null ? null : principal.userId());
-    }
-
     // The answer-side half of that gate. The pre-read can miss a key a
     // racer recorded inside its still-open transaction; the in-store probe
     // and the DuplicateKeyException arm then answer the recorded admission
@@ -2879,14 +2871,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
         requireReplayActor(tenantId, operation, idempotencyKey, session,
                 principal, rawActorId);
-    }
-
-    private void requireReplayedAdmission(String tenantId, String operation,
-            String idempotencyKey, Admission admission, SessionRecord session,
-            SessionPrincipal principal) {
-        requireReplayedAdmission(tenantId, operation, idempotencyKey,
-                admission, session, principal,
-                principal == null ? null : principal.userId());
     }
 
     // The probe half, standing alone for the mutation routes whose replay

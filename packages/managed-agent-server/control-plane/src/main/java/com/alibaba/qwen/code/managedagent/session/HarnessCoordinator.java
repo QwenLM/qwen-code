@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HostedHarnessRecover
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessAttachmentLostFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessCapabilityFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessGenerationFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
@@ -40,7 +41,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -48,10 +48,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -118,21 +115,15 @@ public class HarnessCoordinator {
     private final int batchMaxEvents;
     private final int batchMaxBytes;
     private final boolean sessionCreateWarm;
-    private final String owner = UUID.randomUUID().toString();
-    private final Set<String> active = ConcurrentHashMap.newKeySet();
+    private final LeaseRenewalRunner runner =
+            new LeaseRenewalRunner("managed-agent-dispatch-lease");
+    private final String owner = runner.owner();
     private final Set<String> cancellations = ConcurrentHashMap.newKeySet();
     // See cancelAdmittedTurn: forced cancellation takeover loads are paced
     // per Turn, far below the ~500ms lease-renewal cadence that re-runs
     // the coded-refusal pair (the round-10 hot loop).
     private static final long TAKEOVER_LOAD_MIN_INTERVAL_MS = 5_000;
     private final Map<String, Long> takeoverPace = new ConcurrentHashMap<>();
-    private final ScheduledExecutorService renewer =
-            Executors.newSingleThreadScheduledExecutor(runnable -> {
-                Thread thread = new Thread(runnable,
-                        "managed-agent-dispatch-lease");
-                thread.setDaemon(true);
-                return thread;
-            });
 
     public HarnessCoordinator(AgentStateStore store,
             HarnessConnector harness, HarnessEventProjector projector,
@@ -209,17 +200,8 @@ public class HarnessCoordinator {
     }
 
     public void dispatch(String tenantId, String sessionId, String turnId) {
-        String key = key(tenantId, sessionId, turnId);
-        if (!active.add(key)) {
-            return;
-        }
-        executor.execute(() -> {
-            try {
-                coordinate(tenantId, sessionId, turnId);
-            } finally {
-                active.remove(key);
-            }
-        });
+        runner.dispatchOnce(executor, key(tenantId, sessionId, turnId),
+                () -> coordinate(tenantId, sessionId, turnId));
     }
 
     public void cancel(String tenantId, String sessionId, String turnId) {
@@ -293,7 +275,7 @@ public class HarnessCoordinator {
 
     @PreDestroy
     public void close() {
-        renewer.shutdownNow();
+        runner.close();
     }
 
     private void coordinate(String tenantId, String sessionId,
@@ -303,34 +285,30 @@ public class HarnessCoordinator {
         if (claimed == null) {
             return;
         }
-        AtomicBoolean leaseLost = new AtomicBoolean();
-        ScheduledFuture<?> renewal = renewer.scheduleAtFixedRate(
-                () -> {
-                    try {
-                        if (!store.renewTurn(tenantId, sessionId, turnId,
-                                owner, leaseDuration)) {
-                            leaseLost.set(true);
-                        } else if (!leaseLost.get()) {
-                            executor.execute(() -> cancelAdmittedTurn(
-                                    tenantId, sessionId, turnId, true));
-                        }
-                    } catch (RuntimeException error) {
-                        leaseLost.set(true);
-                        LOG.warn("Managed Turn lease renewal failed tenant={}"
-                                        + " session={} turn={} failure={}",
-                                tenantId, sessionId, turnId,
-                                error.getClass().getSimpleName());
-                    }
-                },
-                renewInterval.toMillis(), renewInterval.toMillis(),
-                TimeUnit.MILLISECONDS);
+        var renewal = runner.startFixedRate(
+                renewInterval.toMillis(),
+                () -> store.renewTurn(tenantId, sessionId, turnId, owner,
+                        leaseDuration),
+                () -> executor.execute(() -> cancelAdmittedTurn(
+                        tenantId, sessionId, turnId, true)),
+                error -> LOG.warn("Managed Turn lease renewal failed tenant={}"
+                                + " session={} turn={} failure={}",
+                        tenantId, sessionId, turnId,
+                        error.getClass().getSimpleName()));
+        AtomicBoolean leaseLost = renewal.leaseLost();
         boolean terminal = false;
         AtomicBoolean submissionAttempted = new AtomicBoolean(
                 claimed.submissionAttempted());
         AtomicBoolean recoveryPath = new AtomicBoolean();
         try {
-            terminal = runClaimed(claimed, leaseLost,
-                    submissionAttempted, recoveryPath);
+            try {
+                terminal = runClaimed(claimed, leaseLost, submissionAttempted, recoveryPath);
+            } catch (HarnessAttachmentLostFailure lost) {
+                requireLease(leaseLost);
+                TurnRecord current = store.findTurn(tenantId, sessionId, turnId).orElseThrow();
+                // Re-enter binding, snapshot and watermark handling; never replay a leaf submit blindly.
+                terminal = runClaimed(current, leaseLost, submissionAttempted, recoveryPath);
+            }
         } catch (HarnessCapabilityFailure error) {
             terminal = failTerminally(claimed, error.getCode(),
                     "Hosted Harness capability policy changed.", error);
@@ -471,7 +449,7 @@ public class HarnessCoordinator {
             terminal = transientFailure(claimed,
                     submissionAttempted.get(), error, false);
         } finally {
-            renewal.cancel(false);
+            renewal.close();
             if (!terminal) {
                 store.releaseTurnLease(tenantId, sessionId, turnId, owner);
             }
@@ -569,7 +547,9 @@ public class HarnessCoordinator {
         TurnRecord current;
         boolean recoveredCancellation = false;
         boolean cancelledOnAttach = false;
-        if (runtimeRecovery != null) {
+        // Unbound submissions reconcile by prompt id, not by adopting a Session snapshot.
+        if (runtimeRecovery != null
+                && (recoveringCancellation || claimed.harnessEventEpoch() != null)) {
             // #14387: continuing a workflow Turn re-runs its deterministic
             // in-process script while the first run's outcome stays
             // unwitnessed — the parked snapshot proves nothing about the
@@ -875,6 +855,52 @@ public class HarnessCoordinator {
                     current = store.findTurn(current.tenantId(),
                             current.sessionId(), current.turnId())
                             .orElseThrow();
+                    // The attach may have driven this prompt's parked
+                    // execution to a continuation-ready phase. Opening the
+                    // stream alone never settles such a park — the daemon's
+                    // only continuation entry is the continue route — so
+                    // drive it here under the same watermark guards as the
+                    // bound recovery arm (#17521). A park that is not
+                    // continuation-ready (a requested Action) keeps the
+                    // stream semantics: its durable resolution drives a
+                    // later redispatch.
+                    if (runtimeRecovery != null
+                            && runtimeRecovery.isContinuationReady()) {
+                        // #14387: continuing a workflow re-runs its
+                        // deterministic in-process script while the first
+                        // run's outcome stays unwitnessed.
+                        if (isWorkflowLaunchTurn(claimed)) {
+                            return blockWorkflowRecovery(claimed, leaseLost);
+                        }
+                        if (attachment.eventEpoch() == null
+                                || attachment.lastEventId() == null) {
+                            return fail(claimed,
+                                    "managed_runtime_recovery_watermark_missing",
+                                    "Hosted Harness recovery did not return an"
+                                            + " event watermark.");
+                        }
+                        Admission continuation = harness.continueManagedRuntime(
+                                session.tenantId(), session.sessionId(),
+                                current.promptId(),
+                                runtimeRecovery.getCheckpointId(),
+                                runtimeRecovery.getActivationId());
+                        requireLease(leaseLost);
+                        if (!attachment.eventEpoch()
+                                        .equals(continuation.eventEpoch())
+                                || continuation.lastEventId()
+                                        < attachment.lastEventId()) {
+                            throw new IllegalStateException(
+                                    "Hosted Harness recovery watermark changed");
+                        }
+                        store.recordRecoveryAdmission(current.tenantId(),
+                                current.sessionId(), current.turnId(), owner,
+                                attachment.eventEpoch(), attachment.eventEpoch(),
+                                continuation.eventEpoch(),
+                                continuation.lastEventId());
+                        current = store.findTurn(current.tenantId(),
+                                current.sessionId(), current.turnId())
+                                .orElseThrow();
+                    }
                 }
                 if (admission != null) {
                     store.recordAdmission(current.tenantId(),
@@ -1878,7 +1904,8 @@ public class HarnessCoordinator {
                             && POOL_OWNERSHIP_WAIT_CODES.contains(managed.getCode());
         }
         return error instanceof HarnessHttpFailure http && http.getStatusCode() == 409
-                && "hosted_harness_quiescing".equals(http.getErrorCode());
+                && ("hosted_harness_quiescing".equals(http.getErrorCode())
+                        || "hosted_session_closing".equals(http.getErrorCode()));
     }
 
     // #14387: refuse the workflow Turn's unwitnessed re-execution — mark

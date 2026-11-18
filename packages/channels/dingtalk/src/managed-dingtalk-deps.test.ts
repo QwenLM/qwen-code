@@ -17,6 +17,26 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+// A fetch double that answers after a fixed delay and rejects on abort, like a
+// real fetch. The abort listener is load-bearing: a double that resolved on
+// abort would let a shared budget truncate the tail on the wire while every
+// assertion here still passed. Shared so the two witnesses that depend on it
+// cannot drift apart.
+const latencyFetch = (latencyMs: number) =>
+  vi.fn(
+    (_url: string, init: { signal: AbortSignal }) =>
+      new Promise<Response>((resolve, reject) => {
+        const timer = setTimeout(
+          () => resolve(jsonResponse({ errcode: 0 })),
+          latencyMs,
+        );
+        init.signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new Error('aborted'));
+        });
+      }),
+  );
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -501,19 +521,7 @@ describe('managed DingTalk webhook per-chunk send budget (#17173 R10)', () => {
       expect(chunks.length).toBeGreaterThanOrEqual(3);
       // A real fetch rejects on abort; a mock that ignored the signal would
       // let a shared budget pass this witness unnoticed.
-      const fetchMock = vi.fn(
-        (_url: string, init: { signal: AbortSignal }) =>
-          new Promise<Response>((resolve, reject) => {
-            const timer = setTimeout(
-              () => resolve(jsonResponse({ errcode: 0 })),
-              20_000,
-            );
-            init.signal.addEventListener('abort', () => {
-              clearTimeout(timer);
-              reject(new Error('aborted'));
-            });
-          }),
-      );
+      const fetchMock = latencyFetch(20_000);
       vi.stubGlobal('fetch', fetchMock);
       const { sendWebhook } = createManagedDingtalkDeps();
       let settled = false;
@@ -540,6 +548,123 @@ describe('managed DingTalk webhook per-chunk send budget (#17173 R10)', () => {
       // last one would still be pending here if the clear were dropped.
       expect(vi.getTimerCount()).toBe(0);
     } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('managed DingTalk webhook sends are never truncated (#17529 R2-1)', () => {
+  // Two real fixtures at the 48 KiB segment bound: heading-dense text packs
+  // ~2000 units per chunk (24), paragraphs sized just over half the 3800-unit
+  // target fit one per chunk (25, 47548 bytes). The counts are lower bounds,
+  // not equalities — the reachable count keeps moving with the packing (a
+  // heading-band sweep reaches 42, and the admission predicate allows 52), so
+  // pinning an exact split would red these rows for a splitter change rather
+  // than for truncation. Coverage of the whole band does not rest on them: the
+  // splitter-independent witness below drives more chunks than the splitter
+  // can admit, so any ceiling that could fire on a real segment reds it.
+  //
+  // Every row must deliver all of its chunks: a send that outlives the claim
+  // lease is reconciled to unknown, but a late receipt moves unknown → partial
+  // → delivered, so the ledger converges while the tail keeps arriving;
+  // refusing the tail strands it instead (#17529 has the trace).
+  it.each([
+    { shape: 'heading', want: 24, latency: 1_000 },
+    { shape: 'heading', want: 24, latency: 15_000 },
+    { shape: 'heading', want: 24, latency: 20_000 },
+    { shape: 'heading', want: 24, latency: 24_500 },
+    { shape: 'heading', want: 24, latency: 25_000 },
+    { shape: 'heading', want: 24, latency: 29_000 },
+    { shape: 'heading', want: 24, latency: 29_999 },
+    { shape: 'paragraph', want: 25, latency: 29_999 },
+  ])(
+    'a $shape segment of at least $want chunks at $latency ms per chunk delivers every chunk',
+    async ({ shape, want, latency }) => {
+      vi.useFakeTimers();
+      try {
+        let text: string;
+        if (shape === 'paragraph') {
+          // 25 paragraphs of 1900 units: two would exceed the 3800-unit target,
+          // so each chunk carries exactly one. 47548 bytes, inside the bound.
+          text = Array.from({ length: 25 }, () => 'x'.repeat(1_900)).join(
+            '\n\n',
+          );
+        } else {
+          text = '';
+          while (text.length < 48 * 1024 - 200) {
+            text += `#### h${text.length}\n`;
+          }
+        }
+        expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(48 * 1024);
+        const chunks = splitChunks(text);
+        // A lower bound, not an equality: the row must sit in its band, but a
+        // legitimate packing change that yields more chunks must not red a
+        // witness about truncation with a message about the splitter.
+        expect(chunks.length).toBeGreaterThanOrEqual(want);
+        const fetchMock = latencyFetch(latency);
+        vi.stubGlobal('fetch', fetchMock);
+        const { sendWebhook } = createManagedDingtalkDeps();
+        let failure: unknown;
+        const sending = sendWebhook(WEBHOOK, text).then(
+          () => undefined,
+          (error) => {
+            failure = error;
+          },
+        );
+        await vi.advanceTimersByTimeAsync(chunks.length * latency);
+        await sending;
+        expect(failure).toBeUndefined();
+        expect(fetchMock).toHaveBeenCalledTimes(chunks.length);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('delivers every chunk for any chunk count, past the splitter admission bound', async () => {
+    // The rows above are real fixtures, so they can only certify the band those
+    // fixtures reach — and the reachable count keeps moving with the packing
+    // (24 heading, 25 paragraph, 42 by a heading-band sweep; the admission
+    // predicate allows 52). This witness removes the fixture from the loop:
+    // drive the send with more chunks than the splitter can admit at the
+    // segment bound, so no aggregate ceiling that could ever fire on a real
+    // segment can survive it, and a packing change cannot red it either.
+    const count = 60; // > 4 * ceil(49152 / 3800) = 52
+    const latency = 29_999; // inside the per-chunk budget, so only a ceiling cuts
+    vi.useFakeTimers();
+    vi.resetModules();
+    vi.doMock('./markdown.js', async () => {
+      const actual =
+        await vi.importActual<typeof import('./markdown.js')>('./markdown.js');
+      return {
+        ...actual,
+        splitChunks: () =>
+          Array.from({ length: count }, (_, i) => `chunk-${i}`),
+      };
+    });
+    try {
+      const fresh = await import('./managed-dingtalk-deps.js');
+      const fetchMock = latencyFetch(latency);
+      vi.stubGlobal('fetch', fetchMock);
+      const { sendWebhook } = fresh.createManagedDingtalkDeps();
+      let failure: unknown;
+      const sending = sendWebhook(WEBHOOK, 'segment').then(
+        () => undefined,
+        (error) => {
+          failure = error;
+        },
+      );
+      // 60 × 29999ms = 1799940ms, past 52 × 30s = 1560s — the longest a real
+      // segment could ever take.
+      await vi.advanceTimersByTimeAsync(count * latency);
+      await sending;
+      expect(failure).toBeUndefined();
+      expect(fetchMock).toHaveBeenCalledTimes(count);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.doUnmock('./markdown.js');
+      vi.resetModules();
       vi.useRealTimers();
     }
   });

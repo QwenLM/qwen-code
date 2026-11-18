@@ -27,6 +27,10 @@ type Mode =
   | 'slow-verification-body'
   | 'cumulative-deadline';
 
+const budgetMs = 900;
+const preflightMs = 300;
+const verificationMs = 450; // 300 < verificationMs < 600
+
 async function start(mode: Mode = 'normal', outside = false) {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), 'mem0-delete-stdio-')),
@@ -103,7 +107,15 @@ async function start(mode: Mode = 'normal', outside = false) {
       res.writeHead(target ? 200 : 404, { 'content-type': 'application/json' });
       res.end(JSON.stringify(target ?? { detail: 'not found' }));
     };
-    if (mode === 'cumulative-deadline') timers.push(setTimeout(respond, 100));
+    // Inside the 900 ms budget: the preflight responses leave the verification
+    // GET enough time to reach the server, and its 450 ms response lands after
+    // the deadline but before any deadline that starts after the preflight
+    // read, so a late-starting deadline fails the assertions below. The 450 ms
+    // delay must also stay below the 900 ms budget: at or above it, a fresh
+    // per-request timeout would abort the verification read too, and the case
+    // could no longer tell a cumulative budget from a per-request one.
+    if (mode === 'cumulative-deadline')
+      timers.push(setTimeout(respond, deleted ? verificationMs : preflightMs));
     else respond();
   });
   await new Promise<void>((resolve, reject) => {
@@ -132,7 +144,7 @@ async function start(mode: Mode = 'normal', outside = false) {
         basePath: '',
         allowInsecureHttp: true,
       },
-      timeoutMs: mode === 'cumulative-deadline' ? 250 : 200,
+      timeoutMs: mode === 'cumulative-deadline' ? budgetMs : 200,
     }),
   );
   const client = new Client({ name: 'stdio-delete-test', version: '1' });
@@ -274,12 +286,16 @@ describe('packaged deletion MCP through real HTTP', () => {
       expect(
         test.requests.filter((req) => req.method === 'DELETE'),
       ).toHaveLength(mode === 'slow-preflight-body' ? 0 : 1);
-      if (mode === 'cumulative-deadline')
+      if (mode === 'cumulative-deadline') {
+        expect(2 * preflightMs + verificationMs).toBeGreaterThan(budgetMs);
+        expect(preflightMs + verificationMs).toBeLessThan(budgetMs);
+        expect(Date.now() - startTime).toBeGreaterThanOrEqual(850);
         expect(test.requests.map((req) => req.method)).toEqual([
           'GET',
           'DELETE',
           'GET',
         ]);
+      }
       expect(test.stderr()).toBe('');
     },
   );

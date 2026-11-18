@@ -21,6 +21,43 @@ describe('resolveNetworkTarget', () => {
     expect(target.lookup).toBeUndefined();
   });
 
+  it('preserves the unrestricted URL object without applying shared policy', async () => {
+    const lookup = vi.spyOn(dns, 'lookup');
+    const url = new URL('ftp://user:secret@localhost/archive#part');
+    const target = await resolveNetworkTarget(url);
+
+    expect(target).toEqual({ url });
+    expect(target.url).toBe(url);
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  it('keeps public normalization, fragments and the original return shape', async () => {
+    const target = await resolveNetworkTarget(
+      ' \nhttps://8.8.8.8:443/archive#part\t',
+      'public',
+    );
+
+    expect(target.url.href).toBe('https://8.8.8.8/archive#part');
+    expect(Object.keys(target).sort()).toEqual([
+      'curlResolve',
+      'lookup',
+      'url',
+    ]);
+  });
+
+  it('preserves native invalid-URL errors and checks cancellation first', async () => {
+    await expect(resolveNetworkTarget('invalid URL')).rejects.toBeInstanceOf(
+      TypeError,
+    );
+    await expect(
+      resolveNetworkTarget('invalid URL', 'public'),
+    ).rejects.toBeInstanceOf(TypeError);
+    const reason = new Error('cancelled');
+    await expect(
+      resolveNetworkTarget('invalid URL', undefined, AbortSignal.abort(reason)),
+    ).rejects.toBe(reason);
+  });
+
   it('requires credential-free HTTPS for public targets', async () => {
     await expect(
       resolveNetworkTarget('http://example.com/archive', 'public'),

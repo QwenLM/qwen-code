@@ -15,9 +15,10 @@ import java.nio.charset.StandardCharsets;
  * {@code AuthenticatedTenantActor} implementation overrides
  * {@code actorSubjectId()} today, so every live request builds a subjectless
  * principal and the subject member exists only for the schema and the test
- * harness. The receipt encoding below deliberately drops the subject so a
- * receipt stamped by a subjectless caller answers its recorder; the subject
- * joins no derived key until an adapter signs it.
+ * harness. The receipt encoding keeps the subject in the stamp
+ * ({@link #receiptActorKey()}) so receipts recorded before the subject axis
+ * went inert still replay for their recorder; the subject joins no other
+ * derived key until an adapter signs it.
  */
 public record SessionPrincipal(String tenantId, String userId,
         String actorSubjectId) {
