@@ -7,7 +7,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 
-import java.time.Duration;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.CompletionException;
@@ -52,19 +51,26 @@ public final class ParkedMcpReclamationJob {
     }
 
     public synchronized Sweep runOnce() {
-        var candidates = owners.candidates(cursor, settings.getBatchSize());
-        cursor = candidates.size() < settings.getBatchSize() ? 0 : candidates.getLast().id();
+        int reclaimed = 0;
         Set<String> urgent = new HashSet<>(expedited);
         expedited.removeAll(urgent);
+        for (String storageKey : urgent) {
+            for (var owner : owners.onStorage(storageKey, settings.getBatchSize())) {
+                if (owners.sealedFor(owner).isPresent() && reclaim(owner)) {
+                    reclaimed++;
+                }
+            }
+        }
+        var candidates = owners.candidates(cursor, settings.getBatchSize());
+        cursor = candidates.size() < settings.getBatchSize() ? 0 : candidates.getLast().id();
         int parked = 0;
-        int reclaimed = 0;
         for (var owner : candidates) {
-            if (!owners.parked(owner, Duration.ZERO)) {
+            var sealed = owners.sealedFor(owner);
+            if (sealed.isEmpty()) {
                 continue;
             }
             parked++;
-            boolean due = urgent.contains(owner.storageKey()) || owners.parked(owner, settings.getIdleDuration());
-            if (due && reclaim(owner)) {
+            if (sealed.get().compareTo(settings.getIdleDuration()) >= 0 && reclaim(owner)) {
                 reclaimed++;
             }
         }
@@ -74,7 +80,7 @@ public final class ParkedMcpReclamationJob {
     private boolean reclaim(ParkedMcpOwners.Owner owner) {
         try {
             return broker.reclaimParkedMcp(owner.bindingId(), owner.generation(), owner.runtimeSessionId(),
-                    () -> owners.parked(owner, Duration.ZERO)).toCompletableFuture().join();
+                    () -> owners.sealedFor(owner).isPresent()).toCompletableFuture().join();
         } catch (CompletionException error) {
             // Pending work or a reopened Session refuses; the next tick looks again.
             LOG.debug("Parked MCP owner {} was not reclaimed", owner.runtimeSessionId(), error);

@@ -265,6 +265,8 @@ WP3 rig 是本地脚本（MySQL8.4 + Spring exec jar + hosted-harness bundle + f
 - **远程连接过期**：远程会话可能在 park 期间过期。重新校验（§4.3）覆盖重开时刻；探测之后的失败与 resident Session 的行为相同。
 - **替换正确性**：被回收连接的 journal 行仍为 active。load 必须先替换连接再退役该行，且不得重发原操作。worker 丢失（recovery-required）与连接丢失（替换）两条路径都须分别验证。
 - **回收竞争**：回收路由与成员资格交还必须在并发重开、两步之间 Broker 重启这些情况下保持安全。
+- **worker 丢失后删除 parked Session**：终态 close 必须重新获取 `active` 行的 owner，因此 worker 丢失后仍为 recovery-required。在有恢复路径之前不得启用 park（§10）。
+- **跨进程的提前回收**：维护信号只会到达看到拒绝的那个 Broker 进程。如果活 binding 在另一个进程上，维护要等到正常的空闲时长。
 - **配额压力**：驱逐可能关闭 resident Session 的空闲连接；其下一次工具调用会干净地失败，下一次 refresh 会替换连接。
 - **stdio 长存进程的资源**：parked stdio server 是 worker 里的长存进程，占内存/FD。空闲回收 bound；H1 已列"stdio HOME/USERPROFILE 为 Workspace"等部署约束沿用。
 - **与 detach 路径耦合**：挂起复用 detach 的 close 路径一部分；第二阶段改 park 须用测试固定"close 路径审查"每一行（父设计风险项）。
@@ -292,7 +294,8 @@ WP3 rig 是本地脚本（MySQL8.4 + Spring exec jar + hosted-harness bundle + f
 2. `EXTERNAL` 存储后续是否 park；这需要在竞争方 acquire 时抢占 parked 持有者。
 3. 已证明 settled 的 owner 在 worker 丢失后能否自动重装；这需要重新审视 §5.7 的故障门禁。
 4. 回收是否也应覆盖崩溃的 Harness（head 为 `ACTIVE` 且写者租约已过期）。第一增量只覆盖已 seal 的 head。
-5. 实测维护延迟后，是否需要存储所有权解耦（§5.4 后续增量）。
+5. worker 丢失后如何删除 parked Session。目前 close 保持 recovery-required，这会阻塞启用 park。
+6. 实测维护延迟后，是否需要存储所有权解耦（§5.4 后续增量）。
 
 ## 11. 可行性结论
 
@@ -300,7 +303,7 @@ WP3 rig 是本地脚本（MySQL8.4 + Spring exec jar + hosted-harness bundle + f
 
 - **收益真实且主要是延迟**：第二阶段消除冷开侧 K 次**串行**物理重连/发现（每次 ≤25s）+ ~7K journal 提交 + K 资源 publish，以及挂起侧 ~2K 提交 + K 次物理关闭。对配置 MCP 的 Session，wake 延迟收益显著（尤其 K 大或 server 慢）；SQL 收益随 K 放大。~91 是无 MCP 地板，MCP 成本完全在其之上（§3.1）。
 - **基础设施大部分已就位**：worker 跨 attach 存活、durable owner 可重获取、active-row 复用路径与连接替换已存在、投影 runtime_state 已兼容 parked、已 seal 的 head 已能识别 parked owner。新增主要是：远程重新校验、过期行退役、Broker 空闲回收、配额驱逐、park 声明。
-- **先决条件**：回收及其竞争的正确性证明；针对过期与被拒远程会话的重新校验的真实进程证明。存储所有权解耦延后（不阻塞第一增量）。
+- **先决条件**：回收及其竞争的正确性证明；针对过期与被拒远程会话的重新校验的真实进程证明；worker 丢失后删除 parked Session 的恢复路径。存储所有权解耦延后（不阻塞第一增量）。
 - **与第一阶段兼容**：资格谓词、#8 有界恢复证明、恢复视图判据均保持（§6）；不引入新 journal 状态、不改 schema、不引入新 cleanup debt 类。
 - **门槛**：§7 实测确认收益占比与发布常量；真实进程/MySQL 故障验收。估算不能替代实测（父设计明确要求）。
 

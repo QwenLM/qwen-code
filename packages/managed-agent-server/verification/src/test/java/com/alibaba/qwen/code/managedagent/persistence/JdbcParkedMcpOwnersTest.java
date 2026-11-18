@@ -13,7 +13,6 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcParkedMcpOwnersTest {
@@ -79,20 +78,29 @@ class JdbcParkedMcpOwnersTest {
     }
 
     @Test
-    void aSealedHeadIsParkedOnceItsIdlePeriodElapses() {
+    void findsOnlyTheOwnersOnOneStorage() {
+        runtimeSession("mcp-here", "READY", "b".repeat(64));
+        runtimeSession("mcp-elsewhere", "READY", "c".repeat(64));
+        assertEquals(List.of("mcp-here"), owners.onStorage("b".repeat(64), 10).stream()
+                .map(ParkedMcpOwners.Owner::runtimeSessionId).toList());
+    }
+
+    @Test
+    void reportsHowLongAHeadHasBeenSealed() {
         head("SEALED", Duration.ofMinutes(45).toMillis());
-        assertTrue(owners.parked(owner(), Duration.ofMinutes(30)));
-        assertFalse(owners.parked(owner(), Duration.ofHours(1)));
+        Duration sealed = owners.sealedFor(owner()).orElseThrow();
+        assertTrue(sealed.compareTo(Duration.ofMinutes(45)) >= 0);
+        assertTrue(sealed.compareTo(Duration.ofMinutes(46)) < 0);
     }
 
     @Test
-    void anActiveHeadIsNeverParked() {
+    void anActiveHeadIsNotSealed() {
         head("ACTIVE", Duration.ofHours(2).toMillis());
-        assertFalse(owners.parked(owner(), Duration.ZERO));
+        assertTrue(owners.sealedFor(owner()).isEmpty());
     }
 
     @Test
-    void aMissingHeadIsNeverParked() {
-        assertFalse(owners.parked(owner(), Duration.ZERO));
+    void aMissingHeadIsNotSealed() {
+        assertTrue(owners.sealedFor(owner()).isEmpty());
     }
 }

@@ -265,6 +265,8 @@ Add an IT in the verification module, building the stack like `HostedMcpRestartF
 - **Stale remote connections**: a remote session can expire during the park. Revalidation (§4.3) covers the reopen; a failure after the probe behaves as it does for a resident Session.
 - **Replacement correctness**: a reclaimed connection's journal row is still active. The load must replace the connection before retiring that row, and must not resend original operations. Worker loss (recovery-required) and connection loss (replace) must each be verified.
 - **Reclamation races**: the reclaim route and the membership handback must stay safe against a concurrent reopen and a Broker restart between the two steps.
+- **Deleting a parked Session after worker loss**: a terminal close must re-acquire an `active` row's owner, so it stays recovery-required once the worker is gone. Parking must not be enabled until this has a recovery path (§10).
+- **Expedited reclamation across processes**: the maintenance signal reaches only the Broker process that saw the refusal. If another process holds the live binding, maintenance waits for the normal idle duration.
 - **Quota pressure**: eviction can close an idle connection of a resident Session; its next tool call fails cleanly and its next refresh replaces the connection.
 - **Long-lived stdio process resources**: a parked stdio server is a long-lived process in the worker, holding memory/FDs. Idle reclamation bounds it; H1's deployment constraints ("stdio HOME/USERPROFILE is the Workspace", etc.) carry over.
 - **Coupling with the detach path**: suspension reuses part of detach's close path; Phase 2's park change must pin every line of the "close-path review" with tests (a parent-design risk item).
@@ -292,7 +294,8 @@ Add an IT in the verification module, building the stack like `HostedMcpRestartF
 2. Whether `EXTERNAL` storage should park later, which would require preempting a parked holder when a rival acquires.
 3. Whether an owner proven settled may reinstall automatically after worker loss, which would require revisiting the fault gate in §5.7.
 4. Whether reclamation should also cover a crashed Harness (`ACTIVE` head with an expired writer lease). The first increment covers sealed heads only.
-5. Whether storage-ownership decoupling is needed once maintenance delay is measured (§5.4 later increment).
+5. How a parked Session is deleted after its worker is lost. Today the close stays recovery-required; this blocks enabling parking.
+6. Whether storage-ownership decoupling is needed once maintenance delay is measured (§5.4 later increment).
 
 ## 11. Feasibility conclusion
 
@@ -300,7 +303,7 @@ Add an IT in the verification module, building the stack like `HostedMcpRestartF
 
 - **The benefit is real and primarily latency**: Phase 2 eliminates K **sequential** physical reconnects/discoveries (each ≤25s) + ~7K journal commits + K resource publishes on the cold-open side, and ~2K commits + K physical closes on the suspend side. For MCP-configured Sessions the wake-latency benefit is significant (especially large K or slow servers); the SQL benefit scales with K. ~91 is the MCP-free floor; MCP cost sits entirely on top (§3.1).
 - **Most infrastructure is already in place**: the worker survives attaches, the durable owner is re-acquirable, the active-row reuse path and connection replacement exist, the projection's runtime_state already accommodates parked, and the sealed head already identifies parked owners. The additions are mainly: remote revalidation, stale-row retirement, Broker idle reclamation, quota eviction, and the parking advertisement.
-- **Prerequisites**: correctness proof of reclamation and its races; real-process proof of revalidation against expired and refused remote sessions. Storage-ownership decoupling is deferred (does not block the first increment).
+- **Prerequisites**: correctness proof of reclamation and its races; real-process proof of revalidation against expired and refused remote sessions; a recovery path for deleting a parked Session after worker loss. Storage-ownership decoupling is deferred (does not block the first increment).
 - **Compatible with Phase 1**: the eligibility predicate, the #8 bounded-recovery proof, and the recovery-view criterion all hold (§6); no new journal state, no schema change, no new cleanup-debt class.
 - **Gate**: §7 measurement confirms the benefit share and release constants; real-process/MySQL fault acceptance. An estimate cannot replace measurement (the parent design explicitly requires it).
 

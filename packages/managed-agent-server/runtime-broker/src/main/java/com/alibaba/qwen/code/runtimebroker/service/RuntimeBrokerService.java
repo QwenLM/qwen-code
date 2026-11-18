@@ -563,8 +563,20 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 || !bindingId.equals(saved.getBindingId()) || saved.getRuntimeGeneration() != generation) {
             return CompletableFuture.completedFuture(false);
         }
-        var adopted = CompletableFuture.completedFuture(new SessionContext(saved.getSession(), binding, live.lease()));
+        CompletableFuture<SessionContext> adopted = new CompletableFuture<>();
         var existing = bindingRegistry.registerSession(runtimeSessionId, adopted);
+        if (existing == null) {
+            safeStage(() -> executionRecovery.scanExecutions(
+                    new SessionContext(saved.getSession(), binding, live.lease()), saved, null))
+                    .whenComplete((context, error) -> {
+                        if (error == null) {
+                            adopted.complete(context);
+                        } else {
+                            bindingRegistry.removeSession(runtimeSessionId, adopted);
+                            adopted.completeExceptionally(unwrap(error));
+                        }
+                    });
+        }
         return (existing == null ? adopted : existing).thenCompose(context -> context.binding().sameIdentity(binding)
                 ? reclaimParkedMcp(context, parked) : CompletableFuture.completedFuture(false));
     }

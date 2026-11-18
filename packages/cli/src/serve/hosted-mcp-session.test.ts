@@ -2499,6 +2499,15 @@ describe('idle suspension', () => {
     );
   });
 
+  it('claims the mount again before parking', async () => {
+    advertiseParking();
+    await mcp.refresh();
+    const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+    acquire.mockClear();
+    await mcp.suspend();
+    expect(acquire).toHaveBeenCalledOnce();
+  });
+
   it('drains as before when the Broker does not advertise parking', async () => {
     await mcp.refresh();
     await mcp.suspend();

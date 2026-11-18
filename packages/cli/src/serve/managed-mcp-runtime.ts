@@ -1362,6 +1362,7 @@ export class ManagedMcpRuntime {
   ): void {
     if (operation.timer) clearTimeout(operation.timer);
     operation.connection?.pending.delete(operation.control.operationId);
+    if (operation.connection) operation.connection.lastUsedAt = Date.now();
     if (operation.connection?.pending.size === 0) {
       for (const resolve of operation.connection.drained) resolve();
       operation.connection.drained.clear();

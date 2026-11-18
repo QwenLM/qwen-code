@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BooleanSupplier;
 
@@ -34,9 +35,13 @@ class ParkedMcpReclamationJobTest {
         }
 
         @Override
-        public boolean parked(Owner owner, Duration idle) {
-            Duration sealed = sealedFor.get(owner.runtimeSessionId());
-            return sealed != null && sealed.compareTo(idle) >= 0;
+        public List<Owner> onStorage(String storageKey, int limit) {
+            return rows.stream().filter(row -> row.storageKey().equals(storageKey)).limit(limit).toList();
+        }
+
+        @Override
+        public Optional<Duration> sealedFor(Owner owner) {
+            return Optional.ofNullable(sealedFor.get(owner.runtimeSessionId()));
         }
     };
 
@@ -92,6 +97,16 @@ class ParkedMcpReclamationJobTest {
         reclaimed.clear();
         assertEquals(0, job.runOnce().reclaimed());
         assertEquals(List.of(), reclaimed);
+    }
+
+    @Test
+    void expeditesAnOwnerOutsideTheScannedPage() {
+        owner(1, "first", Duration.ofMinutes(1));
+        owner(2, "waited-on", Duration.ofMinutes(1));
+        ParkedMcpReclamationJob job = job(1);
+        job.expedite("storage-waited-on");
+        assertEquals(1, job.runOnce().reclaimed());
+        assertEquals(List.of("waited-on"), reclaimed);
     }
 
     @Test

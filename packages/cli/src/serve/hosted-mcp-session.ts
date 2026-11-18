@@ -1170,7 +1170,9 @@ export class HostedMcpSession {
       )
     )
       return false;
-    await this.acquireOwner(true);
+    // Not the reuse form: a recovery-blocked turn may have handed the mount
+    // back, and a parked owner must hold it to be found and reclaimed.
+    await this.acquireOwner();
     if (!this.broker.mcpParkable) return false;
     for (const entry of configurations)
       if (entry.releaseState !== 'released' && !kept.has(entry.configurationId))

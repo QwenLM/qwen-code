@@ -80,10 +80,6 @@
       "en": "SSH Runtime nodes: hosts the server reaches over SSH, on which users may register Workspaces whose Runtime workers then run there.",
       "zh": "SSH Runtime 节点：服务端通过 SSH 访问的主机，用户可以在这些主机上登记 Workspace，其 Runtime worker 随后在该主机上运行。"
     },
-    "qwen.managed-agent.session-resources": {
-      "en": "Externalization of oversized private Session resources and cold storage of closed Session journals into immutable object storage, with independent default-off controls for resource writes, pack building, and SQL body eviction.",
-      "zh": "将超大的私有 Session 资源与已关闭 Session 的日志冷藏到不可变对象存储；资源写入、pack 构建与 SQL 正文腾空由各自独立、默认关闭的开关控制。"
-    },
     "qwen.managed-agent.session-store": {
       "en": "The private Managed Session Store through which the Hosted Harness reads and writes Session journals on this server's internal routes, and the writer credentials and leases that guard it.",
       "zh": "私有的 Managed Session Store：Hosted Harness 通过本服务的内部路由读写 Session 日志；以及保护它的写入凭据与写入租约。"
@@ -91,9 +87,51 @@
     "qwen.managed-agent.tool-publication": {
       "en": "Durable publication of Hosted Shell tool output to object storage: the storage target, capacity limits, operation and verification deadlines, and garbage collection.",
       "zh": "将 Hosted Shell 工具输出持久发布到对象存储：存储位置、容量上限、操作与校验期限，以及垃圾回收。"
+    },
+    "qwen.managed-agent.session-resources": {
+      "en": "Externalization of oversized private Session resources and cold storage of closed Session journals into immutable object storage, with independent default-off controls for resource writes, pack building, and SQL body eviction.",
+      "zh": "将超大的私有 Session 资源与已关闭 Session 的日志冷藏到不可变对象存储；资源写入、pack 构建与 SQL 正文腾空由各自独立、默认关闭的开关控制。"
     }
   },
   "properties": {
+    "qwen.managed-agent.object-storage.enabled": {
+      "en": "Whether the generic Aliyun OSS object-store auto-configuration is active. Defaults to follow `qwen.managed-agent.tool-publication.enabled`; set it true with tool publication disabled to back Session resources and journal cold storage without enabling publication. The OSS endpoint, region and bucket are still read from `qwen.managed-agent.tool-publication.oss-*`.",
+      "zh": "通用 Aliyun OSS 对象存储自动装配是否启用。默认跟随 `qwen.managed-agent.tool-publication.enabled`；在关闭 tool publication 时设为 true，可在不启用发布的情况下支撑 Session 资源与 journal 冷存储。OSS endpoint、region、bucket 仍从 `qwen.managed-agent.tool-publication.oss-*` 读取。"
+    },
+    "qwen.managed-agent.session-resources.enabled": {
+      "en": "Whether oversized private Session resources may be externalized to immutable object storage (allocate/upload/finalize before journal commit). While false, over-cap resources are refused with HTTP 501 `managed_session_oss_disabled`; already-externalized resources remain readable.",
+      "zh": "是否允许把超大的私有 Session 资源外置到不可变对象存储（journal 提交前 allocate/upload/finalize）。为 false 时超上限资源返回 HTTP 501 `managed_session_oss_disabled`；已外置资源仍可读取。"
+    },
+    "qwen.managed-agent.session-resources.oss-key-prefix": {
+      "en": "Key prefix under the configured object-storage bucket for externalized Session resources and journal packs.",
+      "zh": "已配置对象存储 bucket 中用于外置 Session 资源与 journal pack 的 key 前缀。"
+    },
+    "qwen.managed-agent.session-resources.pack-job-enabled": {
+      "en": "Whether the background sweeper builds and publishes immutable journal packs for eligible Sessions. Requires `qwen.managed-agent.session-resources.enabled`. Pack building never deletes SQL bodies.",
+      "zh": "后台清扫任务是否为符合条件的 Session 构建并发布不可变 journal pack。需要开启 `qwen.managed-agent.session-resources.enabled`。构建 pack 绝不删除 SQL 正文。"
+    },
+    "qwen.managed-agent.session-resources.deletion-enabled": {
+      "en": "Whether covered SQL journal bodies may be evicted after the deletion grace period. Requires pack-only mode to be qualified first; eviction is fenced by the head watermark and grace period. The direct record_bytes reader JournalStoreRows.activationLeaseRow is pack-aware (#17047): it resolves an evicted range from the published journal pack and re-verifies it against the surviving SQL digest. Precondition: every process that serves these reads must have the tool-publication object store configured (the Spring broker and the hand-constructed maintenance entry points alike); without a store an evicted read still fails closed, so confirm OSS is configured everywhere before enabling.",
+      "zh": "是否允许在删除宽限期后腾空被 pack 覆盖的 SQL journal 正文。需先完成只打包模式的资格验证；腾空受 head 水位与宽限期围栏保护。直读 record_bytes 的 JournalStoreRows.activationLeaseRow 已 pack-aware（#17047）：被腾空的区间会从已发布的 journal pack 解析，并对照留存的 SQL 摘要重新校验。前提：任何承载这些读取的进程都必须配置 tool-publication 对象存储（Spring broker 与手工构造的维护入口皆然）；缺少对象存储时被腾空的读取仍会失败关闭，因此启用前须确认所有相关进程均已配置 OSS。"
+    },
+    "qwen.managed-agent.session-resources.pack-target-bytes": {
+      "en": "Target compressed size of a single journal pack; the pack range shrinks adaptively to stay within it.",
+      "zh": "单个 journal pack 的目标压缩后大小；pack 范围会自适应收缩以不超过该值。"
+    },
+    "qwen.managed-agent.session-resources.pack-max-transactions": {
+      "en": "Maximum number of journal transactions packed into one journal pack.",
+      "zh": "单个 journal pack 最多容纳的 journal 事务数。"
+    },
+    "qwen.managed-agent.session-resources.deletion-grace": {
+      "en": "Grace period after a pack is published and its publisher fenced before covered SQL bodies may be evicted; must exceed the backup replication lag. A plain number is seconds.",
+      "zh": "pack 发布且发布者被围栏后、到可腾空被覆盖 SQL 正文之间的宽限期；必须大于备份复制 lag。纯数字按秒解析。",
+      "type": "duration"
+    },
+    "qwen.managed-agent.session-resources.scan-delay": {
+      "en": "Interval between background journal-compaction sweeper passes. A plain number is milliseconds; a value with a unit such as `30s` is also accepted.",
+      "zh": "后台 journal compaction 清扫任务的运行间隔。纯数字按毫秒解析，也可使用带单位的值如 `30s`。",
+      "type": "duration"
+    },
     "qwen.managed-agent.agent-revision": {
       "en": "The revision label of the built-in `qwen-code` agent, pinned on each Session that uses it; a request naming any other revision of `qwen-code` is refused. Must be 1 to 128 characters (startup refusal).",
       "zh": "内置 `qwen-code` agent 的修订号标签，会固定在使用它的每个 Session 上；请求中指定 `qwen-code` 的其他修订号会被拒绝。长度必须为 1 到 128 个字符（否则启动时拒绝）。"
@@ -220,14 +258,14 @@
       "en": "The maximum number of unanswered JSON-RPC requests one Session registration may queue for the browser; a further request is refused with a structured error instead of blocking the Turn. Aligns with the worker MCP in-flight cap by default (32).",
       "zh": "单个 Session 注册可为浏览器排队等待应答的 JSON-RPC 请求上限；超出的请求以结构化错误拒绝，而不是阻塞 Turn。默认与 worker MCP 在途上限对齐（32）。"
     },
-    "qwen.managed-agent.client-files.relay-url": {
-      "en": "The base URL of this control plane's internal listener as reachable from the Hosted Harness, used to build the relay MCP endpoint the Harness connects back to (`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`). When left blank while `qwen.managed-agent.client-files.enabled` is true, it is derived from the internal listener; if no URL can be derived, startup fails. A configured value must be an http(s) URL without credentials, query or fragment.",
-      "zh": "从 Hosted Harness 可达的本控制面内部监听器基地址，用于构造 Harness 回连的 relay MCP 端点（`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`）。`qwen.managed-agent.client-files.enabled` 为 true 且留空时，从 internal listener 推导；推导不出则启动失败。显式配置的值必须是不带凭据、查询串或片段的 http(s) URL。"
-    },
     "qwen.managed-agent.client-files.request-ttl": {
       "en": "How long one queued JSON-RPC request waits for the browser before it expires and the Runtime receives a structured offline error. Accepts a duration such as `25s`; a plain number is seconds.",
       "zh": "单条排队 JSON-RPC 请求等待浏览器应答的时长，到期后过期并向 Runtime 返回结构化离线错误。接受 `25s` 这类时长；不带单位的数字按秒计。",
       "type": "duration"
+    },
+    "qwen.managed-agent.client-files.relay-url": {
+      "en": "The base URL of this control plane's internal listener as reachable from the Hosted Harness, used to build the relay MCP endpoint the Harness connects back to (`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`). When left blank while `qwen.managed-agent.client-files.enabled` is true, it is derived from the internal listener; if no URL can be derived, startup fails. A configured value must be an http(s) URL without credentials, query or fragment.",
+      "zh": "从 Hosted Harness 可达的本控制面内部监听器基地址，用于构造 Harness 回连的 relay MCP 端点（`<relay-url>/internal/managed-client-files/v1/sessions/<id>/mcp`）。`qwen.managed-agent.client-files.enabled` 为 true 且留空时，从 internal listener 推导；推导不出则启动失败。显式配置的值必须是不带凭据、查询串或片段的 http(s) URL。"
     },
     "qwen.managed-agent.definition-models": {
       "en": "The model IDs a stored AgentDefinition may name in `model.id`, as a comma-separated list; a Session whose definition names any other model is refused at admission. Each ID should match a model provider route configured in the Harness. Empty admits only definitions without a model.",
@@ -504,10 +542,6 @@
       "type": "yaml-list",
       "default": ""
     },
-    "qwen.managed-agent.object-storage.enabled": {
-      "en": "Whether the generic Aliyun OSS object-store auto-configuration is active. Defaults to follow `qwen.managed-agent.tool-publication.enabled`; set it true with tool publication disabled to back Session resources and journal cold storage without enabling publication. The OSS endpoint, region and bucket are still read from `qwen.managed-agent.tool-publication.oss-*`.",
-      "zh": "通用 Aliyun OSS 对象存储自动装配是否启用。默认跟随 `qwen.managed-agent.tool-publication.enabled`；在关闭 tool publication 时设为 true，可在不启用发布的情况下支撑 Session 资源与 journal 冷存储。OSS endpoint、region、bucket 仍从 `qwen.managed-agent.tool-publication.oss-*` 读取。"
-    },
     "qwen.managed-agent.runtime-broker.allow-non-loopback": {
       "en": "Whether the embedded Runtime Broker may bind a non-loopback address in `qwen.managed-agent.runtime-broker.host`, such as `0.0.0.0`; without it, startup refuses such an address. The listener serves one global bearer token over plaintext HTTP, with no per-tenant authorization, so enable it only behind a layer that terminates TLS and authorizes callers: restricting the network alone still sends the token in clear text, and whoever reads it can drive every execution the Broker admits. The `managed-local` profile refuses a non-loopback host regardless.",
       "zh": "是否允许内嵌 Runtime Broker 绑定 `qwen.managed-agent.runtime-broker.host` 中的非回环地址（例如 `0.0.0.0`）；未开启时，此类地址启动时拒绝。该监听器通过明文 HTTP 使用同一个全局 bearer token，且没有按租户的鉴权，因此只应在终止 TLS 并对调用方鉴权的前置层之后开启：仅限制网络仍会以明文传输该 token，读到它的人可以操控 Broker 接纳的所有执行。`managed-local` profile 无论此项如何都拒绝非回环 host。"
@@ -585,22 +619,6 @@
       "en": "Whether WebShell may import an existing directory on this host as a Workspace, registering its parent as storage and granting the importing actor OWNER access. For a trusted single-user host: startup requires a loopback `server.address` with signed authentication or `qwen.managed-agent.trusted-actor-header`, plus `qwen.managed-agent.harness.workspace-files-enabled`, `qwen.managed-agent.runtime-broker.durable-local-process` and `qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled`.",
       "zh": "是否允许 WebShell 将本机上已有的目录导入为 Workspace：导入时把其父目录登记为存储，并授予发起导入的 actor OWNER 权限。仅适用于可信的单用户主机：要求 `server.address` 为回环地址并使用 signed 认证或 `qwen.managed-agent.trusted-actor-header`，同时开启 `qwen.managed-agent.harness.workspace-files-enabled`、`qwen.managed-agent.runtime-broker.durable-local-process` 和 `qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled`，否则启动时拒绝。"
     },
-    "qwen.managed-agent.runtime-broker.mcp-parking.batch-size": {
-      "en": "How many Runtime Sessions one reclamation tick may examine. Must be between 1 and 1000; checked at startup even while parking is off.",
-      "zh": "每轮回收最多检查的 Runtime Session 数。取值须在 1 到 1000 之间；即使未启用 park 也会在启动时校验，越界则启动时拒绝。"
-    },
-    "qwen.managed-agent.runtime-broker.mcp-parking.enabled": {
-      "en": "Whether suspended Sessions keep their MCP connections and storage membership until reclamation. Off keeps draining them on every suspension. Takes effect only with `qwen.managed-agent.runtime-broker.enabled`, and never applies to external storage.",
-      "zh": "挂起的 Session 是否保留其 MCP 连接和存储成员资格直到被回收。关闭时每次挂起都照常 drain。仅在启用 `qwen.managed-agent.runtime-broker.enabled` 时生效，且从不适用于外部存储。"
-    },
-    "qwen.managed-agent.runtime-broker.mcp-parking.idle-duration": {
-      "en": "How long a Session must stay suspended before its parked MCP connections are closed and its storage membership is handed back. Physical maintenance on the same storage reclaims sooner. A suffix-less number binds as milliseconds. Must be at least `1ms`; checked at startup even while parking is off.",
-      "zh": "Session 须保持挂起多久，其 parked MCP 连接才会被关闭、存储成员资格才会被交还。同一存储上的物理维护会提前触发回收。不带单位的数字按毫秒绑定。不得小于 `1ms`；即使未启用 park 也会在启动时校验，越界则启动时拒绝。"
-    },
-    "qwen.managed-agent.runtime-broker.mcp-parking.scan-delay": {
-      "en": "How long the reclamation job waits after one tick finishes before it starts the next. A suffix-less number binds as milliseconds. Must be at least `1ms`; checked at startup even while parking is off.",
-      "zh": "回收任务在一轮结束后等待多久再开始下一轮。不带单位的数字按毫秒绑定。不得小于 `1ms`；即使未启用 park 也会在启动时校验，越界则启动时拒绝。"
-    },
     "qwen.managed-agent.runtime-broker.node-executable": {
       "en": "The path of the Node.js executable that runs the local Runtime worker (`qwen.managed-agent.runtime-broker.worker-entry`) and the helper processes for local Workspace file reads and uploads. Required with the `local-process` provisioner; startup refuses it empty. Preflight checks that it is executable.",
       "zh": "Node.js 可执行文件的路径，用于运行本地 Runtime worker（`qwen.managed-agent.runtime-broker.worker-entry`）以及本地 Workspace 文件读取和上传的辅助进程。使用 `local-process` provisioner 时必填，留空时启动时拒绝。预检会检查它是否可执行。"
@@ -626,6 +644,22 @@
     "qwen.managed-agent.runtime-broker.provisioner": {
       "en": "The installed factory kind that places Runtime workers: `local-process` (local Node.js workers), `ssh-process` (registered SSH Workspaces), `static` (a preconfigured worker), or `external-scratch` or `external-workspace` (an operator-run HTTP provider). A trusted additional provider may register its own kind. With the Broker enabled, missing or duplicate kinds fail before resources are created. Embedding hosts must explicitly include the selected backend artifact.",
       "zh": "放置 Runtime worker 所用的已安装工厂 kind：`local-process`（本机 Node.js worker）、`ssh-process`（已注册 SSH Workspace）、`static`（预配置 worker）、`external-scratch` 或 `external-workspace`（运维方 HTTP provider）。其他可信 provider 可以注册自己的 kind。Broker 启用时，缺失或重复的 kind 在创建资源前拒绝。嵌入服务须显式添加所选后端产物。"
+    },
+    "qwen.managed-agent.runtime-broker.mcp-parking.batch-size": {
+      "en": "How many Runtime Sessions one reclamation tick may examine. Must be between 1 and 1000; checked at startup even while parking is off.",
+      "zh": "每轮回收最多检查的 Runtime Session 数。取值须在 1 到 1000 之间；即使未启用 park 也会在启动时校验，越界则启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.mcp-parking.enabled": {
+      "en": "Whether suspended Sessions keep their MCP connections and storage membership until reclamation. Off keeps draining them on every suspension. Takes effect only with `qwen.managed-agent.runtime-broker.enabled`, and never applies to external storage.",
+      "zh": "挂起的 Session 是否保留其 MCP 连接和存储成员资格直到被回收。关闭时每次挂起都照常 drain。仅在启用 `qwen.managed-agent.runtime-broker.enabled` 时生效，且从不适用于外部存储。"
+    },
+    "qwen.managed-agent.runtime-broker.mcp-parking.idle-duration": {
+      "en": "How long a Session must stay suspended before its parked MCP connections are closed and its storage membership is handed back. Physical maintenance on the same storage reclaims sooner. A suffix-less number binds as milliseconds. Must be at least `1ms`; checked at startup even while parking is off.",
+      "zh": "Session 须保持挂起多久，其 parked MCP 连接才会被关闭、存储成员资格才会被交还。同一存储上的物理维护会提前触发回收。不带单位的数字按毫秒绑定。不得小于 `1ms`；即使未启用 park 也会在启动时校验，越界则启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.mcp-parking.scan-delay": {
+      "en": "How long the reclamation job waits after one tick finishes before it starts the next. A suffix-less number binds as milliseconds. Must be at least `1ms`; checked at startup even while parking is off.",
+      "zh": "回收任务在一轮结束后等待多久再开始下一轮。不带单位的数字按毫秒绑定。不得小于 `1ms`；即使未启用 park 也会在启动时校验，越界则启动时拒绝。"
     },
     "qwen.managed-agent.runtime-broker.retention.batch-size": {
       "en": "How many records one retention tick may handle: it caps the bindings scanned, the child records scanned and the total rows deleted per tick. Must be between 1 and 1000; checked at startup even while retention is off.",
@@ -688,10 +722,6 @@
       "en": "The bearer token the Hosted Harness presents to the embedded Runtime Broker's private listener; it also authorizes the loopback-only external storage registration endpoint. A secret. Required when `qwen.managed-agent.runtime-broker.enabled` is true; at most 512 characters. It can come from `qwen.managed-agent.harness.credentials-file` (`QWEN_MANAGED_RUNTIME_BROKER_TOKEN`) instead; setting it in both places is refused at startup.",
       "zh": "Hosted Harness 访问内嵌 Runtime Broker 私有监听端口时出示的 Bearer 令牌；它也用于授权仅限回环地址的外部存储登记接口。属于密钥。`qwen.managed-agent.runtime-broker.enabled` 为 true 时必填，最长 512 个字符。也可以改由 `qwen.managed-agent.harness.credentials-file` 中的 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 提供；两处同时设置时启动时拒绝。"
     },
-    "qwen.managed-agent.runtime-broker.tool-measurements": {
-      "en": "Whether newly resolved ordinary Workspace bindings select the attested managed-workspace-execution/2 profile and Tool v4 numeric execution/file measurements. Defaults to false; existing bindings and extension/MCP owners retain their contracts. Deploy compatible Worker/Broker readers first. Measurement commits reuse existing activity evidence and require a storage-version-5 grant; no separate collector flag is introduced. See the [execution diagnostics design](../design/2026-11-07-managed-execution-diagnostics.md).",
-      "zh": "是否让新解析的普通 Workspace binding 选择经过 attestation 的 managed-workspace-execution/2 profile 和 Tool v4 数值执行/文件测量。默认 false；已有 binding 和 extension/MCP owner 保留原契约。先部署兼容 Worker/Broker reader。测量提交复用现有 activity evidence，并要求 storage grant 支持 version 5；不引入独立 collector 开关。参见[执行诊断设计](../design/2026-11-07-managed-execution-diagnostics.zh-CN.md)。"
-    },
     "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery": {
       "en": "Whether, after a whole-host reboot on Linux or macOS, the Broker treats the changed boot identity (the kernel boot ID on Linux, the boot session UUID on the same macOS hardware) as proof that the original local workers stopped, and clears the holders of their saved Runtime bindings once every execution is terminal. It scans 8 saved bindings every 5 seconds and never starts a replacement worker or replays an execution. Requires `qwen.managed-agent.runtime-broker.durable-local-process` and the `local-process` provisioner; startup refuses it otherwise.",
       "zh": "Linux 或 macOS 主机整机重启后，Broker 是否把启动身份的变化（Linux 的内核 boot ID，同一 macOS 硬件上的 boot session UUID）视为原本地 worker 已停止的证据，并在所有执行都已终结后清除这些已保存 Runtime 绑定的持有者。它每 5 秒扫描 8 个已保存的绑定，从不启动替代 worker，也不重放执行。要求 `qwen.managed-agent.runtime-broker.durable-local-process` 和 `local-process` provisioner；不满足条件时启动时拒绝。"
@@ -703,10 +733,6 @@
     "qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled": {
       "en": "Whether LOCAL Workspace execution is gated on a verified physical storage registration: before tools, file access or child Git run, the server checks that the Workspace root still matches its registered identity and marker, and otherwise refuses with `409 workspace_unavailable`. Required by `qwen.managed-agent.runtime-broker.workspace-creation-root` and `qwen.managed-agent.runtime-broker.local-directory-import-enabled`; without `qwen.managed-agent.runtime-broker.workspace-mounts` it also satisfies the Workspace source that `qwen.managed-agent.harness.workspace-files-enabled` needs. Startup refuses it with external provisioners.",
       "zh": "LOCAL Workspace 的执行是否以已验证的物理存储登记为前提：在工具、文件访问或子 Git 操作运行前，服务端检查 Workspace 根目录是否仍与登记的身份和标记一致，否则以 `409 workspace_unavailable` 拒绝。`qwen.managed-agent.runtime-broker.workspace-creation-root` 和 `qwen.managed-agent.runtime-broker.local-directory-import-enabled` 都依赖它；未配置 `qwen.managed-agent.runtime-broker.workspace-mounts` 时，它也满足 `qwen.managed-agent.harness.workspace-files-enabled` 对 Workspace 来源的要求。与外部 provisioner 同时使用时启动时拒绝。"
-    },
-    "qwen.managed-agent.runtime-broker.web-terminal": {
-      "en": "Whether newly resolved ordinary local Workspace bindings select the terminal-capable measured profile (managed-workspace-execution/2 plus web-terminal/1), whose worker serves the interactive user-terminal upgrade route. Defaults to false and requires tool-measurements. The capability digest is a frozen binding input: deploy matching control-plane, Harness and Runtime artifacts together before enabling. SSH, extension and external-scratch placements keep their existing profiles. See the [Managed Web Terminal design](../design/2026-11-10-managed-web-terminal.md).",
-      "zh": "是否让新解析的普通本地 Workspace binding 选择带终端能力的测量 profile（managed-workspace-execution/2 加 web-terminal/1），其 worker 提供交互式用户终端 upgrade 路由。默认 false，且要求开启 tool-measurements。capability digest 是冻结的 binding 输入：启用前先协同部署配套的控制平面、Harness 与 Runtime 制品。SSH、extension 与 external-scratch 放置保留现有 profile。参见 [Managed Web 终端设计](../design/2026-11-10-managed-web-terminal.zh-CN.md)。"
     },
     "qwen.managed-agent.runtime-broker.worker-entry": {
       "en": "Path to the built Qwen Code CLI bundle (for example `dist/cli.js`) that `qwen.managed-agent.runtime-broker.node-executable` runs with `managed-runtime-worker` to start local-process workers; LOCAL Workspace file-reference checks and uploads also run through it. Required when `qwen.managed-agent.runtime-broker.provisioner` is `local-process`; a relative path resolves against the server's working directory.",
@@ -736,40 +762,6 @@
     "qwen.managed-agent.service-user": {
       "en": "The operating-system account the server runs as. Only the preflight check reads it: it confirms the account exists and checks that the configuration and credentials files are readable by that account rather than by the account running preflight. Where the account running preflight cannot look at such a file, or cannot read one the check reads, the row fails and says to run the check as that account. Empty checks access as the account running preflight.",
       "zh": "服务端运行所用的操作系统账号。仅预检会读取该值：确认账号存在，并按该账号（而非运行预检的账号）检查配置文件和凭据文件是否可读。运行预检的账号看不到这类文件，或读不了检查要读取的文件时，该行为 FAIL，并提示以该账号运行检查。为空时按运行预检的账号检查访问权限。"
-    },
-    "qwen.managed-agent.session-resources.deletion-enabled": {
-      "en": "Whether covered SQL journal bodies may be evicted after the deletion grace period. Requires pack-only mode to be qualified first; eviction is fenced by the head watermark and grace period. The direct record_bytes reader JournalStoreRows.activationLeaseRow is pack-aware (#17047): it resolves an evicted range from the published journal pack and re-verifies it against the surviving SQL digest. Precondition: every process that serves these reads must have the tool-publication object store configured (the Spring broker and the hand-constructed maintenance entry points alike); without a store an evicted read still fails closed, so confirm OSS is configured everywhere before enabling.",
-      "zh": "是否允许在删除宽限期后腾空被 pack 覆盖的 SQL journal 正文。需先完成只打包模式的资格验证；腾空受 head 水位与宽限期围栏保护。直读 record_bytes 的 JournalStoreRows.activationLeaseRow 已 pack-aware（#17047）：被腾空的区间会从已发布的 journal pack 解析，并对照留存的 SQL 摘要重新校验。前提：任何承载这些读取的进程都必须配置 tool-publication 对象存储（Spring broker 与手工构造的维护入口皆然）；缺少对象存储时被腾空的读取仍会失败关闭，因此启用前须确认所有相关进程均已配置 OSS。"
-    },
-    "qwen.managed-agent.session-resources.deletion-grace": {
-      "en": "Grace period after a pack is published and its publisher fenced before covered SQL bodies may be evicted; must exceed the backup replication lag. A plain number is seconds.",
-      "zh": "pack 发布且发布者被围栏后、到可腾空被覆盖 SQL 正文之间的宽限期；必须大于备份复制 lag。纯数字按秒解析。",
-      "type": "duration"
-    },
-    "qwen.managed-agent.session-resources.enabled": {
-      "en": "Whether oversized private Session resources may be externalized to immutable object storage (allocate/upload/finalize before journal commit). While false, over-cap resources are refused with HTTP 501 `managed_session_oss_disabled`; already-externalized resources remain readable.",
-      "zh": "是否允许把超大的私有 Session 资源外置到不可变对象存储（journal 提交前 allocate/upload/finalize）。为 false 时超上限资源返回 HTTP 501 `managed_session_oss_disabled`；已外置资源仍可读取。"
-    },
-    "qwen.managed-agent.session-resources.oss-key-prefix": {
-      "en": "Key prefix under the configured object-storage bucket for externalized Session resources and journal packs.",
-      "zh": "已配置对象存储 bucket 中用于外置 Session 资源与 journal pack 的 key 前缀。"
-    },
-    "qwen.managed-agent.session-resources.pack-job-enabled": {
-      "en": "Whether the background sweeper builds and publishes immutable journal packs for eligible Sessions. Requires `qwen.managed-agent.session-resources.enabled`. Pack building never deletes SQL bodies.",
-      "zh": "后台清扫任务是否为符合条件的 Session 构建并发布不可变 journal pack。需要开启 `qwen.managed-agent.session-resources.enabled`。构建 pack 绝不删除 SQL 正文。"
-    },
-    "qwen.managed-agent.session-resources.pack-max-transactions": {
-      "en": "Maximum number of journal transactions packed into one journal pack.",
-      "zh": "单个 journal pack 最多容纳的 journal 事务数。"
-    },
-    "qwen.managed-agent.session-resources.pack-target-bytes": {
-      "en": "Target compressed size of a single journal pack; the pack range shrinks adaptively to stay within it.",
-      "zh": "单个 journal pack 的目标压缩后大小；pack 范围会自适应收缩以不超过该值。"
-    },
-    "qwen.managed-agent.session-resources.scan-delay": {
-      "en": "Interval between background journal-compaction sweeper passes. A plain number is milliseconds; a value with a unit such as `30s` is also accepted.",
-      "zh": "后台 journal compaction 清扫任务的运行间隔。纯数字按毫秒解析，也可使用带单位的值如 `30s`。",
-      "type": "duration"
     },
     "qwen.managed-agent.session-store.allow-insecure-http": {
       "en": "Whether a plaintext `http` `qwen.managed-agent.session-store.base-url` on a non-loopback host is accepted. Without it startup refuses such a URL, which every Harness would reject; with it the flag is passed to the Harness in each Session's Store descriptor so its client accepts the URL.",
@@ -912,6 +904,14 @@
       "en": "The database user the control plane connects as. Besides rights on the control plane's database, it needs `SELECT` on `performance_schema.user_variables_by_thread`, which the preflight `--check` verifies.",
       "zh": "控制面连接数据库所用的用户。除控制面数据库的权限外，还需要 `performance_schema.user_variables_by_thread` 的 `SELECT` 权限，预检 `--check` 会校验该权限。",
       "type": "string"
+    },
+    "qwen.managed-agent.runtime-broker.tool-measurements": {
+      "en": "Whether newly resolved ordinary Workspace bindings select the attested managed-workspace-execution/2 profile and Tool v4 numeric execution/file measurements. Defaults to false; existing bindings and extension/MCP owners retain their contracts. Deploy compatible Worker/Broker readers first. Measurement commits reuse existing activity evidence and require a storage-version-5 grant; no separate collector flag is introduced. See the [execution diagnostics design](../design/2026-11-07-managed-execution-diagnostics.md).",
+      "zh": "是否让新解析的普通 Workspace binding 选择经过 attestation 的 managed-workspace-execution/2 profile 和 Tool v4 数值执行/文件测量。默认 false；已有 binding 和 extension/MCP owner 保留原契约。先部署兼容 Worker/Broker reader。测量提交复用现有 activity evidence，并要求 storage grant 支持 version 5；不引入独立 collector 开关。参见[执行诊断设计](../design/2026-11-07-managed-execution-diagnostics.zh-CN.md)。"
+    },
+    "qwen.managed-agent.runtime-broker.web-terminal": {
+      "en": "Whether newly resolved ordinary local Workspace bindings select the terminal-capable measured profile (managed-workspace-execution/2 plus web-terminal/1), whose worker serves the interactive user-terminal upgrade route. Defaults to false and requires tool-measurements. The capability digest is a frozen binding input: deploy matching control-plane, Harness and Runtime artifacts together before enabling. SSH, extension and external-scratch placements keep their existing profiles. See the [Managed Web Terminal design](../design/2026-11-10-managed-web-terminal.md).",
+      "zh": "是否让新解析的普通本地 Workspace binding 选择带终端能力的测量 profile（managed-workspace-execution/2 加 web-terminal/1），其 worker 提供交互式用户终端 upgrade 路由。默认 false，且要求开启 tool-measurements。capability digest 是冻结的 binding 输入：启用前先协同部署配套的控制平面、Harness 与 Runtime 制品。SSH、extension 与 external-scratch 放置保留现有 profile。参见 [Managed Web 终端设计](../design/2026-11-10-managed-web-terminal.zh-CN.md)。"
     }
   }
 }
