@@ -1150,6 +1150,208 @@ describe('ProcessTransport', () => {
       mockSpawn.mockReturnValue(mockChildProcess);
     });
 
+    it.each(
+      [
+        { platform: 'linux', code: 130 },
+        { platform: 'linux', code: 143 },
+        { platform: 'win32', code: 1 },
+      ].flatMap((outcome) =>
+        ['waiting', 'exit-before-close', 'after-close'].map((timing) => ({
+          ...outcome,
+          timing,
+        })),
+      ),
+    )(
+      'accepts requested shutdown code $code on $platform with a $timing waiter',
+      async ({ platform, code, timing }) => {
+        const originalPlatform = Object.getOwnPropertyDescriptor(
+          process,
+          'platform',
+        )!;
+        Object.defineProperty(process, 'platform', { value: platform });
+        try {
+          const transport = new ProcessTransport({
+            pathToQwenExecutable: 'qwen',
+          });
+          await transport.close();
+          expect(mockChildProcess.kill).toHaveBeenCalledWith('SIGTERM');
+
+          const waiting =
+            timing === 'waiting' ? transport.waitForExit() : undefined;
+          mockChildProcess.exitCode = code;
+          if (timing !== 'exit-before-close') {
+            mockChildProcess.emit('close', code, null);
+          }
+
+          await expect(
+            waiting ?? transport.waitForExit(),
+          ).resolves.toBeUndefined();
+          expect(transport.exitError).toBeNull();
+          if (timing === 'exit-before-close') {
+            mockChildProcess.emit('close', code, null);
+            expect(transport.exitError).toBeNull();
+          }
+        } finally {
+          Object.defineProperty(process, 'platform', originalPlatform);
+        }
+      },
+    );
+
+    it.each([
+      { signal: 'SIGABRT' as const, timing: 'waiting' },
+      { signal: 'SIGSEGV' as const, timing: 'exit-before-close' },
+      { signal: 'SIGKILL' as const, timing: 'after-close' },
+    ])(
+      'reports unrequested $signal after close with a $timing waiter',
+      async ({ signal, timing }) => {
+        const transport = new ProcessTransport({
+          pathToQwenExecutable: 'qwen',
+        });
+        await transport.close();
+        const waiting =
+          timing === 'waiting' ? transport.waitForExit() : undefined;
+        mockChildProcess.signalCode = signal;
+        if (timing !== 'exit-before-close') {
+          mockChildProcess.emit('close', null, signal);
+        }
+
+        await expect(waiting ?? transport.waitForExit()).rejects.toThrow(
+          `CLI process terminated by signal ${signal}`,
+        );
+        expect(transport.exitError?.message).toBe(
+          `CLI process terminated by signal ${signal}`,
+        );
+        if (timing === 'exit-before-close') {
+          mockChildProcess.emit('close', null, signal);
+        }
+      },
+    );
+
+    it.each([
+      { platform: 'linux', code: 130 },
+      { platform: 'linux', code: 143 },
+      { platform: 'win32', code: 1 },
+    ])(
+      'retains code $code already visible before close on $platform',
+      async ({ platform, code }) => {
+        const originalPlatform = Object.getOwnPropertyDescriptor(
+          process,
+          'platform',
+        )!;
+        Object.defineProperty(process, 'platform', { value: platform });
+        try {
+          const transport = new ProcessTransport({
+            pathToQwenExecutable: 'qwen',
+          });
+          mockChildProcess.exitCode = code;
+          await transport.close();
+          expect(mockChildProcess.kill).not.toHaveBeenCalled();
+          mockChildProcess.emit('close', code, null);
+          await expect(transport.waitForExit()).rejects.toThrow(
+            `CLI process exited with code ${code}`,
+          );
+        } finally {
+          Object.defineProperty(process, 'platform', originalPlatform);
+        }
+      },
+    );
+
+    it.each(['linux', 'darwin'])(
+      'keeps an unrelated exit code 1 after close on %s',
+      async (platform) => {
+        const originalPlatform = Object.getOwnPropertyDescriptor(
+          process,
+          'platform',
+        )!;
+        Object.defineProperty(process, 'platform', { value: platform });
+        try {
+          const transport = new ProcessTransport({
+            pathToQwenExecutable: 'qwen',
+          });
+          await transport.close();
+          mockChildProcess.exitCode = 1;
+          mockChildProcess.emit('close', 1, null);
+          await expect(transport.waitForExit()).rejects.toThrow(
+            'CLI process exited with code 1',
+          );
+        } finally {
+          Object.defineProperty(process, 'platform', originalPlatform);
+        }
+      },
+    );
+
+    it.each([
+      { code: 130, signal: null, message: 'CLI process exited with code 130' },
+      {
+        code: null,
+        signal: 'SIGTERM' as const,
+        message: 'CLI process terminated by signal SIGTERM',
+      },
+    ])(
+      'does not exempt a failed signal request: $message',
+      async ({ code, signal, message }) => {
+        vi.mocked(mockChildProcess.kill).mockReturnValue(false);
+        const transport = new ProcessTransport({
+          pathToQwenExecutable: 'qwen',
+        });
+        await transport.close();
+        mockChildProcess.exitCode = code;
+        mockChildProcess.signalCode = signal;
+        mockChildProcess.emit('close', code, signal);
+        await expect(transport.waitForExit()).rejects.toThrow(message);
+      },
+    );
+
+    it('does not claim a signal already sent by another caller', async () => {
+      const transport = new ProcessTransport({ pathToQwenExecutable: 'qwen' });
+      mockChildProcess.killed = true;
+      await transport.close();
+      expect(mockChildProcess.kill).not.toHaveBeenCalled();
+      mockChildProcess.signalCode = 'SIGTERM';
+      mockChildProcess.emit('close', null, 'SIGTERM');
+      await expect(transport.waitForExit()).rejects.toThrow(
+        'CLI process terminated by signal SIGTERM',
+      );
+    });
+
+    it('accepts its own successful SIGKILL escalation', async () => {
+      vi.useFakeTimers();
+      const transport = new ProcessTransport({ pathToQwenExecutable: 'qwen' });
+      await transport.close();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(mockChildProcess.kill).toHaveBeenCalledWith('SIGKILL');
+      mockChildProcess.signalCode = 'SIGKILL';
+      mockChildProcess.emit('close', null, 'SIGKILL');
+      await expect(transport.waitForExit()).resolves.toBeUndefined();
+      expect(transport.exitError).toBeNull();
+    });
+
+    it('accepts Windows termination when only the escalation succeeds', async () => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(
+        process,
+        'platform',
+      )!;
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      vi.useFakeTimers();
+      try {
+        vi.mocked(mockChildProcess.kill)
+          .mockReturnValueOnce(false)
+          .mockReturnValue(true);
+        const transport = new ProcessTransport({
+          pathToQwenExecutable: 'qwen',
+        });
+        await transport.close();
+        await vi.advanceTimersByTimeAsync(5000);
+        expect(mockChildProcess.kill).toHaveBeenCalledWith('SIGKILL');
+        mockChildProcess.exitCode = 1;
+        mockChildProcess.emit('close', 1, null);
+        await expect(transport.waitForExit()).resolves.toBeUndefined();
+        expect(transport.exitError).toBeNull();
+      } finally {
+        Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
     it.each(['waiting', 'exit-before-close', 'after-close'])(
       'completes an intentional signal shutdown with a %s waiter',
       async (timing) => {
@@ -1231,11 +1433,11 @@ describe('ProcessTransport', () => {
     it('still reports a nonzero exit after requesting shutdown', async () => {
       const transport = new ProcessTransport({ pathToQwenExecutable: 'qwen' });
       await transport.close();
-      mockChildProcess.exitCode = 1;
-      mockChildProcess.emit('close', 1, null);
+      mockChildProcess.exitCode = 2;
+      mockChildProcess.emit('close', 2, null);
 
       await expect(transport.waitForExit()).rejects.toThrow(
-        'CLI process exited with code 1',
+        'CLI process exited with code 2',
       );
     });
 

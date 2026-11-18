@@ -30,6 +30,7 @@ export class ProcessTransport implements Transport {
   private abortController: AbortController;
   private abortHandler: (() => void) | null = null;
   private killEscalationTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly sentSignals = new Set<NodeJS.Signals>();
 
   constructor(options: TransportOptions) {
     this.options = options;
@@ -221,7 +222,9 @@ export class ProcessTransport implements Transport {
     }
 
     if (!this.childProcess.killed) {
-      this.childProcess.kill('SIGTERM');
+      if (this.childProcess.kill('SIGTERM')) {
+        this.sentSignals.add('SIGTERM');
+      }
     }
 
     this.scheduleChildProcessKillEscalation(this.childProcess);
@@ -235,7 +238,9 @@ export class ProcessTransport implements Transport {
         this.childProcess === childProcess &&
         childProcess.exitCode === null
       ) {
-        childProcess.kill('SIGKILL');
+        if (childProcess.kill('SIGKILL')) {
+          this.sentSignals.add('SIGKILL');
+        }
       }
       this.killEscalationTimer = null;
     }, 5000);
@@ -304,9 +309,22 @@ export class ProcessTransport implements Transport {
     code: number | null,
     signal: NodeJS.Signals | null,
   ): Error | undefined {
+    // The CLI can handle SIGTERM by exiting with a cancellation code, and
+    // Windows TerminateProcess reports code 1 instead of a signal.
+    const requestedShutdown =
+      this.closed &&
+      (signal
+        ? this.sentSignals.has(signal)
+        : (this.sentSignals.has('SIGTERM') && (code === 130 || code === 143)) ||
+          (process.platform === 'win32' &&
+            code === 1 &&
+            (this.sentSignals.has('SIGTERM') ||
+              this.sentSignals.has('SIGKILL'))));
+    if (requestedShutdown) return undefined;
+
     if (code !== 0 && code !== null) {
       return new Error(`CLI process exited with code ${code}`);
-    } else if (signal && !this.closed) {
+    } else if (signal) {
       return new Error(`CLI process terminated by signal ${signal}`);
     }
     return undefined;
