@@ -115,8 +115,8 @@ Pierre 目录树，点击文件后左侧显示内容、右侧保留目录树。M
 
 新建会话页的内置 `header` 只提供工作区级入口：右侧面板开关、启用时的
 Local Control，以及多主机位置。面板开关遵循 `header.items`，并在工作区确定后
-才显示；`rightPanel.items` 此时仅保留 `files`、`terminal` 和 `webPreview`，
-`review`、`sideTask`、`trajectory` 要等首条消息创建会话后才出现。
+才显示；`rightPanel.items` 此时仅保留 `files`、`terminal`、`webPreview` 和
+`changeOverview`，`review`、`sideTask`、`trajectory` 要等首条消息创建会话后才出现。
 自定义 `renderChatHeader` 的宿主在新建会话页仍不调用该渲染器。
 输入框没有显示工作区选择器时，精简 header 保留只读工作区图标。
 面板跟随输入框选择的工作区；各工作区草稿独立保存，刷新和会话切换后可恢复，
