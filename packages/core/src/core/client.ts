@@ -4839,6 +4839,7 @@ export class LlmClient {
             undefined,
             goalPermit,
             /* deliveredTurn */ true,
+            /* teammateTurn */ messageType === SendMessageType.Teammate,
           );
       }
     }

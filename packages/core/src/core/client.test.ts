@@ -10546,6 +10546,38 @@ Other open files:
       expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
     });
 
+    it('carries ledgerTurnKey through a stop-policy continuation (R17)', async () => {
+      mockTurnRunFn.mockReturnValue(textTurn('Done'));
+      installChat({
+        getHistory: vi
+          .fn()
+          .mockReturnValue([userText('A comment.'), modelText('Done')]),
+      });
+      const policy = {
+        continueAt: vi
+          .fn()
+          .mockResolvedValueOnce([{ text: 'Finish the todos.' }])
+          .mockResolvedValue(undefined),
+        onStopHookCap: vi.fn(),
+      };
+      const send = vi.spyOn(client, 'sendMessageStream');
+
+      await run([{ text: 'A comment.' }], 'prompt-id-ledger-key', {
+        type: SendMessageType.UserQuery,
+        ledgerTurnKey: 'prompt-id-ledger-key/goal/goal-runtime:t1',
+        stopPolicies: [policy],
+      });
+
+      expect(send).toHaveBeenCalledTimes(2);
+      // The continuation keeps the turn's base ledger key rather than reading
+      // its suffixed prompt id as a new turn; without the hostContinuationOptions
+      // forwarding this assertion fails and the consumed marks would reset.
+      expect(send.mock.calls[1][3]).toMatchObject({
+        type: SendMessageType.Hook,
+        ledgerTurnKey: 'prompt-id-ledger-key/goal/goal-runtime:t1',
+      });
+    });
+
     it('should run managed auto-memory extraction after a completed user query', async () => {
       mockMemoryManager.scheduleExtract.mockResolvedValue({
         touchedTopics: ['user'],
@@ -11929,6 +11961,33 @@ Other open files:
         undefined,
         undefined,
         undefined,
+        true,
+        false,
+      );
+    });
+
+    it('stamps a Teammate turn entry with teammateTurn for the resume seed (R17-1)', async () => {
+      const recordNotification = vi.fn();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordNotification,
+        recordAttributionSnapshot: vi.fn(),
+        recordFileHistorySnapshot: vi.fn(),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      mockTurnRunFn.mockReturnValue(textTurn('Hello'));
+      installChat();
+
+      await run([{ text: 'teammate finished' }], 'prompt-id-teammate', {
+        type: SendMessageType.Teammate,
+      });
+
+      // A Teammate turn records like a notification but carries teammateTurn so
+      // the resume Prompts seed counts it (the live counter advances for it).
+      expect(recordNotification).toHaveBeenCalledWith(
+        [{ text: 'teammate finished' }],
+        undefined,
+        undefined,
+        undefined,
+        true,
         true,
       );
     });

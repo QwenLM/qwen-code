@@ -2538,7 +2538,7 @@ describe('computeResumedPromptCountSeed', () => {
 });
 
 describe('computeResumedUserTurnCount', () => {
-  const userRecord = (subtype?: string): ChatRecord =>
+  const userRecord = (subtype?: string, teammateTurn?: boolean): ChatRecord =>
     ({
       uuid: `u-${subtype ?? 'plain'}`,
       parentUuid: null,
@@ -2548,6 +2548,7 @@ describe('computeResumedUserTurnCount', () => {
       version: '0.27.4',
       type: 'user',
       ...(subtype ? { subtype } : {}),
+      ...(teammateTurn ? { teammateTurn: true } : {}),
       message: { role: 'user', content: 'hi' },
     }) as unknown as ChatRecord;
 
@@ -2583,6 +2584,24 @@ describe('computeResumedUserTurnCount', () => {
         userRecord('cron'),
       ]),
     ).toBe(2);
+  });
+
+  it('counts a Teammate turn recorded as a notification, but not a cold notification (R17-1)', () => {
+    // A Teammate turn records as subtype:'notification' with teammateTurn:true
+    // and the live counter advances for it, so the resume seed counts it. A
+    // cold background notification (no teammateTurn) stays excluded.
+    expect(
+      computeResumedUserTurnCount([
+        userRecord(),
+        userRecord('notification', true),
+        userRecord('notification'),
+      ]),
+    ).toBe(2);
+    // Without the teammateTurn marker the same notification record is excluded
+    // (this is the assertion that fails if the marker is dropped).
+    expect(
+      computeResumedUserTurnCount([userRecord(), userRecord('notification')]),
+    ).toBe(1);
   });
 
   it('stays below the mint seed when background mints claimed higher ids (S1)', () => {
