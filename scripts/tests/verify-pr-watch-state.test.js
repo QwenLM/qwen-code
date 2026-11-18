@@ -1749,7 +1749,6 @@ describe('CLI', () => {
         '--artifact-dir',
         'r',
       ],
-      ['16866', '--start', '--head', HEAD, '--round', '1'],
       [
         '16866',
         '--complete',
@@ -3192,5 +3191,330 @@ describe('round-12 witnesses', () => {
     expect(re.duplicate).toBe('in-flight');
     const entry = readState(root, 1).deferredHeads.find((e) => e.head === HEAD);
     expect(entry.seq).toBeNull();
+  });
+});
+
+// R17-2: registration runs ahead of prepare, so --start no longer requires
+// --artifact-dir (prepare has not printed the directory yet). A round killed
+// in the prepare window leaves a recoverable in-flight marker, not a silently
+// dropped head; the directory prepare printed is recorded at --complete.
+describe('R17-2 register ahead of prepare', () => {
+  it('--start without --artifact-dir registers in flight with a null dir', () => {
+    const root = makeRoot();
+    const res = run(root, START);
+    expect(res.status).toBe(0);
+    const st = readState(root, 16866);
+    expect(st.inFlightHeads[0]).toMatchObject({ head: HEAD, round: 11 });
+    expect(st.inFlightHeads[0].artifactDir).toBeNull();
+  });
+
+  it('--start with --artifact-dir still records it (backward compatible)', () => {
+    const root = makeRoot();
+    const res = run(root, [...START, '--artifact-dir', 'r11']);
+    expect(res.status).toBe(0);
+    expect(readState(root, 16866).inFlightHeads[0].artifactDir).toBe('r11');
+  });
+
+  it('--start still rejects an empty --artifact-dir', () => {
+    const root = makeRoot();
+    const res = run(root, [...START, '--artifact-dir', '']);
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/--artifact-dir must not be empty/);
+  });
+
+  it('--complete records the directory prepare printed', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+      '--artifact-dir',
+      'r11',
+    ]);
+    expect(res.status).toBe(0);
+    // R2-3: a resolved directory must NOT trigger the no-evidence warning.
+    expect(res.stderr).not.toMatch(/no artifact directory/);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('r11');
+  });
+
+  it('--complete without a dir inherits the start directory', () => {
+    const root = makeRoot();
+    expect(run(root, [...START, '--artifact-dir', 'r11']).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+    ]);
+    expect(res.status).toBe(0);
+    // R2-3: inheriting the marker's directory is not a null resolution, so no
+    // warning — dropping the warning's directory conjunct reds this.
+    expect(res.stderr).not.toMatch(/no artifact directory/);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('r11');
+  });
+
+  // Deferred (round 7): the explicit completion directory wins over the start
+  // directory. Without a case supplying BOTH, a reorder of the chain to
+  // ownFlight?.artifactDir first would file the stale start directory and every
+  // other dir case would stay green.
+  it('--complete with a dir overrides a different start directory', () => {
+    const root = makeRoot();
+    expect(run(root, [...START, '--artifact-dir', 'dirA']).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+      '--artifact-dir',
+      'dirB',
+    ]);
+    expect(res.status).toBe(0);
+    expect(res.stderr).not.toMatch(/no artifact directory/);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('dirB');
+  });
+
+  // Deferred (round 8): the prior arm's precedence is pinned — a replayed
+  // completion that supplies an explicit dir must override the prior verdict's
+  // dir. A prior-first reorder would file the stale prior dir and keep every
+  // other dir case green.
+  it('a replayed completion with an explicit dir overrides the prior directory', () => {
+    const root = makeRoot();
+    expect(run(root, [...START, '--artifact-dir', 'r11']).status).toBe(0);
+    expect(
+      run(root, [
+        '16866',
+        '--complete',
+        '--head',
+        HEAD,
+        '--round',
+        '11',
+        '--verdict',
+        'merge-ready',
+      ]).status,
+    ).toBe(0);
+    const replay = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+      '--artifact-dir',
+      'r99',
+    ]);
+    expect(replay.status).toBe(0);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('r99');
+  });
+
+  // R8-1: completeRound matches the marker by head+round alone and files whatever
+  // directory it is given — it cannot see that the tree moved to another head. So
+  // completing the live head with a DIFFERENT head's evidence directory is
+  // accepted and files it verified with that evidence; a re-start is then refused
+  // forever. The contract's checkout remedy (never check out under a live marker)
+  // is the only guard — this witnesses the harm it prevents, not a tool guarantee.
+  it('a completion files the live head with whatever directory it is given', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+      '--artifact-dir',
+      'tmp/pr16866-verify-otherhead',
+    ]);
+    expect(res.status).toBe(0);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('tmp/pr16866-verify-otherhead');
+    expect(
+      run(root, ['16866', '--start', '--head', HEAD, '--round', '12']).status,
+    ).toBe(3);
+  });
+
+  // P1 (maintainer, round 14): prepare checks the tree against the LIVE PR head,
+  // not the registered one, so a force-push back to a head the tree already sits
+  // at prepares SUCCESSFULLY while the round registered a different head — the
+  // refusal-handler comparison never runs. The contract's post-success
+  // comparison routes that to the moved-head recovery: release this round's
+  // marker, never complete. This witnesses the recovery's effect — the
+  // registered head receives no verdict, and completing it with the other
+  // head's evidence directory is refused (contrast the witness above, where
+  // completing under the live marker files the wrong evidence).
+  it('a prepare-success head mismatch releases the round without a verdict', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    // Prepare succeeded for another head; the recovery releases this round's
+    // marker instead of completing it.
+    expect(
+      run(root, ['16866', '--release', '--head', HEAD, '--round', '11']).status,
+    ).toBe(0);
+    // The registered head received no verdict.
+    expect(
+      readState(root, 16866).verifiedHeads.find((e) =>
+        sameCommit(e.head, HEAD),
+      ),
+    ).toBeUndefined();
+    // Completing it with the other head's evidence directory is now refused
+    // (no marker, no prior verdict), so the wrong evidence cannot be filed.
+    expect(
+      run(root, [
+        '16866',
+        '--complete',
+        '--head',
+        HEAD,
+        '--round',
+        '11',
+        '--verdict',
+        'merge-ready',
+        '--artifact-dir',
+        'tmp/pr16866-verify-otherhead',
+      ]).status,
+    ).toBe(3);
+    // The head is not deduped away: a later genuine round can still start it.
+    expect(
+      run(root, ['16866', '--start', '--head', HEAD, '--round', '12']).status,
+    ).toBe(0);
+  });
+
+  // R2-3: a replayed completion (no in-flight marker) inherits the prior
+  // verdict's directory and prints no warning.
+  it('a replayed completion inherits the prior verdict directory', () => {
+    const root = makeRoot();
+    expect(run(root, [...START, '--artifact-dir', 'r11']).status).toBe(0);
+    expect(
+      run(root, [
+        '16866',
+        '--complete',
+        '--head',
+        HEAD,
+        '--round',
+        '11',
+        '--verdict',
+        'merge-ready',
+      ]).status,
+    ).toBe(0);
+    // The marker is gone; a second completion for the same head/round replays
+    // against the prior verdict and inherits its directory.
+    const replay = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'merge-ready',
+    ]);
+    expect(replay.status).toBe(0);
+    expect(replay.stderr).not.toMatch(/no artifact directory/);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir).toBe('r11');
+  });
+
+  // R1-2: driven through the CLI so it exercises parseArgs (the only helper
+  // code this PR changes); restoring the --artifact-dir requirement reds it.
+  it('a prepare-window kill leaves a recoverable marker, not a dropped head', () => {
+    const root = makeRoot();
+    // Register first through the CLI (no dir, with --repo as the contract
+    // documents), then the round dies during prepare: no --complete runs.
+    expect(run(root, [...START, '--repo', 'o/r']).status).toBe(0);
+    expect(
+      readState(root, 16866).inFlightHeads[0].artifactDir ?? null,
+    ).toBeNull();
+    // Recovery releases the dead round's marker with the documented --repo
+    // form (a repo-less release is refused against the recorded repo)...
+    expect(
+      run(root, ['16866', '--release', '--head', HEAD, '--repo', 'o/r']).status,
+    ).toBe(0);
+    // ...and the head is startable again, not silently deduped away.
+    expect(
+      run(root, [
+        '16866',
+        '--start',
+        '--head',
+        HEAD,
+        '--round',
+        '12',
+        '--repo',
+        'o/r',
+      ]).status,
+    ).toBe(0);
+    expect(readState(root, 16866).inFlightHeads[0].round).toBe(12);
+  });
+
+  // R1-3: the register-ahead marker carries no directory, so a non-inconclusive
+  // completion that resolves to none warns (the verdict has no evidence link).
+  it('a non-inconclusive completion with no directory warns', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'findings',
+    ]);
+    expect(res.status).toBe(0);
+    expect(res.stderr).toMatch(/no artifact directory/);
+    const verified = readState(root, 16866).verifiedHeads.find((e) =>
+      sameCommit(e.head, HEAD),
+    );
+    expect(verified.artifactDir ?? null).toBeNull();
+  });
+
+  it('an inconclusive completion with no directory does not warn', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    const res = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--verdict',
+      'inconclusive',
+    ]);
+    expect(res.status).toBe(0);
+    expect(res.stderr).not.toMatch(/no artifact directory/);
   });
 });

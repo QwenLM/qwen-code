@@ -38,6 +38,7 @@ import {
   MOD_EVENTS,
   MOD_HOST_EVENTS,
   MOD_STORE_EVENTS,
+  MOD_TOOL_EVENTS,
   MOD_METHODS,
   MOD_READS,
   ModBudget,
@@ -1253,9 +1254,11 @@ port.on('message', async (request: ModWorkerRequest) => {
           !MOD_HOST_EVENTS.includes(event) ||
           (event === 'prompt.submit'
             ? request.prompts === true
-            : MOD_STORE_EVENTS.includes(event)
-              ? keepsStore
-              : sites.length > 0),
+            : MOD_TOOL_EVENTS.includes(event)
+              ? request.tools === true
+              : MOD_STORE_EVENTS.includes(event)
+                ? keepsStore
+                : sites.length > 0),
       );
       for (const plugin of request.plugins) {
         assertLive();

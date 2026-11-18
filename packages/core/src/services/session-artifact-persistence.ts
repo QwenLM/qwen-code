@@ -16,7 +16,7 @@ export const WORKSPACE_CONTENT_MTIME_MS_METADATA_KEY = 'qwen.workspace.mtimeMs';
 export const WORKSPACE_CONTENT_SIZE_BYTES_METADATA_KEY =
   'qwen.workspace.sizeBytes';
 export const PUBLISHED_CONTENT_SHA256_METADATA_KEY = 'qwen.published.sha256';
-const MAX_PERSISTED_ARTIFACTS = 500;
+export const MAX_PERSISTED_ARTIFACTS = 500;
 const MAX_PERSISTED_EVENT_CHANGES = 800;
 const MAX_PERSISTED_IDS = 500;
 const MAX_PERSISTED_MARKER_ARTIFACTS = MAX_PERSISTED_IDS * 2;
@@ -166,6 +166,12 @@ export interface SessionArtifactEventRecordPayload {
   sequence: number;
   recordedAt: string;
   changes: SessionArtifactPersistedChange[];
+  /** Authoritative restorable artifact count after this event, stamped by
+   * the store so the summary sidecar can be refreshed without rebuilding the
+   * journal. Derived and optional: older records omit it, and a fork remap
+   * drops it because the forked session's count is unknown until its own
+   * store writes one. */
+  artifactCount?: number;
 }
 
 export interface SessionArtifactSnapshotRecordPayload {
@@ -339,15 +345,87 @@ export class SessionArtifactSnapshotAccumulator {
       warnings: this.warnings,
     };
   }
+
+  /**
+   * Warnings collected even when no readable record produced a snapshot —
+   * an all-refused journal still carries its damage warnings here.
+   */
+  warningList(): readonly string[] {
+    return this.warnings;
+  }
 }
 
 export function rebuildSessionArtifactSnapshot(
   records: readonly SessionArtifactChatRecordLike[],
   fallbackSessionId?: string,
+  outWarnings?: string[],
 ): RebuiltSessionArtifactSnapshot | undefined {
   const accumulator = new SessionArtifactSnapshotAccumulator(fallbackSessionId);
   for (const record of records) accumulator.add(record);
-  return accumulator.finish();
+  const snapshot = accumulator.finish();
+  if (outWarnings) outWarnings.push(...accumulator.warningList());
+  return snapshot;
+}
+
+/**
+ * Published `file:` locators without a web-preview snapshot. The bridge
+ * refuses every one of them on restore — whatever its kind or id — via
+ * the URL validation (allowFile is false for them), and excludes them
+ * from the payload's restorable count. Shared by the bridge's count and
+ * the derived sidecar seed so the two definitions cannot drift: a
+ * narrower seed rule would flip the row's count between the seed and the
+ * next durable event stamp for the session's life.
+ */
+export function isNonSnapshotPublishedFileUrl(
+  artifact: Partial<PersistedSessionArtifact>,
+): boolean {
+  if (artifact.storage !== 'published') return false;
+  if (getWebPreviewSnapshotId(artifact) !== undefined) return false;
+  try {
+    return new URL(artifact.url ?? '').protocol === 'file:';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The set a cold open actually restores: non-ephemeral artifacts minus
+ * the non-snapshot published file locators the bridge drops on restore.
+ * The derived sidecar count must describe this set, not the raw rebuild —
+ * otherwise a legacy journal over-counts the row for the session's life.
+ * A real published web-preview snapshot stays counted.
+ */
+export function isRestorablePersistedArtifact(
+  artifact: PersistedSessionArtifact,
+): boolean {
+  return (
+    artifact.retention !== 'ephemeral' &&
+    !isNonSnapshotPublishedFileUrl(artifact)
+  );
+}
+
+/**
+ * Whether a rebuilt snapshot's warnings disqualify the journal as an
+ * authority for derived writes. Per-artifact skips (malformed, oversized
+ * metadata, missing id/title) leave the surviving sequence trustworthy;
+ * record-level damage (stale sequences, malformed or truncated events,
+ * discarded change entries) does not. Shared by the library mutation
+ * guard and the load-time sidecar seed so both refuse the same journals.
+ */
+export function hasDisqualifyingArtifactJournalWarning(
+  warnings: readonly string[],
+): boolean {
+  return warnings.some(
+    (warning) =>
+      // The per-artifact prefix must not swallow the change-level drop
+      // 'skipped malformed artifact change': a discarded change entry is
+      // record-level damage (the artifact it would create is missing from
+      // the rebuild), unlike the id-interpolated per-artifact skips.
+      (!warning.startsWith('skipped malformed artifact ') ||
+        warning === 'skipped malformed artifact change') &&
+      !warning.startsWith('skipped oversized metadata for artifact ') &&
+      warning !== 'skipped artifact without id/title',
+  );
 }
 
 export function remapSessionArtifactPayloadForFork(
@@ -423,8 +501,12 @@ export function remapSessionArtifactPayloadForFork(
 
   const event = normalizeEventPayload(payload, []);
   if (!event) return payload;
+  // The source's restorable count does not survive the fork: fork-unsafe
+  // artifacts are dropped and ids are remapped, so the forked session's
+  // count is unknown until its own store stamps a fresh one.
+  const { artifactCount: _sourceArtifactCount, ...eventWithoutCount } = event;
   return {
-    ...event,
+    ...eventWithoutCount,
     sessionId: newSessionId,
     changes: event.changes
       .map((change): SessionArtifactPersistedChange | undefined => {
@@ -758,6 +840,9 @@ export function normalizeEventPayload(
       `event change list truncated to ${MAX_PERSISTED_EVENT_CHANGES}`,
     );
   }
+  // Derived summary hint: preserve silently when valid, drop when not. A
+  // malformed count must never invalidate the authoritative journal record.
+  const artifactCount = getNonNegativeInteger(value, 'artifactCount');
   return {
     v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
     sessionId,
@@ -769,6 +854,7 @@ export function normalizeEventPayload(
       .slice(0, MAX_PERSISTED_EVENT_CHANGES)
       .map((change) => normalizePersistedChange(change, warnings))
       .filter((change) => change !== undefined),
+    ...(artifactCount !== undefined ? { artifactCount } : {}),
   };
 }
 

@@ -291,50 +291,62 @@ export function ManagedSessionsPage({
   return <p role="status">{t('managed.unavailable')}</p>;
 }
 
-const FAILURE_MESSAGES: Record<string, readonly [string, string, string]> = {
+const FAILURE_MESSAGES: Record<
+  string,
+  readonly [string, string, string, string]
+> = {
   model_payment_required: [
     'Model API payment required (HTTP 402). Check the provider account balance and billing before retrying.',
     '模型接口要求支付（HTTP 402），可能是余额不足或计费受限。请检查供应商账户余额与计费状态后重试。',
+    '模型介面要求支付（HTTP 402），可能是餘額不足或計費受限。請檢查供應商帳戶餘額與計費狀態後重試。',
     'Требуется оплата API модели (HTTP 402). Перед повтором проверьте баланс и биллинг аккаунта поставщика.',
   ],
   model_authentication_failed: [
     'Model API authentication failed (HTTP 401). Check the configured provider credentials.',
     '模型接口鉴权失败（HTTP 401）。请检查供应商凭据配置。',
+    '模型介面鑑權失敗（HTTP 401）。請檢查供應商憑證配置。',
     'Ошибка аутентификации API модели (HTTP 401). Проверьте настроенные учётные данные поставщика.',
   ],
   model_access_denied: [
     'Model API access denied (HTTP 403). Check the provider account and model permissions.',
     '模型接口拒绝访问（HTTP 403）。请检查供应商账户与模型访问权限。',
+    '模型介面拒絕訪問（HTTP 403）。請檢查供應商帳戶與模型訪問權限。',
     'Доступ к API модели запрещён (HTTP 403). Проверьте аккаунт поставщика и права на модель.',
   ],
   model_request_timeout: [
     'The model API request timed out. Try again later.',
     '模型接口请求超时，请稍后重试。',
+    '模型介面請求超時，請稍後重試。',
     'Запрос к API модели превысил время ожидания. Попробуйте позже.',
   ],
   model_rate_limited: [
     'Model API rate limit exceeded (HTTP 429). Wait and try again later.',
     '模型接口触发限流（HTTP 429），请稍后重试。',
+    '模型介面觸發限流（HTTP 429），請稍後重試。',
     'Превышен лимит запросов API модели (HTTP 429). Подождите и попробуйте позже.',
   ],
   model_request_rejected: [
     'The model API rejected the request. Check the model configuration and input.',
     '模型接口拒绝了请求，请检查模型配置与输入内容。',
+    '模型介面拒絕了請求，請檢查模型配置與輸入內容。',
     'API модели отклонил запрос. Проверьте конфигурацию модели и входные данные.',
   ],
   model_service_unavailable: [
     'The model API service is unavailable. Try again later.',
     '模型接口服务暂不可用，请稍后重试。',
+    '模型介面服務暫不可用，請稍後重試。',
     'Сервис API модели недоступен. Попробуйте позже.',
   ],
   model_request_failed: [
     'Model API request failed. Check the server logs for this session before retrying.',
     '模型接口请求失败，请根据当前会话检查服务日志后再重试。',
+    '模型介面請求失敗，請根據當前會話檢查服務日誌後再重試。',
     'Запрос к API модели не удался. Перед повтором проверьте журналы сервера для этой сессии.',
   ],
   hosted_turn_failed: [
     'The turn failed. Check the server logs for this session to identify the cause.',
     '本轮执行失败，请根据当前会话检查服务日志以定位具体原因。',
+    '本輪執行失敗，請根據當前會話檢查服務日誌以定位具體原因。',
     'Ход не удался. Проверьте журналы сервера для этой сессии, чтобы найти причину.',
   ],
 };
@@ -851,7 +863,13 @@ function ManagedSessionsContent({
   );
   const failureMessage = summary?.failure
     ? (FAILURE_MESSAGES[summary.failure.code]?.[
-        language === 'zh-CN' ? 1 : language === 'ru' ? 2 : 0
+        language === 'zh-TW'
+          ? 2
+          : language === 'zh-CN'
+            ? 1
+            : language === 'ru'
+              ? 3
+              : 0
       ] ?? summary.failure.message)
     : undefined;
   const recoveryError =
@@ -1368,11 +1386,13 @@ function ManagedSessionsContent({
         !sideQueries.context
       ) {
         setError(
-          language === 'zh-CN'
-            ? '此会话暂不支持 BTW/回顾。'
-            : language === 'ru'
-              ? 'BTW/обзор недоступны для этой сессии.'
-              : 'BTW/recap is unavailable for this session.',
+          language === 'zh-TW'
+            ? '此會話暫不支援 BTW/回顧。'
+            : language === 'zh-CN'
+              ? '此会话暂不支持 BTW/回顾。'
+              : language === 'ru'
+                ? 'BTW/обзор недоступны для этой сессии.'
+                : 'BTW/recap is unavailable for this session.',
           true,
         );
         return;
@@ -1383,11 +1403,13 @@ function ManagedSessionsContent({
         (sideCommand.kind === 'recap' && sideCommand.argument)
       ) {
         setError(
-          language === 'zh-CN'
-            ? 'BTW 仅支持文本问题，/recap 不接受参数。'
-            : language === 'ru'
-              ? 'BTW принимает только текст; /recap не принимает аргументы.'
-              : 'BTW accepts text only; /recap accepts no arguments.',
+          language === 'zh-TW'
+            ? 'BTW 僅支援文字問題，/recap 不接受參數。'
+            : language === 'zh-CN'
+              ? 'BTW 仅支持文本问题，/recap 不接受参数。'
+              : language === 'ru'
+                ? 'BTW принимает только текст; /recap не принимает аргументы.'
+                : 'BTW accepts text only; /recap accepts no arguments.',
           true,
         );
         return;
@@ -1399,11 +1421,13 @@ function ManagedSessionsContent({
       }
       if (!sideQueries.available(sideCommand.kind)) {
         setError(
-          language === 'zh-CN'
-            ? '此会话暂不支持 BTW/回顾生成。'
-            : language === 'ru'
-              ? 'Генерация BTW/обзора недоступна для этой сессии.'
-              : 'BTW/recap generation is unavailable for this session.',
+          language === 'zh-TW'
+            ? '此會話暫不支援 BTW/回顧生成。'
+            : language === 'zh-CN'
+              ? '此会话暂不支持 BTW/回顾生成。'
+              : language === 'ru'
+                ? 'Генерация BTW/обзора недоступна для этой сессии.'
+                : 'BTW/recap generation is unavailable for this session.',
           true,
         );
         return;
@@ -1659,11 +1683,13 @@ function ManagedSessionsContent({
             size="sm"
             onClick={() => sideQueries.show('recap')}
           >
-            {language === 'zh-CN'
-              ? '回顾'
-              : language === 'ru'
-                ? 'Обзор'
-                : 'Recap'}
+            {language === 'zh-TW'
+              ? '回顧'
+              : language === 'zh-CN'
+                ? '回顾'
+                : language === 'ru'
+                  ? 'Обзор'
+                  : 'Recap'}
           </Button>
         )}
       </>
@@ -2884,11 +2910,13 @@ function ManagedSessionsContent({
                         {
                           name: 'btw',
                           description:
-                            language === 'zh-CN'
-                              ? '私下继续追问当前会话'
-                              : language === 'ru'
-                                ? 'Задать частный уточняющий вопрос'
-                                : 'Ask a private follow-up',
+                            language === 'zh-TW'
+                              ? '私下繼續追問當前會話'
+                              : language === 'zh-CN'
+                                ? '私下继续追问当前会话'
+                                : language === 'ru'
+                                  ? 'Задать частный уточняющий вопрос'
+                                  : 'Ask a private follow-up',
                           source: 'builtin-command',
                           displayCategory: 'system' as const,
                         },
@@ -2899,11 +2927,13 @@ function ManagedSessionsContent({
                         {
                           name: 'recap',
                           description:
-                            language === 'zh-CN'
-                              ? '回顾已完成的对话'
-                              : language === 'ru'
-                                ? 'Обзор завершённого разговора'
-                                : 'Recap the completed conversation',
+                            language === 'zh-TW'
+                              ? '回顧已完成的對話'
+                              : language === 'zh-CN'
+                                ? '回顾已完成的对话'
+                                : language === 'ru'
+                                  ? 'Обзор завершённого разговора'
+                                  : 'Recap the completed conversation',
                           source: 'builtin-command',
                           displayCategory: 'system' as const,
                         },

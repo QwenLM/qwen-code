@@ -14,6 +14,7 @@ import type {
   GoalControlRequest,
   GoalSnapshotV2,
   GoalStateResponse,
+  GoalStatus,
   SessionGroupPresetColor,
   SessionSourceInput,
   SessionSourcesResult,
@@ -1305,6 +1306,42 @@ export interface BridgeSessionSummary {
    * session can produce several PRs (stacked or follow-up work).
    */
   prs?: SessionPrInfo[];
+  /**
+   * Session artifact count, present when non-zero. Live entries carry the
+   * live public count; there, absent means ZERO — the in-memory store is
+   * authoritative, and the list merge drops a stale sidecar-derived count
+   * when the live entry omits the field — EXCEPT while
+   * `artifactCountPending` is true (see there). Persisted summaries are
+   * enriched best-effort from the artifact summary sidecar with the
+   * restorable count; there, absent means unknown (no sidecar / older
+   * daemon), not zero.
+   */
+  artifactCount?: number;
+  /**
+   * True while the session's artifact restore is still in flight: the
+   * entry is live, but its store is not hydrated yet, so `artifactCount`
+   * is omitted and MUST NOT be read as zero. The list merge keeps the
+   * sidecar-enriched count for such rows. Absent once the restore settles.
+   */
+  artifactCountPending?: boolean;
+  /**
+   * List-facing projection of the session's Goal, read from the goal
+   * sidecar on disk — present for unloaded and archived sessions too,
+   * unlike the live-only Goals listing. Absent when the session has no
+   * goal (or none journaled yet).
+   */
+  goal?: BridgeSessionGoalInfo;
+}
+
+/**
+ * The goal sidecar's wire projection: identity + lifecycle state, no
+ * budgets or spend (the Goals page remains the detail surface).
+ */
+export interface BridgeSessionGoalInfo {
+  status: GoalStatus;
+  objective: string;
+  /** ISO time of the goal's last transition. */
+  updatedAt: string;
 }
 
 /** Original event-bus cursor captured when a prompt id was first admitted. */

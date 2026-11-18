@@ -183,6 +183,8 @@ import {
 } from '../server/session-artifact-library.js';
 import { WorkspaceArtifactCache } from '../server/workspace-artifact-cache.js';
 import { ArtifactLibraryStream } from '../server/artifact-library-stream.js';
+import type { SseAdmissionCaps } from '../daemon-status.js';
+import { checkSseAdmission, countSseStream } from '../sse-occupancy.js';
 import {
   PROMPT_IDEMPOTENCY_KEY_MAX_LENGTH,
   admitSessionPrompt,
@@ -369,6 +371,7 @@ interface RegisterSessionRoutesDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
   daemonLog?: DaemonLogger;
+  sseAdmissionCaps?: SseAdmissionCaps;
   channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
@@ -8490,6 +8493,18 @@ export function registerSessionRoutes(
                 req.accepts(['application/json', 'text/event-stream']) ===
                 'text/event-stream'
               ) {
+                if (
+                  !checkSseAdmission({
+                    surface: 'artifactLibrary',
+                    req,
+                    res,
+                    caps: deps.sseAdmissionCaps,
+                    daemonLog: deps.daemonLog,
+                  })
+                ) {
+                  return;
+                }
+                countSseStream('artifactLibrary', req, res);
                 stream = new ArtifactLibraryStream(res);
                 await stream.send('start', { total: groups.length });
               }
@@ -8552,7 +8567,9 @@ export function registerSessionRoutes(
               : { v: 1, sessions: readResults, errors };
           }),
         );
-        if (!stream && !res.destroyed)
+        // headersSent: an SSE admission refusal inside the closure already
+        // answered 503; the JSON fallback must not double-send.
+        if (!stream && !res.destroyed && !res.headersSent)
           res.status(200).set('Cache-Control', 'no-store').json(response);
       } catch (error) {
         if (stream) {
@@ -9505,6 +9522,18 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (
+          !checkSseAdmission({
+            surface: 'generation',
+            req,
+            res,
+            caps: deps.sseAdmissionCaps,
+            daemonLog: deps.daemonLog,
+            logContext: { sessionId },
+          })
+        ) {
+          return;
+        }
 
         const abort = new AbortController();
         let completed = false;
@@ -9520,6 +9549,7 @@ export function registerSessionRoutes(
           clientId !== undefined ? { clientId } : undefined,
         );
 
+        countSseStream('generation', req, res);
         res.status(200);
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -11468,6 +11498,30 @@ export function registerSessionRoutes(
             return;
           }
           const { requestId, question, resume } = parsed.data;
+          // Terminal outcomes (409 conflict / 410 expired) must survive
+          // saturation: decide them BEFORE the admission gate, which stays
+          // immediately before open() so a refusal never starts the bridge
+          // side request (issue #17554 review R1-5).
+          btwStreams.precheck(
+            bridge,
+            sessionId,
+            clientId,
+            requestId,
+            question,
+            resume === true,
+          );
+          if (
+            !checkSseAdmission({
+              surface: 'artifactLibrary',
+              req,
+              res,
+              caps: deps.sseAdmissionCaps,
+              daemonLog: deps.daemonLog,
+              logContext: { sessionId },
+            })
+          ) {
+            return;
+          }
           const request = btwStreams.open(
             bridge,
             sessionId,
@@ -11476,6 +11530,7 @@ export function registerSessionRoutes(
             question,
             resume === true,
           );
+          countSseStream('artifactLibrary', req, res);
           // The bridge's side request holds generation alive independently of HTTP.
           void streamBtwSnapshots(res, request);
         } catch (error) {
