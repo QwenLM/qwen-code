@@ -6644,6 +6644,49 @@ describe('ManagedSessionsPage', () => {
     expect(createSession).not.toHaveBeenCalled();
   });
 
+  it('retries the unconfirmed prompt from the binding page under the same idempotency key', async () => {
+    const workspace = {
+      workspaceId: 'ws-a',
+      displayName: 'Project A',
+      state: 'active',
+      canCreateSession: true,
+      defaultCwdRelative: '.',
+    };
+    const createSession = vi
+      .fn()
+      .mockResolvedValue({ sessionId: 'created-bound' });
+    provider = {
+      ...provider,
+      workspaceBinding: {
+        agentId: 'agent-a',
+        list: vi.fn().mockResolvedValue({ data: [workspace], supported: true }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+        createSession,
+      },
+    } as unknown as ManagedAgentProvider;
+    seedPending({ idempotencyKey: 'bind-key', text: 'Bind this draft' });
+    await render();
+    const notice = container.querySelector('[data-managed-unconfirmed]')!;
+    const retry = [...notice.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Retry the same request',
+    )!;
+    await act(async () => {
+      retry.click();
+      await flush();
+    });
+    // The page's own submit path owns the retry: it must reuse the persisted
+    // key rather than let the creator start a second creation.
+    expect(mocks.client.createSession).toHaveBeenCalledTimes(1);
+    expect(mocks.client.createSession.mock.calls[0]?.[0]).toEqual({
+      text: 'Bind this draft',
+    });
+    expect(mocks.client.createSession.mock.calls[0]?.[1].idempotencyKey).toBe(
+      'bind-key',
+    );
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
   it('keeps the durable pending record when its discard cannot be persisted', async () => {
     const key = `qwen-managed-pending:${provider.storageKey}:${getManagedClientId(provider.storageKey)}`;
     seedPending({
