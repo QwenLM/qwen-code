@@ -1350,18 +1350,29 @@ export function OpenTuiAuthDialog(props: AuthDialogProps) {
   return <AuthDialogFlow {...props} config={props.config} />;
 }
 
-function SubscriptionWaitingIndicator() {
+function SubscriptionWaitingIndicator({
+  screenReader = false,
+}: {
+  screenReader?: boolean;
+}) {
   const [frame, setFrame] = useState(0);
   useEffect(() => {
+    // The spinner glyph would change the row's text every tick, defeating the
+    // writer's byte-identical suppression on the screen-reader live lane.
+    if (screenReader) return;
     const timer = setInterval(
       () => setFrame((current) => (current + 1) % SPINNER_FRAMES.length),
       SPINNER_INTERVAL_MS,
     );
     return () => clearInterval(timer);
-  }, []);
+  }, [screenReader]);
   return (
     <text id="screen-reader-live-auth-waiting">
-      <span fg={C.accent}>{SPINNER_FRAMES[frame]}</span>{' '}
+      {screenReader ? null : (
+        <>
+          <span fg={C.accent}>{SPINNER_FRAMES[frame]}</span>{' '}
+        </>
+      )}
       {t('Waiting for sign-in…')}
     </text>
   );
@@ -1374,6 +1385,7 @@ function SubscriptionView({
   suppressBrowserLaunch,
   availableTerminalHeight,
   onConnect,
+  screenReader,
 }: {
   onBack: () => void;
   onModelSelectionRequired: () => void;
@@ -1381,6 +1393,7 @@ function SubscriptionView({
   onConnect?: (signal: AbortSignal, authorizationUrl: string) => Promise<void>;
   suppressBrowserLaunch?: boolean;
   availableTerminalHeight?: number;
+  screenReader?: boolean;
 }) {
   const flow = useSubscription({
     suppressBrowserLaunch,
@@ -1556,7 +1569,7 @@ function SubscriptionView({
             </>
           )}
           <box marginTop={1}>
-            <SubscriptionWaitingIndicator />
+            <SubscriptionWaitingIndicator screenReader={screenReader} />
           </box>
           <box marginTop={1}>
             <text fg={C.dim}>{t('c to copy link · Esc to cancel')}</text>
@@ -2047,6 +2060,7 @@ function AuthDialogFlow({
       <SubscriptionView
         availableTerminalHeight={availableTerminalHeight}
         suppressBrowserLaunch={config.isBrowserLaunchSuppressed()}
+        screenReader={config.getScreenReader()}
         onBack={goBack}
         onModelSelectionRequired={onClose}
         onConnect={async (signal, authorizationUrl) => {

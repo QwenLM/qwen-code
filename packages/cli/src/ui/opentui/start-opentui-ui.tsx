@@ -498,6 +498,7 @@ function OpenTuiEntryApp({
     screenReaderPresentation?.setHistory(
       screenReaderOwner,
       quittingItems ?? live.items,
+      quittingItems !== null,
     );
   }, [screenReaderPresentation, screenReaderOwner, live.items, quittingItems]);
 

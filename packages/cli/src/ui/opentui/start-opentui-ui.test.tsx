@@ -879,6 +879,94 @@ describe('startOpenTuiUI fallback contract', () => {
     }
   });
 
+  it('does not replay the spoken transcript when the closing summary mounts', async () => {
+    const invocationId = 400;
+    const echo = {
+      type: 'user',
+      text: '/quit',
+      id: invocationId,
+      sentToModel: false,
+    } as const;
+    mocks.state.items = [
+      ...foldLiveEvent([], {
+        type: 'user',
+        text: echo.text,
+        historyId: invocationId,
+        canonicalHistoryItem: echo,
+      }),
+      {
+        kind: 'assistant',
+        id: 'as-live',
+        text: 'The actual reply',
+        streaming: false,
+      },
+    ];
+    const config = buildConfig();
+    config.getScreenReader = () => true;
+    const root = Object.create(Renderable.prototype) as Renderable;
+    const history = Object.assign(Object.create(Renderable.prototype), {
+      id: 'screen-reader-history',
+      visible: true,
+      isDestroyed: false,
+      getChildren: () =>
+        (mocks.state.renderedQuitItems ?? mocks.state.items).map(
+          (item) =>
+            Object.assign(Object.create(TextBufferRenderable.prototype), {
+              id: `screen-reader-item-${item.kind}:${item.id}`,
+              visible: true,
+              isDestroyed: false,
+              children: [],
+              plainText: 'text' in item ? item.text : '',
+            }) as Renderable,
+        ),
+    }) as Renderable;
+    Object.assign(root, {
+      id: 'root',
+      visible: true,
+      isDestroyed: false,
+      children: [history],
+    });
+    mocks.state.renderer.root = root;
+    vi.useFakeTimers();
+    try {
+      await withEntryApp(() => {
+        const frame = mocks.state.renderer.on.mock.calls.find(
+          ([name]) => name === 'frame',
+        )![1] as () => void;
+        const output = () =>
+          vi
+            .mocked(process.stdout.write)
+            .mock.calls.map(([chunk]) => String(chunk))
+            .join('');
+        frame();
+        expect(
+          stripAnsi(output()).match(/^assistant: The actual reply$/gm),
+        ).toHaveLength(1);
+        const messages: HistoryItem[] = [
+          { type: 'user', text: '/quit', id: 401 },
+          { type: 'gemini', text: 'The actual reply', id: 402, timestamp: 1 },
+          { type: 'quit', duration: '1s', id: 403 },
+        ];
+        act(() =>
+          Reflect.apply(mocks.state.appProps!.onQuit!, undefined, [
+            messages,
+            invocationId,
+          ]),
+        );
+        frame();
+        expect(
+          stripAnsi(output()).match(/^assistant: The actual reply$/gm),
+        ).toHaveLength(1);
+        expect(
+          stripAnsi(output()).match(/Agent powering down\. Goodbye!/g),
+        ).toHaveLength(1);
+        expect(stripAnsi(output()).match(/^user: \/quit$/gm)).toHaveLength(1);
+      }, config);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('wraps screen-reader announcements at the terminal width', async () => {
     const config = buildConfig();
     config.getScreenReader = () => true;

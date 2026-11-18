@@ -1191,4 +1191,103 @@ describe('screen-reader semantic presentation', () => {
       '12:00:03',
     ]);
   });
+
+  it('appends an untagged timer-driven row at most once across changing frames', () => {
+    const events = new EventEmitter();
+    const elapsed = text('1.0s');
+    const writer = new ScreenReaderOutputWriter(() => {});
+    const appendStatic = vi.spyOn(writer, 'appendStatic');
+    const presentation = new ScreenReaderPresentation(writer);
+    presentation.observeFrames(events, () => box([elapsed]));
+    events.emit('frame');
+    Object.assign(elapsed, { plainText: '2.0s' });
+    events.emit('frame');
+    Object.assign(elapsed, { plainText: '3.0s' });
+    events.emit('frame');
+    expect(appendStatic).toHaveBeenCalledTimes(1);
+    expect(appendStatic).toHaveBeenCalledWith('1.0s');
+  });
+
+  it('speaks a changed control row once its text settles on the next frame', () => {
+    const events = new EventEmitter();
+    const status = text('model-x');
+    status.id = 'screen-reader-footer-status-0';
+    const writer = new ScreenReaderOutputWriter(() => {});
+    const appendStatic = vi.spyOn(writer, 'appendStatic');
+    const presentation = new ScreenReaderPresentation(writer);
+    presentation.observeFrames(events, () => box([status]));
+    events.emit('frame');
+    Object.assign(status, { plainText: 'model-y' });
+    events.emit('frame');
+    expect(appendStatic).toHaveBeenCalledTimes(1);
+    events.emit('frame');
+    expect(appendStatic).toHaveBeenCalledTimes(2);
+    expect(appendStatic).toHaveBeenLastCalledWith('model-y');
+    events.emit('frame');
+    expect(appendStatic).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the de-selection suppression across the settle frame', () => {
+    const events = new EventEmitter();
+    const row = text('\u203a Option A');
+    row.id = 'screen-reader-selected-option';
+    const writer = new ScreenReaderOutputWriter(() => {});
+    const appendStatic = vi.spyOn(writer, 'appendStatic');
+    const presentation = new ScreenReaderPresentation(writer);
+    presentation.observeFrames(events, () => box([row]));
+    events.emit('frame');
+    expect(appendStatic).toHaveBeenCalledWith('Selected Option A');
+    row.id = 'screen-reader-unselected-option';
+    Object.assign(row, { plainText: '  Option A' });
+    events.emit('frame');
+    events.emit('frame');
+    expect(appendStatic).toHaveBeenCalledTimes(1);
+    row.id = 'screen-reader-selected-option';
+    Object.assign(row, { plainText: '\u203a Option A' });
+    events.emit('frame');
+    events.emit('frame');
+    expect(appendStatic).toHaveBeenCalledTimes(2);
+    expect(appendStatic).toHaveBeenLastCalledWith('Selected Option A');
+  });
+
+  it('reseeds a closing history with fresh ids without replaying spoken rows', () => {
+    let output = '';
+    const events = new EventEmitter();
+    const live = box([text('The actual reply')]);
+    live.id = 'screen-reader-item-assistant:as1';
+    const liveHistory = box([live]);
+    liveHistory.id = 'screen-reader-history';
+    let root = box([liveHistory]);
+    const presentation = new ScreenReaderPresentation(
+      new ScreenReaderOutputWriter((chunk) => {
+        output += chunk;
+      }),
+    );
+    const owner = {};
+    presentation.setHistory(owner, [{ kind: 'assistant', id: 'as1' }]);
+    presentation.observeFrames(events, () => root);
+    events.emit('frame');
+    expect(output).toBe('assistant: The actual reply\n');
+    const closing = box([text('The actual reply')]);
+    closing.id = 'screen-reader-item-assistant:as99';
+    const summary = box([text('Agent powering down. Goodbye!')]);
+    summary.id = 'screen-reader-item-info:quit1';
+    const closingHistory = box([closing, summary]);
+    closingHistory.id = 'screen-reader-history';
+    root = box([closingHistory]);
+    presentation.setHistory(
+      owner,
+      [
+        { kind: 'assistant', id: 'as99' },
+        { kind: 'info', id: 'quit1' },
+      ],
+      true,
+    );
+    events.emit('frame');
+    expect(output.match(/^assistant: The actual reply$/gm)).toHaveLength(1);
+    expect(output).toContain('info: Agent powering down. Goodbye!');
+    events.emit('frame');
+    expect(output.match(/^assistant: The actual reply$/gm)).toHaveLength(1);
+    expect(output.match(/Agent powering down/g)).toHaveLength(1);
+  });
 });

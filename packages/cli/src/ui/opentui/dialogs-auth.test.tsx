@@ -272,6 +272,7 @@ async function pasteText(text: string): Promise<FakePasteEvent> {
 function createMockConfig(authType?: AuthType): Config {
   return {
     isBrowserLaunchSuppressed: () => false,
+    getScreenReader: () => false,
     getAuthType: vi.fn(() => authType),
     getContentGeneratorConfig: vi.fn(() => ({})),
     getModelsConfig: vi.fn(() => ({
@@ -2067,6 +2068,35 @@ describe('real subscription entry', () => {
       act(() => vi.advanceTimersByTime(SPINNER_INTERVAL_MS));
       expect(waiting.textContent).toContain(SPINNER_FRAMES[1]);
       await pressEsc();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      cleanup();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the screen-reader waiting row byte-identical across spinner ticks', async () => {
+    vi.useFakeTimers();
+    const config = createMockConfig();
+    config.getScreenReader = () => true;
+    render(
+      <OpenTuiAuthDialog
+        config={config}
+        settings={createMockSettings()}
+        onClose={vi.fn()}
+      />,
+    );
+    try {
+      await press('return');
+      const waiting = document.querySelector(
+        '[data-screen-reader-id="screen-reader-live-auth-waiting"]',
+      );
+      expect(waiting?.textContent).toBe('Waiting for sign-in\u2026');
+      const first = waiting!.textContent;
+      for (let tick = 0; tick < 3; tick++) {
+        act(() => vi.advanceTimersByTime(SPINNER_INTERVAL_MS));
+        expect(waiting!.textContent).toBe(first);
+      }
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       cleanup();

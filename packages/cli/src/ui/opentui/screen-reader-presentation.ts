@@ -247,6 +247,8 @@ export class ScreenReaderPresentation {
   private owner: object | undefined;
   private history = new Map<string, string>();
   private controls = new Map<Renderable | string, string>();
+  private pending = new Map<Renderable | string, string>();
+  private reseed = false;
   private dialogOpen = false;
   private historyWindow = '';
   private items: readonly HistoryOwnerItem[] = [];
@@ -254,11 +256,19 @@ export class ScreenReaderPresentation {
 
   constructor(private readonly writer: ScreenReaderOutputWriter) {}
 
-  setHistory(owner: object, items: readonly HistoryOwnerItem[]): void {
+  /** `reseed` hands over a re-projection of the same conversation (the quit
+   *  summary): its fresh item ids must not replay rows already spoken, so the
+   *  prune waits until publishHistory has matched them by spoken text. */
+  setHistory(
+    owner: object,
+    items: readonly HistoryOwnerItem[],
+    reseed = false,
+  ): void {
     if (this.owner !== owner) {
       this.owner = owner;
       this.history.clear();
       this.controls.clear();
+      this.pending.clear();
       this.dialogOpen = false;
       this.historyWindow = '';
     } else if (!items.length && this.history.size > 0) {
@@ -268,7 +278,12 @@ export class ScreenReaderPresentation {
     }
     if (!items.length) this.historyWindow = '';
     this.items = items;
-    const current = new Set(items.map((item) => historyKey(item)));
+    this.reseed = reseed;
+    if (!reseed) this.pruneHistory();
+  }
+
+  private pruneHistory(): void {
+    const current = new Set(this.items.map((item) => historyKey(item)));
     for (const key of this.history.keys())
       if (!current.has(key)) this.history.delete(key);
   }
@@ -280,17 +295,19 @@ export class ScreenReaderPresentation {
     if (!this.items.length) return;
     const historyRoot = root.findDescendantById('screen-reader-history');
     if (!historyRoot) return;
+    const reseed = this.reseed;
     const range = historyRoot.findDescendantById(
       'screen-reader-history-window',
     );
     const rangeText = range ? readScreenReaderControls(range) : '';
+    const quiet = silent || reseed;
     if (
       rangeText &&
       rangeText !== this.historyWindow &&
-      (!silent || this.historyWindow)
+      (!quiet || this.historyWindow)
     ) {
       this.historyWindow = rangeText;
-      if (!silent) this.writer.appendStatic(rangeText);
+      if (!quiet) this.writer.appendStatic(rangeText);
     }
     const nodes = new Map<string, Renderable>();
     const collect = (node: Renderable): void => {
@@ -298,6 +315,7 @@ export class ScreenReaderPresentation {
       else for (const child of node.getChildren()) collect(child);
     };
     collect(historyRoot);
+    const spokenTexts = reseed ? new Set(this.history.values()) : undefined;
     for (const item of this.items) {
       const key = historyKey(item);
       if (
@@ -321,11 +339,19 @@ export class ScreenReaderPresentation {
       const previous = this.history.get(key) ?? '';
       if (text === previous) continue;
       if (silent && !this.history.has(key)) continue;
+      if (spokenTexts?.has(text)) {
+        this.history.set(key, text);
+        continue;
+      }
       this.history.set(key, text);
       if (!silent)
         this.writer.appendStatic(
           previous ? t('Revision {{value}}', { value: text }) : text,
         );
+    }
+    if (reseed) {
+      this.reseed = false;
+      this.pruneHistory();
     }
   }
 
@@ -379,6 +405,7 @@ export class ScreenReaderPresentation {
           key !== 'screen-reader-footer-queue'
         )
           current.set(key, text);
+      const pending = new Map<Renderable | string, string>();
       const live: string[] = [];
       for (const row of root ? controlRows(root) : []) {
         const key = controlKey(row.owner);
@@ -394,16 +421,33 @@ export class ScreenReaderPresentation {
           continue;
         }
         const previous = this.controls.get(key);
-        if (silent && previous === undefined) continue;
-        current.set(key, row.text);
-        if (
-          !silent &&
-          row.text !== previous &&
-          previous !== t('Selected {{value}}', { value: row.text })
-        )
+        if (silent) {
+          if (previous !== undefined) current.set(key, row.text);
+          continue;
+        }
+        if (row.text === previous) {
+          current.set(key, row.text);
+          continue;
+        }
+        if (previous === undefined) {
+          current.set(key, row.text);
           this.writer.appendStatic(row.text);
+          continue;
+        }
+        // A readout that changes every refresh tick (a clock, a spinner) never
+        // settles, so it never reaches the append-only scrollback; a genuine
+        // change speaks once the next frame repeats it.
+        if (this.pending.get(key) === row.text) {
+          current.set(key, row.text);
+          if (previous !== t('Selected {{value}}', { value: row.text }))
+            this.writer.appendStatic(row.text);
+        } else {
+          pending.set(key, row.text);
+          current.set(key, previous);
+        }
       }
       this.controls = current;
+      this.pending = pending;
       this.writer.updateDynamic(live.join('\n'));
     };
     renderer.on('frame', onFrame);
