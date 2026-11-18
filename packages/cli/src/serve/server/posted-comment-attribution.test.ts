@@ -133,6 +133,17 @@ describe('extractPostedCommentIds', () => {
     expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
   });
 
+  it('attributes a creation from a working directory containing a newline', () => {
+    const command =
+      "gh pr comment 1 --body 'Example:\nOutput: (empty)\nError: (none)'";
+    const entry = shellResult(
+      command,
+      '',
+      `Command: ${command}\nDirectory: /repository/notes\n2026\nOutput (stdout and stderr combined): https://github.com/o/r/pull/1#issuecomment-42\nExecution Error: (none)\nExit Code: 0\n`,
+    );
+    expect(extractPostedCommentIds(entry)).toEqual(['ic:42']);
+  });
+
   it('attributes a gh pr comment creation', () => {
     const entry = shellResult(
       'gh pr comment 16458 --repo QwenLM/qwen-code --body-file report.md',

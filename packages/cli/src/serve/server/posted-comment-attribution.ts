@@ -840,11 +840,16 @@ export function extractPostedCommentIds(entry: unknown): string[] {
       /\nDirectory: [^\n]*\n(Output(?: \(stdout and stderr combined\))?): /g;
     const header = headerPattern.exec(output);
     if (header && headerPattern.exec(output)) continue;
-    const boundary =
-      header ?? /\n(Output(?: \(stdout and stderr combined\))?): /.exec(output);
+    const directoryStart = header?.index ?? output.indexOf('\nDirectory: ');
+    const outputPattern = /\n(Output(?: \(stdout and stderr combined\))?): /g;
+    outputPattern.lastIndex = Math.max(0, directoryStart);
+    const boundary = header ?? outputPattern.exec(output);
     if (!boundary) continue;
 
-    const command = output.slice(commandPrefix.length, boundary.index);
+    const command = output.slice(
+      commandPrefix.length,
+      directoryStart === -1 ? boundary.index : directoryStart,
+    );
     const segment = creationSegment(command);
     if (!segment) continue;
     const resultStart = boundary.index + boundary[0].length;
