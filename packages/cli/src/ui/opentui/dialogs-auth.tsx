@@ -420,11 +420,19 @@ function InputLine({
 }) {
   return (
     <box
-      id={secret ? 'screen-reader-protected-input' : 'screen-reader-input-line'}
+      id={
+        secret
+          ? 'screen-reader-protected-input'
+          : value.length === 0 && placeholder
+            ? 'screen-reader-input-line-placeholder'
+            : 'screen-reader-input-line'
+      }
       flexDirection="row"
       marginTop={marginTop}
     >
-      <text fg={C.accent}>{'> '}</text>
+      <text id="screen-reader-input-glyph" fg={C.accent}>
+        {'> '}
+      </text>
       <FieldText
         value={value}
         caret={caret}
@@ -1196,7 +1204,11 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
         </box>
       )}
       <box
-        id="screen-reader-input-line"
+        id={
+          contextWindowSize
+            ? 'screen-reader-input-line'
+            : 'screen-reader-input-line-placeholder'
+        }
         flexDirection="row"
         marginTop={1}
         paddingLeft={2}

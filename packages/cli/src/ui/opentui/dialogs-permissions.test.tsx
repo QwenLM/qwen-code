@@ -166,7 +166,7 @@ describe('OpenTuiPermissionsDialog rule rows', () => {
     const { container } = renderPermissions([]);
     const field = () =>
       container.querySelector(
-        '[data-screen-reader-id="screen-reader-input-line"]',
+        '[data-screen-reader-id^="screen-reader-input-line"]',
       );
     expect(
       field()?.querySelector(
@@ -181,6 +181,26 @@ describe('OpenTuiPermissionsDialog rule rows', () => {
       ),
     ).toBeTruthy();
     expect(field()?.textContent).toContain('re');
+  });
+
+  it('marks the empty search box as a placeholder while keeping its caret', () => {
+    const { container } = renderPermissions([]);
+    const field = () =>
+      container.querySelector(
+        '[data-screen-reader-id^="screen-reader-input-line"]',
+      );
+    expect(field()?.getAttribute('data-screen-reader-id')).toBe(
+      'screen-reader-input-line-placeholder',
+    );
+    expect(
+      field()?.querySelector(
+        '[data-screen-reader-id="screen-reader-caret-active-0"]',
+      ),
+    ).toBeTruthy();
+    press('r');
+    expect(field()?.getAttribute('data-screen-reader-id')).toBe(
+      'screen-reader-input-line',
+    );
   });
 
   it('edits a permission rule at its caret before submitting it', () => {

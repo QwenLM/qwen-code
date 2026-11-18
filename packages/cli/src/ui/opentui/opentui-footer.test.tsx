@@ -219,6 +219,23 @@ describe('OpenTuiLoadingIndicator', () => {
     expect(spinnerCell(container)).toBe(WAITING_SPINNER_FRAME);
   });
 
+  it('installs no tick source in screen-reader mode, whose text cannot change', () => {
+    const chars = { current: 0 };
+    const view = render(
+      <OpenTuiLoadingIndicator
+        screenReader
+        streaming
+        streamingCharsRef={chars}
+      />,
+    );
+    expect(vi.getTimerCount()).toBe(0);
+    chars.current = 400;
+    act(() => {
+      vi.advanceTimersByTime(20000);
+    });
+    expect(view.container.textContent).toBe('Working. Escape to cancel.');
+  });
+
   it('resumes the elapsed counter a parked call paused instead of restarting it', () => {
     const { container, rerender } = render(
       <OpenTuiLoadingIndicator streaming />,

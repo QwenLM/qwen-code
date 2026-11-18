@@ -1177,6 +1177,28 @@ describe('caret editing in dialog text fields (#107)', () => {
     expect(focusedField()).toEqual({ text: 'abcdXef', cell: 'e' });
   });
 
+  it('marks an empty field as a placeholder lane and a filled one as a value lane', async () => {
+    await runToBaseUrlStep();
+    const lane = () =>
+      document
+        .querySelector('[data-screen-reader-id^="screen-reader-input-line"]')
+        ?.getAttribute('data-screen-reader-id');
+    expect(lane()).toBe('screen-reader-input-line-placeholder');
+    await typeText('https://api.example.com/v1');
+    expect(lane()).toBe('screen-reader-input-line');
+  });
+
+  it('marks the empty context-window row as a placeholder lane', async () => {
+    await runToContextWindowRow();
+    const lane = () =>
+      document
+        .querySelector('[data-screen-reader-id^="screen-reader-input-line"]')
+        ?.getAttribute('data-screen-reader-id');
+    expect(lane()).toBe('screen-reader-input-line-placeholder');
+    await typeText('4096');
+    expect(lane()).toBe('screen-reader-input-line');
+  });
+
   it('draws the model step’s custom-ID field with its own caret', async () => {
     await runToBaseUrlStep();
     await typeText('https://api.example.com/v1');

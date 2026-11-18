@@ -84,6 +84,10 @@ export function computeTranscriptWindow(opts: {
   /** Scroll position in transcript rows, 0 at the first item. */
   scrollTop: number;
   viewportRows: number;
+  /** Rows painted below the last item inside the same scroll content. The
+   *  sticky pin rests below them, so a bottom clamp that ignores them starts
+   *  the visible span that many rows too early. */
+  trailingRows?: number;
 }): TranscriptWindow {
   const { itemCount, offsets } = opts;
   if (itemCount <= 0)
@@ -100,7 +104,7 @@ export function computeTranscriptWindow(opts: {
 
   const scrollTop = Math.min(
     Math.max(0, opts.scrollTop),
-    Math.max(0, total - viewportRows),
+    Math.max(0, total + (opts.trailingRows ?? 0) - viewportRows),
   );
   const start = lastOffsetAtMost(
     offsets,
@@ -119,11 +123,14 @@ export function computeTranscriptWindow(opts: {
     end = start + MAX_MOUNTED_ITEMS;
   }
 
-  const visibleStart = lastOffsetAtMost(offsets, scrollTop);
+  // The mount cap can leave the viewport past the mounted slice; the span then
+  // names the last mounted item rather than inverting.
+  const visibleStart = Math.min(lastOffsetAtMost(offsets, scrollTop), end - 1);
   const visibleReach = scrollTop + viewportRows;
   let visibleEnd = lastOffsetAtMost(offsets, visibleReach);
   if (visibleEnd < itemCount && offsets[visibleEnd] < visibleReach)
     visibleEnd += 1;
+  visibleEnd = Math.max(visibleStart + 1, Math.min(visibleEnd, end));
 
   return {
     start,
@@ -131,8 +138,6 @@ export function computeTranscriptWindow(opts: {
     topPad: offsets[start] ?? 0,
     bottomPad: Math.max(0, total - (offsets[end] ?? 0)),
     visibleStart,
-    // Nothing outside the mounted slice is on screen, whatever the row
-    // arithmetic says a viewport taller than the mount cap would show.
-    visibleEnd: Math.min(visibleEnd, end),
+    visibleEnd,
   };
 }

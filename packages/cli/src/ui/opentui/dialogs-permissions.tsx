@@ -1079,7 +1079,11 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         <text fg={C.text}>{activeTab.description}</text>
       </box>
       <box
-        id="screen-reader-input-line"
+        id={
+          searchQuery
+            ? 'screen-reader-input-line'
+            : 'screen-reader-input-line-placeholder'
+        }
         borderStyle="rounded"
         borderColor={C.dim}
         paddingX={1}
@@ -1087,7 +1091,9 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         width={60}
         flexDirection="row"
       >
-        <text fg={C.accent}>{'> '}</text>
+        <text id="screen-reader-input-glyph" fg={C.accent}>
+          {'> '}
+        </text>
         {searchQuery ? (
           // A query longer than the box would wrap it onto a second content
           // row the chrome budget does not pay for.

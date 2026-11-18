@@ -183,6 +183,10 @@ function itemMarginTop(kind: LiveHistoryItem['kind']): number {
  *  real offset; `computeTranscriptWindow` clamps it to the bottom. */
 const ANCHOR_BOTTOM = Number.MAX_SAFE_INTEGER;
 
+/** The range and help rows the screen-reader transcript paints below its last
+ *  item, inside the scroll content the sticky pin rests at the end of. */
+const SCREEN_READER_TRAILING_ROWS = 2;
+
 const transcriptLogger = createDebugLogger('OPEN_TUI_TRANSCRIPT');
 
 /**
@@ -227,14 +231,21 @@ function findScrollHost(node: Renderable | null): ScrollBoxRenderable | null {
   return null;
 }
 
-function sameWindow(a: TranscriptWindow, b: TranscriptWindow): boolean {
+function sameWindow(
+  a: TranscriptWindow,
+  b: TranscriptWindow,
+  screenReader: boolean,
+): boolean {
   return (
     a.start === b.start &&
     a.end === b.end &&
     a.topPad === b.topPad &&
     a.bottomPad === b.bottomPad &&
-    a.visibleStart === b.visibleStart &&
-    a.visibleEnd === b.visibleEnd
+    // Only the screen-reader announcement reads the span, so comparing it in
+    // graphical mode re-renders the mounted slice on scroll steps that leave
+    // the mount itself unchanged.
+    (!screenReader ||
+      (a.visibleStart === b.visibleStart && a.visibleEnd === b.visibleEnd))
   );
 }
 
@@ -287,6 +298,7 @@ function useTranscriptWindow(
   availableTerminalHeight: number,
   initialAnchor: 'top' | 'bottom',
   trackThinkingVisibility: boolean,
+  screenReader: boolean,
 ) {
   const renderer = useRenderer();
   const rootRef = useRef<Renderable | null>(null);
@@ -365,6 +377,8 @@ function useTranscriptWindow(
     offsets,
     scrollTop: scrollRef.current.top,
     viewportRows: scrollRef.current.rows || availableTerminalHeight,
+    trailingRows:
+      screenReader && items.length > 0 ? SCREEN_READER_TRAILING_ROWS : 0,
   });
   // Recorded here rather than in the frame handler: the render body is what
   // mounts a window, so it is also what can say which items the move pulled in
@@ -419,8 +433,12 @@ function useTranscriptWindow(
         offsets: offsetsRef.current,
         scrollTop: top,
         viewportRows: rows,
+        trailingRows:
+          screenReader && itemsRef.current.length > 0
+            ? SCREEN_READER_TRAILING_ROWS
+            : 0,
       });
-      return !sameWindow(next, mountedRef.current);
+      return !sameWindow(next, mountedRef.current, screenReader);
     };
 
     // The mounted window includes overscan. Use the laid-out rows to decide
@@ -541,7 +559,7 @@ function useTranscriptWindow(
       renderer.off('frame', onFrame);
       bar?.off('change', onScroll);
     };
-  }, [renderer, trackThinkingVisibility]);
+  }, [renderer, trackThinkingVisibility, screenReader]);
 
   const thoughtVisibility: ThoughtVisibility = {
     visible: visibleThoughts,
@@ -682,6 +700,7 @@ export function OpenTuiTranscriptView({
     availableTerminalHeight,
     initialAnchor,
     modRows !== undefined,
+    screenReader,
   );
   return (
     <box

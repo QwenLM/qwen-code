@@ -185,4 +185,35 @@ describe('computeTranscriptWindow', () => {
       expect(win.end - win.start).toBeLessThanOrEqual(60 + 2 * 24 + 1);
     }
   });
+
+  it('counts the speech rows painted below the items in the bottom pin', () => {
+    const offsets = itemOffsets(Array.from({ length: 30 }, () => 1));
+    const win = computeTranscriptWindow({
+      itemCount: 30,
+      offsets,
+      // The sticky pin rests at the end of the scroll content, which carries
+      // the range and help rows below the last item.
+      scrollTop: 32 - 24,
+      viewportRows: 24,
+      trailingRows: 2,
+    });
+    expect([win.visibleStart, win.visibleEnd]).toEqual([8, 30]);
+  });
+
+  it('keeps the visible span ordered when zero-row turns meet the mount cap', () => {
+    const offsets = itemOffsets([
+      ...Array.from({ length: 100 }, () => 1),
+      ...Array.from({ length: 500 }, () => 0),
+      ...Array.from({ length: 400 }, () => 1),
+    ]);
+    const win = computeTranscriptWindow({
+      itemCount: 1000,
+      offsets,
+      scrollTop: 101,
+      viewportRows: 24,
+    });
+    expect(win.visibleStart).toBeLessThan(win.visibleEnd);
+    expect(win.visibleStart).toBeGreaterThanOrEqual(win.start);
+    expect(win.visibleEnd).toBeLessThanOrEqual(win.end);
+  });
 });

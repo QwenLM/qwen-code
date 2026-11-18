@@ -986,4 +986,154 @@ describe('screen-reader semantic presentation', () => {
       await setLanguageAsync('en');
     }
   });
+
+  it('strips the cursor and checkmark a toggle row paints as furniture', () => {
+    const on = text('\u203a \u25c9\ufe0e Image');
+    on.id = 'screen-reader-auth-toggle-focused-on';
+    expect(readScreenReaderControls(on)).toBe('Focused Toggle on: Image');
+    const off = text('  \u25cb\ufe0e Video');
+    off.id = 'screen-reader-auth-toggle-unfocused-off';
+    expect(readScreenReaderControls(off)).toBe('Toggle off: Video');
+  });
+
+  it('speaks an empty input lane as a placeholder rather than as its value', () => {
+    const glyph = text('> ');
+    glyph.id = 'screen-reader-input-glyph';
+    const caret = text('Search\u2026');
+    caret.id = 'screen-reader-caret-active-0';
+    const field = box([glyph, caret]);
+    field.id = 'screen-reader-input-line-placeholder';
+    expect(readScreenReaderControls(field)).toBe(
+      'Focused input. Cursor: 0\nPlaceholder: Search\u2026',
+    );
+    // The same text typed as a query is a value, not a placeholder.
+    field.id = 'screen-reader-input-line';
+    expect(readScreenReaderControls(field)).toBe(
+      'Focused input. Cursor: 0\nSearch\u2026',
+    );
+  });
+
+  it('keeps a history row that arrives on the language-switch frame audible', async () => {
+    let output = '';
+    const events = new EventEmitter();
+    const greeting = box([text('Hello world')]);
+    greeting.id = 'screen-reader-item-user:greeting';
+    const history = box([greeting]);
+    history.id = 'screen-reader-history';
+    let root = box([history]);
+    const presentation = new ScreenReaderPresentation(
+      new ScreenReaderOutputWriter((chunk) => {
+        output += chunk;
+      }),
+    );
+    const owner = {};
+    presentation.setHistory(owner, [{ kind: 'user', id: 'greeting' }]);
+    presentation.observeFrames(events, () => root);
+    events.emit('frame');
+    await setLanguageAsync('de');
+    try {
+      const settled = box([text('A turn settles on the switch frame')]);
+      settled.id = 'screen-reader-item-user:settled';
+      const wider = box([greeting, settled]);
+      wider.id = 'screen-reader-history';
+      root = box([wider]);
+      presentation.setHistory(owner, [
+        { kind: 'user', id: 'greeting' },
+        { kind: 'user', id: 'settled' },
+      ]);
+      events.emit('frame');
+      events.emit('frame');
+      expect(output).toContain('A turn settles on the switch frame');
+    } finally {
+      await setLanguageAsync('en');
+    }
+  });
+
+  it('keeps a control that mounts on the language-switch frame audible', async () => {
+    let output = '';
+    const events = new EventEmitter();
+    const row = box([text('Hello world')]);
+    row.id = 'screen-reader-item-user:greeting';
+    const history = box([row]);
+    history.id = 'screen-reader-history';
+    let root = box([history]);
+    const presentation = new ScreenReaderPresentation(
+      new ScreenReaderOutputWriter((chunk) => {
+        output += chunk;
+      }),
+    );
+    presentation.setHistory({}, [{ kind: 'user', id: 'greeting' }]);
+    presentation.observeFrames(events, () => root);
+    events.emit('frame');
+    await setLanguageAsync('de');
+    try {
+      const loading = text('Wird ausgef\u00fchrt. Escape zum Abbrechen.');
+      loading.id = 'screen-reader-loading';
+      root = box([history, loading]);
+      events.emit('frame');
+      events.emit('frame');
+      expect(output).toContain('Wird ausgef\u00fchrt. Escape zum Abbrechen.');
+    } finally {
+      await setLanguageAsync('en');
+    }
+  });
+
+  it('keeps a history range that first appears on the language-switch frame audible', async () => {
+    let output = '';
+    const events = new EventEmitter();
+    const row = box([text('Hello world')]);
+    row.id = 'screen-reader-item-user:greeting';
+    const history = box([row]);
+    history.id = 'screen-reader-history';
+    let root = box([history]);
+    const presentation = new ScreenReaderPresentation(
+      new ScreenReaderOutputWriter((chunk) => {
+        output += chunk;
+      }),
+    );
+    presentation.setHistory({}, [{ kind: 'user', id: 'greeting' }]);
+    presentation.observeFrames(events, () => root);
+    events.emit('frame');
+    await setLanguageAsync('de');
+    try {
+      const range = text('Historieneintr\u00e4ge 1-1 von 1');
+      range.id = 'screen-reader-history-window';
+      const withRange = box([range, row]);
+      withRange.id = 'screen-reader-history';
+      root = box([withRange]);
+      events.emit('frame');
+      events.emit('frame');
+      expect(output).toContain('Historieneintr\u00e4ge 1-1 von 1');
+    } finally {
+      await setLanguageAsync('en');
+    }
+  });
+
+  it('does not re-speak an unchanged footer after a frame without it', () => {
+    let output = '';
+    const events = new EventEmitter();
+    const footer = () => {
+      const model = text('model-x');
+      model.id = 'screen-reader-footer-status-0';
+      const worktree = text('Worktree: main (issue-123)');
+      worktree.id = 'screen-reader-footer-worktree';
+      return box([model, worktree]);
+    };
+    let root: Renderable = footer();
+    const presentation = new ScreenReaderPresentation(
+      new ScreenReaderOutputWriter((chunk) => {
+        output += chunk;
+      }),
+    );
+    presentation.observeFrames(events, () => root);
+    events.emit('frame');
+    // The shell unmounts the whole footer behind a dialog or the completion
+    // menu, then mounts the same rows again.
+    root = box([]);
+    events.emit('frame');
+    root = footer();
+    events.emit('frame');
+    expect(output.match(/model-x/g)).toHaveLength(1);
+    expect(output.match(/Worktree: main/g)).toHaveLength(1);
+  });
 });

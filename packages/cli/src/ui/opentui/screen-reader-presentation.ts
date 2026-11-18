@@ -47,6 +47,7 @@ interface ControlRow {
 function inputLineText(node: Renderable): string {
   if (!node.visible || node.isDestroyed) return '';
   if (node.id === 'screen-reader-protected-input') return t('Protected input');
+  if (node.id === 'screen-reader-input-glyph') return '';
   if (node instanceof TextBufferRenderable) return node.plainText;
   return node.getChildren().map(inputLineText).join('');
 }
@@ -81,14 +82,27 @@ function controlRows(node: Renderable): ControlRow[] {
   }
   if (node.id === 'screen-reader-protected-input')
     return [{ owner: node, text: t('Protected input') }];
-  if (node.id === 'screen-reader-input-line') {
+  if (
+    node.id === 'screen-reader-input-line' ||
+    node.id === 'screen-reader-input-line-placeholder'
+  ) {
     const caret = inputCaret(node);
     const focus = caret
       ? caret[1] === 'active'
         ? `${t('Focused input. Cursor: {{position}}', { position: caret[2] })}\n`
         : `${t('Unfocused input.')}\n`
       : '';
-    return [{ owner: node, text: focus + inputLineText(node) }];
+    const value = inputLineText(node);
+    return [
+      {
+        owner: node,
+        text:
+          focus +
+          (node.id === 'screen-reader-input-line-placeholder'
+            ? t('Placeholder: {{value}}', { value })
+            : value),
+      },
+    ];
   }
   let text: string;
   if (node instanceof EditBufferRenderable) {
@@ -158,7 +172,12 @@ function controlRows(node: Renderable): ControlRow[] {
         : toggle[2] === 'on'
           ? 'Toggle on: {{value}}'
           : 'Toggle off: {{value}}',
-      { value: text },
+      {
+        value: text
+          .trim()
+          .replace(/^[›❯▸]\s*/, '')
+          .replace(/^[◉○]\uFE0E?\s*/, ''),
+      },
     );
   const selected = node.id?.startsWith('screen-reader-selected-');
   if (selected || node.id?.startsWith('screen-reader-unselected-')) {
@@ -254,6 +273,9 @@ export class ScreenReaderPresentation {
       if (!current.has(key)) this.history.delete(key);
   }
 
+  /** `silent` reseeds the dedupe state for a language switch. It may only
+   *  re-record rows that were already spoken: recording a row that arrives on
+   *  this frame would suppress it on every later frame too. */
   private publishHistory(root: Renderable, silent: boolean): void {
     if (!this.items.length) return;
     const historyRoot = root.findDescendantById('screen-reader-history');
@@ -262,7 +284,11 @@ export class ScreenReaderPresentation {
       'screen-reader-history-window',
     );
     const rangeText = range ? readScreenReaderControls(range) : '';
-    if (rangeText && rangeText !== this.historyWindow) {
+    if (
+      rangeText &&
+      rangeText !== this.historyWindow &&
+      (!silent || this.historyWindow)
+    ) {
       this.historyWindow = rangeText;
       if (!silent) this.writer.appendStatic(rangeText);
     }
@@ -294,6 +320,7 @@ export class ScreenReaderPresentation {
       const text = body ? t('{{role}}: {{value}}', { role, value: body }) : '';
       const previous = this.history.get(key) ?? '';
       if (text === previous) continue;
+      if (silent && !this.history.has(key)) continue;
       this.history.set(key, text);
       if (!silent)
         this.writer.appendStatic(
@@ -339,21 +366,29 @@ export class ScreenReaderPresentation {
       }
       this.dialogOpen = dialogOpen;
       const current = new Map<Renderable | string, string>();
+      // The shell unmounts the whole footer behind a dialog or the completion
+      // menu, so its rows keep their entry across that gap instead of being
+      // re-spoken when they return. The loading row is left out: a new turn
+      // must still announce itself once.
+      for (const [key, text] of this.controls)
+        if (typeof key === 'string' && key.startsWith('screen-reader-footer-'))
+          current.set(key, text);
       const live: string[] = [];
       for (const row of root ? controlRows(root) : []) {
         const key = controlKey(row.owner);
-        current.set(key, row.text);
         // An editable value is ink's dynamic block: it replaces its own lines
         // in place, so a keystroke never appends another copy of the whole
         // field to the permanent scrollback.
         if (
           row.owner instanceof EditBufferRenderable ||
-          row.owner.id === 'screen-reader-input-line'
+          row.owner.id?.startsWith('screen-reader-input-line')
         ) {
           live.push(row.text);
           continue;
         }
         const previous = this.controls.get(key);
+        if (silent && previous === undefined) continue;
+        current.set(key, row.text);
         if (
           !silent &&
           row.text !== previous &&

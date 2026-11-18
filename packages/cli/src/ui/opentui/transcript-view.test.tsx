@@ -1558,6 +1558,47 @@ describe('OpenTuiTranscriptView scroll host', () => {
     }
   });
 
+  it('does not re-render the mounted slice for a span-only scroll step outside screen-reader mode', () => {
+    const items = Array.from({ length: 40 }, (_, index) => ({
+      kind: 'user' as const,
+      id: `u${index}`,
+      text: `TURN_${String(index).padStart(4, '0')}`,
+    }));
+    const rows = Array.from({ length: 40 }, () => 4);
+    const view = mountHosted({ items, rows });
+    try {
+      view.frame();
+      // Walk the whole transcript so every turn is measured and the row table
+      // is uniform, as a settled session's is.
+      for (let top = 0; top <= 176; top += 4) {
+        view.jump(top);
+        view.frame();
+      }
+      // Five rows a turn does not divide the 24-row overscan, so some one-row
+      // steps move the visible span while the mounted slice stays put. Each of
+      // those steps must cost nothing: graphical mode never reads the span.
+      let spanOnlySteps = 0;
+      for (let top = 60; top < 150; top++) {
+        view.jump(top);
+        view.frame();
+        const mounted = view.mounted().join();
+        const spacers = JSON.stringify(view.spacers());
+        mocks.resetRenders();
+        view.jump(top + 1);
+        if (
+          view.mounted().join() !== mounted ||
+          JSON.stringify(view.spacers()) !== spacers
+        )
+          continue;
+        spanOnlySteps++;
+        expect(mocks.renders()).toBe(0);
+      }
+      expect(spanOnlySteps).toBeGreaterThan(0);
+    } finally {
+      view.unmount();
+    }
+  });
+
   function mountHosted(opts: {
     /** Rows each turn's box is laid out at. `0` means laid out empty: Yoga
      *  computes 0 while the reported height is clamped to 1. */

@@ -133,17 +133,19 @@ export function OpenTuiLoadingIndicator({
   screenReader = false,
 }: OpenTuiLoadingIndicatorProps) {
   const { width } = useTerminalDimensions();
+  // The screen-reader branch below depends only on `waiting`, and every tick a
+  // source installs commits a frame that re-reads the whole history window.
   // The shared cycler resolves the phrase list for all nine locales and owns
   // the 15s rotation, so this renderer cannot drift from ink's.
-  const phrase = usePhraseCycler(streaming, waiting);
+  const phrase = usePhraseCycler(!screenReader && streaming, waiting);
   // Paused rather than deactivated while a call is parked: useTimer zeroes its
   // accumulated elapsed on a false-to-true edge, so dropping `waiting` out of
   // `isActive` would restart the counter when the parked call resumes.
-  const elapsedTime = useTimer(streaming, 0, waiting);
+  const elapsedTime = useTimer(!screenReader && streaming, 0, waiting);
   const fallbackRef = useRef(0);
   const animatedChars = useAnimationFrame(
     streamingCharsRef ?? fallbackRef,
-    streamingCharsRef && streaming ? 100 : null,
+    !screenReader && streamingCharsRef && streaming ? 100 : null,
   );
   if (!streaming && !waiting) return null;
   if (screenReader)
