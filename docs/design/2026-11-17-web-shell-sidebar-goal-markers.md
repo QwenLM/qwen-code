@@ -264,7 +264,8 @@ moves; each is resolvable in the file named.
 - Unit: sidecar write/read/move/delete (core), journal-hook upsert/delete
   incl. best-effort failure isolation, restore-time write, session-list
   merge (present/absent/archived), bridge notification validation
-  (bad v/sessionId/status rejected, good marks the clock), SDK type
+  (bad v/sessionId rejected and unowned sessions ignored, good marks the
+  clock — the payload carries no status, per the decision above), SDK type
   surface, sidebar marker render (tone per status, tooltip, accessible
   name, click opens session, complete hidden, absent without goal).
 - E2E (mockDaemon): catalog fixture with goal sidecars → markers render

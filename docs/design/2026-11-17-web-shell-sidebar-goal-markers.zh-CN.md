@@ -97,7 +97,7 @@ Goals 页（#17230、#17291、#17349）展示每个已加载会话的目标，�
 
 ## 验证计划
 
-- 单测：sidecar 写/读/搬移/删除（core）、日志钩子 upsert/删除含尽力而为的失败隔离、恢复时写、session-list 合并（有/无/已归档）、bridge 通知校验（坏 v/sessionId/status 拒绝、好的标记时钟）、SDK 类型面、侧栏标记渲染（各状态色调、tooltip、可访问名、点击打开会话、complete 隐藏、无目标缺席）。
+- 单测：sidecar 写/读/搬移/删除（core）、日志钩子 upsert/删除含尽力而为的失败隔离、恢复时写、session-list 合并（有/无/已归档）、bridge 通知校验（坏 v/sessionId 拒绝、非本进程所属会话忽略、好的标记时钟——按上文决策，载荷不带 status）、SDK 类型面、侧栏标记渲染（各状态色调、tooltip、可访问名、点击打开会话、complete 隐藏、无目标缺席）。
 - E2E（mockDaemon）：带目标 sidecar 的目录夹具 → 标记按色调渲染；goal-changed 通知刷新标记；清除移除标记。
 - 真实环境：隔离 daemon + HTTP 真实会话/目标；设置时标记出现、暂停/继续色调翻转、清除消失、daemon 重启后仍在（磁盘 sidecar）、未加载会话也显示。截图上传 assets 分支并对账。
 - 承重钉子的变异见证（日志钩子、sidecar 读取、色调映射、complete 过滤），字节级还原。
