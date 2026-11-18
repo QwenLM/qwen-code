@@ -802,6 +802,38 @@ class SessionMessageRelayTest {
         assertThat(row.get().attempts()).isZero();
     }
 
+    // A lead out of cold-open admission slots is the same wait family as
+    // a closing one: the slot frees on its own, so no attempt is spent.
+    @Test
+    void defersAnOpenBusyLeaderWithoutSpendingAnAttempt() {
+        pending.set(commandPending("accepting"));
+        commandBody("board_read", CHILD);
+        when(records.readResourceBytes(TENANT, PARENT, "resource-args"))
+                .thenReturn(CONTENT);
+        harness.refuseKind = "execute";
+        harness.refuseCode = "hosted_session_open_busy";
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().attempts()).isZero();
+    }
+
+    // A wedged teardown is a real fault, not a wait: it spends the attempt
+    // budget, so a lead that never finishes its teardown ends the relay
+    // row through the give-up chain instead of waiting forever.
+    @Test
+    void aWedgedTeardownSpendsTheAttemptBudget() {
+        pending.set(commandPending("accepting"));
+        commandBody("board_read", CHILD);
+        when(records.readResourceBytes(TENANT, PARENT, "resource-args"))
+                .thenReturn(CONTENT);
+        harness.refuseKind = "execute";
+        harness.refuseCode = "hosted_session_teardown_blocked";
+        relay.scan();
+        assertThat(harness.calls).isEmpty();
+        assertThat(row.get().attempts()).isEqualTo(1);
+        assertThat(row.get().state()).isEqualTo("relaying");
+    }
+
     // The sender's run has not attached yet: the control plane's attach
     // commit may trail this execute — a wait, never a rejection.
     @Test

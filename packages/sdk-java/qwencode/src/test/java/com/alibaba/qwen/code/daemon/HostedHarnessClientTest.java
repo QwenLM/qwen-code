@@ -24,6 +24,7 @@ import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Delayed;
 import java.util.concurrent.ExecutorService;
@@ -7239,6 +7240,86 @@ class HostedHarnessClientTest {
         } finally {
             client.close();
         }
+    }
+
+    @Test
+    void aHeartbeatRetirementNotifiesTheListenerWithTheExactReference()
+            throws Exception {
+        // The control plane caches its own references beside this client's.
+        // A heartbeat's definitive 404 retires the attachment here, and the
+        // registered listener must receive that exact reference so the
+        // consumer can evict its own cache by identity — a reloaded
+        // replacement gets its own notice, never the retired one's.
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID + "/heartbeat",
+                exchange -> {
+                    exchange.getResponseHeaders().set(
+                            HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
+                    sendJson(exchange, 404,
+                            "{\"code\":\"hosted_session_not_found\"}",
+                            false);
+                });
+        HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ofMillis(10))
+                .build();
+        List<HarnessSessionRef> retired = new CopyOnWriteArrayList<>();
+        client.onAttachmentRetirement(retired::add);
+        try {
+            HarnessSessionRef first = createSession(client);
+            awaitRetirementNotices(retired, 1);
+            assertSame(first, retired.get(0));
+            HarnessSessionRef second = createSession(client);
+            awaitRetirementNotices(retired, 2);
+            assertSame(second, retired.get(1));
+        } finally {
+            client.close();
+        }
+    }
+
+    @Test
+    void aGenerationChangeRetirementNotifiesTheListener()
+            throws Exception {
+        // A proven generation change discards every local record for the
+        // peer; the attachment's retirement rides the same notice so the
+        // consumer's cache does not outlive the client's.
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID + "/heartbeat",
+                exchange -> {
+                    exchange.getResponseHeaders().set(
+                            HostedHarnessClient.BOOT_ID_HEADER,
+                            "99999999-9999-4999-8999-999999999999");
+                    sendJson(exchange, 200, "{}", false);
+                });
+        HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ofMillis(10))
+                .build();
+        List<HarnessSessionRef> retired = new CopyOnWriteArrayList<>();
+        client.onAttachmentRetirement(retired::add);
+        try {
+            HarnessSessionRef ref = createSession(client);
+            awaitRetirementNotices(retired, 1);
+            assertSame(ref, retired.get(0));
+        } finally {
+            client.close();
+        }
+    }
+
+    private static void awaitRetirementNotices(
+            List<HarnessSessionRef> retired, int expected)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (retired.size() < expected
+                && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        assertEquals(expected, retired.size(),
+                "the retirement notice never arrived");
     }
 
     @ParameterizedTest

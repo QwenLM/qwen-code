@@ -694,32 +694,48 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyString(), anyString());
     }
 
+    // A pool wait spends no admission budget — 10 charged failures outlive
+    // both budgets (pre 5, post 10) — but it ages out at the churn cap
+    // (4 × the phase budget) like a generation wait: an ownership handoff
+    // that never resolves must not keep the Turn retrying forever.
     @ParameterizedTest
     @CsvSource({"503,harness_pool_unavailable", "409,harness_owner_still_live",
             "409,harness_placement_changed", "409,harness_placement_quiescing", "409,harness_placement_released"})
-    void poolCapacityAndOwnershipWaitsOutliveBothAdmissionBudgets(int status, String code) {
+    void poolCapacityAndOwnershipWaitsOutliveTheChargedBudgetsButAgeOut(int status, String code) {
         for (boolean submitted : List.of(false, true)) {
             var failure = new ManagedAgentException(status, code, "Waiting for a Harness owner");
-            AgentStateStore store = dispatchWithCreateOrLoadFailure(failure, submitted, 100, unboundSessionRecord());
+            AgentStateStore store = dispatchWithCreateOrLoadFailure(failure, submitted, 10, unboundSessionRecord());
             verify(store).scheduleTurnRetry(eq("tenant"), eq("session"), eq("turn"),
                     anyString(), anyLong(), eq(true));
             verify(store, never()).failTurn(anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
             verify(store, never()).markTurnFailureRecovery(anyString(), anyString(), anyString(), anyString(), anyString());
+            AgentStateStore aged = dispatchWithCreateOrLoadFailure(failure, submitted, 100, unboundSessionRecord());
+            verify(aged).failTurn(eq("tenant"), eq("session"), eq("turn"), anyString(),
+                    eq(submitted ? "hosted_harness_unavailable_after_admission" : "hosted_harness_unavailable"),
+                    anyString());
+            verify(aged, never()).scheduleTurnRetry(anyString(), anyString(), anyString(), anyString(), anyLong(), anyBoolean());
         }
     }
 
+    // The drain cutoff and a closing Session wait the same way: exempt
+    // below the churn cap, terminal with the phase's unavailable code at it.
     @ParameterizedTest
     @ValueSource(strings = {"hosted_harness_quiescing", "hosted_session_closing"})
-    void hostedDrainCutoffOutlivesBothAdmissionBudgets(String code) {
+    void hostedDrainCutoffOutlivesTheChargedBudgetsButAgesOut(String code) {
         for (boolean submitted : List.of(false, true)) {
             var failure = mock(HarnessHttpFailure.class);
             when(failure.getStatusCode()).thenReturn(409);
             when(failure.getErrorCode()).thenReturn(code);
-            AgentStateStore store = dispatchWithCreateOrLoadFailure(failure, submitted, 100, unboundSessionRecord());
+            AgentStateStore store = dispatchWithCreateOrLoadFailure(failure, submitted, 10, unboundSessionRecord());
             verify(store).scheduleTurnRetry(eq("tenant"), eq("session"), eq("turn"),
                     anyString(), anyLong(), eq(true));
             verify(store, never()).failTurn(anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
             verify(store, never()).markTurnFailureRecovery(anyString(), anyString(), anyString(), anyString(), anyString());
+            AgentStateStore aged = dispatchWithCreateOrLoadFailure(failure, submitted, 100, unboundSessionRecord());
+            verify(aged).failTurn(eq("tenant"), eq("session"), eq("turn"), anyString(),
+                    eq(submitted ? "hosted_harness_unavailable_after_admission" : "hosted_harness_unavailable"),
+                    anyString());
+            verify(aged, never()).scheduleTurnRetry(anyString(), anyString(), anyString(), anyString(), anyLong(), anyBoolean());
         }
     }
 
@@ -2688,6 +2704,87 @@ class HarnessCoordinatorTest {
             verify(store, never()).failTurn(anyString(), anyString(),
                     anyString(), anyString(), anyString(), anyString());
         }
+    }
+
+    // Pool waits age out like generation waits: a closing Session, a full
+    // cold-open slot or a drain cutoff that never resolves must not keep a
+    // Turn retrying forever — a caller can fill an instance's cold-open
+    // slots with its own suspended Sessions. The cap is 4 × the phase's
+    // budget (pre 5, post 10): the last run below it still retries exempt,
+    // and at it the Turn fails with its phase's unavailable code.
+    @ParameterizedTest(name = "{0} submitted={1} consecutive={2} terminal={3}")
+    @CsvSource({
+            "hosted_session_closing, false, 19, false",
+            "hosted_session_closing, false, 20, true",
+            "hosted_session_open_busy, false, 19, false",
+            "hosted_session_open_busy, false, 20, true",
+            "hosted_harness_quiescing, false, 20, true",
+            "hosted_session_closing, true, 39, false",
+            "hosted_session_closing, true, 40, true",
+            "hosted_session_open_busy, true, 40, true"})
+    void boundsPoolWaitsAtTheChurnCap(String code, boolean submitted,
+            int consecutiveFailures, boolean terminal) {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        when(runtimeWarmer.isEnabled()).thenReturn(false);
+        TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
+                "prompt", List.of(Map.of("type", "text", "text", "wait")),
+                "sha256:" + "a".repeat(64), "RUNNING", submitted, null, 0L,
+                "previous-owner", Long.MAX_VALUE, consecutiveFailures,
+                consecutiveFailures, consecutiveFailures, null, null, null,
+                1, 1, null, 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session"))
+                .thenReturn(unboundSessionRecord());
+        HarnessHttpFailure wait = new HarnessHttpFailure("wait", null, 409,
+                "{\"code\":\"" + code + "\"}", Map.of("code", code));
+        when(harness.createOrLoad("tenant", "session", false))
+                .thenThrow(wait);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), runtimeWarmer,
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        if (terminal) {
+            verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                    anyString(), eq(submitted
+                            ? "hosted_harness_unavailable_after_admission"
+                            : "hosted_harness_unavailable"), anyString());
+            verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyBoolean());
+        } else {
+            verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
+                    eq("turn"), anyString(), anyLong(), eq(true));
+            verify(store, never()).failTurn(anyString(), anyString(),
+                    anyString(), anyString(), anyString(), anyString());
+        }
+    }
+
+    // A wedged teardown is a refusal, not a wait: the Turn fails at once
+    // under the code that names the operator recovery it needs, before
+    // and after admission alike, without spending a retry.
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void teardownBlockedFailsImmediatelyWithItsOwnCode(boolean submitted) {
+        HarnessHttpFailure wedged = new HarnessHttpFailure("wedged", null, 409,
+                "{\"code\":\"hosted_session_teardown_blocked\"}",
+                Map.of("code", "hosted_session_teardown_blocked"));
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(wedged,
+                submitted, 0, unboundSessionRecord());
+        verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("hosted_session_teardown_blocked"),
+                anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong(), anyBoolean());
     }
 
     // Missing admission acknowledgement does not prove this prompt never ran.
