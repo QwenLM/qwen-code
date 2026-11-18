@@ -71,7 +71,11 @@ describe.each([false, true])('Mods in an ACP session (shared=%s)', (shared) => {
       experimental: { mods: true, unifiedAgentLoop: shared },
       general: { enableAutoUpdate: false, chatRecording: true },
       memory: E2E_MEMORY_SETTINGS_DEFAULTS,
-      model: { skipNextSpeakerCheck: true, sessionTokenLimit: 9_000 },
+      model: {
+        skipNextSpeakerCheck: true,
+        sessionTokenLimit: 9_000,
+        loopProtection: 'stop',
+      },
       ui: { enableFollowupSuggestions: false },
       telemetry: { enabled: false },
       security: {
@@ -124,6 +128,10 @@ describe.each([false, true])('Mods in an ACP session (shared=%s)', (shared) => {
       releaseStream = resolve;
     });
     let answered = 0;
+    const goalSteer = 'Check the fixture during the active Goal';
+    let testingGoal = false;
+    let automaticGoalStarted = false;
+    let goalToolAttempts = 0;
     server = await startFakeOpenAIServer(async ({ body }) => {
       const messages = (body['messages'] ?? []) as Message[];
       const last = text(
@@ -134,6 +142,22 @@ describe.each([false, true])('Mods in an ACP session (shared=%s)', (shared) => {
         return { content: 'Chunk received.' };
       }
       if (last.startsWith('Summarize: ')) return { content: 'SUMMARY' };
+      if (testingGoal && body['stream'] === true) {
+        if (
+          !messages.some((message) => text(message.content).includes(goalSteer))
+        ) {
+          automaticGoalStarted = true;
+          await heldStream;
+          return { content: 'Automatic Goal response.' };
+        }
+        if (++goalToolAttempts > 3)
+          return { content: 'Unexpected extra round.' };
+        return {
+          toolCalls: [
+            fakeToolCall('read_file', {}, `goal_read_${goalToolAttempts}`),
+          ],
+        };
+      }
       if (body['stream'] === true && last.includes('Abort after first chunk'))
         return {
           contentChunks: ['Abort marker.', 'This chunk should not arrive.'],
@@ -312,6 +336,26 @@ describe.each([false, true])('Mods in an ACP session (shared=%s)', (shared) => {
         () => expect(of(limited.sessionId)).toContain('acp-probe: ended error'),
         { timeout: 5_000 },
       );
+
+      const goal = await client.newSession({ cwd: workspace, mcpServers: [] });
+      const goalPrompt = (text: string) =>
+        client.prompt({
+          sessionId: goal.sessionId,
+          prompt: [{ type: 'text', text }],
+        });
+      testingGoal = true;
+      expect(
+        (await goalPrompt('/goal set Review the fixture')).stopReason,
+      ).toBe('end_turn');
+      await vi.waitFor(() => expect(automaticGoalStarted).toBe(true), {
+        timeout: 5_000,
+      });
+      expect((await goalPrompt(goalSteer)).stopReason, stderr).toBe('end_turn');
+      await vi.waitFor(
+        () => expect(of(goal.sessionId)).toContain('acp-probe: ended error'),
+        { timeout: 5_000 },
+      );
+      expect(goalToolAttempts).toBe(3);
     } finally {
       onFirstChunk();
       releaseStream();

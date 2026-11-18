@@ -8948,6 +8948,7 @@ export class Session implements SessionContext {
                     );
                   nextMessage = nextAfterTools.message;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
+                    modTurn?.fail();
                     pauseGoalForLoopStop();
                     return {
                       stopReason: rejectOnLoopDetected
@@ -8959,6 +8960,7 @@ export class Session implements SessionContext {
                     };
                   }
                   if (toolRun.loopDetected) {
+                    modTurn?.fail();
                     pauseGoalForLoopStop();
                     this.todoStopGuard.suspend();
                     await this.#preserveStoppedToolRun(
@@ -10814,6 +10816,7 @@ export class Session implements SessionContext {
           };
         }
         if (toolRun.loopDetected) {
+          options.responseCapture?.modTurn?.fail();
           this.todoStopGuard.suspend();
           await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
           return {
@@ -10856,6 +10859,7 @@ export class Session implements SessionContext {
         );
         nextMessage = nextAfterTools.message;
         if (nextAfterTools.stoppedByRepeatedToolFailure) {
+          options.responseCapture?.modTurn?.fail();
           return {
             kind: 'terminal',
             stopReason: options.rejectOnLoopDetected
