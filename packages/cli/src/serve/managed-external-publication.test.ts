@@ -399,7 +399,7 @@ describe.skipIf(process.platform === 'win32')(
       );
     });
 
-    it('revives a lapsed channel on the owning dispatch\'s re-begin and renewal', async () => {
+    it("revives a lapsed channel on the owning dispatch's re-begin and renewal", async () => {
       const expiresAt = Date.now() + 1_000;
       const id = await publication!.begin(request, expiresAt, captureId);
       // A lapsed horizon is the state a Broker outage leaves behind: the
