@@ -33,6 +33,7 @@ function createStreamClient(
   onMessage: (messageId: string, data: string) => void,
   onStopped: (reason: string) => void,
   onClient: (client: WSClient | undefined) => void,
+  onReady: (ready: boolean) => void,
 ): ManagedWecomStreamClient {
   const options: WSClientOptions = {
     botId: settings.botId,
@@ -107,6 +108,8 @@ function createStreamClient(
   client.on('event.disconnected_event', () => {
     if (!authenticated || stopped) return;
     stopped = true;
+    authenticated = false;
+    onReady(false);
     onClient(undefined);
     onStopped('a new connection displaced this one (server kick)');
   });
@@ -115,7 +118,19 @@ function createStreamClient(
       `Managed WeCom SDK error: ${sanitizeLogText(error.message, 200)}\n`,
     );
   });
+  // Readiness tracks AUTHENTICATION, not the socket reaching OPEN: the SDK
+  // marks isConnected at WebSocket.OPEN, before the subscribe acknowledgement.
+  // Claiming deliveries in that window would send on a socket that may still
+  // fail authentication, settling the reply unknown. Clear readiness on every
+  // disconnect and restore it on each authenticated event (the SDK re-emits it
+  // on every successful reconnect).
+  client.on('authenticated', () => {
+    authenticated = true;
+    onReady(true);
+  });
   client.on('disconnected', (reason) => {
+    authenticated = false;
+    onReady(false);
     process.stderr.write(
       `Managed WeCom WebSocket ${sanitizeLogText(reason, 200)}.\n`,
     );
@@ -143,6 +158,7 @@ function createStreamClient(
           detach();
           if (error) {
             authenticated = false;
+            onReady(false);
             onClient(undefined);
             try {
               client.disconnect();
@@ -152,6 +168,7 @@ function createStreamClient(
             reject(error);
           } else {
             authenticated = true;
+            onReady(true);
             onClient(client);
             resolve();
           }
@@ -181,6 +198,7 @@ function createStreamClient(
     disconnect: () => {
       stopped = true;
       authenticated = false;
+      onReady(false);
       onClient(undefined);
       // Interrupt a pending handshake promptly with the stop reason rather
       // than letting it time out 30s later as a credential error.
@@ -227,13 +245,24 @@ export function createManagedWecomDeps(): ManagedWecomAdapterDeps {
   // The send path rides the stream's live client; the factory holds the
   // current instance so sendMessage and the stream cannot drift apart.
   let current: WSClient | undefined;
+  // Authentication readiness of the live socket (see createStreamClient): the
+  // claim phase gates on this, not on the socket merely reaching OPEN.
+  let ready = false;
   return {
     createStreamClient: (settings, onMessage, onStopped) =>
-      createStreamClient(settings, onMessage, onStopped, (client) => {
-        current = client;
-      }),
+      createStreamClient(
+        settings,
+        onMessage,
+        onStopped,
+        (client) => {
+          current = client;
+        },
+        (value) => {
+          ready = value;
+        },
+      ),
     sendMessage: (chatId, text) => sendMessage(current, chatId, text),
-    isConnected: () => current?.isConnected ?? false,
+    isConnected: () => ready,
     lock: async (directory, onCompromised) => {
       const { default: lockfile } = await import('proper-lockfile');
       const { mkdirSync } = await import('node:fs');

@@ -159,27 +159,32 @@ export class ManagedWecomStateStore {
   readonly directory: string;
   readonly file: string;
 
-  constructor(name: string, cwd: string, botId: string, destinationKey = '') {
-    // One directory per configured entry (channel name + botId) AND control-plane
-    // destination (base URL + tenant + channel) per workspace,
-    // beside the other channel state — the same name+account key shape the
-    // DingTalk store uses. Its lock serializes concurrent managed instances of
-    // this entry; two entries sharing a botId get separate directories and
-    // locks (the SDK then admits one connection and kicks the other), so a
-    // duplicated or renamed entry is an operator config concern, not something
-    // the lock merges. The Legacy WeCom channel keeps no on-disk state and
-    // takes no lock, so the lock does not arbitrate managed-versus-Legacy.
-    const key = createHash('sha256')
-      .update(`${name}\u0000${botId}\u0000${destinationKey}`)
+  constructor(name: string, cwd: string, botId: string, identityKey = '') {
+    // The lock directory is keyed by the configured entry (channel name +
+    // botId) per workspace — NOT by destination — so two instances of the same
+    // bot entry contend for one connection lock even when they target different
+    // control-plane destinations: WeCom admits one connection per bot and kicks
+    // the other, so a per-destination lock would let both reach stream.connect()
+    // and displace each other. The ledger FILE beneath that directory is keyed
+    // by the full registration identity (control plane + tenant + channel +
+    // actor + workspace + cwd-relative), so a pending message staged under one
+    // registration is never loaded or replayed under another. The Legacy WeCom
+    // channel keeps no on-disk state and takes no lock.
+    const entryKey = createHash('sha256')
+      .update(`${name}\u0000${botId}`)
       .digest('hex')
       .slice(0, 16);
     this.directory = join(
       getGlobalQwenDir(),
       'channels',
       getWorkspaceScopeDirName(cwd),
-      `wecom-${key}`,
+      `wecom-${entryKey}`,
     );
-    this.file = join(this.directory, 'managed-state.json');
+    const ledgerKey = createHash('sha256')
+      .update(identityKey)
+      .digest('hex')
+      .slice(0, 16);
+    this.file = join(this.directory, `managed-state-${ledgerKey}.json`);
   }
 
   load(): ManagedWecomState | undefined {

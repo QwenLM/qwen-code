@@ -158,6 +158,29 @@ describe('managed WeCom deps stream lifecycle', () => {
     stream.disconnect();
   });
 
+  it('isConnected tracks authentication, not the socket reaching OPEN', async () => {
+    const { deps, stream } = setup();
+    const connecting = stream.connect();
+    // The SDK marks isConnected at WebSocket.OPEN, before the subscribe
+    // acknowledgement. Readiness must stay false in that window so the claim
+    // phase does not send on a socket that may still fail authentication.
+    mockState.instance!.connected = true;
+    expect(deps.isConnected()).toBe(false);
+    mockState.instance!.emit('authenticated');
+    await connecting;
+    expect(deps.isConnected()).toBe(true);
+    // A transient disconnect clears readiness; the socket reopening alone does
+    // not restore it until the replacement socket authenticates.
+    mockState.instance!.emit('disconnected', 'reconnect backoff');
+    expect(deps.isConnected()).toBe(false);
+    mockState.instance!.connected = true; // socket OPEN again, auth pending
+    expect(deps.isConnected()).toBe(false);
+    mockState.instance!.emit('authenticated');
+    expect(deps.isConnected()).toBe(true);
+    stream.disconnect();
+    expect(deps.isConnected()).toBe(false);
+  });
+
   it('connect resolves only on the authenticated event', async () => {
     const { stream } = setup();
     let resolved = false;

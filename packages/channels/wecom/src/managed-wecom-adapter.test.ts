@@ -2764,4 +2764,98 @@ describe('ManagedWecomAdapter — connection and destination guards (P1)', () =>
     expect(pendingOf(adapterA2)).toEqual(['wecom:m1']);
     await adapterA2.disconnect();
   });
+
+  it('a second destination of the same bot entry is refused the connection lock', async () => {
+    const cwd = tempCwd();
+    const locked = new Set<string>();
+    const lockFake = async (directory: string) => {
+      if (locked.has(directory)) throw new Error('ELOCKED');
+      locked.add(directory);
+      return async () => {
+        locked.delete(directory);
+      };
+    };
+    const planeA = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fakeA = fakeDeps();
+    const adapterA = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: planeA.controlPlane,
+      deps: { ...fakeA.deps, lock: lockFake },
+      pollLoop: false,
+    });
+    await adapterA.connect();
+    // Same bot entry, different destination: the connection lock is per entry,
+    // so the second instance is refused before it can open a socket and displace
+    // the first (WeCom admits one connection per bot and kicks the other).
+    const planeB = fakeControlPlane('cp|tenant-b|chan-1|actor|ws|.');
+    const fakeB = fakeDeps();
+    const adapterB = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: planeB.controlPlane,
+      deps: { ...fakeB.deps, lock: lockFake },
+      pollLoop: false,
+    });
+    await expect(adapterB.connect()).rejects.toThrow(
+      'owned by another process',
+    );
+    expect(fakeB.sent).toHaveLength(0);
+    await adapterA.disconnect();
+  });
+
+  it('a workspace change within one tenant never replays the prior owner pending', async () => {
+    const cwd = tempCwd();
+    const planeA = fakeControlPlane('cp|tenant-a|chan-1|actor|ws-a|.');
+    const fakeA = fakeDeps();
+    const adapterA = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: planeA.controlPlane,
+      deps: fakeA.deps,
+      pollLoop: false,
+    });
+    await adapterA.connect();
+    fakeA.push('m1', messageData({ msgid: 'm1' }));
+    expect(pendingOf(adapterA)).toEqual(['wecom:m1']);
+    const stateFileA = adapterA.stateFile;
+    await adapterA.disconnect();
+    // Same tenant/channel, different workspace: the ledger follows the
+    // registration ownership, so B opens a different ledger and submits nothing
+    // of A's under B's actor/workspace.
+    const planeB = fakeControlPlane('cp|tenant-a|chan-1|actor|ws-b|.');
+    const fakeB = fakeDeps();
+    const adapterB = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: planeB.controlPlane,
+      deps: fakeB.deps,
+      pollLoop: false,
+    });
+    await adapterB.connect();
+    expect(adapterB.stateFile).not.toBe(stateFileA);
+    expect(pendingOf(adapterB)).toEqual([]);
+    await adapterB.tick();
+    expect(planeB.submit).toHaveLength(0);
+    await adapterB.disconnect();
+    // A's pending claim is still available to A on its own restart.
+    const planeA2 = fakeControlPlane('cp|tenant-a|chan-1|actor|ws-a|.');
+    const fakeA2 = fakeDeps();
+    const adapterA2 = new ManagedWecomAdapter({
+      name: 'wecom-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: planeA2.controlPlane,
+      deps: fakeA2.deps,
+      pollLoop: false,
+    });
+    await adapterA2.connect();
+    expect(adapterA2.stateFile).toBe(stateFileA);
+    expect(pendingOf(adapterA2)).toEqual(['wecom:m1']);
+    await adapterA2.disconnect();
+  });
 });
