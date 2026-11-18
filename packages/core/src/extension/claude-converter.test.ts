@@ -706,9 +706,7 @@ describe('convertClaudePluginPackage', () => {
     const installedCommand = (
       loaded!.hooks!['PostToolUse']![0].hooks![0] as { command: string }
     ).command;
-    expect(installedCommand).toBe(
-      path.join(installedDir, 'scripts', 'post-install.sh'),
-    );
+    expect(installedCommand).toBe(`${installedDir}/scripts/post-install.sh`);
     expect(fs.readFileSync(installedCommand, 'utf8')).toBe(
       'echo POST_INSTALL\n',
     );
