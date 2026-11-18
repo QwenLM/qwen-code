@@ -83,30 +83,30 @@ claim to mirror the gate's full trigger:
    **seed/gate** image must ALSO bundle a digest-pinned Node: the isolation
    gate is a Node program (`node /trusted-scripts/verify-pr-prepare.mjs
 --require-isolation --artifact-dir …`), and the stock Maven image carries
-   no Node, so a Java-only round could not produce the `boundary-gate.json`
-   its `mode:"container"` declaration requires (R16-6). Run the seed and the
+   no Node, so the gate could not run in a stock-Maven-only image (R16-6). A
+   conforming Java round is `mode:"waived"` (below), not `mode:"container"`, so
+   it needs no gate record; this Node serves the seed/gate attestation. Run the seed and the
    gate in this one Maven+JDK+Node image (trusted scripts at
    `/trusted-scripts`), so the gate's `observed`/`credentialFree` attest the
    same container that executes the PR's Maven code. The offline **battery**
    image stays the stock Maven+JDK image (no Node needed for the battery);
    the "no Java+Node derivative" non-goal applies to the battery image, not
    the seed/gate image. If a model turn runs in a separate `node:22-bookworm`
-   container, that container needs its own gate record too — one
-   `boundary-gate.json` per PR-code-bearing container, each recording the
-   container it observed. **Nonce binding (R16-1, #17371).** The gate record
-   carries only `nonceSha256`; the plaintext lives in the gate container's
-   `$HOME/.qwen-verify-nonce`, and the checker reads ONE record and ONE hash,
-   refusing `mode:"container"` unless a round log carries a `container-nonce:`
-   line whose sha256 matches. The per-container gate records are
-   `checkBoundary` evidence only — they do not multiply the nonce binding. The
-   `container-nonce:` line must be echoed by the container that runs the
-   battery, reading that container's own `$HOME/.qwen-verify-nonce`. The
-   offline battery runs in a different container than the seed/gate, so it
-   cannot read the gate container's plaintext and cannot mint
-   `mode:"container"`. Per the skill's step 5, a round whose battery cannot run
-   in the gate container declares `mode:"waived"` with the maintainer's
-   approval — a gate-container attestation is not a substitute for the
-   battery's own boundary (R3-6).
+   container, note that the checker reads ONE gate record (a single fixed
+   `boundary-gate.json` path, last write wins), not a set of per-container
+   records. **Nonce binding (R16-1, #17371).** A `mode:"container"` claim is
+   tied to a nonce: the gate record carries only `nonceSha256`; the plaintext
+   lives in the gate container's `$HOME/.qwen-verify-nonce`, and the checker
+   refuses `mode:"container"` unless a round log carries a `container-nonce:`
+   line whose sha256 matches. The offline Java **battery** runs in a different
+   container than the seed/gate — the stock Maven+JDK battery image carries no
+   Node and runs no gate, so it has no `$HOME/.qwen-verify-nonce` of its own and
+   cannot echo a matching line. A conforming Java round therefore declares
+   `mode:"waived"` with the maintainer's approval, NOT `mode:"container"`: a
+   waived round's check reads no gate record and needs no nonce line. The
+   seed/gate image's digest-pinned Node exists to run the gate, but the gate
+   attests the seed container, not the separate battery — a gate-container
+   attestation is not a substitute for the battery's own boundary (R3-6).
 2. **Offline Maven repository, seeded inside a boundary.** No host step runs
    a Maven goal against the PR's poms: `mvn install` walks the whole default
    lifecycle, so any plugin execution the PR binds to `compile` or `test`
@@ -230,10 +230,12 @@ claim to mirror the gate's full trigger:
    round never receives the Docker socket — that would hand untrusted PR
    code host-root while `--require-isolation` still exits 0 (the gate
    inspects environment and credential signals, not sockets).
-4. **Declaration.** The operator writes the declaration after the gate
-   passes — the same operator-owned rule as the JS recipe, not the round
-   itself. The gate run (`--require-isolation --artifact-dir <round-dir>`)
-   writes the `boundary-gate.json` record in the seed container. Because the
+4. **Declaration.** The operator writes the declaration — the same
+   operator-owned rule as the JS recipe, not the round itself. A waived
+   declaration needs no gate record: `checkBoundary` consults
+   `boundary-gate.json` only under `mode:"container"`. The gate run
+   (`--require-isolation --artifact-dir <round-dir>`) attests the seed
+   container, but because the
    offline battery runs in a _separate_ container that cannot read the seed
    container's `$HOME/.qwen-verify-nonce`, it cannot echo a `container-nonce:`
    line hashing to the gate record's `nonceSha256` (step 1), so the round
@@ -337,8 +339,9 @@ claim to mirror the gate's full trigger:
 ## Validation plan
 
 - One live Java-heavy round (a `managed-agent-server` PR) runs compile +
-  battery + at least one mutation inside the recipe; the gate exits 0 and
-  `boundary.json` records container mode.
+  battery + at least one mutation inside the recipe; the gate exits 0 in the
+  seed container and `boundary.json` records `mode:"waived"` with the
+  maintainer's approval (the battery runs in a separate offline container).
 - A/B parity: the same battery's counts match a baseline run of the same
   head (the recipe changes the boundary, not the measurements). A host
   baseline is itself a `waived` round with the maintainer's approval recorded
@@ -372,11 +375,16 @@ claim to mirror the gate's full trigger:
 
 - The skill carries the Java recipe with the same trusted-clone / PR-clone /
   proxy layout as the JS recipe.
-- A Java round can complete without any host execution of PR code, and its
-  report's `**Boundary.**` line names every container the round used, each
-  with its image and network policy.
-- The waiver path remains available and recorded for rounds that cannot use
-  the recipe (e.g. a database-dependent repro).
+- A Java round can complete without any host execution of PR code. Its
+  report's `**Boundary.**` line reads the waiver and its approval — a waived
+  line must not name an image or network policy (`node:<digits>` /
+  `--network none` trip the checker's boundary-line warning); every container
+  the round used, with its image and network policy, is named in the
+  declaration `detail` and the report body instead.
+- The waived declaration is the recipe's normal outcome (the battery runs in
+  a separate offline container), not merely an opt-out; it stays available and
+  recorded for rounds that cannot use the recipe too (e.g. a database-dependent
+  repro).
 
 ## Open questions
 

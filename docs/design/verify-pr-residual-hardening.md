@@ -203,6 +203,12 @@ parseArgs refuses (R3-4).
   scoping pin, the checker-sole-matcher pin, the step-5↔checker nonce-spelling
   pin (R6 deferred); the shimmed-node replay keeps the declaration/teardown
   witness (nonce witnesses moved to the checker tests).
+- `docs/design/verify-pr-watch.md` + `.zh-CN.md` — the canonical watch design's
+  nonce-corroboration and shape-guard prose aligned to the checker-sole-matcher
+  and the ladder-derived guard (F3: previously omitted from this list).
+- `docs/design/2026-11-14-verify-pr-java-container-recipe.md` + `.zh-CN.md` —
+  the recipe's nonce/boundary prose aligned to the hash-only record; the full
+  waived-model coherence sweep is deferred as R5-2 (F3: previously omitted).
 
 ## Scope boundaries
 

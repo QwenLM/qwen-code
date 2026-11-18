@@ -6637,7 +6637,9 @@ describe('qwen-triage verify hardening round 2', () => {
     // --artifact-dir (prepare has not printed the directory yet); a prepare
     // window kill then leaves a recoverable marker, not a dropped head.
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --repo <owner>/<repo>',
+      // E2 (#17371 R12-D5): closing backtick pins the command's end (see the
+      // watch twin) so re-appending --artifact-dir inside the span reds this.
+      'verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --repo <owner>/<repo>`',
     );
     // R4-2: shared sentences on the manual slice (the watch copy is no alibi).
     expect(manualSlice).toContain(
@@ -6714,11 +6716,17 @@ describe('qwen-triage verify hardening round 2', () => {
     // (an order-insensitive toContain would stay green if --start moved back
     // below prepare). Round 13: scope it to manualSlice, not the whole flattened
     // skill, so it guards this section as claimed.
-    expect(
-      manualSlice.indexOf(
-        'Register the round in the shared watch state **ahead of prepare**',
-      ),
-    ).toBeLessThan(manualSlice.indexOf('Then run prepare; it creates'));
+    // E3 (#17371 round-14): presence guards on both operands so a renamed
+    // sentinel cannot make the ordering comparison vacuous (indexOf -1).
+    const manualHeadingAt = manualSlice.indexOf(
+      'Register the round in the shared watch state **ahead of prepare**',
+    );
+    const manualPrepareHeadingAt = manualSlice.indexOf(
+      'Then run prepare; it creates',
+    );
+    expect(manualHeadingAt).toBeGreaterThan(-1);
+    expect(manualPrepareHeadingAt).toBeGreaterThan(-1);
+    expect(manualHeadingAt).toBeLessThan(manualPrepareHeadingAt);
     // Deferred (round 10): the heading pin above is not enough — guard the
     // --start COMMAND's position too, so moving the command below prepare (while
     // the heading stays above) reds this per-section assertion. Presence guards
@@ -6829,7 +6837,10 @@ describe('qwen-triage verify hardening round 2', () => {
     // R17-2: the watch prompt registers ahead of prepare, so --start carries
     // no --artifact-dir; the directory is recorded at --complete.
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo>',
+      // E2 (#17371 R12-D5): the closing backtick pins the command's end, so
+      // re-appending --artifact-dir inside the code span reds this (a bare
+      // prefix match would stay green).
+      'verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo>`',
     );
     // Deferred (round 6): the no-artifact-dir invariant is a shared sentence
     // (the manual section carries it too) — pin the prompt's own copy so the
@@ -6949,6 +6960,11 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(promptSlice).toContain(
       'the live head is delivered by the next fire (the gate cursor tracks the live head), or is already in the deferred list the release prints, which you then start',
     );
+    // C3 (#17371 R12-D4): the moved-head recipe re-excludes the terminal
+    // not-covered group from "which you then start" (it needs a new head move).
+    expect(promptSlice).toContain(
+      'except a head the list names under the terminal "not covered after repeated inconclusive rounds" group, which needs a new head move',
+    );
     // Deferred (round 7): the watch moved-head branch rebinds the completion to
     // the started head's own round (the manual twin carries the same clause); a
     // literal completion under the released head would exit 3.
@@ -7011,9 +7027,17 @@ describe('qwen-triage verify hardening round 2', () => {
       "an omitted `--round` skips the round match, so a retried release would delete a newer round's live marker for the same head",
     );
     // R1-2: positional pin — registration precedes prepare in the watch prompt.
-    expect(
-      flat.indexOf('Register the round **first, ahead of prepare** (R17-2)'),
-    ).toBeLessThan(flat.indexOf('Then run prepare (trusted host metadata)'));
+    // E3 (#17371 round-14): scope to promptSlice and guard both operands so a
+    // renamed sentinel cannot make the comparison vacuous (indexOf -1).
+    const watchHeadingAt = promptSlice.indexOf(
+      'Register the round **first, ahead of prepare** (R17-2)',
+    );
+    const watchPrepareHeadingAt = promptSlice.indexOf(
+      'Then run prepare (trusted host metadata)',
+    );
+    expect(watchHeadingAt).toBeGreaterThan(-1);
+    expect(watchPrepareHeadingAt).toBeGreaterThan(-1);
+    expect(watchHeadingAt).toBeLessThan(watchPrepareHeadingAt);
     // Deferred (round 10): guard the --start COMMAND's position too, so moving
     // the command below prepare (while the heading stays above) reds this.
     // Presence guards (round 11) keep the comparison from going vacuous if a
@@ -7050,6 +7074,12 @@ describe('qwen-triage verify hardening round 2', () => {
       "The helper runs from the trusted clone — the state root defaults to its main worktree, never the round's PR clone",
     );
     expect(flat).toContain('`<dir>` is the artifact directory prepare printed');
+    // E3 (#17371 round-14): the pin above is the manual copy's phrasing; pin the
+    // watch prompt's own dir provenance on its slice so the manual copy is not
+    // its alibi.
+    expect(promptSlice).toContain(
+      'it creates and prints the artifact directory `<dir>`, which you record at `--complete`',
+    );
     // A copy outside the trusted clone resolves the default root to the
     // mount's parent — the container's /trusted-scripts mount resolves it
     // to / — so the prompt must demand an explicit absolute --state-root.
@@ -7165,6 +7195,12 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'there is no in-boundary gate command and no `boundary-gate.json` to produce — declare `mode:"vm"` per the VM bullet above',
     );
+    // E1 (#17371 round-7): the retracted preflight sentence that routed the VM
+    // to run the same gate file must stay gone — the positive pins alone do not
+    // assert its absence.
+    expect(flat).not.toContain(
+      'a VM boundary runs the same file from the trusted checkout instead',
+    );
     expect(flat).toContain(
       'The VM round still runs under a **scratch `HOME`**',
     );
@@ -7179,6 +7215,15 @@ describe('qwen-triage verify hardening round 2', () => {
     // hash-compares a container-nonce log line against it.
     expect(flat).toContain('stores only its **sha256** in the gate record');
     expect(flat).toContain('(`nonceSha256`), never the plaintext');
+    // C2 (#17371 round-7): the nonce claim is scoped to "cannot produce" (the
+    // plaintext also rides the PR-writable log), not the stronger "cannot read".
+    expect(flat).toContain(
+      'cannot produce the matching `container-nonce:` line without the container-local plaintext',
+    );
+    expect(flat).not.toContain('cannot read the container-local nonce');
+    // C1 (#17371 round-7): the nonce contract names the scan's resource bound so
+    // a compliant round refused beyond it is not a surprise.
+    expect(flat).toContain('The scan is bounded (64 MiB of');
     expect(flat).toContain('the SINGLE authoritative implementation');
     // R6 (deferred): step 5's container-nonce spelling and the checker's
     // matcher literal are pinned together, so rewording either side cannot
