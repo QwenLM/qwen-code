@@ -96,6 +96,21 @@ describe('RootErrorFallback', () => {
     expect(container.querySelector('button')?.textContent).toBe('重新加载');
   });
 
+  it('renders zh-TW copy when language is zh-TW', () => {
+    const { container } = mount(
+      <RootErrorFallback
+        error={new Error('x')}
+        onRetry={() => {}}
+        language="zh-TW"
+        retryMode="reload"
+      />,
+    );
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      '出了點問題',
+    );
+    expect(container.querySelector('button')?.textContent).toBe('重新載入');
+  });
+
   it('catches an App-level render crash instead of white-screening', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     function BrokenApp(): React.ReactElement {

@@ -115,10 +115,16 @@ import type {
   AgentMessageRecordPayload,
 } from '../agents/session-agents/contract.js';
 import type {
+  GoalRecord,
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
   TranscriptCursor,
 } from '../goals/goal-protocol.js';
+import {
+  deleteSessionGoalSidecar,
+  projectGoalSidecar,
+  writeSessionGoalSidecar,
+} from './session-goal-sidecar.js';
 import {
   collectPendingBranchToolCalls,
   resolveCompletedTurnBranchCandidateFromRecords,
@@ -2723,7 +2729,40 @@ export class ChatRecordingService {
       },
     };
     await this.appendRecordStrict(record);
+    this.refreshGoalProjection(payload.snapshot.goal);
     return record;
+  }
+
+  /**
+   * Keeps the sidebar goal marker independent of the live-only Goals
+   * listing: the session catalog reads this sidecar from disk, so unloaded
+   * and archived sessions show their marker too. Best-effort by contract —
+   * the transcript stays canonical, and a sidecar failure only delays the
+   * marker until the next transition or load (the same lag the PR badge
+   * accepts). Called by the journal hook on every transition and once by
+   * Config after goal restore, so sessions journaled before the sidecar
+   * existed gain a marker on their next load. Managed logs own their
+   * metadata and are skipped.
+   */
+  refreshGoalProjection(goal: GoalRecord | null): void {
+    if (this.managedSink) return;
+    const sessionId = this.getSessionId();
+    const sidecarPath = path.join(
+      this.ensureChatsDir(),
+      `${sessionId}.goal.json`,
+    );
+    const mutation = goal
+      ? writeSessionGoalSidecar(sidecarPath, projectGoalSidecar(goal))
+      : deleteSessionGoalSidecar(sidecarPath);
+    void mutation
+      .then(() => {
+        this.config.getSessionService().emitSessionGoalChanged(sessionId);
+      })
+      .catch((error) => {
+        debugLogger.warn(
+          `Goal sidecar write failed for ${sessionId}; the sidebar marker may lag until the next transition: ${error}`,
+        );
+      });
   }
 
   /**

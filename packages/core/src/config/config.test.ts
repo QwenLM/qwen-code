@@ -5202,6 +5202,44 @@ describe('Server Config (config.ts)', () => {
       expect(replacement.getSnapshot().goal?.status).toBe('active');
     });
 
+    it('refreshes the goal projection from the restored record on load', async () => {
+      // Restore itself writes nothing; the projection backfill is what gives
+      // a session journaled before the sidecar existed its sidebar marker.
+      const config = recordingConfig({
+        sessionData: resumedGoalSession('paused'),
+      });
+      const recorder = config.getChatRecordingService();
+      if (!recorder) throw new Error('expected a chat recording service');
+      const refresh = vi
+        .spyOn(recorder, 'refreshGoalProjection')
+        .mockImplementation(() => {});
+
+      await config.getGoalRuntimeReady();
+
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect(refresh).toHaveBeenCalledWith(
+        expect.objectContaining({
+          goalId: 'g-resumed',
+          status: 'paused',
+          objective: 'resume me',
+        }),
+      );
+    });
+
+    it('refreshes the goal projection to null for a goal-less restore', async () => {
+      const config = recordingConfig();
+      const recorder = config.getChatRecordingService();
+      if (!recorder) throw new Error('expected a chat recording service');
+      const refresh = vi
+        .spyOn(recorder, 'refreshGoalProjection')
+        .mockImplementation(() => {});
+
+      await config.getGoalRuntimeReady();
+
+      expect(refresh).toHaveBeenCalledTimes(1);
+      expect(refresh).toHaveBeenCalledWith(null);
+    });
+
     it('reports a committed Goal transition to telemetry', async () => {
       vi.mocked(logGoalState).mockClear();
       const config = recordingConfig();
@@ -9993,6 +10031,27 @@ describe('Server Config (config.ts)', () => {
     expect(seen).toEqual([{ sessionId: 's1', number: 2 }]);
   });
 
+  it('relocateWorkingDirectory should carry the session goal-changed callback to the fresh SessionService', async () => {
+    // Like the pr-bound callback, the goal-changed callback is registered
+    // once at session init; relocation must re-carry it so a later goal
+    // transition still bumps the catalog clock.
+    const config = makeConfig();
+    const seen: string[] = [];
+    config.getSessionService().setSessionGoalChangedCallback((sessionId) => {
+      seen.push(sessionId);
+    });
+
+    await config.relocateWorkingDirectory(
+      NEW_DIR,
+      NEW_DIR,
+      SKIP_MOVE_SIDE_EFFECTS,
+    );
+
+    config.getSessionService().emitSessionGoalChanged('s1');
+
+    expect(seen).toEqual(['s1']);
+  });
+
   it('relocateWorkingDirectory should recreate cwd-derived file service', async () => {
     const config = makeConfig();
     mockProcessCwd(NEW_DIR);
@@ -10058,6 +10117,7 @@ describe('Server Config (config.ts)', () => {
       '.pr.json',
       '.title.json',
       '.artifacts.json',
+      '.goal.json',
     ]);
     mockProcessCwd(NEW_DIR);
     existingPaths(...from);
