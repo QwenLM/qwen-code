@@ -510,8 +510,10 @@ test.describe('shadow portal details', () => {
   // which one-core contention stretches past the suite's 60s ceiling.
   // describe-scoped so the 120s covers the beforeEach boot. #17063 raised it,
   // #17067 withdrew the raise when its failure proved to be a deterministic
-  // More-locator timeout; this re-lands it for boot cost only — a background
-  // refresh can still remount the row and drop focus to <body>.
+  // More-locator timeout; this re-lands it for boot cost only. The budget buys
+  // reaching the assertions, not their outcome under load: a background
+  // refresh can remount the row and drop focus to <body>, and the copy button
+  // can resolve outside the shadow root (#17547).
   test.describe.configure({ timeout: 120_000 });
 
   test('shadow portal details keep focus in the overview after hover replacement @smoke', async ({
