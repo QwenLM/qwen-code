@@ -224,10 +224,15 @@ describe('daemon discovery records', () => {
     });
 
     it('returns undefined for a symlinked record', (t) => {
-      writeDaemonDiscovery(record(), dir);
+      // The link target names the port being read, so it would otherwise be
+      // accepted and the lstat guard is the only check that can reject it.
+      fs.writeFileSync(
+        daemonDiscoveryFilePath(4172, dir),
+        JSON.stringify({ ...record(), port: 4171 }),
+      );
       try {
         fs.symlinkSync(
-          daemonDiscoveryFilePath(4170, dir),
+          daemonDiscoveryFilePath(4172, dir),
           daemonDiscoveryFilePath(4171, dir),
         );
       } catch {

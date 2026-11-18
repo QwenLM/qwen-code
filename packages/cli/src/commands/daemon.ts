@@ -213,6 +213,24 @@ export function terminateTree(pid: number, force: boolean): void {
   process.kill(pid, force ? 'SIGKILL' : 'SIGTERM');
 }
 
+export function describeUnpublishedRecordChild(child: {
+  pid?: number;
+  exitCode: number | null;
+  signalCode: NodeJS.Signals | null;
+}): string {
+  // A child that already exited will never publish a record, so the
+  // "within 30s / may still start" wording would describe a timeout that
+  // never happened — report the real exit instead.
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return `qwen daemon: daemon pid ${child.pid} exited (${
+      child.signalCode ?? `exit code ${child.exitCode}`
+    }) without publishing a discovery record; its startup output follows.`;
+  }
+  return `qwen daemon: daemon pid ${child.pid} did not publish a discovery record within ${
+    START_TIMEOUT_MS / 1000
+  }s. The detached child may still start; run \`qwen daemon status\` to check.`;
+}
+
 export function formatDaemonAge(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   if (seconds < 60) return `${seconds}s`;
@@ -839,23 +857,7 @@ async function handleStart(argv: StartArgs): Promise<void> {
     return;
   }
 
-  // A child that already exited will never publish a record, so the
-  // "within 30s / may still start" wording would describe a timeout that
-  // never happened — report the real exit instead.
-  const childExited = child.exitCode !== null || child.signalCode !== null;
-  if (childExited) {
-    writeStderrLine(
-      `qwen daemon: daemon pid ${child.pid} exited (${
-        child.signalCode ?? `exit code ${child.exitCode}`
-      }) without publishing a discovery record; its startup output follows.`,
-    );
-  } else {
-    writeStderrLine(
-      `qwen daemon: daemon pid ${child.pid} did not publish a discovery record within ${
-        START_TIMEOUT_MS / 1000
-      }s. The detached child may still start; run \`qwen daemon status\` to check.`,
-    );
-  }
+  writeStderrLine(describeUnpublishedRecordChild(child));
   if (spawnError) {
     writeStderrLine(`qwen daemon: spawn failed: ${spawnError.message}`);
   }
