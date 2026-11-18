@@ -130,12 +130,19 @@ export class ManagedDingtalkStateStore {
   readonly directory: string;
   readonly file: string;
 
-  constructor(name: string, cwd: string, clientId: string) {
-    // One directory per robot app per workspace, beside the other channel
-    // state. Its lock serializes concurrent managed instances of this robot
-    // app; the Legacy DingTalk channel keeps no on-disk state and takes no
-    // lock, so the lock does not arbitrate managed-versus-Legacy.
-    const key = createHash('sha256')
+  constructor(name: string, cwd: string, clientId: string, identityKey = '') {
+    // The lock directory is keyed by the configured entry (channel name +
+    // clientId) per workspace — NOT by destination — so two instances of the
+    // same robot app contend for one connection lock even when they target
+    // different control-plane destinations; a per-destination lock would let
+    // both run concurrently and duplicate inbound processing. The ledger FILE
+    // beneath that directory is keyed by the full registration identity
+    // (control plane + tenant + channel + actor + workspace + cwd-relative),
+    // so a pending message staged under one registration is never loaded or
+    // replayed under another. The Legacy DingTalk channel keeps no on-disk
+    // state and takes no lock, so the lock does not arbitrate
+    // managed-versus-Legacy.
+    const entryKey = createHash('sha256')
       .update(`${name}\u0000${clientId}`)
       .digest('hex')
       .slice(0, 16);
@@ -143,9 +150,13 @@ export class ManagedDingtalkStateStore {
       getGlobalQwenDir(),
       'channels',
       getWorkspaceScopeDirName(cwd),
-      `dingtalk-${key}`,
+      `dingtalk-${entryKey}`,
     );
-    this.file = join(this.directory, 'managed-state.json');
+    const ledgerKey = createHash('sha256')
+      .update(identityKey)
+      .digest('hex')
+      .slice(0, 16);
+    this.file = join(this.directory, `managed-state-${ledgerKey}.json`);
   }
 
   load(): ManagedDingtalkState | undefined {

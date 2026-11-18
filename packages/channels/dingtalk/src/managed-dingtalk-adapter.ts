@@ -190,6 +190,7 @@ export class ManagedDingtalkAdapter {
       options.name,
       options.cwd,
       this.settings.clientId,
+      options.controlPlane.destinationKey ?? '',
     );
     this.controlPlane = options.controlPlane;
     this.deps = options.deps;

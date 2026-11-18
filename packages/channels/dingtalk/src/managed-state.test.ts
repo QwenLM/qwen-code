@@ -13,7 +13,7 @@ import {
   mkdirSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MANAGED_DINGTALK_PENDING_LIMIT,
@@ -24,6 +24,8 @@ import {
 } from './managed-state.js';
 import type { ManagedDingtalkState } from './managed-state.js';
 import {
+  getGlobalQwenDir,
+  getWorkspaceScopeDirName,
   MANAGED_OUTBOUND_LIMIT,
   type ManagedInboundEvent,
 } from '@qwen-code/channel-base';
@@ -328,6 +330,81 @@ describe('ManagedDingtalkStateStore', () => {
       expect((thrown as Error).cause).toMatchObject({ code: 'EACCES' });
     } finally {
       chmodSync(s.directory, 0o700);
+    }
+  });
+
+  it('keys the lock directory by name and clientId per workspace scope', () => {
+    const cwd = tempHome();
+    const a = new ManagedDingtalkStateStore('robot', cwd, 'client-1');
+    // Determinism: a fresh store with the same inputs resolves the SAME
+    // directory, or a restart silently loses every un-receipted claim.
+    expect(
+      new ManagedDingtalkStateStore('robot', cwd, 'client-1').directory,
+    ).toBe(a.directory);
+    // The name and clientId are part of the key: a renamed entry or a different
+    // robot app is a different directory (and a different connection lock).
+    expect(
+      new ManagedDingtalkStateStore('other', cwd, 'client-1').directory,
+    ).not.toBe(a.directory);
+    expect(
+      new ManagedDingtalkStateStore('robot', cwd, 'client-2').directory,
+    ).not.toBe(a.directory);
+    // The workspace-scope term is load-bearing: two cwds must not collapse onto
+    // one directory.
+    expect(
+      new ManagedDingtalkStateStore('robot', tempHome(), 'client-1').directory,
+    ).not.toBe(a.directory);
+    expect(a.directory).toBe(
+      join(
+        getGlobalQwenDir(),
+        'channels',
+        getWorkspaceScopeDirName(cwd),
+        basename(a.directory),
+      ),
+    );
+  });
+
+  it('keys the ledger file by registration identity beneath the shared entry directory', () => {
+    const cwd = tempHome();
+    const a = new ManagedDingtalkStateStore(
+      'robot',
+      cwd,
+      'client-1',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    const b = new ManagedDingtalkStateStore(
+      'robot',
+      cwd,
+      'client-1',
+      'cp|tenant-b|chan-1|actor|ws|.',
+    );
+    // The connection lock stays per entry: both registrations share ONE
+    // directory (so two instances of the robot app contend for one lock).
+    expect(b.directory).toBe(a.directory);
+    // The ledger is file-deep isolated: a different registration identity keys
+    // a different file, so A's pending is never loaded under B.
+    expect(b.file).not.toBe(a.file);
+    expect(basename(a.file)).toMatch(/^managed-state-[0-9a-f]{16}\.json$/);
+    // Determinism: the same identity resolves the same ledger file.
+    expect(
+      new ManagedDingtalkStateStore(
+        'robot',
+        cwd,
+        'client-1',
+        'cp|tenant-a|chan-1|actor|ws|.',
+      ).file,
+    ).toBe(a.file);
+    // Each ownership field changes the ledger key.
+    for (const identity of [
+      'cp|tenant-a|chan-1|other-actor|ws|.',
+      'cp|tenant-a|chan-1|actor|ws-2|.',
+      'cp|tenant-a|chan-1|actor|ws|sub',
+      'cp|tenant-a|chan-2|actor|ws|.',
+      'other-cp|tenant-a|chan-1|actor|ws|.',
+    ]) {
+      expect(
+        new ManagedDingtalkStateStore('robot', cwd, 'client-1', identity).file,
+      ).not.toBe(a.file);
     }
   });
 });

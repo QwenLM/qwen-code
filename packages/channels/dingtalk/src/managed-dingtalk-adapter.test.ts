@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CHANNEL_INBOUND_TRUNCATION_NOTICE,
@@ -55,7 +55,7 @@ function messageData(overrides: Record<string, unknown> = {}): string {
   });
 }
 
-function fakeControlPlane() {
+function fakeControlPlane(destinationKey = 'cp|tenant-a|chan-1') {
   const register: unknown[] = [];
   const submit: ManagedInboundEvent[] = [];
   const receipts: Array<{ deliveryId: string; receipt: unknown }> = [];
@@ -76,6 +76,7 @@ function fakeControlPlane() {
       ) => (Error & { status?: number; code?: string }) | undefined)
     | undefined;
   const controlPlane: ManagedChannelControlPlane = {
+    destinationKey,
     register: async (request) => {
       register.push(request);
     },
@@ -2505,5 +2506,119 @@ describe('managed DingTalk persist-failure guards (#17173 R10)', () => {
     expect(lines.some((line) => line.includes('tick failed'))).toBe(false);
     spy.mockRestore();
     await adapter.disconnect();
+  });
+});
+
+describe('managed DingTalk adapter registration-identity isolation', () => {
+  function pendingOf(adapter: ManagedDingtalkAdapter): string[] {
+    const state = (
+      adapter as unknown as { state: { pending: Array<{ eventId: string }> } }
+    ).state;
+    return state.pending.map((entry) => entry.eventId);
+  }
+
+  function adapterFor(
+    cwd: string,
+    plane: ReturnType<typeof fakeControlPlane>,
+    fake: ReturnType<typeof fakeDeps>,
+    lock?: ManagedDingtalkAdapterDeps['lock'],
+  ) {
+    return new ManagedDingtalkAdapter({
+      name: 'ding-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: lock ? { ...fake.deps, lock } : fake.deps,
+      pollLoop: false,
+    });
+  }
+
+  it('a destination change never replays one tenant pending into another', async () => {
+    const cwd = tempCwd();
+    // Tenant A stages a pending claim (its admission answer has not landed).
+    const planeA = fakeControlPlane('cp|tenant-a|chan-1');
+    const fakeA = fakeDeps();
+    const adapterA = adapterFor(cwd, planeA, fakeA);
+    await adapterA.connect();
+    fakeA.push('m1', messageData({ msgId: 'm1' }));
+    expect(pendingOf(adapterA)).toEqual(['dingtalk:m1']);
+    const stateFileA = adapterA.stateFile;
+    await adapterA.disconnect();
+
+    // Restart the SAME configured entry against tenant B: a different
+    // destination keys a different ledger FILE beneath the SAME entry directory
+    // (the directory is the per-entry connection lock, not per-destination), so
+    // A's pending claim is never loaded into B nor submitted under B's tenant
+    // header.
+    const planeB = fakeControlPlane('cp|tenant-b|chan-1');
+    const fakeB = fakeDeps();
+    const adapterB = adapterFor(cwd, planeB, fakeB);
+    await adapterB.connect();
+    expect(adapterB.stateFile).not.toBe(stateFileA);
+    expect(dirname(adapterB.stateFile)).toBe(dirname(stateFileA));
+    expect(pendingOf(adapterB)).toEqual([]);
+    await adapterB.tick();
+    expect(planeB.submit).toHaveLength(0);
+    await adapterB.disconnect();
+
+    // A's pending claim is still available to A on its own restart.
+    const planeA2 = fakeControlPlane('cp|tenant-a|chan-1');
+    const fakeA2 = fakeDeps();
+    const adapterA2 = adapterFor(cwd, planeA2, fakeA2);
+    await adapterA2.connect();
+    expect(adapterA2.stateFile).toBe(stateFileA);
+    expect(pendingOf(adapterA2)).toEqual(['dingtalk:m1']);
+    await adapterA2.disconnect();
+  });
+
+  it('a workspace change within one tenant never replays the prior owner pending', async () => {
+    const cwd = tempCwd();
+    const planeA = fakeControlPlane('cp|tenant-a|chan-1|actor|ws-a|.');
+    const fakeA = fakeDeps();
+    const adapterA = adapterFor(cwd, planeA, fakeA);
+    await adapterA.connect();
+    fakeA.push('m1', messageData({ msgId: 'm1' }));
+    expect(pendingOf(adapterA)).toEqual(['dingtalk:m1']);
+    const stateFileA = adapterA.stateFile;
+    await adapterA.disconnect();
+
+    // Same tenant/channel, different workspace: the ledger follows the owning
+    // workspace, so B loads nothing and submits nothing of A's.
+    const planeB = fakeControlPlane('cp|tenant-a|chan-1|actor|ws-b|.');
+    const fakeB = fakeDeps();
+    const adapterB = adapterFor(cwd, planeB, fakeB);
+    await adapterB.connect();
+    expect(adapterB.stateFile).not.toBe(stateFileA);
+    expect(dirname(adapterB.stateFile)).toBe(dirname(stateFileA));
+    expect(pendingOf(adapterB)).toEqual([]);
+    await adapterB.tick();
+    expect(planeB.submit).toHaveLength(0);
+    await adapterB.disconnect();
+  });
+
+  it('a second destination of the same robot app is refused the connection lock', async () => {
+    const cwd = tempCwd();
+    const locked = new Set<string>();
+    const lockFake: ManagedDingtalkAdapterDeps['lock'] = async (directory) => {
+      if (locked.has(directory)) throw new Error('ELOCKED');
+      locked.add(directory);
+      return async () => {
+        locked.delete(directory);
+      };
+    };
+    const planeA = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fakeA = fakeDeps();
+    const adapterA = adapterFor(cwd, planeA, fakeA, lockFake);
+    await adapterA.connect();
+    // Same robot app, different destination: the connection lock is per entry,
+    // so the second instance is refused before it can run concurrently and
+    // duplicate inbound processing.
+    const planeB = fakeControlPlane('cp|tenant-b|chan-1|actor|ws|.');
+    const fakeB = fakeDeps();
+    const adapterB = adapterFor(cwd, planeB, fakeB, lockFake);
+    await expect(adapterB.connect()).rejects.toThrow(
+      /owned by another process/,
+    );
+    await adapterA.disconnect();
   });
 });
