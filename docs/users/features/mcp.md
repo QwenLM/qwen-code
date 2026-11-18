@@ -47,6 +47,10 @@ Then enter:
    picks up `mcpServers` changes without a restart (hot reload). If the tools
    do not appear, restart Qwen Code in the same project.
 
+> [!note]
+>
+> **Hot reload vs. restart:** `mcpServers` edits in `settings.json` are picked up by a running interactive session without a restart; a server added to project settings waits for your approval before it connects. A restart is required for edits made during a `--bare` or `--safe-mode` session, which never pick up ambient servers mid-session, and for sessions running inside a shell-execution sandbox, where hot reload is disabled.
+
 ## Where configuration is stored (scopes)
 
 Most users only need these two scopes:
