@@ -82,7 +82,8 @@ ledger 很小（每个 prompt 约两条记录），且在准入和停机时已�
 
 - 该 prompt 没有终态记录：`interruption: 'in_flight'`。这是崩溃情形。
 - 终态为 `interrupted`：`interruption` 取记录的 `code`（如 `daemon_shutdown`、
-  `daemon_lost`、`channel_closed`），没有 `code` 时取 `interrupted`。
+  `daemon_lost`、`channel_closed`），`code` 不存在或不是不超过 64 个字符的小写标识符时
+  取 `interrupted`。
 - 终态为 `completed`、`cancelled` 或 `error`：不列出该会话。已完成或已取消的轮次
   不需要恢复，已报错的轮次已经发布了结果。
 
@@ -92,8 +93,8 @@ ledger 很小（每个 prompt 约两条记录），且在准入和停机时已�
 按时间倒序；超过时返回 `truncated: true`。
 
 扫描只报告 ledger 能证明的事实：最新 prompt 要么从未到达终态，要么到达了
-`interrupted` 终态。它不断言该会话可以继续。恢复类型和 `canContinue` 判定仍在加载后
-由已有分类器给出。
+`interrupted` 终态。时间戳无法形成 ISO 值的记录按不可读处理并省略。它不断言该会话
+可以继续。恢复类型和 `canContinue` 判定仍在加载后由已有分类器给出。
 
 ### 只读批量路由
 
@@ -156,7 +157,8 @@ ledger 很小（每个 prompt 约两条记录），且在准入和停机时已�
    相同的归属、信任和 generation 守卫，且不回退到主运行环境。standalone 会话不在
    范围内，会在冷加载时失败。
 3. 会话不在内存时，运行与 `POST /session/:id/load` 相同的冷恢复核心。不引入第二套
-   加载路径。
+   加载路径。恢复过程产生的临时客户端 attachment 在续接结算后（或被拒绝返回前）释放；
+   过早释放会让空闲关闭路径拆掉刚加载的会话。
 4. 通过与横幅相同的 bridge 状态路径读取恢复摘要。
 5. `canContinue` 为 false 时返回 `not_continuable` 和 `kind`。这包括
    `degraded_history` 以及仍在执行的会话。
@@ -200,12 +202,13 @@ ledger 很小（每个 prompt 约两条记录），且在准入和停机时已�
 ```
 
 `status` 取 `accepted`、`not_continuable`、`confirmation_required`、`rejected` 或
-`error`。`not_continuable` 携带 `already_moved`、`no_evidence` 或
-`virtual_subagent`；`confirmation_required` 携带 `cancellation_confirmation` 或
-`tool_turn`；`error` 携带 `workspace_not_found`、`untrusted_workspace`、
-`workspace_runtime_unavailable`、`session_not_found` 或 `continue_failed`。
+`error`。`not_continuable` 携带 `already_moved`、`no_evidence`、`virtual_subagent`
+或 `invalid_session_id`（id 不符合持久化会话文件形状）；`confirmation_required` 携带
+`cancellation_confirmation` 或 `tool_turn`；`error` 携带 `workspace_not_found`、
+`untrusted_workspace`、`workspace_runtime_unavailable`、`session_not_found` 或
+`continue_failed`。
 
-单个失败不阻断其余条目。不连接客户端，也不建立 SSE 订阅；轮次在普通 prompt 准入
+单个失败不阻断其余条目。不保留客户端连接，也不建立 SSE 订阅；轮次在普通 prompt 准入
 下运行，之后任何打开该会话的客户端都能读取其事件。
 
 ### Web Shell 界面

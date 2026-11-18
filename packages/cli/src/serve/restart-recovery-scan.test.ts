@@ -234,6 +234,63 @@ describe('scanRestartRecoveries', () => {
     ]);
   });
 
+  it('skips a record whose timestamp cannot become an ISO string', () => {
+    const root = makeScanRoot();
+    writeLedger(root, 'out-of-range', [inFlight('p1', Number.MAX_VALUE)]);
+
+    expect(
+      scanRestartRecoveries({
+        sessionService: root.sessionService,
+        sessionIds: ['out-of-range'],
+        sinceMs: WINDOW_START,
+      }).items,
+    ).toEqual([]);
+  });
+
+  it('falls back to `interrupted` for an oversized terminal code', () => {
+    const root = makeScanRoot();
+    writeLedger(root, 'long-code', [
+      inFlight('p1', NOW - 1000),
+      terminal('p1', NOW, 'interrupted', 'x'.repeat(65)),
+    ]);
+
+    expect(
+      scanRestartRecoveries({
+        sessionService: root.sessionService,
+        sessionIds: ['long-code'],
+        sinceMs: WINDOW_START,
+      }).items,
+    ).toEqual([
+      {
+        sessionId: 'long-code',
+        lastActivityAt: new Date(NOW).toISOString(),
+        interruption: 'interrupted',
+      },
+    ]);
+  });
+
+  it('falls back to `interrupted` for a code with control characters', () => {
+    const root = makeScanRoot();
+    writeLedger(root, 'bad-code', [
+      inFlight('p1', NOW - 1000),
+      terminal('p1', NOW, 'interrupted', 'bad\ncode'),
+    ]);
+
+    expect(
+      scanRestartRecoveries({
+        sessionService: root.sessionService,
+        sessionIds: ['bad-code'],
+        sinceMs: WINDOW_START,
+      }).items,
+    ).toEqual([
+      {
+        sessionId: 'bad-code',
+        lastActivityAt: new Date(NOW).toISOString(),
+        interruption: 'interrupted',
+      },
+    ]);
+  });
+
   it('drops an entry older than the window', () => {
     const root = makeScanRoot();
     writeLedger(root, 'old', [inFlight('p1', WINDOW_START - 1)]);

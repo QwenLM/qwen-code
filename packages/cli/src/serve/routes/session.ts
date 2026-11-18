@@ -881,6 +881,8 @@ export type ResolveSubagentSessionRuntime = (
   parentSessionId: string,
 ) => Promise<WorkspaceRuntime | undefined>;
 
+const SESSION_FILE_ID_PATTERN = /^[0-9a-fA-F-]{32,36}$/;
+
 /**
  * Bridge errors can cross module or process boundaries, where `instanceof`
  * alone is not reliable; the typed name and code survive that boundary.
@@ -11193,8 +11195,9 @@ export function registerSessionRoutes(
       }
       try {
         const sessionService = createWorkspaceRuntimeSessionService(runtime);
-        const sessionIds =
-          await sessionService.listAllProjectSessionIds('active');
+        const sessionIds = (
+          await sessionService.listAllProjectSessionIds('active')
+        ).filter((sessionId) => SESSION_FILE_ID_PATTERN.test(sessionId));
         const result = scanRestartRecoveries({
           sessionService,
           sessionIds,
@@ -11333,6 +11336,15 @@ export function registerSessionRoutes(
           code: 'virtual_subagent',
         };
       }
+      // The ledger path is derived from this value; reject anything that is
+      // not a persisted session id before touching the filesystem.
+      if (!SESSION_FILE_ID_PATTERN.test(requested.sessionId)) {
+        return {
+          ...base,
+          status: 'not_continuable',
+          code: 'invalid_session_id',
+        };
+      }
 
       try {
         const sessionService = createWorkspaceRuntimeSessionService(runtime);
@@ -11355,6 +11367,9 @@ export function registerSessionRoutes(
           if (!isSessionNotFoundError(error)) throw error;
         }
 
+        let restoreAttachment:
+          | { sessionId: string; clientId: string }
+          | undefined;
         if (!loaded) {
           const outcome = await restoreSessionCore({
             action: 'load',
@@ -11379,69 +11394,90 @@ export function registerSessionRoutes(
           if (outcome.kind === 'cancelled') {
             return { ...base, status: 'error', code: 'cancelled' };
           }
+          // The restore attaches a generated client id even when the caller
+          // supplied none. A batch owns no client, so the attachment is
+          // released after the continuation settles; detaching before it
+          // would let the idle-close path tear down the just-loaded session.
+          if (outcome.session.clientId !== undefined) {
+            restoreAttachment = {
+              sessionId: outcome.session.sessionId,
+              clientId: outcome.session.clientId,
+            };
+          }
         }
 
-        if (!isCurrent()) {
-          return {
-            ...base,
-            status: 'error',
-            code: 'workspace_runtime_unavailable',
-          };
-        }
+        try {
+          if (!isCurrent()) {
+            return {
+              ...base,
+              status: 'error',
+              code: 'workspace_runtime_unavailable',
+            };
+          }
 
-        const context = await runtime.bridge.getSessionContextStatus(
-          requested.sessionId,
-        );
-        const recovery = context.recovery;
-        if (!recovery || !recovery.canContinue) {
-          return {
-            ...base,
-            status: 'not_continuable',
-            ...(recovery ? { kind: recovery.kind } : {}),
-          };
-        }
-        if (recovery.cancellationConfirmationId) {
-          return {
-            ...base,
-            status: 'confirmation_required',
-            kind: recovery.kind,
-            code: 'cancellation_confirmation',
-          };
-        }
-        if (recovery.kind === 'interrupted_turn' && !confirmToolTurn) {
-          return {
-            ...base,
-            status: 'confirmation_required',
-            kind: recovery.kind,
-            code: 'tool_turn',
-          };
-        }
+          const context = await runtime.bridge.getSessionContextStatus(
+            requested.sessionId,
+          );
+          const recovery = context.recovery;
+          if (!recovery || !recovery.canContinue) {
+            return {
+              ...base,
+              status: 'not_continuable',
+              ...(recovery ? { kind: recovery.kind } : {}),
+            };
+          }
+          if (recovery.cancellationConfirmationId) {
+            return {
+              ...base,
+              status: 'confirmation_required',
+              kind: recovery.kind,
+              code: 'cancellation_confirmation',
+            };
+          }
+          if (recovery.kind === 'interrupted_turn' && !confirmToolTurn) {
+            return {
+              ...base,
+              status: 'confirmation_required',
+              kind: recovery.kind,
+              code: 'tool_turn',
+            };
+          }
 
-        const promptId = crypto.randomUUID();
-        const result = await runtime.bridge.continueSession(
-          requested.sessionId,
-          { promptId },
-        );
-        if (!result.accepted) {
+          const promptId = crypto.randomUUID();
+          const result = await runtime.bridge.continueSession(
+            requested.sessionId,
+            { promptId },
+          );
+          if (!result.accepted) {
+            return {
+              ...base,
+              status: 'rejected',
+              kind: recovery.kind,
+              interruption: result.interruption,
+            };
+          }
           return {
             ...base,
-            status: 'rejected',
+            status: 'accepted',
             kind: recovery.kind,
-            interruption: result.interruption,
+            promptId: result.promptId ?? promptId,
+            ...(result.lastEventId !== undefined
+              ? { lastEventId: result.lastEventId }
+              : {}),
+            ...(result.eventEpoch !== undefined
+              ? { eventEpoch: result.eventEpoch }
+              : {}),
           };
+        } finally {
+          if (restoreAttachment !== undefined) {
+            await runtime.bridge
+              .detachClient(
+                restoreAttachment.sessionId,
+                restoreAttachment.clientId,
+              )
+              .catch(() => {});
+          }
         }
-        return {
-          ...base,
-          status: 'accepted',
-          kind: recovery.kind,
-          promptId: result.promptId ?? promptId,
-          ...(result.lastEventId !== undefined
-            ? { lastEventId: result.lastEventId }
-            : {}),
-          ...(result.eventEpoch !== undefined
-            ? { eventEpoch: result.eventEpoch }
-            : {}),
-        };
       } catch (error) {
         if (isSessionNotFoundError(error)) {
           return { ...base, status: 'error', code: 'session_not_found' };

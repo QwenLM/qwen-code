@@ -13,6 +13,7 @@ import {
 import type { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 
 const LEDGER_TAIL_BYTES = 64 * 1024;
+const TERMINAL_CODE_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
 
 export const DEFAULT_RESTART_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const MAX_RESTART_RECOVERY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -72,12 +73,21 @@ export function readRestartRecoveryState(
   }
   const last = records[records.length - 1];
   if (last === undefined) return { kind: 'missing' };
+  // `at` is only checked for finiteness by the ledger reader; a value
+  // outside the Date range cannot produce an ISO timestamp.
+  if (!Number.isFinite(last.at) || Math.abs(last.at) > 8.64e15) {
+    return { kind: 'missing' };
+  }
   if (sinceMs !== undefined && last.at < sinceMs) return { kind: 'settled' };
   if (isPromptLedgerTerminalRecord(last)) {
     if (last.terminal !== 'interrupted') return { kind: 'settled' };
+    const code = last.code;
     return {
       kind: 'interrupted',
-      interruption: last.code ?? 'interrupted',
+      interruption:
+        typeof code === 'string' && TERMINAL_CODE_PATTERN.test(code)
+          ? code
+          : 'interrupted',
       lastActivityAt: new Date(last.at).toISOString(),
     };
   }

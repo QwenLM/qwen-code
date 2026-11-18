@@ -69,6 +69,7 @@ function makeFixture(trusted = true): Fixture {
       recovery: { kind: 'interrupted_prompt' as const, canContinue: true },
       state: {},
     })),
+    detachClient: vi.fn(async () => {}),
     continueSession: vi.fn(async () => ({
       accepted: true,
       interruption: 'interrupted_prompt' as const,
@@ -157,7 +158,7 @@ describe('POST /sessions/recovery/continue', () => {
     vi.clearAllMocks();
     restoreMocks.restoreSessionCore.mockResolvedValue({
       kind: 'restored',
-      session: { sessionId: 'restored' },
+      session: { sessionId: 'restored', clientId: 'batch-client' },
     });
   });
 
@@ -180,6 +181,15 @@ describe('POST /sessions/recovery/continue', () => {
       },
     ]);
     expect(restoreMocks.restoreSessionCore).toHaveBeenCalledOnce();
+    expect(fixture.bridge.detachClient).toHaveBeenCalledWith(
+      'restored',
+      'batch-client',
+    );
+    expect(
+      vi.mocked(fixture.bridge.detachClient).mock.invocationCallOrder[0]!,
+    ).toBeGreaterThan(
+      vi.mocked(fixture.bridge.continueSession).mock.invocationCallOrder[0]!,
+    );
     expect(fixture.bridge.continueSession).toHaveBeenCalledWith(
       fixture.sessionId,
       { promptId: expect.any(String) },
@@ -308,6 +318,24 @@ describe('POST /sessions/recovery/continue', () => {
     });
     expect(restoreMocks.restoreSessionCore).not.toHaveBeenCalled();
     expect(fixture.bridge.continueSession).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-persisted session id before reading a ledger', async () => {
+    const fixture = makeFixture();
+    const response = await request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send({
+        sessions: [
+          { workspace: fixture.runtime.workspaceId, sessionId: '../../escape' },
+        ],
+      });
+
+    expect(response.body.results[0]).toMatchObject({
+      status: 'not_continuable',
+      code: 'invalid_session_id',
+    });
+    expect(restoreMocks.restoreSessionCore).not.toHaveBeenCalled();
+    expect(fixture.bridge.getSessionSummary).not.toHaveBeenCalled();
   });
 
   it('does not load a session with no ledger evidence', async () => {

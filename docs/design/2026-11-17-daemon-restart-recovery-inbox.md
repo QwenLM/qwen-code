@@ -107,6 +107,7 @@ Reduce each ledger to the last record of its newest prompt:
 - No terminal record for that prompt: `interruption: 'in_flight'`. This is the
   crash case.
 - Terminal `interrupted`: `interruption` is the record's `code` when present
+  and shaped as a lowercase identifier of at most 64 characters
   (`daemon_shutdown`, `daemon_lost`, `channel_closed`, ...), otherwise
   `interrupted`.
 - Terminal `completed`, `cancelled`, or `error`: the session is not listed. A
@@ -121,9 +122,10 @@ entries older than the requested window. Keep at most 200 entries per
 workspace, newest first, and report `truncated: true` when more were present.
 
 The scan reports what the ledger proves: the newest prompt either never
-reached a terminal or reached an `interrupted` one. It does not claim that the
-session can be continued. The recovery kind and the `canContinue` decision
-still come from the existing classifier after a load.
+reached a terminal or reached an `interrupted` one. A record whose timestamp
+cannot form an ISO value is treated as unreadable and omitted. It does not
+claim that the session can be continued. The recovery kind and the
+`canContinue` decision still come from the existing classifier after a load.
 
 ### Read-only batch route
 
@@ -192,7 +194,10 @@ each entry:
    with no primary-runtime fallback. Standalone conversations are out of scope
    and fail at the cold load.
 3. If the session is not live, run the same cold restore core that
-   `POST /session/:id/load` uses. No second loading path is introduced.
+   `POST /session/:id/load` uses. No second loading path is introduced. The
+   restore's temporary client attachment is released after the continuation
+   settles (or before returning when it is rejected); releasing it first would
+   let the idle-close path tear down the just-loaded session.
 4. Read the recovery summary through the same bridge status path the banner
    uses.
 5. If `canContinue` is false, return `not_continuable` with `kind`. This
@@ -240,14 +245,16 @@ The result is per session:
 
 `status` is one of `accepted`, `not_continuable`, `confirmation_required`,
 `rejected`, or `error`. `not_continuable` carries `already_moved`,
-`no_evidence`, or `virtual_subagent`; `confirmation_required` carries
+`no_evidence`, `virtual_subagent`, or `invalid_session_id` (the id does not
+match the persisted session-file shape); `confirmation_required` carries
 `cancellation_confirmation` or `tool_turn`; `error` carries
 `workspace_not_found`, `untrusted_workspace`, `workspace_runtime_unavailable`,
 `session_not_found`, or `continue_failed`.
 
-One failure does not stop the remaining entries. No client is attached and no
-SSE subscription is created; the turn runs under normal prompt admission and
-its events are available to any client that opens the session later.
+One failure does not stop the remaining entries. No client remains attached
+and no SSE subscription is created; the turn runs under normal prompt
+admission and its events are available to any client that opens the session
+later.
 
 ### Web Shell surface
 
