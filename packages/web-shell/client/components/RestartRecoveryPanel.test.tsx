@@ -8,7 +8,10 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DaemonRestartRecoveryBatchResult } from '@qwen-code/sdk/daemon';
+import {
+  DaemonClient,
+  type DaemonRestartRecoveryBatchResult,
+} from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
 import { formatTimestamp } from './MessageTimestamp';
 import { RestartRecoveryPanel } from './RestartRecoveryPanel';
@@ -22,7 +25,11 @@ const client = {
 };
 
 function recoveryResult(
-  items: Array<{ sessionId: string; interruption: string }>,
+  items: Array<{
+    sessionId: string;
+    interruption: string;
+    lastActivityAt?: string;
+  }>,
 ): DaemonRestartRecoveryBatchResult {
   return {
     workspaces: [
@@ -33,7 +40,7 @@ function recoveryResult(
         v: 1,
         items: items.map((item) => ({
           sessionId: item.sessionId,
-          lastActivityAt: '2026-11-17T09:12:31.000Z',
+          lastActivityAt: item.lastActivityAt ?? '2026-11-17T09:12:31.000Z',
           interruption: item.interruption,
         })),
         truncated: false,
@@ -61,6 +68,10 @@ describe('RestartRecoveryPanel', () => {
 
   function render(
     options: {
+      client?: Pick<
+        DaemonClient,
+        'getRestartRecoveries' | 'continueRestartRecoveries'
+      >;
       available?: boolean;
       supported?: boolean;
       workspaceCwds?: string[];
@@ -68,6 +79,7 @@ describe('RestartRecoveryPanel', () => {
     } = {},
   ) {
     const {
+      client: panelClient = client,
       available = true,
       supported = true,
       workspaceCwds = ['/ws'],
@@ -77,7 +89,7 @@ describe('RestartRecoveryPanel', () => {
       root.render(
         <I18nProvider language={language}>
           <RestartRecoveryPanel
-            client={client}
+            client={panelClient}
             available={available}
             supported={supported}
             workspaceCwds={workspaceCwds}
@@ -143,22 +155,52 @@ describe('RestartRecoveryPanel', () => {
       formatTimestamp(Date.parse('2026-11-17T09:12:31.000Z')),
     );
 
-    expect(client.getRestartRecoveries).toHaveBeenCalledWith(
-      { workspaces: ['/ws'] },
-      { timeoutMs: 0 },
-    );
+    expect(client.getRestartRecoveries).toHaveBeenCalledWith({
+      workspaces: ['/ws'],
+    });
     act(() => buttonByText('Continue').click());
     await waitFor(() =>
-      expect(client.continueRestartRecoveries).toHaveBeenCalledWith(
-        { sessions: [{ workspace: '/ws', sessionId: SESSION_A }] },
-        { timeoutMs: 0 },
-      ),
+      expect(client.continueRestartRecoveries).toHaveBeenCalledWith({
+        sessions: [{ workspace: '/ws', sessionId: SESSION_A }],
+      }),
     );
     await waitFor(() =>
       expect(
         container.querySelector('[data-testid="restart-recovery-panel"]'),
       ).toBeNull(),
     );
+  });
+
+  it('shows the newest interrupted task first', async () => {
+    client.getRestartRecoveries.mockResolvedValue(
+      recoveryResult([
+        {
+          sessionId: SESSION_A,
+          interruption: 'daemon_shutdown',
+          lastActivityAt: '2026-11-16T09:12:31.000Z',
+        },
+        {
+          sessionId: SESSION_B,
+          interruption: 'in_flight',
+          lastActivityAt: '2026-11-17T10:12:31.000Z',
+        },
+      ]),
+    );
+    render();
+    await waitFor(() =>
+      expect(container.textContent).toContain(
+        '2 tasks interrupted by a restart',
+      ),
+    );
+    act(() => buttonByText('Review').click());
+
+    const order = [...container.querySelectorAll('li')].map((row) => {
+      const text = row.textContent;
+      if (text.includes(SESSION_A.slice(0, 8))) return 'a';
+      if (text.includes(SESSION_B.slice(0, 8))) return 'b';
+      return undefined;
+    });
+    expect(order).toEqual(['b', 'a']);
   });
 
   it('requires a second confirmation before continuing a tool turn', async () => {
@@ -204,14 +246,82 @@ describe('RestartRecoveryPanel', () => {
     );
     act(() => buttonByText('Confirm and continue').click());
     await waitFor(() =>
-      expect(client.continueRestartRecoveries).toHaveBeenLastCalledWith(
-        {
-          sessions: [{ workspace: '/ws', sessionId: SESSION_A }],
-          confirmToolTurn: true,
-        },
-        { timeoutMs: 0 },
-      ),
+      expect(client.continueRestartRecoveries).toHaveBeenLastCalledWith({
+        sessions: [{ workspace: '/ws', sessionId: SESSION_A }],
+        confirmToolTurn: true,
+      }),
     );
+  });
+
+  it('shows a batch-stop notice and re-enables continue at the derived deadline', async () => {
+    try {
+      const recoveryBody = recoveryResult([
+        { sessionId: SESSION_A, interruption: 'daemon_shutdown' },
+      ]);
+      let signal: AbortSignal | null | undefined;
+      let abortEvents = 0;
+      const deadlineClient = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith('/sessions/recovery')) {
+            return new Response(JSON.stringify(recoveryBody), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          signal = init?.signal;
+          return new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(
+              () =>
+                resolve(
+                  new Response('{"results":[]}', {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                  }),
+                ),
+              70_100,
+            );
+            signal?.addEventListener(
+              'abort',
+              () => {
+                abortEvents += 1;
+                clearTimeout(timer);
+                reject(signal?.reason);
+              },
+              { once: true },
+            );
+          });
+        },
+      });
+      render({ client: deadlineClient });
+      await waitFor(() =>
+        expect(container.textContent).toContain(
+          '1 task interrupted by a restart',
+        ),
+      );
+
+      act(() => buttonByText('Review').click());
+      vi.useFakeTimers();
+      const button = buttonByText('Continue');
+      act(() => button.click());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(signal).toBeDefined();
+      expect(button.disabled).toBe(true);
+      await vi.advanceTimersByTimeAsync(69_999);
+      expect(button.disabled).toBe(true);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+      });
+      expect(abortEvents).toBe(1);
+      expect(signal?.aborted).toBe(true);
+      expect(container.textContent).toContain(
+        'No reply from the daemon. Earlier sessions may already be running; check their state before retrying.',
+      );
+      expect(button.disabled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('continues all eligible rows in one batch', async () => {
@@ -248,15 +358,12 @@ describe('RestartRecoveryPanel', () => {
     act(() => buttonByText('Continue all').click());
 
     await waitFor(() =>
-      expect(client.continueRestartRecoveries).toHaveBeenCalledWith(
-        {
-          sessions: [
-            { workspace: '/ws', sessionId: SESSION_A },
-            { workspace: '/ws', sessionId: SESSION_B },
-          ],
-        },
-        { timeoutMs: 0 },
-      ),
+      expect(client.continueRestartRecoveries).toHaveBeenCalledWith({
+        sessions: [
+          { workspace: '/ws', sessionId: SESSION_A },
+          { workspace: '/ws', sessionId: SESSION_B },
+        ],
+      }),
     );
     await waitFor(() =>
       expect(
@@ -287,10 +394,9 @@ describe('RestartRecoveryPanel', () => {
     render({ workspaceCwds: ['/ws\nline'] });
 
     await waitFor(() =>
-      expect(client.getRestartRecoveries).toHaveBeenCalledWith(
-        { workspaces: ['/ws\nline'] },
-        { timeoutMs: 0 },
-      ),
+      expect(client.getRestartRecoveries).toHaveBeenCalledWith({
+        workspaces: ['/ws\nline'],
+      }),
     );
   });
 
@@ -481,18 +587,34 @@ describe('RestartRecoveryPanel', () => {
     ).toHaveLength(1);
   });
 
-  it('stops later chunks when one batch has no daemon reply', async () => {
-    const items = Array.from({ length: 11 }, (_, index) => ({
-      sessionId: `session-${index}`,
+  it('keeps accepted rows removed and stops after a later chunk is unanswered', async () => {
+    const items = Array.from({ length: 21 }, (_, index) => ({
+      sessionId: `${String(index).padStart(2, '0')}aaaaaa-aaaa-4111-8111-111111111111`,
       interruption: 'daemon_shutdown',
     }));
     client.getRestartRecoveries.mockResolvedValue(recoveryResult(items));
-    client.continueRestartRecoveries.mockRejectedValue(new Error('offline'));
+    let calls = 0;
+    client.continueRestartRecoveries.mockImplementation(
+      async (request: {
+        sessions: Array<{ workspace: string; sessionId: string }>;
+      }) => {
+        calls += 1;
+        if (calls === 2) throw new Error('offline');
+        return {
+          results: request.sessions.map((session) => ({
+            workspace: session.workspace,
+            sessionId: session.sessionId,
+            status: 'accepted' as const,
+            kind: 'interrupted_prompt' as const,
+          })),
+        };
+      },
+    );
     render();
 
     await waitFor(() =>
       expect(container.textContent).toContain(
-        '11 tasks interrupted by a restart',
+        '21 tasks interrupted by a restart',
       ),
     );
     act(() => buttonByText('Review').click());
@@ -503,7 +625,12 @@ describe('RestartRecoveryPanel', () => {
         'No reply from the daemon. Earlier sessions may already be running; check their state before retrying.',
       ),
     );
-    expect(client.continueRestartRecoveries).toHaveBeenCalledTimes(1);
+    expect(client.continueRestartRecoveries).toHaveBeenCalledTimes(2);
+    expect(container.querySelectorAll('li')).toHaveLength(11);
+    expect(container.textContent).not.toContain('00aaaaaa');
+    expect(container.textContent).not.toContain('09aaaaaa');
+    expect(container.textContent).toContain('10aaaaaa');
+    expect(container.textContent).toContain('20aaaaaa');
   });
 
   it('keeps a not-continuable notice across later continue-all chunks', async () => {

@@ -505,6 +505,52 @@ describe('DaemonClient', () => {
       }
     });
 
+    it('does not abort at one budget and times out only after two derived budgets', async () => {
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const fetch = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith('/capabilities')) {
+            return Promise.resolve(
+              jsonResponse(200, {
+                v: 1,
+                mode: 'http-bridge',
+                features: [],
+                modelServices: [],
+                limits: { sessionRestoreTimeoutMs: 60_000 },
+              }),
+            );
+          }
+          signal = init?.signal ?? undefined;
+          return new Promise<Response>((_resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(signal?.reason), {
+              once: true,
+            });
+          });
+        }) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.capabilities();
+
+        const outcome = client
+          .continueRestartRecoveries({
+            sessions: [
+              { workspace: 'workspace-a', sessionId: 'session-1' },
+              { workspace: 'workspace-a', sessionId: 'session-2' },
+            ],
+          })
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(99_999);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(40_000);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('preserves an explicit zero deadline over the derived member budget', async () => {
       vi.useFakeTimers();
       try {
@@ -556,6 +602,34 @@ describe('DaemonClient', () => {
           })
           .catch((error: unknown) => error);
         await vi.advanceTimersByTimeAsync(999);
+        expect(calls[0]?.signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('honors a per-call timeout independently of the member count', async () => {
+      vi.useFakeTimers();
+      try {
+        const { fetch, calls } = recordingFetch(({ signal }) => {
+          return new Promise<Response>((_resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(signal.reason), {
+              once: true,
+            });
+          });
+        });
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        const outcome = client
+          .getRestartRecoveries(
+            {
+              workspaces: Array.from({ length: 20 }, (_, i) => `ws-${i}`),
+            },
+            { timeoutMs: 5_000 },
+          )
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(4_999);
         expect(calls[0]?.signal?.aborted).toBe(false);
         await vi.advanceTimersByTimeAsync(1);
         expect(await outcome).toMatchObject({ name: 'TimeoutError' });

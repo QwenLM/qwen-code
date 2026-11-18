@@ -104,15 +104,12 @@ export function RestartRecoveryPanel({
           index < requestWorkspaces.length;
           index += WORKSPACE_BATCH_SIZE
         ) {
-          const result = await client.getRestartRecoveries(
-            {
-              workspaces: requestWorkspaces.slice(
-                index,
-                index + WORKSPACE_BATCH_SIZE,
-              ),
-            },
-            { timeoutMs: 0 },
-          );
+          const result = await client.getRestartRecoveries({
+            workspaces: requestWorkspaces.slice(
+              index,
+              index + WORKSPACE_BATCH_SIZE,
+            ),
+          });
           if (cancelled) return;
           for (const member of result.workspaces) {
             if (!('items' in member)) {
@@ -150,16 +147,13 @@ export function RestartRecoveryPanel({
       setBusy(true);
       if (options.clearNotice !== false) setNotice(null);
       try {
-        const result = await client.continueRestartRecoveries(
-          {
-            sessions: targets.map((row) => ({
-              workspace: row.workspace,
-              sessionId: row.sessionId,
-            })),
-            ...(confirmToolTurn ? { confirmToolTurn: true } : {}),
-          },
-          { timeoutMs: 0 },
-        );
+        const result = await client.continueRestartRecoveries({
+          sessions: targets.map((row) => ({
+            workspace: row.workspace,
+            sessionId: row.sessionId,
+          })),
+          ...(confirmToolTurn ? { confirmToolTurn: true } : {}),
+        });
         const notContinuable = result.results.find(
           (entry) => entry.status === 'not_continuable',
         );

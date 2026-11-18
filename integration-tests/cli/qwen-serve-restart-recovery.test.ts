@@ -280,7 +280,7 @@ async function startDaemon(
     const cleanup = () => {
       clearTimeout(timer);
       child.stdout?.off('data', onData);
-      child.off('exit', onExit);
+      child.off('close', onClose);
     };
     const fail = (message: string) => {
       if (settled) return;
@@ -303,11 +303,11 @@ async function startDaemon(
       cleanup();
       resolve(`http://127.0.0.1:${match[1]}`);
     };
-    const onExit = (code: number | null) => {
+    const onClose = (code: number | null) => {
       fail(`daemon exited before listening with ${code}`);
     };
     child.stdout?.on('data', onData);
-    child.once('exit', onExit);
+    child.once('close', onClose);
   });
   return running;
 }
