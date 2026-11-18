@@ -239,6 +239,9 @@ export function WorkspaceBindingCreator({
   creationSkills,
   handoff,
   onOpenHandoffSource,
+  unconfirmed,
+  onUnconfirmedRetry,
+  onUnconfirmedDiscard,
   renderWelcomeHeader,
   renderWelcomeFooter,
   renderComposerFooter,
@@ -261,6 +264,15 @@ export function WorkspaceBindingCreator({
   creationSkills?: ManagedCreationSkillsSource;
   handoff?: import('./managed-recovery-handoff').ManagedRecoveryHandoff;
   onOpenHandoffSource?: () => void;
+  /**
+   * The page's unconfirmed new-task prompt. This surface replaces the
+   * transcript, so the notice and both actions have to live here — and its
+   * editor is the only place the draft can be handed back to.
+   */
+  unconfirmed?: { text: string; input?: readonly ManagedInputBlock[] };
+  onUnconfirmedRetry?: () => void;
+  /** Resolves false when the durable record could not be cleared. */
+  onUnconfirmedDiscard?: () => Promise<boolean>;
   /**
    * Host welcome renderer for the creation surface, passed through from the
    * managed page so the first screen a user reaches does not keep the built-in
@@ -1374,6 +1386,35 @@ export function WorkspaceBindingCreator({
     <div
       className={`${directInput ? shellStyles.appChatEmpty : ''} flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-2`}
     >
+      {unconfirmed && (
+        <div className="space-y-2 text-sm" data-managed-unconfirmed>
+          <p role="alert" className="text-destructive">
+            {t('managed.uncertain')}
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {onUnconfirmedRetry && (
+              <Button disabled={busy} onClick={onUnconfirmedRetry}>
+                {t('managed.retry')}
+              </Button>
+            )}
+            {onUnconfirmedDiscard && (
+              <Button
+                variant="ghost"
+                disabled={busy}
+                onClick={async () => {
+                  if (!(await onUnconfirmedDiscard())) return;
+                  // This surface owns the only editor that can take the draft
+                  // back; the page's composer is not mounted here.
+                  editor.current?.setText(unconfirmed.text);
+                  restoreManagedAttachments(editor.current, unconfirmed.input);
+                }}
+              >
+                {t('managed.discard')}
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
       {handoff && (
         <div className="space-y-2 rounded-md border p-3 text-sm" role="status">
           <p>{recoveryText('managed.recovery.handoffNotice')}</p>

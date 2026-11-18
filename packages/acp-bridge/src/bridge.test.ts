@@ -114,6 +114,7 @@ import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
+  DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY,
   DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
   DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
@@ -7130,6 +7131,7 @@ describe('createAcpSessionBridge', () => {
       sessionId: 'persisted-1',
       workspaceCwd: WS_A,
       suppressWorktreeContextRestore: true,
+      deferAutomaticWorkUntilCwdRestore: true,
     });
 
     expect(loaded).toEqual({
@@ -7150,6 +7152,7 @@ describe('createAcpSessionBridge', () => {
       {
         _meta: {
           [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+          [DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY]: true,
         },
         sessionId: 'persisted-1',
         cwd: WS_A,
@@ -12261,6 +12264,7 @@ describe('createAcpSessionBridge', () => {
       sessionId: 'persisted-2',
       workspaceCwd: WS_A,
       suppressWorktreeContextRestore: true,
+      deferAutomaticWorkUntilCwdRestore: true,
     });
 
     expect(resumed).toEqual({
@@ -12279,6 +12283,7 @@ describe('createAcpSessionBridge', () => {
       {
         _meta: {
           [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+          [DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY]: true,
         },
         sessionId: 'persisted-2',
         cwd: WS_A,

@@ -196,6 +196,7 @@ import {
   collectBoundSessionIds,
   startScheduledTaskKeepalive,
   rehydrateScheduledTaskSessions,
+  type KeepaliveSessionResumeRequest,
 } from './scheduled-task-keepalive.js';
 import {
   registerWorkspaceDiagnosticStatusRoutes,
@@ -290,6 +291,7 @@ import {
   deleteDaemonSessionIfOrphan,
   SessionArchiveCoordinator,
 } from './server/session-archive.js';
+import { restoreSessionCore } from './server/session-restore.js';
 import {
   installSelfOriginStripMiddleware,
   installRemoteSelfOriginMiddleware,
@@ -4060,6 +4062,44 @@ export function createServeApp(
   // embeds that call createServeApp neither spawn sessions on boot nor hold a
   // heartbeat timer (both would read the bound workspace's real tasks file).
   if (deps.manageScheduledTaskSessions) {
+    const restoreScheduledSession = async (
+      runtime: WorkspaceRuntime,
+      request: KeepaliveSessionResumeRequest,
+    ) => {
+      const generation = workspaceRegistry.getManagedEntryByWorkspaceId(
+        runtime.workspaceId,
+      )?.current;
+      if (generation?.runtime !== runtime) {
+        throw new WorkspaceGenerationClosedError();
+      }
+      const assertOpen = () => generation.guard.assertOpen();
+      assertOpen();
+      const result = await restoreSessionCore({
+        action: 'resume',
+        runtime,
+        workspaceCwd: runtime.workspaceCwd,
+        sessionId: request.sessionId,
+        archiveCoordinator,
+        requestedSessionIdAdmission,
+        assertRuntimeGenerationOpen: assertOpen,
+        daemonLog,
+        materializeLiveConversationDirectory: undefined,
+        historyPageSize: undefined,
+        liveReplayMode: undefined,
+        compactedReplayMode: undefined,
+        clientId: undefined,
+        approvalMode: undefined,
+        restoreSource: {
+          sourceType: request.sourceType,
+          sourceId: request.sourceId,
+        },
+        isCancelled: () => runtimeStopsClosing,
+      });
+      if (result.kind !== 'restored') {
+        throw new Error('Scheduled session restore was cancelled');
+      }
+      return result.session;
+    };
     const registerScheduledTaskAuthorizations = (
       workspaceCwd: string,
       tasks: readonly DurableCronTask[],
@@ -4098,6 +4138,8 @@ export function createServeApp(
       void runWithWorkspaceRuntimeStorage(runtime, () =>
         rehydrateScheduledTaskSessions({
           bridge: runtime.bridge,
+          restoreSession: (request) =>
+            restoreScheduledSession(runtime, request),
           boundWorkspace: runtime.workspaceCwd,
           loadTimeoutMs: scheduledTaskRestoreTimeoutMs,
           onTasksRead: (tasks) =>
@@ -4139,6 +4181,7 @@ export function createServeApp(
       if (keepaliveStops.has(runtime.workspaceCwd)) return;
       const keepalive = startScheduledTaskKeepalive({
         bridge: runtime.bridge,
+        restoreSession: (request) => restoreScheduledSession(runtime, request),
         boundWorkspace: runtime.workspaceCwd,
         intervalMs: keepaliveIntervalMs,
         reviveTimeoutMs: scheduledTaskRestoreTimeoutMs,
