@@ -88,6 +88,7 @@ class Query:
             asyncio.Queue()
         )
         self._closed = False
+        self._close_reason: Exception | None = None
         self._started = False
         self._start_lock = asyncio.Lock()
         self._cancel_event = asyncio.Event()
@@ -105,13 +106,13 @@ class Query:
 
     async def _ensure_started(self) -> None:
         if self._closed:
-            raise RuntimeError("Query is closed")
+            raise self._close_reason or RuntimeError("Query is closed")
         if self._started:
             return
 
         async with self._start_lock:
             if self._closed:
-                raise RuntimeError("Query is closed")
+                raise self._close_reason or RuntimeError("Query is closed")
             if self._started:
                 return
             await self._transport.start()
@@ -146,6 +147,8 @@ class Query:
         try:
             assert isinstance(self._prompt, str)
             await self._wait_initialized()
+            if self.is_closed():
+                return
             message: SDKUserMessage = {
                 "type": "user",
                 "session_id": self._session_id,
@@ -385,13 +388,13 @@ class Query:
         subtype: str,
         data: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        if self._closed:
-            raise RuntimeError("Query is closed")
+        if self.is_closed():
+            raise self._close_reason or RuntimeError("Query is closed")
 
         if subtype != "initialize":
             await self._wait_initialized()
-            if self._closed:
-                raise RuntimeError("Query is closed")
+            if self.is_closed():
+                raise self._close_reason or RuntimeError("Query is closed")
 
         request_id = str(uuid4())
 
@@ -557,7 +560,7 @@ class Query:
         return self._session_id
 
     def is_closed(self) -> bool:
-        return self._closed
+        return self._closed or self._terminal_event_sent
 
     def _fail_pending_control_requests(self, error: Exception) -> None:
         for request_id, pending in list(self._pending_control_requests.items()):
@@ -612,13 +615,17 @@ class Query:
     async def _finish(self) -> None:
         if self._terminal_event_sent:
             return
+        # Keep queued messages readable and leave input-task cleanup to close().
         self._terminal_event_sent = True
+        self._cancel_event.set()
+        self._fail_pending_control_requests(RuntimeError("Query is closed"))
         await self._message_queue.put(_DONE)
 
     async def _finish_with_error(self, exc: Exception) -> None:
         if self._terminal_event_sent:
             return
         self._closed = True
+        self._close_reason = exc
         self._terminal_event_sent = True
         self._cancel_event.set()
         self._fail_pending_control_requests(exc)
