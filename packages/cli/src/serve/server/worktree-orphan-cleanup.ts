@@ -14,6 +14,7 @@ import {
   readWorktreeSessionMarkerStrict,
   readWorktreeSessionStrict,
   worktreeBranchForSlug,
+  worktreeHasPopulatedGitlink,
   worktreeHasWork,
   type SessionService,
   type WorktreeSession,
@@ -65,7 +66,9 @@ function logWarning(message: string): void {
 }
 
 function logInfo(message: string): void {
-  writeStderrLine(`qwen serve: ${message}`);
+  // An explicit level marker so a successful capture is distinguishable from
+  // the preserve/failure warnings on the same stderr channel (F4-1).
+  writeStderrLine(`qwen serve: level=info ${message}`);
 }
 
 export function logWorktreeCleanupPreserve(
@@ -85,10 +88,13 @@ export function logWorktreeCleanupSnapshot(
 ): void {
   // A successful capture is normal operation, not an alert: keep it out of
   // the warning channel so log scanners do not treat it as a preserve/failure.
+  // The archive path is the only durable pointer until U5 lands, so it must be
+  // a usable full path — do NOT run it through safeLogValue's 82-char budget
+  // (R4-4). It is daemon-generated; JSON.stringify still escapes control chars.
   logInfo(
     `worktree cleanup snapshotted checkout action=delete session=${safeLogValue(
       sessionId,
-    )} snapshot=${safeLogValue(snapshotPath)}`,
+    )} snapshot=${JSON.stringify(snapshotPath)}`,
   );
 }
 
@@ -451,6 +457,14 @@ export async function executeWorktreeCleanup(
   const marker = await readWorktreeSessionMarkerStrict(plan.lockKey);
   if (marker.state !== 'valid' || marker.sessionId !== sessionId) {
     logWorktreeCleanupPreserve(sessionId, 'marker changed after delete');
+    return;
+  }
+  // An initialized submodule holds its own object database (possibly unpushed
+  // commits) that neither the worktree tar nor the removal preserves, so the
+  // checkout must be kept whole — before either the snapshot or the clean
+  // deletion path (P1 submodule).
+  if (await worktreeHasPopulatedGitlink(plan.lockKey)) {
+    logWorktreeCleanupPreserve(sessionId, 'initialized submodule present');
     return;
   }
   // Exempt the recorded carried overlay only while its content still matches

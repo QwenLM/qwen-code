@@ -272,17 +272,19 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     ).toBe(false);
   });
 
-  it('snapshots a no-carry checkout whose edit is hidden under assume-unchanged (F6 default path)', async () => {
+  it('preserves a no-carry checkout whose edit is hidden under assume-unchanged (F6 default path)', async () => {
     const plan = await planFor('hidden-nocarry');
     // A tracked file edited under a hidden index bit: git status omits it, so
-    // the base predicate (no carriedEntries) must still refuse via ls-files -v
-    // rather than read clean and delete the work bare.
+    // the base predicate (no carriedEntries) refuses via ls-files -v rather
+    // than read clean and delete bare. The hidden version also cannot be
+    // faithfully snapshotted, so the capture refuses and the checkout is kept.
     fs.writeFileSync(path.join(plan.lockKey, '.gitignore'), 'hidden-edit\n');
     git(plan.lockKey, 'update-index', '--assume-unchanged', '.gitignore');
 
     await executeWorktreeCleanup(plan);
 
-    expect(fs.existsSync(plan.lockKey)).toBe(false);
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(fs.existsSync(path.join(plan.lockKey, '.gitignore'))).toBe(true);
     expect(
       fs.existsSync(
         path.join(
@@ -290,7 +292,7 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
           'session-hidden-nocarry.worktree-snapshot.tar.gz',
         ),
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it('snapshots a session edit to a carried path instead of deleting it bare (F1)', async () => {
@@ -333,6 +335,41 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     expect(
       fs.existsSync(
         path.join(repoParent, 'session-mm-preserve.worktree-snapshot.tar.gz'),
+      ),
+    ).toBe(false);
+  });
+
+  it('preserves a checkout with an initialized submodule (P1)', async () => {
+    const plan = await planFor('submodule-preserve');
+    // A populated gitlink models an initialized submodule whose object database
+    // can hold unpushed commits; neither the tar nor the removal preserves it,
+    // so the whole checkout must be kept (no snapshot, no deletion).
+    const subSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    }).trim();
+    git(
+      plan.lockKey,
+      'update-index',
+      '--add',
+      '--cacheinfo',
+      `160000,${subSha},lib`,
+    );
+    fs.mkdirSync(path.join(plan.lockKey, 'lib'));
+    fs.writeFileSync(path.join(plan.lockKey, 'lib', 'file.txt'), 'sub work\n');
+
+    await executeWorktreeCleanup(plan);
+
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(fs.existsSync(path.join(plan.lockKey, 'lib', 'file.txt'))).toBe(
+      true,
+    );
+    expect(
+      fs.existsSync(
+        path.join(
+          repoParent,
+          'session-submodule-preserve.worktree-snapshot.tar.gz',
+        ),
       ),
     ).toBe(false);
   });

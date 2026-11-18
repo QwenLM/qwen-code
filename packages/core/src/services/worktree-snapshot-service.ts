@@ -22,6 +22,7 @@ import * as path from 'node:path';
 import * as tar from 'tar';
 import {
   WORKTREE_SESSION_FILE,
+  hasHiddenIndexBit,
   isDisposableIgnoredEntry,
 } from './gitWorktreeService.js';
 import { runGit } from '../utils/git-branches.js';
@@ -77,6 +78,30 @@ function isSafeRelativePath(p: string): boolean {
 }
 
 /**
+ * Strip leading `./` segments so a protected-path comparison cannot be
+ * bypassed by `./.git` or `././.git` (F4-0). `path.resolve` would normalize
+ * these to the same target, but the lexical `.git` / marker prefix checks
+ * below run on the raw string, so normalize first.
+ */
+function normalizeRel(p: string): string {
+  let n = p;
+  while (n.startsWith('./')) n = n.slice(2);
+  return n;
+}
+
+/**
+ * Whether a normalized repo-relative path names a protected target the
+ * restore must never remove: the worktree's `.git` or the session marker.
+ */
+function isProtectedRel(norm: string): boolean {
+  return (
+    norm === '.git' ||
+    norm.startsWith('.git/') ||
+    norm === WORKTREE_SESSION_FILE
+  );
+}
+
+/**
  * The ignored disposable output the has-work gate waives, split into collapsed
  * directory entries (trailing slash) and individual ignored files. Built from
  * a directory-collapsed `git ls-files --others --ignored --exclude-standard
@@ -118,6 +143,10 @@ async function atomicWriteFile(
   const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
   try {
     await write(tmp);
+    // The archive can hold private work (e.g. a 0600 ignored file); keep it
+    // owner-only from the first write through the rename, independent of the
+    // process umask (P2). No-op on Windows.
+    await fs.chmod(tmp, 0o600).catch(() => {});
     await fs.rename(tmp, target);
   } catch (error) {
     await fs.rm(tmp, { force: true }).catch(() => {});
@@ -145,12 +174,34 @@ export async function buildWorktreeSnapshotMeta(
   },
 ): Promise<Omit<WorktreeSnapshotMeta, 'version' | 'createdAt'>> {
   await fs.access(path.join(worktreePath, '.git'));
+  // A hidden index bit (assume-unchanged / skip-worktree) hides a second file
+  // version — a staged draft or a tracked deletion — from `git status`, so the
+  // worktree tar + status-derived header cannot represent it faithfully and a
+  // restore would lose it (P1). Refuse the capture; the caller preserves the
+  // checkout. Full index-state capture is part of the restore affordance (U5).
+  if (await hasHiddenIndexBit(worktreePath)) {
+    throw new Error(
+      'Worktree snapshot meta: an index flag hides a file version; the capture cannot be faithful',
+    );
+  }
   const headCommit = (
     await runGit(worktreePath, [
       ...NO_EXEC_CONFIG,
       '--no-optional-locks',
       'rev-parse',
       'HEAD',
+    ])
+  ).trim();
+  // Read the branch actually checked out now, not the sidecar's creation-time
+  // branch: a session may `git switch -c` after a detached creation, and a
+  // restore must recreate that branch, not a detached checkout (P2). Empty for
+  // a detached HEAD.
+  const branch = (
+    await runGit(worktreePath, [
+      ...NO_EXEC_CONFIG,
+      '--no-optional-locks',
+      'branch',
+      '--show-current',
     ])
   ).trim();
   const status = await runGit(worktreePath, [
@@ -210,7 +261,12 @@ export async function buildWorktreeSnapshotMeta(
       'Worktree snapshot meta: a deleted path is not valid UTF-8; cannot restore it faithfully',
     );
   }
-  return { ...info, headCommit, dirty: { tracked, untracked, deleted } };
+  return {
+    ...info,
+    branch,
+    headCommit,
+    dirty: { tracked, untracked, deleted },
+  };
 }
 
 /**
@@ -321,7 +377,12 @@ export async function readWorktreeSnapshotMeta(
     typeof d['tracked'] !== 'number' ||
     typeof d['untracked'] !== 'number' ||
     !Array.isArray(d['deleted']) ||
-    !d['deleted'].every((p) => typeof p === 'string' && isSafeRelativePath(p))
+    !d['deleted'].every(
+      (p) =>
+        typeof p === 'string' &&
+        isSafeRelativePath(normalizeRel(p)) &&
+        !isProtectedRel(normalizeRel(p)),
+    )
   ) {
     throw new Error(`Worktree snapshot meta at ${metaPath} is malformed`);
   }
@@ -363,22 +424,19 @@ export async function restoreWorktreeSnapshot(
   await tar.t({
     file: snapshotPath,
     onReadEntry: (entry) => {
-      const norm = entry.path.replace(/^\.\//, '').replace(/\/$/, '');
+      const norm = normalizeRel(entry.path).replace(/\/$/, '');
       if (norm.length > 0) archived.set(norm, entry.type);
     },
   });
   const confine = (rel: string): string => {
-    if (!isSafeRelativePath(rel)) {
+    const norm = normalizeRel(rel);
+    if (!isSafeRelativePath(norm)) {
       throw new Error(`Unsafe path in snapshot meta: ${rel}`);
     }
-    if (
-      rel === '.git' ||
-      rel.startsWith('.git/') ||
-      rel === WORKTREE_SESSION_FILE
-    ) {
+    if (isProtectedRel(norm)) {
       throw new Error(`Snapshot meta names a protected path: ${rel}`);
     }
-    const target = path.resolve(root, rel);
+    const target = path.resolve(root, norm);
     if (target !== root && !target.startsWith(root + path.sep)) {
       throw new Error(`Snapshot path escapes worktree root: ${rel}`);
     }
@@ -413,7 +471,7 @@ export async function restoreWorktreeSnapshot(
   }
   for (const rel of meta.dirty.deleted) {
     const target = confine(rel);
-    const norm = rel.replace(/^\.\//, '').replace(/\/$/, '');
+    const norm = normalizeRel(rel).replace(/\/$/, '');
     if (archived.has(norm)) continue;
     const stat = await fs.lstat(target).catch(() => null);
     if (stat?.isDirectory()) continue;

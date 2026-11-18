@@ -113,7 +113,9 @@ sparse-checkout 从不设置）恒拒绝；skip-worktree（`S`）仅在 `core.sp
   untracked 文件的进一步未暂存编辑、仅模式变更，各读作工作（F1 单元）。
 - 原始搬运删除读作干净；恢复或暂存它读作工作。
 - 隐藏在 assume-unchanged 或 skip-worktree 下的会话编辑读作工作。
-- 含任何非搬运工作（迟到的 ignored 文件、搬运文件之外填充的目录）的 checkout 仍被保留。
+- 含任何非搬运工作（迟到的 ignored 文件、搬运文件之外填充的目录）的 checkout 读作工作，
+  被先快照再删除（P6 U3）——绝不裸删。快照无法忠实表示的状态（暂存内容与工作树不同、
+  隐藏索引位、已初始化子模块）拒绝捕获并改为保留 checkout。
 - 无该字段的 sidecar 行为与今日完全一致（向后兼容）。
 - 类型错误的 `carriedEntries` 使 sidecar 判为损坏（形状校验）。
 - 变异见证：去掉回收器的 `carriedEntries` 参数、把豁免放宽为前缀匹配、去掉内容身份比较，
@@ -123,6 +125,6 @@ sparse-checkout 从不设置）恒拒绝；skip-worktree（`S`）仅在 `core.sp
 
 - P6 保留清扫（U4）与重开恢复（U5），设计 D7：按数量的 `worktree.maxRetained`
   清扫与读回快照的入口。删除前快照（U3）**已在本 PR 落地**（D4）；清扫与恢复读取方
-  是 P6 剩余单元。U5 落地前，归档按 `sessionId` 键存于 chats 目录并在清理日志中点名；
-  U4 落地前，无清理方修剪它。
+  是 P6 剩余单元。U5 落地前，归档按 `sessionId` 键存于 sidecar 旁（chats 目录，归档会话
+  为其 `archive/` 子目录）并在清理日志中点名；U4 落地前，无清理方修剪它。
 - P7 可配置 worktree 根（`worktree.root`）。

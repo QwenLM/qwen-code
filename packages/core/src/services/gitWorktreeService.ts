@@ -204,9 +204,14 @@ export async function computeCarriedIdentities(
   const BATCH = 200;
   for (let i = 0; i < present.length; i += BATCH) {
     const batch = present.slice(i, i + BATCH);
+    // --no-filters hashes the raw on-disk bytes. A path's clean filter (eol /
+    // text / a custom clean command) can normalize an edit away, so hashing
+    // filtered content would read a changed carried file as pristine and let
+    // the reaper delete the session's new bytes without a snapshot (R4-1).
     const out = await runGit(worktreePath, [
       ...NO_EXEC_CONFIG,
       'hash-object',
+      '--no-filters',
       '--',
       ...batch.map((e) => e.path),
     ]);
@@ -240,16 +245,21 @@ export async function computeCarriedIdentities(
  * upward discovery) and is fail-closed: any read error or stderr output
  * counts as hidden.
  */
-async function hasHiddenIndexBit(worktreePath: string): Promise<boolean> {
+export async function hasHiddenIndexBit(
+  worktreePath: string,
+): Promise<boolean> {
   try {
     await fs.access(path.join(worktreePath, '.git'));
-    const { stdout, stderr } = await runGitCapture(worktreePath, [
-      ...NO_EXEC_CONFIG,
-      '--no-optional-locks',
-      'ls-files',
-      '-v',
-      '-z',
-    ]);
+    // The listing's size follows the repository (~64 B/tracked path), not the
+    // question; give it a much larger buffer than the default so a large index
+    // does not overflow into the fail-closed "has work" answer (R3-2). A truly
+    // enormous index still fails closed (preserve), never deletes bare.
+    const { stdout, stderr } = await runGitCapture(
+      worktreePath,
+      [...NO_EXEC_CONFIG, '--no-optional-locks', 'ls-files', '-v', '-z'],
+      undefined,
+      64 * 1024 * 1024,
+    );
     if (stderr.trim().length > 0) {
       debugLogger.debug(
         `worktreeHasWork: ls-files -v probe at ${worktreePath} reported on stderr, treating as work: ${stderr.trim()}`,
@@ -278,6 +288,62 @@ async function hasHiddenIndexBit(worktreePath: string): Promise<boolean> {
   } catch (error) {
     debugLogger.debug(
       `worktreeHasWork: ls-files -v probe at ${worktreePath} failed, treating as work: ${error}`,
+    );
+    return true;
+  }
+}
+
+/**
+ * Whether the worktree's index holds a populated gitlink (an initialized
+ * submodule). A submodule has its own object database, which can hold unpushed
+ * commits that live nowhere else; removing the checkout (or archiving only its
+ * working files) would discard them, and `submodule.<name>.ignore=dirty` can
+ * hide the dirt from `git status`. A destructive sink must therefore preserve
+ * such a checkout. Fail-closed: a read error counts as populated.
+ */
+export async function worktreeHasPopulatedGitlink(
+  worktreePath: string,
+): Promise<boolean> {
+  try {
+    await fs.access(path.join(worktreePath, '.git'));
+    const { stdout, stderr } = await runGitCapture(worktreePath, [
+      ...NO_EXEC_CONFIG,
+      '--no-optional-locks',
+      'ls-files',
+      '--stage',
+      '-z',
+    ]);
+    if (stderr.trim().length > 0) return true;
+    for (const entry of stdout.split('\0')) {
+      if (!entry.startsWith('160000 ')) continue;
+      const separator = entry.indexOf('\t');
+      if (separator < 0) return true;
+      const gitlinkPath = path.resolve(
+        worktreePath,
+        entry.slice(separator + 1),
+      );
+      if (
+        gitlinkPath === worktreePath ||
+        !gitlinkPath.startsWith(`${worktreePath}${path.sep}`)
+      ) {
+        return true;
+      }
+      const populated = await fs
+        .lstat(gitlinkPath)
+        .then(async (stat) => {
+          if (!stat.isDirectory()) return true;
+          return (await fs.readdir(gitlinkPath)).length > 0;
+        })
+        .catch((error: NodeJS.ErrnoException) => {
+          if (error.code === 'ENOENT') return false;
+          throw error;
+        });
+      if (populated) return true;
+    }
+    return false;
+  } catch (error) {
+    debugLogger.debug(
+      `worktreeHasPopulatedGitlink: probe at ${worktreePath} failed, treating as populated: ${error}`,
     );
     return true;
   }
@@ -330,6 +396,11 @@ export async function worktreeHasWork(
   // either probe — carried or not — mirroring the prepared-worktree gate's
   // `ls-files -v` check. Fail-closed: a probe error counts as work.
   if (await hasHiddenIndexBit(worktreePath)) return true;
+  // An initialized submodule holds its own object database (possibly unpushed
+  // commits) that neither the worktree tar nor `git worktree remove` preserves,
+  // and submodule.<name>.ignore=dirty can hide its dirt from status. Count it
+  // as work so no destructive sink collects the checkout (P1 submodule).
+  if (await worktreeHasPopulatedGitlink(worktreePath)) return true;
   // With a recorded carried overlay, exempt exactly those paths whose
   // current state still matches the carry-time identity, so a checkout
   // whose only content is the pristine carried copy reads clean (R9-6).

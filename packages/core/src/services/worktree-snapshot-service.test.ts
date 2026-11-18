@@ -406,13 +406,25 @@ describe('worktreeSnapshotService (P6 U1)', () => {
 
   it.skipIf(process.platform === 'win32')(
     'refuses capture when a deleted path is not valid UTF-8',
-    async () => {
+    async (ctx) => {
       const badName = Buffer.from('bad-\xff.txt', 'latin1');
       const badPath = Buffer.concat([
         Buffer.from(`${worktree}${path.sep}`),
         badName,
       ]);
-      await fs.writeFile(badPath, 'x\n');
+      // Some filesystems (e.g. APFS) reject non-UTF-8 names with EILSEQ before
+      // the snapshot code runs; that is an unsupported fixture, not a failure
+      // of the guard. Skip there, keep the rejection assertion where the
+      // fixture can be created (P2 macOS).
+      try {
+        await fs.writeFile(badPath, 'x\n');
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'EILSEQ' || code === 'EINVAL' || code === 'ENOTSUP') {
+          ctx.skip();
+        }
+        throw error;
+      }
       git(worktree, 'add', '-A');
       git(worktree, 'commit', '-qm', 'bad name', '--no-verify');
       await fs.rm(badPath);
@@ -546,6 +558,128 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     await expect(
       fs.readFile(path.join(outside, 'victim.txt'), 'utf8'),
     ).resolves.toBe('PRECIOUS\n');
+  });
+
+  it('refuses ./-prefixed protected deletion paths (F4-0)', async () => {
+    const m = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-dotgit',
+      slug: 'dotgit',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      branch: 'main',
+    });
+    const { snapshotPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: m,
+    });
+    const restored = path.join(root, 'restored-dotgit');
+    git(worktree, 'worktree', 'add', '--detach', restored, 'HEAD');
+    for (const bad of ['./.git/config', '././.git/config', './.git']) {
+      const meta = {
+        ...m,
+        version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+        createdAt: Date.now(),
+        dirty: { tracked: 0, untracked: 0, deleted: [bad] },
+      };
+      await expect(
+        restoreWorktreeSnapshot(snapshotPath, restored, meta),
+      ).rejects.toThrow(/protected/);
+    }
+    // The worktree's .git link survives (no deletion detached the checkout).
+    await expect(
+      fs.access(path.join(restored, '.git')),
+    ).resolves.toBeUndefined();
+  });
+
+  it('refuses capture when an index flag hides a second file version (P1)', async () => {
+    // Stage a draft, set assume-unchanged, then edit again: status hides the
+    // worktree column, so the tar + header cannot represent the staged draft.
+    await fs.writeFile(path.join(worktree, 'committed.txt'), 'staged-draft\n');
+    git(worktree, 'add', 'committed.txt');
+    git(worktree, 'update-index', '--assume-unchanged', 'committed.txt');
+    await fs.writeFile(path.join(worktree, 'committed.txt'), 'later-edit\n');
+    await expect(
+      buildWorktreeSnapshotMeta(worktree, {
+        sessionId: 'session-hiddenver',
+        slug: 'hiddenver',
+        baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+        branch: 'main',
+      }),
+    ).rejects.toThrow(/index flag hides/);
+  });
+
+  it('refuses archive-clearing that resolves outside the root via a symlink (R4-2)', async () => {
+    // link -> outside (which holds a directory x). The session replaces link
+    // with a real directory containing a FILE x; the archive carries link/x as
+    // a File. The conflict-clearing loop lstat follows the intermediate symlink
+    // and sees outside/x as a directory — it must refuse, not rm outside/x.
+    const outside = path.join(root, 'outside-conflict');
+    await fs.mkdir(path.join(outside, 'x'), { recursive: true });
+    await fs.writeFile(path.join(outside, 'x', 'inner.txt'), 'OUTSIDE\n');
+    await fs.symlink(outside, path.join(worktree, 'link'));
+    git(worktree, 'add', 'link');
+    git(worktree, 'commit', '-qm', 'link', '--no-verify');
+    await fs.rm(path.join(worktree, 'link'));
+    await fs.mkdir(path.join(worktree, 'link'));
+    await fs.writeFile(path.join(worktree, 'link', 'x'), 'SESSION\n');
+    const m = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-conflict',
+      slug: 'conflict',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      branch: 'main',
+    });
+    const { snapshotPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: m,
+    });
+    const restored = path.join(root, 'restored-conflict');
+    git(worktree, 'worktree', 'add', '--detach', restored, 'HEAD');
+    const fullMeta = {
+      ...m,
+      version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+      createdAt: Date.now(),
+    };
+    await expect(
+      restoreWorktreeSnapshot(snapshotPath, restored, fullMeta),
+    ).rejects.toThrow(/via symlink/);
+    await expect(
+      fs.readFile(path.join(outside, 'x', 'inner.txt'), 'utf8'),
+    ).resolves.toBe('OUTSIDE\n');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'creates snapshot files owner-only regardless of umask (P2)',
+    async () => {
+      await fs.writeFile(path.join(worktree, 'secret.txt'), 'private\n');
+      await fs.chmod(path.join(worktree, 'secret.txt'), 0o600);
+      const m = await buildWorktreeSnapshotMeta(worktree, {
+        sessionId: 'session-perms',
+        slug: 'perms',
+        baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+        branch: 'main',
+      });
+      const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: m,
+      });
+      expect((await fs.stat(snapshotPath)).mode & 0o777).toBe(0o600);
+      expect((await fs.stat(metaPath)).mode & 0o777).toBe(0o600);
+    },
+  );
+
+  it('records the branch actually checked out at capture (P2)', async () => {
+    // A session created detached may `git switch -c` later; the header must
+    // record the real branch even though the sidecar still says detached ('').
+    git(worktree, 'switch', '-c', 'real-branch');
+    const m = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-branch',
+      slug: 'branch',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      branch: '',
+    });
+    expect(m.branch).toBe('real-branch');
   });
 
   // F3: the exclusion must match the gate's ignored-only geometry — a

@@ -283,6 +283,43 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     await expect(fs.lstat(created.worktree!.path)).rejects.toThrow();
   });
 
+  it('prepared rollback removes a sparse-repo worktree (R4-3)', async () => {
+    // A sparse repo stamps skip-worktree on out-of-cone paths; the prepared
+    // gate's sparse carve-out must allow them so the rollback is not stranded.
+    await fs.mkdir(path.join(repoRoot, 'cone'));
+    await fs.mkdir(path.join(repoRoot, 'other'));
+    await fs.writeFile(path.join(repoRoot, 'cone', 'a.txt'), 'a\n');
+    await fs.writeFile(path.join(repoRoot, 'other', 'b.txt'), 'b\n');
+    git(repoRoot, 'add', '.');
+    git(repoRoot, 'commit', '-qm', 'sparse', '--no-verify');
+    git(repoRoot, 'sparse-checkout', 'init', '--cone');
+    git(repoRoot, 'sparse-checkout', 'set', 'cone');
+    await makeDirty(repoRoot);
+    const base = git(repoRoot, 'rev-parse', 'HEAD');
+    const service = new GitWorktreeService(repoRoot);
+    const created = await service.createUserWorktree(
+      'prepared-sparse',
+      'main',
+      {
+        detached: true,
+        carryDirtyState: true,
+      },
+    );
+    expect(created.success).toBe(true);
+    const wt = created.worktree!.path;
+    expect(git(wt, 'ls-files', '-v')).toContain('S other/b.txt');
+    const removed = await service.removePreparedUserWorktree(
+      'prepared-sparse',
+      null,
+      base,
+      undefined,
+      true,
+      created.carriedPaths,
+    );
+    expect(removed.success).toBe(true);
+    await expect(fs.lstat(wt)).rejects.toThrow();
+  });
+
   it('prepared rollback still refuses a non-carried file alongside the overlay', async () => {
     await makeDirty(repoRoot);
     const base = git(repoRoot, 'rev-parse', 'HEAD');
@@ -1984,6 +2021,45 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
     // it still reads as work even in a sparse worktree.
     git(wt, 'update-index', '--assume-unchanged', 'cone/a.txt');
     await fs.writeFile(path.join(wt, 'cone', 'a.txt'), 'hidden\n');
+    await expect(worktreeHasWork(wt)).resolves.toBe(true);
+  });
+
+  it('a carried edit the clean filter would normalize away still reads as work (R4-1)', async () => {
+    // With a text/eol filter, hash-object (filtered) would hide a CRLF-only
+    // rewrite of an already-dirty carried file; the raw-byte identity must
+    // still detect it so the reaper snapshots instead of deleting bare.
+    await fs.writeFile(
+      path.join(repoRoot, '.gitattributes'),
+      '*.txt text eol=lf\n',
+    );
+    git(repoRoot, 'add', '.gitattributes');
+    git(repoRoot, 'commit', '-qm', 'attrs', '--no-verify');
+    await makeDirty(repoRoot);
+    const { worktree, carriedEntries } = await createCarried('r96-filter');
+    // tracked.txt matches the *.txt eol=lf filter and is carried as
+    // 'dirty-staged\n' (status ' M'). Rewrite with CRLF-only endings: raw bytes
+    // change, but the clean-filtered hash would not — the raw-byte identity
+    // must still detect it.
+    await fs.writeFile(
+      path.join(worktree.path, 'tracked.txt'),
+      'dirty-staged\r\n',
+    );
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
+      true,
+    );
+  });
+
+  it('a populated gitlink (initialized submodule) reads as work (P1)', async () => {
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r96-gitlink', 'main');
+    expect(result.success).toBe(true);
+    const wt = result.worktree!.path;
+    // A gitlink (mode 160000) with a populated directory models an initialized
+    // submodule whose object database can hold unpushed commits.
+    const subSha = git(repoRoot, 'rev-parse', 'HEAD');
+    git(wt, 'update-index', '--add', '--cacheinfo', `160000,${subSha},lib`);
+    await fs.mkdir(path.join(wt, 'lib'));
+    await fs.writeFile(path.join(wt, 'lib', 'file.txt'), 'submodule work\n');
     await expect(worktreeHasWork(wt)).resolves.toBe(true);
   });
 });

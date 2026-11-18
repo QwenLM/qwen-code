@@ -152,7 +152,10 @@ is unchanged in this deliverable.
 - A pristine carried deletion reads clean; restoring or staging it reads as work.
 - A session edit hidden under assume-unchanged or skip-worktree reads as work.
 - A checkout with any non-carried work (a late-arriving ignored file, a populated
-  directory beyond the carried files) is still preserved.
+  directory beyond the carried files) reads as work and is snapshotted then
+  deleted (P6 U3) — never deleted bare. States the snapshot cannot represent
+  faithfully (staged content differing from the worktree, a hidden index bit, an
+  initialized submodule) refuse capture and preserve the checkout instead.
 - Sidecars without the field behave exactly as today (back-compat).
 - A wrong-typed `carriedEntries` corrupts the sidecar (shape check).
 - Mutation witnesses: dropping the reaper's `carriedEntries` argument, widening
@@ -165,6 +168,7 @@ is unchanged in this deliverable.
   count-based `worktree.maxRetained` sweep and the affordance that reads the
   snapshot back. Snapshot-before-delete (U3) **ships in this PR** (D4); the
   sweep and the restore reader are the remaining P6 units. Until U5 lands, the
-  archive is keyed by `sessionId` in the chats dir and named in the cleanup log;
-  until U4 lands, nothing prunes it.
+  archive is keyed by `sessionId` beside the sidecar (the chats dir, or its
+  `archive/` subdir for archived sessions) and named in the cleanup log; until
+  U4 lands, nothing prunes it.
 - P7 configurable worktree root (`worktree.root`).
