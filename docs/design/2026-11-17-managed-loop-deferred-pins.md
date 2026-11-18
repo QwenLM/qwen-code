@@ -204,6 +204,14 @@ Round 9 posted no inline findings and sixteen deferred items, and downgraded its
 
 The suite sizes are now core 34 and scripts meta 183 (the changed file 88). The residual is unchanged in kind: the spelling-evasion family is still unbounded — fabricating the `schemaTool` lookup one level up survives — and its durable fix stays in #17673.
 
+## Third merge: the inherited required-check red is fixed upstream
+
+Main was merged a third time (merge commit `fecbb312e0`, zero overlap with this PR's files). `164bb1eb58` (#17746) raised the document renderer budget from 2,146,100 to 2,148,200 bytes, so the export byte gate that reddened the required-check chain now passes: the full local build is green, including `packages/cli`, which the previous build never reached. The two Java ratchet reds are still unfixed on main (`AgentSessionPolicies` is 795 lines against the 791 ceiling) and remain non-required.
+
+That merge also changed cli and core serve sources, so the harness was rebuilt rather than reused: core and cli dist were asserted refreshed against the build's start timestamp, the bundle rebuilt and asserted refreshed, and both arms re-run. Java is untouched by the incoming commits, so the jar and its byte-equal sidecars carry over.
+
+Arms at this head: `--loop-skill` success (session `1202cce3-c272-406b-8d29-e59d3062f85b`, modelRounds 6, cron create/list/delete all witnessed); `--loop-fire` success (session `79e11be7-0ed5-4bb2-9dee-f355f5e5e5bb`, schedule `asch_7b67f54fde2eb587c9b7bddc2474dc98`, `fireTrigger=scheduled`, `fireOutcome=fired`, `fireState=completed`, occurrenceKey `schedule:2026-11-18T16:06:00Z`, modelRounds 5).
+
 ## Open questions
 
 None blocking.

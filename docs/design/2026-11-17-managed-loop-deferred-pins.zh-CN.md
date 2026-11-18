@@ -204,6 +204,14 @@ core 邻近面是整面跑而非抽样：`src/managed-runtime` 加 `src/skills/b
 
 套件规模现为 core 34、scripts 元 183（改动文件 88）。残留在种类上不变：拼写 evasion 家族仍无界——把 `schemaTool` 查找伪造在上一层仍存活——其持久修复留在 #17673。
 
+## 第三次合并：继承的必需检查红已被上游修好
+
+第三次合入 main（合并提交 `fecbb312e0`，与本 PR 文件零重叠）。`164bb1eb58`（#17746）把文档渲染器预算从 2,146,100 抬到 2,148,200 字节，故此前打红必需检查链的导出体积门现在通过：本地全量构建绿，包含上一次构建从未到达的 `packages/cli`。两条 Java 棘轮红在 main 上仍未修（`AgentSessionPolicies` 795 行对 791 上限），且仍非必需检查。
+
+该合并还改了 cli 与 core 的 serve 源码，故 harness 是重建而非复用：core 与 cli 的 dist 按构建起点时间戳断言已刷新，bundle 重建并断言已刷新，两条臂重跑。incoming 提交未触碰 Java，故 jar 及其逐字节相等的 sidecar 承接有效。
+
+本 head 的臂：`--loop-skill` success（session `1202cce3-c272-406b-8d29-e59d3062f85b`、modelRounds 6、cron create/list/delete 均见证）；`--loop-fire` success（session `79e11be7-0ed5-4bb2-9dee-f355f5e5e5bb`、schedule `asch_7b67f54fde2eb587c9b7bddc2474dc98`、fireTrigger=scheduled、fireOutcome=fired、fireState=completed、occurrenceKey `schedule:2026-11-18T16:06:00Z`、modelRounds 5）。
+
 ## 开放问题
 
 无阻塞项。
