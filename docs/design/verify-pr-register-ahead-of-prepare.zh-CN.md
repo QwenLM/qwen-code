@@ -182,8 +182,9 @@ release 形式都像兄弟恢复形式一样传 `--round <r>`（本轮自己的�
   （`packages/cli/src/commands/autofix-pr/snapshot.ts`），故会话在闸门投递与首次
   `--start` 之间被杀仍使 head 无记录——窗口收窄到该「投递→--start」区间，并未
   闭合（闭合需把标记写在闸门侧，那里本就握着 headSha）；(2) watch prompt 是任务上
-  的持久快照，故本改动前安装的 watch 仍按 prepare→register 旧顺序，直到任务重建
-  ——而 `--start --artifact-dir` 仍被接受，无机制强制重建；(3) 死轮恢复把
+  的持久快照，故本改动前安装的 watch 仍按 prepare→register 旧顺序，直到任务手动
+  迁移——标准安装无法重建（步骤 3 被探针游标与 claim 共同阻挡、`--release` 只清
+  claim），而 `--start --artifact-dir` 仍被接受，无机制强制升级；(3) 死轮恢复把
   `--release` 与重启成对，两命令之间被杀会使 head 失去记录——瞬时路径通过对完好
   标记重试 prepare、不 release 来避免此窗口，但死轮恢复仍带该窗口。watch 只在
   head move 时醒来，故*最后一个* head 上被杀的轮仍等待新 move，或手动

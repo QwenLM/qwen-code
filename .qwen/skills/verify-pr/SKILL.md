@@ -817,8 +817,9 @@ Exit 3 has several shapes, each with its own reaction:
   it once the state records a repo. Because registration runs ahead of
   prepare, a mistyped `--repo` is recorded at `--start` before prepare can
   reject it, and every later verb then refuses the correct slug without naming
-  the file; the reset — only when no round is live (the state has no in-flight
-  marker), since deleting the file strands a live round's marker — is to delete
+  the file; the reset — only when no other round is live (the sole in-flight
+  marker is the mistyped one being reset), since deleting the file would strand
+  any other live round's marker — is to delete
   the state file `.qwen/tmp/verify-pr-watch-<n>.json` in the trusted clone's main worktree
   (this drops the PR's dedup history and any deferred heads, which no fire will
   re-deliver) and then re-register the delivered head — and any deferred head
@@ -1043,7 +1044,11 @@ inconclusive` instead: it increments the retry counter whose cap is the
    yourself (`gh pr view <n> --repo <owner>/<repo> --json headRefOid`), then
    `--start --head <live> --round <next> --repo <owner>/<repo>` and run prepare
    for it. The restarted round is now `<live>` at `<next>` — repeat those
-   values in `--complete`, not the original `<H>` and `<r>`.
+   values in `--complete`, not the original `<H>` and `<r>`. If that `--start`
+   is refused because `<live>` is already verified (a force-push can return to
+   an earlier, already-covered head), the head needs no new round. The follow-up
+   protocol below then classifies the delta and re-measures at `<live>` (the new
+   head), not the original `H`.
    Do not `git checkout` the named head under the old marker.
    Exit 3 means the file already records `H` as verified or in flight, or
    another head's round is in flight (one round per PR): let that round

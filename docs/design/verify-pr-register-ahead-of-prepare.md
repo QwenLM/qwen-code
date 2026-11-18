@@ -257,8 +257,10 @@ existing dead-round recovery (`--release` for a round that died after
   closed (closing it would put the marker in the gate, which already holds
   `headSha`); (2) the watch prompt is a persisted task snapshot, so a watch
   installed before this change keeps the prepare-then-register order until its
-  task is re-created — and `--start --artifact-dir` remains accepted, so nothing
-  forces re-creation; (3) the dead-round recovery pairs `--release` with a
+  task is manually migrated — the standard install cannot re-create it (step 3
+  is blocked by the probe cursor as well as the claim, and `--release` clears
+  only the claim), and `--start --artifact-dir` remains accepted, so nothing
+  forces the upgrade; (3) the dead-round recovery pairs `--release` with a
   restart, and a kill between those two commands leaves the head unregistered —
   the transient path avoids this by retrying prepare against the intact marker
   without releasing, but a dead round's recovery still carries that window. A

@@ -6691,14 +6691,24 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(manualSlice).toContain(
       'The restarted round is now `<live>` at `<next>` — repeat those values in `--complete`, not the original `<H>` and `<r>`',
     );
+    // Deferred (round 13): a force-push can return the live head to one already
+    // verified, so the --start <live> may be refused — the head needs no new
+    // round; and the follow-up protocol re-measures at <live>, not the original H.
+    expect(manualSlice).toContain(
+      'is refused because `<live>` is already verified (a force-push can return to an earlier, already-covered head), the head needs no new round',
+    );
+    expect(manualSlice).toContain(
+      'classifies the delta and re-measures at `<live>` (the new head), not the original `H`',
+    );
     // R1-2: a positional pin — registration precedes prepare in this section
     // (an order-insensitive toContain would stay green if --start moved back
-    // below prepare).
+    // below prepare). Round 13: scope it to manualSlice, not the whole flattened
+    // skill, so it guards this section as claimed.
     expect(
-      flat.indexOf(
+      manualSlice.indexOf(
         'Register the round in the shared watch state **ahead of prepare**',
       ),
-    ).toBeLessThan(flat.indexOf('Then run prepare; it creates'));
+    ).toBeLessThan(manualSlice.indexOf('Then run prepare; it creates'));
     // Deferred (round 10): the heading pin above is not enough — guard the
     // --start COMMAND's position too, so moving the command below prepare (while
     // the heading stays above) reds this per-section assertion. Presence guards
@@ -6939,10 +6949,12 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(promptSlice).toContain(
       "this drops the PR's dedup history and any deferred heads, which no fire will re-deliver",
     );
-    // Deferred (round 12): the reset must not strand a live round — it is only
-    // safe when no round is live (no in-flight marker), not merely not mid-battery.
+    // Deferred (round 12/13): the reset must not strand another live round — it
+    // is only safe when no OTHER round is live (the sole in-flight marker is the
+    // mistyped one being reset); gating on "no in-flight marker" at all would
+    // deadlock, since the mistyped --start itself writes that marker.
     expect(promptSlice).toContain(
-      "only when no round is live (the state has no in-flight marker), since deleting the file strands a live round's marker",
+      "only when no other round is live (the sole in-flight marker is the mistyped one being reset), since deleting the file would strand any other live round's marker",
     );
     expect(promptSlice).toContain(
       'and then re-register the delivered head — and any deferred head you still want covered — with the correct slug (`--start`)',
