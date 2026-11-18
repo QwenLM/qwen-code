@@ -356,6 +356,9 @@ test('Managed composer hides attachment affordances without the inputAttachments
   const trigger = page.getByTestId('composer-add-menu-trigger');
   if (await trigger.isVisible()) {
     await trigger.click();
+    // Prove the menu actually opened before asserting the absence of the
+    // attachment entries; a silent click failure must not pass vacuously.
+    await expect(page.getByRole('menu')).toBeVisible();
     await expect(page.getByTestId('composer-add-menu-file-attach')).toHaveCount(
       0,
     );
@@ -363,6 +366,13 @@ test('Managed composer hides attachment affordances without the inputAttachments
       0,
     );
     await page.keyboard.press('Escape');
+  } else {
+    await expect(page.getByTestId('composer-add-menu-file-attach')).toHaveCount(
+      0,
+    );
+    await expect(page.getByTestId('composer-add-menu-file-upload')).toHaveCount(
+      0,
+    );
   }
   await editor.press('Enter');
   await expect.poll(() => captured.submits.length).toBe(1);
