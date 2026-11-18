@@ -34,10 +34,11 @@ profile，加载时任意更换配置仍会被拒绝。
 ## 验证与验收
 
 统一后的 Shell profile 必须在普通 Workspace 执行路径上提供 `read_file`、`write_file`、`edit`、
-`run_shell_command`、`monitor` 与 `glob`。原生 `glob` 必须保留参数校验、结果边界和目录约束，并在
+`run_shell_command`、`monitor`、`glob` 与持久化 Session `todo_write`。Plan 模式不允许待办写入。原生 `glob` 必须保留参数校验、结果边界和目录约束，并在
 default 与 auto-edit 策略下按只读操作预批准。仅前台执行的传输方式保留现有限制。
 
-创建、加载与 Workspace 恢复必须拒绝被移除的 Shell profile。文件工具配置与只读子会话配置必须保留原有工具清单。
+创建、加载与 Workspace 恢复必须拒绝被移除的 Shell profile。
+[基础工具对齐设计](2026-11-06-managed-basic-tools.zh-CN.md) 取代原有工具清单验收标准：`files/1` 增加 `glob`，`shell/1` 增加 `todo_write`，包括只读子会话在内的普通 Hosted 读取暴露 PDF `pages`。
 公开 Shell 选择、实时审批与 Plan 准入必须使用统一标识。
 
 当 `/1` 启用了生命周期 v2 时，统一后的 profile 必须继续执行现有效果、资源准备与资源结算阶段。

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { authCommandMetadata } from './auth-command-metadata.js';
 import type { Argv, CommandModule } from 'yargs';
 import { t } from '../i18n/index.js';
 
@@ -53,8 +54,7 @@ const legacySubcommands = [
 ];
 
 export const authCommand: CommandModule = {
-  command: 'auth',
-  describe: t('Configure authentication (removed)'),
+  ...authCommandMetadata,
   builder: (yargs: Argv) => {
     let y = yargs.version(false).strict(false);
     for (const name of legacySubcommands) {

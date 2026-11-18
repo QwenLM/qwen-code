@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredTransaction;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.ToolResultResourceRef;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -45,13 +46,15 @@ public class ManagedNativeJournalSnapshots {
     static final String PAYLOAD_FORMAT = "committed-prefix-v1";
     static final int MAX_PAGE_BYTES = 16 * 1024 * 1024;
     private static final String OWNER = "NATIVE_SNAPSHOT";
+    /** Claim attempts for one publication: the initial try plus deadlock retries. */
+    private static final int CLAIM_ATTEMPTS = 3;
     private final JdbcTemplate jdbc;
-    private final ManagedSessionStore sessions;
+    private final JdbcManagedSessionStore sessions;
     private final ObjectMapper json;
     private final TransactionTemplate isolated;
     private final ToolPublicationRetentionStore retention;
 
-    public ManagedNativeJournalSnapshots(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, ManagedSessionStore sessions, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
+    public ManagedNativeJournalSnapshots(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, JdbcManagedSessionStore sessions, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.jdbc = jdbc;
         this.sessions = sessions;
         this.json = json;
@@ -89,7 +92,21 @@ public class ManagedNativeJournalSnapshots {
         Basis basis = isolated.execute(status -> new Basis(sessions.lockSnapshotWriter(tenant, session, token, request),
                 retention.read(tenant, session)));
         try {
-            return isolated.execute(status -> build(tenant, session, token, request, basis));
+            // Build is retried when InnoDB rolls it back as a deadlock victim,
+            // wherever in Build that happens. For two publishers of the same
+            // snapshot that both find no manifest row, the claim's upsert is
+            // where they can still meet (see claim); the retry's locking read
+            // then waits for the winner's row and answers the replay
+            // descriptor, unless the winner rolled back too.
+            for (int attempt = 1; ; attempt++) {
+                try {
+                    return isolated.execute(status -> build(tenant, session, token, request, basis));
+                } catch (RuntimeException error) {
+                    if (attempt >= CLAIM_ATTEMPTS || !JournalFencing.deadlockVictim(error)) {
+                        throw error;
+                    }
+                }
+            }
         } finally {
             isolated.executeWithoutResult(status -> basis.lease().close());
         }
@@ -99,7 +116,7 @@ public class ManagedNativeJournalSnapshots {
 
     private Descriptor build(String tenant, String session, String token, PublishRequest request, Basis basis) {
         RestoreHead head = basis.head();
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String owner = ownerKey(scope, request.snapshotId());
         claim(tenant, request.workspaceId(), session, request.snapshotId());
         Descriptor existing = find(tenant, request.workspaceId(), session, token, request.snapshotId());
@@ -109,7 +126,7 @@ public class ManagedNativeJournalSnapshots {
             return new Descriptor(existing.snapshot(), existing.manifest(), true);
         }
         byte[] claimed = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE resource_key = ?", byte[].class,
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, manifestId(scope, request.snapshotId())));
+                ManagedSessionStore.resourceKey(scope, manifestId(scope, request.snapshotId())));
         require(java.util.Arrays.equals(claimed, "{}".getBytes(StandardCharsets.UTF_8)), "managed_session_snapshot_corrupt");
         require(head.journalRevision() == request.expectedJournalRevision()
                 && head.committedSequence() == request.expectedCommittedSequence()
@@ -174,7 +191,7 @@ public class ManagedNativeJournalSnapshots {
         StoredResource stored = new StoredResource(id, MANIFEST_KIND, 1, manifestBytes.length,
                 DigestUtils.sha256Hex(manifestBytes), manifestBytes);
         jdbc.update("UPDATE ma_resource SET inline_bytes = ?, byte_length = ?, sha256 = ?, kind = ? WHERE resource_key = ?",
-                manifestBytes, manifestBytes.length, stored.digest(), MANIFEST_KIND, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, id));
+                manifestBytes, manifestBytes.length, stored.digest(), MANIFEST_KIND, ManagedSessionStore.resourceKey(scope, id));
         basis.lease().checkReadView();
         RestoreHead current = sessions.lockSnapshotWriter(tenant, session, token, request);
         require(current.journalRevision() == request.expectedJournalRevision()
@@ -213,7 +230,7 @@ public class ManagedNativeJournalSnapshots {
                 + " WHERE session_scope_key = ? AND owner_kind = 'NATIVE_SNAPSHOT' AND owner_revision <= ?"
                 + " GROUP BY owner_key, owner_revision ORDER BY owner_revision DESC, owner_key LIMIT 1",
                 (row, index) -> new Candidate(row.getString(1), row.getLong(2)),
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), frozen.journalRevision());
+                ManagedSessionStore.sessionScopeKey(tenant, session), frozen.journalRevision());
         if (candidates.isEmpty()) {
             return null;
         }
@@ -221,7 +238,7 @@ public class ManagedNativeJournalSnapshots {
         var roots = jdbc.queryForList("SELECT r.resource_id FROM ma_resource_ref f"
                 + " JOIN ma_resource r ON r.resource_key = f.resource_key WHERE f.session_scope_key = ?"
                 + " AND f.owner_kind = 'NATIVE_SNAPSHOT' AND f.owner_key = ? AND f.owner_revision = ? AND r.kind = ?",
-                String.class, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), selected.ownerKey(),
+                String.class, ManagedSessionStore.sessionScopeKey(tenant, session), selected.ownerKey(),
                 selected.coverage(), MANIFEST_KIND);
         require(roots.size() == 1, "managed_session_snapshot_corrupt");
         String root = roots.getFirst();
@@ -229,7 +246,7 @@ public class ManagedNativeJournalSnapshots {
         require(manifest.snapshotId() != null, "managed_session_snapshot_corrupt");
         Descriptor descriptor = read(tenant, workspace, session, token, manifest.snapshotId());
         require(root.equals(descriptor.manifest().resourceId())
-                && selected.ownerKey().equals(ownerKey(com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), manifest.snapshotId()))
+                && selected.ownerKey().equals(ownerKey(ManagedSessionStore.sessionScopeKey(tenant, session), manifest.snapshotId()))
                 && selected.coverage() == descriptor.snapshot().coveredJournalRevision()
                 && descriptor.snapshot().committedSequence() <= frozen.committedSequence()
                 && descriptor.snapshot().activationEpoch() <= frozen.activationEpoch()
@@ -262,7 +279,7 @@ public class ManagedNativeJournalSnapshots {
         Manifest manifest = descriptor.snapshot();
         require(afterRevision >= 0 && afterRevision <= manifest.coveredJournalRevision()
                 && limit >= 1 && limit <= 100, "invalid_managed_session_store_request");
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String owner = ownerKey(scope, snapshotId);
         List<StoredPage> result = new ArrayList<>();
         int bytes = 0;
@@ -295,7 +312,7 @@ public class ManagedNativeJournalSnapshots {
     private Descriptor find(String tenant, String workspace, String session, String token, String id) {
         require(id != null && !id.isBlank() && id.getBytes(StandardCharsets.UTF_8).length <= 512,
                 "invalid_managed_session_store_request");
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String owner = ownerKey(scope, id);
         List<String> roots = jdbc.queryForList("SELECT f.resource_id FROM ma_resource_ref f JOIN ma_resource r"
                 + " ON r.resource_key = f.resource_key WHERE f.session_scope_key = ? AND f.owner_kind = ?"
@@ -320,7 +337,7 @@ public class ManagedNativeJournalSnapshots {
     }
 
     private List<CommitResource> census(String tenant, String workspace, String session, String token, long revision) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         List<String> ids = jdbc.queryForList("SELECT resource_id FROM ma_resource_ref WHERE session_scope_key = ?"
                 + " AND owner_kind = 'JOURNAL' AND owner_key = ? AND owner_revision = ?"
                 + " AND journal_revision = ? ORDER BY resource_id", String.class, scope, scope, revision, revision);
@@ -392,11 +409,12 @@ public class ManagedNativeJournalSnapshots {
             case "input.accepted" -> List.of("contentRef", "admissionRef");
             case "activation.changed" -> List.of("installRef", "boundaryRef");
             case "model.attempt" -> List.of("routeRef", "inputCheckpointRef", "usageRef", "recoveryRef");
-            case "message.committed" -> List.of("contentRef");
-            case "tool.intent" -> List.of("toolDefinitionRef", "argsRef");
+            case "message.committed" -> List.of("contentRef", "diagnosticsRef");
+            case "tool.intent" -> List.of("toolDefinitionRef", "argsRef", "diagnosticsRef");
             case "hosted.batch.planned" -> List.of("planRef");
             case "hosted.cleanup" -> List.of("descriptorRef");
             case "action.changed" -> List.of("optionsRef", "decisionRef");
+            case "tool.measured" -> List.of("toolOutcomeRef", "measurementsRef");
             case "tool.receipt" -> List.of("toolOutcomeRef", "resultRef", "resources");
             case "checkpoint.committed" -> List.of("stateRef");
             case "context.compacted" -> List.of("summaryRef", "tokenCountsRef");
@@ -426,7 +444,7 @@ public class ManagedNativeJournalSnapshots {
         while (!pending.isEmpty()) {
             JsonNode next = pending.removeFirst();
             String id = next.path("resourceId").asText();
-            String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+            String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
             Long pinned = building
                     ? jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE session_scope_key = ?"
                             + " AND owner_kind = 'JOURNAL' AND owner_key = ? AND owner_revision = journal_revision"
@@ -442,6 +460,16 @@ public class ManagedNativeJournalSnapshots {
                     && resource.schemaVersion() == next.path("schemaVersion").asInt(-1)
                     && resource.byteLength() == next.path("byteLength").asLong(-1)
                     && resource.digest().equals(next.path("digest").asText()), "managed_session_snapshot_corrupt");
+            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(resource.kind())) {
+                require(resource.schemaVersion() == 1, "managed_session_snapshot_corrupt");
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.requireBody(
+                        resource.kind(), decode(resource.bytes(), JsonNode.class));
+            }
+            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolMeasurements.KIND.equals(resource.kind())) {
+                require(resource.schemaVersion() == 1 && resource.byteLength() <= com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolMeasurements.MAX_BYTES,
+                        "managed_session_snapshot_corrupt");
+                com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolMeasurements.requireEvidence(decode(resource.bytes(), JsonNode.class));
+            }
             if (seen.add(id) && structured(resource.kind())) {
                 JsonNode body = decode(resource.bytes(), JsonNode.class);
                 if (ManagedHostedRecoveryRecords.KINDS.contains(resource.kind()) || "managed-action-options".equals(resource.kind())) {
@@ -477,8 +505,8 @@ public class ManagedNativeJournalSnapshots {
     private StoredResource put(String tenant, String workspace, String session, String kind, byte[] bytes) {
         String digest = DigestUtils.sha256Hex(bytes);
         String id = kind + ":" + digest;
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
-        String key = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, id);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        String key = ManagedSessionStore.resourceKey(scope, id);
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
                     + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
                     + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', "
@@ -494,19 +522,43 @@ public class ManagedNativeJournalSnapshots {
         return new StoredResource(id, kind, 1, bytes.length, digest, bytes);
     }
 
+    /**
+     * Claims the manifest row. A second publication of the same snapshot
+     * waits here until the first commits and then replays it, or, when the
+     * first rolls back, finds no row and claims it itself. The wait lasts at
+     * most innodb_lock_wait_timeout from when it queues: a Build that holds
+     * the row longer fails the waiting publication with a lock wait timeout
+     * (MySQL error 1205), which publish does not retry; it retries only
+     * deadlock victims (1213).
+     *
+     * <p>An upsert that meets the first publication's uncommitted row queues
+     * for it with a next-key lock, since resource_key is a secondary unique
+     * index. The first Build's page inserts can fall into that lock's gap,
+     * and InnoDB then rolls the waiting publication back, once per such
+     * insert while it waits. So the claim first locks the row by key: at READ
+     * COMMITTED, which publications run at, that takes the row's record lock
+     * when the row exists, committed or not, waiting while another
+     * transaction holds it, and takes no lock when it does not; only a
+     * missing row is upserted. Two publications that both pass the read
+     * before either row exists can still meet in the upsert; publish retries
+     * the one rolled back.
+     */
     private void claim(String tenant, String workspace, String session, String snapshotId) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String id = manifestId(scope, snapshotId);
+        String key = ManagedSessionStore.resourceKey(scope, id);
         byte[] pending = "{}".getBytes(StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
-                + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
-                + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', "
-                + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key = resource_key",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, id), scope, tenant, workspace, session, id, MANIFEST_KIND,
-                pending.length, DigestUtils.sha256Hex(pending), pending);
+        if (jdbc.queryForList("SELECT 1 FROM ma_resource WHERE resource_key = ? FOR UPDATE", Integer.class, key).isEmpty()) {
+            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
+                    + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
+                    + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', "
+                    + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key = resource_key",
+                    key, scope, tenant, workspace, session, id, MANIFEST_KIND,
+                    pending.length, DigestUtils.sha256Hex(pending), pending);
+        }
         var rows = jdbc.queryForList("SELECT tenant_id, workspace_id, session_id, resource_id, kind, schema_version,"
                 + " storage_kind, state, object_key, object_version_id, encryption_key_id FROM ma_resource WHERE resource_key = ?",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, id));
+                key);
         require(rows.size() == 1 && tenant.equals(rows.getFirst().get("tenant_id"))
                 && workspace.equals(rows.getFirst().get("workspace_id")) && session.equals(rows.getFirst().get("session_id"))
                 && id.equals(rows.getFirst().get("resource_id")) && MANIFEST_KIND.equals(rows.getFirst().get("kind"))
@@ -526,7 +578,7 @@ public class ManagedNativeJournalSnapshots {
 
     private void pin(String scope, String owner, long coverage, StoredResource resource, Long revision,
             String tenant, String workspace, String session) {
-        String key = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, resource.resourceId());
+        String key = ManagedSessionStore.resourceKey(scope, resource.resourceId());
         Long count = jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE session_scope_key = ?"
                 + " AND owner_kind = ? AND owner_key = ? AND owner_revision = ? AND resource_key = ?",
                 Long.class, scope, OWNER, owner, coverage, key);

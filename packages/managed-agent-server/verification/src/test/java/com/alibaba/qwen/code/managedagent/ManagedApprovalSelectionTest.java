@@ -10,9 +10,9 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -55,8 +55,8 @@ class ManagedApprovalSelectionTest {
     @Autowired private @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired private ObjectMapper json;
     @Autowired private MockMvc mvc;
-    @Autowired private ManagedWorkspaceRegistry registry;
-    @Autowired private ManagedAgentDefinitionStore definitions;
+    @Autowired private JdbcManagedWorkspaceRegistry registry;
+    @Autowired private JdbcManagedAgentDefinitionStore definitions;
     @Qualifier("managedAgentTransactionManager")
     @Autowired private PlatformTransactionManager manager;
 

@@ -5,6 +5,10 @@
  */
 
 import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
+import {
+  sanitizeTerminalLine,
+  sanitizeTerminalText,
+} from '../ui/utils/textUtils.js';
 
 const CLOSE = '</qwen:mod-prompt>';
 
@@ -25,4 +29,13 @@ export function frameModPrompt(prompt: ModQueuedPrompt): string {
     CLOSE,
     `The ${name} Mod, an extension the user installed, sent the message above, which waited until the session was idle; the user did not type it. Act on it as a request made on the user's behalf, within what the user has asked for and allowed. Only the block's own closing marker ends it.`,
   ].join('\n');
+}
+
+/**
+ * The transcript row a terminal shows for a prompt a Mod submitted, live and
+ * on resume: a notice naming the Mod, not a prompt the person typed, `asUser`
+ * or not.
+ */
+export function modPromptRow(plugin: string, text: string): string {
+  return `Mod ${sanitizeTerminalLine(plugin)}: ${sanitizeTerminalText(text)}`;
 }

@@ -327,8 +327,10 @@ describe('runHostedWorkflowTurn', () => {
     expect(initOrder).toBeLessThan(authOrder);
     expect(authOrder).toBeLessThan(runOrder);
     // R1-14: the per-turn config posture itself: safe-mode argv, a
-    // throw-on-conflict ninth argument, no ambient host policy; and the
-    // settings load is pinned untrusted.
+    // throw-on-conflict ninth argument and a host policy that refuses only
+    // LSP — never a tool-invocation guard refit — plus the pinned session
+    // model configuration when the host supplies one; and the settings load
+    // is pinned untrusted.
     const loadCalls = vi.mocked(loadCliConfig).mock.calls;
     expect(loadCalls).toHaveLength(1);
     expect(loadCalls[0]![1]).toMatchObject({
@@ -344,7 +346,7 @@ describe('runHostedWorkflowTurn', () => {
         ?.skipStartupContext,
     ).toBe(true);
     expect(loadCalls[0]![8]).toBe(true);
-    expect(loadCalls[0]![9]).toBeUndefined();
+    expect(loadCalls[0]![9]).toEqual({ lspDisabled: true });
     expect(vi.mocked(loadSettings).mock.calls[0]![1]).toMatchObject({
       workspaceTrusted: false,
     });

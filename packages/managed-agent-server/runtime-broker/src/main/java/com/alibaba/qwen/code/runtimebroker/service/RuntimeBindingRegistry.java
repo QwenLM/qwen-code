@@ -15,6 +15,7 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -51,6 +52,37 @@ final class RuntimeBindingRegistry {
         this.brokerOwnerId = brokerOwnerId;
         this.operationLeaseDuration = operationLeaseDuration;
         this.clock = clock;
+    }
+
+    RuntimeBindingRecord findLatestBindingByHarnessSession(
+            String tenantId, String harnessSessionId, boolean readyOnly) {
+        String after = null;
+        RuntimeBindingRecord best = null;
+        for (;;) {
+            List<RuntimeBindingRecord> page = bindingRepository
+                    .findByHarnessSession(tenantId, harnessSessionId, after, 100);
+            if (page.isEmpty()) {
+                return best;
+            }
+            for (RuntimeBindingRecord candidate : page) {
+                if ((!readyOnly || candidate.getState() == RuntimeBindingRecord.State.READY)
+                        && (best == null || candidate.getBindingId().compareTo(best.getBindingId()) > 0)) {
+                    best = candidate;
+                }
+            }
+            if (page.size() < 100) {
+                return best;
+            }
+            after = page.get(page.size() - 1).getBindingId();
+        }
+    }
+
+    String runtimeProvisionerKind(RuntimeSessionRecord record) {
+        RuntimeBindingRecord binding = bindingRepository.findById(record.getBindingId());
+        if (binding == null || binding.getGeneration() != record.getRuntimeGeneration()) {
+            throw conflict("workspace_close_identity_unverified", "Original Runtime binding is unavailable");
+        }
+        return binding.getRequest().getProvisionerKind();
     }
 
     CompletableFuture<BindingContext> bindingOperation(String bindingId) {

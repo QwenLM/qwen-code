@@ -1607,6 +1607,7 @@ describe('release workflow', () => {
     // run never reached, words a test merely printed).
     const timeout = 'Error: [vitest-worker]: Timeout calling "x"';
     const tally = ' Tests  10614 passed (10614)';
+    const unhandled = '⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯';
     const passedThrough =
       '::warning title=Workspace tests passed through a Vitest transport timeout::';
     const stands =
@@ -1622,14 +1623,14 @@ describe('release workflow', () => {
       // unhandled error Vitest counted. It cost this release three attempts.
       [
         'transport timeout, run completed',
-        `${timeout}\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n${tally}\n     Errors  1 error`,
         1,
         passedThrough,
         0,
       ],
       [
         'transport timeout, killed by a signal',
-        `${timeout}\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n${tally}\n     Errors  1 error`,
         137,
         '::warning title=Workspace tests exited 137 on a Vitest transport timeout::',
       ],
@@ -1637,7 +1638,7 @@ describe('release workflow', () => {
       // something else as well, whatever its header said.
       [
         'transport timeout beside a real one',
-        `${timeout}\nError: write after end\n${tally}\n     Errors  2 errors`,
+        `${unhandled}\n${timeout}\nError: write after end\n${tally}\n     Errors  2 errors`,
         1,
         stands,
       ],
@@ -1648,7 +1649,7 @@ describe('release workflow', () => {
       // them the oncall is told one of four things happened when none did.
       [
         'transport timeout counted twice against one unhandled error',
-        `${timeout}\n${timeout}\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n${timeout}\n${tally}\n     Errors  1 error`,
         1,
         '::warning title=Workspace tests exited 1 on a Vitest transport timeout::A transport timeout the run cannot account for — no passing tally, a failing tally, a signal death, an unhandled error that was not the transport, or the two counts disagreeing for a reason this log does not show. The failure stands (status 1, 1 counted error(s) vs 2 transport line(s)); rerun the job.',
       ],
@@ -1660,13 +1661,13 @@ describe('release workflow', () => {
       // The count sees both, because it never looks at the header.
       [
         'transport timeout beside a suffix-less crash header',
-        `${timeout}\nPoolTimeout: worker pool exhausted\n${tally}\n     Errors  2 errors`,
+        `${unhandled}\n${timeout}\nPoolTimeout: worker pool exhausted\n${tally}\n     Errors  2 errors`,
         1,
         stands,
       ],
       [
         'transport timeout beside a bare string throw',
-        `${timeout}\nUnknown Error: a bare string, no class header\n${tally}\n     Errors  2 errors`,
+        `${unhandled}\n${timeout}\nUnknown Error: a bare string, no class header\n${tally}\n     Errors  2 errors`,
         1,
         stands,
       ],
@@ -1677,18 +1678,18 @@ describe('release workflow', () => {
       // unmoved by them.
       [
         'transport timeout beside Error: lines a test printed',
-        `${timeout}\nError: boom\nError: Not implemented: navigation\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\nError: boom\nError: Not implemented: navigation\n${tally}\n     Errors  1 error`,
         1,
         passedThrough,
         0,
       ],
-      // `--workspaces` prints one summary per workspace into one log, so both
-      // figures are whole-file sums: a passing tally cannot cover a later
-      // workspace's crash, and two transport deaths in two workspaces still
-      // pass.
+      // `--workspaces` prints one summary per workspace into one log, so the
+      // `Errors` figure is a whole-file sum: a passing tally cannot cover a
+      // later workspace's crash, and two transport deaths in two workspaces
+      // still pass.
       [
         'tally, then a later workspace crashing',
-        `${timeout}\n${tally}\n Tests  8 passed (8)\n     Errors  2 errors`,
+        `${unhandled}\n${timeout}\n${tally}\n Tests  8 passed (8)\n     Errors  2 errors`,
         1,
         stands,
       ],
@@ -1697,14 +1698,14 @@ describe('release workflow', () => {
       // one of them (run 33713579913).
       [
         'four transport deaths, four unhandled errors',
-        `${timeout}\n${timeout}\n${timeout}\n${timeout}\n${tally}\n     Errors  4 errors`,
+        `${unhandled}\n${timeout}\n${timeout}\n${timeout}\n${timeout}\n${tally}\n     Errors  4 errors`,
         1,
         passedThrough,
         0,
       ],
       [
         'two workspaces, both lost to the transport',
-        `${timeout}\n Tests  5 passed (5)\n     Errors  1 error\nError: [vitest-worker]: Timeout calling "y"\n Tests  7 passed (7)\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n Tests  5 passed (5)\n     Errors  1 error\n${unhandled}\nError: [vitest-worker]: Timeout calling "y"\n Tests  7 passed (7)\n     Errors  1 error`,
         1,
         passedThrough,
         0,
@@ -1713,13 +1714,13 @@ describe('release workflow', () => {
       // line at all, no passing tally, or a failing tally.
       [
         'transport timeout, no error summary to count',
-        `${timeout}\n${tally}`,
+        `${unhandled}\n${timeout}\n${tally}`,
         1,
         stands,
       ],
       [
         'transport timeout, no tally to back it',
-        'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
+        `${unhandled}\nError: [vitest-worker]: Timeout calling "onTaskUpdate"`,
         1,
         stands,
       ],
@@ -1728,7 +1729,7 @@ describe('release workflow', () => {
       // count is all transport.
       [
         'error summary with no tally to back it',
-        `${timeout}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n     Errors  1 error`,
         1,
         stands,
       ],
@@ -1745,7 +1746,7 @@ describe('release workflow', () => {
       // beside a real transport death do not inflate it into a mismatch.
       [
         'transport timeout, and Timeout calling printed by a test',
-        `${timeout}\nTimeout calling the vendor API\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\nTimeout calling the vendor API\n${tally}\n     Errors  1 error`,
         1,
         passedThrough,
         0,
@@ -1758,14 +1759,56 @@ describe('release workflow', () => {
       // earned — the false-red this PR exists to remove, back again.
       [
         'transport timeout, and a summary-shaped line a test printed',
-        `${timeout}\nErrors 2 errors occurred in fixture data\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\nErrors 2 errors occurred in fixture data\n${tally}\n     Errors  1 error`,
+        1,
+        passedThrough,
+        0,
+      ],
+      // Console output is echoed at column 0, so a test that prints the
+      // transport's exact prefix outside the unhandled-error section must not
+      // move the count. A whole-file grep reads two here against one counted
+      // error and refuses the pass the run earned; the anchored count reads
+      // one and grants it.
+      [
+        'transport timeout, and the transport prefix printed outside the section',
+        `${unhandled}\n${timeout}\n${tally}\n     Errors  1 error\n[vitest-worker]: Timeout calling "printed by a test"`,
+        1,
+        passedThrough,
+        0,
+      ],
+      // The pass must be earned by at least one unhandled error Vitest itself
+      // counted. A log with no `Errors` summary and a transport prefix printed
+      // outside any section used to satisfy `0 == 0` and pass a shard whose
+      // only "evidence" was a test's own output.
+      [
+        'transport prefix printed, no error summary to count',
+        `${tally}\n[vitest-worker]: Timeout calling "printed by a test"`,
+        1,
+        stands,
+      ],
+      // The opener needs Vitest's ruler on both sides: the bare words are a
+      // phrase a test can print, not the section header.
+      [
+        'transport timeout, and the bare section words printed',
+        `Unhandled Errors\n${timeout}\n${unhandled}\n${timeout}\n${tally}\n     Errors  1 error`,
+        1,
+        passedThrough,
+        0,
+      ],
+      // A test can print a line that merely starts with the section header.
+      // The opener must match Vitest's ruler-shaped line, not any line that
+      // contains the words, or the printed copy opens a pseudo-section and the
+      // transport line after it is counted twice against one real error.
+      [
+        'transport timeout, and a printed near-miss of the section header',
+        `${unhandled}\n${timeout}\n${tally}\n     Errors  1 error\nUnhandled Errors: a test printed this\n${timeout}`,
         1,
         passedThrough,
         0,
       ],
       [
         'transport timeout, failing tally',
-        `${timeout}\n Tests  3 failed | 10611 passed (10614)\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n Tests  3 failed | 10611 passed (10614)\n     Errors  1 error`,
         1,
         stands,
       ],
@@ -1774,7 +1817,7 @@ describe('release workflow', () => {
       // across the whole log rather than trusted to the branch above.
       [
         'passing tally in one workspace, failing tally in another',
-        `${timeout}\n Tests  10 passed (10)\n Test Files  1 failed (3)\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n Tests  10 passed (10)\n Test Files  1 failed (3)\n     Errors  1 error`,
         1,
         stands,
       ],
@@ -2510,10 +2553,29 @@ describe('release workflow', () => {
     );
     expect(dockerIntegrationScript).toContain('exec 7>&-');
     expect(dockerIntegrationScript).toContain('exec 8>&-');
-    expect(dockerIntegrationScript).toContain('integration-tests cli 9>&-');
     expect(dockerIntegrationScript).toContain(
-      'integration-tests interactive 9>&-',
+      'QWEN_SANDBOX=docker npx vitest run --root ./integration-tests "$1" 9>&-',
     );
+    expect(dockerIntegrationScript).toContain(
+      'for suite in cli interactive; do',
+    );
+  });
+
+  it('selects the apt mirror before the always-cold sandbox build', () => {
+    // #16271: this lane prunes the builder cache, so its apt layers are always
+    // cold — the same defect #16214 fixed for the E2E leg. It must source the
+    // shared probe and apply it before `build:sandbox`, so a mainland host
+    // builds against the VPC intranet mirror rather than the throttled default.
+    // Match the source statement, not a substring — the shellcheck directive
+    // above it also names the file.
+    expect(dockerIntegrationScript).toMatch(
+      /^source .*apt-mirror-probe\.sh"$/m,
+    );
+    const applyIndex = dockerIntegrationScript.indexOf('apply_apt_mirror');
+    expect(applyIndex).toBeGreaterThan(-1);
+    expect(
+      dockerIntegrationScript.indexOf('npm run build:sandbox'),
+    ).toBeGreaterThan(applyIndex);
   });
 
   it('prunes BuildKit cache and gates the docker data root before the build and the vitest phase', () => {
@@ -2565,6 +2627,22 @@ describe('release workflow', () => {
     );
   });
 
+  it('keeps the Docker retry budget below the integration_docker job timeout', () => {
+    const budget = Number(
+      /^DOCKER_TEST_STEP_BUDGET_SECONDS=(\d+)$/m.exec(
+        dockerIntegrationScript,
+      )?.[1],
+    );
+    expect(Number.isInteger(budget)).toBe(true);
+    expect(budget).toBeGreaterThan(0);
+    // The step starts several minutes into the job — 7m50s and 5m54s on the
+    // two measured release runs — so the budget must keep that margin below
+    // the job's timeout-minutes.
+    expect(budget).toBeLessThanOrEqual(
+      releaseYaml.jobs.integration_docker['timeout-minutes'] * 60 - 600,
+    );
+  });
+
   const dockerIntegrationScriptAbsolutePath = join(
     process.cwd(),
     '.github/scripts/run-release-docker-integration.sh',
@@ -2591,6 +2669,18 @@ describe('release workflow', () => {
     dockerPostFloorKb,
     postGateExit,
     inspectTimesOut = false,
+    buildFails = false,
+    suiteFailures = 0,
+    failSuite = 'cli',
+    suiteSeconds = 0,
+    retrySuiteSeconds = suiteSeconds,
+    preLoopSeconds = 0,
+    postGateFailAt = 2,
+    dockerPsFails = false,
+    dockerPsIds = '',
+    aptDefaultRate,
+    aptAliyunRate,
+    aptTunaRate,
   } = {}) => {
     const directory = mkdtempSync(
       join(tmpdir(), 'release-docker-integration-'),
@@ -2608,11 +2698,28 @@ describe('release workflow', () => {
       writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
     stub('git', 'echo 0123456789abcdef0123456789abcdef01234567');
     stub('node', 'echo ghcr.io/qwenlm/qwen-code:0.0.0-test');
+    // Virtual clock: each stubbed vitest run advances it by
+    // STUB_SUITE_SECONDS so a case can model an attempt's duration without
+    // wall-clock waits.
+    stub(
+      'date',
+      `offset=0
+if [ -f "$CALLS_LOG.clock" ]; then offset=$(cat "$CALLS_LOG.clock"); fi
+echo $(( \${STUB_DATE_START:-1000000} + offset ))`,
+    );
     stub('timeout', 'shift; exec "$@"');
     stub('flock', `printf 'flock %s\\n' "$*" >> "$CALLS_LOG"`);
     stub(
       'docker',
       `printf 'docker %s\\n' "$*" >> "$CALLS_LOG"
+if [ "$1" = 'ps' ] && [ "$DOCKER_PS_FAILS" = '1' ]; then
+  echo 'ERROR: cannot connect to the Docker daemon' >&2
+  exit 1
+fi
+if [ "$1" = 'ps' ] && [ -n "$DOCKER_PS_IDS" ]; then
+  printf '%s\n' "$DOCKER_PS_IDS"
+  exit 0
+fi
 if [ "$1" = 'image' ] && [ "$2" = 'inspect' ]; then
   if [ "$3" = '--format' ]; then
     echo sha256:fakeimageid
@@ -2647,8 +2754,51 @@ if [ "$1" = 'info' ]; then
 fi
 exit 0`,
     );
-    stub('npm', `printf 'npm %s\\n' "$*" >> "$CALLS_LOG"`);
-    stub('npx', `printf 'npx %s\\n' "$*" >> "$CALLS_LOG"`);
+    stub(
+      'npm',
+      `printf 'npm %s flags=%s\\n' "$*" "\${BUILD_SANDBOX_FLAGS:-}" >> "$CALLS_LOG"
+offset=0
+if [ -f "$CALLS_LOG.clock" ]; then offset=$(cat "$CALLS_LOG.clock"); fi
+printf '%s' "$(( offset + \${BUILD_SECONDS:-0} ))" > "$CALLS_LOG.clock"
+if [ "$BUILD_FAILS" = '1' ] && [ "$1" = 'run' ] && [ "$2" = 'build:sandbox' ]; then
+  exit 1
+fi`,
+    );
+    stub(
+      'npx',
+      `printf 'npx %s\\n' "$*" >> "$CALLS_LOG"
+suite=cli
+case "$*" in
+  *" interactive") suite=interactive ;;
+esac
+attempts_file="$CALLS_LOG.npx-\${suite}-attempts"
+attempts=0
+if [ -f "$attempts_file" ]; then attempts=$(cat "$attempts_file"); fi
+attempts=$((attempts + 1))
+printf '%s' "$attempts" > "$attempts_file"
+seconds=\${STUB_SUITE_SECONDS:-0}
+if [ "$attempts" -gt 1 ]; then seconds=\${RETRY_SUITE_SECONDS:-$seconds}; fi
+offset=0
+if [ -f "$CALLS_LOG.clock" ]; then offset=$(cat "$CALLS_LOG.clock"); fi
+printf '%s' "$(( offset + seconds ))" > "$CALLS_LOG.clock"
+if [ "\${SUITE_FAILURES:-0}" -gt 0 ] && [ "$suite" = "$FAIL_SUITE" ] && [ "$attempts" -le "$SUITE_FAILURES" ]; then
+  exit 1
+fi`,
+    );
+    // Deterministic stand-in for the probe's range reads so the suite stays
+    // hermetic (#16278 R1-1): answer the -w '%{http_code} %{speed_download}'
+    // projection per URL, default slow + one fast mirror.
+    stub(
+      'curl',
+      `for url; do :; done
+case "$url" in
+  *deb.debian.org*) printf '206 %s' "\${CURL_DEFAULT_RATE:-10000}" ;;
+  *mirrors.aliyun.com*) printf '206 %s' "\${CURL_ALIYUN_RATE:-5000000}" ;;
+  *mirrors.tuna.tsinghua.edu.cn*) printf '206 %s' "\${CURL_TUNA_RATE:-0}" ;;
+  *mirrors.cloud.aliyuncs.com*) printf '000 0' ;;
+  *) printf '000 0' ;;
+esac`,
+    );
     if (!helperAbsent) {
       // Both checkpoints share this stub: count invocations so a case can
       // fail the pre-vitest gate while the pre-build gate passes.
@@ -2661,7 +2811,7 @@ exit 0`,
           'count=$((count + 1))\n' +
           'printf \'%s\' "$count" > "$count_file"\n' +
           'printf \'disk-floor %s floor=%s inodes=%s\\n\' "$*" "${DISK_FLOOR_MIN_FREE_KB:-unset}" "${DISK_FLOOR_MIN_FREE_INODES:-unset}" >> "$CALLS_LOG"\n' +
-          'if [ "$count" -gt 1 ] && [ -n "${POST_GATE_EXIT:-}" ]; then\n' +
+          'if [ "$count" -ge "${POST_GATE_FAIL_AT:-2}" ] && [ -n "${POST_GATE_EXIT:-}" ]; then\n' +
           '  exit "$POST_GATE_EXIT"\n' +
           'fi\n' +
           'exit "${GATE_EXIT:-0}"\n',
@@ -2683,6 +2833,20 @@ exit 0`,
         PRUNE_FAILS: pruneFails ? '1' : '0',
         IMAGE_PRUNE_FAILS: imagePruneFails ? '1' : '0',
         DOCKER_INFO_FAILS: dockerInfoFails ? '1' : '0',
+        BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true',
+        BUILD_FAILS: buildFails ? '1' : '0',
+        SUITE_FAILURES: String(suiteFailures),
+        FAIL_SUITE: failSuite,
+        STUB_DATE_START: '1000000',
+        STUB_SUITE_SECONDS: String(suiteSeconds),
+        RETRY_SUITE_SECONDS: String(retrySuiteSeconds),
+        BUILD_SECONDS: String(preLoopSeconds),
+        POST_GATE_FAIL_AT: String(postGateFailAt),
+        DOCKER_PS_FAILS: dockerPsFails ? '1' : '0',
+        DOCKER_PS_IDS: dockerPsIds,
+        CURL_DEFAULT_RATE: String(aptDefaultRate ?? 10000),
+        CURL_ALIYUN_RATE: String(aptAliyunRate ?? 5000000),
+        CURL_TUNA_RATE: String(aptTunaRate ?? 0),
       };
       // The floor knobs come from the test, never the ambient environment:
       // the suite's verdict must not depend on the env of whoever runs it.
@@ -2715,11 +2879,44 @@ exit 0`,
         encoding: 'utf8',
         env,
       });
-      return { result, calls: readFileSync(callsLog, 'utf8'), dockerRoot };
+      const clockPath = `${callsLog}.clock`;
+      const modelledSeconds = existsSync(clockPath)
+        ? Number(readFileSync(clockPath, 'utf8'))
+        : 0;
+      return {
+        result,
+        calls: readFileSync(callsLog, 'utf8'),
+        dockerRoot,
+        modelledSeconds,
+      };
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
   };
+
+  it.skipIf(process.platform === 'win32')(
+    'selects the fast apt mirror and preserves the CI label in the build flags',
+    () => {
+      const { result, calls } = runDockerIntegrationScript();
+      expect(result.status).toBe(0);
+      expect(calls).toContain('--build-arg APT_MIRROR=mirrors.aliyun.com');
+      expect(calls).toContain('--label org.qwen-code.ci.sandbox=true');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'adds no apt mirror build arg when every endpoint is slow',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        aptDefaultRate: 10000,
+        aptAliyunRate: 20000,
+        aptTunaRate: 15000,
+      });
+      expect(result.status).toBe(0);
+      expect(calls).not.toContain('--build-arg APT_MIRROR=');
+      expect(calls).toContain('--label org.qwen-code.ci.sandbox=true');
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'reclaims without the disk gate or the lock protocol on hosted runners',
@@ -2751,6 +2948,388 @@ exit 0`,
       expect(
         lines.filter((line) => line.startsWith('npx vitest')),
       ).toHaveLength(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'labels an image build failure instead of letting it read as a test failure',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        buildFails: true,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain('sandbox image build failed for');
+      expect(result.stdout).toContain('-release-0123456789abcdef');
+      expect(result.stdout).toContain(
+        'the Docker integration tests did not run',
+      );
+      expect(calls).not.toContain('npx vitest');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'retries a failed Docker suite once within the job budget',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        dockerPsIds: 'cid-alpha\ncid-beta',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('retrying once');
+      const lines = calls.trim().split('\n');
+      const cliRuns = lines.filter(
+        (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+      );
+      expect(cliRuns).toHaveLength(2);
+      const firstCli = lines.indexOf(cliRuns[0]);
+      const secondCli = lines.lastIndexOf(cliRuns[1]);
+      expect(secondCli).toBeGreaterThan(firstCli);
+      // The retry removes this job's containers before the second attempt.
+      expect(
+        lines
+          .slice(firstCli, secondCli)
+          .filter((line) => line.startsWith('docker rm -f')),
+      ).toEqual(['docker rm -f cid-alpha cid-beta']);
+      expect(
+        lines.filter(
+          (line) =>
+            line.startsWith('npx vitest') && line.endsWith(' interactive'),
+        ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'retries the suite that failed, not the one before it',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        failSuite: 'interactive',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const lines = calls.trim().split('\n');
+      expect(
+        lines.filter(
+          (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+        ),
+      ).toHaveLength(1);
+      expect(
+        lines.filter(
+          (line) =>
+            line.startsWith('npx vitest') && line.endsWith(' interactive'),
+        ),
+      ).toHaveLength(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps the lane red when the retried Docker suite fails again',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 2,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain('failed again after a retry');
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(2);
+      expect(calls).not.toContain(
+        'npx vitest run --root ./integration-tests interactive',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'retries a suite that fails late in the step when the retry fits the job',
+    () => {
+      // interactive always runs after cli, so its attempt starts well into
+      // the step. The gate must measure this attempt, not cli's time too.
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        failSuite: 'interactive',
+        suiteSeconds: 2000,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('failed after 2000s; retrying once');
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) =>
+              line.startsWith('npx vitest') && line.endsWith(' interactive'),
+          ),
+      ).toHaveLength(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps the lane red when the motivating 38-minute cli failure repeats',
+    () => {
+      // The nightly incident was deterministic — the sandbox $HOME crash —
+      // so the retry reproduces its two red attempts instead of absorbing
+      // them into a green lane.
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 2,
+        suiteSeconds: 2317,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain('failed again after a retry');
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(2);
+      expect(calls).not.toContain(
+        'npx vitest run --root ./integration-tests interactive',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a retry the pre-suite work and the remaining suite no longer fit',
+    () => {
+      // 2000s of pre-suite work — the build, prunes, and lock waits all
+      // charge the step — plus 2 * 3001s for cli and the ~21-minute
+      // interactive reserve is past the step's 6600s share of the job.
+      const { result, calls } = runDockerIntegrationScript({
+        runnerEnvironment: 'self-hosted',
+        suiteFailures: 1,
+        suiteSeconds: 3001,
+        preLoopSeconds: 2000,
+        dockerPostFloorKb: '3145728',
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain(
+        'failed after 3001s (5001s of the 6600s step budget already spent, 3001s charged for the retry, 1260s reserved for the remaining suite)',
+      );
+      expect(result.stdout).toContain(
+        'would overrun the 120-minute job timeout',
+      );
+      expect(result.stdout).not.toContain('retrying once');
+      const lines = calls.trim().split('\n');
+      // Only the EXIT trap reclaims; the refused retry must not announce
+      // itself, reclaim containers, or sample the floor a third time.
+      expect(
+        lines.filter((line) => line.startsWith('docker ps -aq')),
+      ).toHaveLength(1);
+      expect(
+        lines.filter((line) => line.startsWith('disk-floor')),
+      ).toHaveLength(2);
+      expect(
+        lines.filter(
+          (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+        ),
+      ).toHaveLength(1);
+      expect(calls).not.toContain(
+        'npx vitest run --root ./integration-tests interactive',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a retry that only fits if it fails as fast as the first attempt',
+    () => {
+      // 5000s of pre-suite work plus a 120s cli failure leaves room only for
+      // a retry that fails just as fast. A recovering retry spends the
+      // suite's own ~40 minutes, so the gate must refuse it.
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        suiteSeconds: 120,
+        retrySuiteSeconds: 2400,
+        preLoopSeconds: 5000,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain(
+        'failed after 120s (5120s of the 6600s step budget already spent, 2400s charged for the retry, 1260s reserved for the remaining suite)',
+      );
+      expect(result.stdout).toContain(
+        'would overrun the 120-minute job timeout',
+      );
+      expect(result.stdout).not.toContain('retrying once');
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(1);
+      expect(calls).not.toContain(
+        'npx vitest run --root ./integration-tests interactive',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'admits a recovering retry and models it at its full length',
+    () => {
+      const { result, calls, modelledSeconds } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        suiteSeconds: 120,
+        retrySuiteSeconds: 1272,
+        preLoopSeconds: 472,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('failed after 120s; retrying once');
+      // pre-suite 472s + failed cli 120s + the 1272s retry + interactive 120s.
+      expect(modelledSeconds).toBe(1984);
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'admits a retry that exactly fits the step budget',
+    () => {
+      // 540s of pre-suite work plus a 2400s cli failure leaves 2940s spent;
+      // the 2400s retry charge and the 1260s interactive reserve then model
+      // the step at exactly 6600s. Equality fits; only a strict overrun is
+      // refused.
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        suiteSeconds: 2400,
+        preLoopSeconds: 540,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('failed after 2400s; retrying once');
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(2);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses an interactive retry when the step has no room left for it',
+    () => {
+      // cli's 2400s plus the interactive attempt's 2400s already fill 4800s
+      // of the 6600s step budget, so the retry would overrun the job even
+      // though no later suite needs a reserve.
+      const { result, calls } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        failSuite: 'interactive',
+        suiteSeconds: 2400,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain(
+        'failed after 2400s (4800s of the 6600s step budget already spent, 2400s charged for the retry)',
+      );
+      expect(result.stdout).toContain(
+        'would overrun the 120-minute job timeout',
+      );
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) =>
+              line.startsWith('npx vitest') && line.endsWith(' interactive'),
+          ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    're-samples the post-build disk floor before retrying a suite',
+    () => {
+      const { result, calls, dockerRoot } = runDockerIntegrationScript({
+        runnerEnvironment: 'self-hosted',
+        suiteFailures: 1,
+        dockerPostFloorKb: '3145728',
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const lines = calls.trim().split('\n');
+      const cliRuns = lines
+        .map((line, index) =>
+          line.startsWith('npx vitest') && line.endsWith(' cli') ? index : -1,
+        )
+        .filter((index) => index >= 0);
+      expect(cliRuns).toHaveLength(2);
+      const postGates = lines
+        .map((line, index) =>
+          line === `disk-floor ${dockerRoot} floor=3145728 inodes=unset`
+            ? index
+            : -1,
+        )
+        .filter((index) => index >= 0);
+      const reclaims = lines
+        .map((line, index) =>
+          line.startsWith('docker ps -aq') &&
+          index > cliRuns[0] &&
+          index < cliRuns[1]
+            ? index
+            : -1,
+        )
+        .filter((index) => index >= 0);
+      // The pre-build sample charges the build floor; the pre-vitest and
+      // pre-retry samples charge the POST knob. The retry reclaims first and
+      // gates the filesystem the reclaimed attempt left behind.
+      expect(reclaims).toHaveLength(1);
+      expect(postGates).toHaveLength(2);
+      expect(postGates[0]).toBeLessThan(cliRuns[0]);
+      expect(postGates[1]).toBeGreaterThan(reclaims[0]);
+      expect(postGates[1]).toBeLessThan(cliRuns[1]);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'stops before a retry when the pre-retry disk floor trips',
+    () => {
+      // The reclaim leaves container-layer residue the cleanup cannot
+      // remove, so a retry may not start below the floor the first attempt
+      // was admitted on.
+      const { result, calls } = runDockerIntegrationScript({
+        runnerEnvironment: 'self-hosted',
+        suiteFailures: 1,
+        postGateExit: '1',
+        postGateFailAt: 3,
+        dockerPostFloorKb: '3145728',
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain('failed at the pre-retry checkpoint');
+      expect(result.stdout).not.toContain('retrying once');
+      expect(
+        calls
+          .trim()
+          .split('\n')
+          .filter(
+            (line) => line.startsWith('npx vitest') && line.endsWith(' cli'),
+          ),
+      ).toHaveLength(1);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'warns when the pre-retry container listing fails',
+    () => {
+      const { result } = runDockerIntegrationScript({
+        suiteFailures: 1,
+        dockerPsFails: true,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain(
+        'failed to list release containers for test-owner',
+      );
+      expect(result.stdout).toContain('failed after 0s; retrying once');
     },
   );
 
@@ -2851,6 +3430,7 @@ exit 0`,
       // actually reads, so the operator is not sent to the job-start gate's
       // variables.
       expect(result.stdout).toContain('docker data root floor gate failed');
+      expect(result.stdout).toContain('failed at the pre-build checkpoint');
       expect(result.stdout).toContain('DISK_FLOOR_DOCKER_MIN_FREE_KB');
     },
   );
@@ -2943,6 +3523,7 @@ exit 0`,
         postGateExit: '1',
       });
       expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain('failed at the pre-vitest checkpoint');
       expect(calls).toContain('npm run build:sandbox');
       expect(calls).toContain('flock --unlock 7');
       expect(calls).not.toContain('npx vitest');

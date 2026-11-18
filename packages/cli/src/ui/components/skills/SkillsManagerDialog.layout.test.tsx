@@ -11,7 +11,27 @@ import type { Config, SkillConfig } from '@qwen-code/qwen-code-core';
 import { LoadedSettings, SettingScope } from '../../../config/settings.js';
 import { setLanguageAsync } from '../../../i18n/index.js';
 import { KeypressProvider } from '../../contexts/KeypressContext.js';
+import {
+  isSlowTestHost,
+  slowHostBudgetMs,
+} from '../../../test-utils/slow-test-host.js';
 import { SkillsManagerDialog } from './SkillsManagerDialog.js';
+
+// The macOS nightly legs run on contended 3-core hosts where the ink
+// keypress-to-render chain can exceed vi.waitFor's 1s default budget: the
+// "picks the nonfirst highlighted skill" case failed dispatch 43626431399
+// and 43639080277 at ~1.4-1.9s with the selection never rendered in time.
+// Same fix as SubscriptionDialog.test.tsx — give every render wait the
+// repo's contended-host budget. vi.waitFor's timeout is per-call (vitest
+// hardcodes the 1s default), so route all waits through this helper.
+const WAIT_FOR_TIMEOUT = slowHostBudgetMs(5_000, 15_000);
+const waitForRender = (assertion: () => void | Promise<void>) =>
+  vi.waitFor(assertion, { timeout: WAIT_FOR_TIMEOUT });
+// A slow host's 15s render-wait budget must sit UNDER the case ceiling, or a
+// starved wait reports an opaque runner timeout instead of its own assertion.
+// Give any slow host (not only the macOS runner the config keys on) headroom;
+// the fast arm inherits the lane grant so it never outranks the autofix gate.
+const CEILING_MS = isSlowTestHost() ? 60_000 : undefined;
 
 const lockedSkills: SkillConfig[] = ['one', 'two', 'three', 'four', 'five'].map(
   (name) => ({
@@ -100,13 +120,13 @@ function renderDialog(overrides: Partial<DialogProps> = {}, columns?: number) {
   return result;
 }
 
-describe('SkillsManagerDialog', () => {
+describe('SkillsManagerDialog', { timeout: CEILING_MS }, () => {
   it.each([18, 12, 11, 6, 5, 1])(
     'keeps the interactive list within a %i-row budget',
     async (availableTerminalHeight) => {
       const { lastFrame } = renderDialog({ availableTerminalHeight });
 
-      await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
+      await waitForRender(() => expect(lastFrame()).toContain('eight skill'));
       expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(
         availableTerminalHeight,
       );
@@ -121,12 +141,12 @@ describe('SkillsManagerDialog', () => {
       dialog({ settings, config, onClose, availableTerminalHeight });
     const { stdin, lastFrame, rerender } = render(renderAt(18));
 
-    await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
+    await waitForRender(() => expect(lastFrame()).toContain('eight skill'));
     act(() => stdin.write('six'));
-    await vi.waitFor(() => expect(lastFrame()).toContain('Search: six'));
+    await waitForRender(() => expect(lastFrame()).toContain('Search: six'));
 
     rerender(renderAt(5));
-    await vi.waitFor(() => expect(lastFrame()).not.toContain('Search:'));
+    await waitForRender(() => expect(lastFrame()).not.toContain('Search:'));
     expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(5);
     expect(lastFrame()).toContain('› [x] eight');
 
@@ -136,12 +156,12 @@ describe('SkillsManagerDialog', () => {
       stdin.write('\x7f');
     });
     act(() => stdin.write('j'));
-    await vi.waitFor(() => expect(lastFrame()).toContain('› [x] nine'));
+    await waitForRender(() => expect(lastFrame()).toContain('› [x] nine'));
     act(() => stdin.write('k'));
-    await vi.waitFor(() => expect(lastFrame()).toContain('› [x] eight'));
+    await waitForRender(() => expect(lastFrame()).toContain('› [x] eight'));
 
     act(() => stdin.write('\u001B'));
-    await vi.waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    await waitForRender(() => expect(onClose).toHaveBeenCalledTimes(1));
 
     rerender(renderAt(18));
     expect(lastFrame()).toContain('Search: six');
@@ -162,15 +182,15 @@ describe('SkillsManagerDialog', () => {
       });
     const { stdin, lastFrame, rerender } = render(renderAt(18));
 
-    await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
+    await waitForRender(() => expect(lastFrame()).toContain('eight skill'));
     act(() => stdin.write('six'));
-    await vi.waitFor(() => expect(lastFrame()).toContain('Search: six'));
+    await waitForRender(() => expect(lastFrame()).toContain('Search: six'));
 
     rerender(renderAt(5));
-    await vi.waitFor(() => expect(lastFrame()).toContain('› [x] eight'));
+    await waitForRender(() => expect(lastFrame()).toContain('› [x] eight'));
     act(() => stdin.write('\r'));
 
-    await vi.waitFor(() =>
+    await waitForRender(() =>
       expect(setInputBuffer).toHaveBeenCalledWith('/eight'),
     );
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -179,7 +199,7 @@ describe('SkillsManagerDialog', () => {
   it('prioritizes unlocked rows and summarizes locked skills', async () => {
     const { lastFrame } = renderDialog({ availableTerminalHeight: 18 });
 
-    await vi.waitFor(() => expect(lastFrame()).toContain('six skill'));
+    await waitForRender(() => expect(lastFrame()).toContain('six skill'));
     expect(lastFrame()).toContain('5 locked not shown');
     expect(lastFrame()).not.toContain('one skill');
     expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(18);
@@ -197,7 +217,7 @@ describe('SkillsManagerDialog', () => {
         availableTerminalHeight,
       });
 
-      await vi.waitFor(() =>
+      await waitForRender(() =>
         expect(lastFrame()).toContain(`${hiddenCount} locked not shown`),
       );
       expect(lastFrame()).not.toContain('[x]');
@@ -212,15 +232,15 @@ describe('SkillsManagerDialog', () => {
       availableTerminalHeight: 8,
     });
 
-    await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
+    await waitForRender(() => expect(lastFrame()).toContain('eight skill'));
     act(() => stdin.write('six'));
-    await vi.waitFor(() => expect(lastFrame()).toContain('six skill'));
+    await waitForRender(() => expect(lastFrame()).toContain('six skill'));
     expect(lastFrame()).toContain('1 / 10 skills');
 
     act(() => stdin.write('\u001B'));
-    await vi.waitFor(() => expect(lastFrame()).not.toContain('Search: six'));
+    await waitForRender(() => expect(lastFrame()).not.toContain('Search: six'));
     act(() => stdin.write('one'));
-    await vi.waitFor(() => expect(lastFrame()).toContain('one skill'));
+    await waitForRender(() => expect(lastFrame()).toContain('one skill'));
     expect(lastFrame()).toContain('1 / 10 skills');
     expect(lastFrame()).toContain('[locked: User]');
     expect(lastFrame()).not.toContain('No skills match the search.');
@@ -235,7 +255,7 @@ describe('SkillsManagerDialog', () => {
     'allocates remaining rows to locked skills at %i rows',
     async (height, hidden) => {
       const { lastFrame } = renderDialog({ availableTerminalHeight: height });
-      await vi.waitFor(() => expect(lastFrame()).toContain('six skill'));
+      await waitForRender(() => expect(lastFrame()).toContain('six skill'));
       const frame = lastFrame() ?? '';
       expect(frame.split('\n').length).toBeLessThanOrEqual(height);
       expect((frame.match(/\[locked: User\]/g) ?? []).length).toBe(5 - hidden);
@@ -260,9 +280,9 @@ describe('SkillsManagerDialog', () => {
         onClose,
         setInputBuffer,
       });
-      await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
+      await waitForRender(() => expect(lastFrame()).toContain('eight skill'));
       act(() => stdin.write('one'));
-      await vi.waitFor(() => expect(lastFrame()).toContain('1 / 10 skills'));
+      await waitForRender(() => expect(lastFrame()).toContain('1 / 10 skills'));
       const frame = lastFrame() ?? '';
       expect(frame).not.toContain('No skills match the search.');
       expect(frame).not.toContain('[x]');
@@ -288,9 +308,11 @@ describe('SkillsManagerDialog', () => {
       config: createConfig(lockedSkills),
       availableTerminalHeight: 12,
     });
-    await vi.waitFor(() => expect(lastFrame()).toContain('5 locked not shown'));
+    await waitForRender(() =>
+      expect(lastFrame()).toContain('5 locked not shown'),
+    );
     act(() => stdin.write('missing'));
-    await vi.waitFor(() =>
+    await waitForRender(() =>
       expect(lastFrame()).toContain('No skills match the search.'),
     );
     expect(lastFrame()).toContain('0 / 5 skills');
@@ -304,17 +326,19 @@ describe('SkillsManagerDialog', () => {
     const atHeight = (availableTerminalHeight: number) =>
       dialog({ settings, config, availableTerminalHeight });
     const { stdin, lastFrame, rerender } = render(atHeight(100));
-    await vi.waitFor(() => expect(lastFrame()).toContain('one skill'));
+    await waitForRender(() => expect(lastFrame()).toContain('one skill'));
     act(() => stdin.write('one'));
-    await vi.waitFor(() => expect(lastFrame()).toContain('1 / 10 skills'));
+    await waitForRender(() => expect(lastFrame()).toContain('1 / 10 skills'));
     rerender(atHeight(6));
-    await vi.waitFor(() => expect(lastFrame()).toContain('1 locked not shown'));
+    await waitForRender(() =>
+      expect(lastFrame()).toContain('1 locked not shown'),
+    );
     rerender(atHeight(5));
-    await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
+    await waitForRender(() => expect(lastFrame()).toContain('eight skill'));
     expect(lastFrame()).not.toContain('Search:');
     expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(5);
     rerender(atHeight(100));
-    await vi.waitFor(() => expect(lastFrame()).toContain('one skill'));
+    await waitForRender(() => expect(lastFrame()).toContain('one skill'));
     expect(lastFrame()).toContain('Search: one');
     expect(lastFrame()).toContain('1 / 10 skills');
     expect(lastFrame()).not.toContain('eight skill');
@@ -333,11 +357,20 @@ describe('SkillsManagerDialog', () => {
       onClose,
       availableTerminalHeight: 18,
     });
-    await vi.waitFor(() => expect(lastFrame()).toContain('› [ ] eight'));
+    // `[x] nine` only paints after the dialog's selectedKeys effect, and a
+    // child's passive effects (MultiSelect's keypress subscription) flush
+    // before it — so this frame also guarantees the list is listening. On the
+    // bare first frame the subscription may still be pending, and a 'j' sent
+    // then is dropped for good (the selection frame that follows does not
+    // replay it).
+    await waitForRender(() => {
+      expect(lastFrame()).toContain('› [ ] eight');
+      expect(lastFrame()).toContain('[x] nine');
+    });
     act(() => stdin.write('j'));
-    await vi.waitFor(() => expect(lastFrame()).toContain('› [x] nine'));
+    await waitForRender(() => expect(lastFrame()).toContain('› [x] nine'));
     act(() => stdin.write('\r'));
-    await vi.waitFor(() =>
+    await waitForRender(() =>
       expect(setInputBuffer).toHaveBeenCalledWith('/nine'),
     );
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -349,7 +382,7 @@ describe('SkillsManagerDialog', () => {
       config: createConfig(manyLockedSkills),
     });
 
-    await vi.waitFor(() => expect(lastFrame()).toContain('locked-12'));
+    await waitForRender(() => expect(lastFrame()).toContain('locked-12'));
     expect(lastFrame()).toContain('locked-01');
     expect(lastFrame()).toContain(
       'Locked by settings entries you cannot toggle here:',
@@ -360,10 +393,10 @@ describe('SkillsManagerDialog', () => {
   it('shows locked-only search results without an empty state', async () => {
     const { stdin, lastFrame } = renderDialog();
 
-    await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
+    await waitForRender(() => expect(lastFrame()).toContain('eight skill'));
     act(() => stdin.write('one'));
 
-    await vi.waitFor(() => expect(lastFrame()).toContain('one skill'));
+    await waitForRender(() => expect(lastFrame()).toContain('one skill'));
     expect(lastFrame()).toContain(
       'Locked by settings entries you cannot toggle here:',
     );
@@ -387,12 +420,12 @@ describe('SkillsManagerDialog', () => {
       onClose,
     });
 
-    await vi.waitFor(() => expect(lastFrame()).toContain('› [x] eight'));
+    await waitForRender(() => expect(lastFrame()).toContain('› [x] eight'));
     act(() => stdin.write(' '));
-    await vi.waitFor(() => expect(lastFrame()).toContain('› [ ] eight'));
+    await waitForRender(() => expect(lastFrame()).toContain('› [ ] eight'));
     act(() => stdin.write('\u001B'));
 
-    await vi.waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    await waitForRender(() => expect(onClose).toHaveBeenCalledTimes(1));
     expect(setValues).toHaveBeenCalledWith([
       {
         scope: SettingScope.Workspace,
@@ -409,7 +442,9 @@ describe('SkillsManagerDialog', () => {
     await setLanguageAsync('ca');
     const result = renderDialog({ availableTerminalHeight: 12 }, 26);
     try {
-      await vi.waitFor(() => expect(result.lastFrame()).toContain('Gestiona'));
+      await waitForRender(() =>
+        expect(result.lastFrame()).toContain('Gestiona'),
+      );
       expect(result.lastFrame()?.split('\n').length).toBeLessThanOrEqual(12);
     } finally {
       result.unmount();
@@ -426,7 +461,7 @@ describe('SkillsManagerDialog', () => {
       10,
     );
 
-    await vi.waitFor(() => expect(lastFrame()).toContain('[x]'));
+    await waitForRender(() => expect(lastFrame()).toContain('[x]'));
     expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(16);
   });
 
@@ -451,7 +486,7 @@ describe('SkillsManagerDialog', () => {
         availableTerminalHeight,
       });
 
-      await vi.waitFor(() =>
+      await waitForRender(() =>
         expect(lastFrame()).toContain(
           rejects ? 'Failed to load skills' : 'Loading skills',
         ),
@@ -484,7 +519,7 @@ describe('SkillsManagerDialog', () => {
       config: createConfig(skills),
     });
 
-    await vi.waitFor(() => expect(lastFrame()).toContain('multiline'));
+    await waitForRender(() => expect(lastFrame()).toContain('multiline'));
     expect(lastFrame()).toContain('first line second line');
     expect(lastFrame()).toContain('third line fourth line');
   });
@@ -495,9 +530,9 @@ describe('SkillsManagerDialog', () => {
       54,
     );
 
-    await vi.waitFor(() => expect(lastFrame()).toContain('eight skill'));
+    await waitForRender(() => expect(lastFrame()).toContain('eight skill'));
     act(() => stdin.write('x'.repeat(80)));
-    await vi.waitFor(() =>
+    await waitForRender(() =>
       expect(lastFrame()).toContain('No skills match the search.'),
     );
     expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(12);

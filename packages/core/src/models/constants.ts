@@ -5,6 +5,7 @@
  */
 
 import { DEFAULT_QWEN_MODEL, MAINLINE_CODER_MODEL } from '../config/models.js';
+import { QWEN_SUBSCRIPTION_MODEL } from '../qwen/oauth-config.js';
 
 import type { ModelConfig } from './types.js';
 
@@ -50,6 +51,7 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'extra_body',
   'thinkingMandatory',
   'modalities',
+  'imageDetail',
   'splitToolMedia',
   'toolResultContentFormat',
 ] as const satisfies ReadonlyArray<keyof ContentGeneratorConfig>;
@@ -114,11 +116,17 @@ export const AUTH_ENV_MAPPINGS = {
     baseUrl: [],
     model: [],
   },
+  'qwen-subscription': {
+    apiKey: [],
+    baseUrl: [],
+    model: [],
+  },
 } as const satisfies Record<AuthType, AuthEnvMapping>;
 
 export const DEFAULT_MODELS = {
   openai: MAINLINE_CODER_MODEL,
   'qwen-oauth': DEFAULT_QWEN_MODEL,
+  'qwen-subscription': QWEN_SUBSCRIPTION_MODEL,
 } as Partial<Record<AuthType, string>>;
 
 /**

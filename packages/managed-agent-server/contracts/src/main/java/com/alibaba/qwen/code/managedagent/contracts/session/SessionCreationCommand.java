@@ -29,10 +29,11 @@ public record SessionCreationCommand(
         WorkspaceSelection selection, String requestedApprovalMode,
         boolean approvalSelectionSupported, Boolean requestedPlanMode,
         boolean planModeSupported, List<Map<String, Object>> skills,
-        boolean publicChildrenSupported, String modelId,
+        boolean publicChildrenSupported, boolean sessionSkillsSupported, String modelId,
         List<ManagedExtensionPackages.Pin> extensionPins,
+        com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages.Selection extensionSelection,
         Set<String> extensionLifecycleProfiles,
-        SessionWorktreeStore.Plan worktree, SessionModelConfig modelConfig) {
+        SessionWorktreeStore.Plan worktree, SessionModelConfig modelConfig, String memoryStoreId) {
     public static Builder builder() {
         return new Builder();
     }
@@ -55,11 +56,14 @@ public record SessionCreationCommand(
         private boolean planModeSupported;
         private List<Map<String, Object>> skills = List.of();
         private boolean publicChildrenSupported;
+        private boolean sessionSkillsSupported;
         private String modelId;
         private List<ManagedExtensionPackages.Pin> extensionPins;
+        private com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages.Selection extensionSelection;
         private Set<String> extensionLifecycleProfiles = Set.of();
         private SessionWorktreeStore.Plan worktree;
         private SessionModelConfig modelConfig;
+        private String memoryStoreId;
 
         public Builder tenantId(String value) {
             this.tenantId = value;
@@ -141,6 +145,11 @@ public record SessionCreationCommand(
             return this;
         }
 
+        public Builder sessionSkillsSupported(boolean value) {
+            this.sessionSkillsSupported = value;
+            return this;
+        }
+
         public Builder modelId(String value) {
             this.modelId = value;
             return this;
@@ -148,6 +157,11 @@ public record SessionCreationCommand(
 
         public Builder extensionPins(List<ManagedExtensionPackages.Pin> value) {
             this.extensionPins = value;
+            return this;
+        }
+
+        public Builder extensionSelection(com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages.Selection value) {
+            this.extensionSelection = value;
             return this;
         }
 
@@ -166,13 +180,18 @@ public record SessionCreationCommand(
             return this;
         }
 
+        public Builder memoryStoreId(String value) {
+            this.memoryStoreId = value;
+            return this;
+        }
+
         public SessionCreationCommand build() {
             return new SessionCreationCommand(tenantId, actorId, idempotencyKey,
                     requestDigest, agentId, requestedRevision, title, input,
                     payloadDigest, selection, requestedApprovalMode,
                     approvalSelectionSupported, requestedPlanMode, planModeSupported,
-                    skills, publicChildrenSupported, modelId, extensionPins,
-                    extensionLifecycleProfiles, worktree, modelConfig);
+                    skills, publicChildrenSupported, sessionSkillsSupported, modelId, extensionPins, extensionSelection,
+                    extensionLifecycleProfiles, worktree, modelConfig, memoryStoreId);
         }
     }
 }

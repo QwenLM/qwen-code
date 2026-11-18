@@ -5,7 +5,11 @@
  */
 
 import { CLAUDE_CODE_EVENTS } from './claude-events.js';
-import { INVALIDATABLE_EVENTS, TERMINAL_ELEMENTS } from './render-tree.js';
+import {
+  INVALIDATABLE_EVENTS,
+  MOD_RENDER_SITES,
+  TERMINAL_ELEMENTS,
+} from './render-tree.js';
 import { MOD_MAX_DEPTH } from './types.js';
 
 // Executed only inside QuickJS. The factory's handles stay private to the host.
@@ -152,10 +156,13 @@ export const MOD_GUEST_FACTORY = String.raw`
       hook.caught = handler;
     }});
   };
-  const call = (id, frames, kind, value) => bridge(id, kind, encode({ value, frames })).then(json => {
+  let modelTokens = 0;
+  const abortedModel = frozen({ isAnswered: false, reason: 'aborted', usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } });
+  const unpack = json => {
     const envelope = parse(json);
     return frozen(envelope.voidValue ? {value: undefined} : envelope.value);
-  });
+  };
+  const call = (id, frames, kind, value) => bridge(id, kind, encode({ value, frames })).then(unpack);
   const api = (id, frames) => {
     const invoke = (name, value) => call(id, frames, name, value);
     const namespaces = {
@@ -188,9 +195,44 @@ export const MOD_GUEST_FACTORY = String.raw`
           });
         }
       },
+      model: {
+        // The signal stays here, as a sleep's does; aborting it cuts the
+        // call, which then resolves aborted. No hook reads it.
+        complete: async (request, options = {}) => {
+          if (!object(options) || keys(options).some(k => k !== 'signal')) throw new Error('Invalid Mod model.complete options');
+          const { signal } = options;
+          if (signal !== undefined && (!object(signal) || typeof signal.addEventListener !== 'function')) throw new Error('Invalid Mod model.complete signal');
+          if (signal?.aborted) return abortedModel;
+          const token = ++modelTokens;
+          let aborted = false;
+          let published = false;
+          const abort = () => {
+            aborted = true;
+            if (published) bridge(id, 'model.abort', token);
+          };
+          try {
+            signal?.addEventListener('abort', abort);
+            if (signal?.aborted || aborted) return abortedModel;
+            const json = encode({ value: request, frames });
+            if (signal?.aborted || aborted) return abortedModel;
+            const pending = bridge(id, 'model.complete', json, token);
+            published = true;
+            return await pending.then(unpack);
+          } finally {
+            signal?.removeEventListener?.('abort', abort);
+          }
+        }
+      },
       // Async, so an input too large for the bridge rejects like a wrong shape.
       prompt: { submit: async input => invoke('prompt.submit', input) },
       turn: { abort: input => invoke('turn.abort', input) },
+      // Async, so a value that is no JSON (a cycle) rejects as a wrong shape does.
+      store: {
+        get: async key => invoke('store.get', { key }),
+        set: async (key, value) => invoke('store.set', { key, value }),
+        delete: async key => invoke('store.delete', { key }),
+        keys: async () => invoke('store.keys', {})
+      },
       ui: {
         log: (text, options = {}) => {
           if (!object(options) || keys(options).some(k => k !== 'to')) throw new Error('Invalid Mod log');
@@ -245,7 +287,15 @@ export const MOD_GUEST_FACTORY = String.raw`
       if (typeof register !== 'function') throw new Error('Mod must export register(on, options)');
       registering = true;
       try { await register(on, frozen(parse(options))); } finally { registering = false; }
-      return stringify(hooks.map(h => h.event));
+      // A render hook names the sites its matcher's component allows, so the
+      // host raises a site only where some hook may hear it.
+      const sites = ${JSON.stringify(MOD_RENDER_SITES)};
+      return stringify(hooks.map(h => ({
+        event: h.event,
+        sites: object(h.matcher) && hasOwn(h.matcher, 'component')
+          ? sites.filter(site => matches(h.matcher.component, site))
+          : null
+      })));
     },
     run: async json => {
       const run = parse(json);

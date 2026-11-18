@@ -5,7 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.event.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.event.TransportWakeActivator.LoadOutcome;
 import com.alibaba.qwen.code.managedagent.event.TransportWakeActivator.Outcome;
-import com.alibaba.qwen.code.managedagent.persistence.TransportConsumerStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcTransportConsumerStore;
 import com.alibaba.qwen.code.managedagent.repository.TransportConsumerStore.WakeFence;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,7 +27,7 @@ import static org.mockito.Mockito.when;
 class TransportWakeActivatorTest {
     private static final String DIGEST = "a".repeat(64);
 
-    private TransportConsumerStore store;
+    private JdbcTransportConsumerStore store;
     private HarnessConnector harness;
     private List<String> activated;
     private List<Runnable> queued;
@@ -62,7 +62,7 @@ class TransportWakeActivatorTest {
 
     @BeforeEach
     void setUp() {
-        store = mock(TransportConsumerStore.class);
+        store = mock(JdbcTransportConsumerStore.class);
         harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(true);
         activated = new ArrayList<>();

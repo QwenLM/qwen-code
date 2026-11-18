@@ -73,6 +73,7 @@ import {
   freshAttempt,
   readFixMarker,
 } from './fix.js';
+import { AutofixPrRefusal } from './refusal.js';
 
 const CHECK_CONTEXT_FIELDS = `nodes {
   __typename
@@ -1940,7 +1941,8 @@ function markOrphanReplies(
       first.id in cache ? cache[first.id] : undefined;
     if (parent === undefined) {
       if (check.strict && Date.now() > deadline) {
-        throw new Error(
+        throw new AutofixPrRefusal(
+          'partial',
           `asked GitHub about ${asked} bot comments on PR #${target.prNumber} and kept the answers; run snapshot again to go on`,
         );
       }

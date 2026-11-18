@@ -340,7 +340,7 @@ export function allowOriginCors(
   patterns: ParsedAllowOriginPatterns | OriginMatcher,
 ): RequestHandler {
   const matcher = toMatcher(patterns);
-  const allowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
+  const allowedMethods = 'GET, POST, PUT, PATCH, DELETE, OPTIONS';
   // `X-Qwen-Event-Epoch` pairs with `Last-Event-ID` on SSE reconnects
   // (DAEMON-001): it must survive preflight AND be readable from the
   // response, or cross-origin clients silently lose stale-cursor detection.

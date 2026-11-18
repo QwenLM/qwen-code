@@ -232,4 +232,24 @@ describe('GroupGate', () => {
       expect(result).toEqual({ allowed: false, reason: 'disabled' });
     });
   });
+
+  describe('admits', () => {
+    it('follows the policy, allowlist and pairing steps without the mention step', () => {
+      withQwenHome(() => {
+        const store = new PairingStore('test');
+        const pairing = new GroupGate('pairing', {}, store);
+        expect(new GroupGate('disabled').admits('g1')).toBe(false);
+        expect(new GroupGate('open').admits('g1')).toBe(true);
+        expect(new GroupGate('allowlist', { g1: {} }).admits('g1')).toBe(true);
+        expect(new GroupGate('allowlist', { g2: {} }).admits('g1')).toBe(false);
+        expect(pairing.admits('g1')).toBe(false);
+        // No side effect: asking never opens a pairing request.
+        expect(store.listPending()).toEqual([]);
+        const created = store.createGroupRequest('g1', 'g1', 'user1', 'User');
+        if (!('code' in created)) throw new Error('expected a pairing code');
+        store.approve(created.code);
+        expect(pairing.admits('g1')).toBe(true);
+      });
+    });
+  });
 });

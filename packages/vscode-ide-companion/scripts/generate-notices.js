@@ -7,7 +7,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createHash } from 'node:crypto';
 
 const projectRoot = path.resolve(
   path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..'),
@@ -77,6 +76,12 @@ async function getDependencyLicense(depName, depVersion, packageDir) {
           `Warning: Failed to read license file for ${depName}: ${e.message}`,
         );
       }
+    } else if (depName === 'saxes' && depVersion === '5.0.1') {
+      // The published tarball omits https://github.com/lddubeau/saxes/blob/v5.0.1/LICENSE.
+      licenseContent = await fs.readFile(
+        new URL('./licenses/saxes-5.0.1.txt', import.meta.url),
+        'utf-8',
+      );
     } else {
       const fallbackLicense = getFallbackLicenseText(
         depPackageJson.license,
@@ -193,6 +198,8 @@ export async function findLicenseFile(packageDir, licenseFileHint) {
     'LICENSE.txt',
     'LICENSE-MIT.txt',
     'LICENSE-MIT',
+    'LICENSE.MIT',
+    'LICENCE',
     'LICENCE.md',
     'license.md',
     'license',
@@ -421,8 +428,7 @@ export async function collectDependencies(
     ...Object.keys(manifest.dependencies ?? {}),
     ...bundled,
   ]) {
-    // Web Shell uses ExcelJS's prebuilt browser entry. These Node-only branches
-    // are not in that bundle; its actual embedded packages are inventoried below.
+    // Web Shell builds ExcelJS's browser sources without these Node-only branches.
     if (
       packageName === 'exceljs' &&
       ['archiver', 'unzipper', 'tmp'].includes(depName)
@@ -430,31 +436,6 @@ export async function collectDependencies(
       continue;
     await collectDependencies(depName, dir, dependenciesMap, visitedDirs);
   }
-}
-
-// ExcelJS ships a prebuilt browser bundle whose embedded dependencies are not
-// discoverable by walking its runtime package.json dependencies.
-export async function getExceljsBrowserNotices(packageDir) {
-  const inventory = JSON.parse(
-    await fs.readFile(
-      new URL('./licenses/exceljs-browser.json', import.meta.url),
-      'utf-8',
-    ),
-  );
-  const manifest = JSON.parse(
-    await fs.readFile(path.join(packageDir, 'package.json'), 'utf-8'),
-  );
-  const bundle = await fs.readFile(path.join(packageDir, inventory.browser));
-  if (
-    manifest.version !== inventory.exceljsVersion ||
-    manifest.browser !== inventory.browser ||
-    createHash('sha256').update(bundle).digest('hex') !== inventory.bundleSha256
-  ) {
-    throw new Error(
-      'ExcelJS browser bundle changed; refresh its bundled license inventory.',
-    );
-  }
-  return inventory.packages;
 }
 
 async function main({ packageDir = packagePath, bundledOnly = false } = {}) {
@@ -490,27 +471,11 @@ async function main({ packageDir = packagePath, bundledOnly = false } = {}) {
 
   const dependencyEntries = Array.from(allDependencies.values());
 
-  const exceljs = dependencyEntries.find(({ name }) => name === 'exceljs');
-  const browserLicenses = exceljs
-    ? await getExceljsBrowserNotices(exceljs.dir)
-    : [];
-  const bundledLicenses = new Map(
-    browserLicenses.map((license) => [
-      `${license.name}@${license.version}`,
-      license,
-    ]),
-  );
-  const licensePromises = dependencyEntries.map(
-    ({ name, version, dir }) =>
-      bundledLicenses.get(`${name}@${version}`) ??
+  const dependencyLicenses = await Promise.all(
+    dependencyEntries.map(({ name, version, dir }) =>
       getDependencyLicense(name, version, dir),
-  );
-  const dependencyLicenses = [
-    ...(await Promise.all(licensePromises)),
-    ...browserLicenses.filter(
-      ({ name, version }) => !allDependencies.has(`${name}@${version}`),
     ),
-  ];
+  );
 
   let noticeText =
     'This file contains third-party software notices and license terms.\n\n';

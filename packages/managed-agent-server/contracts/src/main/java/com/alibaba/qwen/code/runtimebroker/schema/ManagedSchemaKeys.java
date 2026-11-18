@@ -1,12 +1,13 @@
 package com.alibaba.qwen.code.runtimebroker.schema;
 
+import org.apache.commons.codec.digest.DigestUtils;
+
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.Objects;
 
@@ -19,12 +20,7 @@ public final class ManagedSchemaKeys {
         if (components.length == 0) {
             throw new IllegalArgumentException("A key requires an identity tuple");
         }
-        MessageDigest digest;
-        try {
-            digest = MessageDigest.getInstance("SHA-256");
-        } catch (NoSuchAlgorithmException exception) {
-            throw new IllegalStateException("SHA-256 is unavailable", exception);
-        }
+        MessageDigest digest = DigestUtils.getSha256Digest();
         for (String component : components) {
             byte[] bytes = identity(component);
             digest.update(ByteBuffer.allocate(Integer.BYTES).putInt(bytes.length).array());

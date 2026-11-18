@@ -327,6 +327,60 @@ function getNightlyVersion() {
   };
 }
 
+// A channel base at or below the published stable would repeat a shipped
+// version or move the `latest` tag backwards, so target the next patch after
+// `latest` instead. Returns the base unchanged when no bump is needed.
+// Read through the rollback-aware lookup so a rolled-back dist-tag can never
+// become the base.
+function bumpPastPublishedLatest(baseVersion, label, target, refBase) {
+  const latestStable =
+    getAndVerifyTags('latest', 'v[0-9].[0-9].[0-9]')?.latestVersion ?? '';
+  // A ref behind the published stable would publish its own content
+  // under a version it never contained, whether the preview base is ahead of
+  // latest (a release/0.25 dispatch mid-cycle) or behind it. Check before the
+  // no-bump early return so both states are caught.
+  if (
+    refBase &&
+    semver.valid(latestStable) &&
+    semver.lt(refBase, latestStable)
+  ) {
+    throw new Error(
+      `Published latest ${latestStable} is ahead of the checked-out package.json version ${refBase}. Refusing a stale or cross-line stable release.`,
+    );
+  }
+  // When the preview base already leads `latest`, no bump is computed below,
+  // so the bumped-version check cannot fire. Only a base on another release
+  // line is refused here: a patch ahead on the ref's own line is the ordinary
+  // next release.
+  if (
+    refBase &&
+    semver.valid(baseVersion) &&
+    semver.lt(refBase, baseVersion) &&
+    semver.diff(refBase, baseVersion) !== 'patch'
+  ) {
+    throw new Error(
+      `Derived base ${baseVersion} is on a different release line than the checked-out package.json version ${refBase}. Refusing a cross-line stable release.`,
+    );
+  }
+  if (
+    !semver.valid(latestStable) ||
+    !semver.valid(baseVersion) ||
+    semver.lt(latestStable, baseVersion)
+  ) {
+    return baseVersion;
+  }
+  const bumped = semver.inc(latestStable, 'patch');
+  if (refBase && semver.lt(bumped, refBase)) {
+    throw new Error(
+      `Bumping to ${bumped} would publish the checked-out ${refBase} content on an older release line. Refusing a cross-line stable release.`,
+    );
+  }
+  console.error(
+    `${label} ${baseVersion} is at or below published latest ${latestStable}; bumping ${target} ${bumped}.`,
+  );
+  return bumped;
+}
+
 function getStableVersion(args) {
   const tagResult = getAndVerifyTags('preview', 'v*-preview*');
   let releaseVersion;
@@ -337,20 +391,23 @@ function getStableVersion(args) {
   } else if (tagResult) {
     releaseVersion = tagResult.latestVersion.replace(/-preview.*/, '');
     validateVersion(releaseVersion, 'X.Y.Z', 'derived from preview dist-tag');
-    const latestStable = getVersionFromNPM('latest');
-    if (
-      latestStable &&
-      semver.valid(latestStable) &&
-      semver.gt(latestStable, releaseVersion)
-    ) {
-      throw new Error(
-        `Derived stable version ${releaseVersion} is lower than published latest ${latestStable}. Refusing retrograde baseline.`,
-      );
-    }
+    const refBase = readJson('package.json').version.split('-')[0];
+    releaseVersion = bumpPastPublishedLatest(
+      releaseVersion,
+      'Preview baseline',
+      'the stable base to at least',
+      refBase,
+    );
   } else {
     const packageJson = readJson('package.json');
     releaseVersion = packageJson.version.split('-')[0];
     validateVersion(releaseVersion, 'X.Y.Z', 'package.json version');
+    releaseVersion = bumpPastPublishedLatest(
+      releaseVersion,
+      'Package version',
+      'the stable base to at least',
+      releaseVersion,
+    );
   }
 
   return {
@@ -375,23 +432,11 @@ function getPreviewVersion(args) {
     // When the nightly base is already published as stable, the preview must
     // target the next patch — otherwise the scheduled Tuesday release derives
     // a version whose channel packages already exist on npm (E403).
-    // Use the rollback-aware lookup so a rolled-back dist-tag doesn't produce
-    // a retrograde preview base.
-    const latestTagResult = getAndVerifyTags('latest', 'v[0-9].[0-9].[0-9]');
-    const latestStable = latestTagResult?.latestVersion ?? '';
-    if (
-      latestStable &&
-      semver.valid(latestStable) &&
-      semver.valid(baseVersion)
-    ) {
-      if (semver.gte(latestStable, baseVersion)) {
-        const bumped = semver.inc(latestStable, 'patch');
-        console.error(
-          `Nightly base ${baseVersion} is at or below published latest ${latestStable}; bumping preview base to ${bumped}.`,
-        );
-        baseVersion = bumped;
-      }
-    }
+    baseVersion = bumpPastPublishedLatest(
+      baseVersion,
+      'Nightly base',
+      'preview base to',
+    );
     releaseVersion = baseVersion + '-preview.0';
     validateVersion(
       releaseVersion,

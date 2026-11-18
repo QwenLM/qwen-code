@@ -53,6 +53,42 @@ describe('HookAggregator', () => {
     createHookOutput(event, aggregate(event, outputs).finalOutput ?? {}) as T;
 
   describe('aggregateResults', () => {
+    it.each([HookEventName.SessionStart, HookEventName.FileChanged])(
+      'ignores watchPaths from a failed %s hook without mutating its other fields',
+      (eventName) => {
+        const failed: HookOutput = {
+          reason: 'failed',
+          hookSpecificOutput: {
+            hookEventName: eventName,
+            watchPaths: ['/failed'],
+            additionalContext: 'kept',
+          },
+        };
+        const result = aggregateAll(
+          eventName,
+          {
+            output: {
+              hookSpecificOutput: {
+                hookEventName: eventName,
+                watchPaths: ['/valid'],
+              },
+            },
+          },
+          { success: false, output: failed },
+        );
+        expect(result.allOutputs[0].hookSpecificOutput?.['watchPaths']).toEqual(
+          ['/valid'],
+        );
+        expect(result.allOutputs[1]).toEqual({
+          reason: 'failed',
+          hookSpecificOutput: {
+            hookEventName: eventName,
+            additionalContext: 'kept',
+          },
+        });
+        expect(failed.hookSpecificOutput?.['watchPaths']).toEqual(['/failed']);
+      },
+    );
     it('should return undefined finalOutput when no results', () => {
       const result = aggregator.aggregateResults([], HookEventName.PreToolUse);
       expect(result.success).toBe(true);

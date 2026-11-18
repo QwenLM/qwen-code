@@ -23,6 +23,7 @@ import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type { LocalShellCaptureRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
 import { formatRecordArtifactReminder } from '@qwen-code/qwen-code-core/tools/artifact/workspace-auto-record.js';
+import { isPdftotextAvailable } from '@qwen-code/qwen-code-core/utils/pdf.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import type { AnyDeclarativeTool } from '@qwen-code/qwen-code-core/tools/tools.js';
 import {
@@ -3028,6 +3029,122 @@ describe('readWorkspaceContext', () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+});
+
+describe('ManagedToolExecutor PDF page reads', () => {
+  const markers = [
+    'FIRST_PAGE_MARKER',
+    'SECOND_PAGE_MARKER',
+    'THIRD_PAGE_MARKER',
+  ];
+  let workspace: string;
+  let runtimeDir: string;
+  let executor: ManagedToolExecutor;
+
+  function pdfFixture(): Buffer {
+    const objects = [
+      '<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>',
+      ...markers.map(
+        (_, index) =>
+          `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 6 0 R >> >> /Contents ${7 + index} 0 R >>`,
+      ),
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+      ...markers.map((marker) => {
+        const stream = `BT /F1 12 Tf 20 100 Td (${marker}) Tj ET`;
+        return `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`;
+      }),
+    ];
+    const offsets: number[] = [];
+    let pdf = '%PDF-1.4\n';
+    objects.forEach((object, index) => {
+      offsets.push(Buffer.byteLength(pdf));
+      pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+    });
+    const xref = Buffer.byteLength(pdf);
+    pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+    pdf += offsets
+      .map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`)
+      .join('');
+    pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+    return Buffer.from(pdf);
+  }
+
+  beforeEach(async () => {
+    workspace = fs.realpathSync(
+      await mkdtemp(path.join(tmpdir(), 'qwen-managed-pdf-')),
+    );
+    runtimeDir = await mkdtemp(
+      path.join(tmpdir(), 'qwen-managed-pdf-runtime-'),
+    );
+    Storage.setRuntimeBaseDir(runtimeDir);
+    executor = ManagedToolExecutor.forWorkspace(workspace, 'pdf-session');
+    await writeFile(path.join(workspace, 'document.pdf'), pdfFixture());
+  });
+
+  afterEach(async () => {
+    await executor.close();
+    unregisterSessionModel('pdf-session');
+    unregisterSessionProjectDir('pdf-session');
+    Storage.setRuntimeBaseDir(undefined);
+    await rm(workspace, { recursive: true, force: true });
+    await rm(runtimeDir, { recursive: true, force: true });
+  });
+
+  function read(input: Record<string, unknown>) {
+    return executor.execute(
+      {
+        sessionId: 'pdf-session',
+        promptId: 'pdf-prompt',
+        callId: 'pdf-read',
+        argsDigest: managedToolDigest(input),
+      },
+      'read_file',
+      input,
+    );
+  }
+
+  it('extracts only page 2 from a real three-page PDF', async ({ skip }) => {
+    if (!(await isPdftotextAvailable())) return skip();
+    const result = await read({ file_path: 'document.pdf', pages: '2' });
+    expect(result.executionStatus).toBe('success');
+    const output = JSON.stringify(result.responseParts);
+    expect(output).toContain(markers[1]);
+    expect(output).not.toContain(markers[0]);
+    expect(output).not.toContain(markers[2]);
+  });
+
+  it.each([
+    ['0', 'Invalid pages parameter'],
+    ['3-1', 'Invalid pages parameter'],
+    ['2-', 'Open-ended page ranges'],
+    ['1-21', 'maximum of 20 pages'],
+  ])(
+    'rejects unsupported PDF pages %s through Core',
+    async (pages, message) => {
+      const result = await read({ file_path: 'document.pdf', pages });
+      expect(result.executionStatus).toBe('error');
+      expect(result.error?.message).toContain(message);
+    },
+  );
+
+  it('retains text line selection when PDF pages are omitted with null', async () => {
+    await writeFile(
+      path.join(workspace, 'notes.txt'),
+      'FIRST_TEXT_LINE\nSECOND_TEXT_LINE\nTHIRD_TEXT_LINE\n',
+    );
+    const result = await read({
+      file_path: 'notes.txt',
+      offset: 1,
+      limit: 1,
+      pages: null,
+    });
+    expect(result.executionStatus).toBe('success');
+    const output = JSON.stringify(result.responseParts);
+    expect(output).toContain('SECOND_TEXT_LINE');
+    expect(output).not.toContain('FIRST_TEXT_LINE');
+    expect(output).not.toContain('THIRD_TEXT_LINE');
   });
 });
 

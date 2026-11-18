@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { frameModPrompt } from './mod-prompt-frame.js';
+import { frameModPrompt, modPromptRow } from './mod-prompt-frame.js';
 
 describe('frameModPrompt', () => {
   it('names the Mod and says the person did not type the prompt', () => {
@@ -36,5 +36,18 @@ describe('frameModPrompt', () => {
     expect(frameModPrompt({ plugin: 'lint', text: 'hi', asUser: true })).toBe(
       'hi',
     );
+  });
+});
+
+describe('modPromptRow', () => {
+  it('names the Mod on one line and keeps the text safe for the terminal', () => {
+    expect(modPromptRow('lint', 'Run it\nthen report')).toBe(
+      'Mod lint: Run it\nthen report',
+    );
+    const row = modPromptRow('li\nnt\u202e', 'a\u001b]52;c;eA==\u0007b');
+    expect(row.startsWith('Mod li nt: ')).toBe(true);
+    expect(row).not.toContain('\u001b');
+    expect(row).not.toContain('\u0007');
+    expect(row).not.toContain('\u202e');
   });
 });

@@ -747,15 +747,15 @@ describe('local container recipe pins', () => {
     // path, so a single positive assertion cannot detect step 7 reverting to
     // <pr-clone>/scripts.
     const checkerCalls = [
-      ...skill.matchAll(/node (\S+)\/scripts\/verify-pr-check\.mjs/g),
+      ...skill.matchAll(/node "?([^"\s]+)\/scripts\/verify-pr-check\.mjs/g),
     ].map((match) => match[1]);
     expect(checkerCalls.length).toBeGreaterThanOrEqual(3);
     for (const prefix of checkerCalls) expect(prefix).toBe('<trusted-clone>');
     expect(skill).not.toMatch(
-      /node <pr-clone>\/scripts\/verify-pr-(prepare|check|model-proxy|guard)/,
+      /node <pr-clone>\/scripts\/verify-pr-(prepare|check|model-proxy|guard|watch-state|watch-gate|credential-scan)/,
     );
     expect(skill).not.toMatch(
-      /node scripts\/verify-pr-(prepare|check|model-proxy|guard)\.mjs/,
+      /node scripts\/verify-pr-(prepare|check|model-proxy|guard|watch-state|watch-gate|credential-scan)\.mjs/,
     );
   });
 
@@ -861,10 +861,11 @@ describe('local container recipe pins', () => {
     ];
     expect(contextCalls.length).toBeGreaterThanOrEqual(2);
     // The prose occurrences alone cannot catch step 7 dropping the flag on
-    // its continuation line — pin the executable call too.
-    expect(skill).toContain(
-      '--context ~/.cache/qwen-verify/pr<n>/pr.json <round-dir>',
-    );
+    // its continuation line — pin the executable call too. The trust root is
+    // host-provided (--context-root) and the round-dir expansion is the
+    // normalised $rd, quoted so a space-bearing path stays one argument.
+    expect(skill).toContain('--context ~/.cache/qwen-verify/pr<n>/pr.json');
+    expect(skill).toContain('--context-root "<pr-clone>" "$rd"');
   });
 
   it('writes previous-report.md only when a report exists', () => {
@@ -884,6 +885,32 @@ describe('local container recipe pins', () => {
     expect(skill).toContain(
       '/bot$/.test(c.user.login)||c.user.login===process.argv[1]',
     );
+  });
+
+  it('copies the review snapshot only when prepare wrote one', () => {
+    // Absent means the fetch failed; an earlier round's copy left in the
+    // cache would read as this round's review state.
+    expect(skill).toContain(
+      'rm -f ~/.cache/qwen-verify/pr<n>/review-threads.json',
+    );
+    expect(skill).toContain(
+      'if [ -f <pr-clone>/tmp/verify-context/pr<n>-review-threads.json ]; then',
+    );
+    // The container sees only the name the skill tells the round to read.
+    const cp = skill.indexOf(
+      'cp <pr-clone>/tmp/verify-context/pr<n>-review-threads.json ~/.cache/qwen-verify/pr<n>/review-threads.json',
+    );
+    // Clear first, then copy: the other way round deletes the copy it just
+    // made, and every local round would read the review state as unknown.
+    const rm = skill.indexOf(
+      'rm -f ~/.cache/qwen-verify/pr<n>/review-threads.json',
+    );
+    const test = skill.indexOf(
+      'if [ -f <pr-clone>/tmp/verify-context/pr<n>-review-threads.json ]; then',
+    );
+    expect(rm).toBeGreaterThan(-1);
+    expect(test).toBeGreaterThan(rm);
+    expect(cp).toBeGreaterThan(test);
   });
 
   it('keeps the proxy JSON parseable and the base extraction fresh', () => {

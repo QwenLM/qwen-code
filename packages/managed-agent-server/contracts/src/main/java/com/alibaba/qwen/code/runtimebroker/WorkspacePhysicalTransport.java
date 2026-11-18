@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
+import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.CompletionStage;
 
@@ -12,7 +13,7 @@ public interface WorkspacePhysicalTransport extends RuntimeTransport {
     }
 
     void configureExtensionPreparation(ExtensionPreparation preparation);
-    CompletionStage<Map<String, Object>> installExtensionPackage(RuntimeBindingRecord runtime, String digest, java.nio.file.Path archive);
+    CompletionStage<Map<String, Object>> installExtensionPackage(RuntimeBindingRecord runtime, String digest, Path archive);
 
     public CompletionStage<Map<String, Object>> extensionControl(RuntimeBindingRecord runtime, String harnessSessionId,
             ContextBinding binding, Map<String, Object> operation);

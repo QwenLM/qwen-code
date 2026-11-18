@@ -76,6 +76,7 @@ interface HeaderProps {
   customBannerSubtitle?: string;
   version: string;
   authDisplayType?: AuthDisplayType | string;
+  subscriptionPlan?: 'plus' | 'pro';
   model: string;
   workingDirectory: string;
 }
@@ -86,6 +87,7 @@ export const Header: React.FC<HeaderProps> = ({
   customBannerSubtitle,
   version,
   authDisplayType,
+  subscriptionPlan,
   model,
   workingDirectory,
 }) => {
@@ -152,7 +154,10 @@ export const Header: React.FC<HeaderProps> = ({
     0,
     availableInfoPanelWidth - infoPanelChromeWidth,
   );
-  const authModelText = `${formattedAuthType} | ${model}`;
+  const authModelText =
+    authDisplayType === 'Qwen Subscription'
+      ? `${subscriptionPlan ? `Qwen ${subscriptionPlan.charAt(0).toUpperCase() + subscriptionPlan.slice(1)} | ` : ''}[Qwen Subscription] ${model}`
+      : `${formattedAuthType} | ${model}`;
   const modelHintText = ' (/model to change)';
   const showModelHint =
     infoPanelContentWidth > 0 &&
@@ -216,12 +221,10 @@ export const Header: React.FC<HeaderProps> = ({
           </Text>
           <Text color={theme.text.secondary}> ({versionLabel})</Text>
         </Text>
-        {/* Subtitle (when set) replaces the blank spacer row. We always
-            emit a row here so the auth/model line stays at the same
-            vertical position regardless of whether the subtitle is set. */}
+        {/* Subscription headers omit the default spacer, while custom subtitles remain. */}
         {customBannerSubtitle ? (
           <Text color={theme.text.secondary}>{customBannerSubtitle}</Text>
-        ) : (
+        ) : authDisplayType === 'Qwen Subscription' ? null : (
           <Text> </Text>
         )}
         {/* Auth and Model line */}

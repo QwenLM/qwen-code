@@ -21,6 +21,7 @@ import type {
 import { AuthType } from '../contentGenerator.js';
 import { LoggingContentGenerator } from './index.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
+import { StreamingToolCallParser } from '../openaiContentGenerator/streamingToolCallParser.js';
 import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCaptureContext.js';
 import { setToolCallPreparations } from '../tool-call-preparation.js';
 import {
@@ -38,6 +39,8 @@ import { OpenAILogger } from '../../utils/openaiLogger.js';
 import type OpenAI from 'openai';
 import { APIUserAbortError } from 'openai';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { withModelObservationScope } from '../../telemetry/model-observation.js';
+import { retryContext } from '../../utils/retryContext.js';
 import {
   collect,
   content,
@@ -508,6 +511,91 @@ const runContent = (
     request,
     promptId,
   );
+
+describe('Managed invocation observation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(startLLMRequestSpanWithContext).mockImplementation(
+      (model, promptId, options) => {
+        const span = createOwnedLlmSpan(model, promptId, options);
+        return {
+          span: span as never,
+          context: {
+            label: span.__spanName,
+            span,
+            getValue: () => options?.sessionId,
+          } as never,
+        };
+      },
+    );
+  });
+  const scope = <T>(observe: ReturnType<typeof vi.fn>, run: () => T) =>
+    withModelObservationScope(
+      {
+        sessionId: 'test-session',
+        source: 'main',
+        observe,
+        observationFailed: vi.fn(),
+      },
+      run,
+    );
+
+  it('collects model usage with telemetry disabled and a throwing telemetry logger', async () => {
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
+    vi.mocked(logApiResponse).mockImplementationOnce(() => {
+      throw new Error('logger');
+    });
+    const observe = vi.fn();
+    const response = resp('observed');
+    response.usageMetadata = usage(13, 5);
+    await scope(observe, () => runContent(resolving(response), 'managed'));
+    expect(observe).toHaveBeenCalledOnce();
+    expect(observe.mock.calls[0][0]).toMatchObject({
+      outcome: 'success',
+      usage: { promptTokenCount: 13, candidatesTokenCount: 5 },
+    });
+  });
+
+  it.each([false, true])(
+    'closes a returned stream exactly once after iterated=%s',
+    async (iterated) => {
+      const observe = vi.fn();
+      const iterator = await scope(observe, () =>
+        openStream(streams(resp('partial')), 'managed-return'),
+      );
+      if (iterated) await iterator.next();
+      await iterator.return(undefined);
+      await iterator.return(undefined);
+      expect(observe).toHaveBeenCalledOnce();
+      expect(observe.mock.calls[0][0].outcome).toBe('interrupted');
+    },
+  );
+
+  it('retains partial usage on provider cancellation and an explicit outer retry ordinal', async () => {
+    const observe = vi.fn();
+    const abort = new AbortController();
+    const response = resp('partial');
+    response.usageMetadata = usage(10, 2);
+    const iterator = await scope(observe, () =>
+      retryContext.run(
+        { attempt: 2, requestSetupMs: 0, retryTotalDelayMs: 10 },
+        () =>
+          openStream(failingStream(userAbort(), response), 'managed-abort', {
+            request: helloRequest({ abortSignal: abort.signal }),
+          }),
+      ),
+    );
+    await iterator.next();
+    abort.abort();
+    await expect(iterator.next()).rejects.toBeInstanceOf(APIUserAbortError);
+    expect(observe).toHaveBeenCalledOnce();
+    expect(observe.mock.calls[0][0]).toMatchObject({
+      outcome: 'cancelled',
+      backoffRetryOrdinal: 1,
+      usage: { candidatesTokenCount: 2 },
+    });
+  });
+});
 
 /** Opens a stream through a fresh generator wrapping `stream`. */
 const openStream = (
@@ -1835,6 +1923,94 @@ describe('LoggingContentGenerator', () => {
       inputTokens: 100,
       cachedInputTokens: 40,
     });
+  });
+
+  it('forwards a converter-reported cache creation count to endLLMRequestSpan', async () => {
+    // The value only survives because provenance is a WeakMap keyed on the
+    // usage object and the stream forwards that same reference. Reading
+    // provenance off the converter's own object (which the converter tests
+    // do) cannot see a copy, a spread or a JSON round-trip on the way.
+    const converted = OpenAIContentConverter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-cache-write',
+        created: 123,
+        model: 'test-model',
+        choices: [],
+        usage: {
+          prompt_tokens: 373,
+          completion_tokens: 112,
+          total_tokens: 485,
+          prompt_tokens_details: { cache_write_tokens: 256 },
+        },
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      {
+        requestId: 'cache-write-request',
+        isStreaming: true,
+        toolCallParser: new StreamingToolCallParser(),
+        model: 'test-model',
+        modalities: { image: true, pdf: true, audio: true, video: true },
+        startTime: 0,
+      } as Parameters<typeof OpenAIContentConverter.convertOpenAIChunkToLlm>[1],
+    );
+
+    await runStream(
+      streams(
+        createResponse(
+          'r1',
+          'test-model',
+          [{ text: 'ok' }],
+          converted.usageMetadata,
+        ),
+      ),
+      'prompt-cache-write',
+    );
+
+    expect(llmSpan().endMetadata).toMatchObject({
+      inputTokens: 373,
+      cacheCreationInputTokens: 256,
+    });
+  });
+
+  it('leaves cache creation unreported when the provider omits the field', async () => {
+    const converted = OpenAIContentConverter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-no-cache-write',
+        created: 123,
+        model: 'test-model',
+        choices: [],
+        usage: {
+          prompt_tokens: 373,
+          completion_tokens: 112,
+          total_tokens: 485,
+        },
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      {
+        requestId: 'no-cache-write-request',
+        isStreaming: true,
+        toolCallParser: new StreamingToolCallParser(),
+        model: 'test-model',
+        modalities: { image: true, pdf: true, audio: true, video: true },
+        startTime: 0,
+      } as Parameters<typeof OpenAIContentConverter.convertOpenAIChunkToLlm>[1],
+    );
+
+    await runStream(
+      streams(
+        createResponse(
+          'r1',
+          'test-model',
+          [{ text: 'ok' }],
+          converted.usageMetadata,
+        ),
+      ),
+      'prompt-no-cache-write',
+    );
+
+    // Absent must stay absent: session-tracing writes the attribute only when
+    // the value is defined, so a defaulted 0 would emit it on every turn.
+    expect(llmSpan().endMetadata!.cacheCreationInputTokens).toBeUndefined();
   });
 
   it('leaves ttftMs undefined when stream yields no user-visible chunks (Phase 4a)', async () => {

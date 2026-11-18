@@ -21,13 +21,20 @@ import type {
   SlashMenuState,
 } from '../hooks/useComposerCore';
 import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
+import { MODEL_SHEET_QUERY } from '../hooks/useIsTouchComposer';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import type { VoiceButtonHandle } from '../voice/VoiceButton';
 import type {
   WebShellUnavailableModel,
   WebShellUnavailableModelTooltipMount,
 } from '../unavailableModels';
 import { WebShellPortalRootContext } from '../portalRoot';
 import { PASTE_TITLE_MAX_CHARS } from '../utils/largePaste';
+import type {
+  WebShellModelPickerContext,
+  WebShellModelPickerItemContext,
+  WebShellModelPickerMount,
+} from '../model-picker';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -134,7 +141,18 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
       },
       capabilities: { features: [] },
     }),
-    useOptionalWorkspace: () => uploadWorkspaceState.current,
+    useOptionalWorkspace: () => {
+      throw new Error('composer must not read the daemon workspace hook');
+    },
+  };
+});
+
+vi.mock('../hooks/useComposerWorkspace.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../hooks/useComposerWorkspace.js')>();
+  return {
+    ...actual,
+    useOptionalComposerWorkspace: () => uploadWorkspaceState.current,
   };
 });
 
@@ -164,13 +182,18 @@ const composerCoreState = vi.hoisted(() => ({
   setShellMode: vi.fn(),
   toggleShellMode: vi.fn(),
   submitText: vi.fn(),
+  submitPreparing: false,
+  submitBlocked: false,
   onFileUploadRequest: undefined as
     | ((targetDir: string, restoreQuery?: () => void) => void)
     | undefined,
   workspaceUploadBusy: false,
 }));
 
-// Controllable `useOptionalWorkspace()` value for file-upload gating tests.
+// Controllable `useOptionalComposerWorkspace()` value for file-upload gating
+// tests, supplied through the neutral hook mock above. The daemon-barrel
+// `useOptionalWorkspace` entry throws, so re-coupling the composer to the
+// daemon hook reddens this suite instead of passing silently.
 // Defaults to undefined (upload disabled) so existing tests are unaffected.
 const uploadWorkspaceState = vi.hoisted(() => ({
   current: undefined as
@@ -196,6 +219,7 @@ const uploadWorkspaceState = vi.hoisted(() => ({
 
 const voiceButtonState = vi.hoisted(() => ({
   onActiveChange: undefined as ((active: boolean) => void) | undefined,
+  flush: vi.fn(async () => ''),
 }));
 
 Object.defineProperty(window, 'matchMedia', {
@@ -246,9 +270,15 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           mockComposerCoreState.composerTags.length > 0,
         hasContent: composerCoreState.hasContent,
         canSubmit:
+          !composerCoreState.submitBlocked &&
           !options?.disabled &&
           !options?.workspaceUploadBusy &&
           composerCoreState.hasContent,
+        submitBlocked:
+          composerCoreState.submitBlocked ||
+          Boolean(options?.disabled) ||
+          Boolean(options?.workspaceUploadBusy),
+        submitPreparing: composerCoreState.submitPreparing,
         pendingImageBatchCount: composerCoreState.pendingImageBatchCount,
         imageDragActive: composerCoreState.imageDragActive,
         clearImageDragState: composerCoreState.clearImageDragState,
@@ -326,16 +356,26 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
   };
 });
 
-vi.mock('../voice/VoiceButton', () => ({
-  VoiceButton: ({
-    onActiveChange,
-  }: {
-    onActiveChange?: (active: boolean) => void;
-  }) => {
-    voiceButtonState.onActiveChange = onActiveChange;
-    return <span data-testid="voice-button" />;
-  },
-}));
+vi.mock('../voice/VoiceButton', async () => {
+  const React = await import('react');
+  return {
+    VoiceButton: ({
+      ref,
+      onActiveChange,
+    }: {
+      ref?: React.Ref<VoiceButtonHandle>;
+      onActiveChange?: (active: boolean) => void;
+    }) => {
+      voiceButtonState.onActiveChange = onActiveChange;
+      React.useImperativeHandle(
+        ref,
+        () => ({ flush: voiceButtonState.flush }),
+        [],
+      );
+      return <span data-testid="voice-button" />;
+    },
+  };
+});
 
 const liveVoiceState = vi.hoisted(() => ({ supported: false }));
 vi.mock('../live/LiveVoiceButton', async () => {
@@ -382,6 +422,8 @@ afterEach(() => {
   composerCoreState.setShellMode.mockReset();
   composerCoreState.toggleShellMode.mockReset();
   composerCoreState.submitText.mockReset();
+  composerCoreState.submitPreparing = false;
+  composerCoreState.submitBlocked = false;
   composerCoreState.shellMode = false;
   composerCoreState.hasContent = false;
   composerCoreState.pendingImageBatchCount = 0;
@@ -389,6 +431,7 @@ afterEach(() => {
   composerCoreState.imageDragActive = false;
   composerCoreState.onFileUploadRequest = undefined;
   voiceButtonState.onActiveChange = undefined;
+  voiceButtonState.flush.mockReset().mockResolvedValue('');
   liveVoiceState.supported = false;
   for (const { root, container, portalRoot } of mounted.splice(0)) {
     act(() => root.unmount());
@@ -420,6 +463,7 @@ interface ChatEditorRenderProps
     | 'workflowModeStatus'
     | 'workflowModePending'
     | 'onWorkflowModeChange'
+    | 'modelPickerScope'
   > {
   composerTags?: WebShellComposerTag[];
   pastedImages?: Array<{ data: string; media_type: string }>;
@@ -477,7 +521,7 @@ interface ChatEditorRenderProps
   language?: WebShellLanguage;
   builtinAtProviders?: WebShellCustomization['builtinAtProviders'];
   atProviders?: WebShellCustomization['atProviders'];
-  skills?: Array<{ name: string; description: string }>;
+  skills?: ComponentProps<typeof ChatEditor>['skills'];
   onSkillsOpenChange?: (open: boolean) => void;
   skillsLoading?: boolean;
   skillsLoadError?: boolean;
@@ -849,6 +893,205 @@ describe('ChatEditor voice toolbar integration', () => {
       hidden.querySelector('[data-testid="live-voice-button"]'),
     ).toBeNull();
   });
+
+  it('finalizes active dictation into the composer before a submit proceeds', async () => {
+    composerCoreState.hasContent = true;
+    voiceButtonState.flush.mockResolvedValue('  dictated tail  ');
+    renderChatEditor({ visibleToolbarActions: ['voice'] });
+    act(() => voiceButtonState.onActiveChange?.(true));
+
+    const prepareSubmit = latestComposerCoreOptions.current?.prepareSubmit as
+      | (() => Promise<void>)
+      | undefined;
+    expect(prepareSubmit).toBeTypeOf('function');
+    await act(async () => {
+      await prepareSubmit!();
+    });
+    expect(voiceButtonState.flush).toHaveBeenCalledOnce();
+    expect(composerCoreState.insertText).toHaveBeenCalledWith('dictated tail ');
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it('does not insert anything when the finalized dictation is empty', async () => {
+    composerCoreState.hasContent = true;
+    voiceButtonState.flush.mockResolvedValue('   ');
+    renderChatEditor({ visibleToolbarActions: ['voice'] });
+    act(() => voiceButtonState.onActiveChange?.(true));
+
+    const prepareSubmit = latestComposerCoreOptions.current?.prepareSubmit as
+      | (() => Promise<void>)
+      | undefined;
+    expect(prepareSubmit).toBeTypeOf('function');
+    await act(async () => {
+      await prepareSubmit!();
+    });
+    expect(voiceButtonState.flush).toHaveBeenCalledOnce();
+    expect(composerCoreState.insertText).not.toHaveBeenCalled();
+  });
+
+  it('shows the send button as preparing while a submit finalizes dictation', () => {
+    composerCoreState.hasContent = true;
+    composerCoreState.submitPreparing = true;
+    const container = renderChatEditor({ visibleToolbarActions: ['voice'] });
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(true);
+    expect(submit.getAttribute('aria-label')).toBe('Loading...');
+    act(() => submit.click());
+    expect(composerCoreState.submitText).not.toHaveBeenCalled();
+  });
+
+  it('keeps the running-agent stop button usable while a submit finalizes dictation', () => {
+    composerCoreState.hasContent = true;
+    composerCoreState.submitPreparing = true;
+    const onCancel = vi.fn();
+    const container = renderChatEditor({
+      customization: { composerVariant: 'simple' },
+      visibleToolbarActions: ['voice'],
+      isRunning: true,
+      onCancel,
+    });
+    const stop = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-stop]',
+    )!;
+    expect(stop.disabled).toBe(false);
+    act(() => stop.click());
+    expect(onCancel).toHaveBeenCalledOnce();
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(true);
+  });
+
+  it('keeps the desktop stop affordance usable while a submit finalizes dictation', () => {
+    // Empty draft during a run: the submit button doubles as the Stop control.
+    composerCoreState.hasContent = false;
+    composerCoreState.submitPreparing = true;
+    const onCancel = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice'],
+      isRunning: true,
+      onCancel,
+    });
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(false);
+    expect(submit.getAttribute('aria-label')).toBe('esc to cancel');
+    act(() => submit.click());
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(composerCoreState.submitText).not.toHaveBeenCalled();
+  });
+
+  it('enables Send for an active dictation even with an empty draft', () => {
+    composerCoreState.hasContent = false;
+    const container = renderChatEditor({ visibleToolbarActions: ['voice'] });
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(true);
+
+    act(() => voiceButtonState.onActiveChange?.(true));
+    expect(submit.disabled).toBe(false);
+    act(() => submit.click());
+    expect(composerCoreState.submitText).toHaveBeenCalledOnce();
+
+    act(() => voiceButtonState.onActiveChange?.(false));
+    expect(submit.disabled).toBe(true);
+  });
+
+  it('installs the submit finalizer only while a capture is active', () => {
+    renderChatEditor({ visibleToolbarActions: ['voice'] });
+    expect(latestComposerCoreOptions.current?.prepareSubmit).toBeUndefined();
+
+    act(() => voiceButtonState.onActiveChange?.(true));
+    expect(latestComposerCoreOptions.current?.prepareSubmit).toBeTypeOf(
+      'function',
+    );
+
+    act(() => voiceButtonState.onActiveChange?.(false));
+    expect(latestComposerCoreOptions.current?.prepareSubmit).toBeUndefined();
+  });
+
+  it('sends the dictation instead of cancelling when a capture is active during a run', () => {
+    // Touch layouts have no Enter-to-submit: with an active dictation the
+    // button must send (queue) it, not take the Stop role.
+    composerCoreState.hasContent = false;
+    const onCancel = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice'],
+      isRunning: true,
+      onCancel,
+    });
+    act(() => voiceButtonState.onActiveChange?.(true));
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(false);
+    expect(submit.getAttribute('aria-label')).toBe('Send message');
+    act(() => submit.click());
+    expect(composerCoreState.submitText).toHaveBeenCalledOnce();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it('keeps Send disabled while submit guards block even with an active capture', () => {
+    composerCoreState.hasContent = false;
+    composerCoreState.submitBlocked = true;
+    const container = renderChatEditor({ visibleToolbarActions: ['voice'] });
+    act(() => voiceButtonState.onActiveChange?.(true));
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(true);
+  });
+
+  it('keeps a stop control reachable during dictation on an empty draft', () => {
+    composerCoreState.hasContent = false;
+    composerCoreState.submitPreparing = true;
+    const onCancel = vi.fn();
+    const container = renderChatEditor({
+      customization: { composerVariant: 'simple' },
+      visibleToolbarActions: ['voice'],
+      isRunning: true,
+      onCancel,
+    });
+    act(() => voiceButtonState.onActiveChange?.(true));
+    const stop = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-stop]',
+    );
+    expect(stop).not.toBeNull();
+    expect(stop!.disabled).toBe(false);
+    act(() => stop!.click());
+    expect(onCancel).toHaveBeenCalledOnce();
+  });
+
+  it('inserts the finalized transcript directly in the simple variant', async () => {
+    voiceButtonState.flush.mockResolvedValue('simple tail');
+    // Record whether the finalizer was still installed when the insertion
+    // happened: direct insertion runs while voiceActive is true; the
+    // deferred review path only inserts after the voiceActive=false render
+    // uninstalls it — too late for the submit in the same continuation.
+    let prepareSubmitAtInsert: unknown;
+    composerCoreState.insertText.mockImplementation(() => {
+      prepareSubmitAtInsert = latestComposerCoreOptions.current?.prepareSubmit;
+    });
+    renderChatEditor({
+      customization: { composerVariant: 'simple' },
+      visibleToolbarActions: ['voice'],
+    });
+    act(() => voiceButtonState.onActiveChange?.(true));
+
+    const prepareSubmit = latestComposerCoreOptions.current?.prepareSubmit as
+      | (() => Promise<void>)
+      | undefined;
+    expect(prepareSubmit).toBeTypeOf('function');
+    await act(async () => {
+      await prepareSubmit!();
+    });
+    expect(composerCoreState.insertText).toHaveBeenCalledWith('simple tail ');
+    expect(prepareSubmitAtInsert).toBeTypeOf('function');
+  });
 });
 
 describe('ChatEditor add menu (+)', () => {
@@ -879,6 +1122,46 @@ describe('ChatEditor add menu (+)', () => {
       visibleToolbarActions: ['approvalMode', 'voice'],
     });
     expect(trigger(container)).toBeNull();
+  });
+
+  it('yields the add entry to the host when the host owns it', () => {
+    const container = renderChatEditor({
+      customization: { hostOwnsAddMenu: true },
+      visibleToolbarActions: ['addMenu', 'approvalMode'],
+    });
+    expect(trigger(container)).toBeNull();
+  });
+
+  function touchComposer() {
+    composerCoreState.mobileComposer = {
+      textareaRef: createRef<HTMLTextAreaElement>(),
+      expandedTextareaRef: createRef<HTMLTextAreaElement>(),
+      value: '',
+      onChange: vi.fn(),
+      onBlur: vi.fn(),
+      placeholder: 'Ask anything',
+    } satisfies MobileComposerBackend;
+  }
+
+  it('yields the touch commands-only entry to the host too', () => {
+    touchComposer();
+    const container = renderChatEditor({
+      customization: {
+        hostOwnsAddMenu: true,
+        renderComposerToolbarStart: () => <button>Host add action</button>,
+      },
+      visibleToolbarActions: ['commands'],
+    });
+    expect(trigger(container)).toBeNull();
+    expect(container.textContent).toContain('Host add action');
+  });
+
+  it('keeps the touch commands-only entry when the host does not own it', () => {
+    touchComposer();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['commands'],
+    });
+    expect(trigger(container)).not.toBeNull();
   });
 
   it('keeps session attachments available without workspace actions', async () => {
@@ -3246,11 +3529,18 @@ describe('ChatEditor Plan toolbar switch fallback', () => {
         .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
         ?.click(),
     );
+    expect(
+      document.querySelector('[data-web-shell-mode-popover]'),
+    ).not.toBeNull();
     const buttons = Array.from(
       document.querySelectorAll<HTMLButtonElement>(
         '[data-web-shell-toolbar-popover] button',
       ),
     );
+    const fullAccess = buttons.find((button) =>
+      button.textContent?.includes('(yolo)'),
+    );
+    expect(fullAccess?.className).toContain('dropdownItemDanger');
     const labels = buttons.map((button) => button.textContent ?? '');
     expect(labels.some((label) => label.includes('(plan)'))).toBe(false);
     for (const mode of ['default', 'auto-edit', 'auto', 'yolo']) {
@@ -3267,6 +3557,26 @@ describe('ChatEditor Plan toolbar switch fallback', () => {
         .querySelector('[data-web-shell-plan-button]')
         ?.getAttribute('aria-checked'),
     ).toBe('true');
+  });
+
+  it('marks the selected Full Access trigger as dangerous', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: ['approvalMode'],
+      currentMode: 'yolo',
+    });
+    expect(
+      container.querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.className,
+    ).toContain('modeToolBtnDanger');
+
+    rerenderChatEditor(container, {
+      visibleToolbarActions: ['approvalMode'],
+      currentMode: 'default',
+    });
+    expect(
+      container.querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')
+        ?.className,
+    ).not.toContain('modeToolBtnDanger');
   });
 
   it('renders only the supplied mode choices and retains the actual current mode', () => {
@@ -4291,12 +4601,28 @@ describe('ChatEditor toolbar popovers', () => {
           controls?.querySelectorAll('[data-web-shell-effort]') ?? [],
         ).map((button) => button.getAttribute('data-web-shell-effort')),
       ).toEqual(efforts);
+      expect(
+        controls?.querySelector('[data-web-shell-effort="high"]')?.className,
+      ).toContain('reasoningEffortRowActive');
+      expect(
+        controls?.querySelector('[data-web-shell-effort="max"]')?.className,
+      ).not.toContain('reasoningEffortRowActive');
       await act(async () =>
         controls
           ?.querySelector<HTMLButtonElement>('[data-web-shell-effort="max"]')
           ?.click(),
       );
       expect(onSelectReasoningEffort).toHaveBeenLastCalledWith('max');
+      rerenderChatEditor(container, {
+        ...props,
+        reasoning: { ...props.reasoning!, effort: 'max' },
+      });
+      expect(
+        controls?.querySelector('[data-web-shell-effort="max"]')?.className,
+      ).toContain('reasoningEffortRowActive');
+      expect(
+        controls?.querySelector('[data-web-shell-effort="high"]')?.className,
+      ).not.toContain('reasoningEffortRowActive');
       await act(async () =>
         controls
           ?.querySelector<HTMLButtonElement>('[data-web-shell-thinking-toggle]')
@@ -4390,6 +4716,30 @@ describe('ChatEditor toolbar popovers', () => {
         controls?.querySelectorAll('[data-web-shell-effort]') ?? [],
       ).every((button) => button.getAttribute('aria-pressed') === 'false'),
     ).toBe(true);
+  });
+
+  it('clears the cached model label when the selection and model catalog are empty', () => {
+    const props = {
+      visibleToolbarActions: ['model'] as const,
+      currentModel: 'subscription-model',
+      availableModels: [
+        { id: 'subscription-model', label: 'Subscription Model' },
+      ],
+    };
+    const container = renderChatEditor(props);
+    const button = () =>
+      container.querySelector('[data-web-shell-model-button]');
+    expect(button()?.getAttribute('aria-label')).toContain(
+      'Subscription Model',
+    );
+    rerenderChatEditor(container, {
+      ...props,
+      currentModel: '',
+      availableModels: [],
+    });
+    expect(button()?.getAttribute('aria-label')).not.toContain(
+      'Subscription Model',
+    );
   });
 
   it('displays the model label instead of an opaque route id', () => {
@@ -4643,7 +4993,747 @@ describe('ChatEditor toolbar popovers', () => {
   });
 });
 
+describe('ChatEditor model picker host content', () => {
+  const modelA = { id: 'shared-model(openai)', label: 'Shared Model' };
+  const modelB = { id: 'shared-model(anthropic)', label: 'Shared Model' };
+  const scope = {
+    sessionId: 'picker-session',
+    workspaceCwd: '/picker-workspace',
+    daemonBaseUrl: 'https://models.example/daemon/proxy',
+  };
+
+  function row(id: string) {
+    const element = document.querySelector<HTMLButtonElement>(
+      `[data-web-shell-toolbar-popover] [data-model-id="${id}"]`,
+    );
+    expect(element).not.toBeNull();
+    return element!;
+  }
+
+  function open(container: HTMLDivElement) {
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')!
+        .click(),
+    );
+  }
+
+  function filter(query: string) {
+    const search = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-toolbar-popover] input[type="search"]',
+    )!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(search, query);
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  function createRowMount() {
+    const update = vi.fn<(context: WebShellModelPickerItemContext) => void>();
+    const dispose = vi.fn();
+    const mount = vi.fn<
+      WebShellModelPickerMount<WebShellModelPickerItemContext>
+    >((target, context) => {
+      const draw = (next: WebShellModelPickerItemContext) => {
+        target.textContent = `Custom ${next.model.id}`;
+      };
+      draw(context);
+      return {
+        update(next) {
+          draw(next);
+          update(next);
+        },
+        dispose,
+      };
+    });
+    return { mount, update, dispose };
+  }
+
+  it('matches raw model ids and preserves the native row for an unmatched id', () => {
+    const { mount } = createRowMount();
+    const unmatched = vi.fn(() => null);
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: modelA.id,
+      availableModels: [modelA, modelB],
+      modelPickerScope: scope,
+      customization: {
+        modelPicker: {
+          displayContentByModelId: {
+            [modelA.id]: mount,
+            [modelA.label]: unmatched,
+            'not-in-catalog': unmatched,
+          },
+        },
+      },
+    });
+    open(container);
+    expect(row(modelA.id).textContent).toContain(`Custom ${modelA.id}`);
+    expect(row(modelA.id).hasAttribute('title')).toBe(false);
+    expect(row(modelA.id).getAttribute('aria-label')).toBe(modelA.label);
+    expect(row(modelB.id).textContent).toBe(modelB.label);
+    expect(row(modelB.id).title).toBe(modelB.label);
+    expect(unmatched).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-model-id="not-in-catalog"]'),
+    ).toBeNull();
+    expect(mount).toHaveBeenCalledTimes(1);
+    expect(mount.mock.calls[0]![1]).toMatchObject({
+      ...scope,
+      currentModelId: modelA.id,
+      model: { id: modelA.id, label: modelA.label, disabled: false },
+      isSelected: true,
+    });
+    expect(mount.mock.calls[0]![1].rowElement).toBe(row(modelA.id));
+  });
+
+  it('keeps custom unavailable rows disabled and gives their hover ownership to the host', () => {
+    const { mount } = createRowMount();
+    const originalTooltip = vi.fn(() => null);
+    const onSelectModel = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: modelA.id,
+      availableModels: [modelA],
+      unavailableModels: [{ ...modelB, tooltip: 'Subscription required' }],
+      mountUnavailableModelTooltip: originalTooltip,
+      onSelectModel,
+      customization: {
+        modelPicker: { displayContentByModelId: { [modelB.id]: mount } },
+      },
+    });
+    open(container);
+    const disabled = row(modelB.id);
+    expect(disabled.getAttribute('aria-disabled')).toBe('true');
+    expect(
+      disabled.querySelector('[data-web-shell-unavailable-model-lock]'),
+    ).not.toBeNull();
+    expect(mount.mock.calls[0]![1]).toMatchObject({
+      model: {
+        id: modelB.id,
+        disabled: true,
+        tooltip: 'Subscription required',
+      },
+      isSelected: false,
+    });
+    act(() => {
+      disabled.focus();
+      disabled.click();
+    });
+    expect(onSelectModel).not.toHaveBeenCalled();
+    expect(originalTooltip).not.toHaveBeenCalled();
+    expect(
+      document.querySelector('[data-web-shell-unavailable-model-tooltip]'),
+    ).toBeNull();
+  });
+
+  it.each(['decline', 'throw'] as const)(
+    'restores the original unavailable explanation when custom content %s',
+    (result) => {
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const mount = vi.fn<
+          WebShellModelPickerMount<WebShellModelPickerItemContext>
+        >(() => {
+          if (result === 'throw') throw new Error('Custom content failed');
+          return null;
+        });
+        const container = renderChatEditor({
+          visibleToolbarActions: ['model'],
+          currentModel: modelA.id,
+          availableModels: [modelA],
+          unavailableModels: [{ ...modelB, tooltip: 'Subscription required' }],
+          customization: {
+            modelPicker: { displayContentByModelId: { [modelB.id]: mount } },
+          },
+        });
+        open(container);
+        act(() => row(modelB.id).focus());
+        expect(row(modelB.id).textContent).toContain(modelB.label);
+        expect(
+          document.querySelector('[data-web-shell-unavailable-model-tooltip]')
+            ?.textContent,
+        ).toContain('Subscription required');
+        expect(mount).toHaveBeenCalledTimes(1);
+      } finally {
+        error.mockRestore();
+      }
+    },
+  );
+
+  it('honors host native click cancellation and restores selection when content is removed', () => {
+    const onSelectModel = vi.fn();
+    const dispose = vi.fn();
+    const mount: WebShellModelPickerMount<WebShellModelPickerItemContext> = (
+      target,
+      context,
+    ) => {
+      target.textContent = 'Host display';
+      const cancelClick = (event: Event) => event.preventDefault();
+      context.rowElement.addEventListener('click', cancelClick);
+      return {
+        update() {},
+        dispose() {
+          context.rowElement.removeEventListener('click', cancelClick);
+          dispose();
+        },
+      };
+    };
+    const props: ChatEditorRenderProps = {
+      visibleToolbarActions: ['model'],
+      currentModel: modelA.id,
+      availableModels: [modelA],
+      onSelectModel,
+      customization: {
+        modelPicker: { displayContentByModelId: { [modelA.id]: mount } },
+      },
+    };
+    const container = renderChatEditor(props);
+    open(container);
+    act(() => row(modelA.id).click());
+    expect(onSelectModel).not.toHaveBeenCalled();
+    rerenderChatEditor(container, { ...props, customization: {} });
+    expect(dispose).toHaveBeenCalledTimes(1);
+    act(() => row(modelA.id).click());
+    expect(onSelectModel).toHaveBeenCalledWith(modelA.id);
+  });
+
+  it('updates a stable row factory for map and selection changes without remounting', () => {
+    const { mount, update } = createRowMount();
+    const props: ChatEditorRenderProps = {
+      visibleToolbarActions: ['model'],
+      currentModel: modelA.id,
+      availableModels: [modelA, modelB],
+      customization: {
+        modelPicker: { displayContentByModelId: { [modelA.id]: mount } },
+      },
+    };
+    const container = renderChatEditor(props);
+    open(container);
+    const originalRow = row(modelA.id);
+    rerenderChatEditor(container, {
+      ...props,
+      currentModel: modelB.id,
+      customization: {
+        modelPicker: { displayContentByModelId: { [modelA.id]: mount } },
+      },
+    });
+    expect(mount).toHaveBeenCalledTimes(1);
+    expect(row(modelA.id)).toBe(originalRow);
+    expect(update).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        currentModelId: modelB.id,
+        isSelected: false,
+      }),
+    );
+  });
+
+  it('disposes filtered rows and mounts fresh content when they return or the picker reopens', () => {
+    const first = { id: 'first-model', label: 'First Model' };
+    const second = { id: 'second-model', label: 'Second Model' };
+    const { mount, dispose } = createRowMount();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: first.id,
+      availableModels: [first, second],
+      customization: {
+        modelPicker: { displayContentByModelId: { [first.id]: mount } },
+      },
+    });
+    open(container);
+    filter('Second');
+    expect(document.querySelector('[data-model-id="first-model"]')).toBeNull();
+    expect(row(second.id)).not.toBeNull();
+    expect(dispose).toHaveBeenCalledTimes(1);
+    filter('');
+    expect(mount).toHaveBeenCalledTimes(2);
+    open(container);
+    expect(dispose).toHaveBeenCalledTimes(2);
+    open(container);
+    expect(mount).toHaveBeenCalledTimes(3);
+  });
+
+  it('disposes old header and row content when the composer scope changes', () => {
+    const content = createRowMount();
+    const headerDispose = vi.fn();
+    const mountHeader = vi.fn<
+      WebShellModelPickerMount<WebShellModelPickerContext>
+    >(() => ({
+      update() {},
+      dispose: headerDispose,
+    }));
+    const props: ChatEditorRenderProps = {
+      visibleToolbarActions: ['model'],
+      currentModel: modelA.id,
+      availableModels: [modelA],
+      modelPickerScope: scope,
+      customization: {
+        modelPicker: {
+          mountHeader,
+          displayContentByModelId: { [modelA.id]: content.mount },
+        },
+      },
+    };
+    const container = renderChatEditor(props);
+    open(container);
+    rerenderChatEditor(container, {
+      ...props,
+      modelPickerScope: { ...scope, sessionId: 'next-session' },
+    });
+    expect(content.mount).toHaveBeenCalledTimes(2);
+    expect(content.dispose).toHaveBeenCalledTimes(1);
+    expect(mountHeader).toHaveBeenCalledTimes(2);
+    expect(headerDispose).toHaveBeenCalledTimes(1);
+    expect(mountHeader.mock.calls[1]![1].sessionId).toBe('next-session');
+  });
+
+  it('mounts the header with the reasoning submenu and follows only its composer selection', () => {
+    const update = vi.fn<(context: WebShellModelPickerContext) => void>();
+    const mountHeader = vi.fn<
+      WebShellModelPickerMount<WebShellModelPickerContext>
+    >((target) => {
+      target.dataset.testid = 'custom-model-header';
+      target.textContent = 'Model promotion';
+      return { update, dispose() {} };
+    });
+    const props: ChatEditorRenderProps = {
+      visibleToolbarActions: ['model'],
+      currentModel: modelA.id,
+      availableModels: [modelA, modelB],
+      modelPickerScope: scope,
+      reasoning: { enabled: true, effort: 'high', efforts: ['low', 'high'] },
+      customization: { modelPicker: { mountHeader } },
+    };
+    const container = renderChatEditor(props);
+    open(container);
+    expect(mountHeader).not.toHaveBeenCalled();
+    act(() =>
+      document
+        .querySelector<HTMLButtonElement>(
+          '[data-web-shell-model-submenu-trigger]',
+        )!
+        .click(),
+    );
+    const header = document.querySelector(
+      '[data-testid="custom-model-header"]',
+    )!;
+    expect(header.closest('[data-web-shell-model-submenu]')).not.toBeNull();
+    const search = header
+      .closest('[data-web-shell-model-submenu]')!
+      .querySelector('input[type="search"]')!;
+    expect(
+      header.compareDocumentPosition(search) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(mountHeader.mock.calls[0]![1]).toMatchObject({
+      ...scope,
+      currentModelId: modelA.id,
+    });
+
+    rerenderChatEditor(container, { ...props, currentModel: modelB.id });
+    expect(mountHeader).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenLastCalledWith(
+      expect.objectContaining({ currentModelId: modelB.id }),
+    );
+    act(() => row(modelA.id).focus());
+    expect(update.mock.lastCall?.[0].currentModelId).toBe(modelB.id);
+  });
+
+  it('opens the model picker as a bottom sheet on coarse pointers', async () => {
+    const media = vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === MODEL_SHEET_QUERY,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+    try {
+      const onSelectModel = vi.fn();
+      const props: ChatEditorRenderProps = {
+        visibleToolbarActions: ['model'],
+        currentModel: modelA.id,
+        availableModels: [modelA, modelB],
+        onSelectModel,
+        reasoning: { enabled: true, effort: 'high', efforts: ['low', 'high'] },
+      };
+      const container = renderChatEditor(props);
+      open(container);
+      const sheet = document.querySelector('[data-web-shell-model-sheet]')!;
+      expect(sheet).not.toBeNull();
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(sheet.contains(document.activeElement)).toBe(true);
+      expect(document.activeElement).not.toBe(sheet.querySelector('input'));
+      expect(
+        document.querySelector('[data-web-shell-model-submenu]'),
+      ).toBeNull();
+      const sectionTrigger = sheet.querySelector<HTMLButtonElement>(
+        '[data-web-shell-model-submenu-trigger]',
+      )!;
+      act(() => sectionTrigger.click());
+      const list = sheet.querySelector<HTMLElement>(
+        '[data-web-shell-model-sheet-list]',
+      )!;
+      expect(list.contains(document.activeElement)).toBe(true);
+      expect(
+        sectionTrigger.compareDocumentPosition(list) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      expect(
+        sheet.querySelector(`[data-model-id="${modelA.id}"]`),
+      ).not.toBeNull();
+      expect(
+        sheet.querySelector(`[data-model-id="${modelB.id}"]`),
+      ).not.toBeNull();
+
+      const search = sheet.querySelector<HTMLInputElement>(
+        'input[type="search"]',
+      )!;
+      act(() => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(search, 'anthropic');
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      expect(sheet.querySelector(`[data-model-id="${modelA.id}"]`)).toBeNull();
+      expect(
+        sheet.querySelector(`[data-model-id="${modelB.id}"]`),
+      ).not.toBeNull();
+
+      act(() =>
+        sheet
+          .querySelector<HTMLButtonElement>(`[data-model-id="${modelB.id}"]`)!
+          .click(),
+      );
+      expect(onSelectModel).toHaveBeenCalledWith(modelB.id);
+      expect(document.activeElement).toBe(sectionTrigger);
+      expect(
+        document.querySelector('[data-web-shell-model-sheet]'),
+      ).not.toBeNull();
+      expect(
+        sheet.querySelector('[data-web-shell-model-sheet-list]'),
+      ).toBeNull();
+      rerenderChatEditor(container, { ...props, modelControlsDisabled: true });
+      expect(
+        document.querySelector('[data-web-shell-model-sheet]'),
+      ).not.toBeNull();
+      rerenderChatEditor(container, props);
+
+      act(() => sectionTrigger.click());
+      expect(
+        sheet.querySelector<HTMLInputElement>('input[type="search"]')!.value,
+      ).toBe('');
+      expect(
+        sheet.querySelector(`[data-model-id="${modelA.id}"]`),
+      ).not.toBeNull();
+      expect(
+        sheet.querySelector(`[data-model-id="${modelB.id}"]`),
+      ).not.toBeNull();
+      act(() => {
+        const search = sheet.querySelector<HTMLInputElement>(
+          'input[type="search"]',
+        )!;
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(search, 'anthropic');
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      act(() => sectionTrigger.click());
+      expect(sheet.querySelector('[data-model-id]')).toBeNull();
+      expect(document.activeElement).toBe(sectionTrigger);
+      act(() => sectionTrigger.click());
+      expect(
+        sheet.querySelector<HTMLInputElement>('input[type="search"]')!.value,
+      ).toBe('');
+      expect(
+        sheet.querySelector(`[data-model-id="${modelA.id}"]`),
+      ).not.toBeNull();
+      expect(
+        sheet.querySelector(`[data-model-id="${modelB.id}"]`),
+      ).not.toBeNull();
+      act(() => sectionTrigger.click());
+      expect(sheet.querySelector('[data-model-id]')).toBeNull();
+
+      await act(async () => {
+        sheet
+          .querySelector<HTMLButtonElement>(
+            '[data-web-shell-model-sheet-done]',
+          )!
+          .click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(document.querySelector('[data-web-shell-model-sheet]')).toBeNull();
+      await vi.waitFor(() => {
+        expect(document.activeElement).toBe(
+          document.querySelector('[data-web-shell-model-button]'),
+        );
+      });
+    } finally {
+      media.mockImplementation(
+        () =>
+          ({
+            matches: false,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+    }
+  });
+
+  it('keeps the mode picker as a popover on coarse pointers', () => {
+    const media = vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === MODEL_SHEET_QUERY,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+    try {
+      const container = renderChatEditor({
+        visibleToolbarActions: ['approvalMode'],
+        currentMode: 'default',
+        availableModes: ['default', 'auto-edit'],
+      });
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-mode-button]')!
+          .click(),
+      );
+      expect(document.querySelector('[data-web-shell-model-sheet]')).toBeNull();
+      expect(
+        document.querySelector('[data-web-shell-mode-popover]'),
+      ).not.toBeNull();
+    } finally {
+      media.mockImplementation(
+        () =>
+          ({
+            matches: false,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+    }
+  });
+
+  it('keeps the bottom sheet open when interacting with host overlays', async () => {
+    const media = vi.mocked(window.matchMedia).mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === MODEL_SHEET_QUERY,
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+    try {
+      const hostAction = vi.fn();
+      const mountHeader = vi.fn<
+        WebShellModelPickerMount<WebShellModelPickerContext>
+      >((target, context) => {
+        const button = document.createElement('button');
+        button.textContent = 'Host overlay action';
+        button.addEventListener('click', hostAction);
+        context.overlayContainer.append(button);
+        return { update() {}, dispose() {} };
+      });
+      const container = renderChatEditor({
+        visibleToolbarActions: ['model'],
+        currentModel: modelA.id,
+        availableModels: [modelA, modelB],
+        reasoning: { enabled: true, effort: 'high', efforts: ['low', 'high'] },
+        customization: { modelPicker: { mountHeader } },
+      });
+      open(container);
+      act(() =>
+        document
+          .querySelector<HTMLButtonElement>(
+            '[data-web-shell-model-submenu-trigger]',
+          )!
+          .click(),
+      );
+      const overlayRoot = document.querySelector<HTMLElement>(
+        '[data-web-shell-model-picker-overlays]',
+      )!;
+      expect(overlayRoot.style.pointerEvents).toBe('auto');
+      const overlayButton =
+        overlayRoot.querySelector<HTMLButtonElement>('button')!;
+      expect(overlayButton).not.toBeNull();
+
+      const escapeEvent = new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => overlayButton.dispatchEvent(escapeEvent));
+      expect(escapeEvent.defaultPrevented).toBe(true);
+      expect(
+        document.querySelector('[data-web-shell-model-sheet]'),
+      ).not.toBeNull();
+
+      act(() =>
+        overlayButton.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            button: 0,
+            cancelable: true,
+          }),
+        ),
+      );
+      act(() =>
+        overlayButton.dispatchEvent(
+          new MouseEvent('click', { bubbles: true, button: 0 }),
+        ),
+      );
+      expect(hostAction).toHaveBeenCalledTimes(1);
+      expect(
+        document.querySelector('[data-web-shell-model-sheet]'),
+      ).not.toBeNull();
+
+      const sheet = document.querySelector<HTMLElement>(
+        '[data-web-shell-model-sheet]',
+      )!;
+      act(() =>
+        sheet.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }),
+        ),
+      );
+      await vi.waitFor(() => {
+        expect(
+          document.querySelector('[data-web-shell-model-sheet]'),
+        ).toBeNull();
+      });
+
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-model-button]')!
+          .click(),
+      );
+      act(() =>
+        document
+          .querySelector<HTMLButtonElement>(
+            '[data-web-shell-model-submenu-trigger]',
+          )!
+          .click(),
+      );
+      const backdrop = document.querySelector<HTMLElement>(
+        '[data-slot="drawer-overlay"]',
+      )!;
+      act(() => {
+        backdrop.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            button: 0,
+            cancelable: true,
+          }),
+        );
+        backdrop.dispatchEvent(
+          new MouseEvent('click', { bubbles: true, button: 0 }),
+        );
+      });
+      await vi.waitFor(() => {
+        expect(
+          document.querySelector('[data-web-shell-model-sheet]'),
+        ).toBeNull();
+      });
+    } finally {
+      media.mockImplementation(
+        () =>
+          ({
+            matches: false,
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+          }) as unknown as MediaQueryList,
+      );
+    }
+  });
+});
+
 describe('ChatEditor slash command popovers', () => {
+  it.each([
+    { source: 'plugin-command', extensionName: undefined },
+    { source: 'skill', extensionName: 'suite' },
+  ])(
+    'separates Extension Skill details for $source',
+    ({ source, extensionName }) => {
+      const name = 'suite:rust:chat';
+      composerCoreState.slashMenu = {
+        kind: 'command',
+        from: 0,
+        to: 1,
+        query: '',
+        selectedIndex: 0,
+        items: [
+          { id: name, label: `/${name}`, apply: `/${name} `, detail: 'Chat' },
+        ],
+      };
+      renderChatEditor({
+        commands: [{ name, description: 'Chat', source }],
+        skills: [{ name, description: 'Chat', extensionName }],
+      });
+      const option = document.querySelector(
+        '[data-web-shell-slash-menu] [role="option"]',
+      );
+      act(() =>
+        option?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })),
+      );
+      const detail = document.querySelector('[data-web-shell-slash-detail]');
+      expect(detail?.firstElementChild?.children[0]?.textContent).toBe(
+        'rust:chat',
+      );
+      expect(detail?.firstElementChild?.children[1]?.textContent).toBe(
+        'Extension: suite',
+      );
+    },
+  );
+
+  it.each([true, false])(
+    'preserves colon names without an Extension (Skill: %s)',
+    (isSkill) => {
+      const name = 'analysis:report';
+      composerCoreState.slashMenu = {
+        kind: 'command',
+        from: 0,
+        to: 1,
+        query: '',
+        selectedIndex: 0,
+        items: [
+          { id: name, label: `/${name}`, apply: `/${name} `, detail: 'Report' },
+        ],
+      };
+      renderChatEditor({
+        commands: [
+          {
+            name,
+            description: 'Report',
+            source: isSkill ? 'skill-dir-command' : 'plugin-command',
+          },
+        ],
+        skills: isSkill ? [{ name, description: 'Report' }] : [],
+      });
+      const option = document.querySelector(
+        '[data-web-shell-slash-menu] [role="option"]',
+      );
+      act(() =>
+        option?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })),
+      );
+      const detail = document.querySelector('[data-web-shell-slash-detail]');
+      expect(detail?.firstElementChild?.children[0]?.textContent).toBe(
+        isSkill ? name : `/${name}`,
+      );
+      expect(detail?.textContent).not.toContain('Extension:');
+    },
+  );
+
   it('keeps Skill status messages out of populated local command menus', () => {
     composerCoreState.slashMenu = {
       kind: 'command',
@@ -4967,6 +6057,20 @@ describe('ChatEditor mobile composer actions', () => {
     ].find((b) => b.textContent === 'Stop')!;
     act(() => stop.click());
     expect(onCancel).toHaveBeenCalledTimes(2);
+    expect(composerCoreState.submitText).not.toHaveBeenCalled();
+
+    // The expanded Stop must survive submit finalization too — while the
+    // modal is open it is the only reachable stop control.
+    composerCoreState.submitPreparing = true;
+    rerenderChatEditor(container, { isRunning: true, onCancel });
+    const stopDuringFlush = [
+      ...document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-expanded-editor] button',
+      ),
+    ].find((b) => b.textContent === 'Stop')!;
+    expect(stopDuringFlush.disabled).toBe(false);
+    act(() => stopDuringFlush.click());
+    expect(onCancel).toHaveBeenCalledTimes(3);
     expect(composerCoreState.submitText).not.toHaveBeenCalled();
   });
 
@@ -6872,6 +7976,10 @@ describe('ChatEditor Workflow mode', () => {
     workflowModeStatus: 'ready' as const,
     workflowMode: { requested: true, available: true, effective: true },
   };
+  const workflowSwitch = (container: HTMLElement) =>
+    container.querySelector<HTMLElement>(
+      '[data-web-shell-workflow-switch] [role="switch"]',
+    );
 
   it('moves Workflow into the menu and keeps it usable during a running response', async () => {
     const onWorkflowModeChange = vi.fn();
@@ -6993,7 +8101,7 @@ describe('ChatEditor Workflow mode', () => {
     expect(composerCoreState.focus).toHaveBeenCalled();
   });
 
-  it('hides Workflow when the host excludes the add menu', () => {
+  it('keeps a Workflow switch when the host excludes the add menu', () => {
     const container = renderChatEditor({
       ...ready,
       visibleToolbarActions: ['workflowMode', 'model'],
@@ -7004,6 +8112,52 @@ describe('ChatEditor Workflow mode', () => {
     expect(
       container.querySelector('[data-web-shell-workflow-chip]'),
     ).toBeNull();
+    expect(workflowSwitch(container)).not.toBeNull();
+  });
+
+  it('keeps Workflow dismissible from the switch when the host owns the add menu', () => {
+    const onWorkflowModeChange = vi.fn();
+    const container = renderChatEditor({
+      ...ready,
+      customization: { hostOwnsAddMenu: true },
+      visibleToolbarActions: ['addMenu', 'workflowMode'],
+      onWorkflowModeChange,
+    });
+    expect(
+      container.querySelector('[data-testid="composer-add-menu-trigger"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-workflow-chip]'),
+    ).toBeNull();
+    const control = workflowSwitch(container)!;
+    expect(control.getAttribute('aria-checked')).toBe('true');
+    expect(control.disabled).toBe(false);
+    act(() => control.click());
+    expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it('lets the host turn Workflow back on from the switch', () => {
+    const onWorkflowModeChange = vi.fn();
+    const container = renderChatEditor({
+      workflowModeStatus: 'ready',
+      workflowMode: { requested: false, available: true, effective: false },
+      customization: { hostOwnsAddMenu: true },
+      visibleToolbarActions: ['addMenu', 'workflowMode'],
+      onWorkflowModeChange,
+    });
+    const control = workflowSwitch(container)!;
+    expect(control.getAttribute('aria-checked')).toBe('false');
+    act(() => control.click());
+    expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(true);
+  });
+
+  it('keeps no switch while the add menu holds the Workflow entry', () => {
+    const container = renderChatEditor({
+      ...ready,
+      visibleToolbarActions: ['addMenu', 'workflowMode'],
+      onWorkflowModeChange: vi.fn(),
+    });
+    expect(workflowSwitch(container)).toBeNull();
   });
 
   it.each([

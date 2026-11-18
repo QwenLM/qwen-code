@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { commandMetadata } from './command-metadata.js';
 import { spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
@@ -89,6 +90,7 @@ interface StartArgs {
   port?: number;
   hostname: string;
   workspace?: string | string[];
+  'conversations-dir'?: string | string[];
   web: boolean;
   'require-auth': boolean;
   token?: string;
@@ -566,6 +568,7 @@ export function buildDaemonStartArgs(options: {
   port: number;
   hostname: string;
   workspaces: readonly string[];
+  conversationsDir?: string;
   web: boolean;
   requireAuth: boolean;
 }): { command: string; args: string[] } {
@@ -579,6 +582,9 @@ export function buildDaemonStartArgs(options: {
   ];
   if (!options.web) childArgs.push('--no-web');
   if (options.requireAuth) childArgs.push('--require-auth');
+  if (options.conversationsDir !== undefined) {
+    childArgs.push('--conversations-dir', options.conversationsDir);
+  }
   for (const workspace of options.workspaces) {
     childArgs.push('--workspace', workspace);
   }
@@ -717,6 +723,12 @@ async function printStartLogTail(file: string): Promise<void> {
 
 async function handleStart(argv: StartArgs): Promise<void> {
   ignoreBrokenPipe();
+  const conversationsDir = argv['conversations-dir'];
+  if (Array.isArray(conversationsDir)) {
+    writeStderrLine('qwen daemon: pass --conversations-dir once.');
+    process.exitCode = 1;
+    return;
+  }
   const entry = resolveCliEntry();
   if (!entry) {
     writeStderrLine(
@@ -802,6 +814,7 @@ async function handleStart(argv: StartArgs): Promise<void> {
     port,
     hostname,
     workspaces,
+    conversationsDir,
     web: argv.web,
     requireAuth: argv['require-auth'],
   });
@@ -1450,6 +1463,9 @@ export function buildDaemonRestartPlan(
     record.hostname,
     '--wait',
   ];
+  if (record.conversationsDir !== undefined) {
+    startArgs.push('--conversations-dir', record.conversationsDir);
+  }
   for (const workspace of workspaces) {
     startArgs.push('--workspace', workspace);
   }
@@ -1710,6 +1726,12 @@ const startCommand: CommandModule<unknown, StartArgs> = {
         describe:
           'Workspace path; repeat for multiple; defaults to the current directory',
       })
+      .option('conversations-dir', {
+        type: 'string',
+        requiresArg: true,
+        describe:
+          'Absolute Conversations working-directory root (overrides QWEN_CONVERSATIONS_DIR)',
+      })
       .option('web', {
         type: 'boolean',
         default: true,
@@ -1881,8 +1903,7 @@ const tokenCommand: CommandModule<unknown, TokenArgs> = {
 };
 
 export const daemonCommand: CommandModule = {
-  command: 'daemon',
-  describe: 'Inspect and control local qwen serve daemons',
+  ...commandMetadata.daemon,
   builder: (yargs: Argv) =>
     yargs
       .command(startCommand)

@@ -13,7 +13,11 @@ import {
   createHostedHarnessContract,
   installHostedHarnessContractMiddleware,
 } from './hosted-harness-contract.js';
-import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
+import {
+  CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
+  CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST,
+  type CsiFilesProfile,
+} from './managed-csi-file-profile.js';
 import { registerHostedCsiSessionRoutes } from './hosted-csi-session.js';
 
 const components = vi.hoisted(() => ({
@@ -22,6 +26,7 @@ const components = vi.hoisted(() => ({
   project: vi.fn(),
   bind: vi.fn(),
   initial: vi.fn(),
+  diagnostics: vi.fn(),
 }));
 
 vi.mock(
@@ -49,6 +54,12 @@ vi.mock('./hosted-csi-file-history.js', () => ({
   bindHostedCsiHistory: components.bind,
   commitInitialHostedCsiHistory: components.initial,
 }));
+vi.mock(
+  '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js',
+  () => ({
+    enableManagedSessionDiagnostics: components.diagnostics,
+  }),
+);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -66,6 +77,7 @@ describe('original Hosted retirement owner barrier', () => {
     components.bind.mockResolvedValue({});
     components.initial.mockResolvedValue(undefined);
     components.project.mockResolvedValue({ messages: [] });
+    components.diagnostics.mockResolvedValue(undefined);
   });
   afterEach(() => vi.restoreAllMocks());
 
@@ -93,7 +105,7 @@ describe('original Hosted retirement owner barrier', () => {
       'X-Qwen-Harness-Boot-Id': contract.bootId,
     };
     const owners = new Map<string, ReturnType<typeof owner>>();
-    function owner() {
+    function owner(profile: CsiFilesProfile = 'csi-files-retirement/1') {
       const id = randomUUID();
       const bindingId = randomUUID();
       const retirementId = randomUUID();
@@ -106,6 +118,14 @@ describe('original Hosted retirement owner barrier', () => {
       };
       let installed = false;
       const authority = {
+        sessionHeader: {
+          definitionRef: {},
+          sessionKey: {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: id,
+          },
+        },
         get currentActivation() {
           return installed ? activation : undefined;
         },
@@ -129,7 +149,15 @@ describe('original Hosted retirement owner barrier', () => {
       };
       const stores = {
         journalStore: { open: vi.fn().mockResolvedValue({}) },
-        resourceStore: { publish: vi.fn().mockResolvedValue({}) },
+        resourceStore: {
+          publish: vi.fn().mockResolvedValue({}),
+          read: vi
+            .fn()
+            .mockResolvedValue(
+              Buffer.from(JSON.stringify({ toolProfile: profile })),
+            ),
+        },
+        supportsModelDiagnostics: vi.fn().mockReturnValue(true),
         publication: {
           owner: vi.fn().mockResolvedValue({ writerGeneration: 1 }),
         },
@@ -143,6 +171,7 @@ describe('original Hosted retirement owner barrier', () => {
       };
       return {
         id,
+        profile,
         bindingId,
         retirementId,
         activation,
@@ -189,7 +218,10 @@ describe('original Hosted retirement owner barrier', () => {
               canonicalCwd: '/workspace',
               workspaceGeneration: '1',
               isolationClass: 'session',
-              capabilityDigest: CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
+              capabilityDigest:
+                selected.profile === 'csi-files-retirement/2'
+                  ? CSI_FILES_DIAGNOSTICS_CAPABILITY_DIGEST
+                  : CSI_FILES_RETIREMENT_CAPABILITY_DIGEST,
             },
             runtime: { bindingId: selected.bindingId, generation: '1' },
           }),
@@ -209,9 +241,13 @@ describe('original Hosted retirement owner barrier', () => {
       supertest(app)
         .get(`/session/${selected.id}/internal-csi/history`)
         .set(headers);
-    async function attach() {
-      const selected = owner();
+    function createOwner(profile?: CsiFilesProfile) {
+      const selected = owner(profile);
       owners.set(selected.id, selected);
+      return selected;
+    }
+    async function attach(profile?: CsiFilesProfile) {
+      const selected = createOwner(profile);
       expect((await post(selected, 'attach', selected.attachment)).status).toBe(
         200,
       );
@@ -222,6 +258,7 @@ describe('original Hosted retirement owner barrier', () => {
       handle,
       headers,
       attach,
+      createOwner,
       post,
       history,
       rpc,
@@ -229,6 +266,64 @@ describe('original Hosted retirement owner barrier', () => {
       enteredRetirement,
     };
   }
+
+  it('admits /2 with the durable matching profile and diagnostics storage support', async () => {
+    const fixture = setup();
+    try {
+      const selected = await fixture.attach('csi-files-retirement/2');
+      const definition = selected.stores.resourceStore.publish.mock.calls.find(
+        ([kind]) => kind === 'managed-definition',
+      )!;
+      expect(JSON.parse(definition[1].toString()).toolProfile).toBe(
+        'csi-files-retirement/2',
+      );
+      expect(selected.stores.supportsModelDiagnostics).toHaveBeenCalledOnce();
+      expect(components.diagnostics).toHaveBeenCalledWith(
+        expect.objectContaining({ authority: selected.authority }),
+      );
+      expect(components.initial).toHaveBeenCalledOnce();
+    } finally {
+      await fixture.handle.stopLocal();
+    }
+  });
+
+  it.each(['storage', 'profile'] as const)(
+    'refuses /2 with incompatible %s before enabling diagnostics or binding history',
+    async (failure) => {
+      const fixture = setup();
+      const selected = fixture.createOwner('csi-files-retirement/2');
+      if (failure === 'storage')
+        selected.stores.supportsModelDiagnostics.mockReturnValue(false);
+      else
+        selected.stores.resourceStore.read.mockResolvedValue(
+          Buffer.from(
+            JSON.stringify({ toolProfile: 'csi-files-retirement/1' }),
+          ),
+        );
+      try {
+        const response = await fixture.post(
+          selected,
+          'attach',
+          selected.attachment,
+        );
+        expect(response.status).toBe(409);
+        expect(response.body.code).toBe(
+          failure === 'storage'
+            ? 'csi_diagnostics_storage_unavailable'
+            : 'csi_runtime_identity_conflict',
+        );
+        expect(components.diagnostics).not.toHaveBeenCalled();
+        expect(components.bind).not.toHaveBeenCalled();
+        expect(components.initial).not.toHaveBeenCalled();
+        if (failure === 'storage') {
+          expect(selected.stores.resourceStore.publish).not.toHaveBeenCalled();
+          expect(components.open).not.toHaveBeenCalled();
+        }
+      } finally {
+        await fixture.handle.stopLocal();
+      }
+    },
+  );
 
   it('closes new selected-owner admission before joining and isolates other owners', async () => {
     const fixture = setup();

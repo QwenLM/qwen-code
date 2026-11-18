@@ -43,6 +43,7 @@ const summaryReport = {
     maxPendingPromptsPerSession: 5,
     listenerMaxConnections: null,
     eventRingSize: 1024,
+    eventRingMaxBytes: 8 * 1024 * 1024,
     promptDeadlineMs: 120_000,
     writerIdleTimeoutMs: null,
     channelIdleTimeoutMs: 60_000,
@@ -112,6 +113,11 @@ const fullReport = {
         pendingPermissionCount: 2,
         hasActivePrompt: true,
         lastEventId: 42,
+        eventRingCount: 0,
+        eventRingBytes: 0,
+        eventRingEvictedEvents: 0,
+        eventRingEvictedBytes: 0,
+        availableCommandsSnapshotBytes: 0,
       },
     ],
     acpConnections: [{ connectionId: 'conn-1' }],
@@ -200,6 +206,10 @@ let fullState: HookState = {
 };
 const seenDetails: Array<string | undefined> = [];
 const seenAutoLoads: Array<boolean | undefined> = [];
+const usagePrefetch = vi.fn(async () => undefined);
+const workspaceActionsState = {
+  loadUsageDashboard: usagePrefetch,
+};
 const workspaceState = {
   baseUrl: 'http://localhost:4170',
   status: 'connected' as const,
@@ -207,6 +217,15 @@ const workspaceState = {
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => workspaceState,
+  useWorkspaceActions: () => workspaceActionsState,
+  // The Usage tab mounts UsageDashboardTab, which calls useUsageDashboard; a
+  // missing mock would throw into the tab's ErrorBoundary on tab-switch.
+  useUsageDashboard: () => ({
+    dashboard: undefined,
+    loading: false,
+    error: undefined,
+    reload: vi.fn(async () => undefined),
+  }),
   useStatusReport: (options: { autoLoad?: boolean; detail?: string } = {}) => {
     seenDetails.push(options.detail);
     seenAutoLoads.push(options.autoLoad);
@@ -306,6 +325,8 @@ beforeEach(() => {
   summaryReload.mockImplementation(async () => undefined);
   fullReload.mockReset();
   fullReload.mockImplementation(async () => undefined);
+  usagePrefetch.mockReset();
+  usagePrefetch.mockImplementation(async () => undefined);
 });
 
 afterEach(() => {
@@ -343,6 +364,50 @@ describe('DaemonStatusDialog', () => {
     act(() => vi.advanceTimersByTime(15_000));
     expect(summaryReload).not.toHaveBeenCalled();
     expect(fullReload).not.toHaveBeenCalled();
+    expect(usagePrefetch).not.toHaveBeenCalled();
+  });
+
+  it('prefetches the usage aggregate once on open so the Usage tab is warm', () => {
+    mount();
+
+    // Fired in the background on open (range-independent server-side), before
+    // the operator ever clicks the Usage tab.
+    expect(usagePrefetch).toHaveBeenCalledTimes(1);
+    expect(usagePrefetch).toHaveBeenCalledWith({ range: 'today' });
+
+    // A real re-render (switching tabs) must not re-fire it: the effect deps
+    // are stable for the life of the connection target.
+    const tabs = container!.querySelectorAll('[role="tab"]');
+    act(() => {
+      tabs[1]!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(usagePrefetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not prefetch usage while the daemon is unavailable', async () => {
+    const { availability } = offlineDaemon();
+    try {
+      await availability.check(true);
+      mount('en', undefined, true, availability);
+      expect(usagePrefetch).not.toHaveBeenCalled();
+    } finally {
+      availability.dispose();
+    }
+  });
+
+  it('swallows a prefetch rejection so it never becomes an unhandled error', async () => {
+    usagePrefetch.mockRejectedValueOnce(new Error('usage load failed'));
+    mount();
+    expect(usagePrefetch).toHaveBeenCalledTimes(1);
+    // Let the rejected prefetch settle; the effect's .catch must absorb it.
+    // Without the .catch this is an unhandled rejection, which fails the run
+    // on Linux (dangerouslyIgnoreUnhandledErrors is false there).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(container!.querySelectorAll('[role="tab"]').length).toBeGreaterThan(
+      0,
+    );
   });
 
   it('rejects a mixed-content target before passing its token to navigation', () => {
@@ -1326,6 +1391,100 @@ describe('DaemonStatusDialog', () => {
     expect(text).toContain('Failed to load diagnostics');
   });
 
+  it('shows the SSE admission cap paired with the aggregate stream occupancy', () => {
+    const withOccupancy = {
+      ...summaryReport,
+      limits: { ...summaryReport.limits, maxSseConnections: 204 },
+      runtime: {
+        ...summaryReport.runtime,
+        transport: {
+          ...summaryReport.runtime.transport,
+          restSseActive: 3,
+          streamOccupancy: {
+            total: 6,
+            bySurface: {
+              restEvents: 3,
+              agentEvents: 0,
+              generation: 0,
+              artifactLibrary: 0,
+              hostedEvents: 0,
+              acpSse: 2,
+              acpWs: 1,
+            },
+            // A non-primary distribution the daemon really produces (streams
+            // parked on the pairing listeners): total 6 ≠ primary 3, so the
+            // paired assertion below reds if the row reads byListener.primary
+            // instead of total (review R1-2).
+            byListener: { primary: 3, 'local-control': 2, 'remote-access': 1 },
+          },
+        },
+      },
+    };
+    summaryState = { report: withOccupancy, loading: false, error: undefined };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    const text = container!.textContent ?? '';
+    expect(text).toContain('SSE admission (used / cap)');
+    // The aggregate occupancy pairs with the cap — not the REST-only 3 and
+    // not the primary listener's share (3).
+    expect(text).toContain('6 / 204');
+  });
+
+  it('shows the cap alone when the daemon predates the occupancy breakdown', () => {
+    const capOnly = {
+      ...summaryReport,
+      limits: { ...summaryReport.limits, maxSseConnections: 204 },
+    };
+    summaryState = { report: capOnly, loading: false, error: undefined };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    const text = container!.textContent ?? '';
+    // Row renders the label and value as adjacent spans with no separator.
+    // The cap-only branch must show the bare cap: pairing restSseActive (1
+    // in this fixture) into the fallback would render '1 / 204' — the exact
+    // misreading the row comment warns about — and both asserts below red
+    // (review R1-1).
+    expect(text).toContain('SSE admission (used / cap)204');
+    expect(text).not.toContain('/ 204');
+  });
+
+  it('shows unlimited when the SSE admission cap is disabled', () => {
+    const unlimited = {
+      ...summaryReport,
+      limits: { ...summaryReport.limits, maxSseConnections: null },
+      runtime: {
+        ...summaryReport.runtime,
+        transport: {
+          ...summaryReport.runtime.transport,
+          streamOccupancy: {
+            total: 0,
+            bySurface: {
+              restEvents: 0,
+              agentEvents: 0,
+              generation: 0,
+              artifactLibrary: 0,
+              hostedEvents: 0,
+              acpSse: 0,
+              acpWs: 0,
+            },
+            byListener: { primary: 0, 'local-control': 0, 'remote-access': 0 },
+          },
+        },
+      },
+    };
+    summaryState = { report: unlimited, loading: false, error: undefined };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    expect(container!.textContent ?? '').toContain('0 / unlimited');
+  });
+
+  it('omits the SSE admission row for daemons that predate the cap', () => {
+    summaryState = { report: summaryReport, loading: false, error: undefined };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    expect(container!.textContent ?? '').not.toContain('SSE admission');
+  });
+
   it('renders the ACP-disabled branch when the transport is off', () => {
     const acpOff = {
       ...summaryReport,
@@ -1625,6 +1784,11 @@ describe('DaemonStatusDialog', () => {
               pendingPermissionCount: 0,
               hasActivePrompt: false,
               lastEventId: 1,
+              eventRingCount: 0,
+              eventRingBytes: 0,
+              eventRingEvictedEvents: 0,
+              eventRingEvictedBytes: 0,
+              availableCommandsSnapshotBytes: 0,
             },
           ],
         },

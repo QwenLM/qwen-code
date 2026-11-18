@@ -3,7 +3,6 @@
   "compilerOptions": {
     "outDir": "dist",
     "rootDir": "src",
-    "baseUrl": ".",
     "lib": ["ES2023"],
     "composite": true,
     "types": ["node", "vitest/globals"],

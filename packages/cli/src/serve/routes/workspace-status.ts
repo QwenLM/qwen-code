@@ -565,7 +565,14 @@ export function registerWorkspaceQualifiedDiagnosticStatusRoutes(
     ['hooks', 'getWorkspaceHooksStatus'],
   ] as const) {
     app.get(`/workspaces/:workspace/${pathSuffix}`, async (req, res) => {
-      const runtime = resolveTrustedRuntime(workspaceRegistry, req, res);
+      // The hooks status reports the pending trust decision, so it must
+      // stay readable exactly when the workspace is untrusted — same
+      // posture as the qualified approve POST. Env/preflight keep the
+      // trusted gate.
+      const runtime =
+        methodName === 'getWorkspaceHooksStatus'
+          ? resolveWorkspaceRuntimeFromParam(workspaceRegistry, req, res)
+          : resolveTrustedRuntime(workspaceRegistry, req, res);
       if (!runtime) return;
       const route = `GET /workspaces/:workspace/${pathSuffix}`;
       const ctx = createBuildWorkspaceCtx(runtime.workspaceCwd)(route);

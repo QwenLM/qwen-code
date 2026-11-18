@@ -62,11 +62,11 @@ A new setting, `qwen.managed-agent.service-user` (`QWEN_MANAGED_AGENT_SERVICE_US
 
 - `SKIP` when it is not set. The file rows then check access as the process, as before.
 - `PASS (this process)` when it names the account running preflight. The rows check access as the process, which is exact.
-- `PASS` with the account's groups when `id -Gn` resolves another account.
-- `FAIL` when no such account exists, which `id -Gn` shows by printing nothing. It also exits 1 for an account in a group without a name, but then prints that group's number, which is how the file attributes name it too, so preflight keeps the groups.
-- `WARN` when `id` cannot run. The rows fall back to the process.
+- `PASS` with the account's groups when `id -u` and `id -Gn` resolve another account's uid and groups.
+- `FAIL` when no such account exists, which `id -u` shows by printing nothing. For an account in a group without a name, `id -Gn` may also exit 1, as GNU's does, but it still prints that group's number, which is how the file attributes name it too, so preflight keeps the groups.
+- `WARN` when `id` cannot run, or prints a uid with no groups, or a first line that is no uid. The rows fall back to the process.
 
-For a resolved account, the `config` and `credentials` rows walk the file's path as the kernel resolves it. The account must be able to enter every directory the walk looks a name up in, including the directories on the way to a symbolic link and those along its target, and it must be able to read the file. Access is judged with the same owner, group and others order. More than 40 links in one path count as unreadable, as the kernel's `ELOOP` does. A failure reads "`<path>` is not readable by `<account>`", and the fix names the `chown`, the `chmod 600` and the directories. A filesystem without POSIX attributes falls back to the process check.
+For a resolved account, the `config` and `credentials` rows walk the file's path as the kernel resolves it. The account must be able to enter every directory the walk looks a name up in, including the directories on the way to a symbolic link and those along its target, and it must be able to read the file. Access is judged with the same owner, group and others order. More than 40 links in one path count as unreadable, as the kernel's `ELOOP` does. A failure reads "`<path>` is not readable by `<account>`", and the fix names the `chown`, the `chmod 600` and the directories. An account whose uid is 0 is root by whatever name and reads every file it reaches. Where the process cannot look along the path but the account may, or cannot read a file the account can and the check reads, a configuration file to judge what it holds or the credentials file the startup validation reads, it cannot tell, so the row fails with "`<path>` is not readable by `<runner>`, which runs this check" and says to run `--check` as the account or as root, or as the account alone when its uid is 0. A filesystem without POSIX attributes falls back to the process check.
 
 ## Failure semantics
 

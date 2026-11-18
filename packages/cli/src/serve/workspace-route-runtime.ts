@@ -281,6 +281,28 @@ export function sendConversationRuntimeUnavailable(res: Response): void {
   });
 }
 
+/** Maps a ConversationRuntimeActivityGate rejection to the declared 503.
+ * Shared by every surface that runs work inside the gate so the draining
+ * response stays byte-identical across them. Returns false for any other
+ * error, leaving the caller's own handling in charge. */
+export function sendDaemonDrainingError(
+  res: Response,
+  error: unknown,
+): boolean {
+  if (
+    !error ||
+    typeof error !== 'object' ||
+    (error as { code?: unknown }).code !== 'daemon_draining'
+  ) {
+    return false;
+  }
+  res.status(503).json({
+    error: 'The daemon is draining and no longer accepts work.',
+    code: 'daemon_draining',
+  });
+  return true;
+}
+
 export function sendWorkspaceRuntimeUnavailable(
   res: Response,
   entry?: Pick<WorkspaceEntry, 'workspaceCwd' | 'workspaceId'>,

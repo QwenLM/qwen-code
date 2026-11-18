@@ -10,10 +10,16 @@ import {
   runWithHookExecutionOwner,
 } from '../hooks/hook-execution-context.js';
 import type { SessionSourceService } from '../services/session-sources.js';
+import type { GeneratedUiStateService } from '../services/generated-ui-state.js';
 import type { RequestLifecycleEvent } from '../telemetry/request-lifecycle.js';
 import { getInvocationContext } from '../utils/invocation-context.js';
 
 import { resolveProviderProtocol } from '../models/modelRegistry.js';
+import {
+  SUBSCRIPTION_MODELS_CACHED,
+  subscriptionModelUnavailable,
+} from '../qwen/subscription-models.js';
+import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
 import {
   captureReasoningSnapshot,
@@ -160,6 +166,13 @@ import type {
   LspStatusSnapshot,
 } from '../lsp/types.js';
 import type { InstructionLoadReason } from '../hooks/types.js';
+import {
+  resolveAgentLoopSwitch,
+  UNIFIED_SURFACE_DEFAULTS,
+  EVENT_BUS_SURFACE_DEFAULTS,
+  type AgentLoopSurface,
+  type AgentLoopPath,
+} from './agent-loop-rollout.js';
 import { ApprovalMode } from './approval-mode.js';
 
 // Other modules
@@ -168,11 +181,8 @@ import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { clearCollectedSkillEntriesCache } from '../tools/skill-utils.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
-import {
-  AUTO_MEMORY_SKILL_NAME,
-  MainSessionAutoMemoryPolicy,
-} from '../skills/auto-memory-skill.js';
 import {
   authoredSkillName,
   skillRestrictionNames,
@@ -445,6 +455,7 @@ import {
 } from '../memory/metadata-migration.js';
 import {
   buildAutoMemoryIndexContext,
+  buildResidentAutoMemoryPrompt,
   buildStructuredAutoMemoryPrompt,
 } from '../memory/prompt.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
@@ -539,6 +550,7 @@ import {
   type ResolvedModelConfig,
   type RuntimeModelSnapshot,
 } from '../models/index.js';
+import type { ModelSwitchOptions } from '../models/modelsConfig.js';
 import { resolveModelId } from '../utils/modelId.js';
 import type { WebSearchSettings } from '../tools/web-search.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
@@ -1082,6 +1094,8 @@ export interface AgentsCollabSettings {
   modelGrades?: Record<string, string>;
   /** Optional whitelist of model grades exposed to the Agent tool. */
   allowedGrades?: string[];
+  /** Default background mode for top-level regular subagents (default: true). */
+  defaultBackground?: boolean;
   /**
    * Global maximum number of background sub-agents running concurrently.
    * When the cap is reached, additional launches wait for a slot.
@@ -1442,6 +1456,8 @@ export interface ConfigParameters {
   agentTeamEnabled?: boolean;
   /** Experimental: run migrated surfaces on the shared agent loop. */
   unifiedAgentLoopEnabled?: boolean;
+  /** Experimental: run the shared agent loop on the event bus. */
+  eventBusAgentLoopEnabled?: boolean;
   /**
    * Opt-in for persistent workspace Agents answering @-mentions in chat
    * sessions. Separate from `agentTeamEnabled`: neither implies the other.
@@ -1611,6 +1627,14 @@ export interface ConfigParameters {
   autoCompactThreshold?: number;
   interactive?: boolean;
   trustedFolder?: boolean;
+  /**
+   * The trust file's decision for `dir` when a rule set strictly inside the
+   * IDE workspace root `ideRoot` decides it; such a rule wins over the IDE.
+   */
+  trustFileDecisionBelowIdeRoot?: (
+    dir: string,
+    ideRoot: string,
+  ) => boolean | undefined;
   defaultFileEncoding?: FileEncodingType;
   useRipgrep?: boolean;
   useBuiltinRipgrep?: boolean;
@@ -2337,6 +2361,8 @@ export interface ConfigInitializeOptions {
    * need config services (hooks, tools, MCP) before a real session exists.
    */
   skipLlmInitialization?: boolean;
+  /** Load hooks without starting a filesystem subscription for bootstrap configs. */
+  skipFileWatching?: boolean;
   /** @deprecated Use `skipLlmInitialization`; retained until a future major release. */
   skipGeminiInitialization?: boolean;
   /**
@@ -2469,12 +2495,31 @@ export interface SubSessionSpawnRequest {
   model?: string;
   /** Optional display name for the sub-session in the session list. */
   name?: string;
+  /** Registered workspace (absolute path or id) to run the sub-session in;
+   * absent means the caller's workspace. */
+  workspace?: string;
+  workspaceGeneration?: string;
+  /** A sub-session this caller created earlier, to send the prompt to
+   * instead of creating one. It lives in `workspace`. */
+  sessionId?: string;
 }
+
+export interface SubSessionWorkspaceBinding {
+  workspaceId: string;
+  workspaceCwd: string;
+  workspaceGeneration: string;
+}
+
+export type SubSessionWorkspaceResolver = (
+  workspace: string,
+) => Promise<SubSessionWorkspaceBinding>;
 
 /** Result returned to the `create_sub_session` tool. `result` (the sub-session's
  * first-turn output) is present only for `completion: 'first-turn'`. */
 export interface SubSessionSpawnResult {
   sessionId: string;
+  /** Canonical destination for a cross-workspace session link. */
+  workspaceCwd?: string;
   result?: string;
   stopReason?: string;
   /** Whether the parent lineage was durably persisted to the sub-session's
@@ -2985,7 +3030,9 @@ export class Config {
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
-  private contentGenerator!: ContentGenerator;
+  private contentGenerator?: ContentGenerator;
+  private subscriptionPlan?: 'plus' | 'pro';
+  private subscriptionModelIdentity?: string;
   private readonly initialAuthType?: AuthType;
   private initialResolvedAuthType?: AuthType;
   private readonly embeddingModel: string;
@@ -3117,18 +3164,8 @@ export class Config {
   private promptToolSnapshot: ReadonlySet<string> | undefined;
   private promptAgentReachable = false;
 
-  /**
-   * Stable managed-memory policy, separate from the changing catalog. Empty
-   * while the legacy main-session policy below is in effect.
-   */
+  /** Stable managed-memory policy, separate from the changing catalog. */
   private autoMemoryPrompt = '';
-  /**
-   * The legacy main-session policy, resolved per reading Config: whether it
-   * points at the bundled `auto-memory` reference depends on the reader's
-   * route to the Skill tool (#16291). Set only by a legacy refresh, cleared by
-   * every path that sets `autoMemoryPrompt` instead.
-   */
-  private mainSessionAutoMemoryPolicy: MainSessionAutoMemoryPolicy | undefined;
   private autoMemoryContext = '';
   private memoryRecallMode: MemoryRecallMode = 'legacy';
   private memoryCorpusRevision = '';
@@ -3164,7 +3201,7 @@ export class Config {
   private activeTodoReminderTurns = new Map<string, number>();
   private activeTodoPlanWriterOwner: string | undefined;
   private llmClient!: LlmClient;
-  private baseLlmClient!: BaseLlmClient;
+  private baseLlmClient?: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
   private readonly fileFiltering: {
     respectGitIgnore: boolean;
@@ -3258,7 +3295,8 @@ export class Config {
   private readonly lsToolEnabled: boolean = false;
   private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
-  private readonly unifiedAgentLoopEnabled: boolean = false;
+  private readonly unifiedAgentLoopEnabled: boolean | undefined;
+  private readonly eventBusAgentLoopEnabled: boolean | undefined;
   private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private readonly artifactRecordingSupported: boolean = true;
@@ -3297,6 +3335,8 @@ export class Config {
    * lazily on first use, never persisted. */
   private omniMediaResourceRegistry?: MediaResourceRegistry;
   private workflowsEnabled: boolean | undefined;
+  /** Workflows are on because the bundled review skill turned them on. */
+  private workflowsEnabledByReviewSkill = false;
   private workflowKeywordTriggerEnabled: boolean;
   private readonly sessionWorkflowEnabled: boolean;
   private sessionWorkflowEnabledProvider?: () => boolean;
@@ -3327,6 +3367,9 @@ export class Config {
   private readonly autoCompactThreshold: number | undefined;
   private readonly interactive: boolean;
   private readonly trustedFolder: boolean | undefined;
+  private readonly trustFileDecisionBelowIdeRoot:
+    | ((dir: string, ideRoot: string) => boolean | undefined)
+    | undefined;
   private readonly useRipgrep: boolean;
   private readonly useBuiltinRipgrep: boolean;
   private readonly shouldUseNodePtyShell: boolean;
@@ -3721,7 +3764,12 @@ export class Config {
     this.lsToolEnabled = params.lsToolEnabled ?? false;
     this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
-    this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled ?? false;
+    // Deliberately not `?? false`: these are tri-state. Unset must stay
+    // undefined so the resolver falls through to the per-surface built-in
+    // default; collapsing to false here would make "not set" indistinguishable
+    // from "explicitly off" and block a later per-surface default flip.
+    this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled;
+    this.eventBusAgentLoopEnabled = params.eventBusAgentLoopEnabled;
     this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactRecordingSupported = params.artifactRecordingSupported ?? true;
@@ -3785,6 +3833,7 @@ export class Config {
     this.autoCompactThreshold = params.autoCompactThreshold;
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
+    this.trustFileDecisionBelowIdeRoot = params.trustFileDecisionBelowIdeRoot;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     // Embedders bypass the CLI's check; an unknown mode would act as `off`.
     this.loopProtection = isLoopProtectionMode(params.loopProtection)
@@ -4214,6 +4263,8 @@ export class Config {
   private async initializeOnce(
     options?: ConfigInitializeOptions,
   ): Promise<void> {
+    const ripgrepAbort = new AbortController();
+    let ripgrepAvailability: Promise<boolean> | undefined;
     try {
       if (this.shellExecutionSandbox)
         this.shellExecutionSandbox = await probeShellSandbox(
@@ -4236,9 +4287,28 @@ export class Config {
           : undefined,
       );
       await this.bindSessionExecutionEngine();
+      // Overlap ACP's binary health check with resource I/O in this request.
+      if (
+        this.getExperimentalZedIntegration() &&
+        this.getUseRipgrep() &&
+        this.sessionExecutionEngine !== 'managed' &&
+        !this.getExecutionEnvironment() &&
+        !this.shellExecutionSandbox &&
+        !this.getBareMode()
+      ) {
+        ripgrepAvailability = canUseRipgrep(
+          this.getUseBuiltinRipgrep(),
+          AbortSignal.any([
+            ripgrepAbort.signal,
+            this.executionShutdown.signal,
+            ...(options?.signal ? [options.signal] : []),
+          ]),
+        );
+        void ripgrepAvailability.catch(() => undefined);
+      }
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
-      await this.initializeInternal(options);
+      await this.initializeInternal(options, ripgrepAvailability);
       this.workflowModeReady = true;
       if (this.initialWorkflowMode !== undefined) {
         const enabled = this.initialWorkflowMode;
@@ -4276,6 +4346,9 @@ export class Config {
         });
       }
       throw error;
+    } finally {
+      ripgrepAbort.abort();
+      await ripgrepAvailability?.catch(() => undefined);
     }
   }
 
@@ -4302,6 +4375,7 @@ export class Config {
 
   private async initializeInternal(
     options?: ConfigInitializeOptions,
+    ripgrepAvailability?: Promise<boolean>,
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
     await this.proxyDispatcherReady;
@@ -4376,7 +4450,9 @@ export class Config {
         (!options?.skipHooks && !this.getDisableAllHooks()))
     ) {
       this.hookSystem = new HookSystem(this, options?.managedHookDispatcher);
-      await this.hookSystem.initialize();
+      await this.hookSystem.initialize({
+        skipFileWatching: options?.skipFileWatching,
+      });
       this.debugLogger.debug('Hook system initialized');
 
       // Initialize MessageBus for hook execution
@@ -4439,6 +4515,28 @@ export class Config {
                     signal,
                   );
                   break;
+                case 'FileChanged': {
+                  const filePath = input['file_path'];
+                  const event = input['event'];
+                  if (
+                    typeof filePath !== 'string' ||
+                    !path.isAbsolute(filePath) ||
+                    (event !== 'add' &&
+                      event !== 'change' &&
+                      event !== 'unlink')
+                  ) {
+                    throw new Error('Invalid FileChanged hook input');
+                  }
+                  const changed = await hookSystem.fireFileChangedEvent(
+                    filePath,
+                    event,
+                    signal,
+                  );
+                  result = changed.finalOutput
+                    ? createHookOutput('FileChanged', changed.finalOutput)
+                    : undefined;
+                  break;
+                }
                 case 'Stop': {
                   // Extract context usage data from input with runtime validation
                   const contextUsageData = buildContextUsage(
@@ -4847,6 +4945,7 @@ export class Config {
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
       skipInlineMcpDiscovery ? { skipDiscovery: true } : undefined,
+      ripgrepAvailability,
     );
     options?.signal?.throwIfAborted();
     recordStartupEvent('config_initialize_tool_registry_end');
@@ -5604,7 +5703,6 @@ export class Config {
     if (this.isSafeMode()) {
       this.setUserMemory('');
       this.autoMemoryPrompt = '';
-      this.mainSessionAutoMemoryPolicy = undefined;
       this.autoMemoryContext = '';
       this.setMemoryFileCount(0);
       this.setContextFilePaths([]);
@@ -5796,7 +5894,6 @@ export class Config {
           userSection.memoryDir,
           teamSection?.memoryDir,
         );
-        this.mainSessionAutoMemoryPolicy = undefined;
       } else {
         const catalog = buildAutoMemoryIndexContext(
           memoryDir,
@@ -5804,19 +5901,16 @@ export class Config {
           userSection,
           teamSection,
         );
-        this.autoMemoryPrompt = '';
-        this.mainSessionAutoMemoryPolicy = new MainSessionAutoMemoryPolicy({
+        this.autoMemoryPrompt = buildResidentAutoMemoryPrompt(
           memoryDir,
-          indexContent: managedAutoMemoryIndex,
           userSection,
           teamSection,
-        });
+        );
         this.autoMemoryContext = catalog;
       }
     } else {
       this.setUserMemory(memoryContent);
       this.autoMemoryPrompt = '';
-      this.mainSessionAutoMemoryPolicy = undefined;
       this.autoMemoryContext = '';
     }
     this.setMemoryFileCount(fileCount);
@@ -5909,10 +6003,46 @@ export class Config {
     return this.contextRuleExcludes;
   }
 
-  getContentGenerator(): ContentGenerator {
-    return (
-      getRuntimeContentGenerator()?.contentGenerator ?? this.contentGenerator
-    );
+  getContentGenerator(options: {
+    allowUninitialized: true;
+  }): ContentGenerator | undefined;
+  getContentGenerator(): ContentGenerator;
+  getContentGenerator(options?: {
+    allowUninitialized: true;
+  }): ContentGenerator | undefined {
+    const generator =
+      getRuntimeContentGenerator()?.contentGenerator ?? this.contentGenerator;
+    if (!generator && !options?.allowUninitialized) {
+      throw new Error('Not signed in. Run /auth to sign in.');
+    }
+    return generator;
+  }
+
+  getSubscriptionPlan(): 'plus' | 'pro' | undefined {
+    return this.subscriptionPlan;
+  }
+
+  setSubscriptionPlan(plan: 'plus' | 'pro' | undefined): void {
+    this.subscriptionPlan = plan;
+  }
+
+  clearAuth(): void {
+    this.backgroundTaskRegistry.abortAll({
+      notify: false,
+      persistedStatus: 'cancelled',
+    });
+    resetPreloadedContentGenerator(this.contentGenerator);
+    this.baseLlmClient?.clearPerModelGeneratorCache();
+    this.contentGenerator = undefined;
+    this.baseLlmClient = undefined;
+    this.contentGeneratorConfig = { model: '' };
+    this.contentGeneratorConfigSources = {};
+    this.initialResolvedAuthType = undefined;
+    this.subscriptionPlan = undefined;
+    this.subscriptionModelIdentity = undefined;
+    this.modelsConfig.clearAuth();
+    this.toolRegistry?.unregisterTool(ToolNames.WEB_SEARCH);
+    this.notifyModelChangeListeners();
   }
 
   /**
@@ -6078,10 +6208,49 @@ export class Config {
     this.initialResolvedAuthType = undefined;
   }
 
+  async refreshSubscriptionModels(signal?: AbortSignal) {
+    const session = new QwenSubscriptionSession();
+    const identity = session.getIdentity();
+    this.subscriptionModelIdentity = undefined;
+    const result = await this.modelsConfig.refreshSubscriptionModels(
+      signal,
+      this.getCliVersion(),
+    );
+    if (identity && session.getIdentity() === identity) {
+      this.subscriptionModelIdentity = identity;
+    }
+    const previous = this.warnings.indexOf(SUBSCRIPTION_MODELS_CACHED);
+    if (previous !== -1) this.warnings.splice(previous, 1);
+    if (result.cached) this.warnings.push(SUBSCRIPTION_MODELS_CACHED);
+    this.notifyModelChangeListeners();
+    return result;
+  }
+
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */
-  async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
+  async refreshAuth(
+    authMethod: AuthType,
+    isInitialAuth?: boolean,
+    subscriptionFallbackModel?: string,
+    allowUnlistedSubscriptionModel?: boolean,
+  ) {
+    return this.rebuildContentGenerator(
+      authMethod,
+      isInitialAuth,
+      true,
+      subscriptionFallbackModel,
+      allowUnlistedSubscriptionModel,
+    );
+  }
+
+  private async rebuildContentGenerator(
+    authMethod: AuthType,
+    isInitialAuth: boolean | undefined,
+    refreshSubscriptionModels: boolean,
+    subscriptionFallbackModel?: string,
+    allowUnlistedSubscriptionModel?: boolean,
+  ) {
     const hookOwner = captureHookExecutionOwner(this, null);
     if (!this.contentGenerator && authMethod === this.initialAuthType) {
       authMethod = this.initialResolvedAuthType ?? authMethod;
@@ -6106,8 +6275,35 @@ export class Config {
       ? priorReasoning.effort
       : undefined;
 
-    // Sync modelsConfig state for this auth refresh.
-    const modelId = this.modelsConfig.getModel();
+    let fallbackModel: string | undefined;
+    if (authMethod === AuthType.QWEN_SUBSCRIPTION) {
+      const { models } = refreshSubscriptionModels
+        ? await this.refreshSubscriptionModels()
+        : {
+            models: this.modelsConfig
+              .getAvailableModelsForAuthType(authMethod)
+              .map((model) => model.id),
+          };
+      const selected = this.modelsConfig.getModel();
+      if (selected && !models.includes(selected)) {
+        if (
+          isInitialAuth &&
+          subscriptionFallbackModel &&
+          models.includes(subscriptionFallbackModel)
+        ) {
+          fallbackModel = subscriptionFallbackModel;
+        } else if (
+          !isInitialAuth ||
+          !allowUnlistedSubscriptionModel ||
+          priorGeneration.authType !== authMethod
+        ) {
+          throw new Error(subscriptionModelUnavailable(selected));
+        }
+      }
+    }
+
+    // The CLI's resolved subscription credentials preserve an unlisted model during sync.
+    const modelId = fallbackModel ?? this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
 
     // Check and consume cached credentials flag
@@ -6184,6 +6380,16 @@ export class Config {
 
     // Initialize BaseLlmClient now that the ContentGenerator is available
     this.baseLlmClient = new BaseLlmClient(this.contentGenerator, this);
+
+    if (
+      this.initialized &&
+      this.toolRegistry &&
+      !this.shellExecutionSandbox &&
+      this.sessionExecutionEngine !== 'managed'
+    ) {
+      await this.syncWebSearchToolRegistration(this.toolRegistry);
+      await this.llmClient?.setTools();
+    }
 
     // Fire auth_success notification hook (supports both interactive & non-interactive)
     const messageBus = this.getMessageBus();
@@ -6628,6 +6834,7 @@ export class Config {
     this.workflowModePublishedState = undefined;
     this.refreshWorkflowMode();
     this.sessionSourceService = this.sessionSourceServiceFactory?.();
+    this.generatedUiStateService = this.generatedUiStateServiceFactory?.();
     this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     // The file-read cache is session-scoped: its `file_unchanged`
     // placeholder relies on the model having seen the prior full read
@@ -7143,13 +7350,30 @@ export class Config {
    * model. Bare selectors stay bare and authType-qualified selectors keep their
    * authType prefix so selector-aware runtime paths can route cross-auth calls.
    */
-  getFastModel(): string | undefined {
+  getFastModel({ requirePinnedEndpoint = false } = {}): string | undefined {
     const selector = this.resolveFastModelSelector();
     if (!selector) return undefined;
 
     const available = selector.authType
       ? this.getAllConfiguredModels([selector.authType])
       : this.getAllConfiguredModels();
+    const pinnedEndpoint = this.fastModel?.trim().split('\0')[1];
+    if (
+      requirePinnedEndpoint &&
+      pinnedEndpoint !== undefined &&
+      !available.some(
+        (model) =>
+          model.id === selector.modelId &&
+          model.baseUrl === pinnedEndpoint &&
+          !model.voiceOnly &&
+          !model.imageOnly &&
+          !model.visionOnly,
+      )
+    ) {
+      throw new Error(
+        'Fast model is no longer configured at the selected endpoint',
+      );
+    }
     if (
       !available.some(
         (model) =>
@@ -7662,9 +7886,12 @@ export class Config {
   private async handleModelChange(
     authType: AuthType,
     requiresRefresh: boolean,
+    initializeIfNeeded?: boolean,
   ): Promise<void> {
     this.initialResolvedAuthType = undefined;
     if (!this.contentGeneratorConfig) {
+      if (initializeIfNeeded || authType === AuthType.QWEN_SUBSCRIPTION)
+        await this.refreshAuth(authType);
       return;
     }
 
@@ -7727,6 +7954,7 @@ export class Config {
       // different image support must update them, or the vision-bridge gate and
       // image-stripping read the previous model's modalities.
       this.contentGeneratorConfig.modalities = config.modalities;
+      this.contentGeneratorConfig.imageDetail = config.imageDetail;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
@@ -7734,6 +7962,10 @@ export class Config {
       if ('modalities' in sources) {
         this.contentGeneratorConfigSources['modalities'] =
           sources['modalities'];
+      }
+      if ('imageDetail' in sources) {
+        this.contentGeneratorConfigSources['imageDetail'] =
+          sources['imageDetail'];
       }
       if ('samplingParams' in sources) {
         this.contentGeneratorConfigSources['samplingParams'] =
@@ -7787,7 +8019,17 @@ export class Config {
     // we captured off the still-intact live contentGeneratorConfig above. This is
     // a no-op when the new model disables thinking (`reasoning: false`), since
     // setReasoningEffort() skips that case and never silently re-enables it.
-    await this.refreshAuth(authType);
+    const reuseSubscriptionModels =
+      authType === AuthType.QWEN_SUBSCRIPTION &&
+      this.contentGeneratorConfig.authType === authType &&
+      this.subscriptionModelIdentity !== undefined &&
+      new QwenSubscriptionSession().getIdentity() ===
+        this.subscriptionModelIdentity;
+    if (reuseSubscriptionModels) {
+      await this.rebuildContentGenerator(authType, undefined, false);
+    } else {
+      await this.refreshAuth(authType);
+    }
     if (priorReasoningEffort) {
       this.setReasoningEffort(priorReasoningEffort);
     }
@@ -7853,7 +8095,7 @@ export class Config {
   async switchModel(
     authType: AuthType,
     modelId: string,
-    options?: { requireCachedCredentials?: boolean; baseUrl?: string },
+    options?: ModelSwitchOptions,
   ): Promise<void> {
     await this.modelsConfig.switchModel(authType, modelId, options);
     this.notifyModelChangeListeners();
@@ -7944,6 +8186,10 @@ export class Config {
       `${this.sessionId}.runtime.json`,
       `${this.sessionId}.worktree.json`,
       `${this.sessionId}.pr.json`,
+      `${this.sessionId}.title.json`,
+      `${this.sessionId}.branch.json`,
+      `${this.sessionId}.artifacts.json`,
+      `${this.sessionId}.goal.json`,
     ].map((fileName) => ({
       from: path.join(oldChatsDir, fileName),
       to: path.join(newChatsDir, fileName),
@@ -8117,6 +8363,7 @@ export class Config {
     this.backgroundTaskRegistry.disposeResidentAgents();
     this.targetDir = expected;
     this.cwd = expected;
+    await this.hookSystem?.refreshFileWatchingForWorkingDirectory();
     resetPreloadedContentGenerator(this.contentGenerator);
     await this.refreshCurrentRuntimeStatus(expected);
     this.workspaceContext.applyRootDirectories(workspaceDirectories);
@@ -8126,10 +8373,17 @@ export class Config {
     // later `gh pr create` in this session must still reach the bridge.
     const sessionPrBoundCallback =
       this.sessionService?.getSessionPrBoundCallback();
+    const sessionGoalChangedCallback =
+      this.sessionService?.getSessionGoalChangedCallback();
     this.sessionService = undefined;
     if (sessionPrBoundCallback) {
       this.getSessionService().setSessionPrBoundCallback(
         sessionPrBoundCallback,
+      );
+    }
+    if (sessionGoalChangedCallback) {
+      this.getSessionService().setSessionGoalChangedCallback(
+        sessionGoalChangedCallback,
       );
     }
     this.fileHistoryService = undefined;
@@ -8142,7 +8396,6 @@ export class Config {
     // reassigns it, and the stale text keeps routing to search_memory while
     // the reset mode leaves that tool undeclared.
     this.autoMemoryPrompt = '';
-    this.mainSessionAutoMemoryPolicy = undefined;
     this.autoMemoryContext = '';
 
     let memoryRefreshError: unknown;
@@ -8337,6 +8590,9 @@ export class Config {
   private async shutdownResourcesOnce(): Promise<void> {
     let resourceError: unknown;
     try {
+      if (Object.hasOwn(this, 'hookSystem')) {
+        await this.hookSystem?.close();
+      }
       this.memoryManager.cancelMigrations();
       this.clearSessionRestoreProjection();
       // Drop this session's project-dir registry entry. It is registered during
@@ -8601,18 +8857,6 @@ export class Config {
       skill.level === 'bundled' &&
       skill.name === 'generated-ui' &&
       !this.getBundledGeneratedUiStatus().enabled
-    ) {
-      return false;
-    }
-    // The auto-memory reference only serves the legacy managed auto-memory
-    // policy; without it, or under the structured protocol (`manage_memory`,
-    // no direct file access), the skill would be listed on every request for
-    // nothing.
-    if (
-      skill.level === 'bundled' &&
-      skill.name === AUTO_MEMORY_SKILL_NAME &&
-      (!this.getManagedAutoMemoryEnabled() ||
-        this.getMemoryRecallMode() !== 'legacy')
     ) {
       return false;
     }
@@ -9540,20 +9784,8 @@ export class Config {
     this.promptAgentReachable = reachable;
   }
 
-  /**
-   * Managed-memory policy for the system prompt, without legacy indexes.
-   *
-   * In legacy mode the main-session policy is resolved for the Config it is
-   * read through, so a subagent's derived Config with no route to the Skill
-   * tool gets the full policy rather than the session's pointer (#16291).
-   */
+  /** Managed-memory policy for the system prompt, without legacy indexes. */
   getAutoMemoryPrompt(): string {
-    if (
-      this.memoryRecallMode === 'legacy' &&
-      this.mainSessionAutoMemoryPolicy !== undefined
-    ) {
-      return this.mainSessionAutoMemoryPolicy.forConfig(this);
-    }
     return this.autoMemoryPrompt;
   }
 
@@ -10672,9 +10904,38 @@ export class Config {
     return this.agentTeamEnabled;
   }
 
-  isUnifiedAgentLoopEnabled(): boolean {
-    if (process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] === '1') return true;
-    return this.unifiedAgentLoopEnabled;
+  isUnifiedAgentLoopEnabled(surface: AgentLoopSurface): boolean {
+    return resolveAgentLoopSwitch({
+      env: process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'],
+      setting: this.unifiedAgentLoopEnabled,
+      surface,
+      surfaceDefault: UNIFIED_SURFACE_DEFAULTS[surface],
+      variable: 'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+    });
+  }
+
+  isEventBusAgentLoopEnabled(surface: AgentLoopSurface): boolean {
+    return resolveAgentLoopSwitch({
+      env: process.env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'],
+      setting: this.eventBusAgentLoopEnabled,
+      surface,
+      surfaceDefault: EVENT_BUS_SURFACE_DEFAULTS[surface],
+      variable: 'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
+    });
+  }
+
+  /**
+   * The loop path a surface runs: unified off -> legacy; otherwise the kernel
+   * only when the event-bus switch is on AND the surface's execution branch
+   * actually enters it, else shared. Speculation and the Hosted Harness never
+   * read the event-bus switch (their rounds always run on the shared loop), so
+   * both are capped at shared even with both switches on.
+   */
+  getAgentLoopPath(surface: AgentLoopSurface): AgentLoopPath {
+    if (!this.isUnifiedAgentLoopEnabled(surface)) return 'legacy';
+    if (!this.isEventBusAgentLoopEnabled(surface)) return 'shared';
+    if (surface === 'speculation' || surface === 'hosted') return 'shared';
+    return 'kernel';
   }
 
   /**
@@ -10718,6 +10979,22 @@ export class Config {
   getSessionSourceService(): SessionSourceService | undefined {
     return Object.hasOwn(this, 'sessionSourceService')
       ? this.sessionSourceService
+      : undefined;
+  }
+
+  private generatedUiStateService?: GeneratedUiStateService;
+  private generatedUiStateServiceFactory?: () => GeneratedUiStateService;
+
+  setGeneratedUiStateServiceFactory(
+    factory: () => GeneratedUiStateService,
+  ): void {
+    this.generatedUiStateServiceFactory = factory;
+    this.generatedUiStateService = factory();
+  }
+
+  getGeneratedUiStateService(): GeneratedUiStateService | undefined {
+    return Object.hasOwn(this, 'generatedUiStateService')
+      ? this.generatedUiStateService
       : undefined;
   }
 
@@ -10938,6 +11215,19 @@ export class Config {
     this.refreshWorkflowMode();
   }
 
+  /**
+   * Applies a reloaded `tools.workflowsEnabled`. When the settings leave it
+   * unset, workflows the bundled review skill turned on stay on: that enable
+   * never came from settings, and undoing it on an unrelated settings change
+   * would end the review's background runs. A value the settings do give
+   * replaces it.
+   */
+  applyWorkflowsEnabledSetting(enabled: boolean | undefined): void {
+    if (enabled === undefined && this.workflowsEnabledByReviewSkill) return;
+    this.workflowsEnabledByReviewSkill = false;
+    this.setWorkflowsEnabled(enabled);
+  }
+
   isWorkflowModeSupported(): boolean {
     return (
       !isDerivedConfig(this) &&
@@ -11156,6 +11446,7 @@ export class Config {
       return;
     }
     if (await this.registerWorkflowTool(this.getToolRegistry())) {
+      this.workflowsEnabledByReviewSkill ||= this.workflowsEnabled !== true;
       this.setWorkflowsEnabled(true);
       await this.getLlmClient().setTools();
     }
@@ -12181,17 +12472,24 @@ export class Config {
       : this.allowPrivateNetworkHooks;
   }
 
-  isTrustedFolder(): boolean {
-    const context = ideContextStore.get();
-    if (context?.workspaceState?.isTrusted !== undefined) {
-      return context.workspaceState.isTrusted;
-    }
+  private getIdeWorkspaceTrust(): boolean | undefined {
+    const dir = this.getTargetDir();
+    const scope = ideContextStore.getWorkspaceTrustScope(dir);
+    const isTrusted = this.experimentalZedIntegration
+      ? scope?.isTrusted
+      : ideContextStore.get()?.workspaceState?.isTrusted;
+    if (isTrusted === undefined || scope?.root === undefined) return isTrusted;
+    return this.trustFileDecisionBelowIdeRoot?.(dir, scope.root) ?? isTrusted;
+  }
 
-    return this.trustedFolder ?? !this.folderTrust;
+  isTrustedFolder(): boolean {
+    return (
+      this.getIdeWorkspaceTrust() ?? this.trustedFolder ?? !this.folderTrust
+    );
   }
 
   isExplicitlyTrustedFolder(): boolean {
-    const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+    const ideTrust = this.getIdeWorkspaceTrust();
     return (
       (this.folderTrust || ideTrust !== undefined) && this.isTrustedFolder()
     );
@@ -12654,7 +12952,14 @@ export class Config {
         .restore(records ?? [])
         .then(() => runtime);
     }
-    void this.goalRuntimeReady.catch(() => undefined);
+    // Restore itself writes nothing (the runtime's invariant); refresh the
+    // list-facing goal projection once it settles, so a session journaled
+    // before the sidecar existed gains its sidebar marker on this load.
+    void this.goalRuntimeReady
+      .then((restoredRuntime) => {
+        recorder.refreshGoalProjection(restoredRuntime.getSnapshot().goal);
+      })
+      .catch(() => undefined);
   }
 
   /**
@@ -13056,6 +13361,9 @@ export class Config {
     provider: () => ReadonlyArray<{ name: string; description: string }>,
   ): void {
     this.modelInvocableCommandsProvider = provider;
+    if (this.skillManager) {
+      clearCollectedSkillEntriesCache(this.skillManager);
+    }
   }
 
   /**
@@ -13322,6 +13630,36 @@ export class Config {
     }
   }
 
+  private async syncWebSearchToolRegistration(
+    registry: ToolRegistry,
+    forSubAgent = false,
+  ): Promise<void> {
+    registry.unregisterTool(ToolNames.WEB_SEARCH);
+    const hasExplicitBackend =
+      !!this.webSearchSettings?.model?.trim() ||
+      !!this.webSearchSettings?.baseUrl;
+    if (
+      this.getBareMode() ||
+      this.isSafeMode() ||
+      this.getDisabledTools().has(ToolNames.WEB_SEARCH) ||
+      this.webSearchSettings?.enabled === false ||
+      (hasExplicitBackend && this.webSearchSettings?.enabled !== true)
+    )
+      return;
+    const { evaluateWebSearchGate } = await import('../tools/web-search.js');
+    const gate = evaluateWebSearchGate(this);
+    if (gate.ok) {
+      await this.registerLazyTool(registry, ToolNames.WEB_SEARCH, async () => {
+        const { WebSearchTool } = await import('../tools/web-search.js');
+        return new WebSearchTool(this);
+      });
+      await registry.ensureTool(ToolNames.WEB_SEARCH);
+    } else if (!gate.silent && !this.webSearchNoticeEmitted && !forSubAgent) {
+      this.webSearchNoticeEmitted = true;
+      this.warnings.push(gate.notice);
+    }
+  }
+
   private async syncAdvisorToolRegistration(
     registry: ToolRegistry,
   ): Promise<void> {
@@ -13385,6 +13723,7 @@ export class Config {
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
     options?: { skipDiscovery?: boolean; forSubAgent?: boolean },
+    ripgrepAvailability?: Promise<boolean>,
   ): Promise<ToolRegistry> {
     const registry = new ToolRegistry(
       this,
@@ -13484,34 +13823,7 @@ export class Config {
       // only when the tool was actually asked for; a provider with no search
       // backend fails silently (`gate.silent`), since warning about a feature
       // the user never configured is noise.
-      const hasExplicitWebSearchBackend =
-        !!this.webSearchSettings?.model?.trim() ||
-        !!this.webSearchSettings?.baseUrl;
-      if (
-        !this.getBareMode() &&
-        !this.isSafeMode() &&
-        this.webSearchSettings?.enabled !== false &&
-        (this.webSearchSettings?.enabled === true ||
-          !hasExplicitWebSearchBackend)
-      ) {
-        const { evaluateWebSearchGate } = await import(
-          '../tools/web-search.js'
-        );
-        const gate = evaluateWebSearchGate(this);
-        if (gate.ok) {
-          await registerLazy(ToolNames.WEB_SEARCH, async () => {
-            const { WebSearchTool } = await import('../tools/web-search.js');
-            return new WebSearchTool(this);
-          });
-        } else if (
-          !gate.silent &&
-          !this.webSearchNoticeEmitted &&
-          !options?.forSubAgent
-        ) {
-          this.webSearchNoticeEmitted = true;
-          this.warnings.push(gate.notice);
-        }
-      }
+      await this.syncWebSearchToolRegistration(registry, options?.forSubAgent);
     };
 
     const environment = this.getExecutionEnvironment();
@@ -13703,7 +14015,8 @@ export class Config {
       let errorString: undefined | string = undefined;
       recordStartupEvent('config_initialize_ripgrep_probe_start');
       try {
-        useRipgrep = await canUseRipgrep(this.getUseBuiltinRipgrep());
+        useRipgrep = await (ripgrepAvailability ??
+          canUseRipgrep(this.getUseBuiltinRipgrep()));
       } catch (error: unknown) {
         errorString = getErrorMessage(error);
       }
@@ -14152,6 +14465,7 @@ export class Config {
   }
 
   private subSessionSpawner?: SubSessionSpawner;
+  private subSessionWorkspaceResolver?: SubSessionWorkspaceResolver;
 
   private currentSessionScheduledTaskCreator?: CurrentSessionScheduledTaskCreator;
 
@@ -14161,8 +14475,16 @@ export class Config {
    * `extMethod`); left unset in interactive TUI / headless, where the tool is
    * therefore never registered. `undefined` clears it on session teardown.
    */
-  setSubSessionSpawner(spawner: SubSessionSpawner | undefined): void {
+  setSubSessionSpawner(
+    spawner: SubSessionSpawner | undefined,
+    resolveWorkspace?: SubSessionWorkspaceResolver,
+  ): void {
     this.subSessionSpawner = spawner;
+    this.subSessionWorkspaceResolver = resolveWorkspace;
+  }
+
+  getSubSessionWorkspaceResolver(): SubSessionWorkspaceResolver | undefined {
+    return this.subSessionWorkspaceResolver;
   }
 
   /** The injected sub-session spawner, or undefined outside daemon mode. */

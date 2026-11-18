@@ -180,6 +180,13 @@ beforeAll(async () => {
     const hasToolResult =
       messages.includes('"role":"tool"') || messages.includes('"tool_call_id"');
 
+    if (messages.includes('context-estimates-e2e')) {
+      return {
+        content: 'ok',
+        usage: { prompt_tokens: 7, completion_tokens: 1, total_tokens: 8 },
+      };
+    }
+
     const guardMarker = messages.match(/todo-guard-e2e-\d+/g)?.at(-1);
     if (guardMarker) {
       const guardTodoId = `${guardMarker}-item`;
@@ -461,6 +468,46 @@ async function turnStatus(
   if (!response.ok) return { status: response.status };
   return (await response.json()) as Record<string, unknown>;
 }
+
+describePOSIX('qwen serve — context usage estimates', () => {
+  it('preserves message and overhead estimates above provider usage', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+    try {
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [
+            { type: 'text', text: 'context-estimates-e2e'.padEnd(772, 'x') },
+          ],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+      await expect
+        .poll(() => turnStatus(session.sessionId, accepted.promptId), {
+          timeout: 30_000,
+        })
+        .toMatchObject({ state: 'completed', resultText: 'ok' });
+
+      const status = await client.sessionContextUsage(session.sessionId, {
+        detail: true,
+      });
+      expect(status.usage.totalTokens).toBe(7);
+      expect(status.usage.isEstimated).toBe(false);
+      expect(status.usage.breakdown.messages).toBeGreaterThanOrEqual(193);
+      expect(status.usage.breakdown.systemPrompt).toBeGreaterThan(7);
+      expect(status.usage.builtinTools.some((tool) => tool.tokens > 7)).toBe(
+        true,
+      );
+      expect(status.usage.breakdown).not.toHaveProperty('unattributed');
+      expect(status.formattedText).not.toContain('Unattributed');
+    } finally {
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 60_000);
+});
 
 describePOSIX('qwen serve — pollable turn results', () => {
   it('returns only the final parent answer after a tool boundary', async () => {

@@ -26,7 +26,10 @@ function createSessionSendMcpServer(
   env: NodeJS.ProcessEnv = process.env,
   fetchImpl: typeof fetch = fetch,
 ): McpServer {
-  const server = new McpServer({ name: 'qwen-session', version: '1.0.0' });
+  const server = new McpServer(
+    { name: 'qwen-session', version: '1.0.0' },
+    { maxToolInputElements: 100_000 },
+  );
   server.registerTool(
     SESSION_SEND_TOOL_NAME,
     {

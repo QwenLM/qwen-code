@@ -27,6 +27,7 @@ import type {
 } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import { loadSettings } from '../config/settings.js';
+import { filterModelEntriesForDisplay } from '../utils/model-display-order.js';
 import type { Settings } from '../config/settings.js';
 import {
   getAuthTypeFromEnv,
@@ -165,7 +166,7 @@ function buildWorkspaceProvidersStatus(
         : undefined;
     const approvalMode = resolveApprovalMode(settings);
     const providers = new Map<string, ServeWorkspaceProviderStatus>();
-    for (const option of modelOptions) {
+    for (const option of filterModelEntriesForDisplay(modelOptions)) {
       const { model, effectiveModelId, modelId } = option;
       if (model.isRuntimeModel) continue;
       const authType = String(model.authType);

@@ -43,6 +43,7 @@ delete process.env['SANDBOX_SET_UID_GID'];
 // ambient runtime root instead of its own temp dir. Deleting rather than
 // pinning: tests that want the variable set it in-body.
 delete process.env['QWEN_RUNTIME_DIR'];
+delete process.env['QWEN_CONVERSATIONS_DIR'];
 
 import { EXTRACT_NOOP_SKIP_TURNS_ENV } from '@qwen-code/qwen-code-core/memory/extract-cadence.js';
 

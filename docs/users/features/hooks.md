@@ -394,6 +394,7 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | `TodoCreated`         | When a new todo item is created                                        | None (always fires)                                              |
 | `TodoCompleted`       | When a todo item is marked as completed                                | None (always fires)                                              |
 | `InstructionsLoaded`  | When a context file such as `QWEN.md`, or a file it imports, is loaded | File path of the loaded file                                     |
+| `FileChanged`         | After an explicitly watched file is added, modified, or deleted        | Basename of the changed file                                     |
 
 ### Matcher Patterns
 
@@ -416,6 +417,9 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | Stop Events         | `StopFailure`                                                                              | ✅ Regex        | Error type: `rate_limit`, `authentication_failed`, `billing_error`, `invalid_request`, `server_error`, `max_output_tokens`, `loop_detected`, `unknown` |
 | Message Display     | `MessageDisplay`                                                                           | ❌ No           | N/A                                                                                                                                                    |
 | Instruction Events  | `InstructionsLoaded`                                                                       | ✅ Regex        | File path of the loaded file                                                                                                                           |
+| File Events         | `FileChanged`                                                                              | ✅ Regex        | Basename of the changed file                                                                                                                           |
+
+For `FileChanged`, registering static paths uses literal filenames in cwd; filtering events uses the basename and the rules below. See [FileChanged hooks](file-changed-hooks.md) for dynamic files and recursive directories.
 
 **Matcher Syntax:**
 
@@ -902,6 +906,7 @@ A command hook that exits 0 with plain-text `stdout` has that text treated as `a
 **Output Options**:
 
 - `hookSpecificOutput.additionalContext`: context to be available in the session
+- `hookSpecificOutput.watchPaths`: absolute files or recursive directories to watch for `FileChanged`, from synchronous output with `hookEventName: "SessionStart"`. See [FileChanged path registration](file-changed-hooks.md#watch-directories-and-paths-outside-cwd) for replacement, clearing, and validation rules.
 - Standard hook output fields
 
 **Example Output**:
@@ -1526,6 +1531,29 @@ It fires when the session starts, when context files are reloaded during the ses
 
 - **None** - InstructionsLoaded output and exit codes are ignored.
 
+#### FileChanged
+
+**Purpose**: Observes additions, modifications, and deletions of explicitly watched files in local, non-managed sessions. Changes may come from Qwen Code, shell commands, editors, or other processes. The common input fields identify the listening session, including when another session writes a shared directory.
+
+**Matcher**: Filters against the file basename using the existing matcher rules. Literal cwd filenames separated by `|` also register static paths. Omitted or empty matchers, `*`, and `.*` register no static paths; they receive events from the session's watched paths, including dynamically registered paths.
+
+**Event-specific fields**:
+
+```json
+{
+  "file_path": "/home/me/work/demo/.envrc",
+  "event": "change"
+}
+```
+
+`file_path` is absolute. `event` is `add`, `change`, or `unlink`. The initial directory scan is not replayed, but native filesystem events from a recent write may arrive after registration. Symbolic links are not traversed; register the real directory root. Notifications are best effort after writes settle. Hook output cannot veto or undo a write or add model context.
+
+**Output Options**:
+
+- Successful synchronous `hookSpecificOutput.watchPaths`, with `hookEventName: "FileChanged"`, replaces the dynamic watch list with absolute files or recursive directories. The last valid, explicit list in hook execution order wins; `[]` clears it, while omitted or invalid lists leave it unchanged. Async output does not register paths. Static registrations remain active.
+
+See [FileChanged hooks](file-changed-hooks.md) for configuration, a memory-directory example, session ownership, and self-trigger and delivery limits. Memory directories are watched only when explicitly registered; there is no dedicated auto-memory enable/disable event.
+
 ## Hook Configuration
 
 Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` or user configuration files. Hooks in the system settings files (System and SystemDefaults) load with the source System and, like user hooks, regardless of folder trust. Within one event, sequential hooks from settings and extensions run in this order: Project, User, System, Extension.
@@ -1589,7 +1617,7 @@ Async hooks are scoped to the Qwen process. On POSIX, Qwen reclaims a still-runn
 **Features:**
 
 - Cannot return decision control (the event continues as soon as the hook starts)
-- Output is not delivered yet: `systemMessage`, `additionalContext` and plain `stdout` from an async hook are neither shown to the user nor added to the model context. The debug log records only that the hook started, completed or failed. Delivering this output is planned.
+- Output is delivered to the model: when an async hook completes, its `additionalContext`, `systemMessage`, plain `stdout` and `stderr` are drained into the next request as a `<qwen:async-hook-context>` block, on sessions whose model round sends through the main client (headless, the TUIs, and ACP with the unified agent loop enabled). Hiding the block from the user-facing transcript projection and giving it resume provenance are follow-ups. The ACP default legacy session-chat path does not deliver it yet. The debug log also records that the hook started, completed or failed.
 - Suitable for side effects such as auditing, logging and background tests that write their results somewhere you can read them
 - Occupies one of 10 concurrent async hook slots until it finishes or reaches its `timeout` (60 seconds by default). While all 10 slots are in use, a new async hook is skipped
 
@@ -1620,7 +1648,10 @@ Async hooks are scoped to the Qwen process. On POSIX, Qwen reclaims a still-runn
 INPUT=$(cat)
 FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
 if [[ "$FILE_PATH" != *.ts && "$FILE_PATH" != *.js ]]; then exit 0; fi
-# Async hook output is not shown yet, so write the result to a file.
+# Write the result to a file for a durable record. Plain-text (non-JSON) stdout
+# is also delivered to the model on the next request; JSON stdout is delivered
+# only through its systemMessage or hookSpecificOutput.additionalContext fields
+# (see above).
 LOG=/tmp/qwen-async-tests.log
 if npm test >"$LOG" 2>&1; then
   echo "Tests passed after editing $FILE_PATH" >>"$LOG"

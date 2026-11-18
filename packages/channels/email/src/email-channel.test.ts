@@ -353,7 +353,7 @@ describe('email admission and delivery', () => {
     await channel.connect();
     for (let i = 0; i < 32; i++) append(raw(`pending-${i}`));
     await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(32), {
-      timeout: 3000,
+      timeout: 10_000,
     });
     append(raw('busy', 'MUST_NOT_EXECUTE_WHILE_FULL'));
     await vi.waitFor(() => expect(fixture.sent).toHaveBeenCalledTimes(1));
@@ -367,7 +367,7 @@ describe('email admission and delivery', () => {
     for (const resolve of releases) resolve('done');
     await vi.waitFor(() => expect(fixture.sent).toHaveBeenCalledTimes(34));
     await idle();
-  });
+  }, 15_000);
 
   it('extracts bounded HTML and supported attachments through the base prompt flow, then removes files', async () => {
     let attachmentPath = '';

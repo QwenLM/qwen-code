@@ -16,6 +16,7 @@ import {
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   isPrivateProvenanceEnvKey,
+  keepsEmptyHomeEnvValue,
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
   reportRejectedLoaderKeys,
@@ -248,7 +249,11 @@ function readHomeEnvInto(file: string): void {
   try {
     const parsed = dotenv.parse(fs.readFileSync(file, 'utf-8'));
     for (const key of HOME_ENV_BOOTSTRAP_KEYS) {
-      if (parsed[key] && !Object.hasOwn(process.env, key)) {
+      if (
+        (parsed[key] ||
+          (keepsEmptyHomeEnvValue(key) && parsed[key] !== undefined)) &&
+        !Object.hasOwn(process.env, key)
+      ) {
         process.env[key] = parsed[key];
       }
     }
@@ -713,6 +718,26 @@ function reportRejectedSettingsEnv(
       `qwen: ${source} cannot set ${entry[0]}; ignored. Set verifyPr.${setting} at user scope in settings.json, or export it in the launch environment.`,
     );
   }
+  // The loop-rollout switches are operator-only. The merged settings.env map
+  // carries a workspace entry indistinguishably from an operator one, so they
+  // are dropped at every settings scope (a home-scoped .env still applies).
+  // Say so instead of dropping the entry silently, and name the channel that
+  // works. The gate folds case, so report whichever spelling was written.
+  for (const key of [
+    'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+    'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
+  ]) {
+    const entry = Object.entries(env).find(
+      ([candidate, value]) =>
+        candidate.toUpperCase() === key &&
+        typeof value === 'string' &&
+        value.trim() !== '',
+    );
+    if (!entry) continue;
+    writeStderrLineSafe(
+      `qwen: ${source} cannot set ${entry[0]}; ignored. Export it in the launch environment instead.`,
+    );
+  }
 }
 
 export function buildRuntimeEnvironment(
@@ -818,7 +843,8 @@ export function loadEnvironment(
 
       const existingValue = process.env[key];
       const isEffectivelyUnset =
-        !Object.hasOwn(process.env, key) || existingValue === '';
+        !Object.hasOwn(process.env, key) ||
+        (existingValue === '' && !keepsEmptyHomeEnvValue(key));
       if (isEffectivelyUnset) {
         process.env[key] = envFile.parsedEnv[key];
         dotEnvSourcedKeys.add(key);

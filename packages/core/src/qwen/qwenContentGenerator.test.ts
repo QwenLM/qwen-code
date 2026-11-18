@@ -19,6 +19,7 @@ import { SharedTokenManager } from './sharedTokenManager.js';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { collect, userText } from '../test-utils/model-fixtures.js';
+import { retryContext } from '../utils/retryContext.js';
 
 // Mock OpenAI client to avoid real network calls
 vi.mock('openai', () => ({
@@ -616,6 +617,34 @@ describe('QwenContentGenerator', () => {
       expect(mockGenerateContent).toHaveBeenCalledTimes(2);
       expect(mockQwenClient.refreshAccessToken).toHaveBeenCalled();
       restore();
+    });
+
+    it('returns the first auth error for a single attempt', async () => {
+      const authError = { status: 401, message: 'Unauthorized' };
+      const mockGenerateContent = vi
+        .fn()
+        .mockRejectedValueOnce(authError)
+        .mockResolvedValueOnce(createMockResponse('Success after retry'));
+      const restore = patchParent('generateContent', mockGenerateContent);
+      mockToken();
+
+      try {
+        await expect(
+          retryContext.run(
+            {
+              attempt: 1,
+              retryTotalDelayMs: 0,
+              requestSetupMs: 0,
+              singleAttempt: true,
+            },
+            generate,
+          ),
+        ).rejects.toBe(authError);
+        expect(mockGenerateContent).toHaveBeenCalledTimes(1);
+        expect(mockQwenClient.refreshAccessToken).not.toHaveBeenCalled();
+      } finally {
+        restore();
+      }
     });
 
     it('should not retry non-authentication errors', async () => {

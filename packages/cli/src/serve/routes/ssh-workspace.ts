@@ -34,6 +34,11 @@ import {
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import { applyReadHeaders } from './workspace-file-read.js';
+import {
+  collectGitIgnoredPaths,
+  isGitIgnorePaths,
+} from '../server/git-ignored.js';
+import { safeBody } from '../server/request-helpers.js';
 
 export function rejectSshWorkspaceOperation(
   res: Response,
@@ -57,7 +62,7 @@ function relativeGitPath(value: unknown): string | undefined {
 function isSshPassthroughRoute(req: Request): boolean {
   switch (req.method) {
     case 'GET':
-      return /^\/(?:acp|file(?:\/bytes)?|stat|list|glob|trust|voice|runtime\/status|permissions|settings|providers|tools|sessions(?:\/(?:search|live-state))?|session-info|session-groups|session\/[^/]+\/(?:export|archive\/export|transcript|turn-index|tool-calls))$/.test(
+      return /^\/(?:acp|file(?:\/bytes)?|stat|list|glob|trust|voice|runtime\/status|permissions|settings|providers|tools|sessions(?:\/(?:search|live-state))?|session-info|session-groups|session\/[^/]+\/(?:export|archive\/export|transcript|turn-index|tool-calls|turns\/[^/]+\/hooks))$/.test(
         req.path,
       );
     case 'POST':
@@ -99,6 +104,12 @@ async function serveSshGit(
       return;
     }
     const filename = relativeGitPath(req.query['path']);
+    const ignorePaths =
+      req.path === '/git/check-ignore' ? safeBody(req)['paths'] : undefined;
+    if (req.path === '/git/check-ignore' && !isGitIgnorePaths(ignorePaths)) {
+      res.status(400).json({ error: 'invalid_paths', code: 'invalid_paths' });
+      return;
+    }
     const oldPath = relativeGitPath(req.query['oldPath']);
     if (
       req.path === '/git/diff/file' &&
@@ -117,7 +128,7 @@ async function serveSshGit(
         "import os,sys; env={k:v for k,v in os.environ.items() if not k.startswith('GIT_')}; env['LC_ALL']='C'; os.execvpe('git',['git']+sys.argv[1:],env)",
         '--no-pager',
         '--no-optional-locks',
-        '--literal-pathspecs',
+        ...(args[0] === 'check-ignore' ? [] : ['--literal-pathspecs']),
         '-c',
         'core.fsmonitor=false',
         '-c',
@@ -160,9 +171,11 @@ async function serveSshGit(
           repository.stderr || 'Remote Git repository is unavailable.',
         );
       res.json(
-        req.path === '/git'
-          ? { v: 2, workspaceCwd: runtime.workspaceCwd, branch: null }
-          : emptyDiff(),
+        req.path === '/git/check-ignore'
+          ? { v: 1, ignoredPaths: [] }
+          : req.path === '/git'
+            ? { v: 2, workspaceCwd: runtime.workspaceCwd, branch: null }
+            : emptyDiff(),
       );
       return;
     }
@@ -171,6 +184,20 @@ async function serveSshGit(
         res,
         'SSH Git inspection requires a working tree.',
       );
+      return;
+    }
+    if (isGitIgnorePaths(ignorePaths)) {
+      const ignoredPaths = await collectGitIgnoredPaths(
+        ignorePaths,
+        (paths) =>
+          run(
+            `printf '%s\\0' ${paths.map((file) => quoteSshArgument(`./${file}`)).join(' ')} | ${gitCommand(['check-ignore', '-z', '--stdin'])}`,
+            true,
+          ),
+        signal,
+        16,
+      );
+      res.json({ v: 1, ignoredPaths });
       return;
     }
     const status = await git([
@@ -404,8 +431,9 @@ export function registerSshWorkspaceBoundary(
     const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
     if (!runtime) return;
     if (
-      req.method === 'GET' &&
-      /^\/git(?:\/diff(?:\/file)?)?$/.test(req.path)
+      (req.method === 'GET' &&
+        /^\/git(?:\/diff(?:\/file)?)?$/.test(req.path)) ||
+      (req.method === 'POST' && req.path === '/git/check-ignore')
     ) {
       if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
       void serveSshGit(req, res, runtime);

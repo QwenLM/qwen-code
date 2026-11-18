@@ -45,10 +45,12 @@ import yargs from 'yargs';
 
 const mocks = vi.hoisted(() => ({
   stdout: vi.fn((_line: string) => {}),
+  stderr: vi.fn((_line: string) => {}),
 }));
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: mocks.stdout,
+  writeStderrLine: mocks.stderr,
   writeStderrLineSafe: () => {},
 }));
 
@@ -187,9 +189,12 @@ describe.skipIf(process.platform === 'win32')(
         .filter((args) => args.includes('--method') || args[0] === 'run')
         .map((args) => args.join(' '));
 
-    /** One helper, parsed by yargs as the CLI parses it: what it printed. */
+    /** One helper, parsed by yargs as the CLI parses it: what it printed.
+     * A refusal — exit 1, and its JSON line last on stderr — rejects, with
+     * the line's fields on the error. */
     async function cli(...argv: string[]): Promise<Output[]> {
       mocks.stdout.mockClear();
+      mocks.stderr.mockClear();
       // Each helper runs in a process of its own: no host carries over.
       setGhHost(undefined);
       await yargs()
@@ -200,6 +205,13 @@ describe.skipIf(process.platform === 'win32')(
           throw error ?? new Error(message);
         })
         .parseAsync(['autofix-pr', ...argv]);
+      if (process.exitCode === 1) {
+        process.exitCode = undefined;
+        const refusal = JSON.parse(
+          String(mocks.stderr.mock.calls.at(-1)?.[0]),
+        ) as { refused: string; next: string; message: string };
+        throw Object.assign(new Error(refusal.message), refusal);
+      }
       return mocks.stdout.mock.calls.map(
         ([line]) => JSON.parse(line) as Output,
       );
@@ -591,8 +603,13 @@ describe.skipIf(process.platform === 'win32')(
       updateWorld((world) => {
         world.loseNextAnswer = true;
       });
-      await expect(cli('reply', '7', plan, '--task', id)).rejects.toThrow(
-        /HTTP 502/,
+      // A reply that failed is still owed: the skill runs it again.
+      await expect(cli('reply', '7', plan, '--task', id)).rejects.toMatchObject(
+        {
+          refused: 'failed',
+          next: 'retry',
+          message: expect.stringMatching(/HTTP 502/),
+        },
       );
       expect(await cli('reply', '7', plan, '--task', id)).toMatchObject([
         { adopted: 1, posted: [{ kind: 'summary' }] },
@@ -793,8 +810,14 @@ describe.skipIf(process.platform === 'win32')(
       updateWorld((world) => {
         world.loseNextAnswer = true;
       });
-      await expect(cli('rerun', '7', '12', '--task', id)).rejects.toThrow(
-        /\(or its answer was lost; the re-run is counted\): .*failed to rerun: HTTP 502/,
+      await expect(cli('rerun', '7', '12', '--task', id)).rejects.toMatchObject(
+        {
+          refused: 'rerun_failed',
+          next: 'needs_human',
+          message: expect.stringMatching(
+            /\(or its answer was lost; the re-run is counted\): .*failed to rerun: HTTP 502/,
+          ),
+        },
       );
       // Not re-run for sure: the skill leaves it for a person.
       const lost = writePlan({
@@ -1091,9 +1114,11 @@ describe.skipIf(process.platform === 'win32')(
           authorCanPush: false,
           resumed: false,
         });
-        await expect(cli('schedule', '7')).rejects.toThrow(
-          /only --once is available/,
-        );
+        await expect(cli('schedule', '7')).rejects.toMatchObject({
+          refused: 'failed',
+          next: 'report',
+          message: expect.stringMatching(/only --once is available/),
+        });
         expect(await cli('cleanup', '7')).toMatchObject([{ removed: true }]);
       }
 

@@ -70,6 +70,7 @@ import { AppEvent } from '../../utils/events.js';
 import { t } from '../../i18n/index.js';
 import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
 import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
+import { filterSubscriptionCommands } from '../commands/subscription-commands.js';
 import {
   appendUserPromptExpansionAdditionalContext,
   formatUserPromptExpansionBlockedMessage,
@@ -77,6 +78,7 @@ import {
 } from '../../utils/userPromptExpansionHook.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
+import { isExitInProgress } from './exit-lifecycle.js';
 import {
   getInteractiveModSession,
   isModRecoveryCommand,
@@ -245,6 +247,7 @@ export class OpenTuiSlashDispatcher {
   private activeCommand: {
     controller: AbortController;
     canCancel: boolean;
+    committing: boolean;
   } | null = null;
   private recentCommands = new Map<string, RecentSlashCommand>();
   private readonly extensionRefreshState: ExtensionRefreshState;
@@ -395,6 +398,13 @@ export class OpenTuiSlashDispatcher {
     return this.commandList;
   }
 
+  private get availableCommands(): readonly SlashCommand[] {
+    return filterSubscriptionCommands(
+      this.commandList,
+      this.services.config?.getAuthType?.(),
+    );
+  }
+
   /** Parity of the processor's `reloadCommands` result swap. */
   setCommands(commands: readonly SlashCommand[]): void {
     this.commandList = commands;
@@ -473,7 +483,10 @@ export class OpenTuiSlashDispatcher {
     if (!this.takesAsSlashCommand(trimmed) || isBtwCommand(trimmed)) {
       return false;
     }
-    const { commandToExecute } = parseSlashCommand(trimmed, this.commandList);
+    const { commandToExecute } = parseSlashCommand(
+      trimmed,
+      this.availableCommands,
+    );
     // Matched on the resolved command, so `/exit` is covered as an altName.
     if (commandToExecute?.name === 'quit') return false;
     return commandToExecute?.canRunDuringStreaming !== true;
@@ -487,13 +500,17 @@ export class OpenTuiSlashDispatcher {
     return !(trimmed.startsWith('/') && hasSlashCommandPathSeparator(trimmed));
   }
 
+  isCommitInProgress(): boolean {
+    return this.activeCommand?.committing === true;
+  }
+
   /**
    * Parity of `cancelSlashCommand` in slashCommandProcessor.ts: ESC while a
    * slash command runs aborts it and reports the cancellation.
    */
   cancel(): void {
     this.host.cancelBtw();
-    if (!this.activeCommand?.canCancel) {
+    if (!this.activeCommand?.canCancel || this.activeCommand.committing) {
       return;
     }
     this.activeCommand.controller.abort();
@@ -517,6 +534,8 @@ export class OpenTuiSlashDispatcher {
     if (!this.takesAsSlashCommand(trimmed)) {
       return false;
     }
+    // The gateway may have waited for the registry after the shell admitted input.
+    if (isExitInProgress()) return { kind: 'handled' };
     this.services.onInputProcessed?.();
     return this.run(trimmed, { recordRecall: true, typed });
   }
@@ -628,7 +647,11 @@ export class OpenTuiSlashDispatcher {
       options.wasIdleBeforeDispatch ?? this.host.isIdle();
     this.host.setIsProcessing(true);
     const abortController = new AbortController();
-    const activeCommand = { controller: abortController, canCancel: true };
+    const activeCommand = {
+      controller: abortController,
+      canCancel: true,
+      committing: false,
+    };
     this.activeCommand = activeCommand;
     const releaseOwnership = () => {
       if (this.activeCommand === activeCommand) {
@@ -699,7 +722,7 @@ export class OpenTuiSlashDispatcher {
       commandToExecute,
       args,
       canonicalPath: resolvedCommandPath,
-    } = parseSlashCommand(trimmed, this.commandList);
+    } = parseSlashCommand(trimmed, this.availableCommands);
     if (!commandToExecute) {
       const config = this.services.config;
       const session = config?.getSessionId();
@@ -720,7 +743,7 @@ export class OpenTuiSlashDispatcher {
           commandToExecute,
           args,
           canonicalPath: resolvedCommandPath,
-        } = parseSlashCommand(trimmed, this.commandList));
+        } = parseSlashCommand(trimmed, this.availableCommands));
       }
     }
     let hideInvocation =
@@ -792,7 +815,7 @@ export class OpenTuiSlashDispatcher {
       }
       const stackedResult = parseStackedSlashCommands(
         trimmed,
-        this.commandList,
+        this.availableCommands,
       );
       if (stackedResult.skills.length >= 2) {
         const combinedContent: PartListUnion[] = [];
@@ -925,6 +948,18 @@ export class OpenTuiSlashDispatcher {
             },
             overwriteConfirmed: options.overwriteConfirmed,
             abortSignal: abortController.signal,
+            beginCommit: () => {
+              if (
+                this.activeCommand !== activeCommand ||
+                abortController.signal.aborted ||
+                isExitInProgress() ||
+                !fullCommandContext.ui.isIdleRef.current
+              ) {
+                return false;
+              }
+              activeCommand.committing = true;
+              return true;
+            },
           };
 
           // Parity: a "Proceed" confirmation temporarily augments the session
@@ -1021,14 +1056,16 @@ export class OpenTuiSlashDispatcher {
                 return { kind: 'handled' };
               }
               case 'dialog': {
-                if (result.dialog === 'resume') {
-                  if (result.sessionId) {
+                if (result.dialog === 'resume' && result.sessionId) {
+                  if (fullCommandContext.beginCommit?.() !== false) {
                     await this.host.handleResume(result.sessionId);
-                    return { kind: 'handled' };
                   }
+                  return { kind: 'handled' };
                 }
                 if (result.dialog === 'branch') {
-                  await this.host.handleBranch(result.name);
+                  if (fullCommandContext.beginCommit?.() !== false) {
+                    await this.host.handleBranch(result.name);
+                  }
                   return { kind: 'handled' };
                 }
                 return {
