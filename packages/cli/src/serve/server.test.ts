@@ -42177,7 +42177,13 @@ describe('runQwenServe', () => {
 
 // ── Shared SSE reaper fixtures (issue #17554, follow-up 4) ──────────
 // The reaper suites used to paste near-identical write spies, deadline
-// read loops, and slot-release polls; these helpers are the single copy.
+// read loops, and slot-release polls; these helpers are the single copy
+// of the forced-stall write model (swallow post-stall writes; eviction
+// frame passes or throws) and of the deadline read loop. Deliberately
+// inline exceptions, NOT copies of the helper: the one-shot backpressure
+// spy (clears via a delayed 'drain' emit), the stall-then-passthrough spy
+// (passes EVERY post-stall frame, unlike the helper's swallow model), and
+// the eviction-payload frame parser in the drain-stall test.
 
 type SseWriteCallback = (error?: Error | null) => void;
 type SseWriteFn = (
@@ -47232,42 +47238,15 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
     // Read for ~700ms — several 300ms budget cycles. Every per-100ms
     // event write flushes synchronously, so no unresolved drain stall
     // ever exists and the reaper must not fire.
-    const reader = res.body!.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    let sawEviction = false;
-    let sessionUpdates = 0;
-    const deadline = Date.now() + 700;
-    while (Date.now() < deadline) {
-      const readPromise = reader.read();
-      const wakeup = new Promise<{ value: undefined; done: false }>((r) => {
-        setTimeout(
-          () => r({ value: undefined, done: false }),
-          Math.max(0, deadline - Date.now() + 10),
-        );
-      });
-      const { value, done } = (await Promise.race([readPromise, wakeup])) as {
-        value: Uint8Array | undefined;
-        done: boolean;
-      };
-      if (done) break;
-      if (value === undefined) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buf.indexOf('\n\n')) !== -1) {
-        const raw = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        if (!raw || raw.startsWith(':') || raw.startsWith('retry:')) continue;
-        for (const line of raw.split('\n')) {
-          if (line.startsWith('event: session_update')) sessionUpdates += 1;
-          if (line.startsWith('event: client_evicted')) sawEviction = true;
-        }
-      }
-    }
-    await reader.cancel().catch(() => undefined);
-
+    const { sawMarker, text } = await readSseUntilMarker(
+      res.body!,
+      ['event: client_evicted'],
+      700,
+    );
+    const sessionUpdates = (text.match(/(^|\n)event: session_update\n/g) ?? [])
+      .length;
     expect(sessionUpdates).toBeGreaterThanOrEqual(3);
-    expect(sawEviction).toBe(false);
+    expect(sawMarker).toBe(false);
   });
 
   it('does NOT evict when a back-pressured write drains within the idle budget', async () => {
@@ -47325,45 +47304,14 @@ describe('T2.9 SSE writer idle timeout (issue #4514)', () => {
       const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
       expect(res.status).toBe(200);
 
-      const reader = res.body!.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      let sawSessionUpdate = false;
-      let sawEviction = false;
-      const deadline = Date.now() + 350;
-      while (Date.now() < deadline) {
-        const readPromise = reader.read();
-        const wakeup = new Promise<{ value: undefined; done: false }>((r) => {
-          setTimeout(
-            () => r({ value: undefined, done: false }),
-            Math.max(0, deadline - Date.now() + 10),
-          );
-        });
-        const { value, done } = (await Promise.race([readPromise, wakeup])) as {
-          value: Uint8Array | undefined;
-          done: boolean;
-        };
-        if (done) break;
-        if (value === undefined) break;
-        buf += decoder.decode(value, { stream: true });
-        let idx: number;
-        while ((idx = buf.indexOf('\n\n')) !== -1) {
-          const raw = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          if (!raw || raw.startsWith(':') || raw.startsWith('retry:')) continue;
-          for (const line of raw.split('\n')) {
-            if (line.startsWith('event: session_update')) {
-              sawSessionUpdate = true;
-            }
-            if (line.startsWith('event: client_evicted')) sawEviction = true;
-          }
-        }
-      }
-      await reader.cancel().catch(() => undefined);
-
+      const { sawMarker, text } = await readSseUntilMarker(
+        res.body!,
+        ['event: client_evicted'],
+        350,
+      );
       expect(forcedBackpressure).toBe(true);
-      expect(sawSessionUpdate).toBe(true);
-      expect(sawEviction).toBe(false);
+      expect(text).toMatch(/(^|\n)event: session_update\n/);
+      expect(sawMarker).toBe(false);
     } finally {
       writeSpy.mockRestore();
     }
@@ -51740,6 +51688,37 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       await fetch(`http://127.0.0.1:${port}/health?deep=1`)
     ).json()) as { connectedClientsMax: number | null };
     expect(deep.connectedClientsMax).toBe(5);
+    // Enforcement at the 503 site under the same override, consolidated
+    // here from a duplicate pin (review R2-3): saturate, then the exact
+    // refusal body and the deep-health aggregate pair at saturation.
+    const streams: Response[] = [];
+    for (let i = 0; i < 5; i++) {
+      const res = await fetch(
+        `http://127.0.0.1:${port}/session/sess-ovr-${i}/events`,
+      );
+      expect(res.status).toBe(200);
+      streams.push(res);
+    }
+    const overflow = await fetch(
+      `http://127.0.0.1:${port}/session/sess-ovr-overflow/events`,
+    );
+    expect(overflow.status).toBe(503);
+    expect(overflow.headers.get('retry-after')).toBe('5');
+    expect(await overflow.json()).toEqual({
+      error:
+        'Daemon SSE connection limit reached (5/5). ' +
+        'Retry after the Retry-After interval.',
+      code: 'sse_connection_limit_exceeded',
+      limit: 5,
+      active: 5,
+      scope: 'daemon',
+    });
+    const deepAtSat = (await (
+      await fetch(`http://127.0.0.1:${port}/health?deep=1`)
+    ).json()) as { connectedClients: number; connectedClientsMax: number };
+    expect(deepAtSat.connectedClients).toBe(5);
+    expect(deepAtSat.connectedClientsMax).toBe(5);
+    for (const stream of streams) await stream.body!.cancel();
     await handle.close();
     handle = undefined;
 
@@ -52017,12 +51996,14 @@ describe('Deferred #17502 review pins (issue #17554, follow-up 4)', () => {
       await new Promise((r) => setTimeout(r, 20));
     }
     expect(isStalled()).toBe(true);
-    // Only the 15s heartbeat may be armed; any idle polling interval
-    // (250ms…5000ms) means the arm gate ignored the zero budget.
+    // Exactly the 15s heartbeat may be armed: an idle polling interval
+    // (250ms…5000ms) means the arm gate ignored the zero budget, and an
+    // EMPTY list means the heartbeat itself was lost (review R2-1 —
+    // `every` on [] is vacuously true).
     const newIntervals = intervalSpy.mock.calls
       .slice(idxBeforeOpen)
       .map((c) => c[1]);
-    expect(newIntervals.every((ms) => ms === 15_000)).toBe(true);
+    expect(newIntervals).toEqual([15_000]);
     // Well past where a small positive budget would have evicted.
     await new Promise((r) => setTimeout(r, 700));
     expect(getActiveSseCount()).toBe(beforeActive + 1);
@@ -52097,61 +52078,6 @@ describe('Deferred #17502 review pins (issue #17554, follow-up 4)', () => {
     expect(sawMarker).toBe(true);
     await expectSseSlotReleased(beforeActive);
   }, 15_000);
-
-  it('enforces an explicit maxSseConnections override at the 503 site', async () => {
-    // The override was previously asserted only in the status payload;
-    // this pins the enforcement site and the deep-health pairing.
-    handle = await runQwenServe(
-      {
-        hostname: '127.0.0.1',
-        port: 0,
-        mode: 'http-bridge',
-        maxConnections: 10,
-        maxSseConnections: 5,
-      },
-      { bridge: parkedBridge() },
-    );
-    const port = (handle.server.address() as { port: number }).port;
-    const streams: Response[] = [];
-    for (let i = 0; i < 5; i++) {
-      const res = await fetch(
-        `http://127.0.0.1:${port}/session/sess-cap-${i}/events`,
-      );
-      expect(res.status).toBe(200);
-      streams.push(res);
-    }
-    const overflow = await fetch(
-      `http://127.0.0.1:${port}/session/sess-overflow/events`,
-    );
-    expect(overflow.status).toBe(503);
-    expect(overflow.headers.get('retry-after')).toBe('5');
-    expect(await overflow.json()).toEqual({
-      error:
-        'Daemon SSE connection limit reached (5/5). ' +
-        'Retry after the Retry-After interval.',
-      code: 'sse_connection_limit_exceeded',
-      limit: 5,
-      active: 5,
-      scope: 'daemon',
-    });
-    const deep = (await (
-      await fetch(`http://127.0.0.1:${port}/health?deep=1`)
-    ).json()) as { connectedClients: number; connectedClientsMax: number };
-    expect(deep.connectedClients).toBe(5);
-    expect(deep.connectedClientsMax).toBe(5);
-    await streams[0]!.body!.cancel();
-    await vi.waitFor(
-      async () => {
-        const readmitted = await fetch(
-          `http://127.0.0.1:${port}/session/sess-readmitted/events`,
-        );
-        expect(readmitted.status).toBe(200);
-        await readmitted.body!.cancel();
-      },
-      { timeout: 5_000 },
-    );
-    for (const stream of streams.slice(1)) await stream.body!.cancel();
-  }, 20_000);
 
   it('logs the admission refusal WARN with surface, scope, and session context', async () => {
     const daemonLog = fakeDaemonLog();
