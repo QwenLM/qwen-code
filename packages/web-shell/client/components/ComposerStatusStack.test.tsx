@@ -150,9 +150,10 @@ describe('ComposerStatusStack', () => {
     // Without test.css, vitest resolves `styles.<key>` from an emulated map
     // regardless of the file's contents, so the className assertion above
     // cannot see the stylesheet. Parse it (as ChatEditor.css.test.ts does) to
-    // pin a live `.root` rule that still carries declarations, plus the two
-    // selectors coupling the strip to the stack root: an emptied or
-    // commented-out rule, or a renamed coupling attribute, must fail here.
+    // pin a live `.root` rule and both child-coupling rules with their full
+    // selector chains and declarations: emptying or commenting out a rule,
+    // renaming either coupling attribute, or re-pointing the divider's parent
+    // or preceding sibling must fail here.
     const css = readFileSync(
       resolve(__dirname, 'ComposerStatusStack.module.css'),
       'utf8',
@@ -167,18 +168,37 @@ describe('ComposerStatusStack', () => {
       (root?.nodes ?? []).filter((node) => node.type === 'decl').length,
     ).toBeGreaterThan(0);
     const selectors: string[] = [];
+    const coupling: Rule[] = [];
     sheet.walkRules((rule) => {
-      selectors.push(
-        ...rule.selectors.map((selector) =>
-          selector.replace(/\s+/g, ' ').trim(),
-        ),
+      const tidy = rule.selectors.map((selector) =>
+        selector.replace(/\s+/g, ' ').trim(),
       );
+      selectors.push(...tidy);
+      if (
+        tidy.some(
+          (selector) =>
+            selector.includes('[data-web-shell-queued-prompts]') ||
+            selector.includes('[data-web-shell-goal-status]'),
+        )
+      ) {
+        coupling.push(rule);
+      }
     });
+    // Both halves of the child reset, and the full divider chain (parent and
+    // preceding sibling included), must survive verbatim.
+    expect(selectors).toContain(
+      '.root > :global([data-web-shell-queued-prompts])',
+    );
     expect(selectors).toContain('.root > [data-web-shell-goal-status]');
-    expect(
-      selectors.some((selector) =>
-        selector.endsWith('+ [data-web-shell-goal-status]'),
-      ),
-    ).toBe(true);
+    expect(selectors).toContain(
+      '.root > :global([data-web-shell-queued-prompts]) + [data-web-shell-goal-status]',
+    );
+    // The reset and divider rules must still carry their declarations.
+    expect(coupling.length).toBeGreaterThan(0);
+    for (const rule of coupling) {
+      expect(
+        (rule.nodes ?? []).filter((node) => node.type === 'decl').length,
+      ).toBeGreaterThan(0);
+    }
   });
 });
