@@ -2615,6 +2615,7 @@ export default {
   'toolDisplayName.ReadFile': 'Чтение файла',
   'toolDisplayName.ZoomImage': 'Масштаб изображения',
   'toolDisplayName.Grep': 'Grep',
+  'toolDisplayName.GetContextRemaining': 'Проверка оставшегося контекста',
   'toolDisplayName.Glob': 'Glob',
   'toolDisplayName.Shell': 'Запуск команды',
   'toolDisplayName.Shell Command': 'Команда Shell',
