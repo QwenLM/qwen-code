@@ -118,11 +118,11 @@ Ask Permissions Mode is the standard way to work with Qwen Code. In this mode, y
 
 **Turn on Ask Permissions Mode during a session**
 
-You can switch into Ask Permissions Mode during a session using **Shift+Tab**​ (or **Tab** on Windows) to cycle through permission modes. If you're in any other mode, pressing **Shift+Tab** (or **Tab** on Windows) will eventually cycle back to Ask Permissions Mode, indicated by the absence of any mode indicator at the bottom of the terminal.
+You can switch into Ask Permissions Mode during a session using **Shift+Tab**​ (or **Tab** on Windows) to cycle through permission modes. If you're in any other mode, pressing **Shift+Tab** (or **Tab** on Windows) will eventually cycle back to Ask Permissions Mode, shown as `⏸ Ask permissions` at the bottom of the terminal.
 
 **Start a new session in Ask Permissions Mode**
 
-Ask Permissions Mode is the initial mode when you start Qwen Code. If you've changed modes and want to return to Ask Permissions Mode, use:
+New sessions start in Auto Mode (in an untrusted folder, Ask Permissions Mode). To start every session in Ask Permissions Mode, set `tools.approvalMode` to `"default"` (see [Configure Ask Permissions Mode as default](#configure-ask-permissions-mode-as-default)) or pass `--approval-mode default`. To switch the current session, use:
 
 ```
 /approval-mode default
@@ -130,10 +130,10 @@ Ask Permissions Mode is the initial mode when you start Qwen Code. If you've cha
 
 **Run "headless" queries in Ask Permissions Mode**
 
-When running headless commands, Ask Permissions Mode is the default behavior. You can explicitly specify it with:
+Headless runs start in Auto Mode too. Because a `--prompt` run cannot show a confirmation, both Auto and Ask Permissions deny shell commands and file edits there unless a `permissions.allow` rule covers them. To run in Ask Permissions Mode explicitly:
 
 ```
-qwen --prompt "Analyze this code for potential bugs"
+qwen --approval-mode default --prompt "Analyze this code for potential bugs"
 ```
 
 ### Example: Safely implementing a feature
@@ -394,6 +394,6 @@ Plan Mode → Ask Permissions Mode → Auto-Edit Mode → Auto Mode → YOLO Mod
 ### Mode Usage Recommendations
 
 1. **New to codebase**: Start with **Plan Mode**​ for safe exploration
-2. **Daily development tasks**: Use **Auto-Accept Edits**​ (default mode), efficient and safe
+2. **Daily development tasks**: Use **Auto-Accept Edits**​, efficient and safe
 3. **Automated scripts**: Use **YOLO Mode**​ in controlled environments for full automation
 4. **Complex refactoring**: Use **Plan Mode**​ first for detailed planning, then switch to appropriate mode for execution
