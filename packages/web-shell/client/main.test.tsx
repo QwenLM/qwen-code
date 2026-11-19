@@ -9,6 +9,10 @@ import type { WebShellRightPanelItem } from './customization';
 import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
 import { useBrowserNotificationSettings } from './browser-turn-notifications';
 import type { WebShellResolvedBrand } from './brandContext';
+import {
+  useDaemonTargetOptional,
+  type FocusHostTarget,
+} from './config/daemon-target';
 import { extractInlineScript, readIndexHtml } from './test/indexHtmlTestUtils';
 
 interface CapturedWorkspaceSessionProps {
@@ -21,8 +25,20 @@ interface CapturedWorkspaceSessionProps {
   webShellProps: WebShellProps;
 }
 
+interface CapturedWorkspaceProviderProps {
+  baseUrl: string;
+  token?: string;
+  initialCapabilities?: unknown;
+}
+
 const testState = vi.hoisted(() => ({
   props: undefined as CapturedWorkspaceSessionProps | undefined,
+  workspaceProviderProps: undefined as
+    | CapturedWorkspaceProviderProps
+    | undefined,
+  focusHost: undefined as ((target: FocusHostTarget) => void) | undefined,
+  fanoutOrigins: [] as string[],
+  tokenOverride: undefined as string | undefined,
   notificationEnabled: undefined as boolean | undefined,
   throwOnRender: false,
   tokenSurvivesReload: true,
@@ -35,7 +51,19 @@ vi.mock('react-dom/client', async (importOriginal) => ({
 }));
 vi.mock('./ManagedAgentWebShell', () => ({ ManagedAgentWebShell: () => null }));
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  DaemonWorkspaceProvider: ({ children }: { children: ReactNode }) => children,
+  DaemonWorkspaceProvider: ({
+    baseUrl,
+    token,
+    initialCapabilities,
+    children,
+  }: CapturedWorkspaceProviderProps & { children: ReactNode }) => {
+    testState.workspaceProviderProps = {
+      baseUrl,
+      token,
+      initialCapabilities,
+    };
+    return children;
+  },
 }));
 vi.mock('./components/WorkspaceSessionProvider', () => ({
   WorkspaceSessionProvider: (props: CapturedWorkspaceSessionProps) => {
@@ -44,18 +72,19 @@ vi.mock('./components/WorkspaceSessionProvider', () => ({
       throw new Error('render boom');
     }
     testState.props = props;
+    testState.focusHost = useDaemonTargetOptional()?.focusHost;
     testState.notificationEnabled = useBrowserNotificationSettings()?.enabled;
     return null;
   },
 }));
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
-  getFanoutOrigins: () => [],
+  getFanoutOrigins: () => testState.fanoutOrigins,
   syncFanoutParams: vi.fn(),
   getAllowedDaemonOrigin: (value: string) => value,
   confirmDaemonTarget: vi.fn(),
   isKnownDaemonTarget: () => false,
-  getDaemonToken: () => 'token',
+  getDaemonToken: () => testState.tokenOverride ?? 'token',
   hasReloadSurvivableDaemonToken: () => testState.tokenSurvivesReload,
   navigateToDaemon: vi.fn(),
   persistDaemonToken: vi.fn(),
@@ -71,6 +100,10 @@ describe('StandaloneApp', () => {
 
   beforeEach(() => {
     testState.props = undefined;
+    testState.workspaceProviderProps = undefined;
+    testState.focusHost = undefined;
+    testState.fanoutOrigins = [];
+    testState.tokenOverride = undefined;
     testState.throwOnRender = false;
     testState.tokenSurvivesReload = true;
     testState.renderCount = 0;
@@ -559,5 +592,70 @@ describe('StandaloneApp brand', () => {
     act(() => root.render(<StandaloneApp daemonToken="token" />));
 
     expect(testState.props?.webShellProps.managedAgentProvider).toBeUndefined();
+  });
+
+  it('forwards initialCapabilities only while staying on the boot origin with matching token', () => {
+    const seeded = {
+      v: 1 as const,
+      mode: 'http-bridge' as const,
+      features: ['workspace_files'],
+      modelServices: [],
+      workspaces: [
+        { id: 'primary', cwd: '/work/a', primary: true, trusted: true },
+      ],
+    };
+    testState.fanoutOrigins = ['https://other.example'];
+
+    act(() =>
+      root.render(
+        <StandaloneApp daemonToken="token" initialCapabilities={seeded} />,
+      ),
+    );
+    expect(testState.workspaceProviderProps?.baseUrl).toBe(
+      window.location.origin,
+    );
+    expect(testState.workspaceProviderProps?.token).toBe('token');
+    expect(testState.workspaceProviderProps?.initialCapabilities).toBe(seeded);
+
+    // Switching to another focused origin drops bootCapabilities, and
+    // switching back to the boot origin does not reuse the stale boot snapshot.
+    act(() => testState.focusHost?.({ origin: 'https://other.example' }));
+    expect(testState.workspaceProviderProps?.baseUrl).toBe(
+      'https://other.example',
+    );
+    expect(
+      testState.workspaceProviderProps?.initialCapabilities,
+    ).toBeUndefined();
+
+    act(() => testState.focusHost?.({ origin: window.location.origin }));
+    expect(testState.workspaceProviderProps?.baseUrl).toBe(
+      window.location.origin,
+    );
+    expect(
+      testState.workspaceProviderProps?.initialCapabilities,
+    ).toBeUndefined();
+  });
+
+  it('drops initialCapabilities when activeToken differs from bootToken', () => {
+    const seeded = {
+      v: 1 as const,
+      mode: 'http-bridge' as const,
+      features: ['workspace_files'],
+      modelServices: [],
+      workspaces: [
+        { id: 'primary', cwd: '/work/a', primary: true, trusted: true },
+      ],
+    };
+    testState.tokenOverride = 'rotated-token';
+
+    act(() =>
+      root.render(
+        <StandaloneApp daemonToken="boot-token" initialCapabilities={seeded} />,
+      ),
+    );
+    expect(testState.workspaceProviderProps?.token).toBe('rotated-token');
+    expect(
+      testState.workspaceProviderProps?.initialCapabilities,
+    ).toBeUndefined();
   });
 });

@@ -6,7 +6,7 @@
 
 // @vitest-environment jsdom
 
-import { act, useEffect, type ReactNode } from 'react';
+import { StrictMode, act, useEffect, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
@@ -52,12 +52,21 @@ const sdkMocks = vi.hoisted(() => {
 
   class MockDaemonClient {
     constructor(opts: unknown) {
-      this.baseUrl = (opts as { baseUrl?: string }).baseUrl;
+      const typed = opts as {
+        baseUrl?: string;
+        token?: string;
+        initialCapabilities?: unknown;
+      };
+      this.baseUrl = typed.baseUrl;
+      this.token = typed.token;
+      this.initialCapabilities = typed.initialCapabilities;
       instances.push(this);
     }
 
     /** The baseUrl this client was constructed with, for attribution. */
     readonly baseUrl: string | undefined;
+    readonly token: string | undefined;
+    readonly initialCapabilities: unknown;
 
     // Per-instance wrapper so a test can attribute each call to the client
     // it was issued against; delegates to the shared mock so the existing
@@ -2054,5 +2063,153 @@ describe('DaemonWorkspaceProvider', () => {
 
     expect(result).toEqual(report);
     expect(sdkMocks.daemonStatus).toHaveBeenCalledWith('full');
+  });
+
+  it('uses initialCapabilities without calling client.capabilities() on mount (even under StrictMode)', async () => {
+    const seeded = {
+      v: 1 as const,
+      mode: 'http-bridge' as const,
+      features: ['session_last_user_prompt_sort'],
+      modelServices: [],
+      workspaces: [
+        { id: 'primary', cwd: '/mock-workspace', primary: true, trusted: true },
+      ],
+    };
+    let latest: DaemonWorkspaceContextValue | undefined;
+
+    function Harness() {
+      latest = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        <StrictMode>
+          <DaemonWorkspaceProvider
+            baseUrl="http://127.0.0.1:4170"
+            token="boot-token"
+            initialCapabilities={seeded}
+          >
+            <Harness />
+          </DaemonWorkspaceProvider>
+        </StrictMode>,
+      );
+    });
+
+    expect(sdkMocks.capabilities).not.toHaveBeenCalled();
+    expect(
+      (latest?.client as unknown as { initialCapabilities?: unknown })
+        ?.initialCapabilities,
+    ).toEqual(seeded);
+    expect(latest?.status).toBe('connected');
+    expect(latest?.capabilities).toEqual(seeded);
+    await expect(latest?.getCapabilities?.()).resolves.toEqual(seeded);
+    expect(sdkMocks.capabilities).not.toHaveBeenCalled();
+
+    const refreshed = {
+      ...seeded,
+      features: ['session_last_user_prompt_sort', 'refreshed'],
+    };
+    sdkMocks.capabilities.mockResolvedValueOnce(refreshed);
+    await act(async () => {
+      await latest?.refreshCapabilities?.();
+    });
+    expect(sdkMocks.capabilities).toHaveBeenCalledTimes(1);
+    expect(latest?.capabilities).toEqual(refreshed);
+  });
+
+  it('does not recreate DaemonClient on initialCapabilities reference changes and fetches fresh after target/token switches', async () => {
+    const seeded = {
+      v: 1 as const,
+      mode: 'http-bridge' as const,
+      features: ['seeded'],
+      modelServices: [],
+      workspaces: [
+        { id: 'primary', cwd: '/mock-workspace', primary: true, trusted: true },
+      ],
+    };
+    let latest: DaemonWorkspaceContextValue | undefined;
+
+    function Harness() {
+      latest = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        <DaemonWorkspaceProvider
+          baseUrl="http://127.0.0.1:4170"
+          token="token-a"
+          initialCapabilities={seeded}
+        >
+          <Harness />
+        </DaemonWorkspaceProvider>,
+      );
+    });
+    expect(sdkMocks.instances).toHaveLength(1);
+    expect(sdkMocks.capabilities).not.toHaveBeenCalled();
+
+    // Re-rendering with a new initialCapabilities reference keeps the existing client.
+    await act(async () => {
+      root?.render(
+        <DaemonWorkspaceProvider
+          baseUrl="http://127.0.0.1:4170"
+          token="token-a"
+          initialCapabilities={{ ...seeded, features: ['ignored-rerender'] }}
+        >
+          <Harness />
+        </DaemonWorkspaceProvider>,
+      );
+    });
+    expect(sdkMocks.instances).toHaveLength(1);
+    expect(sdkMocks.capabilities).not.toHaveBeenCalled();
+    expect(latest?.capabilities?.features).toEqual(['seeded']);
+
+    // Switching token drops the seed and fetches fresh; switching back also fetches fresh.
+    sdkMocks.capabilities.mockResolvedValueOnce({
+      ...seeded,
+      features: ['token-b'],
+    });
+    await act(async () => {
+      root?.render(
+        <DaemonWorkspaceProvider
+          baseUrl="http://127.0.0.1:4170"
+          token="token-b"
+          initialCapabilities={seeded}
+        >
+          <Harness />
+        </DaemonWorkspaceProvider>,
+      );
+    });
+    expect(sdkMocks.instances).toHaveLength(2);
+    expect(sdkMocks.instances[1]?.initialCapabilities).toBeUndefined();
+    expect(sdkMocks.capabilities).toHaveBeenCalledTimes(1);
+    expect(latest?.capabilities?.features).toEqual(['token-b']);
+
+    sdkMocks.capabilities.mockResolvedValueOnce({
+      ...seeded,
+      features: ['token-a-refetched'],
+    });
+    await act(async () => {
+      root?.render(
+        <DaemonWorkspaceProvider
+          baseUrl="http://127.0.0.1:4170"
+          token="token-a"
+          initialCapabilities={seeded}
+        >
+          <Harness />
+        </DaemonWorkspaceProvider>,
+      );
+    });
+    expect(sdkMocks.instances).toHaveLength(3);
+    expect(sdkMocks.instances[2]?.initialCapabilities).toBeUndefined();
+    expect(sdkMocks.capabilities).toHaveBeenCalledTimes(2);
+    expect(latest?.capabilities?.features).toEqual(['token-a-refetched']);
   });
 });

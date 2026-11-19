@@ -1,4 +1,5 @@
 import { createDaemonRestRequest } from '../daemon/rest-request.js';
+import type { DaemonCapabilities } from '@qwen-code/sdk/daemon';
 import {
   useCallback,
   useEffect,
@@ -242,6 +243,26 @@ function retryAfterMs(response: Response): number | undefined {
   return Math.min(Math.max(date - Date.now(), 1000), MAX_RETRY_DELAY_MS);
 }
 
+/**
+ * Only reuse a full runtime capabilities payload. Bootstrap cold-start
+ * envelopes omit `workspaces` and managed-web answers `{ mode: 'managed' }`
+ * without `features`; skipping the downstream fetch on those would leave the
+ * shell without workspace metadata.
+ */
+function isReusableRuntimeCapabilities(
+  value: unknown,
+): value is DaemonCapabilities {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    Array.isArray(record['features']) &&
+    record['features'].every((entry) => typeof entry === 'string') &&
+    Array.isArray(record['workspaces'])
+  );
+}
+
 export function StandaloneAuth({
   baseUrl,
   initialToken,
@@ -272,7 +293,10 @@ export function StandaloneAuth({
       continueFlow?: 'workspace' | 'connection';
     },
   ) => boolean | void;
-  children: (token: string | undefined) => ReactNode;
+  children: (
+    token: string | undefined,
+    initialCapabilities?: DaemonCapabilities,
+  ) => ReactNode;
 }) {
   const copy = COPY[language] ?? COPY.en;
   const remoteWorkspaceAddActive = isRemoteWorkspaceAddActive();
@@ -280,7 +304,10 @@ export function StandaloneAuth({
   const hosts = useWorkspaceHosts();
   const [address, setAddress] = useState(initialAddress);
   const [token, setToken] = useState(initialToken ?? '');
-  const [accepted, setAccepted] = useState<{ token?: string }>();
+  const [accepted, setAccepted] = useState<{
+    token?: string;
+    capabilities?: DaemonCapabilities;
+  }>();
   // Nothing is sent to an unconfirmed target until the user presses Connect.
   const [confirming, setConfirming] = useState(
     unconfirmedTarget && !invalidTarget,
@@ -383,6 +410,14 @@ export function StandaloneAuth({
         });
         if (controllerRef.current !== controller) return;
         if (response.ok) {
+          const body: unknown = await response.json().catch(() => undefined);
+          if (controllerRef.current !== controller) return;
+          if (controller.signal.aborted) {
+            throw new Error('Capabilities response body timed out');
+          }
+          const initialCapabilities = isReusableRuntimeCapabilities(body)
+            ? body
+            : undefined;
           persistDaemonToken(candidate, baseUrl);
           confirmDaemonTarget(baseUrl);
           if (
@@ -391,7 +426,10 @@ export function StandaloneAuth({
           ) {
             return;
           }
-          setAccepted({ token: candidate || undefined });
+          setAccepted({
+            token: candidate || undefined,
+            capabilities: initialCapabilities,
+          });
         } else if (response.status === 401) {
           setBusy(false);
           setNeedsToken(true);
@@ -482,7 +520,11 @@ export function StandaloneAuth({
     retireProbe,
   ]);
 
-  if (accepted) return children(accepted.token);
+  if (accepted) {
+    return accepted.capabilities
+      ? children(accepted.token, accepted.capabilities)
+      : children(accepted.token);
+  }
   // A credential supplied at boot (the desktop `#token=` URL, `serve --open`,
   // or a per-tab stored token) almost always authenticates on the first
   // probe. Painting the credential form during that round trip flashes a login

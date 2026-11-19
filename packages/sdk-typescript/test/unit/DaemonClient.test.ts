@@ -949,6 +949,136 @@ describe('DaemonClient', () => {
       });
       expect(calls).toHaveLength(1);
     });
+
+    it('seeds requireCapability from initialCapabilities within the 60s TTL and refreshes after expiry', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(1_000);
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, {
+            v: 1,
+            mode: 'http-bridge',
+            features: ['session_last_user_prompt_sort'],
+            modelServices: [],
+          }),
+        );
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch,
+          initialCapabilities: {
+            v: 1,
+            mode: 'http-bridge',
+            features: [
+              'session_last_user_prompt_sort',
+              'session_source_metadata',
+            ],
+            modelServices: [],
+          },
+        });
+
+        await client.requireCapability('session_last_user_prompt_sort');
+        await client.requireCapability('session_source_metadata');
+        expect(calls).toHaveLength(0);
+
+        vi.advanceTimersByTime(59_999);
+        await client.requireCapability('session_source_metadata');
+        expect(calls).toHaveLength(0);
+
+        vi.advanceTimersByTime(1);
+        await expect(
+          client.requireCapability('session_source_metadata'),
+        ).rejects.toBeInstanceOf(DaemonCapabilityMissingError);
+        expect(calls).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('ignores malformed initialCapabilities and falls back to GET /capabilities', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_last_user_prompt_sort'],
+          modelServices: [],
+        }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        initialCapabilities: {
+          mode: 'managed',
+        } as unknown as DaemonCapabilities,
+      });
+
+      await client.requireCapability('session_last_user_prompt_sort');
+      expect(calls).toHaveLength(1);
+    });
+
+    it('throws DaemonCapabilityMissingError when a seeded envelope omits the requested feature', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { features: [feature] }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        initialCapabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: [],
+          modelServices: [],
+        },
+      });
+
+      await expect(client.requireCapability(feature)).rejects.toBeInstanceOf(
+        DaemonCapabilityMissingError,
+      );
+      expect(calls).toHaveLength(0);
+    });
+
+    it('lets explicit capabilities() supersede initialCapabilities and clears cache on dispose()', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { features: [] }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        initialCapabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: [feature],
+          modelServices: [],
+        },
+      });
+
+      await client.requireCapability(feature);
+      expect(calls).toHaveLength(0);
+
+      await client.capabilities();
+      expect(calls).toHaveLength(1);
+      await expect(client.requireCapability(feature)).rejects.toBeInstanceOf(
+        DaemonCapabilityMissingError,
+      );
+      expect(calls).toHaveLength(1);
+
+      const seededThenDisposed = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        initialCapabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: [feature],
+          modelServices: [],
+        },
+      });
+      seededThenDisposed.dispose();
+      await expect(
+        seededThenDisposed.requireCapability(feature),
+      ).rejects.toMatchObject({
+        name: 'DaemonTransportClosedError',
+      });
+      expect(calls).toHaveLength(1);
+    });
   });
 
   describe('session artifacts', () => {
@@ -4557,6 +4687,44 @@ describe('DaemonClient', () => {
         }
       },
     );
+
+    it('seeds the session operation timeout budget from initialCapabilities without calling GET /capabilities', async () => {
+      vi.useFakeTimers();
+      try {
+        let signal: AbortSignal | undefined;
+        const fetch = vi.fn(
+          (_input: RequestInfo | URL, init?: RequestInit) =>
+            new Promise<Response>((_resolve, reject) => {
+              signal = init?.signal ?? undefined;
+              signal?.addEventListener('abort', () => reject(signal?.reason), {
+                once: true,
+              });
+            }),
+        ) as unknown as typeof globalThis.fetch;
+        const client = new DaemonClient({
+          baseUrl: 'http://daemon',
+          fetch,
+          initialCapabilities: {
+            v: 1,
+            mode: 'http-bridge',
+            features: [],
+            modelServices: [],
+            limits: { sessionRestoreTimeoutMs: 80_000 },
+          },
+        });
+
+        const outcome = client
+          .createOrAttachSession({ workspaceCwd: '/work/a' })
+          .catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(89_999);
+        expect(signal?.aborted).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(await outcome).toMatchObject({ name: 'TimeoutError' });
+        expect(fetch).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
 
     it('lets an explicit global timeout win over the advertised session budget', async () => {
       // Precedence, not just the derived branch: an operator who configured a

@@ -8,7 +8,8 @@ import { isKnownDaemonTarget } from './config/daemon';
 import { isRemoteConnectionKnown } from './config/remote-connections';
 import { exchangePairingCode } from './config/pairing';
 import ReactDOM from 'react-dom/client';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { DaemonCapabilities } from '@qwen-code/sdk/daemon';
 import { DaemonWorkspaceProvider } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   DaemonTargetProvider,
@@ -227,21 +228,34 @@ function getDevelopmentManagedAgentProvider():
  */
 function FocusedDaemonWorkspaceProvider({
   bootToken,
+  bootCapabilities,
   children,
 }: {
   bootToken?: string;
+  bootCapabilities?: DaemonCapabilities;
   children: React.ReactNode;
 }) {
   useFanoutUrlSync();
   const { activeOrigin, activeToken } = useDaemonTarget();
   const bootOrigin = DAEMON_BASE_URL || window.location.origin;
+  const leftBootOriginRef = useRef(false);
+  if (activeOrigin !== bootOrigin) {
+    leftBootOriginRef.current = true;
+  }
+  const effectiveToken =
+    activeToken ?? (activeOrigin === bootOrigin ? bootToken : undefined);
+  const initialCapabilities =
+    !leftBootOriginRef.current &&
+    activeOrigin === bootOrigin &&
+    effectiveToken === bootToken
+      ? bootCapabilities
+      : undefined;
   return (
     <DaemonWorkspaceProvider
       key={activeOrigin}
       baseUrl={activeOrigin}
-      token={
-        activeToken ?? (activeOrigin === bootOrigin ? bootToken : undefined)
-      }
+      token={effectiveToken}
+      initialCapabilities={initialCapabilities}
     >
       {children}
     </DaemonWorkspaceProvider>
@@ -250,9 +264,11 @@ function FocusedDaemonWorkspaceProvider({
 
 export function StandaloneApp({
   daemonToken,
+  initialCapabilities,
   managedAgentProvider: providedManagedAgentProvider,
 }: {
   daemonToken?: string;
+  initialCapabilities?: DaemonCapabilities;
   managedAgentProvider?: ManagedAgentProvider;
 }) {
   const macosOverlayTitlebar = hasMacOSOverlayTitlebar();
@@ -398,7 +414,10 @@ export function StandaloneApp({
         <StandaloneContext.Provider value={true}>
           <WorkspaceHostsEnabled.Provider value={true}>
             <DaemonTargetProvider>
-              <FocusedDaemonWorkspaceProvider bootToken={daemonToken}>
+              <FocusedDaemonWorkspaceProvider
+                bootToken={daemonToken}
+                bootCapabilities={initialCapabilities}
+              >
                 <WorkspaceSessionProvider
                   urlNavigation={{ basePath: navigationBasePath }}
                   chromeTheme={documentTheme}
@@ -543,7 +562,7 @@ async function main() {
         invalidTarget={INVALID_DAEMON_TARGET}
         unconfirmedTarget={UNCONFIRMED_DAEMON_TARGET}
       >
-        {(token) =>
+        {(token, initialCapabilities) =>
           MANAGED_APP ? (
             <ManagedStandaloneApp
               daemonToken={token}
@@ -554,12 +573,16 @@ async function main() {
               {(managedAgentProvider) => (
                 <StandaloneApp
                   daemonToken={token}
+                  initialCapabilities={initialCapabilities}
                   managedAgentProvider={managedAgentProvider}
                 />
               )}
             </ManagedStandaloneApp>
           ) : (
-            <StandaloneApp daemonToken={token} />
+            <StandaloneApp
+              daemonToken={token}
+              initialCapabilities={initialCapabilities}
+            />
           )
         }
       </StandaloneAuth>

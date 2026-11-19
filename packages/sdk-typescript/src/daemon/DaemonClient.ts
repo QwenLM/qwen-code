@@ -488,6 +488,26 @@ export interface DaemonClientOptions {
    * owner routing and strict mutation authentication remain authoritative.
    */
   transport?: DaemonTransport;
+  /**
+   * Optional `/capabilities` envelope already fetched for this target (for
+   * example by an auth gate). Seeds the capability preflight and session-restore
+   * timeout caches on construction and is ignored if `features` is not a
+   * string array.
+   */
+  initialCapabilities?: DaemonCapabilities;
+}
+
+function isValidInitialCapabilities(
+  value: unknown,
+): value is DaemonCapabilities {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const features = (value as { features?: unknown }).features;
+  return (
+    Array.isArray(features) &&
+    features.every((feature) => typeof feature === 'string')
+  );
 }
 
 const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
@@ -1019,6 +1039,10 @@ export class DaemonClient {
     this.transport =
       opts.transport ??
       new RestSseTransport(this.baseUrl, this.token, this._fetch);
+    if (isValidInitialCapabilities(opts.initialCapabilities)) {
+      const generation = ++this.capabilitiesGeneration;
+      this.applyCapabilitiesCache(opts.initialCapabilities, generation);
+    }
   }
 
   get maxPendingPromptsPerSession(): number {
@@ -1415,6 +1439,31 @@ export class DaemonClient {
     );
   }
 
+  private applyCapabilitiesCache(
+    capabilities: DaemonCapabilities,
+    generation: number,
+  ): void {
+    if (generation === this.capabilitiesGeneration) {
+      this.capabilityFeatures = {
+        features: new Set(
+          Array.isArray(capabilities.features) ? capabilities.features : [],
+        ),
+        expiresAt: Date.now() + CAPABILITY_PREFLIGHT_TTL_MS,
+      };
+    }
+    if (generation > this.restoreBudgetGeneration) {
+      this.restoreBudgetGeneration = generation;
+      const restoreTimeoutMs = capabilities.limits?.sessionRestoreTimeoutMs;
+      this.cachedSessionRestoreTimeoutMs =
+        typeof restoreTimeoutMs === 'number' &&
+        Number.isInteger(restoreTimeoutMs) &&
+        restoreTimeoutMs > 0 &&
+        restoreTimeoutMs <= MAX_TIMER_DELAY_MS
+          ? restoreTimeoutMs
+          : undefined;
+    }
+  }
+
   async capabilities(): Promise<DaemonCapabilities> {
     const generation = ++this.capabilitiesGeneration;
     this.capabilityFeatures = undefined;
@@ -1429,25 +1478,7 @@ export class DaemonClient {
     this.capabilitiesRequest = request;
     try {
       const capabilities = await request;
-      if (generation === this.capabilitiesGeneration) {
-        this.capabilityFeatures = {
-          features: new Set(
-            Array.isArray(capabilities.features) ? capabilities.features : [],
-          ),
-          expiresAt: Date.now() + CAPABILITY_PREFLIGHT_TTL_MS,
-        };
-      }
-      if (generation > this.restoreBudgetGeneration) {
-        this.restoreBudgetGeneration = generation;
-        const restoreTimeoutMs = capabilities.limits?.sessionRestoreTimeoutMs;
-        this.cachedSessionRestoreTimeoutMs =
-          typeof restoreTimeoutMs === 'number' &&
-          Number.isInteger(restoreTimeoutMs) &&
-          restoreTimeoutMs > 0 &&
-          restoreTimeoutMs <= MAX_TIMER_DELAY_MS
-            ? restoreTimeoutMs
-            : undefined;
-      }
+      this.applyCapabilitiesCache(capabilities, generation);
       return capabilities;
     } finally {
       if (generation === this.capabilitiesGeneration) {

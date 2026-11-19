@@ -15,6 +15,7 @@ import {
   DaemonWorkspaceProvider,
   useOptionalDaemonWorkspace,
 } from './DaemonWorkspaceProvider';
+import { StandaloneAuth } from '../../components/StandaloneAuth';
 import type { DaemonWorkspaceContextValue } from './types.js';
 
 let root: Root;
@@ -397,4 +398,70 @@ it('probes on foreground after auth-required can be fixed externally', async () 
     await Promise.resolve();
   });
   expect(fetchMock.mock.calls.length).toBeGreaterThan(before);
+});
+
+it('issues only one GET /capabilities across StandaloneAuth, DaemonWorkspaceProvider, and sorted session listing', async () => {
+  const runtimeCaps = {
+    v: 1,
+    mode: 'http-bridge',
+    features: ['session_last_user_prompt_sort', 'session_source_metadata'],
+    modelServices: [],
+    workspaces: [
+      { id: 'primary', cwd: '/work/project', primary: true, trusted: true },
+    ],
+    limits: { sessionRestoreTimeoutMs: 90_000 },
+  };
+  let latestWorkspace: DaemonWorkspaceContextValue | undefined;
+  function SessionListConsumer() {
+    latestWorkspace = useOptionalDaemonWorkspace();
+    return null;
+  }
+
+  fetchMock.mockImplementation(async (input) => {
+    const path = new URL(String(input)).pathname;
+    if (path === '/capabilities') return Response.json(runtimeCaps);
+    if (path === '/brand') return Response.json({});
+    if (path.endsWith('/sessions')) return Response.json({ sessions: [] });
+    return Response.json({});
+  });
+
+  await act(async () => {
+    root.render(
+      <StrictMode>
+        <StandaloneAuth baseUrl="https://daemon.example" initialToken="secret">
+          {(token, initialCapabilities) => (
+            <DaemonWorkspaceProvider
+              baseUrl="https://daemon.example"
+              token={token}
+              initialCapabilities={initialCapabilities}
+            >
+              <SessionListConsumer />
+            </DaemonWorkspaceProvider>
+          )}
+        </StandaloneAuth>
+      </StrictMode>,
+    );
+  });
+
+  expect(latestWorkspace?.status).toBe('connected');
+  expect(latestWorkspace?.capabilities).toEqual(runtimeCaps);
+
+  await act(async () => {
+    await latestWorkspace!.client.listWorkspaceSessionsPage('/work/project', {
+      sortBy: 'lastUserPromptAt',
+      sourceType: 'cli',
+    });
+  });
+
+  const capCalls = fetchMock.mock.calls.filter(
+    ([input]) => new URL(String(input)).pathname === '/capabilities',
+  );
+  // StrictMode runs StandaloneAuth's probe effect twice (aborting the first),
+  // and must never trigger a follow-up request from DaemonWorkspaceProvider or
+  // requireCapability().
+  const nonAbortedCapCalls = capCalls.filter(([, init]) => {
+    const signal = (init as RequestInit | undefined)?.signal;
+    return !signal?.aborted;
+  });
+  expect(nonAbortedCapCalls).toHaveLength(1);
 });

@@ -103,12 +103,26 @@ export function DaemonWorkspaceProvider({
   token,
   workspaceCwd,
   autoConnect = true,
+  initialCapabilities,
   transport,
   children,
 }: DaemonWorkspaceProviderProps) {
   // Render-phase so the breadcrumb exists before any child can throw, and
   // recorded even when no client is built (autoConnect={false}).
   recordProviderCopy(moduleInstanceId, false);
+  const initialSeedRef = useRef(
+    autoConnect &&
+      initialCapabilities &&
+      Array.isArray(initialCapabilities.features) &&
+      initialCapabilities.features.every((f) => typeof f === 'string')
+      ? {
+          baseUrl,
+          token,
+          transport,
+          capabilities: initialCapabilities,
+        }
+      : undefined,
+  );
   const availability = useMemo(
     () =>
       autoConnect
@@ -116,13 +130,33 @@ export function DaemonWorkspaceProvider({
         : undefined,
     [baseUrl, token, transport, autoConnect],
   );
-  const client = useMemo(
-    () =>
-      autoConnect && availability
-        ? createDaemonClient({ baseUrl, token, transport }, availability)
-        : undefined,
-    [autoConnect, baseUrl, token, transport, availability],
-  );
+  const { client, seededCapabilities } = useMemo(() => {
+    if (!autoConnect || !availability) {
+      initialSeedRef.current = undefined;
+      return { client: undefined, seededCapabilities: undefined };
+    }
+    const seed = initialSeedRef.current;
+    const matched =
+      seed &&
+      seed.baseUrl === baseUrl &&
+      seed.token === token &&
+      seed.transport === transport
+        ? seed.capabilities
+        : undefined;
+    if (seed && !matched) {
+      initialSeedRef.current = undefined;
+    }
+    const created = createDaemonClient(
+      {
+        baseUrl,
+        token,
+        transport,
+        ...(matched ? { initialCapabilities: matched } : {}),
+      },
+      availability,
+    );
+    return { client: created, seededCapabilities: matched };
+  }, [autoConnect, baseUrl, token, transport, availability]);
   const pendingDisposeRef = useRef(new Set<DaemonClient>());
   const clientRef = useRef<DaemonClient | undefined>(client);
   clientRef.current = client;
@@ -135,11 +169,11 @@ export function DaemonWorkspaceProvider({
 
   const [capabilities, setCapabilities] = useState<
     DaemonCapabilities | undefined
-  >(undefined);
+  >(seededCapabilities);
   const [brand, setBrand] = useState<DaemonBrand | undefined>(undefined);
   const [brandSettled, setBrandSettled] = useState(false);
   const [status, setStatus] = useState<DaemonWorkspaceStatus>(
-    autoConnect ? 'connecting' : 'idle',
+    seededCapabilities ? 'connected' : autoConnect ? 'connecting' : 'idle',
   );
   const statusRef = useRef(status);
   statusRef.current = status;
@@ -164,7 +198,9 @@ export function DaemonWorkspaceProvider({
     }
     if (capabilitiesClientRef.current !== client) {
       capabilitiesClientRef.current = client;
-      capabilitiesPromiseRef.current = undefined;
+      capabilitiesPromiseRef.current = seededCapabilities
+        ? Promise.resolve(seededCapabilities)
+        : undefined;
       capabilitiesGenerationRef.current++;
     }
     if (!capabilitiesPromiseRef.current) {
@@ -177,7 +213,7 @@ export function DaemonWorkspaceProvider({
       capabilitiesPromiseRef.current = promise;
     }
     return capabilitiesPromiseRef.current;
-  }, [client]);
+  }, [client, seededCapabilities]);
 
   // Force a fresh capabilities fetch and update state. `getCapabilities`
   // memoizes its first in-flight promise and only feeds `setCapabilities`
@@ -241,15 +277,39 @@ export function DaemonWorkspaceProvider({
 
   useEffect(() => {
     if (!client) return undefined;
-    setStatus('connecting');
-    setError(undefined);
-    setCapabilities(undefined);
 
     // Cancel any pending deferred disposal from a previous cleanup (handles
     // React StrictMode double-invocation: the first cleanup schedules a
     // disposal microtask, but the synchronous second mount cancels it).
     const pending = pendingDisposeRef.current;
     pending.delete(client);
+
+    const scheduleDispose = () => {
+      // Defer disposal by one microtask. In StrictMode the synchronous
+      // re-mount cancels disposal before the microtask fires, preserving
+      // the memoized client. On real unmount or client replacement no
+      // cancellation occurs and disposal proceeds.
+      pending.add(client);
+      queueMicrotask(() => {
+        if (pending.delete(client)) {
+          client.dispose();
+          availability?.dispose();
+        }
+      });
+    };
+
+    if (seededCapabilities) {
+      if (capabilitiesClientRef.current !== client) {
+        capabilitiesClientRef.current = client;
+        capabilitiesPromiseRef.current = Promise.resolve(seededCapabilities);
+        capabilitiesGenerationRef.current++;
+      }
+      return scheduleDispose;
+    }
+
+    setStatus('connecting');
+    setError(undefined);
+    setCapabilities(undefined);
 
     let disposed = false;
     const initialPromise = getCapabilities();
@@ -281,19 +341,9 @@ export function DaemonWorkspaceProvider({
 
     return () => {
       disposed = true;
-      // Defer disposal by one microtask. In StrictMode the synchronous
-      // re-mount cancels disposal before the microtask fires, preserving
-      // the memoized client. On real unmount or client replacement no
-      // cancellation occurs and disposal proceeds.
-      pending.add(client);
-      queueMicrotask(() => {
-        if (pending.delete(client)) {
-          client.dispose();
-          availability?.dispose();
-        }
-      });
+      scheduleDispose();
     };
-  }, [client, getCapabilities, availability]);
+  }, [client, seededCapabilities, getCapabilities, availability]);
 
   // Brand is fetched beside capabilities but deliberately stays out of the
   // connection status machine. An older daemon without `GET /brand`, a logo the

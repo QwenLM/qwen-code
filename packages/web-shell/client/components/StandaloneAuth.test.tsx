@@ -1185,3 +1185,124 @@ it('reports a refused target switch', async () => {
   );
   expect(container.textContent).toContain('could not be carried');
 });
+
+it('forwards full runtime capabilities on 200 OK', async () => {
+  const runtimeCaps = {
+    v: 1,
+    mode: 'http-bridge',
+    features: ['session_last_user_prompt_sort', 'workspace_files'],
+    modelServices: [],
+    workspaces: [
+      { id: 'primary', cwd: '/work/a', primary: true, trusted: true },
+    ],
+  };
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 200, body: runtimeCaps })),
+  );
+  const renderChildren = vi.fn((token?: string, caps?: unknown) => (
+    <p>
+      Connected {token ?? 'open'} {caps ? 'seeded' : 'unseeded'}
+    </p>
+  ));
+
+  await act(async () =>
+    root.render(
+      <StandaloneAuth baseUrl="http://daemon.test" initialToken="secret">
+        {renderChildren}
+      </StandaloneAuth>,
+    ),
+  );
+
+  expect(renderChildren).toHaveBeenCalledWith('secret', runtimeCaps);
+  expect(container.textContent).toContain('Connected secret seeded');
+});
+
+it.each([
+  [
+    'bootstrap payload without workspaces',
+    { v: 1, mode: 'http-bridge', features: ['workspace_files'] },
+  ],
+  ['managed mode marker without features', { mode: 'managed' }],
+  ['empty non-JSON response', undefined],
+])(
+  'authenticates without forwarding incomplete capabilities (%s)',
+  async (_label, body) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(stubResponse({ status: 200, body })),
+    );
+    const renderChildren = vi.fn((token?: string) => (
+      <p>Connected {token ?? 'open'}</p>
+    ));
+
+    await act(async () =>
+      root.render(
+        <StandaloneAuth baseUrl="http://daemon.test" initialToken="secret">
+          {renderChildren}
+        </StandaloneAuth>,
+      ),
+    );
+
+    expect(renderChildren).toHaveBeenCalledTimes(1);
+    expect(renderChildren.mock.calls[0]).toEqual(['secret']);
+  },
+);
+
+it('retries instead of mounting when reading the 200 OK body times out', async () => {
+  vi.useFakeTimers();
+  let calls = 0;
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((_url: string, init?: RequestInit) => {
+      calls += 1;
+      if (calls === 1) {
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          headers: new Headers(),
+          json: () =>
+            new Promise((_resolve, reject) => {
+              init?.signal?.addEventListener('abort', () =>
+                reject(new Error('aborted')),
+              );
+            }),
+        });
+      }
+      return Promise.resolve(
+        stubResponse({
+          status: 200,
+          body: {
+            v: 1,
+            features: ['workspace_files'],
+            workspaces: [{ id: 'primary', cwd: '/work/a', primary: true }],
+          },
+        }),
+      );
+    }),
+  );
+  const renderChildren = vi.fn((token?: string, caps?: unknown) => (
+    <p>
+      Connected {token ?? 'open'} {caps ? 'seeded' : 'unseeded'}
+    </p>
+  ));
+
+  await act(async () =>
+    root.render(
+      <StandaloneAuth baseUrl="http://daemon.test" initialToken="secret">
+        {renderChildren}
+      </StandaloneAuth>,
+    ),
+  );
+  expect(renderChildren).not.toHaveBeenCalled();
+
+  await act(async () => vi.advanceTimersByTimeAsync(10_000));
+  expect(container.textContent).toContain('Cannot reach');
+  expect(renderChildren).not.toHaveBeenCalled();
+
+  await act(async () => vi.advanceTimersByTimeAsync(2_000));
+  expect(renderChildren).toHaveBeenCalledWith(
+    'secret',
+    expect.objectContaining({ features: ['workspace_files'] }),
+  );
+});

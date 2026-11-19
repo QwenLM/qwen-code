@@ -146,6 +146,13 @@ export interface DaemonWorkspaceProviderProps {
   workspaceCwd?: string;
   autoConnect?: boolean;
   /**
+   * Optional `/capabilities` envelope already fetched for the initial
+   * connection (for example by an auth gate). Seeds the initial client when
+   * `autoConnect` is enabled and is ignored once `baseUrl`, `token`, or
+   * `transport` changes.
+   */
+  initialCapabilities?: DaemonCapabilities;
+  /**
    * Optional pluggable transport forwarded to `DaemonClient`. When
    * omitted the client uses the default REST+SSE transport.
    */
