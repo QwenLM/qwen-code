@@ -1023,10 +1023,11 @@ describe('GitDialog', () => {
     );
   });
 
-  it('commits everything when the listing never loaded', async () => {
+  it('refuses to commit everything when the listing never loaded', async () => {
     // A rejected listing leaves `commitFiles` null while `commitListComplete`
-    // keeps its initial `true`; without the null arm the Commit click dies on
-    // the "select at least one file" guard while no checklist is rendered.
+    // keeps its initial `true`. Falling through to `all` would commit the
+    // whole tree with no checklist and nothing disclosing it, so the click is
+    // refused and the dialog says why while the list is still absent.
     workspaceGitDiff.mockRejectedValue(new Error('daemon 5xx'));
     workspaceGitCommit.mockResolvedValue({ sha: 'abc1234', subject: 'x' });
     mount('commit');
@@ -1058,11 +1059,9 @@ describe('GitDialog', () => {
     });
     await flush();
 
-    expect(workspaceGitCommit).toHaveBeenCalledWith(
-      'feat: everything',
-      { all: true },
-      undefined,
-      undefined,
+    expect(workspaceGitCommit).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain(
+      'The file list is still loading — try again shortly',
     );
   });
 

@@ -1330,6 +1330,29 @@ describe('gitCommit', () => {
     );
   });
 
+  it('refuses a staged deletion whose path a recreated file now occupies', async () => {
+    // `git rm` then a regenerated copy at the same path (a build artifact is
+    // the everyday shape). `commit -- <path>` reads the deletion from the
+    // index, but the worktree content would be published in its place — the
+    // rename guard refuses that, and a plain staged deletion needs it too.
+    const dir = makeRepo();
+    commitFile(dir, 'old.txt', 'content\n', 'add old');
+    git(dir, 'rm', '-q', 'old.txt');
+    write(dir, { 'old.txt': 'regenerated\n' });
+
+    await expect(
+      gitCommit(dir, 'remove old', { paths: ['old.txt'] }),
+    ).rejects.toThrow(
+      /is staged for deletion, but a file now sits at that path/,
+    );
+
+    // The refusal leaves the deletion staged instead of publishing the
+    // recreated file in its place.
+    expect(git(dir, 'status', '--porcelain', 'old.txt')).toContain(
+      'D  old.txt',
+    );
+  });
+
   it.skipIf(process.platform === 'win32')(
     'accepts a git-legal root-level name that starts with a drive-like prefix',
     async () => {

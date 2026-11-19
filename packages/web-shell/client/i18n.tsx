@@ -708,6 +708,7 @@ const EN: Messages = {
   'gitCommit.listRefreshed':
     'The file list changed — review it and commit again',
   'gitCommit.listCapped': 'The list is truncated — committing every change',
+  'gitCommit.listLoading': 'The file list is still loading — try again shortly',
   'gitCommit.fileAdded': 'Added',
   'gitCommit.fileDeleted': 'Deleted',
   'gitCommit.fileRenamed': 'Renamed',
@@ -5928,6 +5929,7 @@ const ZH: Messages = {
   'gitCommit.nothingToCommit': '没有可提交的改动——工作区是干净的',
   'gitCommit.listRefreshed': '文件列表已变化——请确认后再次提交',
   'gitCommit.listCapped': '列表已截断——将提交全部变更',
+  'gitCommit.listLoading': '文件列表仍在加载——请稍后重试',
   'gitCommit.fileAdded': '已新增',
   'gitCommit.fileDeleted': '已删除',
   'gitCommit.fileRenamed': '已重命名',

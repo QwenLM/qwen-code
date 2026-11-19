@@ -430,6 +430,15 @@ export function GitDialog({
   const doCommit = useCallback(
     async (andPush: boolean) => {
       if (commitBusy || prBusy || !commitMsg.trim()) return;
+      // A click while the first listing is still in flight has no checklist on
+      // screen and no selection behind it. Falling through to `all` would
+      // commit the whole tree with nothing disclosing it — refuse and let the
+      // list arrive instead. A listing that loaded and *is* capped still goes
+      // to `all`, which the legend says so.
+      if (commitFilesRef.current === null) {
+        setCommitStatus({ msg: t('gitCommit.listLoading'), type: 'error' });
+        return;
+      }
       const paths = commitPathList();
       // A capped or unavailable listing cannot express the tree as a path
       // list: the rows it dropped would silently stay uncommitted, and an
@@ -440,7 +449,7 @@ export function GitDialog({
       // would die on the "select at least one file" guard while no checklist
       // is rendered at all. The ref reads the same never-loaded state without
       // putting the files array in this callback's dependencies.
-      const commitAll = commitFilesRef.current === null || !commitListComplete;
+      const commitAll = !commitListComplete;
       // The request is built from a diff read at commit time, not from the
       // checklist: a row can appear after the snapshot loaded, and a commit
       // empties it while the tree may be dirty again by the next click. A

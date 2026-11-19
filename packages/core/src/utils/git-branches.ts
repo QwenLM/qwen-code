@@ -1453,6 +1453,7 @@ async function resolveCommitPaths(
   cwd: string,
   paths: string[],
   env?: Readonly<Record<string, string | undefined>>,
+  stagedDeletions: ReadonlySet<string> = new Set(),
 ): Promise<string[]> {
   const output = await runGit(
     cwd,
@@ -1549,7 +1550,59 @@ async function resolveCommitPaths(
   for (const pair of preImageCandidates) {
     refuseOccupiedPreImage(root || cwd, pair.oldPath, pair.path);
   }
+  // A plain staged deletion has no rename entry to pair, so the loops above
+  // never see it — yet `commit -- <path>` reads the deletion from the index
+  // and takes whatever now sits at that path from the worktree, publishing an
+  // occupant in place of the deletion the user selected.
+  for (const deleted of stagedDeletions) {
+    if (!selectedOrPrefix(deleted)) continue;
+    if (lstatOrNull(root || cwd, deleted) !== null) {
+      throw new Error(
+        `cannot commit: ${deleted} is staged for deletion, but a file now sits at that path`,
+      );
+    }
+  }
   return resolved;
+}
+
+/**
+ * The paths the index has deleted (status `D`) among the caller's selection.
+ * A staged deletion is absent from both `ls-files --cached` and `--others`,
+ * so it is invisible to the status listing `resolveCommitPaths` works from.
+ */
+async function stagedDeletionPaths(
+  cwd: string,
+  paths: string[],
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<Set<string>> {
+  const deleted = new Set<string>();
+  if (!(await hasHead(cwd, env))) return deleted;
+  const indexChanges = await runGit(
+    cwd,
+    [
+      'diff',
+      '--cached',
+      '--name-status',
+      '-z',
+      '--',
+      ...literalPathspecs(paths),
+    ],
+    env,
+  );
+  const tokens = indexChanges.split('\0');
+  for (let i = 0; i < tokens.length; i++) {
+    const status = tokens[i];
+    if (!/^[A-Z](?:\d+)?$/.test(status)) continue;
+    if (status.startsWith('R') || status.startsWith('C')) {
+      i += 2;
+    } else if (status.startsWith('D')) {
+      deleted.add(tokens[i + 1] ?? '');
+      i++;
+    } else if (i + 1 < tokens.length) {
+      i++;
+    }
+  }
+  return deleted;
 }
 
 /**
@@ -1615,8 +1668,16 @@ export async function gitCommit(
       );
     }
   }
+  // `resolveCommitPaths` can reach a staged deletion only through a rename
+  // pair; a plain one (`git rm`, no rename involved) appears there as a
+  // status `D` and is dropped. `commit -- <path>` then takes whatever content
+  // now sits at that path from the worktree and publishes it as a rewrite,
+  // silently replacing the deletion the user selected. Ask the index instead.
+  const stagedDeletions = paths
+    ? await stagedDeletionPaths(cwd, paths, env)
+    : new Set<string>();
   const selection = paths
-    ? await resolveCommitPaths(cwd, paths, env)
+    ? await resolveCommitPaths(cwd, paths, env, stagedDeletions)
     : undefined;
   const stagesEverything = opts?.all === true;
   // Snapshot the index before staging so a failed commit (e.g. a rejecting
