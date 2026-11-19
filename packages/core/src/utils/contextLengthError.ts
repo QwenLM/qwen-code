@@ -79,8 +79,9 @@ function parseTokenCounts(text: string): {
     };
   }
 
+  // SGLang states the window as "maximum context length of N tokens".
   const maxContextLimitMatch = text.match(
-    /maximum context length is\s*(\d[\d,]*)\s*tokens?/i,
+    /maximum context length (?:is|of)\s*(\d[\d,]*)\s*tokens?/i,
   );
   if (maxContextLimitMatch) {
     return {
@@ -288,11 +289,7 @@ export function getContextLengthExceededInfo(
   // sibling field was reported as not-an-overflow and never reached the
   // compaction path. A fragment counts as evidence only if it names a
   // context-length failure and is not itself a timeout message.
-  const isExceeded = fragments.some(
-    (fragment) =>
-      CONTEXT_LENGTH_PATTERNS.some((pattern) => pattern.test(fragment)) &&
-      !TIMEOUT_PATTERNS.some((pattern) => pattern.test(fragment)),
-  );
+  const isExceeded = fragments.some(isOverflowText);
   const counts = isExceeded ? parseTokenCounts(message) : {};
 
   return {
@@ -300,6 +297,35 @@ export function getContextLengthExceededInfo(
     message,
     ...counts,
   };
+}
+
+/** A fragment that names a context-length failure and is not a timeout. */
+function isOverflowText(fragment: string): boolean {
+  return (
+    CONTEXT_LENGTH_PATTERNS.some((pattern) => pattern.test(fragment)) &&
+    !TIMEOUT_PATTERNS.some((pattern) => pattern.test(fragment))
+  );
+}
+
+/**
+ * The context windows the error's rejections state: one per fragment that is
+ * itself a context-length rejection, when its wording names the window. A
+ * request may only be made smaller by these. An earlier attempt's rejection
+ * carried in another field still names a window the same server stated, so
+ * the caller takes the smallest. Two kinds of figure are left out: an untyped
+ * "N tokens > M" (rate-limit and quota text share the shape), and an input
+ * bound, which lets `prompt + max_tokens` exceed it, so sizing a window by it
+ * floors the summary budget (#13876).
+ */
+export function statedContextWindows(error: unknown): number[] {
+  return uniqueNonEmpty(collectStrings(error, new Set<object>()))
+    .filter(isOverflowText)
+    .map(parseTokenCounts)
+    .flatMap((counts) =>
+      counts.limitKind === 'total' && counts.limitTokens !== undefined
+        ? [counts.limitTokens]
+        : [],
+    );
 }
 
 export function isContextLengthExceededError(error: unknown): boolean {
