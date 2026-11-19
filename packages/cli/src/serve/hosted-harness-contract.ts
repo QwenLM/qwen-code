@@ -8,6 +8,10 @@ import { randomUUID } from 'node:crypto';
 import type { Application, RequestHandler } from 'express';
 import { markAccessLogError } from './server/access-log.js';
 import type { HostedHarnessCapabilities } from './types.js';
+import {
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+  HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
+} from './hosted-workspace-profiles.js';
 
 export const HOSTED_HARNESS_CAPABILITY_DIGEST_ENV =
   'QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST';
@@ -112,6 +116,8 @@ export function createHostedHarnessContract(
       // is committed, so a client may bound a stream by its silence.
       'event-keepalive/1',
       'web-fetch/1',
+      HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+      HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
     ]),
   });
 }

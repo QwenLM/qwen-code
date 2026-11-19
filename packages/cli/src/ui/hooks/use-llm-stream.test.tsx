@@ -10,6 +10,7 @@ import type {
   AgentLoopOptions,
   AgentLoopResult,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
+import * as agentLoopRollout from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import type { ToolCallRequestInfo } from '@qwen-code/qwen-code-core/core/turn.js';
 import type { Mock, MockInstance } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -267,11 +268,13 @@ vi.mock('./useLogger.js', () => ({
 }));
 
 const mockStartNewPrompt = vi.fn();
+const mockRecordUserPrompt = vi.fn();
 const mockAddUsage = vi.fn();
 vi.mock('../contexts/SessionContext.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../contexts/SessionContext.js')>()),
   useSessionStats: vi.fn(() => ({
     startNewPrompt: mockStartNewPrompt,
+    recordUserPrompt: mockRecordUserPrompt,
     addUsage: mockAddUsage,
     getPromptCount: vi.fn(() => 5),
     stats: {
@@ -1029,6 +1032,192 @@ describe('useLlmStream', () => {
         }),
       );
     });
+  });
+
+  it('advances the prompt counter for a minted Notification id (R6-1/R7-1)', async () => {
+    const { mockSendMessageStream } = renderTestHook();
+    await waitFor(() => {
+      expect(
+        mockBackgroundShellRegistry.setNotificationCallback,
+      ).toHaveBeenCalledWith(expect.any(Function));
+    });
+    const callback = mockBackgroundShellRegistry.setNotificationCallback.mock
+      .calls[0][0] as (displayText: string, modelText: string) => void;
+    act(() => {
+      callback(
+        'Background shell done.',
+        '<task-notification>done</task-notification>',
+      );
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        '<task-notification>done</task-notification>',
+        expect.any(AbortSignal),
+        // Pin the minted id itself (the observable mint state), not only the
+        // shared startNewPrompt call count: the id is sessionId + '########' +
+        // getPromptCount() (mocked to 5), so a mint that stopped advancing the
+        // counter or reused a stale id would fail here even if a sibling
+        // consumer satisfied the call-count assertion.
+        'test-session-id########5',
+        expect.objectContaining({ type: SendMessageType.Notification }),
+      );
+    });
+    // The Notification minted a fresh prompt id, so the counter advances and the
+    // next user prompt cannot reuse that id (R6-1/R7-1 root fix). A Notification
+    // is not a user prompt: no user-prompt telemetry is logged, and the
+    // user-visible Prompts statistic (recordUserPrompt) does not advance (R8-F3).
+    expect(mockStartNewPrompt).toHaveBeenCalledTimes(1);
+    expect(mockRecordUserPrompt).not.toHaveBeenCalled();
+    expect(MockedUserPromptEvent).not.toHaveBeenCalled();
+  });
+
+  it('advances the mint counter for a minted Retry id (R8-F1)', async () => {
+    const { result, mockSendMessageStream: streamMock } = renderTestHook();
+    await act(async () => {
+      await result.current.submitQuery(
+        'retry the last prompt',
+        SendMessageType.Retry,
+      );
+    });
+    await waitFor(() => {
+      expect(streamMock).toHaveBeenCalledWith(
+        'retry the last prompt',
+        expect.any(AbortSignal),
+        // Pin the minted id (sessionId + '########' + getPromptCount(), mocked
+        // to 5), not only the shared startNewPrompt call count.
+        'test-session-id########5',
+        expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+    });
+    // A Retry mints a fresh prompt id, so the mint counter advances and the next
+    // user turn cannot inherit the retry turn's consumed fallback marks. A Retry
+    // is not a new user prompt: neither the user statistic nor user-prompt
+    // telemetry advances.
+    expect(mockStartNewPrompt).toHaveBeenCalledTimes(1);
+    expect(mockRecordUserPrompt).not.toHaveBeenCalled();
+    expect(MockedUserPromptEvent).not.toHaveBeenCalled();
+  });
+
+  it('advances the user statistic for a Cron send (R15)', async () => {
+    const { result, mockSendMessageStream: streamMock } = renderTestHook();
+    await act(async () => {
+      await result.current.submitQuery(
+        'scheduled prompt',
+        SendMessageType.Cron,
+      );
+    });
+    await waitFor(() => {
+      expect(streamMock).toHaveBeenCalledWith(
+        'scheduled prompt',
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({ type: SendMessageType.Cron }),
+      );
+    });
+    // Cron belongs to the historical prompt set, so the visible statistic
+    // advances (unlike Notification/Goal/Retry, which only mint). Positively
+    // pins the Cron arm of recordUserPrompt.
+    expect(mockStartNewPrompt).toHaveBeenCalledTimes(1);
+    expect(mockRecordUserPrompt).toHaveBeenCalledTimes(1);
+  });
+
+  it('advances the mint counter for a minted Goal id (R8-F5)', async () => {
+    vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+      getAllToolNames: () => ['tool_search', 'tool_call'],
+    } as unknown as ReturnType<Config['getToolRegistry']>);
+    const permit = { goalId: 'goal-1', revision: 3, turnId: 'turn-automatic' };
+    const goal: QueuedGoalTurn = {
+      kind: 'goal',
+      permit,
+      turnKey: 'goal-runtime:turn-automatic',
+      continuationContext: 'continue from the last accepted evidence',
+      objectiveUpdated: true,
+      windDown: true,
+      verifierFeedback: 'show the final verification result',
+    };
+    const peekNextUserBatchKey = vi.fn((goalTurnActive?: boolean) =>
+      goalTurnActive ? undefined : 'message-queue:next-user',
+    );
+    mockConfig.getGoalRuntime = vi.fn(() => ({
+      markTurnDelivered: vi.fn(),
+    })) as unknown as ReturnType<Config['getGoalRuntime']>;
+    const { result, mockSendMessageStream: streamMock } = renderTestHook(
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { current: { peekNextUserBatchKey } },
+    );
+    await act(async () => {
+      // No prompt_id: the Goal turn mints a fresh id.
+      await result.current.submitQuery(
+        goal.continuationContext,
+        SendMessageType.Goal,
+        undefined,
+        { goal },
+      );
+    });
+    await waitFor(() => {
+      expect(streamMock).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(AbortSignal),
+        // Pin the minted id (sessionId + '########' + getPromptCount(), mocked
+        // to 5), not only the shared startNewPrompt call count.
+        'test-session-id########5',
+        expect.objectContaining({ type: SendMessageType.Goal }),
+      );
+    });
+    // The minted Goal id advances the mint counter so a later user turn cannot
+    // reuse it, but a Goal turn is not a user prompt for the visible statistic.
+    expect(mockStartNewPrompt).toHaveBeenCalledTimes(1);
+    expect(mockRecordUserPrompt).not.toHaveBeenCalled();
+    expect(MockedUserPromptEvent).not.toHaveBeenCalled();
+  });
+
+  it('decouples the mint counter from the user-visible Prompts statistic (R8-F3)', async () => {
+    const { result, mockSendMessageStream: streamMock } = renderTestHook();
+    await act(async () => {
+      await result.current.submitQuery('a user prompt');
+    });
+    await waitFor(() => {
+      expect(streamMock).toHaveBeenCalledWith(
+        'a user prompt',
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({ type: SendMessageType.UserQuery }),
+      );
+    });
+    // A user prompt advances both the mint counter and the user statistic.
+    expect(mockStartNewPrompt).toHaveBeenCalledTimes(1);
+    expect(mockRecordUserPrompt).toHaveBeenCalledTimes(1);
+
+    await waitFor(() => {
+      expect(
+        mockBackgroundShellRegistry.setNotificationCallback,
+      ).toHaveBeenCalledWith(expect.any(Function));
+    });
+    const callback = mockBackgroundShellRegistry.setNotificationCallback.mock
+      .calls[0][0] as (displayText: string, modelText: string) => void;
+    act(() => {
+      callback(
+        'Background shell done.',
+        '<task-notification>done</task-notification>',
+      );
+    });
+    await waitFor(() => {
+      expect(streamMock).toHaveBeenCalledWith(
+        '<task-notification>done</task-notification>',
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({ type: SendMessageType.Notification }),
+      );
+    });
+    // The background Notification advances the mint counter (unique id) but NOT
+    // the user-visible Prompts statistic, so /stats, the feedback threshold and
+    // the tip cadence are not inflated by background turns.
+    expect(mockStartNewPrompt).toHaveBeenCalledTimes(2);
+    expect(mockRecordUserPrompt).toHaveBeenCalledTimes(1);
   });
 
   it('queues background workflow completions for the model loop', async () => {
@@ -14129,6 +14318,40 @@ describe('useLlmStream', () => {
           (item) => item.type === 'gemini' || item.type === 'gemini_content',
         );
 
+    it.each(
+      ['```', '~~~'].flatMap((fence) =>
+        ['\n', '\r\n', '\r\r\n'].map((eol) => ({ fence, eol })),
+      ),
+    )(
+      'commits a closed $fence block before a pending table under $eol line endings',
+      async ({ fence, eol }) => {
+        vi.useFakeTimers();
+        const markdown = await vi.importActual<
+          typeof import('../utils/markdown-utilities.js')
+        >('../utils/markdown-utilities.js');
+        vi.mocked(findLastSafeSplitPoint).mockImplementation(
+          markdown.findLastSafeSplitPoint,
+        );
+        const code = [`${fence}ts`, 'code', `${fence} \t`, '', ''].join(eol);
+        const table = ['| A | B |', '| - | - |', '| 1 | 2 |', '| 3 | 4 |'].join(
+          eol,
+        );
+        // The code fits within eight rows, but the following table does not.
+        const { result } = renderTestHook([], undefined, { current: 13 });
+        const releaseStream = await streamContent(result, code + table);
+
+        try {
+          expect(llmContentItems().map((item) => item.text)).toEqual([code]);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(table);
+        } finally {
+          act(() => result.current.cancelOngoingRequest());
+          await act(async () => {
+            releaseStream();
+          });
+        }
+      },
+    );
+
     it('breaks the commit loop when no safe split point exists (no hang)', async () => {
       vi.useFakeTimers();
       // findLastSafeSplitPoint returning 0 (e.g. content entirely inside an
@@ -25319,6 +25542,36 @@ describe('useLlmStream', () => {
     expect(event.turnCount).toBe(3);
   });
 
+  describe('legacy agent loop round (unified off)', () => {
+    it('still logs the ink loop entry marker on the legacy path', async () => {
+      // The marker is unconditional, one line above the sharedSource ternary;
+      // the legacy arm (the behaviour this slice adds) must log it too, so a
+      // move behind the unified switch is caught here rather than staying green.
+      Object.assign(mockConfig, {
+        isUnifiedAgentLoopEnabled: vi.fn(() => false),
+        isEventBusAgentLoopEnabled: vi.fn(() => false),
+      });
+      mockRunAgentLoop.mockClear();
+      const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'Hello.' };
+        })(),
+      );
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery(
+          'Say hello.',
+          SendMessageType.UserQuery,
+          'prompt-legacy',
+        );
+      });
+      expect(entrySpy).toHaveBeenCalledWith(expect.anything(), 'ink');
+      expect(mockRunAgentLoop).not.toHaveBeenCalled();
+      entrySpy.mockRestore();
+    });
+  });
+
   describe.each([false, true])(
     'shared agent loop round (eventBusAgentLoop=%s)',
     (kernel) => {
@@ -25333,12 +25586,14 @@ describe('useLlmStream', () => {
         },
       });
 
+      let entrySpy: ReturnType<typeof vi.spyOn>;
       beforeEach(() => {
         Object.assign(mockConfig, {
           isUnifiedAgentLoopEnabled: vi.fn(() => true),
           isEventBusAgentLoopEnabled: vi.fn(() => kernel),
         });
         mockRunAgentLoop.mockClear();
+        entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
       });
       // Each round ran as one loop call, on the kernel when it is on, and
       // every loop read that happened names the 'ink' surface.
@@ -25346,6 +25601,9 @@ describe('useLlmStream', () => {
         for (const [options] of mockRunAgentLoop.mock.calls) {
           expect(options).toMatchObject({ maxRounds: 1, useEventBus: kernel });
         }
+        // The ink loop entry marker must be logged for this surface.
+        expect(entrySpy).toHaveBeenCalledWith(expect.anything(), 'ink');
+        entrySpy.mockRestore();
         const runtime = mockConfig as unknown as {
           isUnifiedAgentLoopEnabled: ReturnType<typeof vi.fn>;
           isEventBusAgentLoopEnabled: ReturnType<typeof vi.fn>;

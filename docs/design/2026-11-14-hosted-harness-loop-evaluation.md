@@ -2,7 +2,7 @@
 
 [English](2026-11-14-hosted-harness-loop-evaluation.md) | [简体中文](2026-11-14-hosted-harness-loop-evaluation.zh-CN.md)
 
-- **Status**: evaluation only; no implementation and no setting. It records the parity differences between the Hosted Harness loop and the shared agent loop, and separates the two migration paths: the journaled tool batch must stay, while the model round can move to the shared `runModelRound` as a separate opt-in slice. This is the evaluation of the last surface of the [unified agent loop](2026-10-23-unified-agent-loop.md) program (tracking issue #15327), which that design explicitly left "evaluated separately after the other surfaces". It follows the same doc-only shape as the [streaming tool dispatch evaluation](2026-11-11-streaming-tool-dispatch.md) (#16949). A first review on 2026-11-14 corrected two preconditions — the executor adapter is not a model-round dependency, and the hook isolation already exists — and this version reflects those corrections.
+- **Status**: evaluation; the model-round-only slice it recommends is implemented in #17264 (opt-in `hosted` surface, default off), while the journaled tool batch stays. It records the parity differences between the Hosted Harness loop and the shared agent loop, and separates the two migration paths: the journaled tool batch must stay, while the model round can move to the shared `runModelRound` as a separate opt-in slice. This is the evaluation of the last surface of the [unified agent loop](2026-10-23-unified-agent-loop.md) program (tracking issue #15327), which that design explicitly left "evaluated separately after the other surfaces". It follows the same doc-only shape as the [streaming tool dispatch evaluation](2026-11-11-streaming-tool-dispatch.md) (#16949). A first review on 2026-11-14 corrected two preconditions — the executor adapter is not a model-round dependency, and the hook isolation already exists — and this version reflects those corrections.
 - **Date**: 2026-11-14, review corrections 2026-11-14. Line citations verified on `main` `af312d610143`.
 - **Source of the behavior**: `packages/cli/src/serve/hosted-harness-model.ts` (1,599 lines) and `packages/cli/src/serve/hosted-workspace-tool-turn.ts` (10,908 lines).
 - **Related**:
@@ -65,7 +65,7 @@ It does **not** depend on a durable-executor adapter (the tool batch stays), on 
 
 - The Hosted tool execution is a journaled exactly-once recovery system; the shared in-memory batch cannot replace it without polluting `packages/core` with Hosted-specific durability or weakening the Hosted profile's guarantees. The Hosted Harness therefore does not fully converge onto `runAgentLoop`, and the tool-batch migration stays deferred.
 - The Hosted model round is already the shared `LlmClient` round. Moving it onto `runModelRound` while keeping the outer loop and tool turn is the same shape ACP and speculation already use. It is viable, and it is not gated on an executor adapter or on hook send options. Its real work is the retraction, prepared-recovery and stop-mapping adaptations, plus parity evidence.
-- This PR is the evaluation: it adds no setting, changes no default, and moves no code. The model-round-only implementation and its parity suite are the follow-up slice; the tool-batch migration remains deferred.
+- This document is the evaluation. The model-round-only implementation and its parity suite ship in #17264 (opt-in `hosted` surface, default off); the tool-batch migration remains deferred.
 
 ## Decision points for the follow-up
 

@@ -18,6 +18,9 @@ public enum ManagedSchemaProjection {
     CHANNEL_INSTANCE(
             "tenant_id, channel_id, platform, account_id, account_generation, state, actor_id, "
                     + "workspace_id, cwd_relative, policy_json, gmt_create, gmt_modified"),
+    PR_WATCH_BINDING(
+            "tenant_id, channel_id, binding_id, owner, repo, pr_number, session_id, "
+                    + "events_json, gmt_create"),
     DELIVERY(
             "delivery_key, delivery_kind, tenant_id, channel_id, delivery_id, source_session_id, "
                     + "target_session_id, source_scope_key, source_record_key, source_revision, "
@@ -52,9 +55,7 @@ public enum ManagedSchemaProjection {
                     + "recovery_deadline, verification_request_json, is_verification_ready, "
                     + "verification_next_at, publication_id, publication_command_id, slot_key, "
                     + "execution_key, item_id, policy_version, failure_status, failure_code, gmt_create, "
-                    + "gmt_modified, completed_at, progress_format, progress_version, progress_stage, "
-                    + "settlement_deadline_ms, frozen_request_bytes, frozen_request_sha256, cut_bytes, "
-                    + "cut_sha256, finalize_receipt_bytes, finalize_receipt_sha256, csi_retirement_target_key"),
+                    + "gmt_modified, completed_at"),
     OPERATION_WORK(
             "operation_key, work_kind, target_key, target_id, tenant_id, session_id, "
                     + "storage_key, physical_key, state, revision, payload_version, payload_json, "
@@ -135,7 +136,7 @@ public enum ManagedSchemaProjection {
                     + "session_kind, tenant_key, session_key, session_scope_key, title_revision, "
                     + "preview, preview_revision, "
                     + "retirement_operation_id, retirement_generation, retired_at, is_recovery_protected, "
-                    + "is_resource_gc_completed, runtime_request_key, is_csi_guard, model_id, model_revision, "
+                    + "is_resource_gc_completed, model_id, model_revision, "
                     + "model_config_digest, model_config_key_id, model_config_ciphertext, "
                     + "selected_approval_mode, approval_revision, is_plan_enabled, permission_rules_json, public_child_agents_version, harness_instance_id, "
                     + "harness_owner_boot_id, harness_placement_epoch, harness_placement_state"),
@@ -171,9 +172,8 @@ public enum ManagedSchemaProjection {
             "storage_key, holder_key, binding_id, runtime_generation, runtime_session_id, "
                     + "tenant_id, storage_id, mount_revision, mount_state, mount_operation_id, "
                     + "mount_completed_operation_id, mount_root, mount_host_id, mount_device, mount_inode, "
-                    + "mount_birth_time, mount_registration_id, storage_kind, csi_phase, csi_revision, "
-                    + "csi_reservation_id, csi_registration_key, csi_registration_revision, "
-                    + "csi_provision_request_id, maintenance_id, maintenance_generation, physical_key, "
+                    + "mount_birth_time, mount_registration_id, storage_kind, "
+                    + "maintenance_id, maintenance_generation, physical_key, "
                     + "member_count"),
     TENANT_GUARD(
             "tenant_key, tenant_id, guard_domain"),
@@ -184,7 +184,7 @@ public enum ManagedSchemaProjection {
                     + "execution_state, execution_status, result_json, last_sequence, is_cancel_requested, "
                     + "dispatch_owner, dispatch_lease_until, dispatch_generation, record_version, "
                     + "settled_at, abandoned_at, loss_evidence_id, authorized_dispatch_generation, "
-                    + "authorized_binding_version, native_authorization_json"),
+                    + "authorized_binding_version"),
     TURN(
             "tenant_id, session_id, turn_id, prompt_id, input_json, payload_digest, status, "
                     + "is_submission_attempted, harness_event_epoch, harness_last_event_id, dispatch_owner, "

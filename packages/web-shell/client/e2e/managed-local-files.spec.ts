@@ -299,10 +299,20 @@ test('Managed local files entry connects a directory through the relay peer @smo
     await expect(trigger).toBeVisible();
     await trigger.click();
     await page.getByRole('button', { name: 'Connect a directory…' }).click();
-    await expect(page.getByText('my-dir')).toBeVisible();
+    // Exact match: the trigger's sr-only state description also names the
+    // directory ("Local files — Connected (my-dir)"), so a substring match
+    // resolves to two elements.
+    await expect(page.getByText('my-dir', { exact: true })).toBeVisible();
     await expect(page.getByText('1 tools')).toBeVisible();
     await expect(
       page.getByRole('button', { name: 'Disconnect' }),
+    ).toBeVisible();
+    // Usability: the connected panel names the bound session and offers a
+    // one-step change-directory affordance.
+    const panel = page.locator('[data-web-shell-local-files-panel]');
+    await expect(panel.getByText('Local files task')).toBeVisible();
+    await expect(
+      panel.getByRole('button', { name: 'Change directory…' }),
     ).toBeVisible();
     expect(peer.registered.length).toBeGreaterThanOrEqual(1);
     expect(peer.registered[0]).toMatchObject({ sessionId: 's1' });
