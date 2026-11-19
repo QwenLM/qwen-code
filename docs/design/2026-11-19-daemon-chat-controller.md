@@ -96,8 +96,9 @@ Decisions (approval / question):
   the request (no attempt/option discriminator), so correlation is
   **request-level**: the engine routes the evidence to the request's single active
   (non-terminal) attempt and freezes approval currency **when the evidence
-  arrives**, not when the POST resolves. A late event for an already-terminal
-  attempt is a no-op. The decision target carries only `sessionId`/`requestId` (no
+  arrives**, not when the POST resolves. A late event is a no-op only when the
+  request has no non-terminal attempt; with a live retry the replay limitation
+  below applies. The decision target carries only `sessionId`/`requestId` (no
   per-attempt id), so terminal-row retention still dedupes per request.
   **Replay limitation:** because the event carries no attempt discriminator, a
   replayed delivery from the settlement channel can land on a live retry;

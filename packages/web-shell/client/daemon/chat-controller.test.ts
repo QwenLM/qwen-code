@@ -443,6 +443,8 @@ describe('daemon controller: approvals and questions', () => {
       { questionId: 'q1', value: 'yes' },
     ];
     const pending = h.controller.respondQuestion('q1', answers);
+    // The transport receives the request and the exact answers chosen.
+    expect(h.questionCalls).toEqual([{ requestId: 'q1', answers }]);
     h.resolveQuestion();
     await pending;
     h.emitDecision({ requestId: 'q1', applied: true });
@@ -889,6 +891,20 @@ describe('daemon controller: in-flight and racing correlation', () => {
     await pending;
     h.emitDecision({ requestId: 'r1', applied: true });
     expect(opsOf(h.controller, 'approval')[0]?.state).toBe('established');
+  });
+
+  it('seeds from the live-id list, not pendingApprovals membership', async () => {
+    // A superseded approval stays listed in pendingApprovals until confirmed;
+    // it is not in liveApprovalRequestIds, so it must not be seeded live.
+    const h = harness({
+      liveApprovalRequestIds: [],
+      pendingApprovals: [{ id: 'r2', status: 'superseded' }],
+    });
+    const pending = h.controller.respondApproval('r2', 'allow');
+    h.resolvePermission();
+    await pending;
+    h.emitDecision({ requestId: 'r2', applied: true });
+    expect(opsOf(h.controller, 'approval')[0]?.state).toBe('failed');
   });
 
   it('a decision for one request does not settle another', async () => {
