@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import type * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { setImmediate } from 'node:timers/promises';
 import {
   GitWorktreeService,
   WorktreeDirtyCarryConflictError,
@@ -98,6 +99,25 @@ const rawCalls = (...prefix: string[]) =>
       Array.isArray(call[0]) && prefix.every((arg, i) => call[0][i] === arg),
   );
 
+function holdGitCommand(...prefix: string[]) {
+  let markStarted = () => {};
+  let release = () => {};
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  git.raw.mockImplementation(async (args: string[]) => {
+    if (prefix.every((arg, index) => args[index] === arg)) {
+      markStarted();
+      await held;
+    }
+    return '';
+  });
+  return { started, release };
+}
+
 describe('GitWorktreeService', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -161,6 +181,55 @@ describe('GitWorktreeService', () => {
     await expect(service.isGitRepository()).resolves.toBe(true);
     expect(git.checkIsRepo).toHaveBeenNthCalledWith(1, 'is-repo-root');
     expect(git.checkIsRepo).toHaveBeenNthCalledWith(2);
+  });
+
+  it('cancels a pending branch check before preparing or creating the worktree', async () => {
+    const { started, release } = holdGitCommand('for-each-ref');
+    const service = new GitWorktreeService('/repo');
+    const controller = new AbortController();
+    const creation = service.createUserWorktree('feature', 'main', {
+      signal: controller.signal,
+    });
+
+    try {
+      await started;
+      const reason = 'send-now';
+      controller.abort(reason);
+      await expect(
+        Promise.race([creation, setImmediate('pending')]),
+      ).rejects.toBe(reason);
+
+      release();
+      await setImmediate();
+      expect(hoistedMockFsMkdir).not.toHaveBeenCalled();
+      expect(rawCalls('worktree', 'add')).toHaveLength(0);
+    } finally {
+      release();
+    }
+  });
+
+  it('finishes worktree setup once Git has started the creation', async () => {
+    hoistedMockFsReadFile.mockResolvedValue('/.qwen/worktrees/\n');
+    const { started, release } = holdGitCommand('worktree', 'add');
+    const service = new GitWorktreeService('/repo');
+    const controller = new AbortController();
+    const creation = service.createUserWorktree('feature', 'main', {
+      signal: controller.signal,
+    });
+
+    try {
+      await started;
+      controller.abort('send-now');
+      await expect(
+        Promise.race([creation, setImmediate('pending')]),
+      ).resolves.toBe('pending');
+    } finally {
+      release();
+    }
+    await expect(creation).resolves.toMatchObject({
+      success: true,
+      worktree: { branch: 'worktree-feature' },
+    });
   });
 
   it('initializeRepository should initialize a new repo on main', async () => {

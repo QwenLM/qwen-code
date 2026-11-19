@@ -25,6 +25,7 @@ import { loadSimpleGit } from '../utils/load-simple-git.js';
 import { gitEnv, gitRemoteEnv } from '../utils/git-branches.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { raceWithAbort } from '../utils/race-with-abort.js';
 
 const debugLogger = createDebugLogger('GIT_WORKTREE_SERVICE');
 
@@ -3067,6 +3068,8 @@ export class GitWorktreeService {
     baseBranch?: string,
     options?: {
       symlinkDirectories?: readonly string[];
+      /** Cancel before starting Git creation. Once started, finish setup. */
+      signal?: AbortSignal;
       /** The caller owns the pr-<N> shape (PR-backed startup). */
       prBacked?: boolean;
       /**
@@ -3103,6 +3106,8 @@ export class GitWorktreeService {
       detached?: boolean;
     },
   ): Promise<CreateWorktreeResult> {
+    const signal = options?.signal;
+    signal?.throwIfAborted();
     const validationError = GitWorktreeService.validateUserWorktreeSlug(
       slug,
       options?.prBacked === true ? { allowPrBackedShape: true } : undefined,
@@ -3114,33 +3119,30 @@ export class GitWorktreeService {
       return { success: false, error: validationError };
     }
 
+    let gitAddStarted = false;
     try {
       const worktreesDir = this.getUserWorktreesDir();
-      await fs.mkdir(worktreesDir, { recursive: true });
       const worktreePath = path.join(worktreesDir, slug);
 
-      if (await fileExists(worktreePath)) {
+      if (await raceWithAbort(signal, () => fileExists(worktreePath))) {
         const error = `Worktree already exists at ${worktreePath}`;
         debugLogger.warn(`createUserWorktree: ${error}`);
         return { success: false, error };
       }
 
-      // Keep the worktrees directory and its contents out of the parent
-      // repo's `git status` and any subsequent glob/grep that walks from
-      // the parent root. Only writes when the file is missing — never
-      // touches an existing user-managed `.qwen/.gitignore`.
-      await this.ensureWorktreesGitignored();
-
-      const base = baseBranch || (await this.getCurrentBranch());
+      const base =
+        baseBranch ||
+        (await raceWithAbort(signal, () => this.getCurrentBranch()));
       const detached = options?.detached === true;
       const branchName = detached ? '' : worktreeBranchForSlug(slug);
 
       if (!detached) {
         // Refuse to clobber a pre-existing branch with the same name. Use
-        // `git show-ref --verify --quiet refs/heads/<branch>` (exit 0 →
-        // branch exists). The previous `-B` form would have force-reset
-        // such a branch and silently dropped unmerged commits.
-        const branchExists = await this.localBranchExists(branchName);
+        // `for-each-ref` prints the matching local ref. A forced reset here
+        // could silently drop unmerged commits.
+        const branchExists = await raceWithAbort(signal, () =>
+          this.localBranchExists(branchName),
+        );
         if (branchExists) {
           const error =
             `Cannot create worktree "${slug}": branch ${branchName} already exists. ` +
@@ -3151,9 +3153,16 @@ export class GitWorktreeService {
         }
       }
 
-      await (
-        await this.getGit()
-      ).raw(
+      const git = await raceWithAbort(signal, () => this.getGit());
+      signal?.throwIfAborted();
+      await fs.mkdir(worktreesDir, { recursive: true });
+      signal?.throwIfAborted();
+      // Keep managed checkouts out of the parent repo's status and file walks.
+      await this.ensureWorktreesGitignored();
+      signal?.throwIfAborted();
+
+      gitAddStarted = true;
+      await git.raw(
         detached
           ? ['worktree', 'add', '--detach', worktreePath, base]
           : ['worktree', 'add', '-b', branchName, worktreePath, base],
@@ -3277,6 +3286,7 @@ export class GitWorktreeService {
       };
       return { success: true, worktree, carriedPaths };
     } catch (error) {
+      if (!gitAddStarted) signal?.throwIfAborted();
       const message = `Failed to create worktree "${slug}": ${error instanceof Error ? error.message : 'Unknown error'}`;
       debugLogger.warn(`createUserWorktree: ${message}`);
       return { success: false, error: message };

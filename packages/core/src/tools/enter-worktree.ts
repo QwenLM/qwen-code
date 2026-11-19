@@ -14,6 +14,7 @@ import {
 } from '../services/gitWorktreeService.js';
 import { writeWorktreeSession } from '../services/worktreeSessionService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { raceWithAbort } from '../utils/race-with-abort.js';
 
 const debugLogger = createDebugLogger('ENTER_WORKTREE');
 
@@ -67,7 +68,8 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
       : 'Enter a new worktree';
   }
 
-  async execute(_signal: AbortSignal): Promise<ToolResult> {
+  async execute(signal: AbortSignal): Promise<ToolResult> {
+    signal.throwIfAborted();
     const cwd = this.config.getTargetDir();
 
     // Refuse nested worktree creation. If the caller's cwd is itself
@@ -97,14 +99,16 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
     // would never find them.
     const probe = new GitWorktreeService(cwd);
 
-    const gitCheck = await probe.checkGitAvailable();
+    const gitCheck = await raceWithAbort(signal, () =>
+      probe.checkGitAvailable(),
+    );
     if (!gitCheck.available) {
       const reason = gitCheck.error ?? 'Git is not available.';
       debugLogger.warn(`enter_worktree: ${reason}`);
       return errorResult(reason);
     }
 
-    const isRepo = await probe.isGitRepository();
+    const isRepo = await raceWithAbort(signal, () => probe.isGitRepository());
     if (!isRepo) {
       const reason = `Cannot create a worktree: ${cwd} is not a git repository. Initialize the repo with \`git init\` first.`;
       debugLogger.warn(`enter_worktree: ${reason}`);
@@ -114,7 +118,8 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
     // Resolve to the repo's top-level so worktrees always live under
     // `<repoRoot>/.qwen/worktrees/`, regardless of which subdirectory
     // the user invoked the tool from.
-    const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
+    const projectRoot =
+      (await raceWithAbort(signal, () => probe.getRepoTopLevel())) ?? cwd;
     const service =
       projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
 
@@ -141,8 +146,11 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
     // `main` checked out).
     let baseBranch: string | undefined;
     try {
-      baseBranch = await service.getCurrentBranch();
+      baseBranch = await raceWithAbort(signal, () =>
+        service.getCurrentBranch(),
+      );
     } catch (error) {
+      signal.throwIfAborted();
       debugLogger.warn(
         `enter_worktree: getCurrentBranch failed at ${projectRoot}: ${error}`,
       );
@@ -154,8 +162,11 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
     // "unknown" and skips the commit-count display.
     let originalHeadCommit = '';
     try {
-      originalHeadCommit = await service.getCurrentCommitHash();
+      originalHeadCommit = await raceWithAbort(signal, () =>
+        service.getCurrentCommitHash(),
+      );
     } catch (error) {
+      signal.throwIfAborted();
       debugLogger.warn(
         `enter_worktree: getCurrentCommitHash failed at ${projectRoot}: ${error}`,
       );
@@ -163,6 +174,7 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
 
     const result = await service.createUserWorktree(slug, baseBranch, {
       symlinkDirectories: this.config.getWorktreeSymlinkDirectories(),
+      signal,
     });
     if (!result.success || !result.worktree) {
       const reason = result.error ?? 'Failed to create worktree.';

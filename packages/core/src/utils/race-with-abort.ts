@@ -6,9 +6,10 @@
 
 /** Stop waiting on abort. The operation is responsible for stopping its work. */
 export async function raceWithAbort<T>(
-  signal: AbortSignal,
+  signal: AbortSignal | undefined,
   operation: () => Promise<T>,
 ): Promise<T> {
+  if (!signal) return operation();
   signal.throwIfAborted();
   const result = operation();
 
