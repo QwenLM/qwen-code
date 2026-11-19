@@ -101,7 +101,8 @@ export async function createAndAttachSessionForPrompt({
    */
   onSessionCreated?: (
     sessionId: string,
-    detachedSession?: DaemonSessionClient,
+    detachedSession: DaemonSessionClient | undefined,
+    createdSession: DaemonSessionClient,
   ) => Promise<void> | void;
   onSessionAllocated?: (sessionId: string) => void;
   getCurrentSessionId: () => string | undefined;
@@ -165,9 +166,8 @@ export async function createAndAttachSessionForPrompt({
   onSessionAllocated?.(sessionId);
   // The unbound keepOnNavigation path always returns the created session
   // client; the declared create result type only names its data fields.
-  const detachedSession = navigationOutcome.bound
-    ? undefined
-    : (created as unknown as DaemonSessionClient);
+  const createdSession = created as unknown as DaemonSessionClient;
+  const detachedSession = navigationOutcome.bound ? undefined : createdSession;
   let preparationStep = 'prepare new session';
   try {
     if (onSessionCreated) {
@@ -175,7 +175,7 @@ export async function createAndAttachSessionForPrompt({
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
         await Promise.race([
-          onSessionCreated(sessionId, detachedSession),
+          onSessionCreated(sessionId, detachedSession, createdSession),
           new Promise<never>((_, reject) => {
             timeout = setTimeout(
               () => reject(new Error('onSessionCreated timed out')),
