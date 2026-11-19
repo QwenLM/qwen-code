@@ -563,7 +563,7 @@ export class ManagedGithubAdapter {
         let consequence = '';
         if (!legacy.readable) {
           consequence =
-            ' Its contents could not be read, so any staged-but-unadmitted claims it held are stranded.';
+            ' Its contents could not be read as a ledger, so any staged-but-unadmitted claims it held are stranded.';
         } else {
           if (legacy.pending > 0 && freshWindow)
             consequence +=
@@ -576,17 +576,26 @@ export class ManagedGithubAdapter {
           // ledger can have a cursor yet no baseline for it (the PR was bound
           // only during the rollback window, or the earlier run never finished
           // a watch pass) — there the first observation detects nothing and
-          // only records a baseline, so promising re-detection would page the
-          // operator about work that never arrives. A fresh ledger has no
-          // baseline either, so it takes the dropped arm too.
+          // only records a baseline. Decide PER PR (deferred item 11): a mixed
+          // queue must not read as wholly lost when a baselined subset can
+          // re-derive, and re-detection is conditional on the edge RECURRING —
+          // a baseline already past the edge does not re-fire it, so presence
+          // alone must not promise re-derivation.
           if (legacy.watchPending > 0) {
             const loadedPrs: Record<string, unknown> = loaded?.watch?.prs ?? {};
-            const reDerivable = legacy.watchPendingKeys.every(
+            const baselined = legacy.watchPendingKeys.filter(
               (key) => loadedPrs[key] !== undefined,
-            );
-            consequence += reDerivable
-              ? ' Its queued PR-watch transitions were not adopted; this ledger re-detects them against its own baseline, so one may be re-derived.'
-              : ' Its queued PR-watch transitions were dropped; there is no baseline to re-detect them against, so they are neither replayed nor re-derived.';
+            ).length;
+            const unbaselined = legacy.watchPendingKeys.length - baselined;
+            if (baselined === 0) {
+              consequence +=
+                ' Its queued PR-watch transitions were dropped; there is no baseline to re-detect them against, so they are neither replayed nor re-derived.';
+            } else if (unbaselined === 0) {
+              consequence +=
+                ' Its queued PR-watch transitions were not adopted; this ledger holds their baselines, so one may be re-derived if its edge recurs.';
+            } else {
+              consequence += ` Its queued PR-watch transitions were not adopted; ${baselined} may be re-derived against a loaded baseline if their edge recurs, and ${unbaselined} are dropped with no baseline to re-detect against.`;
+            }
           }
           if (legacy.outbound > 0)
             consequence +=
@@ -618,7 +627,16 @@ export class ManagedGithubAdapter {
       // survive the first start's archive of the legacy and a roll-forward over
       // an existing keyed ledger. watch.prs re-baselines silently; the queued
       // transitions are NOT adopted (cross-ownership replay).
-      const entryEpisodes = this.store.entryWatchEpisodes();
+      const { episodes: entryEpisodes, skipped } =
+        this.store.entryWatchEpisodes();
+      // A counter source that could not be read is skipped, not silently
+      // dropped: name it so the operator knows the carry may be incomplete
+      // (deferred item 8).
+      for (const filePath of skipped) {
+        this.log(
+          `Managed GitHub could not read the episode-counter source ${filePath}; its counters are not carried this start.`,
+        );
+      }
       if (entryEpisodes) {
         const watch = this.state.watch ?? { prs: {} };
         const merged: Record<string, number> = { ...(watch.episodes ?? {}) };

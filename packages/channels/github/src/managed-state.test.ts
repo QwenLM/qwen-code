@@ -732,10 +732,11 @@ describe('ManagedGithubStateStore', () => {
 
   it.each([
     ['{not json', false],
-    ['null', true],
-    ['[]', true],
+    ['null', false],
+    ['[]', false],
+    ['{}', false],
   ])(
-    'a corrupt legacy ledger (%s) reports zero counts instead of throwing',
+    'a corrupt or non-ledger legacy (%s) is flagged unreadable, not a loss-free empty',
     (raw, readable) => {
       const store = new ManagedGithubStateStore(
         'gh-corrupt',
@@ -749,6 +750,9 @@ describe('ManagedGithubStateStore', () => {
       expect(stranded).toBeDefined();
       expect(stranded!.pending).toBe(0);
       expect(stranded!.outbound).toBe(0);
+      // A parseable non-ledger (null/[]/{}) is not a quiescent empty ledger:
+      // its claims are unknown, so it must not render as a loss-free 0/0
+      // (deferred item 7).
       expect(stranded!.readable).toBe(readable);
     },
   );
@@ -829,13 +833,16 @@ describe('ManagedGithubStateStore', () => {
       }),
     );
     // Only safe integers >= 1 are carried; the rest re-baseline (R2-2).
-    expect(store.entryWatchEpisodes()).toEqual({ 'owner/repo#7': 5 });
+    expect(store.entryWatchEpisodes().episodes).toEqual({ 'owner/repo#7': 5 });
+    expect(store.entryWatchEpisodes().skipped).toEqual([]);
     // A legacy without watch carries no episodes.
     writeFileSync(legacyPath, JSON.stringify(freshState()));
-    expect(store.entryWatchEpisodes()).toBeUndefined();
-    // An unreadable legacy carries no episodes.
+    expect(store.entryWatchEpisodes().episodes).toBeUndefined();
+    // An unreadable legacy carries no episodes, and its name is surfaced in
+    // skipped so the caller can log the lost counter source (deferred item 8).
     writeFileSync(legacyPath, '{not json');
-    expect(store.entryWatchEpisodes()).toBeUndefined();
+    expect(store.entryWatchEpisodes().episodes).toBeUndefined();
+    expect(store.entryWatchEpisodes().skipped).toEqual([legacyPath]);
     // No directory at all is best-effort undefined, never a throw.
     const absent = new ManagedGithubStateStore(
       'gh-episodes-absent',
@@ -843,7 +850,8 @@ describe('ManagedGithubStateStore', () => {
       'https://api.github.com',
       'cp|tenant-a|chan-1|actor|ws|.',
     );
-    expect(absent.entryWatchEpisodes()).toBeUndefined();
+    expect(absent.entryWatchEpisodes().episodes).toBeUndefined();
+    expect(absent.entryWatchEpisodes().skipped).toEqual([]);
   });
 
   it('resumes the episode counters from the archive after the legacy is renamed away (R3-1)', () => {
@@ -861,13 +869,13 @@ describe('ManagedGithubStateStore', () => {
         watch: { prs: {}, episodes: { 'owner/repo#7': 5 } },
       }),
     );
-    expect(store.entryWatchEpisodes()).toEqual({ 'owner/repo#7': 5 });
+    expect(store.entryWatchEpisodes().episodes).toEqual({ 'owner/repo#7': 5 });
     // Registration A archives the legacy; a later registration B must still
     // resume the counters from the .stranded-* archive, not restart at 0.
     const archived = store.archiveStrandedLegacy();
     expect(archived).toBeDefined();
     expect(existsSync(join(store.directory, 'managed-state.json'))).toBe(false);
-    expect(store.entryWatchEpisodes()).toEqual({ 'owner/repo#7': 5 });
+    expect(store.entryWatchEpisodes().episodes).toEqual({ 'owner/repo#7': 5 });
   });
 
   it('merges episode counters Math.max across sibling registrations of one entry (R3-1)', () => {
@@ -901,8 +909,8 @@ describe('ManagedGithubStateStore', () => {
       'owner/repo#8': 2,
       'owner/repo#9': 9,
     };
-    expect(a.entryWatchEpisodes()).toEqual(expected);
-    expect(b.entryWatchEpisodes()).toEqual(expected);
+    expect(a.entryWatchEpisodes().episodes).toEqual(expected);
+    expect(b.entryWatchEpisodes().episodes).toEqual(expected);
   });
 
   it('re-caps the merged episode counters so the state stays loadable (R3-1)', () => {
@@ -921,7 +929,7 @@ describe('ManagedGithubStateStore', () => {
       join(store.directory, 'managed-state.json'),
       JSON.stringify({ ...freshState(), watch: { prs: {}, episodes } }),
     );
-    const merged = store.entryWatchEpisodes()!;
+    const merged = store.entryWatchEpisodes().episodes!;
     expect(Object.keys(merged).length).toBeLessThanOrEqual(
       MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT,
     );
@@ -993,6 +1001,39 @@ describe('ManagedGithubStateStore', () => {
     writeFileSync(legacyPath, JSON.stringify(freshState()));
     expect(store.strandedLegacyLedger()!.watchPending).toBe(0);
     expect(store.strandedLegacyLedger()!.watchPendingKeys).toEqual([]);
+  });
+
+  it('counts only un-receipted outbound segments as an unknown-status loss (deferred item 9)', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-outbound-receipt',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    writeFileSync(
+      join(store.directory, 'managed-state.json'),
+      JSON.stringify({
+        ...freshState(),
+        outbound: [
+          { deliveryId: 'd-0', ordinal: 0 },
+          {
+            deliveryId: 'd-1',
+            ordinal: 0,
+            receipt: {
+              outcome: 'accepted',
+              ordinal: 0,
+              providerMessageId: '9001',
+              acceptedAt: 1,
+            },
+          },
+          { deliveryId: 'd-2', ordinal: 1 },
+        ],
+      }),
+    );
+    // The receipted segment's delivery outcome is known, so it must not
+    // inflate the "un-receipted outbound ... status is unknown" loss count.
+    expect(store.strandedLegacyLedger()!.outbound).toBe(2);
   });
 
   it('a failed archive rename leaves the legacy reported, never throws', () => {

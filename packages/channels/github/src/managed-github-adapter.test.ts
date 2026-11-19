@@ -3046,6 +3046,94 @@ describe('managed GitHub adapter registration-identity isolation', () => {
     await second.adapter.disconnect();
   });
 
+  it('a mixed stranded queue names the baselined and unbaselined subsets separately (deferred item 11)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await first.adapter.connect();
+    // The loaded ledger holds a baseline for #9 only, not #8.
+    seedState(first.adapter, (s) => {
+      s.cursor.lastProcessedAt = '2026-11-19T08:00:00Z';
+      s.watch = {
+        prs: { 'owner/repo#9': { headSha: 'sha-a', mergeableState: 'clean' } },
+      };
+    });
+    await first.adapter.disconnect();
+    const queuedFor = (pr: number, sha: string) => ({
+      key: `prw:merge_conflict:owner/repo#${pr}:1:1`,
+      episode: 1,
+      owner: 'owner',
+      repo: 'repo',
+      prNumber: pr,
+      transition: 'merge_conflict',
+      headSha: sha,
+      evidence: 'Merge conflicts',
+      detectedAt: '2026-11-19T09:00:00Z',
+    });
+    seedLegacy(dirname(first.adapter.stateFile), {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: {
+        prs: {
+          'owner/repo#9': {
+            headSha: 'sha-a',
+            pending: [queuedFor(9, 'sha-a')],
+          },
+          'owner/repo#8': {
+            headSha: 'sha-b',
+            pending: [queuedFor(8, 'sha-b')],
+          },
+        },
+      },
+    });
+    lines.length = 0;
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await second.adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('2 pending');
+    // Mixed: the baselined subset may re-derive if its edge recurs; the
+    // unbaselined subset is dropped. Neither "wholly lost" nor a blanket
+    // re-detection promise.
+    expect(stranded[0]).toContain('1 may be re-derived');
+    expect(stranded[0]).toContain('1 are dropped');
+    await second.adapter.disconnect();
+  });
+
+  it('logs an unreadable episode-counter source rather than dropping it silently (deferred item 8)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    // A corrupt sibling ledger matching the state-file pattern: its counters
+    // cannot be carried, and the operator must be told which source was lost.
+    writeFileSync(
+      join(dir, 'managed-state-0123456789abcdef.json'),
+      '{not json',
+    );
+    await adapter.connect();
+    expect(
+      lines.some(
+        (l) =>
+          l.includes('could not read the episode-counter source') &&
+          l.includes('managed-state-0123456789abcdef.json'),
+      ),
+    ).toBe(true);
+    await adapter.disconnect();
+  });
+
   it('a legacy with queued PR-watch transitions names that count, not a quiescent 0 pending (R3-1)', async () => {
     const cwd = tempCwd();
     const lines: string[] = [];

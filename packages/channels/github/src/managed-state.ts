@@ -413,10 +413,35 @@ export class ManagedGithubStateStore {
         cursor?: { lastProcessedAt?: unknown };
         watch?: { prs?: unknown };
       } | null;
+      // A parseable non-ledger (`{}`, `[]`, `null`, or an object without the
+      // ledger's pending/outbound arrays) is not a quiescent empty ledger: it
+      // is an unrecognized file whose claims are unknown. Flag it unreadable so
+      // the notice reports a possible loss, never a loss-free "0 pending / 0
+      // outbound" all-clear (deferred item 7).
+      const isLedgerShape =
+        !!value &&
+        typeof value === 'object' &&
+        !Array.isArray(value) &&
+        Array.isArray(value.pending) &&
+        Array.isArray(value.outbound);
+      if (!isLedgerShape) readable = false;
       const pendingList = value?.pending;
       const outboundList = value?.outbound;
       pending = Array.isArray(pendingList) ? pendingList.length : 0;
-      outbound = Array.isArray(outboundList) ? outboundList.length : 0;
+      // Only un-receipted segments are an unknown-status loss: a segment that
+      // already carries a persisted receipt has a known delivery outcome, so it
+      // must not inflate the "un-receipted outbound ... status is unknown"
+      // clause (deferred item 9).
+      outbound = Array.isArray(outboundList)
+        ? outboundList.filter(
+            (segment) =>
+              !(
+                segment &&
+                typeof segment === 'object' &&
+                (segment as { receipt?: unknown }).receipt
+              ),
+          ).length
+        : 0;
       // The legacy notification watermark: the fresh ledger's null cursor
       // restarts the poll window at connect time, so unread notifications
       // updated after this watermark while the bot was down are never listed.
@@ -474,14 +499,20 @@ export class ManagedGithubStateStore {
    * validator's bound (safe integers >= 1, capped at
    * MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT) so the merged state passes the next
    * load(). Best-effort: an unreadable or corrupt sibling is skipped, never a
-   * startup failure. Returns undefined when no ledger carries counters.
+   * startup failure, but its name is returned in `skipped` so the caller can
+   * log that a counter source was unreadable rather than dropping it silently
+   * (deferred item 8). `episodes` is undefined when no ledger carries counters.
    */
-  entryWatchEpisodes(): Record<string, number> | undefined {
+  entryWatchEpisodes(): {
+    episodes: Record<string, number> | undefined;
+    skipped: string[];
+  } {
+    const skipped: string[] = [];
     let names: string[];
     try {
       names = readdirSync(this.directory);
     } catch {
-      return undefined;
+      return { episodes: undefined, skipped };
     }
     const merged: Record<string, number> = {};
     for (const name of names) {
@@ -490,10 +521,12 @@ export class ManagedGithubStateStore {
       if (!/^managed-state(-[0-9a-f]{16})?\.json(\.stranded-.+)?$/.test(name)) {
         continue;
       }
+      const filePath = join(this.directory, name);
       let value: unknown;
       try {
-        value = JSON.parse(readFileSync(join(this.directory, name), 'utf8'));
+        value = JSON.parse(readFileSync(filePath, 'utf8'));
       } catch {
+        skipped.push(filePath);
         continue;
       }
       const raw = (value as { watch?: { episodes?: unknown } } | null)?.watch
@@ -506,20 +539,26 @@ export class ManagedGithubStateStore {
       }
     }
     const keys = Object.keys(merged);
-    if (keys.length === 0) return undefined;
+    if (keys.length === 0) return { episodes: undefined, skipped };
     // Re-cap to the validator's bound by evicting the OLDEST keys — the head of
     // insertion order — keeping the tail, the same direction as the live
     // watermark eviction (observePr deletes episodes[keys[i]] for i < len-cap).
     // Keeping the head instead would drop the most recently merged counters
     // first, so a counter only a late-walked legacy/archive holds would be the
     // one lost at the bound — the silent dedupe this carry exists to prevent.
+    // At the bound something must be dropped; this is a bounded, RECOVERABLE
+    // tradeoff (deferred item 10): an evicted counter still lives in its source
+    // file (keyed ledger or archive) and is re-merged on the next start, and
+    // observePr seeds a recurrence from the prs entry's own episode when the
+    // watermark is absent, so a surviving baseline still resumes the counter.
+    // Any loss is bounded to the cap-overflow edge, not a silent restart at 0.
     const capped: Record<string, number> = {};
     for (const key of keys.slice(
       Math.max(0, keys.length - MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT),
     )) {
       capped[key] = merged[key]!;
     }
-    return capped;
+    return { episodes: capped, skipped };
   }
 
   /**
