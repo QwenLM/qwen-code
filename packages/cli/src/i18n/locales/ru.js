@@ -2725,6 +2725,10 @@ export default {
     'URL страниц YouTube нельзя отправить как нативный видеоввод. Скачайте видео в рабочую область и передайте локальный путь к файлу в /learn.',
   'The local video could not be attached for /learn.':
     'Не удалось прикрепить локальное видео для /learn.',
+  'Tool Mode (Experimental)': 'Режим инструментов (экспериментально)',
+  Default: 'По умолчанию',
+  'Code Mode': 'Режим кода',
+  'Code Mode Only': 'Только режим кода',
   'Code Mode Only (Experimental)': 'Только режим кода (экспериментально)',
   'Mods (Experimental)': 'Mods (экспериментально)',
   'Enable experimental Mods from enabled extensions in trusted local terminal, headless and ACP sessions. Restart required.':
@@ -2955,6 +2959,19 @@ export default {
     'Текущая голосовая модель: {{voiceModel}}\nИспользуйте «/model --voice <model-id>», чтобы задать голосовую модель.',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     'Текущая модель зрения: {{visionModel}}\nИспользуйте «/model --vision <model-id>», чтобы задать модель визуального моста.',
+  'Set the vision bridge timeout in seconds (use with --vision)':
+    'Задайте таймаут визуального моста в секундах (используйте с --vision)',
+  '--timeout can only be used with --vision.':
+    '--timeout можно использовать только с --vision.',
+  'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.':
+    'Недопустимое значение --timeout «{{value}}». Укажите положительное целое число секунд, например 60, 60s или 90000ms.',
+  'Vision bridge timeout: {{timeout}}':
+    'Таймаут визуального моста: {{timeout}}',
+  'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.':
+    'Таймаут визуального моста {{timeout}}{{scope}} сохранён. Настройка с более высоким приоритетом оставляет действующий таймаут равным {{effectiveTimeout}}.',
+  'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.':
+    'Таймаут визуального моста: {{timeout}}\nИспользуйте «/model --vision --timeout <секунды>», чтобы изменить его.',
+  '{{timeout}} (default)': '{{timeout}} (по умолчанию)',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     'Текущая модель изображений: {{imageModel}}\nИспользуйте «/model --image <model-id>», чтобы задать модель генерации изображений.',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":

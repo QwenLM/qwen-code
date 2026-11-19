@@ -715,6 +715,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.fastModel': 'Быстрая модель',
   'settings.description.fastModel':
     'Модель для подсказок ввода и спекулятивного исполнения. Оставьте пустым, чтобы использовать основную. Более маленькая/быстрая модель (например qwen3-coder-flash) снижает задержку и стоимость.',
+  'settings.label.visionBridgeTimeoutMs': 'Таймаут визуального моста (мс)',
+  'settings.description.visionBridgeTimeoutMs':
+    'Таймаут одной попытки вызова транскрипции изображения визуальным мостом в миллисекундах (положительное целое до 2147483647). Если не задано, используется встроенный 30 с. Увеличьте для медленных или проксируемых визуальных эндпоинтов. Также задаётся через /model --vision --timeout <секунды>.',
   'settings.label.modelFallbacks': 'Резервные модели',
   'settings.description.modelFallbacks':
     'Список ID резервных моделей (через запятую, до 3), которые пробуются по порядку при ошибках ёмкости основной (429/503/529). Например «qwen-plus,qwen-turbo». Можно задать CLI --fallback-model.',
@@ -769,9 +772,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.tools.listDirectory.enabled': 'Включить ListDirectory',
   'settings.description.tools.listDirectory.enabled':
     'Включить встроенный инструмент list_directory. По умолчанию выключен; включается автоматически, если явно в белом списке coreTools (--core-tools / tools.core).',
-  'settings.label.tools.codeModeOnly': 'Только режим кода (экспериментально)',
-  'settings.description.tools.codeModeOnly':
-    'Обычные инструменты доступны модели только через изолированный exec JavaScript. Инструменты прямого управления остаются. Игнорируется в режимах safe и bare.',
+  'settings.label.tools.mode': 'Режим инструментов (экспериментально)',
+  'settings.description.tools.mode':
+    'Выбирает, как инструменты предоставляются модели. Direct использует обычные вызовы инструментов; Code Mode дополнительно предоставляет изолированный инструмент exec JavaScript; Code Mode Only предоставляет обычные инструменты только через exec. Режимы safe и bare всегда используют Direct. При выполнении в контейнере Code Mode предупреждает и использует прямые инструменты, а Code Mode Only отклоняется. Рабочие области SSH предупреждают и используют Direct для обоих режимов кода. Code Mode Only обнаруживает отложенные схемы через tool_search верхнего уровня и вызывает их через exec; пропускает предзагрузку по бюджету и стартовые каталоги инструментов. tools.eager сокращает начальное описание exec; если поиск недоступен в текущей области, exec включает все разрешённые сигнатуры. В режиме Hybrid AgentCore не включает инструменты, всё ещё скрытые tools.eager, во вложенные привязки; белые списки агентов без exec сужают вложенные привязки. Наследование или явная выдача exec сохраняет все иначе допущенные обычные привязки инструментов, вызываемых в режиме кода. Белый список выполнения, упоминающий любой инструмент MCP, дополнительно ограничивает привязки MCP точными именами или шаблонами серверов.',
   'settings.label.tools.todoWrite.enabled': 'Включить Todo Write',
   'settings.description.tools.todoWrite.enabled':
     'Включить встроенный инструмент todo_write и его подсказку в системном промпте.',
@@ -834,6 +837,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
     'Включить сотрудничество агентов',
   'settings.description.experimental.agentCollaboration':
     'Включить сотрудничество устойчивых агентов рабочей области в общих потоках задач (экспериментально). Независимо от Agent Team: ни один переключатель не подразумевает другой. Включение только разрешает сотрудничество; открытие агента внешним вызывающим, доверие к соединению и регистрация host по-прежнему требуют явной настройки. Также включается QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.',
+  'settings.label.experimental.mods': 'Mods (экспериментально)',
+  'settings.description.experimental.mods':
+    'Включает экспериментальные Mods из включённых расширений в доверенном локальном терминале, сессиях без интерфейса и ACP. Требуется перезапуск.',
   'settings.label.experimental.unifiedAgentLoop': 'Единый Agent Loop',
   'settings.description.experimental.unifiedAgentLoop':
     'Запускать сессии на общем agent loop. Если не задано, у каждого входа своё умолчание: headless (`-p` и stream-json), Ink TUI и субагенты идут на общем loop, ACP (Zed, VS Code, Web Shell, channel), OpenTUI и Hosted Harness — на своих (для этих входов это экспериментально). `true` переводит всех на общий loop (раунд модели Hosted Harness тоже на нём, с сохранением journal-диспетчеризации инструментов), `false` — всех на свои loop, включая headless, Ink TUI и субагентов. QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP перекрывает по входам: `1` включает все, `0` выключает все, список через запятую (например `headless,acp=0`) принуждает названные входы (headless, acp, ink, opentui, agent-core, speculation, hosted). Голые `1`/`0` распознаются только как целое значение, не внутри списка; неназванные входы откатываются к этой настройке. Проектные `.env` и `settings.env` переменную задать не могут.',
