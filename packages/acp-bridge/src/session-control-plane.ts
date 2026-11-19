@@ -12137,6 +12137,9 @@ export function createSessionControlPlane(
                 // Resolving attachments can yield; a quarantine that began
                 // meanwhile still refuses the prompt before it is sent.
                 assertChannelAdmitsPrompts(entry);
+                if (isPromotedMidTurn && pendingEntry.removed) {
+                  throw new DOMException('Prompt aborted', 'AbortError');
+                }
                 dispatchSignal?.throwIfAborted();
                 context?.assertCanDispatch?.();
                 entry.events.setEventDetailMode(eventDetailMode);
@@ -15992,9 +15995,20 @@ export function createSessionControlPlane(
       if (!holdsUserInput()) {
         return { requested: false };
       }
+      const turnOwner = () =>
+        entry.activePromptId ??
+        entry.goalTurnId ??
+        entry.backgroundTurn?.turnId;
+      const owner = turnOwner();
       const request = () => {
         // A drain answered meanwhile may have taken the messages.
-        if (!holdsUserInput() || byId.get(sessionId) !== entry) return;
+        if (
+          !holdsUserInput() ||
+          byId.get(sessionId) !== entry ||
+          turnOwner() !== owner
+        ) {
+          return;
+        }
         // Best-effort: an agent without the method still drains the queue at
         // its next tool boundary.
         void entry.connection
@@ -16011,6 +16025,7 @@ export function createSessionControlPlane(
       if ((entry.midTurnDrainsAnswering ?? 0) > 0) {
         entry.sendNowAfterDrains = request;
       } else {
+        delete entry.sendNowAfterDrains;
         request();
       }
       return { requested: true };

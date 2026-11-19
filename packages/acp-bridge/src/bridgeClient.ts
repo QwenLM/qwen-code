@@ -40,6 +40,7 @@ import {
   ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
   ACTIVE_WORK_NOTIFICATION_METHOD,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
+  MID_TURN_GOAL_HANDOFF_METHOD,
   MID_TURN_RECONCILIATION_RING_SIZE,
   MID_TURN_QUEUE_DRAIN_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
@@ -749,6 +750,8 @@ export interface BridgeClientSessionEntry {
   sendNowAfterDrains?: () => void;
   /** Complete prompts waiting behind the currently running prompt. */
   pendingPromptList: PendingPromptEntry[];
+  /** Tail of the session's prompt FIFO, including prompts not yet dispatched. */
+  promptQueue?: Promise<void>;
   /**
    * True while a child-driven Goal turn is running. Set by the
    * `_qwencode/start_turn` notification and cleared by the matching
@@ -1743,6 +1746,21 @@ export class BridgeClient implements Client {
     if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
       return this.handleTodoStopGuardContinuationClaim(params);
     }
+    if (method === MID_TURN_GOAL_HANDOFF_METHOD) {
+      const sessionId = params['sessionId'];
+      const entry =
+        typeof sessionId === 'string' && this.ownsSession(sessionId)
+          ? this.resolveEntry(sessionId)
+          : undefined;
+      if (entry) {
+        // An interrupted RPC prompt may still be settling. Its terminal
+        // path can append the promoted user input to the FIFO.
+        const current = entry.promptQueue;
+        await current;
+        if (entry.promptQueue !== current) await entry.promptQueue;
+      }
+      return {};
+    }
     if (method !== MID_TURN_QUEUE_DRAIN_METHOD) {
       throw RequestError.methodNotFound(method);
     }
@@ -1785,9 +1803,17 @@ export class BridgeClient implements Client {
       entry.midTurnDrainsAnswering = (entry.midTurnDrainsAnswering ?? 1) - 1;
       const sendNow = entry.sendNowAfterDrains;
       if (entry.midTurnDrainsAnswering > 0 || !sendNow) return;
-      entry.sendNowAfterDrains = undefined;
-      // After the answer is written, not ahead of it.
-      setImmediate(sendNow);
+      // Keep the request revocable until the drain answer is written.
+      setImmediate(() => {
+        if (
+          entry.sendNowAfterDrains !== sendNow ||
+          (entry.midTurnDrainsAnswering ?? 0) > 0
+        ) {
+          return;
+        }
+        delete entry.sendNowAfterDrains;
+        sendNow();
+      });
     };
     // A send-now drain takes only the user's own messages: queue-only steering
     // keeps its tool-boundary delivery and the settle path its caller drives.

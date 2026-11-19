@@ -1711,6 +1711,9 @@ export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
  */
 export const MID_TURN_SEND_NOW_METHOD = 'craft/midTurnSendNow';
 
+/** Child-to-host wait for the prompt FIFO to settle after a Send now handoff. */
+export const MID_TURN_GOAL_HANDOFF_METHOD = 'craft/waitForGoalHandoff';
+
 /**
  * Cap on each per-session mid-turn reconciliation ring.
  */

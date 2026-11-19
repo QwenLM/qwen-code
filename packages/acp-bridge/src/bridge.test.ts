@@ -21,6 +21,7 @@ import {
 } from '@agentclientprotocol/sdk';
 import type {
   Agent,
+  ContentBlock,
   InitializeResponse,
   LoadSessionResponse,
   NewSessionResponse,
@@ -158,6 +159,7 @@ import { MultiClientPermissionMediator } from './permissionMediator.js';
 import {
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
+  MID_TURN_GOAL_HANDOFF_METHOD,
   MID_TURN_SEND_NOW_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
   MID_TURN_RECONCILIATION_RING_SIZE,
@@ -41930,6 +41932,173 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       resolveSpy.mockRestore();
       firstTurn.resolve();
       secondTurn.resolve();
+      await bridge.shutdown();
+    }
+  });
+
+  it('drops a scheduled send-now callback after the old turn ends', async () => {
+    const first = deferred<void>();
+    const second = deferred<void>();
+    const secondStarted = deferred<void>();
+    const handle = makeChannel({
+      promptImpl: async (req) => {
+        if ((req.prompt[0] as { text?: string }).text === 'work') {
+          await first.promise;
+        } else {
+          secondStarted.resolve();
+          await second.promise;
+        }
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const { sessionId, clientId } = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+    });
+    const client = { clientId };
+    const turn = bridge.sendPrompt(sessionId, {
+      sessionId,
+      prompt: [{ type: 'text', text: 'work' }],
+    });
+    const gate = deferred<ContentBlock[]>();
+    const resolveContent = vi.spyOn(
+      SessionAttachmentStore.prototype,
+      'resolveContent',
+    );
+    try {
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      resolveContent.mockClear();
+      resolveContent.mockReturnValueOnce(gate.promise);
+      bridge.enqueueMidTurnMessage(sessionId, 'first', client, 'm1');
+      const drain = handle.agentConnection.extMethod(
+        MID_TURN_QUEUE_DRAIN_METHOD,
+        { sessionId },
+      );
+      await vi.waitFor(() => expect(resolveContent).toHaveBeenCalledOnce());
+      bridge.enqueueMidTurnMessage(sessionId, 'second', client, 'm2');
+      expect(bridge.sendMidTurnMessagesNow(sessionId, client)).toEqual({
+        requested: true,
+      });
+      gate.resolve([]);
+      await drain;
+      // The answer scheduled the callback. Settle and start the next turn
+      // before setImmediate can forward it.
+      first.resolve();
+      await turn;
+      await secondStarted.promise;
+      bridge.enqueueMidTurnMessage(sessionId, 'unrelated input', client, 'm3');
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(
+        handle.agent.extMethodCalls.filter(
+          ({ method }) => method === MID_TURN_SEND_NOW_METHOD,
+        ),
+      ).toEqual([]);
+      await handle.agentConnection.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
+        sessionId,
+      });
+      second.resolve();
+      await vi.waitFor(() =>
+        expect(bridge.getPendingPrompts(sessionId)).toEqual([]),
+      );
+    } finally {
+      resolveContent.mockRestore();
+      gate.resolve([]);
+      first.resolve();
+      second.resolve();
+      await bridge.shutdown();
+    }
+  });
+
+  it('waits for the prompt promoted after a Goal handoff RPC starts', async () => {
+    const first = deferred<void>();
+    const promoted = deferred<void>();
+    const promotedStarted = deferred<void>();
+    const handle = makeChannel({
+      promptImpl: async (req) => {
+        if ((req.prompt[0] as { text?: string }).text === 'work') {
+          await first.promise;
+        } else {
+          promotedStarted.resolve();
+          await promoted.promise;
+        }
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const { sessionId, clientId } = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+      });
+      const turn = bridge.sendPrompt(sessionId, {
+        sessionId,
+        prompt: [{ type: 'text', text: 'work' }],
+      });
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      bridge.enqueueMidTurnMessage(sessionId, 'correction', { clientId }, 'm1');
+      const settled = vi.fn();
+      const wait = handle.agentConnection
+        .extMethod(MID_TURN_GOAL_HANDOFF_METHOD, { sessionId })
+        .then(settled);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      first.resolve();
+      await turn;
+      await promotedStarted.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(settled).not.toHaveBeenCalled();
+      promoted.resolve();
+      await wait;
+      expect(settled).toHaveBeenCalledOnce();
+    } finally {
+      first.resolve();
+      promoted.resolve();
+      await bridge.shutdown();
+    }
+  });
+
+  it('settles a Goal handoff withdrawn during attachment resolution', async () => {
+    const reading = deferred<void>();
+    const attachments = deferred<ContentBlock[]>();
+    const handle = makeChannel();
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const resolveContent = vi.spyOn(
+      SessionAttachmentStore.prototype,
+      'resolveContent',
+    );
+    try {
+      const { sessionId, clientId } = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+      });
+      await handle.agentConnection.extNotification('_qwencode/start_turn', {
+        sessionId,
+        source: 'goal',
+      });
+      bridge.enqueueMidTurnMessage(sessionId, 'correction', { clientId }, 'm1');
+      resolveContent.mockImplementationOnce(() => {
+        reading.resolve();
+        return attachments.promise;
+      });
+      await handle.agentConnection.extNotification('_qwencode/end_turn', {
+        sessionId,
+        source: 'goal',
+        reason: 'cancelled',
+        promptId: `${sessionId}########1`,
+      });
+      await reading.promise;
+      const wait = handle.agentConnection.extMethod(
+        MID_TURN_GOAL_HANDOFF_METHOD,
+        { sessionId },
+      );
+      expect(
+        bridge.removeMidTurnMessage(sessionId, 'm1', { clientId }),
+      ).toEqual({
+        removed: true,
+      });
+      attachments.resolve([{ type: 'text', text: 'correction' }]);
+      await wait;
+      expect(handle.agent.promptCalls).toEqual([]);
+    } finally {
+      resolveContent.mockRestore();
+      attachments.resolve([]);
       await bridge.shutdown();
     }
   });

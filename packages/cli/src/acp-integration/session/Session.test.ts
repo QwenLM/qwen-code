@@ -104,6 +104,7 @@ import {
   DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
   DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
+  MID_TURN_GOAL_HANDOFF_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { EventBus } from '@qwen-code/acp-bridge/eventBus';
 import {
@@ -34166,12 +34167,21 @@ describe('Session', () => {
               updatedAt: 1234,
             },
           });
+          const nextPermit = { ...permit, turnId: 'next-goal-turn' };
           mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
-            turnKey === 'goal-runtime:turn-send-now' ? permit : undefined,
+            [permit, nextPermit].find(
+              ({ turnId }) => turnKey === `goal-runtime:${turnId}`,
+            ),
           );
-          mockClient.extMethod = vi
-            .fn()
-            .mockResolvedValue({ messages: ['use plan B instead'] });
+          let finishHandoff!: (result: Record<string, unknown>) => void;
+          const handoff = new Promise<Record<string, unknown>>((resolve) => {
+            finishHandoff = resolve;
+          });
+          mockClient.extMethod = vi.fn((method) =>
+            method === MID_TURN_GOAL_HANDOFF_METHOD
+              ? handoff
+              : Promise.resolve({ messages: [] }),
+          );
           const execute = vi.fn();
           mockToolRegistry.getTool.mockReturnValue(
             readFileTool(execute, 'ask'),
@@ -34184,7 +34194,8 @@ describe('Session', () => {
           );
           mockChat.sendMessageStream = vi
             .fn()
-            .mockResolvedValueOnce(createStreamWithChunks([readFileCall]));
+            .mockResolvedValueOnce(createStreamWithChunks([readFileCall]))
+            .mockResolvedValue(createEmptyStream());
 
           await boundGoalHost!.startGoalTurn({
             permit,
@@ -34218,6 +34229,20 @@ describe('Session', () => {
                 turnId: permit.turnId,
               }),
             ),
+          );
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            MID_TURN_GOAL_HANDOFF_METHOD,
+            { sessionId: 'test-session-id' },
+          );
+          await boundGoalHost!.startGoalTurn({
+            permit: nextPermit,
+            continuationContext: 'check weather',
+          });
+          await nextTick();
+          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+          finishHandoff({});
+          await vi.waitFor(() =>
+            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(nextPermit),
           );
         });
 

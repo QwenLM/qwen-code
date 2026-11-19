@@ -389,6 +389,7 @@ import {
   IMAGE_ONLY_PROMPT_TEXT,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
+  MID_TURN_GOAL_HANDOFF_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
@@ -2812,6 +2813,7 @@ export class Session implements SessionContext {
   // drain request goes out, since that request takes everything queued before
   // it; a request left over from an earlier turn never matches a later one.
   private midTurnSendNowFor: AbortSignal | undefined;
+  private midTurnGoalHandoff?: Promise<Record<string, unknown>>;
   // Pulls queued input for the model response currently open to interruption.
   private pullForOpenResponse: (() => void) | undefined;
   // Whether that response has started a tool call.
@@ -3479,6 +3481,7 @@ export class Session implements SessionContext {
       this.disposed ||
       this.closing ||
       this.goalProcessing ||
+      this.midTurnGoalHandoff ||
       this.pendingPrompt ||
       this.pendingPromptCompletion ||
       this.cronProcessing ||
@@ -3545,6 +3548,9 @@ export class Session implements SessionContext {
       );
     } finally {
       await this.#emitGoalEndTurn(turn.permit.turnId, result);
+      if (turn.controller.signal.reason === MID_TURN_SEND_NOW_ABORT_REASON) {
+        this.#waitForMidTurnGoalHandoff();
+      }
       if (this.activeGoalTurn === turn) this.activeGoalTurn = undefined;
       this.goalProcessing = false;
       this.#activeWorkChanged();
@@ -3552,6 +3558,20 @@ export class Session implements SessionContext {
       void this.#drainNotificationQueue();
       void this.#drainGoalQueue();
     }
+  }
+
+  #waitForMidTurnGoalHandoff(): void {
+    // Let the old turn finish while the host resolves and runs queued prompts.
+    const handoff = this.client.extMethod(MID_TURN_GOAL_HANDOFF_METHOD, {
+      sessionId: this.sessionId,
+    });
+    this.midTurnGoalHandoff = handoff;
+    const resume = () => {
+      if (this.midTurnGoalHandoff !== handoff) return;
+      this.midTurnGoalHandoff = undefined;
+      void this.#drainGoalQueue();
+    };
+    void handoff.then(resume, resume);
   }
 
   /**
@@ -6835,6 +6855,12 @@ export class Session implements SessionContext {
         void this.#drainNotificationQueue();
       }
       if (goalTurn) {
+        if (
+          goalTurn.origin === 'user' &&
+          pendingSend.signal.reason === MID_TURN_SEND_NOW_ABORT_REASON
+        ) {
+          this.#waitForMidTurnGoalHandoff();
+        }
         await this.#settleGoalTurn(
           goalTurn,
           promptResult,
