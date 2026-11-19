@@ -36,6 +36,148 @@ import { createGitWorkspaceScenario } from './utils/gitScenario';
 
 const COMPOSER_TEXTAREA = 'textarea[data-web-shell-composer-editor]';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
+const TEST_ACCESSORY_TOP = 437.5;
+
+async function installTestSoftwareKeyboard(page: Page): Promise<void> {
+  await page.addInitScript((accessoryTop) => {
+    let open = false;
+    const listeners = new Map<string, Set<EventListener>>();
+    const emit = (type: string) => {
+      for (const listener of listeners.get(type) ?? []) {
+        listener(new Event(type));
+      }
+    };
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true,
+      value: {
+        get height() {
+          return open ? accessoryTop : window.innerHeight;
+        },
+        get width() {
+          return window.innerWidth;
+        },
+        get offsetTop() {
+          return 0;
+        },
+        get offsetLeft() {
+          return 0;
+        },
+        get pageTop() {
+          return 0;
+        },
+        get pageLeft() {
+          return 0;
+        },
+        get scale() {
+          return 1;
+        },
+        addEventListener(type: string, listener: EventListener) {
+          const entries = listeners.get(type) ?? new Set<EventListener>();
+          entries.add(listener);
+          listeners.set(type, entries);
+        },
+        removeEventListener(type: string, listener: EventListener) {
+          listeners.get(type)?.delete(listener);
+        },
+      },
+    });
+
+    const setKeyboard = (nextOpen: boolean) => {
+      if (open === nextOpen) return;
+      open = nextOpen;
+      document.querySelector('[data-test-software-keyboard]')?.remove();
+      if (open) {
+        const keyboard = document.createElement('div');
+        keyboard.dataset.testSoftwareKeyboard = '';
+        Object.assign(keyboard.style, {
+          position: 'fixed',
+          top: `${accessoryTop}px`,
+          right: '0',
+          bottom: '0',
+          left: '0',
+          zIndex: '10000',
+          background: '#25272a',
+          pointerEvents: 'auto',
+        });
+        const accessory = document.createElement('div');
+        accessory.dataset.testKeyboardAccessory = '';
+        accessory.textContent = 'Keyboard accessory';
+        Object.assign(accessory.style, {
+          height: '45px',
+          padding: '12px',
+          boxSizing: 'border-box',
+          background: '#35383c',
+          color: '#ffffff',
+        });
+        // Reproduce iOS's intercepted accessory tap: focus leaves the editor,
+        // the keyboard closes, and no click reaches the composer underneath.
+        accessory.addEventListener('pointerdown', (event) => {
+          event.preventDefault();
+          (document.activeElement as HTMLElement | null)?.blur();
+        });
+        keyboard.append(accessory);
+        document.body.append(keyboard);
+      }
+      emit('resize');
+    };
+    (
+      window as typeof window & {
+        __setTestSoftwareKeyboard: (visible: boolean) => void;
+      }
+    ).__setTestSoftwareKeyboard = setKeyboard;
+    document.addEventListener(
+      'focusout',
+      (event) => {
+        if (
+          event.target instanceof HTMLTextAreaElement &&
+          event.target.matches('[data-web-shell-composer-editor]')
+        ) {
+          setKeyboard(false);
+        }
+      },
+      true,
+    );
+  }, TEST_ACCESSORY_TOP);
+}
+
+async function setTestSoftwareKeyboard(
+  page: Page,
+  visible: boolean,
+): Promise<void> {
+  await page.evaluate((nextVisible) => {
+    (
+      window as typeof window & {
+        __setTestSoftwareKeyboard: (visible: boolean) => void;
+      }
+    ).__setTestSoftwareKeyboard(nextVisible);
+  }, visible);
+}
+
+async function expectUncoveredStableSend(
+  page: Page,
+  testInfo: TestInfo,
+  label: string,
+) {
+  const send = page.locator('[data-web-shell-composer-submit]');
+  const box = await send.boundingBox();
+  expect(box).not.toBeNull();
+  const screenshotPath = testInfo.outputPath(`${label}-before-tap.png`);
+  await page.screenshot({ path: screenshotPath });
+  await testInfo.attach(`${label}-before-tap`, {
+    path: screenshotPath,
+    contentType: 'image/png',
+  });
+  expect(box!.y + box!.height).toBeLessThanOrEqual(TEST_ACCESSORY_TOP);
+  const center = { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 };
+  expect(
+    await page.evaluate(({ x, y }) => {
+      const hit = document.elementFromPoint(x, y);
+      const target = document.querySelector('[data-web-shell-composer-submit]');
+      return hit instanceof Node && target?.contains(hit);
+    }, center),
+  ).toBe(true);
+  await page.touchscreen.tap(center.x, center.y);
+}
 
 test('simple mobile composer grows and submits Chinese multiline input @smoke', async ({
   page,
@@ -496,6 +638,143 @@ test('anchors the empty mobile composer with the textarea backend', async ({
   await expect(textarea).toHaveValue(
     'Composer remains interactive on touch devices',
   );
+});
+
+test('submits welcome and follow-up prompts on the first tap above a software keyboard @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await installTestSoftwareKeyboard(page);
+  await page.goto('/?language=en');
+  const installTapGeometry = () =>
+    page.evaluate(() => {
+      type TapEvent = {
+        type: string;
+        target: string;
+        active: string;
+        top: number | null;
+        viewportHeight: number;
+      };
+      const events: TapEvent[] = [];
+      (
+        window as typeof window & { __sendTapGeometry: TapEvent[] }
+      ).__sendTapGeometry = events;
+      for (const type of [
+        'pointerdown',
+        'mousedown',
+        'pointerup',
+        'mouseup',
+        'click',
+        'focusout',
+        'focusin',
+      ]) {
+        document.addEventListener(
+          type,
+          (event) => {
+            if (!(event.target instanceof Element)) return;
+            const send = event.target.closest(
+              '[data-web-shell-composer-submit]',
+            );
+            const editor = event.target.closest(
+              '[data-web-shell-composer-editor]',
+            );
+            if (!send && !editor) return;
+            const currentSend = document.querySelector(
+              '[data-web-shell-composer-submit]',
+            );
+            events.push({
+              type,
+              target: send ? 'send' : 'editor',
+              active: document.activeElement?.tagName ?? 'none',
+              top: currentSend?.getBoundingClientRect().top ?? null,
+              viewportHeight: window.visualViewport?.height ?? -1,
+            });
+          },
+          true,
+        );
+      }
+    });
+  const takeTapGeometry = () =>
+    page.evaluate(() => {
+      const state = window as typeof window & {
+        __sendTapGeometry: Array<{
+          type: string;
+          target: string;
+          active: string;
+          top: number | null;
+          viewportHeight: number;
+        }>;
+      };
+      return state.__sendTapGeometry.splice(0);
+    });
+
+  await installTapGeometry();
+  const welcome = page.locator(COMPOSER_TEXTAREA);
+  await welcome.tap();
+  await welcome.fill('hi');
+  await expect(welcome).toBeFocused();
+  await setTestSoftwareKeyboard(page, true);
+  await expectUncoveredStableSend(page, testInfo, 'welcome');
+  const welcomeEvents = await takeTapGeometry();
+  await testInfo.attach('welcome-tap-events', {
+    body: JSON.stringify(welcomeEvents, null, 2),
+    contentType: 'application/json',
+  });
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  expect(JSON.stringify(daemon.promptRequests()[0]?.body)).toContain('hi');
+  const welcomeSendEvents = welcomeEvents.filter(
+    ({ target, type }) =>
+      target === 'send' && (type === 'pointerdown' || type === 'click'),
+  );
+  expect(welcomeSendEvents.map(({ type }) => type)).toEqual([
+    'pointerdown',
+    'click',
+  ]);
+  expect(welcomeSendEvents[0]?.top).toBe(welcomeSendEvents[1]?.top);
+
+  await expect(page).toHaveURL(new RegExp(`/session/${scenario.sessionId}`));
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await expect(
+    page.locator('[data-web-shell-composer-submit]'),
+  ).toHaveAttribute('aria-label', 'Stop');
+  await daemon.sendEvent(
+    assistantTextEvent('Done.', { id: 100, sessionId: scenario.sessionId }),
+  );
+  await daemon.sendEvent(
+    turnCompleteEvent('prompt-e2e', {
+      id: 101,
+      sessionId: scenario.sessionId,
+    }),
+  );
+  await expect(
+    page.locator('[data-web-shell-composer-submit]'),
+  ).toHaveAttribute('aria-label', 'Send message');
+  await installTapGeometry();
+  const followUp = page.locator(COMPOSER_TEXTAREA);
+  await expect(followUp).toBeVisible();
+  await followUp.tap();
+  await followUp.fill('follow up');
+  await setTestSoftwareKeyboard(page, true);
+  await expectUncoveredStableSend(page, testInfo, 'follow-up');
+  const followUpEvents = await takeTapGeometry();
+  await testInfo.attach('follow-up-tap-events', {
+    body: JSON.stringify(followUpEvents, null, 2),
+    contentType: 'application/json',
+  });
+  await expect.poll(() => daemon.promptRequests().length).toBe(2);
+  expect(JSON.stringify(daemon.promptRequests()[1]?.body)).toContain(
+    'follow up',
+  );
+  const followUpSendEvents = followUpEvents.filter(
+    ({ target, type }) =>
+      target === 'send' && (type === 'pointerdown' || type === 'click'),
+  );
+  expect(followUpSendEvents.map(({ type }) => type)).toEqual([
+    'pointerdown',
+    'click',
+  ]);
+  expect(followUpSendEvents[0]?.top).toBe(followUpSendEvents[1]?.top);
 });
 
 test('keeps voice controls reachable on an extra-narrow touch viewport @smoke', async ({

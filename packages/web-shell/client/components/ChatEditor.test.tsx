@@ -6020,6 +6020,30 @@ describe('ChatEditor mobile composer actions', () => {
     });
   }
 
+  it('keeps Send from blurring the mobile editor before its click', () => {
+    const backend = mobileComposer('draft');
+    composerCoreState.hasContent = true;
+    const container = renderChatEditor({});
+    act(() => backend.textareaRef.current!.focus());
+    const send = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      send.dispatchEvent(mouseDown);
+    });
+
+    expect(mouseDown.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(backend.textareaRef.current);
+    expect(backend.onBlur).not.toHaveBeenCalled();
+    act(() => send.click());
+    expect(composerCoreState.submitText).toHaveBeenCalledOnce();
+  });
+
   it('opens history from the add drawer without simulated keyboard keys', async () => {
     mobileComposer();
     renderChatEditor({ visibleToolbarActions: ['addMenu'] });

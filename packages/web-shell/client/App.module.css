@@ -438,6 +438,17 @@
   overflow-y: auto;
 }
 
+/* iOS overlays its software keyboard without resizing the layout viewport.
+   Keep both the centered welcome composer and the bottom-anchored session
+   composer inside the visible viewport reported by visualViewport. */
+.app[data-compact-sidebar] .chatPane {
+  padding-bottom: var(--web-shell-visual-viewport-inset-bottom, 0px);
+}
+
+.app[data-compact-sidebar] .chatViewWrap {
+  bottom: var(--web-shell-visual-viewport-inset-bottom, 0px);
+}
+
 .themeDark {
   --background: #0d0d0d;
   --foreground: #fafafa;

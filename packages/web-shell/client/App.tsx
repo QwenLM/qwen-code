@@ -57,6 +57,7 @@ import {
   parseWebPreviewUrl,
   type WebPreviewState,
 } from './components/preview/web-preview';
+import { visualViewportBottomInset } from './utils/visualViewportInset';
 import {
   forwardRef,
   memo,
@@ -11350,6 +11351,37 @@ export function App({
   // when an embedded container disagrees with the viewport.
   const compactShell =
     sidebarLayoutWidth !== undefined && sidebarLayoutWidth <= 760;
+  useLayoutEffect(() => {
+    const root = appRootRef.current;
+    const viewport = window.visualViewport;
+    if (!root) return;
+    if (!compactShell || !viewport) {
+      root.style.removeProperty('--web-shell-visual-viewport-inset-bottom');
+      return;
+    }
+
+    const updateInset = () => {
+      const inset = visualViewportBottomInset(
+        root.getBoundingClientRect(),
+        viewport,
+      );
+      root.style.setProperty(
+        '--web-shell-visual-viewport-inset-bottom',
+        `${inset}px`,
+      );
+    };
+    updateInset();
+    viewport.addEventListener('resize', updateInset);
+    // Safari changes offsetTop while scrolling or revealing browser chrome.
+    viewport.addEventListener('scroll', updateInset);
+    window.addEventListener('resize', updateInset);
+    return () => {
+      viewport.removeEventListener('resize', updateInset);
+      viewport.removeEventListener('scroll', updateInset);
+      window.removeEventListener('resize', updateInset);
+      root.style.removeProperty('--web-shell-visual-viewport-inset-bottom');
+    };
+  }, [compactShell]);
   const channelSidebarEnabled =
     sidebarOptions.enabled &&
     projectFeaturesAvailable &&

@@ -4224,6 +4224,10 @@ export const ChatEditor = memo(
                     : core.submitBlocked || (!core.hasContent && !voiceActive)
               }
               data-web-shell-composer-submit
+              // Do not dismiss the software keyboard between touch-down and
+              // click: the resulting viewport resize would move Send out from
+              // under the same tap before its click is dispatched (#12462).
+              onMouseDown={(event) => event.preventDefault()}
               onClick={(e) => {
                 e.stopPropagation();
                 if (submitLoading) {
