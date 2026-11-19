@@ -1,4 +1,8 @@
 import { randomUUID } from './utils/random-uuid.js';
+import {
+  extractVisionTimeout,
+  parseVisionTimeoutMs,
+} from './vision-timeout-command.js';
 import { useWorkspaceFileChanges } from './components/artifacts/useWorkspaceFileChanges';
 import {
   filterWorkspaceFileChanges,
@@ -20452,7 +20456,9 @@ export function App({
             return true;
           }
           if (cmd === 'model') {
-            const modelArg = text.slice(match[0].length).trim();
+            const { modelArg, timeout: visionTimeout } = extractVisionTimeout(
+              text.slice(match[0].length).trim(),
+            );
             if (
               !workspaceContextActive &&
               /^(?:--fast|--voice|--vision)(?:\s|$)/.test(modelArg)
@@ -20491,22 +20497,44 @@ export function App({
               );
               return true;
             }
-            if (modelArg === '--vision') {
+            if (modelArg === '--vision' && visionTimeout === undefined) {
               if (settingsDialogKeyRef.current === 'visionModel') {
                 settingsDialogKeyRef.current = undefined;
               }
               setModelDialogMode('vision');
               return true;
             }
-            if (modelArg.startsWith('--vision ')) {
-              const visionModelId = modelArg.replace(/^--vision\s+/, '');
-              setWorkspaceSetting(
-                'workspace',
-                'visionModel',
-                visionModelId,
-              ).catch((error: unknown) =>
-                reportError(error, t('model.setVision')),
-              );
+            if (modelArg === '--vision' || modelArg.startsWith('--vision ')) {
+              const visionModelId = modelArg.replace(/^--vision\s*/, '');
+              const timeoutMs =
+                visionTimeout === undefined
+                  ? undefined
+                  : parseVisionTimeoutMs(visionTimeout);
+              if (visionTimeout !== undefined && timeoutMs === undefined) {
+                pushToast(
+                  'error',
+                  t('model.invalidVisionTimeout', { value: visionTimeout }),
+                );
+                return true;
+              }
+              if (timeoutMs !== undefined) {
+                setWorkspaceSetting(
+                  'workspace',
+                  'visionBridgeTimeoutMs',
+                  timeoutMs,
+                ).catch((error: unknown) =>
+                  reportError(error, t('model.setVisionTimeout')),
+                );
+              }
+              if (visionModelId) {
+                setWorkspaceSetting(
+                  'workspace',
+                  'visionModel',
+                  visionModelId,
+                ).catch((error: unknown) =>
+                  reportError(error, t('model.setVision')),
+                );
+              }
               return true;
             }
             if (modelArg) {

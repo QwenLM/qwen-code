@@ -49774,6 +49774,45 @@ describe('App session callbacks', () => {
     ).toBeNull();
   });
 
+  it.each([
+    [
+      '/model --vision qwen-vl --timeout 45',
+      [
+        ['workspace', 'visionBridgeTimeoutMs', 45_000],
+        ['workspace', 'visionModel', 'qwen-vl'],
+      ],
+    ],
+    [
+      '/model --timeout 90000ms --vision',
+      [['workspace', 'visionBridgeTimeoutMs', 90_000]],
+    ],
+  ])(
+    '%s writes the vision settings without opening a picker',
+    async (prompt, writes) => {
+      const { container } = renderApp();
+      await flush();
+      settingsSetValue.mockClear();
+      testState.prompt = prompt;
+      await clickSubmit(container);
+      await flush();
+      expect(settingsSetValue.mock.calls).toEqual(writes);
+      expect(
+        container.querySelector('[data-testid="model-select"]'),
+      ).toBeNull();
+    },
+  );
+
+  it('rejects an invalid /model --vision --timeout value without writing', async () => {
+    const { container } = renderApp();
+    await flush();
+    settingsSetValue.mockClear();
+    testState.prompt = '/model --vision qwen-vl --timeout 1.5';
+    await clickSubmit(container);
+    await flush();
+    expect(settingsSetValue).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
+  });
+
   it('does not close a command-launched fast picker when its setting is excluded', async () => {
     const { container, rerender } = renderApp();
     await flush();

@@ -785,6 +785,33 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).toHaveBeenCalled();
   });
 
+  it('serves visionBridgeTimeoutMs to the Web Shell and writes it at workspace scope', async () => {
+    // showInDialog: false; Web Shell's /model --vision --timeout writes it.
+    const { app, persistSetting } = makeApp();
+
+    const list = await request(app).get('/workspace/settings');
+    expect(
+      list.body.settings.some(
+        (setting: { key: string }) => setting.key === 'visionBridgeTimeoutMs',
+      ),
+    ).toBe(true);
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'visionBridgeTimeoutMs',
+      value: 60_000,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ requiresRestart: true });
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/workspace',
+      SettingScope.Workspace,
+      'visionBridgeTimeoutMs',
+      60_000,
+    );
+  });
+
   it('serves serve.maxSessions to the Web Shell and writes it at user scope only', async () => {
     // The key is showInDialog: false, so WEB_SHELL_SETTINGS is what puts it in
     // the panel; the workspace restriction still refuses a workspace write.

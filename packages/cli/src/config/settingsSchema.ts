@@ -1823,14 +1823,14 @@ const SETTINGS_SCHEMA = {
     type: 'integer',
     label: 'Vision Bridge Timeout (ms)',
     category: 'Model',
-    // Read once in the Config constructor with no setter, so a mid-session
-    // change only takes effect on restart.
+    // Read once in the Config constructor; only `/model --vision --timeout`
+    // also updates the running session, so other edits need a restart.
     requiresRestart: true,
     default: undefined as number | undefined,
     minimum: 1,
     maximum: 2_147_483_647,
     description:
-      'Per-attempt timeout in milliseconds for the vision bridge image transcription call (a positive integer up to 2147483647). Unset uses the built-in 30s. Raise for slow or proxied vision endpoints.',
+      'Per-attempt timeout in milliseconds for the vision bridge image transcription call (a positive integer up to 2147483647). Unset uses the built-in 30s. Raise for slow or proxied vision endpoints. Set with /model --vision --timeout <seconds>.',
     showInDialog: false,
   },
 

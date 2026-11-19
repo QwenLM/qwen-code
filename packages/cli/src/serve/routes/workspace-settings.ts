@@ -83,10 +83,12 @@ const OUTPUT_LANGUAGE_OPTIONS = SUPPORTED_LANGUAGES.map(
   }),
 );
 
-// `voiceModel`, `imageModel`, and `advisorModel` are `showInDialog: false` (so
-// not in the dialog allowlist), but the Web Shell settings panel still renders
-// their rows and needs to read + persist them; for `voiceModel` the daemon
-// `/voice/stream` then reads it back via `loadSettings`.
+// `voiceModel`, `imageModel`, `advisorModel`, and `visionBridgeTimeoutMs` are
+// `showInDialog: false` (so not in the dialog allowlist), but the Web Shell
+// settings panel still renders their rows and needs to read + persist them
+// (`visionBridgeTimeoutMs` is also written by Web Shell's
+// `/model --vision --timeout`); for `voiceModel` the daemon `/voice/stream`
+// then reads it back via `loadSettings`.
 const WEB_SHELL_SETTINGS = new Set([
   'ui.allowedApprovalModes',
   'ui.compactMode',
@@ -94,6 +96,7 @@ const WEB_SHELL_SETTINGS = new Set([
   'voiceModel',
   'imageModel',
   'advisorModel',
+  'visionBridgeTimeoutMs',
   'mcpServers',
   'worktree.defaultForNewSessions',
 ]);
