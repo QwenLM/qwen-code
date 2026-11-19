@@ -955,6 +955,37 @@ describe('ChatRecordingService', () => {
       expect(cold).toBeDefined();
       expect('deliveredTurn' in (cold as object)).toBe(false);
     });
+
+    it('persists teammateTurn only on a Teammate notification record (R17-1)', async () => {
+      // Producer guard for the teammateTurn stamp: the resume Prompts seed
+      // counts notification records bearing it, so the argument must survive
+      // recordNotification -> recordNotificationLike -> createNotificationRecord
+      // -> appendRecord. A cold background notification stays unmarked.
+      svc.recordNotification(
+        [{ text: 'teammate finished' }],
+        'Teammate finished',
+        undefined,
+        undefined,
+        /* deliveredTurn */ true,
+        /* teammateTurn */ true,
+      );
+      svc.recordNotification(
+        [{ text: 'background notification' }],
+        'Background',
+        undefined,
+        undefined,
+        /* deliveredTurn */ true,
+        /* teammateTurn */ false,
+      );
+
+      const [teammate, background] = await flushedAll();
+      expect(teammate).toMatchObject({
+        subtype: 'notification',
+        teammateTurn: true,
+      });
+      expect(background).toMatchObject({ subtype: 'notification' });
+      expect('teammateTurn' in (background as object)).toBe(false);
+    });
   });
 
   describe('recordBranchCheckpointTransaction', () => {
