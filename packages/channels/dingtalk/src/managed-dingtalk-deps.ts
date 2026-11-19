@@ -17,8 +17,17 @@ import {
   withConsoleLogSuppressedSync,
 } from './connect-logging.js';
 import { splitChunks } from './markdown.js';
-import { isRetryableDingtalkStatus } from './interactive-card-client.js';
-import { ROBOT_MESSAGE_HOSTS } from './DingtalkAdapter.js';
+import {
+  DingtalkInteractiveCardClient,
+  DingtalkCardRequestError,
+  isRetryableDingtalkCardError,
+  isRetryableDingtalkStatus,
+} from './interactive-card-client.js';
+import {
+  PERMANENT_TOKEN_ERROR_CODES,
+  ROBOT_MESSAGE_HOSTS,
+  TOKEN_API,
+} from './DingtalkAdapter.js';
 
 const WEBHOOK_TIMEOUT_MS = 30_000;
 const RECONNECT_RETRY_MS = 5_000;
@@ -417,13 +426,173 @@ function webhookFailure(
   return failure;
 }
 
+// H5e of #12827: the card transport. It reuses the Legacy interactive-card
+// client (createAndDeliver / updateInstance) and the gettoken discipline, but
+// is a separate managed implementation — the Legacy class is untouched.
+const CARD_TOKEN_TIMEOUT_MS = 15_000;
+
+/** The robot app credential the card API's access token is exchanged from. */
+export interface ManagedDingtalkCardCredentials {
+  clientId: string;
+  clientSecret: string;
+}
+
+type CardSegmentInput = Parameters<
+  NonNullable<ManagedDingtalkAdapterDeps['sendCardSegment']>
+>[0];
+
+/**
+ * A fetch that routes through the resolved proxy when one is configured, with
+ * a per-call dispatcher destroyed afterwards (the sendWebhook shape). The card
+ * client takes a fetch option, so proxy-only egress reaches the card API and
+ * the token endpoint without touching the Legacy client.
+ */
+function createEgressFetch(proxy?: string): typeof fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    // Refuse redirects on both the direct and proxied paths: following one
+    // would replay the card body and the access-token header to the redirect
+    // target (deferred round-3). The webhook send already uses redirect:'error'.
+    const guarded = { ...init, redirect: 'error' as const };
+    if (!proxy) return globalThis.fetch(input, guarded);
+    const { default: undici } = await import('undici');
+    const dispatcher = new undici.EnvHttpProxyAgent({
+      httpProxy: proxy,
+      httpsProxy: proxy,
+    });
+    try {
+      const proxied = { ...guarded, dispatcher } as RequestInit & {
+        dispatcher: import('undici').Dispatcher;
+      };
+      const response = await globalThis.fetch(input, proxied);
+      // fetch resolves on the response headers, but both callers read the body
+      // afterwards (the token provider's response.json(), the card client's
+      // request()). Destroying the dispatcher here would abort that read
+      // (UND_ERR_DESTROYED) on every proxied call, so buffer the body first and
+      // hand back a dispatcher-free Response; the destroy below then cannot
+      // precede the read (R1-1).
+      const body = await response.arrayBuffer();
+      const nullBodyStatus =
+        response.status === 204 ||
+        response.status === 205 ||
+        response.status === 304;
+      return new Response(nullBodyStatus ? null : body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    } finally {
+      await dispatcher.destroy().catch(() => undefined);
+    }
+  }) as typeof fetch;
+}
+
+/**
+ * A cached gettoken provider mirroring the Legacy getProactiveToken: refresh a
+ * minute early, and separate a dead credential (permanent errcode, definitive)
+ * from a transient one. Failures are DingtalkCardRequestError so the card
+ * sender's single classifier maps them to the adapter's rejected/unknown arm.
+ */
+function createCardTokenProvider(
+  credentials: ManagedDingtalkCardCredentials,
+  egressFetch: typeof fetch,
+) {
+  let cached: { token: string; expiresAt: number } | undefined;
+  return {
+    getAccessToken: async (): Promise<string> => {
+      if (cached && Date.now() < cached.expiresAt) return cached.token;
+      const url = `${TOKEN_API}?appkey=${encodeURIComponent(
+        credentials.clientId,
+      )}&appsecret=${encodeURIComponent(credentials.clientSecret)}`;
+      let data: {
+        access_token?: string;
+        expires_in?: number;
+        errcode?: number;
+      };
+      try {
+        const response = await egressFetch(url, {
+          signal: AbortSignal.timeout(CARD_TOKEN_TIMEOUT_MS),
+        });
+        data = (await response.json()) as typeof data;
+      } catch (error) {
+        throw new DingtalkCardRequestError(
+          `DingTalk access token fetch failed: ${String(error)}`,
+          true,
+        );
+      }
+      if (!data.access_token) {
+        throw new DingtalkCardRequestError(
+          `DingTalk access token request failed (errcode ${String(data.errcode)}).`,
+          !PERMANENT_TOKEN_ERROR_CODES.has(Number(data.errcode)),
+        );
+      }
+      cached = {
+        token: data.access_token,
+        expiresAt:
+          Date.now() + Math.max(60, (data.expires_in ?? 7200) - 60) * 1000,
+      };
+      return data.access_token;
+    },
+    invalidateAccessToken: (token: string): void => {
+      if (cached?.token === token) cached = undefined;
+    },
+  };
+}
+
+function createCardSender(
+  credentials: ManagedDingtalkCardCredentials,
+  proxy?: string,
+): NonNullable<ManagedDingtalkAdapterDeps['sendCardSegment']> {
+  const egressFetch = createEgressFetch(proxy);
+  const token = createCardTokenProvider(credentials, egressFetch);
+  const client = new DingtalkInteractiveCardClient({
+    robotCode: credentials.clientId,
+    getAccessToken: token.getAccessToken,
+    invalidateAccessToken: token.invalidateAccessToken,
+    fetch: egressFetch,
+    // The managed receipt is write-once: an unreadable or unconfirmed card
+    // answer must land unknown, never accepted for an undelivered card (R1-2).
+    // Legacy callers of the client stay tolerant.
+    strictResponses: true,
+  });
+  return async (input: CardSegmentInput): Promise<void> => {
+    try {
+      if (input.create) {
+        await client.createAndDeliver({
+          templateId: input.templateId,
+          outTrackId: input.outTrackId,
+          target: input.target,
+          cardParamMap: { content: input.body },
+        });
+      } else {
+        await client.updateInstance({
+          outTrackId: input.outTrackId,
+          cardParamMap: { content: input.body },
+        });
+      }
+    } catch (error) {
+      // One classifier for the whole card path: a non-retryable card or token
+      // error is definitive (rejected); a retryable status, a network failure
+      // or a timeout is ambiguous (unknown). The adapter's arm is the same one
+      // a failed webhook send takes.
+      throw webhookFailure(
+        `DingTalk card send failed: ${String(error)}`,
+        !isRetryableDingtalkCardError(error),
+      );
+    }
+  };
+}
+
 /** The production dependencies of the managed DingTalk adapter. */
 export function createManagedDingtalkDeps(
   proxy?: string,
+  credentials?: ManagedDingtalkCardCredentials,
 ): ManagedDingtalkAdapterDeps {
   return {
     createStreamClient,
     sendWebhook: (webhook, text) => sendWebhook(webhook, text, proxy),
+    ...(credentials
+      ? { sendCardSegment: createCardSender(credentials, proxy) }
+      : {}),
     lock: async (directory, onCompromised) => {
       const { default: lockfile } = await import('proper-lockfile');
       const { mkdirSync } = await import('node:fs');
