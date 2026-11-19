@@ -179,6 +179,56 @@ describe('ReadFile output availability', () => {
   });
 });
 
+describe('tool result row direction', () => {
+  it('renders the Arabic quota notice auto-direction and machine summaries LTR', () => {
+    const quota = renderToolLine(
+      makeTool({
+        toolName: 'CustomTool',
+        status: 'failed',
+        rawOutput: { type: 'subscription_quota', memberType: 'pro' },
+      }),
+      {},
+      {},
+      'ar',
+    );
+    const quotaRow = quota.querySelector('[class*="lineOutput"]');
+    expect(quotaRow?.getAttribute('dir')).toBe('auto');
+    expect(quotaRow?.textContent).toContain('لقد استنفدت رصيدك');
+
+    const machine = renderToolLine(
+      makeTool({
+        toolName: 'CustomTool',
+        status: 'completed',
+        content: [
+          { type: 'content', content: { type: 'text', text: 'health OK' } },
+        ],
+      }),
+      {},
+      {},
+      'ar',
+    );
+    const machineRow = machine.querySelector('[class*="lineOutput"]');
+    expect(machineRow?.textContent).toBe('health OK');
+    expect(machineRow?.getAttribute('dir')).toBe('ltr');
+  });
+
+  it('keeps the quota notice auto-direction in the todo fallback row', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'TodoWrite',
+        status: 'failed',
+        rawOutput: { type: 'subscription_quota', memberType: 'pro' },
+      }),
+      {},
+      {},
+      'ar',
+    );
+    const row = container.querySelector('[class*="lineOutput"]');
+    expect(row?.getAttribute('dir')).toBe('auto');
+    expect(row?.textContent).toContain('لقد استنفدت رصيدك');
+  });
+});
+
 function renderToolLine(
   tool: ACPToolCall,
   props: Partial<Parameters<typeof ToolLine>[0]> = {},

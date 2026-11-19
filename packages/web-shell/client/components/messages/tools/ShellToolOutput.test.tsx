@@ -39,13 +39,17 @@ function envelope(
 ) {
   return `Command: ${cmd}\nDirectory: (root)\nOutput: ${output}\n${footer}`;
 }
-function render(value: ACPToolCall, documentMode = false) {
+function render(
+  value: ACPToolCall,
+  documentMode = false,
+  language: 'en' | 'ar' = 'en',
+) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() =>
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <TranscriptRenderModeProvider
           value={documentMode ? 'document' : 'interactive'}
         >
@@ -333,6 +337,46 @@ describe('shell result presentation', () => {
     expect(values.find((value) => value.textContent === outputFile)?.dir).toBe(
       'ltr',
     );
+  });
+
+  it('leaves the Arabic waiting placeholder to the shell direction', () => {
+    render(
+      tool('', { content: undefined, status: 'in_progress' }),
+      false,
+      'ar',
+    );
+    const pre = container.querySelector('[class*="shellDetails"] > pre');
+    expect(pre?.textContent).toBe('في انتظار المخرجات…');
+    expect(pre?.getAttribute('dir')).toBeNull();
+  });
+
+  it('leaves the Arabic empty-output placeholder to the shell direction', () => {
+    render(tool('', { content: undefined }), false, 'ar');
+    const pre = container.querySelector('[class*="shellDetails"] > pre');
+    expect(pre?.textContent).toBe('المخرجات غير متوفرة لاستدعاء الأداة هذا.');
+    expect(pre?.getAttribute('dir')).toBeNull();
+  });
+
+  it('pins command, output and notices LTR in an RTL shell', () => {
+    render(
+      tool('', {
+        rawOutput: result({ notices: ['This foreground command ran for 90s'] }),
+      }),
+      false,
+      'ar',
+    );
+    container.dir = 'rtl';
+    expect(
+      container
+        .querySelector('[class*="shellSection"] pre')
+        ?.getAttribute('dir'),
+    ).toBe('ltr');
+    const pres = container.querySelectorAll('[class*="shellDetails"] > pre');
+    expect(pres).toHaveLength(2);
+    expect(pres[0].textContent).toBe('health OK');
+    expect(pres[0].getAttribute('dir')).toBe('ltr');
+    expect(pres[1].textContent).toBe('This foreground command ran for 90s');
+    expect(pres[1].getAttribute('dir')).toBe('ltr');
   });
 
   it('keeps long-running notices outside output and copies stdout only', async () => {

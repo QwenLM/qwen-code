@@ -203,7 +203,10 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
           <div className={styles.shellSection}>
             <details open>
               <summary>{t('shell.result.command')}</summary>
-              <pre className={`${styles.expandedOutput} ${styles.shellOutput}`}>
+              <pre
+                className={`${styles.expandedOutput} ${styles.shellOutput}`}
+                dir="ltr"
+              >
                 {sanitizeControlChars(command)}
               </pre>
             </details>
@@ -241,6 +244,7 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
                   el.scrollHeight - el.scrollTop - el.clientHeight < 24;
               }}
               className={`${styles.expandedOutput} ${styles.shellOutput}`}
+              dir={output ? 'ltr' : undefined}
             >
               {output
                 ? segments?.map((seg, i) => (
@@ -279,7 +283,10 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
         {result && result.notices.length > 0 && (
           <details className={styles.shellDetails} open>
             <summary>{t('shell.result.notices')}</summary>
-            <pre className={`${styles.expandedOutput} ${styles.shellOutput}`}>
+            <pre
+              className={`${styles.expandedOutput} ${styles.shellOutput}`}
+              dir="ltr"
+            >
               {sanitizeControlChars(result.notices.join('\n\n'))}
             </pre>
           </details>

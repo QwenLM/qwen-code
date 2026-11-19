@@ -16,8 +16,6 @@ const LTR_CODE_SURFACES: Array<[string, string]> = [
   ['./messages/UserShellMessage.module.css', '.command'],
   ['./messages/PlanExecutionView.module.css', '.dagCanvas'],
   ['./messages/tools/DiffView.module.css', '.line'],
-  ['./messages/tools/ToolChrome.module.css', '.lineOutput'],
-  ['./messages/tools/ToolChrome.module.css', '.shellOutput'],
   ['./messages/tools/ToolChrome.module.css', '.payloadText'],
   ['./messages/TasksStatusMessage.module.css', '.shellOutput'],
   ['./messages/TasksStatusMessage.module.css', '.monitorCommand'],
@@ -42,6 +40,7 @@ const LTR_CODE_SURFACES: Array<[string, string]> = [
 const LTR_MACHINE_RENDERS: Array<[string, string, string, number]> = [
   ['./messages/TasksStatusMessage.tsx', 'div', 'shellFieldValue', 2],
   ['./messages/tools/ShellToolOutput.tsx', 'pre', 'shellFailure', 1],
+  ['./messages/tools/ShellToolOutput.tsx', 'pre', 'shellOutput', 2],
   ['./DesktopRelayControl.tsx', 'code', 'font-mono', 2],
   ['./workspace-agents/add-runtime-dialog.tsx', 'code', 'font-mono', 1],
   ['./workspace-agents/share-agent-dialog.tsx', 'code', 'font-mono', 1],
@@ -87,12 +86,20 @@ describe('RTL shell keeps code surfaces LTR', () => {
     },
   );
 
-  // The shared class also renders localized placeholders and the user's own
-  // answer, so its machine-output paths carry the pin instead: `.shellOutput`
-  // above, and `dir="ltr"` on the read/edit content.
-  it('leaves the shared output class to the shell direction', () => {
+  // The shared output classes also render localized placeholders and quota
+  // notices, so their machine-output renders carry the pin as `dir`
+  // attributes instead: the ShellToolOutput command/notices pres above, its
+  // output pre and the ToolGroup result rows conditionally (pinned by the
+  // DOM tests in ShellToolOutput.test.tsx and ToolGroup.test.tsx).
+  it('leaves the shared output classes to the shell direction', () => {
     expect(
       directions('./messages/tools/ToolChrome.module.css', '.expandedOutput'),
+    ).toEqual([]);
+    expect(
+      directions('./messages/tools/ToolChrome.module.css', '.lineOutput'),
+    ).toEqual([]);
+    expect(
+      directions('./messages/tools/ToolChrome.module.css', '.shellOutput'),
     ).toEqual([]);
   });
 

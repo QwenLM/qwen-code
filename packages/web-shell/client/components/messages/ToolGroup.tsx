@@ -1567,10 +1567,12 @@ export const ToolLine = memo(function ToolLine({
   const fullDescription = getToolDescription(tool, workspaceCwd);
   // Document exports carry a bounded, safe text preview. Keep the full answer
   // in an expanded row instead of reducing it to the one-line header summary.
-  const result =
-    (tool.status === 'failed'
+  const quotaDisplay =
+    tool.status === 'failed'
       ? formatSubscriptionQuotaDisplay(tool.rawOutput, t)
-      : undefined) ??
+      : undefined;
+  const result =
+    quotaDisplay ??
     (transcriptRenderMode === 'document' && expanded
       ? (extractText(tool) ?? getToolResultSummary(tool))
       : getToolResultSummary(tool));
@@ -1798,7 +1800,10 @@ export const ToolLine = memo(function ToolLine({
         isTodo &&
         !hasTodoList &&
         result && (
-          <div className={styles.lineOutput}>
+          <div
+            className={styles.lineOutput}
+            dir={quotaDisplay ? 'auto' : 'ltr'}
+          >
             {renderWithSessionLinks(result, transcriptRenderMode)}
           </div>
         )}
@@ -1839,6 +1844,7 @@ export const ToolLine = memo(function ToolLine({
                 ? `${styles.lineOutput} ${styles.expandedLineOutput}`
                 : styles.lineOutput
             }
+            dir={quotaDisplay ? 'auto' : 'ltr'}
           >
             {renderWithSessionLinks(result, transcriptRenderMode)}
           </div>

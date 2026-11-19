@@ -570,7 +570,6 @@
 }
 
 .lineOutput {
-  direction: ltr;
   margin-inline-start: 16px;
   font-size: 12px;
   color: var(--muted-foreground);
@@ -806,7 +805,6 @@
 }
 
 .shellOutput {
-  direction: ltr;
   color: var(--foreground);
   max-height: 200px;
 }
