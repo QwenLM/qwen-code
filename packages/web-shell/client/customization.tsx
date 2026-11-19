@@ -849,6 +849,7 @@ export interface WebShellCustomization {
    * expanded. Defaults to enabled when unset.
    */
   collapseCompletedTurns?: boolean;
+  overscan?: number;
   markdownTableMode?: MarkdownTableMode;
   markdown?: WebShellMarkdownCustomization;
   loadingPhrases?: LoadingPhrasesResolver;
