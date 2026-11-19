@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Storage } from '@qwen-code/qwen-code-core';
 
 describe('bundled locale fallback', () => {
@@ -178,6 +179,28 @@ describe('supported language resolution', () => {
       SUPPORTED_LANGUAGES.find((language) => language.code === 'ar')
         ?.strictParity,
     ).toBe(true);
+  });
+
+  // A merge can add English keys without touching ar.js, and only check-i18n
+  // would notice, so pin the shipped catalog here too.
+  it('keeps the shipped Arabic catalog key-for-key with en.js', async () => {
+    const localesDir = path.join(
+      path.dirname(fileURLToPath(import.meta.url)),
+      'locales',
+    );
+    const load = async (code: string): Promise<Record<string, unknown>> => {
+      const file = pathToFileURL(path.join(localesDir, `${code}.js`)).href;
+      const module = (await import(file)) as {
+        default?: Record<string, unknown>;
+      };
+      return module.default ?? {};
+    };
+
+    const en = await load('en');
+    const ar = await load('ar');
+
+    expect(Object.keys(ar).filter((key) => !(key in en))).toEqual([]);
+    expect(Object.keys(en).filter((key) => !(key in ar))).toEqual([]);
   });
 });
 

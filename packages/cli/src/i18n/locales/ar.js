@@ -24,6 +24,53 @@ function arPlural(count, zero, one, two, few, many, other) {
 }
 
 export default {
+  user: 'مستخدم',
+  assistant: 'مساعد',
+  thinking: 'تفكير',
+  task: 'مهمة',
+  compaction: 'ضغط',
+  info: 'معلومات',
+  warning: 'تحذير',
+  retry: 'إعادة المحاولة',
+  'stop-hook': 'خطاف الإيقاف',
+  'away-recap': 'ملخص الغياب',
+  'user-shell': 'أمر المستخدم',
+  advisor: 'مستشار',
+  'arena-agent': 'وكيل الساحة',
+  'arena-session': 'جلسة الساحة',
+  goal: 'هدف',
+  'Protected input': 'إدخال محمي',
+  'Focused input. Cursor: {{position}}':
+    'الإدخال مُركَّز. المؤشر: {{position}}',
+  'Unfocused input.': 'الإدخال غير مُركَّز.',
+  'Focused Prompt: {{value}}': 'موجه مُركَّز: {{value}}',
+  'Prompt: {{value}}': 'موجه: {{value}}',
+  'Focused Input: {{value}}': 'إدخال مُركَّز: {{value}}',
+  'Input: {{value}}': 'إدخال: {{value}}',
+  'Placeholder: {{value}}': 'نص نائب: {{value}}',
+  'Cursor: {{position}}': 'المؤشر: {{position}}',
+  'Selected {{value}}': 'محدد {{value}}',
+  'Disabled {{value}}': 'معطّل {{value}}',
+  'Focused Toggle on: {{value}}': 'مفتاح التبديل مُركَّز ومُفعّل: {{value}}',
+  'Focused Toggle off: {{value}}':
+    'مفتاح التبديل مُركَّز وغير مُفعّل: {{value}}',
+  'Toggle on: {{value}}': 'مفتاح التبديل مُفعّل: {{value}}',
+  'Toggle off: {{value}}': 'مفتاح التبديل غير مُفعّل: {{value}}',
+  'Conversation cleared.': 'تم مسح المحادثة.',
+  '{{role}}: {{value}}': '{{role}}: {{value}}',
+  'Revision {{value}}': 'مراجعة {{value}}',
+  Dialog: 'نافذة',
+  'Dialog closed. Focus: prompt.': 'أُغلقت النافذة. التركيز: الموجه.',
+  'Dialog closed.': 'أُغلقت النافذة.',
+  'Waiting for confirmation': 'في انتظار التأكيد',
+  'Working. Escape to cancel.': 'جارٍ العمل. Escape للإلغاء.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'عناصر السجل {{start}}-{{end}} من {{total}}',
+  'Worktree: {{value}}': 'شجرة العمل: {{value}}',
+  'Workflow mode: on': 'وضع مسار العمل: مُفعّل',
+  'Workflow mode: on (unavailable)': 'وضع مسار العمل: مُفعّل (غير متاح)',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'اضغط Shift+Up/Down أو PageUp/Down لقراءة السجل؛ وCtrl+Home/End للانتقال إلى الأول/الأخير.',
   "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
     'لقد استنفدت رصيدك الأسبوعي{{reset}}. يمكنك الانتظار أو تشغيل /upgrade للحصول على رصيد إضافي.',
   "You've used up your weekly credits.{{reset}} Please try again after the reset.":
