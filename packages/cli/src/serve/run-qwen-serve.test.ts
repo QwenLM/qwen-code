@@ -47,6 +47,7 @@ import {
   verifyWorkerTlsTrust,
   waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
+import { countSseStream } from './sse-occupancy.js';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 import * as nativeDirectoryPicker from './native-directory-picker.js';
 import * as localPathOpen from './local-path-open.js';
@@ -18002,6 +18003,91 @@ describe('runQwenServe channel worker supervisor', () => {
         status.issues.some((issue) => issue.code === 'daemon_runtime_starting'),
       ).toBe(true);
     } finally {
+      await handle.close();
+    }
+  });
+
+  it('reports the SSE admission caps and live stream occupancy on bootstrap daemon status', async () => {
+    // The bootstrap window must carry the same cap/occupancy pairing as the
+    // runtime status (issue #17554, review R1-6): per-listener caps derived
+    // from the flags, and a LIVE occupancy read — not a frozen zero snapshot.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-sse-caps-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() =>
+      makeFakeBridge(),
+    );
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        token: 'secret',
+        serveWebShell: false,
+        maxConnections: 10,
+        maxSseConnections: 5,
+      },
+      {
+        resolveOnListen: true,
+        deferRuntimeUntilFirstHealth: true,
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    // A synthetic counted stream proves the bootstrap reads live occupancy.
+    const release = countSseStream('generation', {
+      socket: {},
+    } as never);
+    try {
+      const status = (await (
+        await fetch(`${handle.url}/daemon/status`, {
+          headers: { Authorization: 'Bearer secret' },
+        })
+      ).json()) as {
+        limits: {
+          maxSseConnections: number | null;
+          maxSseConnectionsPerListener: Record<string, number | null>;
+        };
+        runtime: {
+          transport: {
+            restSseActive: number;
+            streamOccupancy: {
+              total: number;
+              bySurface: Record<string, number>;
+              byListener: Record<string, number>;
+            };
+          };
+        };
+        issues: Array<{ code: string }>;
+      };
+      expect(
+        status.issues.some((issue) => issue.code === 'daemon_runtime_starting'),
+      ).toBe(true);
+      expect(status.limits.maxSseConnections).toBe(5);
+      expect(status.limits.maxSseConnectionsPerListener).toEqual({
+        primary: 5,
+        'local-control': 51,
+        'remote-access': 51,
+      });
+      expect(status.runtime.transport.restSseActive).toBe(0);
+      expect(
+        status.runtime.transport.streamOccupancy.total,
+      ).toBeGreaterThanOrEqual(1);
+      expect(
+        status.runtime.transport.streamOccupancy.bySurface['generation'],
+      ).toBeGreaterThanOrEqual(1);
+      expect(
+        status.runtime.transport.streamOccupancy.byListener['primary'],
+      ).toBeGreaterThanOrEqual(1);
+    } finally {
+      release();
       await handle.close();
     }
   });
