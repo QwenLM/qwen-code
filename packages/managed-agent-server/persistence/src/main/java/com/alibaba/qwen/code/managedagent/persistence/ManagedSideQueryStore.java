@@ -54,7 +54,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
         this.json = json;
         this.sessions = new AgentStoreRows(rules, jdbc, json);
         this.sessionQueries = new AgentSessionQueries(sessions, null, jdbc, List.of());
-        this.journal = new JournalStoreRows(StorageReadPolicy.inProcess(), jdbc);
+        this.journal = new JournalStoreRows(StorageReadPolicy.inProcess(), jdbc, null);
         this.workspaces = workspaces;
         this.models = models;
         this.retention = new ToolPublicationRetentionStore(jdbc, manager);

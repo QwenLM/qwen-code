@@ -25,6 +25,7 @@ import styles from './MessageList.module.css';
 
 const virtualizerTestState = vi.hoisted(() => ({
   getItemKeys: [] as Array<(index: number) => string | number>,
+  overscan: vi.fn(),
   itemSizeCache: new Map<string | number, number>(),
   resizeItem: vi.fn(),
   scrollToIndex: vi.fn(),
@@ -55,6 +56,7 @@ vi.mock('./MessageItem', async () => {
       assistantTurnFooterInfo,
       sendFailed,
       onRetrySend,
+      onEditUserMessage,
       assistantFeedbackPromptId,
     }: {
       message: Message;
@@ -68,6 +70,7 @@ vi.mock('./MessageItem', async () => {
       assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
       sendFailed?: boolean;
       onRetrySend?: () => void;
+      onEditUserMessage?: () => void;
     }) => {
       if (message.role === 'tool_group') {
         messageItemTestState.toolArrays.push(message.tools);
@@ -114,6 +117,17 @@ vi.mock('./MessageItem', async () => {
               'retry',
             )
           : null,
+        onEditUserMessage
+          ? React.createElement(
+              'button',
+              {
+                'data-testid': `edit-${message.id}`,
+                onClick: onEditUserMessage,
+                type: 'button',
+              },
+              'edit',
+            )
+          : null,
         message.role === 'thinking'
           ? React.createElement('button', {
               'aria-expanded': 'false',
@@ -150,12 +164,15 @@ vi.mock('@tanstack/react-virtual', () => ({
     count,
     enabled,
     getItemKey,
+    overscan,
   }: {
     count: number;
     enabled: boolean;
     getItemKey: (index: number) => string | number;
+    overscan: number;
   }) => {
     virtualizerTestState.getItemKeys.push(getItemKey);
+    virtualizerTestState.overscan(overscan);
     const virtualItems =
       enabled && virtualizerTestState.renderItems
         ? Array.from({ length: Math.min(count, 5) }, (_, index) => ({
@@ -229,6 +246,7 @@ afterEach(() => {
   virtualizerTestState.resizeItem.mockClear();
   virtualizerTestState.renderItems = true;
   virtualizerTestState.getItemKeys.length = 0;
+  virtualizerTestState.overscan.mockClear();
   messageItemTestState.toolArrays.length = 0;
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -381,6 +399,7 @@ function mount(
     pendingApproval?: PermissionRequest | null;
     failedPromptMessageId?: string;
     onRetryFailedPrompt?: () => void;
+    onEditUserMessage?: (turnIndex: number, content: string) => void;
   } = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -422,6 +441,7 @@ function mount(
                 onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
                 failedPromptMessageId={opts.failedPromptMessageId}
                 onRetryFailedPrompt={opts.onRetryFailedPrompt}
+                onEditUserMessage={opts.onEditUserMessage}
               />
             </TranscriptRenderModeProvider>
           </CompactModeContext.Provider>
@@ -580,17 +600,24 @@ const dispatchTopScroll = async (list: HTMLElement) => {
   });
 };
 const mockMessageListWidth = (width: number) =>
-  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
-    width,
-    height: 600,
-    top: 0,
-    right: width,
-    bottom: 600,
-    left: 0,
-    x: 0,
-    y: 0,
-    toJSON: () => ({}),
-  });
+  vi
+    .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+    .mockImplementation(function (this: HTMLElement) {
+      const isContent = this.hasAttribute('data-web-shell-message-row');
+      const left = isContent ? 64 : 0;
+      const contentWidth = isContent ? Math.max(0, width - 128) : width;
+      return {
+        width: contentWidth,
+        height: 600,
+        top: 0,
+        right: left + contentWidth,
+        bottom: 600,
+        left,
+        x: left,
+        y: 0,
+        toJSON: () => ({}),
+      };
+    });
 const simpleTurns = (count: number): Message[] =>
   Array.from({ length: count }, (_, index) => {
     const turn = index + 1;
@@ -704,6 +731,28 @@ describe('MessageList — failed prompt retry', () => {
     );
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
+});
+
+it('keeps Edit on the latest ordinary prompt when send records follow it', () => {
+  const sendRecord = (id: string): UserMessage => ({
+    ...userMsg(id),
+    agentMessage: {
+      kind: 'agent_mention',
+      sentTo: { sessionId: 'target', workspaceCwd: '/work/b' },
+    },
+  });
+  const onEditUserMessage = vi.fn();
+  const container = mount(
+    [userMsg('u1'), sendRecord('s1'), userMsg('u2'), sendRecord('s2')],
+    undefined,
+    { onEditUserMessage },
+  );
+
+  expect(container.querySelector('[data-testid="edit-s2"]')).toBeNull();
+  const edit = container.querySelector('[data-testid="edit-u2"]');
+  expect(edit).not.toBeNull();
+  click(edit!);
+  expect(onEditUserMessage).toHaveBeenCalledWith(1, 'q');
 });
 
 describe('MessageList — compact mode', () => {
@@ -4737,6 +4786,15 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(isCollapsed(c, 'g1')).toBe(true);
   });
 
+  it.each([
+    [undefined, 15],
+    [0, 0],
+    [6, 6],
+  ])('uses overscan %s as %s virtual rows', (overscan, expected) => {
+    mount(simpleTurns(110), undefined, { customization: { overscan } });
+    expect(virtualizerTestState.overscan).toHaveBeenLastCalledWith(expected);
+  });
+
   it('renders virtual scroll rows with sizer and row width classes', () => {
     const c = mount(simpleTurns(110));
 
@@ -4929,6 +4987,9 @@ describe('MessageList — turn collapse (DOM)', () => {
         }
         const item = this.closest('[data-testid="session-timeline-entry"]');
         if (item) return rect(58, 16, 20, 12);
+        if (this.hasAttribute('data-web-shell-message-row')) {
+          return rect(1072, 600, 0, 64);
+        }
         return rect(1200, 600, 0);
       });
     Object.defineProperty(window, 'innerHeight', {
@@ -4949,6 +5010,7 @@ describe('MessageList — turn collapse (DOM)', () => {
         '[data-testid="session-timeline-detail"]',
       );
       expect(detail?.style.top).toBe('45px');
+      expect(detail?.style.left).toBe('48px');
 
       focusOut(firstEntryButton!);
       detailRect = rect(240, 100, 30, 80);
@@ -5070,6 +5132,9 @@ describe('MessageList — turn collapse (DOM)', () => {
         if (item) {
           const index = Number(item.getAttribute('data-timeline-index'));
           return rect(58, 16, 40 + index * 60 - markerOffset);
+        }
+        if (this.hasAttribute('data-web-shell-message-row')) {
+          return rect(1072, 600, 0, 64);
         }
         return rect(1200, 600, 0);
       });
@@ -5260,13 +5325,46 @@ describe('MessageList — turn collapse (DOM)', () => {
     scrollIntoView.mockRestore();
   });
 
-  it('hides the session timeline below the default content width', async () => {
-    const rectSpy = mockMessageListWidth(999);
+  it('hides the session timeline below the minimum content width', async () => {
+    const rectSpy = mockMessageListWidth(560);
 
     const c = mount(simpleTurns(4));
     await nextFrame();
 
     expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();
+    rectSpy.mockRestore();
+  });
+
+  it('shows the session timeline above the minimum content width', async () => {
+    const rectSpy = mockMessageListWidth(700);
+
+    const c = mount(simpleTurns(4));
+    await nextFrame();
+
+    expect(c.querySelector('[data-testid="session-timeline"]')).not.toBeNull();
+    rectSpy.mockRestore();
+  });
+
+  it('coalesces transcript mutations into one navigation measurement per frame', async () => {
+    const rectSpy = mockMessageListWidth(700);
+    const measure = rectSpy.getMockImplementation()!;
+    const reads: HTMLElement[] = [];
+    rectSpy.mockImplementation(function (this: HTMLElement) {
+      reads.push(this);
+      return measure.call(this);
+    });
+    const c = mount([userMsg('u1')]);
+    await nextFrame();
+    const list = c.querySelector<HTMLElement>('[data-web-shell-message-list]')!;
+    reads.length = 0;
+
+    for (let index = 0; index < 3; index++) {
+      list.append(document.createElement('span'));
+      await Promise.resolve();
+    }
+    await nextFrame();
+
+    expect(reads.filter((element) => element === list)).toHaveLength(1);
     rectSpy.mockRestore();
   });
 
@@ -6795,6 +6893,111 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(has(c, 'agent')).toBe(true);
     expect(has(c, 'a1')).toBe(true);
     expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it.each([
+    [true, true],
+    [false, false],
+  ])(
+    'keeps the card of a turn another session started, and the answer before it, in view: from a session %s',
+    (fromSession, visible) => {
+      const backgroundTurn = {
+        turnId: 'turn-b',
+        taskId: 'kid',
+        kind: 'agent' as const,
+        label: 'projB · Kid',
+        startedAt: 10,
+      };
+      const card: SystemMessage = {
+        id: 'card',
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification_turn_started',
+        content: 'projB · Kid',
+        data: {
+          ...backgroundTurn,
+          backgroundTask: {
+            status: 'completed',
+            ...(fromSession ? { fromSession: { sessionId: 'kid' } } : {}),
+          },
+        },
+        backgroundTurn,
+      };
+      const c = mount([
+        userMsg('u1'),
+        asstMsg('a0'),
+        card,
+        toolMsg('g1'),
+        { ...asstMsg('a1'), backgroundTurn },
+      ]);
+      expect(isCollapsed(c, 'g1')).toBe(true);
+      expect(has(c, 'card')).toBe(visible);
+      expect(has(c, 'a0')).toBe(visible);
+      expect(has(c, 'a1')).toBe(true);
+    },
+  );
+
+  it.each(['none', 'before', 'between'])('keeps relays (%s)', (ordinary) => {
+    const replyCard = (id: string, crossSession = true): SystemMessage => {
+      const backgroundTurn = {
+        turnId: `turn-${id}`,
+        taskId: id,
+        kind: 'agent' as const,
+        label: `projB · ${id}`,
+        startedAt: 10,
+      };
+      return {
+        id: `card-${id}`,
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification_turn_started',
+        content: backgroundTurn.label,
+        data: {
+          ...backgroundTurn,
+          backgroundTask: {
+            status: 'completed',
+            ...(crossSession ? { fromSession: { sessionId: id } } : {}),
+          },
+        },
+        backgroundTurn,
+      };
+    };
+    const completed: SystemMessage = {
+      id: 'completed-b',
+      role: 'system',
+      variant: 'info',
+      source: 'background_task_completed',
+      content: 'b replied',
+    };
+    const c = mount([
+      userMsg('u1'),
+      asstMsg('initial-answer'),
+      ...(ordinary === 'before'
+        ? [replyCard('ordinary', false), toolMsg('ordinary-tool')]
+        : []),
+      replyCard('a'),
+      toolMsg('g1'),
+      asstMsg('a1'),
+      completed,
+      asstMsg('a1-rest'),
+      ...(ordinary === 'between'
+        ? [
+            replyCard('ordinary', false),
+            toolMsg('ordinary-tool'),
+            asstMsg('ordinary-summary'),
+          ]
+        : []),
+      replyCard('b'),
+      toolMsg('g2'),
+      asstMsg('a2'),
+    ]);
+    expect(isCollapsed(c, 'g1')).toBe(true);
+    expect(has(c, 'g2')).toBe(false);
+    expect(has(c, 'ordinary-summary')).toBe(false);
+    expect(has(c, 'initial-answer')).toBe(true);
+    for (const id of ['card-a', 'a1', 'a1-rest', 'card-b', 'a2']) {
+      expect(has(c, id)).toBe(true);
+    }
   });
 
   it('gives a turn of only an agent reply no final answer', () => {

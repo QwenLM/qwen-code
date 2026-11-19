@@ -398,6 +398,29 @@ describe('WorkflowRunner', () => {
     expect(recovery).toContain(hint);
   });
 
+  // Clients draw the declared phases from the start of a run, so the entry
+  // carries the script's meta before the script reaches any phase.
+  it('registers the script meta before the first phase starts', async () => {
+    const { config, registry } = await storedConfig();
+    let release: ((value: string) => void) | undefined;
+    const handle = await startRun(config, {
+      script:
+        "export const meta = { name: 'plan', description: 'plan', phases: [{ title: 'Review', detail: 'read' }, { title: 'Fix' }] }; phase('Review'); return await agent('read');",
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          release = resolve;
+        }),
+    });
+
+    expect(registry.get(handle.runId)?.meta).toMatchObject({
+      name: 'plan',
+      phases: [{ title: 'Review', detail: 'read' }, { title: 'Fix' }],
+    });
+    await vi.waitFor(() => expect(release).toBeDefined());
+    release?.('done');
+    expect((await handle.completion).ok).toBe(true);
+  });
+
   // The Workflow tool shows the user the file a `scriptPath` or `name` call
   // loads, then hands that same read to the runner. Reading the path again
   // here would run whatever the file holds by then, not what was approved.

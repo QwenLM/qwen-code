@@ -20,6 +20,7 @@ vi.mock('@opentui/core', () => ({
   MouseButton: { LEFT: 0 },
 }));
 
+import { getSettingDefinition } from '../../config/settingsUtils.js';
 import {
   buildSettingsListItems,
   editBackspace,
@@ -179,6 +180,15 @@ describe('nextToggleValue', () => {
 
   it('turns an unset tri-state boolean off', () => {
     expect(nextToggleValue({ type: 'boolean' }, undefined)).toBe(false);
+  });
+
+  it('turns the unset unified agent loop setting on', () => {
+    expect(
+      nextToggleValue(
+        getSettingDefinition('experimental.unifiedAgentLoop'),
+        undefined,
+      ),
+    ).toBe(true);
   });
 
   it('cycles enums and loops back to the first option', () => {

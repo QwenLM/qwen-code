@@ -2,12 +2,24 @@ import { describe, expect, it, vi } from 'vitest';
 import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import {
   WEB_SHELL_LANGUAGES,
+  LOCAL_FILES_MESSAGE_KEYS,
   getTranslator,
   languageLabel,
   languageSettingToWebShellLanguage,
   normalizeLanguage,
 } from './i18n';
 import type { WebShellLanguage } from './i18n';
+import { ZH_TW } from './i18n-zh-tw';
+import { SIMPLIFIED_ONLY_GLYPHS } from './test/zh-tw-glyphs';
+import { CHANNEL_METHOD_PLATFORMS } from './components/channels/channel-platform';
+import { RU_PART6 } from './i18n-ru-part6';
+import * as ruPart1Stub from './i18n-ru-part1.transcript-stub';
+import * as ruPart2Stub from './i18n-ru-part2.transcript-stub';
+import * as ruPart3Stub from './i18n-ru-part3.transcript-stub';
+import * as ruPart4Stub from './i18n-ru-part4.transcript-stub';
+import * as ruPart5Stub from './i18n-ru-part5.transcript-stub';
+import * as ruPart6Stub from './i18n-ru-part6.transcript-stub';
+import * as ruRemainderStub from './i18n-ru-remainder.transcript-stub';
 
 // getTranslator returns the raw key when EN has no entry. SettingsMessage
 // translateSettingText then substitutes the settingsSchema.ts description,
@@ -111,6 +123,8 @@ const SCHEDULED_TASK_DELIVERY_KEYS = [
   'chat',
   'cardPrefix',
   'configuredGroupHint',
+  'configuredEndpointHint',
+  'endpoint',
   'configuredHint',
   'useConfiguredDestination',
   'differentConfiguredDestination',
@@ -127,10 +141,18 @@ const OUTBOUND_CHANNEL_KEYS = [
   'statusDescription.readyToSend',
   'statusDescription.notReadyToSend',
   'statusDescription.outbound',
-  'editor.field.dingtalkWebhook.webhookUrl',
-  'editor.field.dingtalkWebhook.webhookUrl.description',
-  'editor.field.dingtalkWebhook.signingSecret',
-  'editor.field.dingtalkWebhook.signingSecret.description',
+  'editor.field.webhook.webhookUrl',
+  'editor.field.webhook.webhookUrl.description',
+  'editor.field.webhook.signingSecret',
+  'editor.field.webhook.signingSecret.description',
+  'platform.name.generic-webhook',
+  'editor.field.genericWebhook.webhookUrl',
+  'editor.field.genericWebhook.webhookUrl.description',
+  'editor.field.genericWebhook.bearerToken',
+  'editor.field.genericWebhook.bearerToken.description',
+  'editor.field.genericWebhook.allowPrivateNetwork',
+  'editor.field.genericWebhook.allowPrivateNetwork.description',
+  'editor.field.genericWebhook.networkDescription',
 ].map((suffix) => `channels.${suffix}`);
 
 describe('web-shell i18n catalog', () => {
@@ -155,6 +177,89 @@ describe('web-shell i18n catalog', () => {
     );
   });
 
+  it('localizes the Goals workspace picker label in every catalog that translates the dialog', () => {
+    // The ru catalog translates the whole Goals dialog; leaving the picker
+    // label English would strand one untranslated string mid-surface.
+    const en = getTranslator('en')('goals.workspace');
+    expect(en).toBe('Workspace');
+    expect(getTranslator('zh-CN')('goals.workspace')).not.toBe(en);
+    expect(getTranslator('ru')('goals.workspace')).not.toBe(en);
+    // Compare against the EN string, not the raw key: the translator falls
+    // back to EN for a missing entry, so a raw-key comparison would pass
+    // even if the zh/ru entry were deleted.
+    const enSkipped = getTranslator('en')('goals.workspacesSkipped', {
+      count: 2,
+    });
+    for (const language of ['zh-CN', 'ru'] as const) {
+      expect(
+        getTranslator(language)('goals.workspacesSkipped', { count: 2 }),
+      ).not.toBe(enSkipped);
+    }
+    // Full-string pins: the noun must agree with the count AND the predicate
+    // must be grammatical for every count. The impersonal "Не показано: N …"
+    // form avoids the neuter-vs-feminine clash a quantified singular subject
+    // would create ("1 рабочая область не показано" is ungrammatical).
+    expect(getTranslator('ru')('goals.workspacesSkipped', { count: 1 })).toBe(
+      'Не показано: 1 рабочая область (нет доверия или удалённый доступ).',
+    );
+    expect(getTranslator('ru')('goals.workspacesSkipped', { count: 5 })).toBe(
+      'Не показано: 5 рабочих областей (нет доверия или удалённый доступ).',
+    );
+    // zh terminology must match the catalog: the sibling scheduled-task
+    // error spells the same condition 不受信任, not the clipped 未受信.
+    const zh = getTranslator('zh-CN');
+    expect(zh('goals.workspacesSkipped', { count: 2 })).toBe(
+      '有 2 个工作区未显示（不受信任或远程）。',
+    );
+    expect(zh('goals.error.workspaceUnavailable')).toBe(
+      '所选工作区不可用或不受信任。',
+    );
+    const enUnavailable = getTranslator('en')(
+      'goals.error.workspaceUnavailable',
+    );
+    for (const language of ['zh-CN', 'ru'] as const) {
+      expect(
+        getTranslator(language)('goals.error.workspaceUnavailable'),
+      ).not.toBe(enUnavailable);
+    }
+  });
+
+  it('localizes the Goals-page affordance and budget-row labels in every catalog', () => {
+    // The budget rows render these labels in all three locales; a missing
+    // zh/ru entry would silently fall back to EN mid-surface. Full-string
+    // pins, not just != EN, so a wrong translation reds too.
+    expect(getTranslator('en')('goals.viewAll')).toBe('View all goals');
+    expect(getTranslator('zh-CN')('goals.viewAll')).toBe('查看全部目标');
+    expect(getTranslator('ru')('goals.viewAll')).toBe('Все цели');
+    expect(getTranslator('en')('goals.budget.turns')).toBe('Turns');
+    expect(getTranslator('zh-CN')('goals.budget.turns')).toBe('轮数');
+    expect(getTranslator('ru')('goals.budget.turns')).toBe('Ходы');
+    expect(getTranslator('en')('goals.budget.tokens')).toBe('Tokens');
+    expect(getTranslator('zh-CN')('goals.budget.tokens')).toBe('Tokens');
+    expect(getTranslator('ru')('goals.budget.tokens')).toBe('Токены');
+    expect(getTranslator('en')('goals.budget.time')).toBe('Active time');
+    expect(getTranslator('zh-CN')('goals.budget.time')).toBe('活跃时长');
+    expect(getTranslator('ru')('goals.budget.time')).toBe('Активное время');
+  });
+
+  it('localizes the sidebar goal marker label in every catalog', () => {
+    // The marker's accessible name composes the localized status word with
+    // the objective; a missing zh/ru entry would fall back to EN mid-label.
+    for (const [language, expected] of [
+      ['en', 'Goal: Paused — ship it'],
+      ['zh-CN', '目标：已暂停 — ship it'],
+      ['ru', 'Цель: Пауза — ship it'],
+    ] as const) {
+      const t = getTranslator(language);
+      expect(
+        t('sidebar.sessionGoal', {
+          status: t('goal.status.paused'),
+          objective: 'ship it',
+        }),
+      ).toBe(expected);
+    }
+  });
+
   it('keeps every scheduled-task delivery translation in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');
@@ -175,6 +280,115 @@ describe('web-shell i18n catalog', () => {
       expect(en(key)).not.toBe(key);
       expect(zh(key)).not.toBe(key);
       expect(zh(key)).not.toBe(en(key));
+    }
+  });
+
+  it('keeps the daemon-status SSE admission label translated in zh and ru', () => {
+    // The status dialog renders this label in every shipped locale. The
+    // translator falls back to EN per key, so a deleted zh/ru entry would
+    // silently show English mid-surface — compare against en(key), not the
+    // raw key (issue #17554 review R1-3).
+    const key = 'daemon.transport.sseAdmission';
+    const en = getTranslator('en')(key);
+    expect(en).not.toBe(key);
+    for (const language of ['zh-CN', 'ru'] as const) {
+      const value = getTranslator(language)(key);
+      expect(value).not.toBe(key);
+      expect(value).not.toBe(en);
+    }
+  });
+
+  it('keeps every change-overview translation in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    const keys = [
+      'changeOverview.title',
+      'changeOverview.uncommitted',
+      'changeOverview.loading',
+      'changeOverview.notGit',
+      'changeOverview.loadFailed',
+      'changeOverview.empty',
+      'changeOverview.files',
+      'changeOverview.prUnavailable',
+      'changeOverview.prUnavailableCli',
+      'changeOverview.prUnavailableRoute',
+      'changeOverview.refresh',
+      'changeOverview.openPr',
+      'changeOverview.description',
+      'changeOverview.hiddenFiles',
+      'changeOverview.hiddenCommits',
+    ];
+    for (const key of keys) {
+      // zh against en, not against the key: the translator falls back to EN
+      // per key, so a deleted zh entry would otherwise pass silently.
+      expect(en(key, { count: 2 })).not.toBe(key);
+      expect(zh(key, { count: 2 })).not.toBe(key);
+      expect(zh(key, { count: 2 })).not.toBe(en(key, { count: 2 }));
+    }
+  });
+
+  it('pluralises the change-overview count strings at count 1', () => {
+    const en = getTranslator('en');
+    expect(en('changeOverview.files', { count: 1 })).toBe('1 file');
+    expect(en('changeOverview.files', { count: 2 })).toBe('2 files');
+    expect(en('changeOverview.hiddenFiles', { count: 1 })).toBe(
+      '…and 1 more file',
+    );
+    expect(en('changeOverview.hiddenFiles', { count: 3 })).toBe(
+      '…and 3 more files',
+    );
+  });
+
+  it.each(WEB_SHELL_LANGUAGES)(
+    'keeps shared connection and webhook copy platform-neutral in %s',
+    (language) => {
+      const t = getTranslator(language);
+      for (const key of [
+        'channels.method.title',
+        'channels.method.description',
+        'channels.method.webhook.description',
+        'channels.editor.field.webhook.webhookUrl.description',
+        'channels.editor.field.webhook.signingSecret.description',
+      ]) {
+        expect(t(key)).not.toBe(key);
+        expect(t(key)).not.toMatch(/DingTalk|钉钉|Feishu|飞书|WeCom|企业微信/i);
+      }
+      for (const key of [
+        'channels.method.title',
+        'channels.method.description',
+      ]) {
+        expect(t(key, { platform: 'Example platform' })).toContain(
+          'Example platform',
+        );
+      }
+    },
+  );
+
+  it('defines names for every grouped channel platform', () => {
+    for (const platform of new Set(Object.values(CHANNEL_METHOD_PLATFORMS))) {
+      if (!platform) continue;
+      const key = `channels.platform.name.${platform.type}`;
+      for (const language of WEB_SHELL_LANGUAGES) {
+        expect(getTranslator(language)(key)).not.toBe(key);
+      }
+    }
+  });
+
+  it.each([
+    { type: 'dingtalk', english: 'DingTalk', chinese: '钉钉' },
+    { type: 'feishu', english: 'Feishu', chinese: '飞书' },
+    { type: 'wecom', english: 'WeCom', chinese: '企业微信' },
+  ])('localizes $type in the connection chooser', (platform) => {
+    for (const language of ['en', 'zh-CN'] as const) {
+      const t = getTranslator(language);
+      const name = t(`channels.platform.name.${platform.type}`);
+      expect(name).toBe(
+        language === 'zh-CN' ? platform.chinese : platform.english,
+      );
+      expect(t('channels.method.title', { platform: name })).toContain(name);
+      expect(t('channels.method.description', { platform: name })).toContain(
+        name,
+      );
     }
   });
 
@@ -236,6 +450,42 @@ describe('web-shell i18n catalog', () => {
     );
   });
 
+  it('keeps every local files translation in both locales (R1-11)', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    // The enumeration itself is load-bearing: the loop below cannot observe
+    // its own source being replaced by the old hardcoded subset, so pin keys
+    // outside that subset here.
+    expect(LOCAL_FILES_MESSAGE_KEYS).toContain('localFiles.status.connected');
+    expect(LOCAL_FILES_MESSAGE_KEYS).toContain(
+      'localFiles.blocker.unsupportedDaemon',
+    );
+    // Derived from the EN catalog, not a hardcoded subset: a new localFiles
+    // key enters the parity check automatically. The vars bag feeds the
+    // function-valued entries (tools/gestureToast/insecureContext); string
+    // entries ignore it.
+    const vars = { count: 2, name: 'proj', localPort: 8080 };
+    for (const key of LOCAL_FILES_MESSAGE_KEYS) {
+      expect(en(key, vars)).not.toBe(key);
+      expect(zh(key, vars)).not.toBe(key);
+      // zh against en, not zh against the key: the translator falls back to EN
+      // per key, so a deleted zh entry (or one pasted with the EN text) would
+      // otherwise pass. Several of these are never rendered by a panel case.
+      expect(zh(key, vars)).not.toBe(en(key, vars));
+    }
+    // Both locales must interpolate the directory name, not drop it (R4-4).
+    expect(en('localFiles.gestureToast', vars)).toContain('proj');
+    expect(zh('localFiles.gestureToast', vars)).toContain('proj');
+    // The insecure-context instruction is function-valued too: pin its
+    // local-port branch in both locales, naming the same address.
+    const portVars = { localPort: 8080 };
+    const enPort = en('localFiles.blocker.insecureContext', portVars);
+    const zhPort = zh('localFiles.blocker.insecureContext', portVars);
+    expect(enPort).toContain('http://localhost:8080');
+    expect(zhPort).toContain('http://localhost:8080');
+    expect(zhPort).not.toBe(enPort);
+  });
+
   it.each([
     [
       'en',
@@ -244,7 +494,7 @@ describe('web-shell i18n catalog', () => {
     ['zh-CN', '周额度已用完，预计将于2天 1小时后恢复，请在额度恢复后重试。'],
     [
       'ru',
-      "You've used up your weekly credits. Your credits are expected to reset in 2 days and 1 hour. Please try again after the reset.",
+      'Недельный лимит кредитов исчерпан. Ожидается сброс через 2 дня и 1 час. Повторите попытку после сброса.',
     ],
   ] as const)(
     'formats quota data through the %s catalog',
@@ -425,10 +675,34 @@ describe('web-shell i18n catalog', () => {
   });
 });
 
-// #13391: ru ships a PARTIAL catalog covering the Goal card and the Goals
-// dialog only; every other key must fall back to EN in getTranslator. These
-// pins guard the normalizer branches, the pluralisation and that fallback.
+// ru is a full shipped catalog. These pins guard the normalizer branches,
+// Goal pluralisation, and that chrome keys resolve from RU rather than EN.
 describe('web-shell ru locale', () => {
+  it.each([
+    'scheduledTasks.delivery.configuredEndpointHint',
+    'scheduledTasks.delivery.endpoint',
+    'channels.editor.field.genericWebhook.webhookUrl',
+    'channels.editor.field.genericWebhook.webhookUrl.description',
+    'channels.editor.field.genericWebhook.bearerToken',
+    'channels.editor.field.genericWebhook.bearerToken.description',
+    'channels.editor.field.genericWebhook.allowPrivateNetwork',
+    'channels.editor.field.genericWebhook.allowPrivateNetwork.description',
+    'channels.editor.field.genericWebhook.networkDescription',
+  ])('localizes Generic Webhook copy in Russian: %s', (key) => {
+    const translated = getTranslator('ru')(key);
+    expect(translated).not.toBe(key);
+    expect(translated).not.toBe(getTranslator('en')(key));
+  });
+
+  it('keeps the Generic Webhook platform name unchanged in Russian', () => {
+    expect(RU_PART6['channels.platform.name.generic-webhook']).toBe(
+      'Generic Webhook',
+    );
+    expect(getTranslator('ru')('channels.platform.name.generic-webhook')).toBe(
+      'Generic Webhook',
+    );
+  });
+
   it('normalizes ru spellings to ru and leaves the en/zh mappings untouched', () => {
     for (const value of [
       'ru',
@@ -451,6 +725,14 @@ describe('web-shell ru locale', () => {
     expect(normalizeLanguage('zh')).toBe('zh-CN');
     expect(normalizeLanguage('zh-cn')).toBe('zh-CN');
     expect(normalizeLanguage('zh_cn')).toBe('zh-CN');
+    expect(normalizeLanguage('zh-TW')).toBe('zh-TW');
+    expect(normalizeLanguage('zh_TW')).toBe('zh-TW');
+    expect(normalizeLanguage('zh-Hant')).toBe('zh-TW');
+    expect(normalizeLanguage('zh-HK')).toBe('zh-TW');
+    // Region- and script-qualified Traditional tags reach the same catalog.
+    for (const value of ['zh-MO', 'zh-Hant-TW', 'zh-hk-x', 'zh-mo-x']) {
+      expect(normalizeLanguage(value)).toBe('zh-TW');
+    }
     // Unrelated locales still collapse to en (fr, ja, … are not shipped).
     expect(normalizeLanguage('fr-FR')).toBe('en');
     expect(normalizeLanguage('ja-JP')).toBe('en');
@@ -470,24 +752,47 @@ describe('web-shell ru locale', () => {
       expect(languageSettingToWebShellLanguage(value)).toBe('ru');
     }
     expect(languageSettingToWebShellLanguage('zh')).toBe('zh-CN');
+    expect(languageSettingToWebShellLanguage('zh-TW')).toBe('zh-TW');
+    expect(languageSettingToWebShellLanguage('zh_HK')).toBe('zh-TW');
     expect(languageSettingToWebShellLanguage('en')).toBe('en');
     expect(languageSettingToWebShellLanguage('fr')).toBeUndefined();
   });
 
   it('lists ru in the picker with the "Русский [ru]" label', () => {
-    expect(WEB_SHELL_LANGUAGES).toEqual(['en', 'zh-CN', 'ru']);
+    expect(WEB_SHELL_LANGUAGES).toEqual(['en', 'zh-CN', 'zh-TW', 'ru']);
     expect(languageLabel('ru')).toBe('Русский [ru]');
   });
 
   it('lists every shipped language in the /language error and usage copy', () => {
     // The /language gate, help and completions derive from WEB_SHELL_LANGUAGES;
-    // the error/usage copy must carry the same set, in both locales.
-    for (const language of ['en', 'zh-CN'] as const) {
+    // the error/usage copy must carry the same set in every locale.
+    for (const language of WEB_SHELL_LANGUAGES) {
       const t = getTranslator(language);
-      expect(t('language.invalid')).toContain('en, zh-CN, ru');
-      expect(t('language.usage')).toContain('en|zh-CN|ru');
+      expect(t('language.invalid')).toContain('en, zh-CN, zh-TW, ru');
+      expect(t('language.usage')).toContain('en|zh-CN|zh-TW|ru');
       expect(t('language.usage')).toContain('[--project|--global]');
     }
+  });
+
+  it('localizes activity grouping options in Russian', () => {
+    const ru = getTranslator('ru');
+    const en = getTranslator('en');
+    for (const key of [
+      'sidebar.groupBy',
+      'sidebar.groupWorkspace',
+      'sidebar.groupActivityDate',
+      'sidebar.groupThisWeek',
+      'sidebar.groupLast30Days',
+      'sidebar.groupOlder',
+      'sidebar.recentConversations',
+    ]) {
+      expect(ru(key)).not.toBe(en(key));
+    }
+    expect(en('sidebar.recentConversations')).toBe('Recent conversations');
+    expect(getTranslator('zh-CN')('sidebar.recentConversations')).toBe(
+      '最近对话',
+    );
+    expect(ru('sidebar.recentConversations')).toBe('Недавние разговоры');
   });
 
   it('pluralises turn counters the Russian way', () => {
@@ -566,16 +871,149 @@ describe('web-shell ru locale', () => {
     expect(t('goal.blocked')).not.toBe(en('goal.blocked'));
   });
 
-  it('falls back to EN for keys the partial ru catalog lacks', () => {
+  it('renders chrome from the ru catalog, not from EN', () => {
     const t = getTranslator('ru');
     const en = getTranslator('en');
-    // Plain and parameterised EN values both resolve, not the raw key.
-    expect(t('welcome.prompt')).toBe(en('welcome.prompt'));
-    expect(t('welcome.prompt')).not.toBe('welcome.prompt');
-    expect(t('capacityChoice.capacity', { used: 1, limit: 2 })).toBe(
+    expect(t('welcome.prompt')).toBe('Что вы хотите сделать?');
+    expect(t('session.new')).toBe('Новая сессия');
+    expect(t('sidebar.project')).toBe('Рабочие области');
+    expect(t('sidebar.recentSessions')).toBe('Недавние');
+    expect(t('activity.title')).toBe('Активность');
+    expect(
+      t(
+        'channels.editor.field.github.boundSessionActions.optionDescription.mention',
+      ),
+    ).toBe('Вас @упомянули в комментарии');
+    expect(t('capacityChoice.capacity', { used: 1, limit: 2 })).not.toBe(
       en('capacityChoice.capacity', { used: 1, limit: 2 }),
     );
     // Unknown in every catalog: the key itself, as in all locales.
     expect(t('no.such.key')).toBe('no.such.key');
+  });
+
+  it('drops the Russian catalog from the transcript build', () => {
+    expect(Object.keys(ruPart1Stub)).toEqual(['RU_PART1']);
+    expect(Object.keys(ruPart2Stub)).toEqual(['RU_PART2']);
+    expect(Object.keys(ruPart3Stub)).toEqual(['RU_PART3']);
+    expect(Object.keys(ruPart4Stub)).toEqual(['RU_PART4']);
+    expect(Object.keys(ruPart5Stub)).toEqual(['RU_PART5']);
+    expect(Object.keys(ruPart6Stub)).toEqual(['RU_PART6']);
+    expect(ruPart1Stub.RU_PART1).toEqual({});
+    expect(ruPart2Stub.RU_PART2).toEqual({});
+    expect(ruPart3Stub.RU_PART3).toEqual({});
+    expect(ruPart4Stub.RU_PART4).toEqual({});
+    expect(ruPart5Stub.RU_PART5).toEqual({});
+    expect(ruPart6Stub.RU_PART6).toEqual({});
+    expect(Object.keys(ruRemainderStub)).toEqual(['RU_REMAINDER']);
+    expect(ruRemainderStub.RU_REMAINDER).toEqual({});
+  });
+});
+
+describe('web-shell zh-TW locale', () => {
+  it('uses Taiwan Traditional Chinese instead of the Simplified catalog', () => {
+    const tw = getTranslator('zh-TW');
+    const zh = getTranslator('zh-CN');
+    expect(tw('files.title')).toBe('檔案');
+    expect(zh('files.title')).toBe('文件');
+    expect(tw('files.delete')).toBe('刪除檔案');
+    expect(tw('managed.approval.failed')).toContain('審批回答');
+    expect(
+      tw(
+        "You've used up your weekly credits.{{reset}} Please try again after the reset.",
+        { reset: '' },
+      ),
+    ).toContain('週額度');
+    expect(languageLabel('zh-TW')).toBe('繁體中文 [zh-TW]');
+    expect(tw('language.invalid')).toContain('zh-TW');
+  });
+
+  it('resolves the Simplified script and region tags the Traditional side honours', () => {
+    for (const tag of [
+      'zh-Hans',
+      'zh-Hans-CN',
+      'zh_SG',
+      'zh-sg-x',
+      'zh-cn-x',
+    ]) {
+      expect(normalizeLanguage(tag)).toBe('zh-CN');
+      expect(languageSettingToWebShellLanguage(tag)).toBe('zh-CN');
+    }
+    // Script wins over region: zh-Hant-CN stays Traditional.
+    expect(normalizeLanguage('zh-Hant-CN')).toBe('zh-TW');
+    expect(languageSettingToWebShellLanguage('zh-Hant-CN')).toBe('zh-TW');
+  });
+
+  it('carries no Simplified-only vocabulary in any entry', () => {
+    for (const [key, value] of Object.entries(ZH_TW)) {
+      const text = typeof value === 'function' ? value({}) : value;
+      expect(`${key}: ${text}`).not.toMatch(SIMPLIFIED_ONLY_GLYPHS);
+    }
+  });
+
+  it('translates the surfaces that would otherwise stay English', () => {
+    const tw = getTranslator('zh-TW');
+    const en = getTranslator('en');
+    for (const key of [
+      'sidebar.gitCloneJobGone',
+      'channels.editor.field.github.prCommentWatch',
+      'channels.editor.field.github.prCommentWatch.description',
+      'sidebar.liveVoicePending',
+      'memory.lastDream',
+      'memory.savedIn',
+      'managed.artifactLibrary.title',
+      'managed.artifactLibrary.description',
+      'managed.artifactLibrary.empty',
+      'managed.artifactLibrary.unavailable',
+      'managed.artifactLibrary.workspaceGone',
+      'managed.artifactLibrary.loadFailed',
+      'managed.artifactLibrary.unavailableBadge',
+      'managed.artifactLibrary.sessionFallback',
+      'managed.artifactLibrary.refresh',
+      'managed.artifactLibrary.close',
+    ]) {
+      expect(tw(key, { path: '/w' })).not.toBe(en(key, { path: '/w' }));
+    }
+    expect(tw('sidebar.liveVoicePending')).toBe('語音通話');
+    expect(tw('memory.savedIn', { path: '/w' })).toBe('已儲存於 /w');
+  });
+
+  it('names the column axis 欄, the row axis 行 and the machine 電腦', () => {
+    const tw = getTranslator('zh-TW');
+    expect(tw('markdownTable.freezeFirstColumn')).toBe('凍結首欄');
+    expect(tw('markdownTable.unfreezeFirstColumn')).toBe('取消凍結首欄');
+    expect(tw('markdownTable.hideColumn')).toBe('隱藏欄');
+    expect(tw('markdownTable.showHiddenColumns', { count: 2 })).toBe(
+      '顯示 2 個隱藏欄',
+    );
+    expect(tw('markdownTable.column', { index: 3 })).toBe('第 3 欄');
+    expect(tw('markdownTable.resizeColumn', { column: 'A' })).toBe(
+      '調整 A 欄寬',
+    );
+    expect(tw('markdownTable.rows', { count: 10 })).toBe('共10行');
+    expect(tw('workspaceHost.thisComputer')).toBe('這臺電腦');
+    expect(tw('daemon.connection.saved')).toBe('已連線的電腦');
+  });
+
+  it('reports only the table truncation that happened', () => {
+    const tw = getTranslator('zh-TW');
+    const shape = {
+      visibleRows: 5,
+      totalRows: 10,
+      visibleColumns: 3,
+      totalColumns: 3,
+    };
+    expect(tw('echartsChart.tableNotice', { ...shape, omittedRows: 5 })).toBe(
+      '顯示 5/10 行',
+    );
+    expect(
+      tw('echartsChart.tableNotice', { ...shape, omittedColumns: 2 }),
+    ).toBe('顯示 3/3 欄');
+    expect(
+      tw('echartsChart.tableNotice', {
+        ...shape,
+        omittedRows: 5,
+        omittedColumns: 2,
+      }),
+    ).toBe('顯示 5/10 行，3/3 欄');
   });
 });

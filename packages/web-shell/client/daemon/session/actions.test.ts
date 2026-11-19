@@ -878,6 +878,24 @@ describe('getConnectionAfterSessionClear', () => {
         titleSource: 'manual',
         tokenCount: 42,
         goalState: { v: 2, goal: null, activity: 'idle' },
+        restoredArtifacts: [
+          {
+            id: 'a1',
+            kind: 'link',
+            storage: 'external_url',
+            source: 'client',
+            status: 'available',
+            title: 'Stale artifact',
+            url: 'https://example.com/stale',
+            retention: 'restorable',
+            clientRetained: true,
+            createdAt: '2026-09-07T00:00:00.000Z',
+            updatedAt: '2026-09-07T00:00:00.000Z',
+          },
+        ],
+        restoredArtifactsSessionId: 'session-a',
+        artifactCountHint: 3,
+        artifactCountHintSessionId: 'session-a',
         backgroundTurn: {
           turnId: 'background-a',
           taskId: 'task-a',
@@ -913,6 +931,10 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('titleSource');
     expect(next).not.toHaveProperty('tokenCount');
     expect(next).not.toHaveProperty('goalState');
+    expect(next).not.toHaveProperty('restoredArtifacts');
+    expect(next).not.toHaveProperty('restoredArtifactsSessionId');
+    expect(next).not.toHaveProperty('artifactCountHint');
+    expect(next).not.toHaveProperty('artifactCountHintSessionId');
     expect(next).not.toHaveProperty('backgroundTurn');
     expect(next).not.toHaveProperty('finishedBackgroundTurnId');
     expect(next).not.toHaveProperty('supportedCommands');
@@ -1439,18 +1461,90 @@ describe('createDaemonSessionActions', () => {
       expect(setPromptStatus).toHaveBeenCalledWith('idle');
     });
 
-    it('settles when the authority itself goes unknown', () => {
-      // A dead daemon: the live-state channel stops answering, its retained
-      // snapshot is dropped, and the bridge publishes `undefined`. Nothing
-      // vouches for the turn any more, so the pane must be released instead of
-      // holding a running turn for the life of the tab.
-      const { actions, setPromptStatus } = createActionsHarness({
-        session: createMockSession('session-1'),
-      });
+    it('bounds activity recovery with the existing load watchdog', async () => {
+      vi.useFakeTimers();
+      try {
+        const harness = createActionsHarness({
+          session: createMockSession('session-1'),
+          connection: {
+            status: 'connected',
+            workspaceCwd: '/workspace',
+            sessionId: 'session-1',
+          },
+          getPromptStatus: () => 'streaming',
+        });
+        harness.actions.setDaemonActivePrompt(true);
+        harness.actions.setDaemonActivePrompt(undefined);
+        expect(harness.pendingSessionLoadRef.current).toMatchObject({
+          sessionId: 'session-1',
+          mode: 'load',
+          reconcilePromptActivity: true,
+        });
+        expect(harness.setPromptStatus).not.toHaveBeenCalled();
 
-      actions.setDaemonActivePrompt(true);
-      actions.setDaemonActivePrompt(undefined);
-      expect(setPromptStatus).toHaveBeenCalledWith('idle');
+        await vi.advanceTimersByTimeAsync(75_000);
+        expect(harness.setPromptStatus).toHaveBeenCalledWith('idle');
+        expect(harness.getConnection().error).toContain('timed out');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not apply an old recovery failure after switching sessions', async () => {
+      vi.useFakeTimers();
+      try {
+        const harness = createActionsHarness({
+          session: createMockSession('session-a'),
+          connection: {
+            status: 'connected',
+            workspaceCwd: '/workspace',
+            sessionId: 'session-a',
+          },
+          getPromptStatus: () => 'streaming',
+        });
+        harness.actions.setDaemonActivePrompt(true);
+        harness.actions.setDaemonActivePrompt(undefined);
+        const switched = harness.actions.loadSession('session-b');
+        harness.setPromptStatus.mockClear();
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(harness.getConnection().sessionId).toBe('session-b');
+        expect(harness.getConnection().error).toBeUndefined();
+        expect(harness.setPromptStatus).not.toHaveBeenCalled();
+        const pending = harness.pendingSessionLoadRef.current!;
+        clearTimeout(pending.timeout);
+        pending.resolve();
+        await switched;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not settle a local prompt submitted during failed recovery', async () => {
+      const harness = createActionsHarness({
+        session: createMockSession('session-1'),
+        connection: {
+          status: 'connected',
+          workspaceCwd: '/workspace',
+          sessionId: 'session-1',
+        },
+        getPromptStatus: () => 'streaming',
+      });
+      harness.actions.setDaemonActivePrompt(true);
+      harness.actions.setDaemonActivePrompt(undefined);
+      harness.activePromptsRef.current.set('session-1', {
+        controller: new AbortController(),
+      });
+      const pending = harness.pendingSessionLoadRef.current!;
+      clearTimeout(pending.timeout);
+      harness.pendingSessionLoadRef.current = undefined;
+      pending.reject(new Error('Activity recovery unavailable'));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(harness.setPromptStatus).not.toHaveBeenCalled();
+      expect(harness.getConnection().error).toBe(
+        'Activity recovery unavailable',
+      );
     });
 
     it('never revives a settled turn', () => {
@@ -3551,6 +3645,84 @@ describe('createDaemonSessionActions', () => {
       requestTimeoutMs: 70_000,
     });
     expect(getConnection().goalState).toBeUndefined();
+  });
+
+  it('commits the click-time artifact count hint keyed to the target session', () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        artifactCountHint: 9,
+        artifactCountHintSessionId: 'session-a',
+      },
+      session: existingSession,
+    });
+
+    void actions
+      .loadSession('session-b', { artifactCountHint: 4 })
+      .catch(() => undefined);
+
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'session-b',
+      artifactCountHint: 4,
+      artifactCountHintSessionId: 'session-b',
+    });
+  });
+
+  it('clears a stale artifact count hint when the target has none', () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        artifactCountHint: 9,
+        artifactCountHintSessionId: 'session-a',
+      },
+      session: existingSession,
+    });
+
+    void actions.loadSession('session-b').catch(() => undefined);
+
+    expect(getConnection().artifactCountHint).toBeUndefined();
+    expect(getConnection().artifactCountHintSessionId).toBeUndefined();
+  });
+
+  it('retires the click-time artifact count hint when the load fails', async () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection, pendingSessionLoadRef } =
+      createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+        },
+        session: existingSession,
+      });
+
+    const load = actions.loadSession('session-b', { artifactCountHint: 4 });
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'session-b',
+      artifactCountHint: 4,
+      artifactCountHintSessionId: 'session-b',
+    });
+
+    const pendingLoad = pendingSessionLoadRef.current;
+    pendingSessionLoadRef.current = undefined;
+    clearTimeout(pendingLoad?.timeout);
+    pendingLoad?.reject(new Error('load failed'));
+
+    await expect(load).rejects.toThrow('load failed');
+    // The failed target stays visible for the error state, but its count
+    // must not outlive the load: no snapshot or cache entry will ever
+    // retire the hint on the failure path.
+    expect(getConnection()).toMatchObject({
+      sessionId: 'session-b',
+      error: 'load failed',
+    });
+    expect(getConnection().artifactCountHint).toBeUndefined();
+    expect(getConnection().artifactCountHintSessionId).toBeUndefined();
   });
 
   it('drops workspace previews when switching to a standalone target', () => {
@@ -7673,6 +7845,7 @@ function createActionsHarness(
     getDefaultSessionContext?: () => DaemonProductSessionContext | undefined;
     getClient?: () => DaemonClient | undefined;
     getEventDetailMode?: () => 'full' | 'summary';
+    getPromptStatus?: () => 'idle' | 'waiting' | 'streaming';
   } = {},
 ) {
   let connection: DaemonConnectionState = opts.connection ?? {
@@ -7748,6 +7921,7 @@ function createActionsHarness(
       opts.getDefaultSessionContext ?? (() => undefined),
     getClient: opts.getClient,
     getConnection: () => connection,
+    getPromptStatus: opts.getPromptStatus ?? (() => 'idle'),
     getEventDetailMode: opts.getEventDetailMode ?? (() => 'full'),
     hasSessionActivePrompt: opts.hasSessionActivePrompt ?? (() => false),
     resetCurrentSessionActivePrompt: vi.fn(),

@@ -75,6 +75,9 @@ import { parseHostedFileHistoryRecord } from './hosted-file-history-protocol.js'
 import { readHostedApprovalDefinition } from './hosted-tool-approval.js';
 import { readHostedSkills } from './hosted-skill-catalog.js';
 import {
+  hasHostedExternalExcludedOptions,
+  isHostedWorkspaceExternalProfile,
+  isHostedWorkspaceExternalShellProfile,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
 } from './hosted-workspace-profiles.js';
@@ -850,6 +853,11 @@ export async function verifyRecoverySession(
         definition['engine'] === 'managed' &&
           definition['sessionId'] === source.sessionId &&
           definition['mcpServers'] === undefined &&
+          (!isHostedWorkspaceExternalProfile(definition['toolProfile']) ||
+            !hasHostedExternalExcludedOptions(
+              definition,
+              definition['toolProfile'],
+            )) &&
           (definition['toolProfile'] === undefined ||
             isHostedWorkspaceProfile(definition['toolProfile'])),
         'unsupported Hosted profile',
@@ -866,7 +874,10 @@ export async function verifyRecoverySession(
       requireValue(
         readHostedApprovalDefinition(definition) &&
           (definition['captureBytes'] === undefined ||
-            (isHostedWorkspaceShellProfile(definition['toolProfile']) &&
+            ((isHostedWorkspaceShellProfile(definition['toolProfile']) ||
+              isHostedWorkspaceExternalShellProfile(
+                definition['toolProfile'],
+              )) &&
               Number.isSafeInteger(definition['captureBytes']) &&
               (definition['captureBytes'] as number) >= 1 &&
               (definition['captureBytes'] as number) <= 2 ** 41)),

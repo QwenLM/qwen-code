@@ -41,11 +41,11 @@ qwen:
       capability-digest: '${QWEN_MANAGED_AGENT_CAPABILITY_DIGEST}'
       pool:
         enabled: true
-        discovery: 'kubernetes'
-        namespace: '${QWEN_HARNESS_NAMESPACE}'
-        service-name: 'qwen-harness'
-        service-uid: '${QWEN_HARNESS_SERVICE_UID}'
-        port-name: 'https'
+        # EndpointSlice discovery (kubernetes) was cold-archived; Java now requires static instances.
+        discovery: 'static'
+        instances:
+          - instance-id: '${QWEN_HARNESS_INSTANCE_ID}'
+            base-url: 'https://${QWEN_HARNESS_ENDPOINT}:8443'
         key-store-file: '/etc/java-tls/client.p12'
         key-store-password-file: '/etc/java-tls/client-password'
         trust-store-file: '/etc/java-tls/trust.p12'

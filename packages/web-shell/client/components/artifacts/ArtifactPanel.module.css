@@ -18,6 +18,7 @@
 
 .panelFullscreen {
   --chat-content-width: 100%;
+  --chat-responsive-content-width: 100%;
 }
 
 .header {
@@ -221,6 +222,11 @@
 
 .headerActions .iconButton {
   margin-left: 0;
+}
+
+.explainBlock {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
 }
 
 .addButton {

@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.event.CommittedEventPublisher;
-import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
@@ -70,7 +69,6 @@ class ManagedAgentStoreFactoryWiringTest {
                 .withBean(WorkspaceProfileLifecycleVerifier.class, () -> mock(WorkspaceProfileLifecycleVerifier.class))
                 .withBean(JdbcManagedAgentDefinitionStore.class, () -> mock(JdbcManagedAgentDefinitionStore.class))
                 .withBean(JdbcSessionWorktreeStore.class, () -> mock(JdbcSessionWorktreeStore.class))
-                .withBean(JournalEventTransport.class, () -> mock(JournalEventTransport.class))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     var store = context.getBean(ManagedAgentStore.class);
@@ -81,8 +79,7 @@ class ManagedAgentStoreFactoryWiringTest {
                             "extensionPackages", ExtensionPackages.class,
                             "lifecycle", JdbcWorkspaceLifecycleStore.class,
                             "definitions", JdbcManagedAgentDefinitionStore.class,
-                            "sessionWorktrees", JdbcSessionWorktreeStore.class,
-                            "journalEventTransport", JournalEventTransport.class)
+                            "sessionWorktrees", JdbcSessionWorktreeStore.class)
                             .forEach((field, type) -> assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, field))
                                     .as(field).isSameAs(context.getBean(type)));
                     var records = (Advised) com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "configRecords");

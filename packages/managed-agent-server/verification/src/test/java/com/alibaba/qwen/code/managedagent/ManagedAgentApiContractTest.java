@@ -7,7 +7,10 @@ import com.alibaba.qwen.code.managedagent.api.RequestIdFilter;
 import com.alibaba.qwen.code.managedagent.api.SshWorkspaceController;
 import com.alibaba.qwen.code.managedagent.api.TenantContextArgumentResolver;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.api.TerminalTicketController;
+import com.alibaba.qwen.code.managedagent.api.TerminalTicketStore;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceDiscoveryController;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.model.ApiModels;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
@@ -61,28 +64,35 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedTaskEventStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcSshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationArtifactReader;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedTaskEventStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceTerminalRelayService;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.introspect.BeanPropertyDefinition;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.networknt.schema.ValidationMessage;
+import com.networknt.schema.Error;
+import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -113,6 +123,7 @@ import static java.util.Map.entry;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
 import static org.awaitility.Awaitility.await;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -133,9 +144,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "qwen.managed-agent.harness.enabled=false",
         "qwen.managed-agent.automation.enabled=true",
         "qwen.managed-agent.session-store.enabled=true",
+        "qwen.managed-agent.client-files.enabled=true",
         "qwen.managed-agent.dispatch.scan-delay=50ms",
         "qwen.managed-agent.events.poll-interval=10ms",
-        "qwen.managed-agent.events.materialize-interval=10ms"
+        "qwen.managed-agent.events.materialize-interval=10ms",
+        "qwen.managed-agent.artifacts.projection-interval=86400000"
 })
 // SSE responses are still being written when MockMvc runs its result printer.
 @AutoConfigureMockMvc(print = MockMvcPrint.NONE)
@@ -195,6 +208,7 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.WebShellToolDetails.class, List.of("WebShellToolDetails")),
                     entry(ApiModels.WebShellShellResult.class, List.of("WebShellShellResult")),
                     entry(ApiModels.WebShellArtifactQueryRequest.class, List.of("WebShellArtifactQueryRequest")),
+                    entry(ApiModels.WebShellWorkspaceArtifactQueryRequest.class, List.of("WebShellWorkspaceArtifactQueryRequest")),
                     entry(ApiModels.WebShellArtifactRequest.class, List.of("WebShellArtifactRequest")),
                     entry(ApiModels.WebShellToolResultRequest.class, List.of("WebShellToolResultRequest")),
                     entry(SshWorkspaceController.DirectoryRequest.class, List.of("WebShellWorkspaceDirectoryRequest")),
@@ -283,6 +297,10 @@ class ManagedAgentApiContractTest {
                             List.of("WebShellListRequest")),
                     entry(WebShellSessionRequest.class,
                             List.of("WebShellSessionRequest")),
+                    entry(ApiModels.WebShellTerminalTicketRequest.class,
+                            List.of("WebShellTerminalTicketRequest")),
+                    entry(ApiModels.WebShellTerminalTicket.class,
+                            List.of("WebShellTerminalTicket")),
                     entry(ApiModels.WebShellActivityQueryRequest.class,
                             List.of("WebShellActivityQueryRequest")),
                     entry(ApiModels.ManagedMcpServerPin.class,
@@ -398,6 +416,15 @@ class ManagedAgentApiContractTest {
     @Autowired
     @Qualifier("requestMappingHandlerMapping")
     private RequestMappingHandlerMapping handlerMapping;
+
+    @Autowired
+    private ManagedAgentProperties properties;
+
+    // The context has no publication data store, so the real reader answers
+    // supported()=false; the mock keeps that default for every other probe
+    // and only the admitted workspace-page exchange stubs it live.
+    @MockitoBean
+    private ToolPublicationArtifactReader artifactReader;
 
     private void exchangeApprovalOptions(Map<String, String> drift, String tenant) throws Exception {
         String request = "{\"agentId\":\"qwen-code\"}";
@@ -890,6 +917,89 @@ class ManagedAgentApiContractTest {
         exchange(drift, "queryWebShellArtifacts", 401,
                 post("/api/agent/web-shell/v1/artifacts/query").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\"}".formatted(sessionId));
+        exchange(drift, "queryWebShellWorkspaceArtifacts", 401,
+                post("/api/agent/web-shell/v1/workspaces/artifacts/query").header(TENANT, tenant),
+                "{\"workspaceId\":\"workspace_missing\"}");
+        // The admitted page: one seeded projection row so the 200 body is
+        // schema-validated down to ArtifactResponse.access, not just the
+        // envelope. The reader mock stands in for the publication data
+        // store this context does not provision.
+        String artifactWorkspace = "workspace-artifacts";
+        String artifactSession = "session-contract-artifact";
+        String resultId = "result-contract-artifact";
+        String artifactId = "artifact_" + DigestUtils.sha256Hex("contract-artifact");
+        byte[] actorKey = new com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor(
+                tenant, "actor-a").getActorId().getBytes(StandardCharsets.UTF_8);
+        jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id, display_name,"
+                + " workspace_generation, storage_id, config_ref, policy_ref, state)"
+                + " VALUES (?, ?, 'Artifacts', 1, 'storage-artifacts', 'config', 'policy', 'ACTIVE')",
+                tenant, artifactWorkspace);
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                + " VALUES (?, ?, ?, 'READER')", tenant, artifactWorkspace,
+                "actor-a".getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status,"
+                + " gmt_create, gmt_modified, workspace_id, workspace_generation, workspace_storage_id,"
+                + " cwd_relative, context_config_ref, context_revision, workspace_config_ref,"
+                + " workspace_policy_ref, creator_actor_key, owner_actor_key, owner_only, session_kind)"
+                + " VALUES (?, ?, 'qwen-code', 'ACTIVE', 1, 1, ?, 1, 'storage-artifacts', '.', 'config', 1,"
+                + " 'config', 'policy', ?, NULL, 0, 'PUBLIC')",
+                tenant, artifactSession, artifactWorkspace, actorKey);
+        ObjectNode source = objectMapper.createObjectNode()
+                .put("id", resultId)
+                .put("tenantId", tenant)
+                .put("workspaceId", artifactWorkspace)
+                .put("sessionId", artifactSession)
+                .put("executionCallId", "exec-contract")
+                .put("journalRevision", 1)
+                .put("receiptSequence", 1)
+                .put("sourceDigest", DigestUtils.sha256Hex("contract-source"));
+        source.set("outcomeRef", objectMapper.createObjectNode());
+        source.set("resultRef", objectMapper.createObjectNode());
+        source.set("resources", objectMapper.createArrayNode());
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_id,"
+                + " operation_kind, tenant_id, session_id, workspace_id, target_kind, target_key,"
+                + " request_digest, request_json, state, phase, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, ?, 'TOOL_RESULT_PROJECTION', ?, ?, ?, 'TOOL_RESULT', ?, ?, ?, 'READY',"
+                + " 'COMPLETED', 1, 1)",
+                DigestUtils.sha256Hex("op-contract-artifact"),
+                ManagedToolResultStore.identity("s", tenant, artifactSession).substring(2),
+                resultId.getBytes(StandardCharsets.UTF_8), tenant.getBytes(StandardCharsets.UTF_8),
+                artifactSession.getBytes(StandardCharsets.UTF_8),
+                artifactWorkspace.getBytes(StandardCharsets.UTF_8),
+                DigestUtils.sha256Hex(resultId), "contract-digest", source.toString());
+        ObjectNode descriptor = objectMapper.createObjectNode()
+                .put("object", "agent.artifact")
+                .put("id", artifactId)
+                .put("session_id", artifactSession)
+                .put("result_id", resultId)
+                .put("revision", DigestUtils.sha256Hex("contract-revision"))
+                .put("stream_role", "stdout")
+                .put("byte_length", 5)
+                .put("sha256", DigestUtils.sha256Hex("contract-bytes"))
+                .put("media_type", "text/plain")
+                .put("created_at", 1);
+        jdbc.update("INSERT INTO ma_artifact (artifact_id, result_id, scope_key, descriptor_json,"
+                + " publication_id, binding_json, manifest_ref_json, stream_id, creation_sequence)"
+                + " VALUES (?, ?, ?, ?, ?, '{}', '{}', ?, 1)",
+                artifactId.getBytes(StandardCharsets.UTF_8), resultId.getBytes(StandardCharsets.UTF_8),
+                ManagedToolResultStore.identity("s", tenant, artifactSession).substring(2),
+                descriptor.toString(), "publication-contract".getBytes(StandardCharsets.UTF_8),
+                "stdout".getBytes(StandardCharsets.UTF_8));
+        boolean artifactsWereEnabled = properties.getArtifacts().isEnabled();
+        properties.getArtifacts().setEnabled(true);
+        when(artifactReader.supported()).thenReturn(true);
+        when(artifactReader.availability(anyList())).thenReturn(Map.of(artifactId, true));
+        try {
+            String admitted = exchange(drift, "queryWebShellWorkspaceArtifacts", 200,
+                    post(WEB_SHELL + "/workspaces/artifacts/query").header(TENANT, tenant)
+                            .principal(actor(tenant)),
+                    "{\"workspaceId\":\"" + artifactWorkspace + "\"}");
+            var admittedRow = json(admitted).path("data").get(0);
+            assertThat(admittedRow.path("artifact").path("id").asText()).isEqualTo(artifactId);
+            assertThat(admittedRow.path("access").path("can_read_content").isBoolean()).isTrue();
+        } finally {
+            properties.getArtifacts().setEnabled(artifactsWereEnabled);
+        }
         exchange(drift, "getToolResult", 401,
                 get("/v1/agents/sessions/%s/items/item_missing/tool-result".formatted(sessionId))
                         .header(TENANT, tenant), null);
@@ -1795,6 +1905,27 @@ class ManagedAgentApiContractTest {
             exchange(drift, sideAction + "WebShellSessionSideQuery", 404,
                     post(WEB_SHELL + "/session-side-queries/" + sideAction).header(TENANT, tenant).principal(actor(tenant)), sideBody);
         }
+        // The ticket route is mounted with the Broker; the web-terminal opt-in
+        // is off here, so admission refuses with workspace_unavailable.
+        exchange(drift, "webShellTerminalTicket", 409,
+                post(WEB_SHELL + "/sessions/terminal-ticket").header(TENANT, tenant)
+                        .principal(actor(tenant)),
+                "{\"sessionId\":\"" + sessionId + "\",\"terminalId\":\"term-contract\"}");
+        exchange(drift, "registerWebShellClientFiles", 404,
+                post(WEB_SHELL + "/client-files/register").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"sessionId\":\"" + sideSession + "\",\"connectionId\":\"conn-contract\"}");
+        exchange(drift, "unregisterWebShellClientFiles", 404,
+                post(WEB_SHELL + "/client-files/unregister").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"sessionId\":\"" + sideSession + "\"}");
+        exchange(drift, "queryWebShellClientFilesStatus", 404,
+                post(WEB_SHELL + "/client-files/status").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"sessionId\":\"" + sideSession + "\"}");
+        exchange(drift, "streamWebShellClientFilesRequests", 404,
+                post(WEB_SHELL + "/client-files/requests/stream").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"sessionId\":\"" + sideSession + "\",\"generation\":1}");
+        exchange(drift, "respondWebShellClientFiles", 404,
+                post(WEB_SHELL + "/client-files/responses").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"sessionId\":\"" + sideSession + "\",\"generation\":1,\"rpcRequestId\":\"probe\",\"responseJson\":\"{}\"}");
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
@@ -3151,7 +3282,7 @@ class ManagedAgentApiContractTest {
                         .isEqualTo(session.get("last_event_id").asLong());
                 JsonNode webCapabilities = json("""
                                 {"tasks":true,"artifacts":false,"actions":false,"workspaceTurns":false,"sessionClose":true,
-                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false,"diagnostics":true,"btw":false,"recap":false}
+                                 "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false,"diagnostics":true,"btw":false,"recap":false,"clientFiles":false}
                                 """);
                 assertThat(other.get("capabilities")).isEqualTo(webCapabilities);
             }
@@ -3948,8 +4079,8 @@ class ManagedAgentApiContractTest {
     }
 
     private static void collect(Map<String, String> drift, String label,
-            Set<ValidationMessage> messages) {
-        for (ValidationMessage message : messages) {
+            List<Error> messages) {
+        for (Error message : messages) {
             String location = message.getInstanceLocation().toString()
                     .replaceAll("/\\d+(?=/|$)", "/*");
             if (location.isEmpty()) {
@@ -3957,7 +4088,7 @@ class ManagedAgentApiContractTest {
             }
             String property = message.getProperty() == null ? ""
                     : " " + message.getProperty();
-            drift.put(label + ": " + location + " " + message.getType()
+            drift.put(label + ": " + location + " " + message.getKeyword()
                     + property, message.getMessage());
         }
     }
@@ -4017,6 +4148,25 @@ class ManagedAgentApiContractTest {
             return gaps;
         } catch (IOException error) {
             throw new UncheckedIOException(error);
+        }
+    }
+
+    @TestConfiguration
+    static class TerminalTicketSurfaceConfiguration {
+        // The terminal ticket route is broker-gated and this context pins the
+        // Runtime Broker off, so mount the controller here to keep the route
+        // mapped for the spec-drift assertions. The relay runs the real
+        // Session admission; only the binding lookup is mocked. The actor-scope
+        // 403 probe is answered by TenantContextFilter before routing.
+        @Bean
+        public TerminalTicketController contractTerminalTicket(
+                com.alibaba.qwen.code.managedagent.session.ManagedAgentService sessions,
+                com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings settings) {
+            return new TerminalTicketController(
+                    new WorkspaceTerminalRelayService(sessions,
+                            mock(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations.class),
+                            settings),
+                    new TerminalTicketStore(java.time.Clock.systemUTC()));
         }
     }
 }

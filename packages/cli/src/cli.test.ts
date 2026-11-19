@@ -27,6 +27,7 @@ import { FatalError } from '@qwen-code/qwen-code-core';
 import { AlreadyReportedError } from './utils/errors.js';
 import { CHECKED_NODE_VERSION_ENV } from './utils/env-provenance.js';
 import { TOP_LEVEL_HELP_OPTIONS } from './config/top-level-options.js';
+import { commandMetadata } from './commands/command-metadata.js';
 import {
   MCP_COMMANDS,
   TOP_LEVEL_COMMANDS,
@@ -41,6 +42,7 @@ import {
 const mocks = vi.hoisted(() => ({
   main: vi.fn(),
   tryRunServeFastPath: vi.fn(),
+  installBundledChunkResolver: vi.fn(),
   initStartupProfiler: vi.fn(),
   initializeAcpStartupProfiler: vi.fn(),
   markAcpStartup: vi.fn(),
@@ -78,6 +80,10 @@ vi.mock('./serve/managed-runtime-attestation-worker.js', () => ({
 
 vi.mock('./llm.js', () => ({
   main: mocks.main,
+}));
+
+vi.mock('./utils/bundled-chunk-resolver.js', () => ({
+  installBundledChunkResolver: mocks.installBundledChunkResolver,
 }));
 
 vi.mock('./serve/fast-path.js', () => ({
@@ -1185,6 +1191,49 @@ describe('runCliEntry', () => {
     expect(mocks.main).not.toHaveBeenCalled();
   });
 
+  it('installs the chunk resolver once before the serve fast path runs', async () => {
+    mocks.tryRunServeFastPath.mockImplementationOnce(async () => {
+      expect(mocks.installBundledChunkResolver).toHaveBeenCalledTimes(1);
+      return true;
+    });
+
+    await runCliEntry(['serve']);
+
+    expect(mocks.installBundledChunkResolver).toHaveBeenCalledTimes(1);
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('does not install the chunk resolver twice when serve with ACP falls through', async () => {
+    await runCliEntry(['serve', '--acp']);
+
+    expect(mocks.tryRunServeFastPath).toHaveBeenCalledTimes(1);
+    expect(mocks.installBundledChunkResolver).toHaveBeenCalledTimes(1);
+    expect(mocks.main).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['--acp', '--experimental-acp'])(
+    'installs the chunk resolver once before the full %s startup',
+    async (flag) => {
+      mocks.main.mockImplementationOnce(async () => {
+        expect(mocks.installBundledChunkResolver).toHaveBeenCalledTimes(1);
+      });
+
+      await runCliEntry([flag]);
+
+      expect(mocks.installBundledChunkResolver).toHaveBeenCalledTimes(1);
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([[], ['--help'], ['--version'], ['--acp=false']])(
+    'does not install the chunk resolver for %j',
+    async (...argv) => {
+      await runCliEntry(argv);
+
+      expect(mocks.installBundledChunkResolver).not.toHaveBeenCalled();
+    },
+  );
+
   it('initializes profilers once when the serve fast path falls back', async () => {
     mocks.tryRunServeFastPath.mockResolvedValue(false);
 
@@ -1356,6 +1405,19 @@ describe('stampCliEntryEnv', () => {
 });
 
 describe('bootstrap import boundaries', () => {
+  it('installs the chunk resolver before importing the serve fast path', () => {
+    // Runtime mocks observe the call, not module evaluation; pin the import
+    // boundary too so moving installation after the import cannot pass.
+    const source = readFileSync('src/cli.ts', 'utf8');
+    const install = source.indexOf(
+      'installBundledChunkResolver(import.meta.url)',
+    );
+    const fastPathImport = source.indexOf("import('./serve/fast-path.js')");
+
+    expect(install).toBeGreaterThan(-1);
+    expect(fastPathImport).toBeGreaterThan(install);
+  });
+
   it('keeps fast-path-only dependencies out of static imports', () => {
     const source = readFileSync('src/cli.ts', 'utf8');
 
@@ -1926,23 +1988,8 @@ describe('bootstrap import boundaries', () => {
   it('keeps bootstrap top-level help commands aligned with config registrations', () => {
     const configSource = readFileSync('src/config/config.ts', 'utf8');
     const commandNameByIdentifier = new Map([
-      ['agentsCommand', 'agents'],
-      ['attachCommand', 'attach'],
       ['autofixPrCommand', 'autofix-pr'],
-      ['authCommand', 'auth'],
-      ['batchCommand', 'batch'],
-      ['boardCommand', 'board'],
-      ['channelCommand', 'channel'],
-      ['daemonCommand', 'daemon'],
-      ['extensionsCommand', 'extensions'],
-      ['hooksCommand', 'hooks'],
-      ['mcpCommand', 'mcp'],
-      ['memoryCommand', 'memory'],
       ['reviewCommand', 'review'],
-      ['sandboxCommand', 'sandbox'],
-      ['serveCommand', 'serve'],
-      ['sessionsCommand', 'sessions'],
-      ['updateCommand', 'update'],
     ]);
     const registeredIdentifiers = [
       ...configSource.matchAll(/\.command\((\w+Command)\)/g),
@@ -1952,11 +1999,15 @@ describe('bootstrap import boundaries', () => {
     );
 
     expect(registeredIdentifiers).toHaveLength(commandNameByIdentifier.size);
-    for (const identifier of registeredIdentifiers) {
-      const commandName = commandNameByIdentifier.get(identifier);
-      expect(commandName, `missing mapping for ${identifier}`).toBeDefined();
-      expect(bootstrapCommands).toContain(commandName);
-    }
+    const registeredCommands = new Set([
+      ...Object.values(commandMetadata).map(
+        ({ command }) => command.split(' ')[0],
+      ),
+      ...registeredIdentifiers.map((identifier) =>
+        commandNameByIdentifier.get(identifier),
+      ),
+    ]);
+    expect(bootstrapCommands).toEqual(registeredCommands);
   });
 
   it('keeps bootstrap MCP help commands aligned with MCP registrations', () => {

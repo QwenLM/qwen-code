@@ -161,6 +161,28 @@ describe('createJavaManagedAgentProvider', () => {
     expect(summary.capabilities.canSend).toBe(false);
   });
 
+  it('projects the client files capability only when the server advertises it', async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant:actor',
+      fetch: fetchImpl,
+    });
+    for (const advertised of [true, false]) {
+      fetchImpl.mockResolvedValueOnce(
+        jsonResponse({
+          sessionId: 's1',
+          status: 'closed',
+          createdAt: 1,
+          updatedAt: 2,
+          capabilities: { clientFiles: advertised },
+        }),
+      );
+      const summary = await provider.getSession('s1', { clientId: 'c' });
+      expect(summary.capabilities.clientFiles === true).toBe(advertised);
+    }
+  });
+
   it('submits and reads a compression operation through the product routes', async () => {
     const operation = {
       operationId: 'compression-1',
@@ -1121,6 +1143,75 @@ describe('createJavaManagedAgentProvider', () => {
       expect(fetchImpl.mock.calls[1][1]?.signal).toBe(abort.signal);
     },
   );
+
+  it('wires the workspace artifact reader and maps the page capability flag', async () => {
+    const page = { data: [], nextCursor: null, hasMore: false };
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (url) =>
+      jsonResponse(
+        String(url).endsWith('/workspaces/query')
+          ? {
+              data: [],
+              defaultWorkspace: null,
+              hasMore: false,
+              capabilities: {
+                workspaceBinding: true,
+                workspaceContext: false,
+                workspaceArtifactLibrary: true,
+              },
+            }
+          : page,
+      ),
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant-a:actor-a',
+      enableWorkspaceBinding: true,
+      fetch: fetchImpl,
+    });
+    expect(
+      (await provider.workspaceBinding!.list({ clientId: 'client' }))
+        .artifactLibrary,
+    ).toBe(true);
+    const abort = new AbortController();
+    expect(
+      await provider.workspaceArtifacts!.listArtifacts('ws-a', {
+        clientId: 'client',
+        cursor: 'next',
+        limit: 50,
+        signal: abort.signal,
+      }),
+    ).toEqual(page);
+    expect(String(fetchImpl.mock.calls[1][0])).toContain(
+      '/workspaces/artifacts/query',
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      workspaceId: 'ws-a',
+      cursor: 'next',
+      limit: 50,
+    });
+    expect(fetchImpl.mock.calls[1][1]?.signal).toBe(abort.signal);
+  });
+
+  it('defaults the artifact library flag to false when the page omits it', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: [],
+        defaultWorkspace: null,
+        hasMore: false,
+        capabilities: { workspaceBinding: true, workspaceContext: false },
+      }),
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant-a:actor-a',
+      enableWorkspaceBinding: true,
+      fetch: fetchImpl,
+    });
+    expect(
+      (await provider.workspaceBinding!.list({ clientId: 'client' }))
+        .artifactLibrary,
+    ).toBe(false);
+  });
 
   it('creates a bound empty session without requiring turnId', async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (input) =>
@@ -2460,6 +2551,49 @@ describe('createJavaManagedAgentProvider', () => {
     expect(
       (await provider.getSession('session-1', { clientId: 'c' })).capabilities,
     ).toEqual({ canSend: true, canCancel: false });
+  });
+
+  it('reports the terminal capability from the Session summary', async () => {
+    const session = {
+      sessionId: 'session-1',
+      status: 'ACTIVE',
+      createdAt: 1,
+      updatedAt: 1,
+      lastSequence: 0,
+    };
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      fetch: vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          jsonResponse({
+            ...session,
+            capabilities: { terminal: true },
+          }),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({
+            ...session,
+            capabilities: { terminal: null },
+          }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ ...session, capabilities: {} })),
+    });
+    const load = () => provider.getSession('session-1', { clientId: 'c' });
+    expect((await load()).capabilities).toEqual({
+      canSend: true,
+      canCancel: false,
+      terminal: true,
+    });
+    expect((await load()).capabilities).toEqual({
+      canSend: true,
+      canCancel: false,
+      terminal: null,
+    });
+    expect((await load()).capabilities).toEqual({
+      canSend: true,
+      canCancel: false,
+    });
   });
 
   it('lets a bound Session send only when the service allows its caller', async () => {

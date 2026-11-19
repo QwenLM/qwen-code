@@ -30,7 +30,9 @@ import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url
 import {
   WORKSPACE_CAPABILITY_DIGEST,
   MEASURED_WORKSPACE_CAPABILITY_DIGEST,
+  MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST,
   RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+  isMeasuredWorkspaceCapability,
 } from './managed-workspace-activation.js';
 import type {
   ManagedMcpControl,
@@ -211,6 +213,7 @@ export class HostedWorkspaceBroker {
   }
   private capabilityResolution?: Promise<void>;
   provisionerKind?: string;
+  mcpParkable = false;
   private readonly identity: {
     harnessSessionId: string;
     runtimeSessionId: string;
@@ -400,6 +403,7 @@ export class HostedWorkspaceBroker {
     if (response['acquired'] !== true)
       throw new Error('Runtime did not acquire the Session.');
     this.readRuntime(response);
+    this.mcpParkable = response['mcpParkable'] === true;
     this.leaseAcquired = true;
   }
 
@@ -410,6 +414,8 @@ export class HostedWorkspaceBroker {
       scope['workspaceId'] !== this.key.workspaceId ||
       (scope['capabilityDigest'] !== WORKSPACE_CAPABILITY_DIGEST &&
         scope['capabilityDigest'] !== MEASURED_WORKSPACE_CAPABILITY_DIGEST &&
+        scope['capabilityDigest'] !==
+          MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST &&
         scope['capabilityDigest'] !==
           MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST &&
         scope['capabilityDigest'] !==
@@ -487,7 +493,7 @@ export class HostedWorkspaceBroker {
         promptId: turnId,
         callId,
         argsDigest: digest,
-        ...(this.capability === MEASURED_WORKSPACE_CAPABILITY_DIGEST
+        ...(isMeasuredWorkspaceCapability(this.capability ?? '')
           ? { resultProtocol: 4 }
           : {}),
         ...(inputDigest ? { runtimeProtocol: 3, inputDigest } : {}),
@@ -600,7 +606,7 @@ export class HostedWorkspaceBroker {
         promptId: turnId,
         callId,
         argsDigest,
-        ...(this.capability === MEASURED_WORKSPACE_CAPABILITY_DIGEST
+        ...(isMeasuredWorkspaceCapability(this.capability ?? '')
           ? { resultProtocol: 4 }
           : {}),
       },

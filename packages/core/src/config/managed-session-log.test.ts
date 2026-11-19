@@ -1869,7 +1869,10 @@ describe('Managed host tools', () => {
     const initializeInternal = vi
       .spyOn(
         config as unknown as {
-          initializeInternal(options?: unknown): Promise<void>;
+          initializeInternal(
+            options?: unknown,
+            ripgrepAvailability?: Promise<boolean>,
+          ): Promise<void>;
         },
         'initializeInternal',
       )
@@ -1877,6 +1880,7 @@ describe('Managed host tools', () => {
     await config.initialize();
     expect(initializeInternal).toHaveBeenCalledWith(
       expect.objectContaining({ skipMcpDiscovery: true }),
+      undefined,
     );
 
     // A settings reload or a working-directory change reconciles MCP servers

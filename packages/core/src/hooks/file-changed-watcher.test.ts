@@ -10,11 +10,33 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { FSWatcher } from 'chokidar';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import { FileChangedWatcher } from './file-changed-watcher.js';
 
-const waitOptions = { timeout: 5000, interval: 25 };
+// The macOS nightly legs run on contended 3-core hosts: FSEvents delivery
+// plus the watcher's awaitWriteFinish stability polling (200ms threshold,
+// 50ms poll) can stretch past 5s under saturation, and the real-file cases
+// then read zero notifications (three different cases across the 11-10 to
+// 11-13 nightlies). 15s matches the repo's other contended-host waits. An
+// idle host keeps the original 5s so a genuinely lost event still fails
+// fast instead of burning the contended budget on every machine. Sampled
+// once so the wait budget and the ceiling above it cannot disagree if the
+// load average crosses the threshold between two reads.
+const SLOW_HOST = isSlowTestHost();
+const waitOptions = { timeout: SLOW_HOST ? 15_000 : 5_000, interval: 25 };
 
-describe('FileChangedWatcher with real files', () => {
+// The per-wait budget must stay UNDER the case ceiling, or vitest decides
+// the outcome first and the diagnostic becomes an opaque runner timeout
+// (packages/core/src/test-utils/latency-budget.ts). The multi-wait cases
+// chain three to four waits, so the ceiling is lifted above them rather
+// than the config ternary (same shape as AuthDialog.test.tsx's
+// describe-level timeout). The slow arm covers four 15s waits; the fast arm
+// is left undefined so it inherits whatever the lane grants (the 15s off-ECS
+// default, or the autofix gate's --testTimeout=60000) instead of outranking
+// it with a lower per-file figure (R4-1) — on an idle host the waits resolve
+// in milliseconds, so the inherited ceiling is ample.
+const CEILING_MS = SLOW_HOST ? 90_000 : undefined;
+describe('FileChangedWatcher with real files', { timeout: CEILING_MS }, () => {
   let root: string;
   let watcher: FileChangedWatcher;
 
@@ -35,6 +57,12 @@ describe('FileChangedWatcher with real files', () => {
     const notify = vi.fn().mockResolvedValue(undefined);
     watcher = new FileChangedWatcher(notify);
     await watcher.setPaths([root]);
+    // Let the native watch finish attaching before mutating the tree: on a
+    // contended macOS host chokidar's 'ready' can fire before FSEvents is
+    // watching deeply, and a mkdir in that window loses the add permanently
+    // (0 notifications, not a slow one). Settle so the future-nested add is
+    // observed deterministically.
+    await delay(500);
 
     const nested = path.join(root, 'future', 'nested');
     const file = path.join(nested, 'topic.md');
@@ -116,6 +144,9 @@ describe('FileChangedWatcher with real files', () => {
     const notify = vi.fn().mockResolvedValue(undefined);
     watcher = new FileChangedWatcher(notify);
     await watcher.setPaths([root]);
+    // FSEvents-attachment settle (see the future-nested case): the nested
+    // mkdir below must not land in the readdir-then-watch window.
+    await delay(500);
     for (const file of excluded) await fs.writeFile(file, 'updated');
     const nested = path.join(root, 'memory', 'deep', 'topic.md');
     await fs.mkdir(path.dirname(nested), { recursive: true });
@@ -213,6 +244,8 @@ describe('FileChangedWatcher with real files', () => {
     const notify = vi.fn().mockResolvedValue(undefined);
     watcher = new FileChangedWatcher(notify);
     await watcher.setPaths([...files, dynamic], files);
+    // FSEvents-attachment settle before the mkdirs below (readdir-then-watch).
+    await delay(500);
     await fs.writeFile(files[1], 'rc');
     await fs.writeFile(files[0], 'env');
     await fs.mkdir(path.join(parent, 'unrelated'));
@@ -265,6 +298,8 @@ describe('FileChangedWatcher with real files', () => {
     const notify = vi.fn().mockResolvedValue(undefined);
     watcher = new FileChangedWatcher(notify);
     await watcher.setPaths([...files, directory]);
+    // FSEvents-attachment settle before the mkdirs below (readdir-then-watch).
+    await delay(500);
     await fs.writeFile(files[1], 'rc');
     await fs.writeFile(files[0], 'env');
     await fs.mkdir(path.join(directory, 'nested'), { recursive: true });
@@ -293,6 +328,10 @@ describe('FileChangedWatcher with real files', () => {
     const notify = vi.fn().mockResolvedValue(undefined);
     watcher = new FileChangedWatcher(notify);
     await watcher.setPaths([directory]);
+    // Same FSEvents-attachment settle as the future-nested case: the discovery
+    // observer must be live before the missing ancestors are created, or the
+    // add is lost in the readdir-then-watch window on a contended macOS host.
+    await delay(500);
     await fs.mkdir(directory, { recursive: true });
     const file = path.join(directory, 'topic.md');
     await fs.writeFile(file, 'new memory');
@@ -317,6 +356,8 @@ describe('FileChangedWatcher with real files', () => {
     await fs.unlink(parent);
     await fs.mkdir(directory, { recursive: true });
     await watcher.setPaths([directory]);
+    // FSEvents-attachment settle before the write that must be observed.
+    await delay(500);
     const file = path.join(directory, 'topic.md');
     await fs.writeFile(file, 'retry');
     await vi.waitFor(
@@ -438,6 +479,8 @@ describe('FileChangedWatcher with real files', () => {
     const notify = vi.fn().mockResolvedValue(undefined);
     watcher = new FileChangedWatcher(notify);
     await watcher.setPaths([alias, target]);
+    // FSEvents-attachment settle before the mkdirs below (readdir-then-watch).
+    await delay(500);
 
     for (const relative of [
       '.git/config',
