@@ -52,16 +52,10 @@ export class ToolHandler {
   ): Promise<void> {
     const isFinished = () =>
       state.finished !== undefined || this.store.get(state.runId) !== state;
-    state.toolBatchRunning = true;
-    let batch: Awaited<ReturnType<typeof runToolBatch>>;
-    try {
-      batch = await runToolBatch(calls, {
-        ...batchOptions(state.input, state.duplicates, state.executor),
-        isFinished,
-      });
-    } finally {
-      state.toolBatchRunning = false;
-    }
+    const batch = await runToolBatch(calls, {
+      ...batchOptions(state.input, state.duplicates, state.executor),
+      isFinished,
+    });
     if (isFinished() || state.round !== round) return;
     state.batch = batch;
     publishFor(this.bus, state, 'tool.settled', { round }, round);

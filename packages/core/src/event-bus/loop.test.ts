@@ -913,11 +913,14 @@ describe('runAgentLoop on the event bus when its signal aborts', () => {
     }
   });
 
-  it('keeps a required tool batch pending past the cancellation cap', async () => {
-    vi.useFakeTimers();
-    try {
-      const abort = new AbortController();
+  it.each([false, true])(
+    'bounds host cleanup once required tool settlement is done (pending at cap: %s)',
+    async (pendingAtCap) => {
+      vi.useFakeTimers();
       const held = heldExecutor();
+      let toolSettled!: () => void;
+      const pending = new Promise<void>((resolve) => (toolSettled = resolve));
+      const abort = new AbortController();
       const running = runAgentLoop({
         ...options([[toolCall]], makeHost().host, {
           signal: abort.signal,
@@ -925,27 +928,34 @@ describe('runAgentLoop on the event bus when its signal aborts', () => {
           keepCancelledResults: true,
         }),
         useEventBus: true,
-        waitForToolSettlementOnCancel: true,
+        getPendingToolSettlement: () => (pendingAtCap ? pending : undefined),
       });
-      const settled = vi.fn();
-      void running.then(settled);
-      await held.started;
-      abort.abort();
-      await vi.advanceTimersByTimeAsync(CANCEL_SETTLEMENT_CAP_MS + 1);
-      expect(settled).not.toHaveBeenCalled();
-      held.settle();
-      const result = await running;
-      expect(result.reason).toBe('cancelled');
-      expect(result.responses?.map(({ callId }) => callId)).toEqual(['c1']);
-      expect(vi.getTimerCount()).toBe(0);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+      try {
+        const settled = vi.fn();
+        void running.then(settled);
+        await held.started;
+        abort.abort();
+        await vi.advanceTimersByTimeAsync(CANCEL_SETTLEMENT_CAP_MS + 1);
+        if (pendingAtCap) {
+          expect(settled).not.toHaveBeenCalled();
+          toolSettled();
+        }
+        await vi.advanceTimersByTimeAsync(0);
+        expect(settled).toHaveBeenCalledWith(
+          expect.objectContaining({ reason: 'cancelled' }),
+        );
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        held.settle();
+        await running;
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it.each([false, true])(
     'bounds cancellation while onRoundEnd is waiting (require tool settlement: %s)',
-    async (waitForToolSettlementOnCancel) => {
+    async (withToolSettlement) => {
       vi.useFakeTimers();
       try {
         const abort = new AbortController();
@@ -968,7 +978,9 @@ describe('runAgentLoop on the event bus when its signal aborts', () => {
             { signal: abort.signal, executor },
           ),
           useEventBus: true,
-          waitForToolSettlementOnCancel,
+          ...(withToolSettlement && {
+            getPendingToolSettlement: () => undefined,
+          }),
         });
         await roundEnded;
         abort.abort();

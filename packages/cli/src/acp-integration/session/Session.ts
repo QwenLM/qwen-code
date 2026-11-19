@@ -9202,8 +9202,6 @@ export class Session implements SessionContext {
               deferRecording: false,
               useEventBus:
                 this.config.isEventBusAgentLoopEnabled?.('acp') === true,
-              waitForToolSettlementOnCancel:
-                this.config.getSessionExecutionEngine?.() === 'managed',
               onModelEvent: host.onModelEvent!,
             },
           );

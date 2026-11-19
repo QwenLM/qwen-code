@@ -53,7 +53,6 @@ export interface LoopRunState extends RunState {
   };
   /** Tool-owned: the settled tool batch. */
   batch?: ToolBatchResult;
-  toolBatchRunning?: boolean;
 }
 
 export interface RunStateStore<T extends RunState = RunState> {

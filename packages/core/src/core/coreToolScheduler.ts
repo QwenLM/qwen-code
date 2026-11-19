@@ -1556,6 +1556,10 @@ interface CoreToolSchedulerOptions {
     status: ToolExecutionStatus,
     durationMs: number,
   ) => void;
+  onManagedToolExecutionSettled?: (
+    callId: string,
+    result: ToolResult | undefined,
+  ) => void;
   config: Config;
   outputUpdateHandler?: OutputUpdateHandler;
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
@@ -6715,6 +6719,7 @@ export class CoreToolScheduler {
       } catch (error) {
         debugLogger.warn('Tool lifecycle end observer failed:', error);
       }
+      this.schedulerOptions.onManagedToolExecutionSettled?.(callId, toolResult);
       if (execSpan) {
         const completedExecSpan = execSpan;
         execSpan = undefined;
@@ -7793,6 +7798,12 @@ export class CoreToolScheduler {
         this.schedulerOptions.onManagedRuntimeOutcomeUnknown
       ) {
         throw executionError;
+      }
+      if (executionThrew) {
+        this.schedulerOptions.onManagedToolExecutionSettled?.(
+          callId,
+          undefined,
+        );
       }
 
       const cancelMessage = executionThrew

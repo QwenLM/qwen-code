@@ -123,6 +123,7 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
   let bridge: AcpSessionBridge | undefined;
   let registry: ProcessRegistry;
   let sourceEnv: NodeJS.ProcessEnv;
+  let settingsFile: string;
   let started: Record<BridgeExecutionEngine, AcpChannel[]>;
   const strayPids: number[] = [];
 
@@ -190,8 +191,9 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('No address');
     const baseUrl = `http://127.0.0.1:${address.port}/v1`;
+    settingsFile = path.join(qwenHome, 'settings.json');
     await writeFile(
-      path.join(qwenHome, 'settings.json'),
+      settingsFile,
       JSON.stringify({
         security: { auth: { selectedType: 'openai' } },
         model: { name: MODEL },
@@ -617,6 +619,74 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     await cancelling;
     await expect(prompt(sessionId)).rejects.toMatchObject(unknownOutcome);
     expect(modelRequests).toHaveLength(requestsBefore);
+  }, 120_000);
+
+  it('cancels a slow post-tool hook after the Runtime receipt has landed', async () => {
+    sourceEnv['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = 'acp=1';
+    sourceEnv['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] = 'acp=1';
+    const ready = path.join(workspace, 'hook.ready');
+    const release = path.join(workspace, 'hook.release');
+    const settings = JSON.parse(await readFile(settingsFile, 'utf8')) as object;
+    await writeFile(
+      settingsFile,
+      JSON.stringify({
+        ...settings,
+        hooks: {
+          PostToolUse: [
+            {
+              matcher: 'read_file',
+              hooks: [
+                {
+                  type: 'command',
+                  command:
+                    `touch ${JSON.stringify(ready)}; ` +
+                    `while [ ! -f ${JSON.stringify(release)} ]; do sleep 0.05; done; printf '{}'`,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    const sessionId = await newSession();
+    const file = path.join(workspace, 'input.txt');
+    const knownOutput = 'content already returned by Runtime';
+    await writeFile(file, knownOutput);
+    turns.push({
+      toolCalls: [{ name: 'read_file', args: { file_path: file } }],
+    });
+    const updates: SessionUpdate[] = [];
+    const running = prompt(sessionId, updates);
+    void running.catch(() => undefined);
+    try {
+      await waitFor(() => existsSync(ready) || undefined);
+      expect(await readManagedLog(sessionId)).toContain('"tool.receipt"');
+      const cancelling = bridge!.cancelSession(sessionId);
+      void cancelling.catch(() => undefined);
+      const cancelled = vi.fn();
+      void running.then(cancelled, () => undefined);
+      await waitFor(() => cancelled.mock.calls[0]?.[0], 13_000);
+      expect((await running).stopReason).toBe('cancelled');
+      await cancelling;
+      expect(
+        updates.filter(
+          (update) =>
+            update.sessionUpdate === 'tool_call_update' &&
+            update.status === 'completed' &&
+            update._meta?.['toolName'] === 'read_file',
+        ),
+      ).toHaveLength(1);
+      turns.push({ text: 'CONTINUED' });
+      expect((await prompt(sessionId)).stopReason).toBe('end_turn');
+      const toolMessages = modelRequests
+        .at(-1)
+        ?.messages?.filter(({ role }) => role === 'tool');
+      expect(toolMessages).toHaveLength(1);
+      expect(JSON.stringify(toolMessages)).toContain(knownOutput);
+    } finally {
+      await writeFile(release, '');
+      await running.catch(() => undefined);
+    }
   }, 120_000);
 
   it('stops the worker and its command when the Managed child dies', async () => {

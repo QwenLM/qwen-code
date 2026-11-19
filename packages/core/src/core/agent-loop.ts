@@ -286,12 +286,12 @@ export interface AgentLoopOptions {
   keepCancelledResults?: ToolBatchOptions['keepCancelledResults'];
   /** Leave recording to the host via `nextRound` or the loop result. */
   deferRecording?: boolean;
-  waitForToolSettlementOnCancel?: boolean;
+  getPendingToolSettlement?: () => Promise<void> | undefined;
   /**
    * Run the loop on the event-bus implementation instead of the procedural
    * one. Opt-in; the two are behaviorally equivalent, except that a run
    * whose signal aborted ends as `cancelled` once it has not settled within
-   * a cap, except when the host requires its active tool batch to settle.
+   * a cap, except when the host still has pending tool settlement.
    * After the cap the host hears nothing further. See
    * docs/design/2026-11-11-event-bus-agent-loop.md.
    */
