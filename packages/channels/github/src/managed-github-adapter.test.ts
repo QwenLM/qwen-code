@@ -2505,7 +2505,7 @@ describe('managed GitHub adapter registration-identity isolation', () => {
     expect(stranded[0]).toContain('3 outbound');
     expect(stranded[0]).toContain('staged-but-unadmitted claims are stranded');
     expect(stranded[0]).toContain(
-      'un-receipted outbound segments were dropped',
+      'outbound segments with an unknown delivery status were dropped',
     );
     // Not adopted: the legacy pending never enters this registration's state.
     expect(pendingOf(adapter)).toEqual([]);
@@ -2550,7 +2550,9 @@ describe('managed GitHub adapter registration-identity isolation', () => {
     expect(stranded[0]).toContain('0 pending');
     expect(stranded[0]).toContain('0 outbound');
     expect(stranded[0]).not.toContain('claims are stranded');
-    expect(stranded[0]).not.toContain('outbound segments were dropped');
+    expect(stranded[0]).not.toContain(
+      'outbound segments with an unknown delivery status were dropped',
+    );
     // A genuinely cursor-less 0/0 legacy names no skipped window either.
     expect(stranded[0]).not.toContain('were never listed');
     await adapter.disconnect();
@@ -2590,7 +2592,9 @@ describe('managed GitHub adapter registration-identity isolation', () => {
     expect(stranded[0]).toContain('were never listed');
     // The watermark clause is separate from the pending/outbound loss clauses.
     expect(stranded[0]).not.toContain('claims are stranded');
-    expect(stranded[0]).not.toContain('outbound segments were dropped');
+    expect(stranded[0]).not.toContain(
+      'outbound segments with an unknown delivery status were dropped',
+    );
     await adapter.disconnect();
   });
 
@@ -2609,7 +2613,7 @@ describe('managed GitHub adapter registration-identity isolation', () => {
     expect(stranded[0]).toContain('0 pending');
     expect(stranded[0]).toContain('3 outbound');
     expect(stranded[0]).toContain(
-      'un-receipted outbound segments were dropped',
+      'outbound segments with an unknown delivery status were dropped',
     );
     expect(stranded[0]).not.toContain(
       'staged-but-unadmitted claims are stranded',
@@ -2631,7 +2635,9 @@ describe('managed GitHub adapter registration-identity isolation', () => {
     expect(stranded).toHaveLength(1);
     expect(stranded[0]).toContain('1 pending');
     expect(stranded[0]).toContain('staged-but-unadmitted claims are stranded');
-    expect(stranded[0]).not.toContain('outbound segments were dropped');
+    expect(stranded[0]).not.toContain(
+      'outbound segments with an unknown delivery status were dropped',
+    );
     await adapter.disconnect();
   });
 
@@ -2886,7 +2892,7 @@ describe('managed GitHub adapter registration-identity isolation', () => {
     await second.adapter.disconnect();
   });
 
-  it('at the episode cap the carry keeps the carried counter, not the loaded head (R4-2)', async () => {
+  it('the carry never evicts the loaded ledger own counters at the cap (R7-1)', async () => {
     const cwd = tempCwd();
     const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
     await first.adapter.connect();
@@ -2912,15 +2918,78 @@ describe('managed GitHub adapter registration-identity isolation', () => {
     await second.adapter.connect();
     const state = readState(second.adapter);
     const episodes = state.watch!.episodes!;
-    expect(Object.keys(episodes).length).toBeLessThanOrEqual(
+    expect(Object.keys(episodes).length).toBe(
       MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT,
     );
-    // The carried counter survives (tail kept); the loaded head is evicted.
-    // Keeping the head would slice the carried counter off here, re-opening the
-    // silent dedupe at the bound (the loaded ledger already holds the cap).
-    expect(episodes['carried/repo#9999']).toBe(7);
-    expect(episodes['loaded/repo#0']).toBeUndefined();
+    // Non-destructive: persist() writes this map back over the loaded ledger,
+    // so evicting an own counter would lose it permanently. Every own counter
+    // is preserved; at the hard bound the overflow carried counter is
+    // bounded-and-accepted (its archive source persists and is re-read next
+    // start), NOT bought by deleting an own counter.
+    expect(episodes['loaded/repo#0']).toBe(1);
+    expect(
+      episodes[`loaded/repo#${MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT - 1}`],
+    ).toBe(1);
+    expect(episodes['carried/repo#9999']).toBeUndefined();
     expect(validManagedGithubState(state)).toBe(true);
+    await second.adapter.disconnect();
+  });
+
+  it('the carry adds a carried counter when the loaded ledger has room (R7-1)', async () => {
+    const cwd = tempCwd();
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await first.adapter.connect();
+    seedState(first.adapter, (s) => {
+      const episodes: Record<string, number> = {};
+      for (let i = 0; i < MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT - 1; i++) {
+        episodes[`loaded/repo#${i}`] = 1;
+      }
+      s.watch = { prs: {}, episodes };
+    });
+    await first.adapter.disconnect();
+    seedLegacy(dirname(first.adapter.stateFile), {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: { prs: {}, episodes: { 'carried/repo#9999': 7 } },
+    });
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await second.adapter.connect();
+    const episodes = readState(second.adapter).watch!.episodes!;
+    // One free slot: the carried counter is added, own counters untouched.
+    expect(episodes['carried/repo#9999']).toBe(7);
+    expect(episodes['loaded/repo#0']).toBe(1);
+    expect(Object.keys(episodes).length).toBe(
+      MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT,
+    );
+    await second.adapter.disconnect();
+  });
+
+  it('the carry never lowers a counter below its prs baseline (R7-2)', async () => {
+    const cwd = tempCwd();
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await first.adapter.connect();
+    // The baseline outlives the watermark: prs episode 9, no episodes key.
+    seedState(first.adapter, (s) => {
+      s.watch = { prs: { 'owner/repo#7': { headSha: 'sha-a', episode: 9 } } };
+    });
+    await first.adapter.disconnect();
+    // A rollback archive holds a LOWER stale counter for the same PR.
+    seedLegacy(dirname(first.adapter.stateFile), {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: { prs: {}, episodes: { 'owner/repo#7': 3 } },
+    });
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await second.adapter.connect();
+    // The carried 3 must be floored at the baseline 9, or the seed
+    // (episodes ?? prs.episode ?? 0) would rewind to an already-admitted id.
+    expect(readState(second.adapter).watch!.episodes!['owner/repo#7']).toBe(9);
     await second.adapter.disconnect();
   });
 
@@ -3131,6 +3200,83 @@ describe('managed GitHub adapter registration-identity isolation', () => {
           l.includes('managed-state-0123456789abcdef.json'),
       ),
     ).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('a loaded ledger with a null cursor is still a fresh window (R7)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await first.adapter.connect();
+    // The keyed ledger exists but its cursor is null (no poll yet).
+    seedState(first.adapter, (s) => {
+      s.cursor.lastProcessedAt = null;
+    });
+    await first.adapter.disconnect();
+    seedLegacy(dirname(first.adapter.stateFile), {
+      ...legacyState(1, 0),
+      cursor: {
+        lastProcessedAt: '2026-11-19T09:00:00Z',
+        dispatchedComments: [],
+      },
+    });
+    lines.length = 0;
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await second.adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    // loaded exists but cursor null: the SECOND freshWindow disjunct holds, so
+    // the fresh-window loss clauses fire (not only the !loaded case).
+    expect(stranded[0]).toContain('does not re-list');
+    expect(stranded[0]).toContain('were never listed');
+    await second.adapter.disconnect();
+  });
+
+  it('queued transitions are not adopted even when the episode carry is active (R7)', async () => {
+    const cwd = tempCwd();
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    const dir = dirname(adapter.stateFile);
+    seedLegacy(dir, {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: {
+        prs: {
+          'owner/repo#9': {
+            headSha: 'sha-h',
+            pending: [
+              {
+                key: 'prw:ci_failure:owner/repo#9:sha-h:1',
+                episode: 1,
+                owner: 'owner',
+                repo: 'repo',
+                prNumber: 9,
+                transition: 'ci_failure',
+                headSha: 'sha-h',
+                evidence: 'CI failing',
+                detectedAt: '2026-11-19T09:00:00Z',
+              },
+            ],
+          },
+        },
+        episodes: { 'owner/repo#7': 5 },
+      },
+    });
+    await adapter.connect();
+    const state = readState(adapter);
+    // The carry IS active here (episodes carried), yet the queued transition is
+    // still NOT adopted — the not-adopted invariant must hold exactly where the
+    // carry is doing work, not only where it is inert.
+    expect(state.watch?.episodes).toEqual({ 'owner/repo#7': 5 });
+    expect(state.watch?.prs ?? {}).toEqual({});
     await adapter.disconnect();
   });
 

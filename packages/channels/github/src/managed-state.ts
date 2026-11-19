@@ -428,19 +428,22 @@ export class ManagedGithubStateStore {
       const pendingList = value?.pending;
       const outboundList = value?.outbound;
       pending = Array.isArray(pendingList) ? pendingList.length : 0;
-      // Only un-receipted segments are an unknown-status loss: a segment that
-      // already carries a persisted receipt has a known delivery outcome, so it
-      // must not inflate the "un-receipted outbound ... status is unknown"
-      // clause (deferred item 9).
+      // Only segments whose delivery status is UNKNOWN are a loss: a definitive
+      // receipt (accepted/rejected) proves the outcome, but an absent receipt —
+      // or one whose outcome is 'unknown' — does not, so both count toward the
+      // unknown-status clause (deferred item 9; an {outcome:'unknown'} receipt
+      // is not a known outcome).
       outbound = Array.isArray(outboundList)
-        ? outboundList.filter(
-            (segment) =>
-              !(
-                segment &&
-                typeof segment === 'object' &&
-                (segment as { receipt?: unknown }).receipt
-              ),
-          ).length
+        ? outboundList.filter((segment) => {
+            const receipt =
+              segment && typeof segment === 'object'
+                ? (segment as { receipt?: { outcome?: unknown } }).receipt
+                : undefined;
+            return !(
+              receipt &&
+              (receipt.outcome === 'accepted' || receipt.outcome === 'rejected')
+            );
+          }).length
         : 0;
       // The legacy notification watermark: the fresh ledger's null cursor
       // restarts the poll window at connect time, so unread notifications
@@ -495,11 +498,14 @@ export class ManagedGithubStateStore {
    * already-admitted input id (a silently deduped recurrence). Reading the
    * archives — not just the live legacy — is what makes the carry survive the
    * first start's rename. `Math.max` per key only errs toward a new id (the
-   * input id already binds tenant/channel), and the result is sanitized to the
-   * validator's bound (safe integers >= 1, capped at
-   * MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT) so the merged state passes the next
-   * load(). Best-effort: an unreadable or corrupt sibling is skipped, never a
-   * startup failure, but its name is returned in `skipped` so the caller can
+   * input id already binds tenant/channel), and values are sanitized to safe
+   * integers >= 1. A counter whose only home is a `watch.prs` baseline (its
+   * watermark was evicted) is carried too. This is the carry SOURCE, not the
+   * persisted state: it is returned uncapped, and the adapter merges it into the
+   * loaded ledger non-destructively under the validator's 1024 bound (R7-1) —
+   * capping here would discard recoverable counters before the adapter can
+   * place them. Best-effort: an unreadable or corrupt sibling is skipped, never
+   * a startup failure, but its path is returned in `skipped` so the caller can
    * log that a counter source was unreadable rather than dropping it silently
    * (deferred item 8). `episodes` is undefined when no ledger carries counters.
    */
@@ -529,36 +535,33 @@ export class ManagedGithubStateStore {
         skipped.push(filePath);
         continue;
       }
-      const raw = (value as { watch?: { episodes?: unknown } } | null)?.watch
-        ?.episodes;
-      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
-      for (const [key, entry] of Object.entries(raw)) {
-        if (Number.isSafeInteger(entry) && (entry as number) >= 1) {
-          merged[key] = Math.max(merged[key] ?? 0, entry as number);
+      const watch = (
+        value as { watch?: { episodes?: unknown; prs?: unknown } } | null
+      )?.watch;
+      const raw = watch?.episodes;
+      if (!!raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        for (const [key, entry] of Object.entries(raw)) {
+          if (Number.isSafeInteger(entry) && (entry as number) >= 1) {
+            merged[key] = Math.max(merged[key] ?? 0, entry as number);
+          }
+        }
+      }
+      // A counter whose only home is a prs baseline (its watermark was evicted
+      // by the live cap) is still durable; carry it too, or a rebind would
+      // restart it and re-derive an admitted id.
+      const rawPrs = watch?.prs;
+      if (!!rawPrs && typeof rawPrs === 'object' && !Array.isArray(rawPrs)) {
+        for (const [key, entry] of Object.entries(rawPrs)) {
+          const episode = (entry as { episode?: unknown } | null)?.episode;
+          if (Number.isSafeInteger(episode) && (episode as number) >= 1) {
+            merged[key] = Math.max(merged[key] ?? 0, episode as number);
+          }
         }
       }
     }
-    const keys = Object.keys(merged);
-    if (keys.length === 0) return { episodes: undefined, skipped };
-    // Re-cap to the validator's bound by evicting the OLDEST keys — the head of
-    // insertion order — keeping the tail, the same direction as the live
-    // watermark eviction (observePr deletes episodes[keys[i]] for i < len-cap).
-    // Keeping the head instead would drop the most recently merged counters
-    // first, so a counter only a late-walked legacy/archive holds would be the
-    // one lost at the bound — the silent dedupe this carry exists to prevent.
-    // At the bound something must be dropped; this is a bounded, RECOVERABLE
-    // tradeoff (deferred item 10): an evicted counter still lives in its source
-    // file (keyed ledger or archive) and is re-merged on the next start, and
-    // observePr seeds a recurrence from the prs entry's own episode when the
-    // watermark is absent, so a surviving baseline still resumes the counter.
-    // Any loss is bounded to the cap-overflow edge, not a silent restart at 0.
-    const capped: Record<string, number> = {};
-    for (const key of keys.slice(
-      Math.max(0, keys.length - MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT),
-    )) {
-      capped[key] = merged[key]!;
-    }
-    return { episodes: capped, skipped };
+    if (Object.keys(merged).length === 0)
+      return { episodes: undefined, skipped };
+    return { episodes: merged, skipped };
   }
 
   /**

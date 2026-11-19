@@ -591,15 +591,14 @@ export class ManagedGithubAdapter {
               consequence +=
                 ' Its queued PR-watch transitions were dropped; there is no baseline to re-detect them against, so they are neither replayed nor re-derived.';
             } else if (unbaselined === 0) {
-              consequence +=
-                ' Its queued PR-watch transitions were not adopted; this ledger holds their baselines, so one may be re-derived if its edge recurs.';
+              consequence += ` Its queued PR-watch transitions were not adopted; this ledger holds their baselines, so ${baselined} may be re-derived if the edge recurs.`;
             } else {
               consequence += ` Its queued PR-watch transitions were not adopted; ${baselined} may be re-derived against a loaded baseline if their edge recurs, and ${unbaselined} are dropped with no baseline to re-detect against.`;
             }
           }
           if (legacy.outbound > 0)
             consequence +=
-              ' Its un-receipted outbound segments were dropped, so their delivery status is unknown.';
+              ' Its outbound segments with an unknown delivery status were dropped.';
           // Even a legacy with no pending/outbound drops the offline backlog:
           // the fresh null cursor restarts the window at connect time, so
           // mentions received after the legacy watermark while the bot was down
@@ -639,23 +638,40 @@ export class ManagedGithubAdapter {
       }
       if (entryEpisodes) {
         const watch = this.state.watch ?? { prs: {} };
-        const merged: Record<string, number> = { ...(watch.episodes ?? {}) };
-        for (const [key, value] of Object.entries(entryEpisodes)) {
-          merged[key] = Math.max(merged[key] ?? 0, value);
+        const episodes: Record<string, number> = { ...(watch.episodes ?? {}) };
+        // R7-2: the seed is `watch.episodes?.[key] ?? previous?.episode ?? 0`,
+        // so a watermark SHADOWS the prs baseline. A carried value must never
+        // sit below that baseline or the next recurrence rewinds to an
+        // already-admitted id. Raise any existing watermark to its baseline.
+        for (const [key, entry] of Object.entries(watch.prs)) {
+          if (entry.episode !== undefined && episodes[key] !== undefined) {
+            episodes[key] = Math.max(episodes[key]!, entry.episode);
+          }
         }
-        // Re-cap by evicting the oldest (head of insertion order), keeping the
-        // tail — the carried counters are appended after the loaded ledger's
-        // own, so keeping the head would slice every carried counter off when
-        // the loaded ledger already holds the full cap (R4-2), re-opening the
-        // silent dedupe at the bound. Same direction as the live eviction.
-        const keys = Object.keys(merged);
-        const capped: Record<string, number> = {};
-        for (const key of keys.slice(
-          Math.max(0, keys.length - MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT),
-        )) {
-          capped[key] = merged[key]!;
+        // R7-1: the carry is NON-DESTRUCTIVE — persist() writes this map back
+        // over the loaded ledger, so evicting the loaded registration's own
+        // counters would lose them permanently. Keep every own counter; raise
+        // existing ones and add carried ones only while there is room, each
+        // floored at the prs baseline so a stale archive can never lower the
+        // effective seed. Iterate sorted so the result is independent of the
+        // directory enumeration order. At the hard bound, overflow carried
+        // counters are bounded-and-accepted (the same tradeoff as the live
+        // watermark eviction): their source files persist and are re-read next
+        // start, but they are NOT promised a slot this start.
+        for (const key of Object.keys(entryEpisodes).sort()) {
+          const baseline = watch.prs[key]?.episode;
+          const carried = entryEpisodes[key]!;
+          const value =
+            baseline !== undefined ? Math.max(carried, baseline) : carried;
+          if (episodes[key] !== undefined) {
+            episodes[key] = Math.max(episodes[key]!, value);
+          } else if (
+            Object.keys(episodes).length < MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT
+          ) {
+            episodes[key] = value;
+          }
         }
-        this.state.watch = { ...watch, episodes: capped };
+        this.state.watch = { ...watch, episodes };
       }
       if (this.state.pending.some((entry) => entry.held)) {
         this.instanceStalled = true;
@@ -696,6 +712,12 @@ export class ManagedGithubAdapter {
         if (archived) {
           this.log(
             `Managed GitHub archived the legacy ledger to ${archived}; the claims it held are preserved there for inspection.`,
+          );
+        } else {
+          // A failed rename leaves the legacy in place; say so rather than
+          // letting the notice name a path with no archive outcome (R7).
+          this.log(
+            `Managed GitHub could not archive the legacy ledger ${legacy.path}; it remains in place and will be reported again on the next start.`,
           );
         }
       }

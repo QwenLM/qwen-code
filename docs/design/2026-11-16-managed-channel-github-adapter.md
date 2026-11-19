@@ -300,9 +300,11 @@ cause so the errno is diagnosable.
   by the registration identity:
   `managed-state-<sha256(destinationKey)[:16]>.json` (see
   [the registration-identity keying design](2026-11-19-managed-github-registration-identity.md)).
-  The pre-upgrade `managed-state.json` is only ever the retired legacy: a
-  successful start reports it and archives it as
-  `managed-state.json.stranded-<uuid>`; the new build never loads that name.
+  The pre-upgrade `managed-state.json` is the retired legacy: a successful
+  start reports it and archives it as `managed-state.json.stranded-<uuid>`.
+  The new build never loads it as the LIVE ledger (`load()` reads only the
+  identity-keyed file), but it does read it to report/archive it and to carry
+  its durable episode counters entry-scoped.
 - Contents: `version`, `generation`, `instanceRefusals`, the cursor
   (`lastProcessedAt`, dispatched comment ring), `pending` (full events, ≤ 32),
   `outbound` (segment ledger, ≤ 64, receipts validated by the shared

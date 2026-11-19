@@ -33,11 +33,23 @@ import {
 // Let one test force a real write failure inside store.save (after the temp
 // file is opened) so the save-failure catch/finally actually executes; every
 // other call passes through to the real fs.
-const fsControl = vi.hoisted(() => ({ failWrite: false, failRename: false }));
+const fsControl = vi.hoisted(() => ({
+  failWrite: false,
+  failRename: false,
+  readdirOrder: null as string[] | null,
+}));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
     ...actual,
+    readdirSync: ((...args: Parameters<typeof actual.readdirSync>) => {
+      if (fsControl.readdirOrder) {
+        return fsControl.readdirOrder as unknown as ReturnType<
+          typeof actual.readdirSync
+        >;
+      }
+      return actual.readdirSync(...args);
+    }) as typeof actual.readdirSync,
     writeFileSync: ((...args: Parameters<typeof actual.writeFileSync>) => {
       if (fsControl.failWrite) {
         throw Object.assign(
@@ -808,6 +820,16 @@ describe('ManagedGithubStateStore', () => {
     // A cursor-less legacy has no watermark to name.
     writeFileSync(legacyPath, JSON.stringify(freshState()));
     expect(store.strandedLegacyLedger()!.watermark).toBeNull();
+    // A non-string watermark is not a timestamp: the typeof guard must reject
+    // it (a number here would otherwise be named as if it were a date).
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({
+        ...freshState(),
+        cursor: { lastProcessedAt: 12345, dispatchedComments: [] },
+      }),
+    );
+    expect(store.strandedLegacyLedger()!.watermark).toBeNull();
     // An unreadable legacy cannot surface a watermark.
     writeFileSync(legacyPath, '{not json');
     expect(store.strandedLegacyLedger()!.watermark).toBeNull();
@@ -828,11 +850,20 @@ describe('ManagedGithubStateStore', () => {
         ...freshState(),
         watch: {
           prs: {},
-          episodes: { 'owner/repo#7': 5, 'owner/repo#8': 0, bad: 'x' },
+          episodes: {
+            'owner/repo#7': 5,
+            'owner/repo#8': 0,
+            bad: 'x',
+            // Non-safe-integer counters must be dropped too: 2^53 is integer-
+            // valued and >= 1 but NOT a safe integer, and 1.5 is not an integer.
+            'owner/repo#9': Number.MAX_SAFE_INTEGER + 1,
+            'owner/repo#10': 1.5,
+          },
         },
       }),
     );
-    // Only safe integers >= 1 are carried; the rest re-baseline (R2-2).
+    // Only safe integers >= 1 are carried; the rest re-baseline (R2-2). The
+    // 2^53 case witnesses the Number.isSafeInteger half specifically.
     expect(store.entryWatchEpisodes().episodes).toEqual({ 'owner/repo#7': 5 });
     expect(store.entryWatchEpisodes().skipped).toEqual([]);
     // A legacy without watch carries no episodes.
@@ -913,7 +944,7 @@ describe('ManagedGithubStateStore', () => {
     expect(b.entryWatchEpisodes().episodes).toEqual(expected);
   });
 
-  it('re-caps the merged episode counters so the state stays loadable (R3-1)', () => {
+  it('returns the full entry merge uncapped — the adapter owns the persisted bound (R7-1)', () => {
     const store = new ManagedGithubStateStore(
       'gh-episodes-cap',
       tempCwd(),
@@ -930,23 +961,103 @@ describe('ManagedGithubStateStore', () => {
       JSON.stringify({ ...freshState(), watch: { prs: {}, episodes } }),
     );
     const merged = store.entryWatchEpisodes().episodes!;
-    expect(Object.keys(merged).length).toBeLessThanOrEqual(
-      MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT,
+    // The carry SOURCE is not capped: capping here would discard recoverable
+    // counters before the adapter can place them non-destructively under the
+    // validator's bound. Every counter is offered, head and tail alike.
+    expect(Object.keys(merged).length).toBe(
+      MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT + 1,
     );
-    expect(
-      validManagedGithubState({
-        ...freshState(),
-        watch: { prs: {}, episodes: merged },
-      }),
-    ).toBe(true);
-    // The eviction direction is the contract (R4-2): overflow drops the OLDEST
-    // (head of insertion order), keeping the tail — the same direction as the
-    // live watermark eviction. Keeping the head instead would drop the most
-    // recently merged counter first, losing a carried counter at the bound.
+    expect(merged['owner/repo#0']).toBe(1);
     expect(merged[`owner/repo#${MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT}`]).toBe(
       1,
     );
-    expect(merged['owner/repo#0']).toBeUndefined();
+  });
+
+  it('carries a counter whose only home is a prs baseline episode (R7)', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-episodes-prs',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    // The watermark was evicted by the live cap; the baseline still holds it.
+    writeFileSync(
+      join(store.directory, 'managed-state.json'),
+      JSON.stringify({
+        ...freshState(),
+        watch: { prs: { 'owner/repo#7': { headSha: 'sha-a', episode: 9 } } },
+      }),
+    );
+    expect(store.entryWatchEpisodes().episodes).toEqual({ 'owner/repo#7': 9 });
+  });
+
+  it('the carry continues past an unreadable source to later readable ones (R7)', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-continue',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    const corrupt = 'managed-state-0000000000000000.json';
+    const readable = 'managed-state-ffffffffffffffff.json';
+    writeFileSync(join(store.directory, corrupt), '{not json');
+    writeFileSync(
+      join(store.directory, readable),
+      JSON.stringify({
+        ...freshState(),
+        watch: { prs: {}, episodes: { 'owner/repo#7': 5 } },
+      }),
+    );
+    // Force the corrupt source to be enumerated FIRST: a `break` would stop
+    // there and lose the readable source that follows; `continue` carries it.
+    fsControl.readdirOrder = [corrupt, readable];
+    try {
+      const { episodes, skipped } = store.entryWatchEpisodes();
+      expect(episodes).toEqual({ 'owner/repo#7': 5 });
+      expect(skipped).toEqual([join(store.directory, corrupt)]);
+    } finally {
+      fsControl.readdirOrder = null;
+    }
+  });
+
+  it('the merge is Math.max, not last-wins, in either read order (R7)', () => {
+    const cwd = tempCwd();
+    const a = new ManagedGithubStateStore(
+      'gh-max',
+      cwd,
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    const b = new ManagedGithubStateStore(
+      'gh-max',
+      cwd,
+      'https://api.github.com',
+      'cp|tenant-b|chan-1|actor|ws|.',
+    );
+    a.save({
+      ...freshState(),
+      watch: { prs: {}, episodes: { 'owner/repo#7': 9 } },
+    });
+    b.save({
+      ...freshState(),
+      watch: { prs: {}, episodes: { 'owner/repo#7': 3 } },
+    });
+    // Read the HIGHER value first: a last-wins merge would overwrite it with 3.
+    fsControl.readdirOrder = [basename(a.file), basename(b.file)];
+    try {
+      expect(a.entryWatchEpisodes().episodes).toEqual({ 'owner/repo#7': 9 });
+    } finally {
+      fsControl.readdirOrder = null;
+    }
+    // The reverse order keeps the max too.
+    fsControl.readdirOrder = [basename(b.file), basename(a.file)];
+    try {
+      expect(a.entryWatchEpisodes().episodes).toEqual({ 'owner/repo#7': 9 });
+    } finally {
+      fsControl.readdirOrder = null;
+    }
   });
 
   it('counts the legacy watch.prs queues so a queued transition is not a quiescent 0 pending (R3-1)', () => {
@@ -1003,7 +1114,7 @@ describe('ManagedGithubStateStore', () => {
     expect(store.strandedLegacyLedger()!.watchPendingKeys).toEqual([]);
   });
 
-  it('counts only un-receipted outbound segments as an unknown-status loss (deferred item 9)', () => {
+  it('counts only unknown-delivery-status outbound segments as a loss (deferred item 9)', () => {
     const store = new ManagedGithubStateStore(
       'gh-outbound-receipt',
       tempCwd(),
@@ -1028,12 +1139,16 @@ describe('ManagedGithubStateStore', () => {
             },
           },
           { deliveryId: 'd-2', ordinal: 1 },
+          // An 'unknown' receipt does NOT prove the outcome: it must count as
+          // an unknown-status loss, not be treated like a definitive receipt.
+          { deliveryId: 'd-3', ordinal: 0, receipt: { outcome: 'unknown' } },
+          { deliveryId: 'd-4', ordinal: 0, receipt: { outcome: 'rejected' } },
         ],
       }),
     );
-    // The receipted segment's delivery outcome is known, so it must not
-    // inflate the "un-receipted outbound ... status is unknown" loss count.
-    expect(store.strandedLegacyLedger()!.outbound).toBe(2);
+    // d-0 and d-2 (no receipt) + d-3 (unknown receipt) = 3 unknown-status;
+    // d-1 (accepted) and d-4 (rejected) prove the outcome and are excluded.
+    expect(store.strandedLegacyLedger()!.outbound).toBe(3);
   });
 
   it('a failed archive rename leaves the legacy reported, never throws', () => {

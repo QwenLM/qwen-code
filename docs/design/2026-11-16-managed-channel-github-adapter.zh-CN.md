@@ -232,8 +232,10 @@ sender-skip 写入记日志而不中断批量。store 抛固定句（状态文�
   0700/0600，临时文件 + fsync + rename 原子写。凭据绝不定义身份。其下的存活账本
   文件按注册身份键控：`managed-state-<sha256(destinationKey)[:16]>.json`（见
   [注册身份键控设计](2026-11-19-managed-github-registration-identity.zh-CN.md)）。
-  升级前的 `managed-state.json` 只可能是已退役的旧账本：成功启动会报告并把它归档
-  为 `managed-state.json.stranded-<uuid>`；新版本从不加载该文件名。
+  升级前的 `managed-state.json` 是已退役的旧账本：成功启动会报告并把它归档
+  为 `managed-state.json.stranded-<uuid>`。新版本绝不把它作为**存活账本**加载
+  （`load()` 只读身份键控文件），但会读取它以报告/归档，并按条目作用域携带其
+  持久 episode 计数。
 - 内容：`version`、`generation`、`instanceRefusals`、游标（`lastProcessedAt`、
   dispatched 评论环）、`pending`（完整事件，≤ 32）、`outbound`（段台账，
   ≤ 64，回执用共享 `validManagedReceipt` 校验）。校验器对水位做日期解析：
