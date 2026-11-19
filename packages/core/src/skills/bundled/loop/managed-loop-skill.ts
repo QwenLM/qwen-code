@@ -442,9 +442,19 @@ export function assertSentinelsExpanded(
   profile: ManagedLoopProfile,
 ): void {
   for (const sentinel of body.match(/<<[^>]+>>/g) ?? []) {
-    if (profile === 'cron' || !EXPANDING_SENTINELS.has(sentinel)) {
+    // Report only what the guard established. Cron fires expand no sentinel at
+    // all, so any sentinel is wrong there. For the other profiles the fact is
+    // membership, not expansion: an unknown sentinel may well expand
+    // somewhere, and calling it "non-expanding" would assert something this
+    // allow-list never checked.
+    if (profile === 'cron') {
       throw new Error(
-        `Managed ${profile} loop body teaches a non-expanding sentinel: ${sentinel}.`,
+        `Managed cron loop body teaches a sentinel, but cron fires expand none: ${sentinel}.`,
+      );
+    }
+    if (!EXPANDING_SENTINELS.has(sentinel)) {
+      throw new Error(
+        `Managed ${profile} loop body teaches a sentinel outside the expanding allow-list: ${sentinel}.`,
       );
     }
   }

@@ -228,6 +228,19 @@ core 邻近面是整面跑而非抽样：`src/managed-runtime` 加 `src/skills/b
 
 套件规模：core 35、scripts 元 183（改动文件 88）。
 
+## 第 11 轮评审：哨兵诊断断言了守卫从未核实的事实
+
+第 11 轮无 inline 发现、一条延后项，并因其边界上 CI 仍在跑而把自己的 Approve 降级为 Comment。它还披露其边界无 JDK，故重生 sidecar 的 Java 消费方 `ManagedLoopSkillTest` 未在那里运行；本 PR 在本地跑它并发布结果。
+
+**该发现属实，并在此修复。** `assertSentinelsExpanded` 对*任何*不在 allow-list 的哨兵都抛 `teaches a non-expanding sentinel: X`。对两个已知字面形这是准确的，但对未知 token，守卫确立的只是**成员资格**而非是否展开：新增哨兵完全可能在别处展开，而该消息在未核实的情况下断言了相反的事。诊断现按两个分支只报告已确立的事实：
+
+- cron —— `Managed cron loop body teaches a sentinel, but cron fires expand none: X.` cron 触发根本不展开任何哨兵，故无论成员资格如何，任何哨兵在此都是错的。
+- union/wakeup —— `Managed <profile> loop body teaches a sentinel outside the expanding allow-list: X.`
+
+拒绝行为不变：同样的 body 被拒、同样的 profile、对未知 token 仍失败关闭。只有措辞变了，而编码旧措辞的六处断言现按 profile 断言新措辞，故每个方向都保有自己的见证。生成的 sidecar 未触碰——parity 测试重生并逐字节比对且保持绿——故这是生成器里的诊断改动，不是发布的模型面向内容的改动。
+
+见证：把两条消息都回退为旧的 `non-expanding sentinel` 措辞会使 **4 个用例红**，各自点名它期望的措辞；字节级还原回到 35/35。core `tsc --build`、eslint 与 prettier 净。
+
 ## 开放问题
 
 无阻塞项。

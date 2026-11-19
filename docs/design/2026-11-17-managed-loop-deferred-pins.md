@@ -228,6 +228,19 @@ Real-environment verification was re-run at this head rather than carried over, 
 
 Suite sizes: core 35, scripts meta 183 (the changed file 88).
 
+## Round-11 review: the sentinel diagnostic claimed a fact the guard never checked
+
+Round 11 posted no inline findings and one deferred item, and downgraded its own Approve to Comment because CI was still running at its boundary. It also disclosed that its boundary has no JDK, so `ManagedLoopSkillTest` — the Java consumer of the regenerated sidecars — did not run there; this PR runs it locally and publishes the result.
+
+**The finding is real and is fixed here.** `assertSentinelsExpanded` threw `teaches a non-expanding sentinel: X` for _any_ sentinel outside the allow-list. For the two known literal forms that is accurate, but for an unknown token the guard has established only **membership**, not expansion: a newly added sentinel may well expand somewhere, and the message asserted the opposite without checking it. The diagnostic now reports exactly what was established, in two branches:
+
+- cron — `Managed cron loop body teaches a sentinel, but cron fires expand none: X.` Cron fires expand no sentinel at all, so any sentinel is wrong there regardless of membership.
+- union/wakeup — `Managed <profile> loop body teaches a sentinel outside the expanding allow-list: X.`
+
+The rejection behaviour is unchanged: same bodies rejected, same profiles, still fail-closed on an unknown token. Only the wording moved, and the six assertion sites that encoded the old wording now assert the new one per profile, so each direction keeps its own witness. The generated sidecars are untouched — the parity test regenerates and compares them byte-for-byte and stays green — so this is a diagnostic change in the generator, not a change to shipped model-facing content.
+
+Witness: reverting both messages to the old `non-expanding sentinel` wording reddens **4 tests**, each naming the wording it expected; a byte-equal restore returns 35/35. core `tsc --build`, eslint and prettier clean.
+
 ## Open questions
 
 None blocking.

@@ -293,20 +293,26 @@ describe('managed loop skill parity', () => {
       '# /loop — run a prompt repeatedly\n\n<<loop.md-dynamic>>',
     );
     expect(() => buildManagedLoopSkill('cron', mutated, description)).toThrow(
-      /non-expanding sentinel/,
+      /cron fires expand none: <<loop\.md-dynamic>>/,
     );
   });
 
-  it('rejects a non-expanding sentinel in every profile, including wakeup', () => {
+  it('rejects an unlisted sentinel in every profile, including wakeup', () => {
     const mutated = body.replace(
       '# /loop — run a prompt repeatedly',
       '# /loop — run a prompt repeatedly\n\n<<autonomous-loop>>',
     );
     expect(mutated).not.toBe(body);
     for (const profile of MANAGED_LOOP_PROFILES) {
+      // Each profile is rejected for its own reason: cron expands nothing,
+      // the others require allow-list membership.
       expect(() =>
         buildManagedLoopSkill(profile, mutated, description),
-      ).toThrow(/non-expanding sentinel/);
+      ).toThrow(
+        profile === 'cron'
+          ? /cron fires expand none: <<autonomous-loop>>/
+          : /outside the expanding allow-list: <<autonomous-loop>>/,
+      );
     }
   });
 
@@ -662,18 +668,21 @@ describe('managed loop skill parity', () => {
     expect(() =>
       assertSentinelsExpanded('no sentinels here', 'cron'),
     ).not.toThrow();
+    // An unknown sentinel is reported as unlisted, not as "non-expanding":
+    // the allow-list establishes membership, and nothing here checks whether
+    // an unknown token expands somewhere else.
     expect(() =>
       assertSentinelsExpanded('teaches <<brand-new-sentinel>>', 'union'),
-    ).toThrow(/non-expanding sentinel: <<brand-new-sentinel>>/);
+    ).toThrow(/outside the expanding allow-list: <<brand-new-sentinel>>/);
     expect(() =>
       assertSentinelsExpanded('teaches <<brand-new-sentinel>>', 'wakeup'),
-    ).toThrow(/non-expanding sentinel/);
+    ).toThrow(/outside the expanding allow-list/);
     expect(() =>
       assertSentinelsExpanded('teaches <<loop.md>>', 'union'),
-    ).toThrow(/non-expanding sentinel/);
+    ).toThrow(/outside the expanding allow-list: <<loop\.md>>/);
     expect(() =>
       assertSentinelsExpanded('teaches <<loop.md-dynamic>>', 'cron'),
-    ).toThrow(/non-expanding sentinel/);
+    ).toThrow(/cron fires expand none: <<loop\.md-dynamic>>/);
   });
 
   it('the sentinel guard runs on the assembled body at its call site', () => {
@@ -690,7 +699,11 @@ describe('managed loop skill parity', () => {
     for (const profile of MANAGED_LOOP_PROFILES) {
       expect(() =>
         buildManagedLoopSkill(profile, mutated, description),
-      ).toThrow(/non-expanding sentinel: <<brand-new-sentinel>>/);
+      ).toThrow(
+        profile === 'cron'
+          ? /cron fires expand none: <<brand-new-sentinel>>/
+          : /outside the expanding allow-list: <<brand-new-sentinel>>/,
+      );
     }
   });
 });
