@@ -3676,13 +3676,16 @@ describe('runNonInteractive', () => {
     return { promise, resolve };
   }
 
-  it('drains workflow completion and waits for the runner to finish persisting', async () => {
+  it('waits for a failed workflow to finish persisting before notifying the model', async () => {
     setupMetricsMock();
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const onResultEmitted = vi.fn();
     const { promise: completion, resolve: finishPersisting } = deferred();
     mockWorkflowRunRegistry.hasRunningEntries.mockReturnValue(true);
-    mockWorkflowRunRegistry.getHandle.mockReturnValue({ completion });
+    mockWorkflowRunRegistry.getHandle.mockReturnValue({
+      runId: 'wf_bg',
+      completion,
+    });
     mockLlmClient.sendMessageStream
       .mockImplementationOnce(async function* () {
         const notify = mockWorkflowRunRegistry.setCompletionCallback.mock
@@ -3690,13 +3693,13 @@ describe('runNonInteractive', () => {
         expect(notify).toBeTypeOf('function');
         setTimeout(() => {
           notify?.(
-            'Background workflow "review" completed.',
-            '<task-notification>workflow done</task-notification>',
-            { runId: 'wf_bg', status: 'completed' },
+            'Background workflow "review" failed.',
+            '<task-notification>workflow failed</task-notification>',
+            { runId: 'wf_bg', status: 'failed' },
           );
           mockWorkflowRunRegistry.hasRunningEntries.mockReturnValue(false);
           mockWorkflowRunRegistry.list.mockReturnValue([
-            { runId: 'wf_bg', status: 'completed' },
+            { runId: 'wf_bg', status: 'failed' },
           ]);
         }, 150);
         yield { type: LlmEventType.Content, value: 'Started it.' };
@@ -3734,7 +3737,8 @@ describe('runNonInteractive', () => {
       mockWorkflowRunRegistry.getHandle.mockReturnValue(undefined);
       await vi.advanceTimersByTimeAsync(100);
       await run;
-      expect(turnsBeforePersistence).toBe(2);
+      expect(turnsBeforePersistence).toBe(1);
+      expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
       expect(resultsBeforePersistence).toBe(0);
       expect(onResultEmitted).toHaveBeenCalledOnce();
     } finally {
@@ -3743,15 +3747,19 @@ describe('runNonInteractive', () => {
 
     expect(
       JSON.stringify(mockLlmClient.sendMessageStream.mock.calls[1]?.[0]),
-    ).toContain('workflow done');
+    ).toContain('workflow failed');
     expect(
       mockWorkflowRunRegistry.setCompletionCallback,
     ).toHaveBeenLastCalledWith(undefined);
   });
 
-  it.each(['interrupt', 'turn limit'] as const)(
-    'lets a cancelled workflow record its end before exit on %s',
-    async (reason) => {
+  it.each([
+    { reason: 'interrupt', exitCode: 130 },
+    { reason: 'turn limit', exitCode: 53 },
+    { reason: 'provider error', exitCode: 1 },
+  ])(
+    'lets a cancelled workflow record its end before exit on $reason',
+    async ({ reason, exitCode }) => {
       setupMetricsMock();
       const order: string[] = [];
       const { promise: completion, resolve: settle } = deferred();
@@ -3772,8 +3780,20 @@ describe('runNonInteractive', () => {
       if (reason === 'turn limit') {
         vi.mocked(mockConfig.getMaxSessionTurns).mockReturnValue(0);
       }
+      if (reason === 'provider error') {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+          OutputFormat.JSON,
+        );
+      }
       mockLlmClient.sendMessageStream.mockImplementation(async function* () {
         yield { type: LlmEventType.Content, value: 'Started it.' };
+        if (reason === 'provider error') {
+          yield {
+            type: LlmEventType.Error,
+            value: { error: { message: 'Provider failure', status: 500 } },
+          };
+          return;
+        }
         controller.abort();
         yield {
           type: LlmEventType.Finished,
@@ -3785,11 +3805,9 @@ describe('runNonInteractive', () => {
         runNonInteractive(mockConfig, mockSettings, 'run it', 'p-wf-int', {
           abortController: controller,
         }),
-      ).rejects.toThrow(
-        `process.exit(${reason === 'turn limit' ? 53 : 130}) called`,
-      );
+      ).rejects.toThrow(`process.exit(${exitCode}) called`);
 
-      expect(order).toEqual(['aborted', 'settled', 'exit']);
+      expect(order.slice(0, 3)).toEqual(['aborted', 'settled', 'exit']);
     },
   );
 

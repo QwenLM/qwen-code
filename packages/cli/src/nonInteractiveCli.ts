@@ -17,6 +17,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import type { SendMessageOptions } from '@qwen-code/qwen-code-core/core/client.js';
 import type { CompletedToolCall } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import type { WorkflowRunHandle } from '@qwen-code/qwen-code-core/agents/runtime/workflow-runner.js';
 
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import type {
@@ -38,6 +39,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { formatDuration } from './ui/utils/formatters.js';
 import { waitForPendingMemoryTasks } from './nonInteractive/memory-tasks.js';
+import { cancelAndSettleWorkflowRuns } from './nonInteractive/workflow-shutdown.js';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
@@ -157,13 +159,6 @@ const restoredBackgroundAgentSessions = new WeakMap<Config, Set<string>>();
  * slow agent can't block exit indefinitely.
  */
 const STRUCTURED_SHUTDOWN_HOLDBACK_MS = 500;
-
-/**
- * How long an exiting run waits for cancelled workflows to record their end.
- * A runner that settles in time removes its checkpoint, so the run reads as
- * cancelled rather than interrupted by a crash.
- */
-const WORKFLOW_CANCEL_SETTLE_MS = 2_000;
 
 /**
  * The memory-wait window for a one-shot run whose caller supplied no stop
@@ -957,22 +952,8 @@ export async function runNonInteractive(
     const markAbortExitCommitted = (): void => {
       abortExitCommitted = true;
     };
-    const cancelWorkflowRuns = async (): Promise<void> => {
-      const workflows = config.getWorkflowRunRegistry();
-      const settling = workflows
-        .list()
-        .flatMap((entry) => workflows.getHandle(entry.runId)?.completion ?? []);
-      workflows.abortAll();
-      if (settling.length === 0) return;
-      let timer: NodeJS.Timeout | undefined;
-      await Promise.race([
-        Promise.allSettled(settling),
-        new Promise((resolve) => {
-          timer = setTimeout(resolve, WORKFLOW_CANCEL_SETTLE_MS);
-        }),
-      ]);
-      clearTimeout(timer);
-    };
+    const cancelWorkflowRuns = () =>
+      cancelAndSettleWorkflowRuns(config.getWorkflowRunRegistry());
     const exitForSessionTurnLimit = async (): Promise<never> => {
       await failClosedActiveGoalTurn(
         'Headless Goal stopped after the session turn limit',
@@ -1034,6 +1015,7 @@ export async function runNonInteractive(
       modPrompt?: ModQueuedPrompt;
       todoWorkChainId?: string;
       monitorId?: string;
+      workflowHandle?: WorkflowRunHandle;
       sdkNotification?: {
         task_id: string;
         tool_use_id?: string;
@@ -1860,8 +1842,6 @@ export async function runNonInteractive(
         });
       });
 
-      // A background workflow reports back the same way: its completion
-      // drains as a turn, and the run waits for it below.
       const workflowRegistry = config.getWorkflowRunRegistry();
       workflowRegistry.setCompletionCallback((displayText, modelText, meta) => {
         localQueue.push({
@@ -1869,8 +1849,14 @@ export async function runNonInteractive(
           modelText,
           sendMessageType: SendMessageType.Notification,
           todoWorkChainId: meta.todoWorkChainId,
+          workflowHandle: workflowRegistry.getHandle(meta.runId),
         });
       });
+      // The model may act on a resume hint immediately. Wait for that runner
+      // to release the ID, while still letting other prompts run.
+      const isReadyForModel = ({ workflowHandle }: LocalQueueItem): boolean =>
+        !workflowHandle ||
+        workflowRegistry.getHandle(workflowHandle.runId) !== workflowHandle;
 
       const monitorRegistry = config.getMonitorRegistry();
       if (options.captureMonitorNotifications !== false) {
@@ -3640,29 +3626,24 @@ export async function runNonInteractive(
           // Drain-turns count toward getMaxSessionTurns() for symmetry with the main
           // loop — otherwise a looping cron or a model that keeps replying to
           // notifications could exceed the cap silently in headless runs.
-          const drainBatch = async () => {
-            if (localQueue.length === 0) return;
-
-            // Batch-drain: take contiguous same-type items from the front
-            // of the queue. Cron prompts run individually — each needs its
-            // own slash/shell/@ preprocessing and approval cycle.
-            const targetType = localQueue[0]!.sendMessageType;
-            let splitIdx =
-              targetType === SendMessageType.Cron || localQueue[0]!.modPrompt
-                ? 1
-                : 0;
-            if (splitIdx === 0) {
+          const drainBatch = async (start: number) => {
+            // Batch contiguous ready items of the same type. Cron prompts
+            // run individually for their own preprocessing and approvals.
+            const first = localQueue[start]!;
+            const targetType = first.sendMessageType;
+            let end = start + 1;
+            if (targetType !== SendMessageType.Cron && !first.modPrompt) {
               while (
-                splitIdx < localQueue.length &&
-                localQueue[splitIdx]!.sendMessageType === targetType &&
-                localQueue[splitIdx]!.todoWorkChainId ===
-                  localQueue[0]!.todoWorkChainId
+                end < localQueue.length &&
+                localQueue[end]!.sendMessageType === targetType &&
+                localQueue[end]!.todoWorkChainId === first.todoWorkChainId &&
+                isReadyForModel(localQueue[end]!)
               ) {
-                splitIdx++;
+                end++;
               }
             }
             const batch = localQueue
-              .splice(0, splitIdx)
+              .splice(start, end - start)
               .filter((item) => !isCancelledMonitorEvent(item));
 
             if (batch.length === 0) return;
@@ -3940,7 +3921,9 @@ export async function runNonInteractive(
                 // call captured the terminal contract — no point running
                 // more queued prompts that can't influence the result.
                 if (structuredSubmission !== undefined) return;
-                await drainBatch();
+                const start = localQueue.findIndex(isReadyForModel);
+                if (start < 0) return;
+                await drainBatch(start);
               }
             })();
             drainPromise = p;
@@ -4319,6 +4302,7 @@ export async function runNonInteractive(
           throw abortError;
         }
       }
+      await cancelWorkflowRuns();
       await handleError(
         error,
         config,
