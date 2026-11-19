@@ -287,6 +287,85 @@ describe('DeleteSessionDialog selection', () => {
     expect(dangerButton().disabled).toBe(true);
   });
 
+  it('keeps the current session row unselectable while only background work runs', () => {
+    // The sidebar refuses to delete this row; the dialog must agree, or the
+    // two entry points disagree about what "still working" means.
+    sessions = [
+      initialSessions[0],
+      initialSessions[1],
+      {
+        ...initialSessions[2],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+    ];
+    mount();
+
+    clickRow(2);
+    expect(isChecked(rows()[2])).toBe(false);
+    expect(dangerButton().disabled).toBe(true);
+  });
+
+  it('refuses to confirm a row that turned busy after it was ticked', async () => {
+    // The guard has to sit on the request, not only on the click: a blocked
+    // row can no longer be unchecked, so a stale checked set would otherwise
+    // still reach the multi-select delete.
+    deleteSessionsMock.mockResolvedValue({
+      removed: [initialSessions[0].sessionId],
+      notFound: [],
+      errors: [],
+    });
+    const idle = [
+      initialSessions[0],
+      initialSessions[1],
+      { ...initialSessions[2], activeWorkState: 'idle' },
+    ];
+    const busy = [
+      initialSessions[0],
+      initialSessions[1],
+      {
+        ...initialSessions[2],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+    ];
+    sessions = idle;
+    mount();
+    clickRow(2);
+    expect(isChecked(rows()[2])).toBe(true);
+    expect(dangerButton().disabled).toBe(false);
+
+    // Alone, the stale selection must disarm the button and uncheck the row:
+    // a blocked row cannot be unchecked by hand, so leaving it ticked would
+    // count a session the request omits.
+    sessions = busy;
+    rerender();
+    expect(dangerButton().disabled).toBe(true);
+    expect(isChecked(rows()[2])).toBe(false);
+    expect(deleteSessionsMock).not.toHaveBeenCalled();
+
+    // Alongside another row the button stays armed, so the request itself has
+    // to drop the row that turned busy — and the count the user reads must
+    // agree with what is actually sent.
+    sessions = idle;
+    rerender();
+    clickRow(2);
+    clickRow(0);
+    expect(hint()).toContain('2');
+    sessions = busy;
+    rerender();
+    expect(dangerButton().disabled).toBe(false);
+    expect(isChecked(rows()[2])).toBe(false);
+    expect(hint()).toContain('1');
+    expect(hint()).not.toContain('2');
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(deleteSessionsMock).toHaveBeenCalledWith([
+      initialSessions[0].sessionId,
+    ]);
+  });
+
   it('clears checked rows and disarms delete when the filter changes', () => {
     mount();
 

@@ -64,7 +64,7 @@ public class FileEventSimpleConsumer implements FileEventConsumer {
                 String line;
                 int count = 0;
                 while (count < limit && (line = br.readLine()) != null) {
-                    content.append(line).append(File.separator);
+                    content.append(line).append('\n');
                     count++;
                 }
             }

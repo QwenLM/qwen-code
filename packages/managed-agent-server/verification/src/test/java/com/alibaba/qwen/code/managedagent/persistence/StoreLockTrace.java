@@ -50,15 +50,10 @@ public final class StoreLockTrace extends DelegatingDataSource {
         }
 
         boolean root() {
-            // The exclusion keeps pin-index probes (is_csi_guard = TRUE, e.g.
-            // ManagedRuntimeRetentionGuard's reference read) out of the root
-            // order: for an ordinary Session they lock only the pin-index gap.
-            // The legacy guard's primary-key current read locks the root row
-            // itself and deliberately classifies as a root lock.
             return table(sql, "ma_session")
                     && (sql.startsWith("insert into ma_session ")
                             || sql.startsWith("update ma_session ")
-                            || sql.contains("for update") && !sql.contains("is_csi_guard = true"));
+                            || sql.contains("for update"));
         }
 
         boolean turn() {

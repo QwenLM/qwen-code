@@ -27,6 +27,7 @@ function fixture(session = 'A') {
     metrics: uiTelemetryService.getMetricsForSession(`stats-test-${session}`),
     lastPromptTokenCount: 0,
     promptCount: 0,
+    userPromptCount: 0,
   };
   return { state, config, stats };
 }

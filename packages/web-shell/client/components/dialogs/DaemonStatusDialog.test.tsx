@@ -1391,6 +1391,100 @@ describe('DaemonStatusDialog', () => {
     expect(text).toContain('Failed to load diagnostics');
   });
 
+  it('shows the SSE admission cap paired with the aggregate stream occupancy', () => {
+    const withOccupancy = {
+      ...summaryReport,
+      limits: { ...summaryReport.limits, maxSseConnections: 204 },
+      runtime: {
+        ...summaryReport.runtime,
+        transport: {
+          ...summaryReport.runtime.transport,
+          restSseActive: 3,
+          streamOccupancy: {
+            total: 6,
+            bySurface: {
+              restEvents: 3,
+              agentEvents: 0,
+              generation: 0,
+              artifactLibrary: 0,
+              hostedEvents: 0,
+              acpSse: 2,
+              acpWs: 1,
+            },
+            // A non-primary distribution the daemon really produces (streams
+            // parked on the pairing listeners): total 6 ≠ primary 3, so the
+            // paired assertion below reds if the row reads byListener.primary
+            // instead of total (review R1-2).
+            byListener: { primary: 3, 'local-control': 2, 'remote-access': 1 },
+          },
+        },
+      },
+    };
+    summaryState = { report: withOccupancy, loading: false, error: undefined };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    const text = container!.textContent ?? '';
+    expect(text).toContain('SSE admission (used / cap)');
+    // The aggregate occupancy pairs with the cap — not the REST-only 3 and
+    // not the primary listener's share (3).
+    expect(text).toContain('6 / 204');
+  });
+
+  it('shows the cap alone when the daemon predates the occupancy breakdown', () => {
+    const capOnly = {
+      ...summaryReport,
+      limits: { ...summaryReport.limits, maxSseConnections: 204 },
+    };
+    summaryState = { report: capOnly, loading: false, error: undefined };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    const text = container!.textContent ?? '';
+    // Row renders the label and value as adjacent spans with no separator.
+    // The cap-only branch must show the bare cap: pairing restSseActive (1
+    // in this fixture) into the fallback would render '1 / 204' — the exact
+    // misreading the row comment warns about — and both asserts below red
+    // (review R1-1).
+    expect(text).toContain('SSE admission (used / cap)204');
+    expect(text).not.toContain('/ 204');
+  });
+
+  it('shows unlimited when the SSE admission cap is disabled', () => {
+    const unlimited = {
+      ...summaryReport,
+      limits: { ...summaryReport.limits, maxSseConnections: null },
+      runtime: {
+        ...summaryReport.runtime,
+        transport: {
+          ...summaryReport.runtime.transport,
+          streamOccupancy: {
+            total: 0,
+            bySurface: {
+              restEvents: 0,
+              agentEvents: 0,
+              generation: 0,
+              artifactLibrary: 0,
+              hostedEvents: 0,
+              acpSse: 0,
+              acpWs: 0,
+            },
+            byListener: { primary: 0, 'local-control': 0, 'remote-access': 0 },
+          },
+        },
+      },
+    };
+    summaryState = { report: unlimited, loading: false, error: undefined };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    expect(container!.textContent ?? '').toContain('0 / unlimited');
+  });
+
+  it('omits the SSE admission row for daemons that predate the cap', () => {
+    summaryState = { report: summaryReport, loading: false, error: undefined };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    expect(container!.textContent ?? '').not.toContain('SSE admission');
+  });
+
   it('renders the ACP-disabled branch when the transport is off', () => {
     const acpOff = {
       ...summaryReport,

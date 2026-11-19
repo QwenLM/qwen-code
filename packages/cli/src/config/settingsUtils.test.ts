@@ -1151,6 +1151,28 @@ describe('SettingsUtils', () => {
         expect(nextBooleanSettingValue(false)).toBe(true);
         expect(nextBooleanSettingValue(true)).toBe(false);
       });
+
+      it('moves an unset boolean to the value its definition asks for', () => {
+        expect(nextBooleanSettingValue(undefined, undefined, true)).toBe(true);
+        expect(nextBooleanSettingValue(false, undefined, true)).toBe(true);
+        expect(nextBooleanSettingValue(true, undefined, true)).toBe(false);
+      });
+
+      it('turns the unified agent loop on from its unset state', async () => {
+        const { getSettingsSchema: getRealSettingsSchema } =
+          await vi.importActual<typeof import('./settingsSchema.js')>(
+            './settingsSchema.js',
+          );
+        const definition =
+          getRealSettingsSchema().experimental.properties.unifiedAgentLoop;
+        expect(
+          nextBooleanSettingValue(
+            undefined,
+            definition.default,
+            definition.unsetToggleValue,
+          ),
+        ).toBe(true);
+      });
     });
 
     describe('saveModifiedSettings', () => {

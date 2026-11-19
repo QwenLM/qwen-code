@@ -29,6 +29,9 @@ export {
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
   CHANNEL_TURN_NOTICE_META_KEY,
   CHANNEL_WORKFLOW_ORIGIN_META_KEY,
+  MID_TURN_DRAIN_BATCH,
+  MID_TURN_QUEUE_MAX_CHARS,
+  MID_TURN_QUEUE_MAX_MESSAGES,
   parseChannelWorkflowOrigin,
 } from './ChannelAgentBridge.js';
 export type {
@@ -245,4 +248,10 @@ export type {
   ManagedClaimedDelivery,
   ManagedReceipt,
   ManagedChannelControlPlane,
+} from './managed-channel.js';
+export {
+  MANAGED_OUTBOUND_LIMIT,
+  validManagedReceipt,
+  CHANNEL_INBOUND_TRUNCATION_NOTICE,
+  fitInboundText,
 } from './managed-channel.js';

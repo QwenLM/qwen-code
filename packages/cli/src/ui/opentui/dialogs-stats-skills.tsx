@@ -322,24 +322,36 @@ export function OpenTuiStatsDialog(props: {
       paddingBottom={compact ? 0 : 1}
       flexShrink={0}
     >
-      <text width="100%" height={headerRows} wrapMode="word">
-        {compact ? (
+      {compact ? (
+        <text
+          id="screen-reader-selected-tab"
+          width="100%"
+          height={headerRows}
+          wrapMode="word"
+        >
           <span fg="#1e1e2e" bg={C.accent}>
             {headerText}
           </span>
-        ) : (
-          TABS.flatMap((definition, index) => [
-            index ? ' ' : '',
-            <span
+        </text>
+      ) : (
+        <box flexDirection="row" height={headerRows} flexShrink={0}>
+          {TABS.map((definition, index) => (
+            <text
               key={definition.name}
+              id={
+                definition.name === tab
+                  ? 'screen-reader-selected-tab'
+                  : 'screen-reader-unselected-tab'
+              }
+              marginLeft={index ? 1 : 0}
               fg={definition.name === tab ? '#1e1e2e' : C.text}
               bg={definition.name === tab ? C.accent : undefined}
             >
               {` ${t(definition.label)} `}
-            </span>,
-          ])
-        )}
-      </text>
+            </text>
+          ))}
+        </box>
+      )}
       <box height={1} flexShrink={0} />
 
       <scrollbox

@@ -510,6 +510,8 @@ export default tseslint.config(
       'packages/*/scripts/**/*.mjs',
       'packages/*/build.mjs',
       'packages/managed-agent-server/verification/src/test/resources/**/*.mjs',
+      // The same CSI fixtures cold-archived under sdk-java keep the node globals.
+      'packages/sdk-java/managed-kubernetes-archive/verification/src/test/resources/**/*.mjs',
       // web-templates' export-html template build scripts also run with `node`.
       'packages/*/src/export-html/*.mjs',
       // Verification reproducer scripts under docs/ also run with `node`.

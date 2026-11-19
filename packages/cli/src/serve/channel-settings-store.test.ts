@@ -328,6 +328,101 @@ describe('WorkspaceChannelSettingsStore', () => {
     });
   });
 
+  it('preserves generic webhook references and explicitly replaces or clears its optional token', async () => {
+    await withEnv(
+      {
+        TEST_GENERIC_STORE_URL: 'https://receiver.example/secret-path',
+        TEST_GENERIC_STORE_TOKEN: 'resolved-bearer-token',
+      },
+      async () => {
+        const store = new WorkspaceChannelSettingsStore(workspace);
+        const created = await store.upsert('receiver', {
+          expectedRevision: store.snapshot().revision,
+          config: { type: 'generic-webhook' },
+          secrets: {
+            webhookUrl: {
+              operation: 'replace',
+              value: '$TEST_GENERIC_STORE_URL',
+            },
+            bearerToken: {
+              operation: 'replace',
+              value: '$TEST_GENERIC_STORE_TOKEN',
+            },
+          },
+        });
+        const preserved = await store.upsert('receiver', {
+          expectedRevision: created.revision,
+          config: { type: 'generic-webhook', allowPrivateNetwork: true },
+          secrets: {
+            webhookUrl: { operation: 'preserve' },
+            bearerToken: { operation: 'preserve' },
+          },
+        });
+        expect(readStoredChannel('receiver')).toEqual({
+          type: 'generic-webhook',
+          allowPrivateNetwork: true,
+          webhookUrl: '$TEST_GENERIC_STORE_URL',
+          bearerToken: '$TEST_GENERIC_STORE_TOKEN',
+        });
+        const stored = fs.readFileSync(settingsPath, 'utf8');
+        expect(stored).not.toContain('https://receiver.example/secret-path');
+        expect(stored).not.toContain('resolved-bearer-token');
+
+        const replaced = await store.upsert('receiver', {
+          expectedRevision: preserved.revision,
+          config: { type: 'generic-webhook' },
+          secrets: {
+            bearerToken: { operation: 'replace', value: 'replacement-token' },
+          },
+        });
+        expect(readStoredChannel('receiver')).toEqual({
+          type: 'generic-webhook',
+          webhookUrl: '$TEST_GENERIC_STORE_URL',
+          bearerToken: 'replacement-token',
+        });
+        const cleared = await store.upsert('receiver', {
+          expectedRevision: replaced.revision,
+          config: { type: 'generic-webhook' },
+          secrets: { bearerToken: { operation: 'clear' } },
+        });
+        expect(readStoredChannel('receiver')).toEqual({
+          type: 'generic-webhook',
+          webhookUrl: '$TEST_GENERIC_STORE_URL',
+        });
+        const before = fs.readFileSync(settingsPath, 'utf8');
+        await expect(
+          store.upsert('receiver', {
+            expectedRevision: cleared.revision,
+            config: { type: 'generic-webhook' },
+            secrets: { webhookUrl: { operation: 'clear' } },
+          }),
+        ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+        expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+      },
+    );
+  });
+
+  it.each([
+    { url: 'http://127.0.0.1:8080/receive' },
+    { url: 'https://user:secret@receiver.example/receive' },
+    { url: 'https://receiver.example/receive#secret-fragment' },
+    { url: 'https://receiver.example/receive', allowPrivateNetwork: 'true' },
+  ])(
+    'rejects invalid generic webhook management configuration: %j',
+    async ({ url, ...config }) => {
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      const before = fs.readFileSync(settingsPath, 'utf8');
+      await expect(
+        store.upsert('receiver', {
+          expectedRevision: store.snapshot().revision,
+          config: { type: 'generic-webhook', ...config },
+          secrets: { webhookUrl: { operation: 'replace', value: url } },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+      expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+    },
+  );
+
   it('preserves an existing secret unless replace or clear is explicit', async () => {
     // The stored secret is an environment reference, so the assertion below only
     // means something with the variable defined: while it is unset, resolution
@@ -1157,6 +1252,25 @@ describe('WorkspaceChannelSettingsStore', () => {
       },
       groupHistoryLimit: 25,
       identity: { id: 'ops', displayName: 'Ops' },
+    });
+  });
+
+  it('accepts inject as a channel and group dispatch mode', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        dispatchMode: 'inject',
+        groups: { '*': { dispatchMode: 'inject' } },
+      },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      dispatchMode: 'inject',
+      groups: { '*': { dispatchMode: 'inject' } },
     });
   });
 

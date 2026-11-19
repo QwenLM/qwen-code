@@ -1590,13 +1590,14 @@ describe('loadCliConfig', () => {
       const argv = await parseArguments();
       vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
       vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+      // ACP is off by default for both switches.
       const defaults = await loadCliConfig({}, argv);
-      expect(defaults[getter]('headless')).toBe(false);
+      expect(defaults[getter]('acp')).toBe(false);
       const enabled = await loadCliConfig(
         { experimental: { [setting]: true } },
         argv,
       );
-      expect(enabled[getter]('headless')).toBe(true);
+      expect(enabled[getter]('acp')).toBe(true);
     },
   );
 
@@ -3396,6 +3397,44 @@ describe('loadCliConfig', () => {
     expect(mockConfigConstructorParams).toHaveBeenCalledWith(
       expect.objectContaining({
         unifiedAgentLoopEnabled: false,
+      }),
+    );
+  });
+
+  it('propagates the model availability tracking opt-in and opt-out', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig(
+      { experimental: { modelAvailabilityTracking: true } },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: true,
+      }),
+    );
+
+    await loadCliConfig(
+      { experimental: { modelAvailabilityTracking: false } },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: false,
+      }),
+    );
+  });
+
+  it('leaves the model availability tracking setting unset by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: undefined,
       }),
     );
   });

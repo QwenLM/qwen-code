@@ -142,6 +142,92 @@ describe('HttpManagedChannelControlPlane', () => {
     });
   });
 
+  it('injectPrEvent composes the model-facing prompt, not the raw evidence', async () => {
+    const headSha = 'a'.repeat(40);
+    const evidence = `CI failed on head ${headSha}. Failed checks: build.`;
+    const { plane, calls } = client([{ status: 200, body: {} }]);
+    await plane.injectPrEvent({
+      owner: 'Owner',
+      repo: 'Repo',
+      prNumber: 7,
+      transition: 'ci_failure',
+      headSha,
+      evidence,
+      episode: 1,
+    });
+    expect(calls[0]!.url).toMatch(/\/pr-watch:inject$/);
+    const body = JSON.parse(calls[0]!.init.body as string) as {
+      text: string;
+    };
+    expect(body.text).toContain('Owner/Repo#7');
+    expect(body.text).toContain('ci_failure');
+    expect(body.text).toContain(headSha);
+    expect(body.text).not.toContain(evidence);
+  });
+
+  it('returns the listed pr-watch bindings', async () => {
+    const { plane } = client([
+      {
+        status: 200,
+        body: {
+          bindings: [
+            {
+              owner: 'Owner',
+              repo: 'Repo',
+              prNumber: 7,
+              sessionId: 'session-1',
+              events: ['ci_failure', 'head_change'],
+            },
+          ],
+        },
+      },
+    ]);
+    await expect(plane.listPrWatchBindings()).resolves.toEqual([
+      {
+        owner: 'Owner',
+        repo: 'Repo',
+        prNumber: 7,
+        sessionId: 'session-1',
+        events: ['ci_failure', 'head_change'],
+      },
+    ]);
+  });
+
+  it('refuses a malformed pr-watch:list answer instead of reading it as empty', async () => {
+    // The adapter prunes every watch the answer omits, so coercing a bad body
+    // to `[]` would wipe each persisted baseline, fired ring and pending
+    // queue. Every shape below must throw out of the client.
+    for (const body of [
+      { bindings: null },
+      { bindings: 'Owner/Repo#7' },
+      {
+        bindings: [
+          { owner: 'Owner', repo: 'Repo', prNumber: 7, events: ['ci_failure'] },
+          { owner: 'Owner', repo: 'Repo', prNumber: 0, events: [] },
+        ],
+      },
+      {
+        bindings: [
+          { owner: 'Owner', repo: 'Repo', prNumber: 7, events: 'ci_failure' },
+        ],
+      },
+    ]) {
+      const { plane } = client([{ status: 200, body }]);
+      const refusal = await plane.listPrWatchBindings().then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect([JSON.stringify(body), refusal instanceof Error]).toEqual([
+        JSON.stringify(body),
+        true,
+      ]);
+    }
+    const { plane } = client([{ status: 200, body: {} }]);
+    await expect(plane.listPrWatchBindings()).rejects.toThrow(
+      'without a bindings array',
+    );
+  });
+
   it('surfaces the server error code on a refusal', async () => {
     const { plane } = client([
       {
@@ -158,5 +244,29 @@ describe('HttpManagedChannelControlPlane', () => {
       status: 409,
       code: 'channel_generation_stale',
     });
+  });
+
+  it('destinationKey binds the full registration identity, not just tenant/channel', () => {
+    const base = {
+      baseUrl: 'http://127.0.0.1:4181/',
+      tenantId: 'tenant-1',
+      channelId: 'chan-1',
+      actorId: 'owner',
+      workspaceId: 'ws-1',
+      cwdRelative: '.',
+    };
+    const key = (over: Record<string, string>) =>
+      new HttpManagedChannelControlPlane({ ...base, ...over }).destinationKey;
+    const original = key({});
+    // Stable for the same registration (trailing slash normalized).
+    expect(key({ baseUrl: 'http://127.0.0.1:4181' })).toBe(original);
+    // Every ownership field changes the key, so a pending ledger follows its
+    // registered owner/workspace/cwd rather than replaying into a new
+    // registration of the same tenant/channel.
+    expect(key({ actorId: 'other' })).not.toBe(original);
+    expect(key({ workspaceId: 'ws-2' })).not.toBe(original);
+    expect(key({ cwdRelative: 'sub' })).not.toBe(original);
+    expect(key({ tenantId: 'tenant-2' })).not.toBe(original);
+    expect(key({ channelId: 'chan-2' })).not.toBe(original);
   });
 });

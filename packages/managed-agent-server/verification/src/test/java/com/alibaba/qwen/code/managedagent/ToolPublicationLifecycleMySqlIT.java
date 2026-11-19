@@ -227,7 +227,7 @@ class ToolPublicationLifecycleMySqlIT {
                                         // (#16354), so the receipt parks on the root
                                         // statement its lane actually runs.
                                         if (execute && "receipt".equals(role)
-                                                && sql.startsWith("SELECT tenant_id, session_id, is_csi_guard FROM ma_session")) {
+                                                && sql.startsWith("SELECT tenant_id, session_id FROM ma_session")) {
                                             receiptPlacement.countDown();
                                         }
                                         try {

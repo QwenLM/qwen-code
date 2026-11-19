@@ -51,6 +51,10 @@ K1 provisioner；修复 `sessionWorktreeScheduler` 默认候选；在各 managed
   `retriesTransientGetAndRechecksTheOriginalGuard` 断言一次重试读取中 guard 执行
   三次：versioning 探针前一次、两次 `getObject` 尝试前各一次。去除读探针后该计数
   变为两次。
+- `verification/.../persistence/AliyunToolPublicationReadRetryTest`
+  `transientReadsRecoverWithTheRealSdk` 的 versioning 行期望三次 `versioning`
+  请求：构造器探针失败及其重试，加上 `open` 的复探测。去除读探针后该计数变为
+  两次。
 - `verification/.../persistence/O4OssGate.java` 委托真实 store，不计数探针；其
   受限身份跳过 `validateConfiguration`，因为探针本身即一次存储操作。保留删除探针
   可保住其断言的 `ACCESS_DENIED` 语义。
@@ -167,7 +171,7 @@ K1 provisioner；修复 `sessionWorktreeScheduler` 默认候选；在各 managed
 ## 非目标
 
 - 去除 `putIfAbsent` 或 `deleteIfPresent` 的每调用探针（正确性不变量：漂移后的
-  版本控制 bucket 上拒绝 forbid-overwrite 与物理删除；由删除回归测试锁定）。
+  版本控制 bucket 上拒绝 forbid-overwrite 与物理删除；由删除与 put 回归测试锁定）。
 - 删除 `validateConfiguration()` SPI 方法或其两处显式生产调用点。
 - 删除 `kubernetes` 保留守卫，或触碰无关的 Harness pool-discovery `"kubernetes"`
   字符串。
@@ -188,8 +192,10 @@ K1 provisioner；修复 `sessionWorktreeScheduler` 默认候选；在各 managed
 
 guarded read loop 仍在每次 `getObject` 尝试与重试前运行 guard，因此接口契约
 「在每次新存储请求（含实现重试）前检查授权」得以保留。更新
-`retriesTransientGetAndRechecksTheOriginalGuard`，期望两次 guard 运行而非三次。
-`deletionRejectsVersioningEnabledAfterConstruction` 与所有请求计数测试保持绿。
+`retriesTransientGetAndRechecksTheOriginalGuard`，期望两次 guard 运行而非三次；
+并将 `AliyunToolPublicationReadRetryTest` `transientReadsRecoverWithTheRealSdk`
+的 versioning 行改为期望两次 versioning 请求而非三次。
+`deletionRejectsVersioningEnabledAfterConstruction` 与其余请求计数测试保持绿。
 构造后版本控制漂移的 bucket 上的读取，在下一次校验、GC 页或删除时被发现；每次
 外部读取仍校验长度与 SHA-256 并在不匹配时 fail-closed。
 
@@ -304,8 +310,9 @@ execution（`workspace-bundle`、`workspace-migration`、
 ## 设计决策与理由
 
 - **仅去读探针**：删除探针被一个安全回归测试与文档化擦除不变量锁定；put 探针保住
-  forbid-overwrite 拒绝。读是高频路径且校验 digest，故去除其探针是无安全损失的纯
-  性能收益。put/delete 探针是正确性而非兼容，即便 pre-production 也保留。
+  forbid-overwrite 拒绝，并由自身的回归测试锁定。读是高频路径且校验 digest，故去除
+  其探针是无安全损失的纯性能收益。put/delete 探针是正确性而非兼容，即便
+  pre-production 也保留。
 - **中性 object-storage 开关并默认跟随 `tool-publication.enabled`**：复用既有
   `application.yml` 模式并保住自定义 store 的失败模式；OSS 属性仍留
   `tool-publication.oss-*`（无迁移）。
@@ -380,7 +387,9 @@ acceptance 处于 pending。
 ## 验收标准
 
 - `open`/`openRange` 不再发每调用 `getBucketVersioning`；`putIfAbsent`/
-  `deleteIfPresent` 仍拒绝版本控制 bucket；删除回归测试绿；guard 计数测试期望两次。
+  `deleteIfPresent` 仍拒绝版本控制 bucket；删除与 put 回归测试绿；guard 计数与
+  versioning 请求计数测试期望两次，range 读取测试验证 `openRange` 不发
+  versioning 探针。
 - `object-storage.enabled=true` 且 `tool-publication.enabled=false` 产出 store bean
   且无发布 bean；现有 tool-publication 部署经跟随默认无需变更即可工作。
 - K1 provisioner 及其仅测试用 fixture 已删除；全模块编译；`KubernetesRuntimeClient`
