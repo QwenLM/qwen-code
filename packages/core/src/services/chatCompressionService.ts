@@ -38,6 +38,7 @@ import {
   statedContextWindows,
 } from '../utils/contextLengthError.js';
 import {
+  estimateContentChars,
   resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
@@ -116,7 +117,10 @@ function compactionOutputReserve(window: number): number {
 interface ColdRequestSizing {
   /** The receiving model's window, or the smaller one a rejection reported. */
   window: number;
-  /** The output budget a retry was sized with. Unset, it follows the estimate. */
+  /**
+   * The output budget a retry, or a request that keeps what the person
+   * typed, was sized with. Unset, it follows the estimate.
+   */
   outputTokens?: number;
 }
 
@@ -1078,6 +1082,55 @@ export class ChatCompressionService {
         : slimCompactionInput(sideQueryHistory, undefined, {
             maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
           }).slimmedHistory;
+    const historyChars = (history: Content[]) =>
+      history.reduce(
+        (sum, content) =>
+          sum +
+          estimateContentChars(content, slimmingConfig.imageTokenEstimate),
+        0,
+      );
+    // The reduced request with what the person typed kept (#9455), sent in
+    // place of `plain` when the summary keeps at least half of `plain`'s
+    // output budget, and its minimum. It asks for no more in all than
+    // `plain` does: its input is larger by the characters it keeps, each
+    // counted as a whole token, and its output budget smaller by as many.
+    // The estimate reads four characters to a token and dense text such as
+    // CJK runs far denser, so this keeps a request the server would accept
+    // in its plain form from being rejected for the text kept, at any
+    // density up to a token a character. The half bounds what the kept text
+    // costs the summary: a summary longer than the kept budget is dropped as
+    // truncated where `plain` would have fit it. Only the first send keeps
+    // the text; the retry sends the plain cut. The payload-overflow path
+    // never gets here: its input is the plain cut from the start, so the
+    // reduction leaves it no smaller.
+    const keepTypedText = (
+      plain: Content[],
+    ): { history: Content[]; sizing: ColdRequestSizing } | undefined => {
+      const kept = slimCompactionInput(sideQueryHistory, undefined, {
+        maxTextChars: PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP,
+        keepTypedText: true,
+      }).slimmedHistory;
+      const keptChars = historyChars(kept) - historyChars(plain);
+      if (keptChars <= 0) return undefined;
+      const plainBudget = coldBudgetFor(plain);
+      const outputTokens = plainBudget - keptChars;
+      if (
+        outputTokens <
+        Math.max(
+          minCompactionOutputTokens(budgetWindow),
+          Math.ceil(plainBudget / 2),
+        )
+      ) {
+        return undefined;
+      }
+      config
+        .getDebugLogger()
+        .debug(
+          `[chat-compression] the reduced request keeps ${keptChars} more ` +
+            `characters the user typed (output budget ${outputTokens})`,
+        );
+      return { history: kept, sizing: { window: budgetWindow, outputTokens } };
+    };
     // A context-length rejection means the estimate ran low for this request.
     // The one retry is sized from the local estimate alone. The rejection's
     // prose is read only for a window it states, which can only make the
@@ -1347,6 +1400,11 @@ export class ChatCompressionService {
         if (estimateColdRequest(reduced) < estimateColdRequest(coldHistory)) {
           coldInputReduced = true;
           coldHistory = reduced;
+          const kept = keepTypedText(reduced);
+          if (kept) {
+            coldHistory = kept.history;
+            coldSizing = kept.sizing;
+          }
         }
         if (
           budgetWindow -

@@ -45,6 +45,7 @@ import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../memory/request-context.js';
 import { createUserPromptSubmitContextPart } from '../hooks/user-prompt-submit-context.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
 import { markApiHistoryPrompt } from '../utils/api-history-metadata.js';
+import { markTypedPrompt } from '../utils/typed-prompt.js';
 import {
   content,
   fnCall,
@@ -4523,6 +4524,178 @@ describe('issue #9455: compression requests fit the receiving window', () => {
       ...extra,
     });
   }
+
+  describe('keeping what the person typed in a reduced request', () => {
+    const MARKER = slimmingModule.SLIM_TEXT_TRUNCATION_MARKER;
+    const plainCut = (typed: string) =>
+      typed.slice(0, PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP) + MARKER;
+    const ASCII = 'port the parser. ';
+    /** 20 characters a tokenizer bills well above char/4. */
+    const CJK = '请把解析器移植到新的接口上，保留错误码。';
+
+    /** `toolSession` whose request is `typed`, marked as typed or not. */
+    function typedSession(
+      typed: string,
+      rounds: number,
+      outputChars: number,
+      marked = true,
+    ): Content[] {
+      const history = toolSession(rounds, outputChars);
+      history[0] = {
+        role: 'user',
+        parts: [marked ? markTypedPrompt({ text: typed }) : { text: typed }],
+      };
+      return history;
+    }
+    const requestText = (request: SentRequest) =>
+      request.contents[0]!.parts![0]!.text;
+
+    /** Compresses the session unmarked, then marked, on one backend. */
+    async function compare(
+      typed: string,
+      rounds: number,
+      outputChars: number,
+      backend: Parameters<typeof mockBackend>[0] = {},
+    ) {
+      mockBackend(backend);
+      const plain = await compressHistory(
+        typedSession(typed, rounds, outputChars, false),
+        64_000,
+      );
+      const plainSends = sent.splice(0);
+      const kept = await compressHistory(
+        typedSession(typed, rounds, outputChars),
+        64_000,
+      );
+      const keptSends = sent.splice(0);
+      return { plain, kept, plainSends, keptSends };
+    }
+
+    it('keeps the typed text, with the output budget smaller by what it keeps', async () => {
+      const typed = ASCII.repeat(700);
+      const { plain, kept, plainSends, keptSends } = await compare(
+        typed,
+        12,
+        20_000,
+      );
+      expectCompressed(plain);
+      expectCompressed(kept);
+      expect(plainSends).toHaveLength(1);
+      expect(keptSends).toHaveLength(1);
+      expect(requestText(plainSends[0]!)).toBe(plainCut(typed));
+      expect(requestText(keptSends[0]!)).toBe(typed);
+      expect(keptSends[0]!.maxOutputTokens).toBe(
+        plainSends[0]!.maxOutputTokens -
+          (typed.length - plainCut(typed).length),
+      );
+    });
+
+    it('sends the plain cut when keeping the text would leave the summary under its minimum', async () => {
+      const typed = ASCII.repeat(1_500);
+      const { kept, plainSends, keptSends } = await compare(typed, 48, 5_200);
+      expectCompressed(kept);
+      expect(keptSends).toHaveLength(1);
+      expect(requestText(keptSends[0]!)).toBe(plainCut(typed));
+      expect(keptSends[0]!.maxOutputTokens).toBe(
+        plainSends[0]!.maxOutputTokens,
+      );
+    });
+
+    it('keeps no more than leaves the summary half of the plain budget', async () => {
+      // Plain cut here leaves the 20,000-token cap; the cut keeps 4,000
+      // characters and the marker, so 14,030 characters keep 10,000 more.
+      const extra = (typed: string) => typed.length - plainCut(typed).length;
+      const atHalf = 'a'.repeat(14_030);
+      const pastHalf = 'a'.repeat(14_031);
+      expect(extra(atHalf)).toBe(10_000);
+
+      const kept = await compare(atHalf, 12, 20_000);
+      expect(kept.plainSends[0]!.maxOutputTokens).toBe(20_000);
+      expect(requestText(kept.keptSends[0]!)).toBe(atHalf);
+      expect(kept.keptSends[0]!.maxOutputTokens).toBe(10_000);
+
+      const plain = await compare(pastHalf, 12, 20_000);
+      expect(requestText(plain.keptSends[0]!)).toBe(plainCut(pastHalf));
+      expect(plain.keptSends[0]!.maxOutputTokens).toBe(20_000);
+    });
+
+    it('keeps dense CJK text without the request being rejected', async () => {
+      const typed = CJK.repeat(600);
+      const { kept, keptSends } = await compare(typed, 12, 20_000, {
+        userTextRatio: 2.4,
+      });
+      expectCompressed(kept);
+      expect(keptSends).toHaveLength(1);
+      expect(requestText(keptSends[0]!)).toBe(typed);
+    });
+
+    it('sends the plain cut on the retry after a rejection', async () => {
+      const typed = ASCII.repeat(700);
+      mockBackend({ window: 25_000, rejection: vllmRejection(25_000) });
+      const result = await compressHistory(
+        typedSession(typed, 12, 20_000),
+        64_000,
+      );
+      expectCompressed(result);
+      expect(sent).toHaveLength(2);
+      expect(requestText(sent[0]!)).toBe(typed);
+      expect(requestText(sent[1]!)).toBe(plainCut(typed));
+    });
+
+    it('sends the plain cut when the request overflowed the payload limit', async () => {
+      const typed = ASCII.repeat(700);
+      mockBackend();
+      await compressHistory(typedSession(typed, 12, 20_000), 64_000, {
+        requestPayloadTooLarge: true,
+      });
+      expect(sent.length).toBeGreaterThan(0);
+      expect(requestText(sent[0]!)).toBe(plainCut(typed));
+    });
+
+    it.each([
+      ['ASCII billed at the estimate', ASCII, undefined],
+      ['CJK billed at 2.4 times the estimate', CJK, 2.4],
+    ])(
+      'is accepted in one send wherever the plain cut is: %s',
+      async (_label, unit, userTextRatio) => {
+        // The guarantee: at up to a token a character, a request the server
+        // accepts in its plain form is accepted with the text kept. The
+        // summaries here (2,000 tokens) fit any kept budget, which keeps at
+        // least half of the plain one.
+        let keptUsed = 0;
+        for (const [rounds, outputChars] of [
+          [12, 20_000],
+          [44, 5_200],
+          [48, 5_200],
+          [52, 5_200],
+          [60, 4_500],
+        ] as const) {
+          for (const length of [3_000, 6_000, 9_000, 12_000, 18_000, 40_000]) {
+            const typed = unit.repeat(Math.ceil(length / unit.length));
+            const { plain, kept, plainSends, keptSends } = await compare(
+              typed,
+              rounds,
+              outputChars,
+              { userTextRatio },
+            );
+            if (requestText(keptSends[0]!) !== requestText(plainSends[0]!)) {
+              keptUsed++;
+            }
+            if (
+              plainSends.length === 1 &&
+              plain.info.compressionStatus === CompressionStatus.COMPRESSED
+            ) {
+              expect(keptSends).toHaveLength(1);
+              expect(kept.info.compressionStatus).toBe(
+                CompressionStatus.COMPRESSED,
+              );
+            }
+          }
+        }
+        expect(keptUsed).toBeGreaterThan(0);
+      },
+    );
+  });
 
   /** Every response follows its call, and roles alternate. */
   function expectWellFormed(contents: Content[]) {

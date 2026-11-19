@@ -24,7 +24,9 @@ import {
   sanitizeMimeForPlaceholder,
   SLIM_TEXT_TRUNCATION_MARKER,
   slimCompactionInput,
+  TYPED_TEXT_MAX_CHARS,
 } from './compactionInputSlimming.js';
+import { isTypedPrompt, markTypedPrompt } from '../utils/typed-prompt.js';
 
 const COMPACTION_ENV_KEYS = [
   'QWEN_IMAGE_TOKEN_ESTIMATE',
@@ -1365,5 +1367,112 @@ describe('compactionInputSlimming', () => {
         expect(output.endsWith(SLIM_TEXT_TRUNCATION_MARKER)).toBe(true);
       }
     });
+  });
+});
+
+describe('keepTypedText (#9455)', () => {
+  const OPEN = '<system-reminder>';
+  const CLOSE = '<' + '/system-reminder>';
+  const NOTE_OPEN = '<task-notification>';
+  const NOTE_CLOSE = '<' + '/task-notification>';
+  const count = (text: string, tag: string) => text.split(tag).length - 1;
+  const CAP = 4_000;
+
+  /** Slims one content holding `parts`, keeping typed text, at CAP. */
+  const slimOne = (role: string, ...parts: Content['parts'] & object) =>
+    slimCompactionInput([{ role, parts }], undefined, {
+      maxTextChars: CAP,
+      keepTypedText: true,
+    });
+  const textsOf = (result: ReturnType<typeof slimOne>) =>
+    result.slimmedHistory[0]!.parts!.map((part) => part.text ?? '');
+
+  const typed = 'port the parser. '.repeat(1_000); // 17,000 characters
+
+  it('keeps a marked user part whole and cuts the rest to the cap', () => {
+    const result = slimOne(
+      'user',
+      markTypedPrompt({ text: typed }),
+      { text: '\n--- Content from referenced files ---' },
+      { text: 'f'.repeat(9_000) },
+    );
+    const [kept, header, file] = textsOf(result);
+    expect(kept).toBe(typed);
+    expect(isTypedPrompt(result.slimmedHistory[0]!.parts![0]!)).toBe(true);
+    expect(header).toBe('\n--- Content from referenced files ---');
+    expect(file).toBe('f'.repeat(CAP) + SLIM_TEXT_TRUNCATION_MARKER);
+    expect(result.stats.textPartsTruncated).toBe(1);
+  });
+
+  it.each<[string, string, Content['parts'] & object]>([
+    ['an unmarked user part', 'user', [{ text: typed }]],
+    [
+      'a marked part in a model turn',
+      'model',
+      [markTypedPrompt({ text: typed })],
+    ],
+  ])('cuts %s like any other text', (_label, role, parts) => {
+    const [text] = textsOf(slimOne(role, ...parts));
+    expect(text).toBe(typed.slice(0, CAP) + SLIM_TEXT_TRUNCATION_MARKER);
+  });
+
+  it('keeps nothing extra without maxTextChars', () => {
+    const history: Content[] = [
+      { role: 'user', parts: [markTypedPrompt({ text: typed })] },
+    ];
+    const result = slimCompactionInput(history, undefined, {
+      keepTypedText: true,
+    });
+    expect(result.slimmedHistory).toBe(history);
+  });
+
+  it('cuts typed text past TYPED_TEXT_MAX_CHARS there', () => {
+    const long = 'x'.repeat(TYPED_TEXT_MAX_CHARS + 5_000);
+    const [text] = textsOf(slimOne('user', markTypedPrompt({ text: long })));
+    expect(text).toBe(
+      'x'.repeat(TYPED_TEXT_MAX_CHARS) + SLIM_TEXT_TRUNCATION_MARKER,
+    );
+  });
+
+  it('cuts a long IDE reminder leading the part to the cap and keeps the typed text', () => {
+    const ide = `${OPEN}\nActive file: a.ts\n${'s'.repeat(10_000)}\n${CLOSE}`;
+    const [text] = textsOf(
+      slimOne('user', markTypedPrompt({ text: `${ide}\n\n${typed}` })),
+    );
+    expect(text.startsWith(OPEN)).toBe(true);
+    expect(text.endsWith(`\n\n${typed}`)).toBe(true);
+    expect(text.length).toBeLessThan(CAP + 100 + 2 + typed.length);
+    expect(count(text, OPEN)).toBe(1);
+    expect(count(text, CLOSE)).toBe(1);
+  });
+
+  it('keeps a short reminder leading the part as it is', () => {
+    const value = `${OPEN}\nworktree notice\n${CLOSE}\n\n${typed}`;
+    const [text] = textsOf(slimOne('user', markTypedPrompt({ text: value })));
+    expect(text).toBe(value);
+  });
+
+  it('cuts a run of leading envelopes as one, closing the one the cut lands in', () => {
+    const value =
+      `${OPEN}\n${'a'.repeat(3_000)}\n${CLOSE}\n` +
+      `${NOTE_OPEN}\n${'b'.repeat(3_000)}\n${NOTE_CLOSE}\n\n${typed}`;
+    const [text] = textsOf(slimOne('user', markTypedPrompt({ text: value })));
+    expect(text.endsWith(`\n\n${typed}`)).toBe(true);
+    expect([count(text, OPEN), count(text, CLOSE)]).toEqual([1, 1]);
+    expect([count(text, NOTE_OPEN), count(text, NOTE_CLOSE)]).toEqual([1, 1]);
+  });
+
+  it('reads an opening tag the person typed with no close after it as typed text', () => {
+    const value = `${OPEN} is the tag I mean. ${typed}`;
+    const [text] = textsOf(slimOne('user', markTypedPrompt({ text: value })));
+    expect(text).toBe(value);
+  });
+
+  it('closes a block the typed text quotes when the cap cuts inside it', () => {
+    const value =
+      'x'.repeat(TYPED_TEXT_MAX_CHARS - 100) +
+      `${OPEN}\n${'q'.repeat(500)}\n${CLOSE} after`;
+    const [text] = textsOf(slimOne('user', markTypedPrompt({ text: value })));
+    expect([count(text, OPEN), count(text, CLOSE)]).toEqual([1, 1]);
   });
 });
