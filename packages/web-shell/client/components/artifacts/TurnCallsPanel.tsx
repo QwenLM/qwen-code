@@ -47,6 +47,7 @@ import { formatDurationMs } from '../messages/tools/toolDisplay';
 import { ToolFilePreviewButton } from '../messages/ToolFilePreviewButton';
 import { ToolSummaryIcon } from '../messages/ToolGroup';
 import { DiffView } from '../messages/tools/DiffView';
+import toolChromeStyles from '../messages/tools/ToolChrome.module.css';
 import {
   MAX_DETAIL_LENGTH,
   ToolCallDetail,
@@ -594,11 +595,17 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
     2000,
   );
   const isShell = isShellToolName(tool.toolName);
-  const { diff, shell, argumentsText, resultText } = useMemo(
+  const { diff, noteKey, shell, argumentsText, resultText } = useMemo(
     () =>
       expanded
         ? toolCallContent(tool, block)
-        : { diff: '', shell: undefined, argumentsText: '', resultText: '' },
+        : {
+            diff: '',
+            noteKey: null,
+            shell: undefined,
+            argumentsText: '',
+            resultText: '',
+          },
     [expanded, tool, block],
   );
   const hasDetails = Boolean(
@@ -751,6 +758,11 @@ const TurnCallRowItem = memo(function TurnCallRowItem({
               {diff ? (
                 <>
                   <DiffView diff={diff.slice(0, MAX_DETAIL_LENGTH)} />
+                  {noteKey && (
+                    <p className={toolChromeStyles.expandedCardDetail}>
+                      {t(noteKey)}
+                    </p>
+                  )}
                   {diff.length > MAX_DETAIL_LENGTH && (
                     <p className="text-xs text-muted-foreground">
                       {t('gitDiff.truncated')}
