@@ -29,13 +29,6 @@ export type ManagedSessionJsonValue =
   | { [key: string]: ManagedSessionJsonValue };
 
 export const MANAGED_SESSION_FORMAT_VERSION = 1;
-// Sessions stay readable by every deployed reader: every domain the log
-// may hold, `monitor_run` included, parses in readers since #12837
-// (v0.24.7). A `managed-session/2` stamp on each new Session would make a
-// rollback or a mixed-version rollout lose access to every Session
-// created in between (H3 round-5 verification matrix), so the stamp
-// rises only when a change genuinely breaks an older reader mid-scan.
-export const MANAGED_SESSION_MINIMUM_READER = 'managed-session/1';
 export const MANAGED_SESSION_READER_CAPABILITY = 'managed-session/3';
 
 const MANAGED_SESSION_DOMAIN_RECORD_VERSION = 1;
