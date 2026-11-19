@@ -46894,6 +46894,12 @@ describe('idle suspension', () => {
       .send(operation())
       .expect(202);
     expect(requests.some((r) => r.kind === 'mcp-configure')).toBe(!parkable);
+    // Terminate the reloaded resident: the registration outlives the
+    // test's listener, and its idle suspension would otherwise drain
+    // into the next test's Broker spies.
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+      204,
+    );
   });
 
   it('an admitted mutation resets the idle timer', async () => {
