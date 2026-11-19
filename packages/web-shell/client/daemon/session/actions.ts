@@ -404,6 +404,8 @@ export function getConnectionAfterSessionClear(
     delete next.goalState;
     delete next.restoredArtifacts;
     delete next.restoredArtifactsSessionId;
+    delete next.artifactCountHint;
+    delete next.artifactCountHintSessionId;
     delete next.backgroundTurn;
     delete next.finishedBackgroundTurnId;
     delete next.backgroundTurnObservedAt;
@@ -1029,6 +1031,7 @@ export function createDaemonSessionActions({
       workspaceCwd?: string;
       sessionContext?: DaemonProductSessionContext;
       reconcilePromptActivity?: boolean;
+      artifactCountHint?: number;
     },
     signal?: AbortSignal,
     replaySource?: PendingSessionLoad['replaySource'],
@@ -1153,6 +1156,12 @@ export function createDaemonSessionActions({
           missingSession: false,
           loadingTranscript: true,
           catchingUp: undefined,
+          // Click-time artifact count from the list summary, keyed like the
+          // restored snapshot so the optimistic switch cannot leak it across
+          // sessions. Both fields move together; no hint clears any stale one.
+          artifactCountHint: options?.artifactCountHint,
+          artifactCountHintSessionId:
+            options?.artifactCountHint !== undefined ? sessionId : undefined,
         };
       });
     }
@@ -1204,6 +1213,11 @@ export function createDaemonSessionActions({
               : undefined,
           loadingTranscript: undefined,
           catchingUp: undefined,
+          // The failed target stays visible (sessionId + workspaceCwd
+          // above), but its click-time count must not outlive the load:
+          // no snapshot or cache entry will ever retire it on this path.
+          artifactCountHint: undefined,
+          artifactCountHintSessionId: undefined,
         }));
       }
       throw error;
@@ -3705,7 +3719,12 @@ export function createDaemonSessionActions({
       const session = sessionRef.current;
       if (!session) throw new Error('Daemon session is not connected');
       try {
-        return await withActionTimeout(session.tasks(), 'Get tasks timed out');
+        return await withActionTimeout(
+          session.tasks(
+            opts?.includeSubSessions ? { includeSubSessions: true } : {},
+          ),
+          'Get tasks timed out',
+        );
       } catch (error) {
         if (
           error instanceof Error &&

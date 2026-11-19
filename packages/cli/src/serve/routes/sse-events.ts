@@ -46,16 +46,22 @@ import {
   type VirtualSubagentSessions,
 } from '../virtual-subagent-sessions.js';
 
-let activeSseCount = 0;
-
 // The writer-stall budget constant/resolver live in daemon-status.ts so
 // status surfaces can report the effective budget without importing route
 // code; re-exported here for the route's callers and tests.
-import { resolveWriterIdleBudgetMs } from '../daemon-status.js';
+import {
+  resolveWriterIdleBudgetMs,
+  type SseAdmissionCaps,
+} from '../daemon-status.js';
 export {
   DEFAULT_WRITER_IDLE_TIMEOUT_MS,
   resolveWriterIdleBudgetMs,
 } from '../daemon-status.js';
+import {
+  checkSseAdmission,
+  countSseStream,
+  getSurfaceCount,
+} from '../sse-occupancy.js';
 
 const SSE_STREAM_ID_HEADER = 'X-Qwen-SSE-Stream-Id';
 // Keep in sync with the REST transport's response-header validator.
@@ -125,7 +131,7 @@ function boundedDiagnosticString(value: string): string {
 }
 
 export function getActiveSseCount(): number {
-  return activeSseCount;
+  return getSurfaceCount('restEvents');
 }
 
 /**
@@ -186,12 +192,12 @@ interface RegisterSseEventsRoutesDeps {
   daemonLog?: DaemonLogger;
   writerIdleTimeoutMs?: number;
   /**
-   * Admission cap on concurrent SSE streams. `undefined` / non-positive
+   * Admission caps shared by every stream surface (issue #17554). Absent
    * means unlimited. Enforced BEFORE the subscription handshake so a
    * saturated SSE fleet is rejected with an explicit `503` while short
    * requests (`/health`, static assets) still reach the listener.
    */
-  maxSseConnections?: number;
+  admissionCaps?: SseAdmissionCaps;
   sendBridgeError: SendBridgeError;
   virtualSubagentSessions?: VirtualSubagentSessions;
   resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime;
@@ -250,13 +256,14 @@ export function registerSseEventsRoutes(
     daemonLog,
     sendBridgeError,
     writerIdleTimeoutMs,
-    maxSseConnections,
+    admissionCaps,
   } = deps;
 
   app.get('/session/:id/events', async (req, res) => {
     const sessionId = req.params['id'];
     const diagnosticSessionId = boundedDiagnosticString(sessionId);
-    // SSE admission cap. Long-lived streams share the listener's
+    // SSE admission cap, shared with every other stream surface
+    // (issue #17554). Long-lived streams share the listener's
     // `server.maxConnections` quota with every short request; once the
     // listener is full Node closes new sockets at accept time WITHOUT an
     // HTTP response, so `/health` and the Web Shell go dark with no 503,
@@ -265,46 +272,18 @@ export function registerSseEventsRoutes(
     // listener headroom for short requests. `EventSource` treats 5xx as
     // terminal and does not auto-reconnect, so a rejected client backs off
     // instead of amplifying the load (same rationale as the per-session
-    // 429 below).
-    //
-    // The check reads the live counter without a reservation: concurrent
-    // handshakes already past this point can overshoot the cap by the
-    // number of in-flight subscriptions. That window is bounded by the
-    // handshake latency and the listener cap remains the hard backstop;
-    // the cap's job is to stop gradual accumulation from consuming the
-    // headroom, which a reservation-free check does.
+    // 429 below). The reservation-free overshoot window is documented on
+    // `checkSseAdmission`.
     if (
-      maxSseConnections !== undefined &&
-      maxSseConnections > 0 &&
-      activeSseCount >= maxSseConnections
+      !checkSseAdmission({
+        surface: 'restEvents',
+        req,
+        res,
+        caps: admissionCaps,
+        daemonLog,
+        logContext: { sessionId: diagnosticSessionId },
+      })
     ) {
-      const context = {
-        sessionId: diagnosticSessionId,
-        activeSseCount,
-        limit: maxSseConnections,
-      };
-      try {
-        if (daemonLog) {
-          daemonLog.warn('SSE connection limit reached', context);
-        } else {
-          writeStderrLine(
-            `qwen serve: SSE connection limit reached ` +
-              `(active=${activeSseCount}, limit=${maxSseConnections}); ` +
-              `rejecting new SSE client with 503`,
-          );
-        }
-      } catch {
-        // Diagnostics must not interfere with the rejection.
-      }
-      res.setHeader('Retry-After', '5');
-      res.status(503).json({
-        error:
-          `Daemon SSE connection limit reached (${activeSseCount}/${maxSseConnections}). ` +
-          `Retry after the Retry-After interval.`,
-        code: 'sse_connection_limit_exceeded',
-        limit: maxSseConnections,
-        active: activeSseCount,
-      });
       return;
     }
     const streamId = randomUUID();
@@ -610,7 +589,7 @@ export function registerSseEventsRoutes(
     let maxLivePublishToWriteSettledMs = 0;
     let liveTimingEnabled = lastEventId === undefined;
     let finalized = false;
-    let sseCounted = false;
+    let releaseSseCount: (() => void) | undefined = undefined;
     const finalize = () => {
       if (finalized) return;
       finalized = true;
@@ -681,10 +660,7 @@ export function registerSseEventsRoutes(
       } catch {
         // Diagnostics must not interfere with stream cleanup.
       }
-      if (sseCounted) {
-        sseCounted = false;
-        activeSseCount--;
-      }
+      releaseSseCount?.();
     };
 
     res.status(200);
@@ -703,8 +679,11 @@ export function registerSseEventsRoutes(
     res.setHeader(SSE_STREAM_ID_HEADER, streamId);
     res.prependOnceListener('finish', finalize);
     res.prependOnceListener('close', finalize);
-    activeSseCount++;
-    sseCounted = true;
+    // Pass res so the module's destroyed-guard/close-hook backstop covers a
+    // client abort inside the async handshake window above: 'close' can fire
+    // before the finalize listeners register, and without the backstop the
+    // shared slot would leak permanently (finalize never runs on that path).
+    releaseSseCount = countSseStream('restEvents', req, res);
     for (const [key, value] of Object.entries(telemetryBaseAttributes)) {
       addDaemonRequestAttribute(key, value);
     }
@@ -998,7 +977,7 @@ export function registerSseEventsRoutes(
         // the FIN can never be sent and the connection lingers in
         // FIN-WAIT-1 until the peer disconnects. When the terminal frame
         // could not be queued at all (write threw), RST the socket
-        // immediately: 'close' → finalize → activeSseCount-- frees the
+        // immediately: 'close' → finalize → occupancy release frees the
         // slot, matching the bus-eviction path above. When the frame WAS
         // buffered (write returned true OR false), end gracefully so a
         // consumer that resumes reading still sees the terminal frame,

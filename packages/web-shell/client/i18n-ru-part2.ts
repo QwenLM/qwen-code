@@ -290,6 +290,18 @@ export const RU_PART2: Record<
   'composerAdd.btw.label': 'Задать побочный вопрос',
   'composerAdd.btw.description': 'Не прерывать основную задачу',
   'composerAdd.btw.textOnly': 'Сначала уберите вложения',
+  'local.send': 'Отправить сообщение в другой сеанс',
+  'send.noAttachments':
+    '/send принимает только текст; сначала уберите вложения',
+  'send.workspaceLocked':
+    'Здесь можно отправлять сообщения и открывать сеансы только в текущем рабочем пространстве.',
+  'send.missingMessage':
+    'Добавьте сообщение после параметров: /send [--workspace <имя>] [--session-id <id>] <сообщение>',
+  'send.missingValue': (v) => `Для ${v?.option ?? ''} нужно значение`,
+  'send.duplicateOption': (v) => `${v?.option ?? ''} указан дважды`,
+  'send.option.workspace':
+    'Рабочее пространство для отправки (по умолчанию текущее)',
+  'send.option.sessionId': 'Сеанс для отправки (по умолчанию новый)',
   'at.category.mcpResources': 'Ресурсы MCP',
   'at.category.mcpResources.description': 'Ссылаться на ресурсы сервера MCP',
   'at.menu': 'Меню ссылок',
@@ -697,6 +709,7 @@ export const RU_PART2: Record<
   'daemon.runtime.memory': 'Память (RSS / куча)',
   'daemon.transport.title': 'Транспорт',
   'daemon.transport.restSse': 'Потоки REST SSE',
+  'daemon.transport.sseAdmission': 'Допуск SSE (занято / лимит)',
   'daemon.transport.acpDisabled': 'Транспорт ACP отключён',
   'daemon.transport.acpConnections': 'Подключения ACP',
   'daemon.transport.acpStreams': 'Потоки ACP (сессия/SSE/WS)',

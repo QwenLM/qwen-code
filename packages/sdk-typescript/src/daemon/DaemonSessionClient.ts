@@ -54,6 +54,8 @@ import type {
   DaemonSessionLspStatus,
   DaemonSessionResourcesStatus,
   DaemonSessionRecapResult,
+  DaemonModRow,
+  DaemonModRowAnswer,
   DaemonSessionSummary,
   DaemonShellCommandResult,
   DaemonSessionArtifactInput,
@@ -1127,6 +1129,17 @@ export class DaemonSessionClient {
     });
   }
 
+  /** Ask this session's Mods for a row; see `DaemonClient.askSessionModRow`. */
+  askModRow(
+    row: DaemonModRow,
+    opts?: { signal?: AbortSignal },
+  ): Promise<DaemonModRowAnswer> {
+    return this.client.askSessionModRow(this.sessionId, row, {
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
   generateContent(
     prompt: string,
     opts?: { signal?: AbortSignal },
@@ -1347,8 +1360,10 @@ export class DaemonSessionClient {
     return this.client.sessionSupportedCommands(this.sessionId, this.clientId);
   }
 
-  tasks(): Promise<DaemonSessionTasksStatus> {
-    return this.client.sessionTasks(this.sessionId, this.clientId);
+  tasks(
+    opts: { includeSubSessions?: boolean } = {},
+  ): Promise<DaemonSessionTasksStatus> {
+    return this.client.sessionTasks(this.sessionId, this.clientId, opts);
   }
 
   taskRuntime(taskId: string): Promise<DaemonSessionTaskRuntimeStatus> {

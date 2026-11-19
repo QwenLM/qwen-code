@@ -8,6 +8,7 @@ import type {
   DaemonBackgroundTurn,
   DaemonSessionArtifactInput,
   DaemonInputAnnotation,
+  DaemonInputSourceAnnotation,
   QwenAgentMessageMeta,
 } from '@qwen-code/sdk/daemon';
 
@@ -157,6 +158,8 @@ export interface DaemonUserMessage extends DaemonMessageMeta {
     attachmentId?: string;
   }>;
   inputAnnotations?: DaemonInputAnnotation[];
+  /** The other session that sent this message (`/send`, a sub-session launch). */
+  sentFrom?: DaemonInputSourceAnnotation;
   source?: string;
   /** `_meta.qwenAgentMessage` of an @-mention (`kind: 'agent_mention'`). */
   agentMessage?: QwenAgentMessageMeta;
@@ -168,6 +171,10 @@ export interface DaemonAssistantMessage extends DaemonMessageMeta {
   role: 'assistant';
   content: string;
   isStreaming?: boolean;
+  /** The block's `meta.source`, such as `slash_command` for command output. */
+  source?: string;
+  /** Identifies subagent output rendered without its parent tool card. */
+  parentToolCallId?: string;
   branchRecordId?: string;
   /**
    * Token usage folded onto this assistant block by the daemon SDK reducer

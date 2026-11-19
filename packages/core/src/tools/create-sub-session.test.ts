@@ -12,10 +12,18 @@ import {
 import { ToolConfirmationOutcome } from './tools.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
-import type { Config, SubSessionSpawner } from '../config/config.js';
+import type {
+  Config,
+  SubSessionSpawner,
+  SubSessionWorkspaceBinding,
+} from '../config/config.js';
 
-function makeConfig(spawner?: SubSessionSpawner): Config {
+function makeConfig(
+  spawner?: SubSessionSpawner,
+  approvalMode = ApprovalMode.DEFAULT,
+): Config {
   return {
+    getApprovalMode: () => approvalMode,
     getSubSessionSpawner: () => spawner,
     getSubSessionWorkspaceResolver: () => async () => ({
       workspaceId: 'repo-b',
@@ -98,6 +106,93 @@ describe('CreateSubSessionTool', () => {
     expect(await local.getConfirmationDetails(signal)).toMatchObject({
       type: 'info',
     });
+  });
+
+  it('runs a named workspace without a prompt in YOLO mode', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1', result: 'ok' }));
+    let mode = ApprovalMode.YOLO;
+    const config = makeConfig(spawner);
+    config.getApprovalMode = () => mode;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'do X',
+      workspace: '/repos/b',
+    });
+
+    expect(invocation.requiresUserInteraction?.()).toBe(false);
+    expect((await invocation.execute(new AbortController().signal)).error).toBe(
+      undefined,
+    );
+    expect(spawner).toHaveBeenCalledWith({
+      prompt: 'do X',
+      completion: 'first-turn',
+      workspace: '/repos/b',
+      workspaceGeneration: 'generation-b',
+      requiresYolo: true,
+    });
+
+    // Leaving YOLO before the call runs brings the approval back.
+    mode = ApprovalMode.AUTO_EDIT;
+    expect(invocation.requiresUserInteraction?.()).toBe(true);
+    expect(
+      (await invocation.execute(new AbortController().signal)).error?.message,
+    ).toContain('requires one-time approval');
+    expect(spawner).toHaveBeenCalledOnce();
+  });
+
+  it('requires approval if YOLO ends while the named workspace resolves', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1' }));
+    let resolveBinding!: (value: SubSessionWorkspaceBinding) => void;
+    const binding = new Promise<SubSessionWorkspaceBinding>((resolve) => {
+      resolveBinding = resolve;
+    });
+    const resolveWorkspace = vi.fn(() => binding);
+    let mode = ApprovalMode.YOLO;
+    const config = makeConfig(spawner);
+    config.getApprovalMode = () => mode;
+    config.getSubSessionWorkspaceResolver = () => resolveWorkspace;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'summarize',
+      workspace: 'repo-b',
+    });
+
+    const result = invocation.execute(new AbortController().signal);
+    expect(resolveWorkspace).toHaveBeenCalledOnce();
+    mode = ApprovalMode.DEFAULT;
+    resolveBinding({
+      workspaceId: 'repo-b',
+      workspaceCwd: '/repos/b',
+      workspaceGeneration: 'generation-b',
+    });
+
+    expect((await result).error?.message).toContain(
+      'requires one-time approval',
+    );
+    expect(spawner).not.toHaveBeenCalled();
+  });
+
+  it('applies destination deny rules in YOLO mode', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1' }));
+    const config = makeConfig(spawner, ApprovalMode.YOLO);
+    const permissionManager = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => ApprovalMode.YOLO,
+    });
+    permissionManager.initialize();
+    permissionManager.addSessionDenyRule(
+      'CreateSubSession(workspace:/canonical/other repo)',
+    );
+    config.getPermissionManager = () => permissionManager;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'summarize',
+      workspace: 'repo-b',
+    });
+
+    expect(
+      (await invocation.execute(new AbortController().signal)).error?.message,
+    ).toContain('denied by permission rules');
+    expect(spawner).not.toHaveBeenCalled();
   });
 
   it('honors a destination deny rule added while approval is pending', async () => {
@@ -237,7 +332,7 @@ describe('CreateSubSessionTool', () => {
     expect(res.error).toBeUndefined();
     expect(res.llmContent).toContain('sub-2');
     expect(res.llmContent).toMatch(/did not wait/i);
-    expect(res.returnDisplay).toContain('qwen-session://sub-2)');
+    expect(res.returnDisplay).toBe('[sub-2](qwen-session://sub-2) started');
   });
 
   it('reports a completed-but-empty first turn without an error', async () => {
@@ -253,6 +348,26 @@ describe('CreateSubSessionTool', () => {
     expect(res.error).toBeUndefined();
     expect(res.llmContent).toContain('no text output');
   });
+
+  it.each(['', 'partial answer'])(
+    'reports a timed-out follow-up with partial output %j',
+    async (result) => {
+      const spawner = vi.fn(async () => ({
+        sessionId: 'sub-3',
+        result,
+        stopReason: 'timeout',
+      }));
+      const res = await new CreateSubSessionTool(makeConfig(spawner))
+        .build({ prompt: 'summarize', sessionId: 'sub-3' })
+        .execute(new AbortController().signal);
+
+      expect(res.returnDisplay).toBe('[sub-3](qwen-session://sub-3) timed out');
+      expect(res.llmContent).toBe(
+        'Timed out waiting for [sub-3](qwen-session://sub-3). The original prompt may still be queued or running.' +
+          (result ? `\n\nPartial output:\n\n${result}` : ''),
+      );
+    },
+  );
 
   it('first-turn: warns when the parent link is live-only (parentSessionPersisted:false)', async () => {
     // The daemon reported the parent lineage was NOT durably written — surface

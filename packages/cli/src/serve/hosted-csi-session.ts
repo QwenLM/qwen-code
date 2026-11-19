@@ -343,6 +343,7 @@ async function initialize(
       ),
       activation,
       releaseActivation: deny,
+      stopRenewal: deny,
       replaceActivation: deny,
       prepareOwnershipRelease: deny,
       close: deny,

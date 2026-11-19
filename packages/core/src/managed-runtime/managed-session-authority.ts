@@ -3506,6 +3506,9 @@ export class LocalManagedSessionAuthority {
           (event.kind === 'context.compacted' &&
             (!extension ||
               event.payload['compactionId'] !== maintenance.operationId)) ||
+          // A wake source is admitted during maintenance: the pump defers
+          // its turn until compaction settles, so refusing it would stall a
+          // delivery every sibling source parks instead.
           (event.kind === 'input.accepted' &&
             !isChildNotificationSource(source) &&
             ![
@@ -3514,6 +3517,7 @@ export class LocalManagedSessionAuthority {
               'channel',
               'session_message',
               'loop',
+              'pr_event',
             ].includes(String(source)))
         )
           throw new ManagedSessionConflictError(
