@@ -48,13 +48,25 @@ provider 事实与动作包装成后端中立的 `SessionChatController`，并�
   session/turn target 匹配。故已结束尝试的迟到事件无法建立共享同一可见 target 的
   重试。
 - 一个 turn 的终态事件同时关闭启动它的 submit 与指向它的 cancel：
-  `promptId -> Set<operationId>`。cancel 绑定到最近被准入的 prompt，该 id 在
-  admission 时记录（先于 submit 的 dispatch 返回）。
+  `promptId -> Set<operationId>`。cancel 指向**存活 turn**——存活 turn FIFO 的队首
+  （终态事件尚未到达的最旧准入 prompt），在派发时捕获——绝不用最新被准入的 id
+  （那可能是排队中的 prompt、或已结束的 turn）。prompt 在其终态事件到达或 submit
+  被拒时出队。无可绑定的存活 turn 时，cancel 结算为 `failed`，使 phase 不至于被一条
+  永久非终态行钉死。
 - 引擎只在 transport resolve 后才返回操作 id，但终态事件可能在 POST 仍在飞时到达。
   适配器按后端身份保留终态见证，并在尝试被绑定时应用，故在飞证据不被丢弃。意图方法
   返回尝试实际到达的 outcome（绑定后），而非证据前的 dispatch 快照。
 - 一个 prompt 恰有一个终态事件；保留它也让「turn 正在结束时才派发的 cancel」仍能
-  结算。
+  结算。prompt 每个 turn 都是全新 id，故保留不会把一个 turn 的判决泄漏到另一个。
+- **决策**见证不同：`requestId` 在多次尝试间稳定，故见证只在「事件到达至该尝试绑定」
+  这段窗口内保留，随后即**消费**。同一请求的重试必须赢得自己的证据；失败决策保持请求
+  存活（非取代），重试仍可建立。
+- **rejected** 的 dispatch 绝不绑定：其被丢弃的操作 id 指向任何不可保留之物，绑定它
+  会让裁剪毁掉属于另一条尝试的、被保留的在飞见证。只有 submit 的绑定才把其 prompt
+  清出在飞集合。
+- 一个请求**至多一条非终态决策尝试**：已有在飞决策时，第二次
+  `respondApproval`/`respondQuestion` 被拒绝——因为决策事件点名请求而非选项，兄弟
+  尝试无法被独立结算，会泄漏一条永久非终态行。
 
 ### 关联状态有界
 
@@ -77,15 +89,24 @@ admission 不等于 establishment。仅 transport resolve 使 outcome 保持 `un
 结算前保持 unsettled；失败 turn 终态化；rejected submit 不跟踪；已结束尝试的迟到
 事件无法建立同 target 重试；乱序事件各落在它点名的尝试；在飞证据在 admission 解析
 后应用；孤儿终态事件不能认证之后的尝试；重复终态事件不再结算；已 resolve 的 cancel
-在 turn 结算 cancelled 前保持 cancelling；作用于存活请求的决定建立而被取代者绝不；
-无证据的已准入决定保持 unsettled；question 应答建立；透传事实被暴露且活读；signal
-释放订阅。孤儿裁剪可经变异判别：去掉它孤儿用例转红、在飞用例仍绿。
+在 turn 结算 cancelled 前保持 cancelling；turn 已结算后的 cancel 既不认证也不钉死；
+cancel 绑定存活（FIFO 队首）turn 而非排队 prompt；在飞的 rejected cancel 不搁死与之
+重叠的 submit；作用于存活请求的决定建立而被取代者绝不；无证据的已准入决定保持
+unsettled；失败决策后的重试赢得自己的证据；rejected 决策派发不破坏关联；已有在飞决策
+时第二次派发被拒绝；question 应答建立；透传事实被暴露且活读；无操作持有时报告结算
+`failed` phase；signal 释放订阅。每条修复均可经变异判别：还原最新准入定向会红排队
+cancel 用例；恢复从不消费的决策见证会红重试用例；绑定 rejected cancel 会红重叠
+submit 用例；写死结算 phase 会红 `failed` 用例；去掉拒绝会红双派发用例；去掉孤儿裁剪
+会红孤儿用例、在飞用例仍绿。
 
 ## 留给表面切换的后续
 
 - 契约尚未暴露 `acknowledge` / `abandon`；表面必须释放已消费的终态行（否则按不同
   target 增长）、并给抛错的 transport 一条出路。这些在表面消费控制器时加入。
-- 无已准入 prompt 时派发的 cancel 无可绑定；表面仅在 turn 在飞时启用 cancel。
+- 无存活 turn 时派发的 cancel 结算为 `failed`（终态出口）；表面仍仅在 turn 在飞时
+  启用 cancel。
+- `deps.settledPhase` 由绑定 hook 从会话的结算态填充；其 `failed` 读取在此已有测试
+  钉住，故该分支非死开关。
 - 绑定 hook（provider context -> `deps`，复用既有 daemon 能力映射）与带视觉前后
   对比门的 `ChatSurface` 主列切换，是接下来的增量。
 

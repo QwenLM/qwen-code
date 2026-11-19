@@ -35,9 +35,9 @@ function harness(overrides?: Partial<DaemonChatControllerDeps>) {
     onAdmitted: (promptId: string) => void;
     deferred: ReturnType<typeof deferredAdmission>;
   }> = [];
-  const cancelTransport = deferredAdmission();
-  const permissionTransport = deferredAdmission();
-  const questionTransport = deferredAdmission();
+  const cancelTransports: Array<ReturnType<typeof deferredAdmission>> = [];
+  const permissionTransports: Array<ReturnType<typeof deferredAdmission>> = [];
+  const questionTransports: Array<ReturnType<typeof deferredAdmission>> = [];
 
   const deps: DaemonChatControllerDeps = {
     sessionId: 's1',
@@ -53,9 +53,21 @@ function harness(overrides?: Partial<DaemonChatControllerDeps>) {
       submitTransports.push({ onAdmitted, deferred });
       return deferred.promise;
     },
-    cancelPrompt: () => cancelTransport.promise,
-    submitPermission: () => permissionTransport.promise,
-    submitQuestionAnswers: () => questionTransport.promise,
+    cancelPrompt: () => {
+      const deferred = deferredAdmission();
+      cancelTransports.push(deferred);
+      return deferred.promise;
+    },
+    submitPermission: () => {
+      const deferred = deferredAdmission();
+      permissionTransports.push(deferred);
+      return deferred.promise;
+    },
+    submitQuestionAnswers: () => {
+      const deferred = deferredAdmission();
+      questionTransports.push(deferred);
+      return deferred.promise;
+    },
     subscribePromptSettlement: (listener) => {
       promptListener = listener;
       return () => {
@@ -82,17 +94,23 @@ function harness(overrides?: Partial<DaemonChatControllerDeps>) {
   }
 
   const controller = createDaemonChatController(deps);
+  const shift = (
+    queue: Array<ReturnType<typeof deferredAdmission>>,
+    label: string,
+  ) => {
+    const next = queue.shift();
+    if (!next) throw new Error(`no ${label} transport in flight`);
+    return next;
+  };
   return {
     controller,
     deps,
-    // Admit the next submit with a prompt id, then resolve its admission.
     admitSubmit(promptId: string, admission: Admission = 'accepted') {
       const next = submitTransports.shift();
       if (!next) throw new Error('no submit transport in flight');
       next.onAdmitted(promptId);
       next.deferred.resolve(admission);
     },
-    // Admit without resolving yet (keeps the POST in flight).
     startSubmit(promptId: string) {
       const next = submitTransports[submitTransports.length - 1];
       if (!next) throw new Error('no submit transport in flight');
@@ -109,17 +127,24 @@ function harness(overrides?: Partial<DaemonChatControllerDeps>) {
       currencyListener?.(requestId, live);
     },
     resolveCancel: (admission: Admission = 'accepted') =>
-      cancelTransport.resolve(admission),
+      shift(cancelTransports, 'cancel').resolve(admission),
     resolvePermission: (admission: Admission = 'accepted') =>
-      permissionTransport.resolve(admission),
+      shift(permissionTransports, 'permission').resolve(admission),
+    resolvePermissionIfPending: (admission: Admission = 'accepted') => {
+      permissionTransports.shift()?.resolve(admission);
+    },
     resolveQuestion: (admission: Admission = 'accepted') =>
-      questionTransport.resolve(admission),
+      shift(questionTransports, 'question').resolve(admission),
     hasPromptListener: () => promptListener !== undefined,
   };
 }
 
 const submitOp = (controller: ReturnType<typeof harness>['controller']) =>
   controller.operations.find((op) => op.kind === 'submit');
+const opsOf = (
+  controller: ReturnType<typeof harness>['controller'],
+  kind: string,
+) => controller.operations.filter((op) => op.kind === kind);
 
 describe('daemon controller: admission is not establishment', () => {
   it('a resolved submit transport stays unsettled until the turn settles', async () => {
@@ -170,11 +195,8 @@ describe('daemon controller: witness correlation by prompt id', () => {
     const b = h.controller.submit(input);
     h.admitSubmit('pB');
     await b;
-    const retry = submitOp(h.controller);
-    expect(retry?.state).toBe('running');
+    expect(submitOp(h.controller)?.state).toBe('running');
 
-    // A late terminal event naming the finished attempt's prompt must not
-    // establish the retry, even though both share the visible session target.
     h.emitPrompt({ promptId: 'pA', outcome: 'completed' });
     expect(submitOp(h.controller)?.state).toBe('running');
     expect(h.controller.phase).toBe('running');
@@ -191,14 +213,9 @@ describe('daemon controller: witness correlation by prompt id', () => {
     const b = h.controller.submit(input);
     h.admitSubmit('pB');
     await b;
-    const [idA, idB] = h.controller.operations
-      .filter((op) => op.kind === 'submit')
-      .map((op) => op.id);
-    // B's event arrives first: it must establish B and leave A running, not
-    // swap onto A. (Retention keeps only the latest terminal per kind+target,
-    // so the discriminating assertion is made while A is still non-terminal.)
+    const [idA, idB] = opsOf(h.controller, 'submit').map((op) => op.id);
     h.emitPrompt({ promptId: 'pB', outcome: 'completed' });
-    const afterB = h.controller.operations.filter((op) => op.kind === 'submit');
+    const afterB = opsOf(h.controller, 'submit');
     expect(afterB.find((op) => op.id === idB)?.state).toBe('established');
     expect(afterB.find((op) => op.id === idA)?.state).toBe('running');
     h.emitPrompt({ promptId: 'pA', outcome: 'failed' });
@@ -209,7 +226,6 @@ describe('daemon controller: witness correlation by prompt id', () => {
     const h = harness();
     const pending = h.controller.submit(input);
     const deferred = h.startSubmit('pF');
-    // Terminal event arrives before dispatch returns the operation id.
     h.emitPrompt({ promptId: 'pF', outcome: 'completed' });
     expect(h.controller.phase).toBe('submitting');
     deferred.resolve('accepted');
@@ -221,9 +237,6 @@ describe('daemon controller: witness correlation by prompt id', () => {
 
   it('a terminal event for a prompt we never dispatched cannot certify a later attempt', async () => {
     const h = harness();
-    // An orphan terminal event (replayed history / another client's turn)
-    // arrives for a prompt this controller never submitted. It must not be
-    // retained as evidence that could certify a future attempt.
     h.emitPrompt({ promptId: 'pX', outcome: 'completed' });
     expect(h.controller.operations).toHaveLength(0);
     expect(h.controller.phase).toBe('idle');
@@ -245,7 +258,7 @@ describe('daemon controller: witness correlation by prompt id', () => {
   });
 });
 
-describe('daemon controller: cancel', () => {
+describe('daemon controller: cancel targets the active turn', () => {
   it('a resolved cancel stays cancelling until the turn settles cancelled', async () => {
     const h = harness();
     const submit = h.controller.submit(input);
@@ -259,8 +272,58 @@ describe('daemon controller: cancel', () => {
     expect(h.controller.phase).toBe('cancelling');
     h.emitPrompt({ promptId: 'p1', outcome: 'cancelled' });
     expect(h.controller.phase).toBe('idle');
-    const cancelOp = h.controller.operations.find((op) => op.kind === 'cancel');
-    expect(cancelOp?.state).toBe('established');
+    expect(opsOf(h.controller, 'cancel')[0]?.state).toBe('established');
+  });
+
+  it('a cancel after the turn already settled does not certify and does not latch', async () => {
+    const h = harness();
+    const submit = h.controller.submit(input);
+    h.admitSubmit('p1');
+    await submit;
+    h.emitPrompt({ promptId: 'p1', outcome: 'completed' });
+    const cancel = h.controller.cancel();
+    h.resolveCancel();
+    const result = await cancel;
+    expect(result.outcome).not.toBe('established');
+    expect(h.controller.phase).not.toBe('cancelling');
+    expect(h.controller.phase).toBe('idle');
+  });
+
+  it('a cancel binds the active (FIFO-head) turn, not a queued prompt', async () => {
+    const h = harness();
+    const a = h.controller.submit(input);
+    h.admitSubmit('pA');
+    await a;
+    const b = h.controller.submit(input);
+    h.admitSubmit('pB');
+    await b;
+    const cancel = h.controller.cancel();
+    h.resolveCancel();
+    await cancel;
+    // The active turn A is cancelled; the cancel must settle on A's event, not
+    // wait for the unrelated queued prompt B to complete.
+    h.emitPrompt({ promptId: 'pA', outcome: 'cancelled' });
+    expect(opsOf(h.controller, 'cancel')[0]?.state).toBe('established');
+    expect(h.controller.phase).not.toBe('cancelling');
+  });
+
+  it('a rejected cancel in flight does not strand the submit it overlaps', async () => {
+    const h = harness();
+    const pending = h.controller.submit(input);
+    const deferred = h.startSubmit('p1');
+    // The cancel is dispatched against the live turn p1, then the turn's
+    // terminal event arrives while both POSTs are in flight, then the cancel
+    // resolves rejected. Binding that rejected cancel would prune p1's
+    // retained in-flight witness and strand the submit.
+    const cancel = h.controller.cancel();
+    h.emitPrompt({ promptId: 'p1', outcome: 'completed' });
+    h.resolveCancel('rejected');
+    await cancel;
+    deferred.resolve('accepted');
+    const result = await pending;
+    expect(result.outcome).toBe('established');
+    expect(submitOp(h.controller)?.state).toBe('established');
+    expect(h.controller.phase).toBe('idle');
   });
 });
 
@@ -273,8 +336,7 @@ describe('daemon controller: approvals and questions', () => {
     const result = await pending;
     expect(result.outcome).toBe('unsettled');
     h.emitDecision({ requestId: 'r1', applied: true });
-    const op = h.controller.operations.find((op) => op.kind === 'approval');
-    expect(op?.state).toBe('established');
+    expect(opsOf(h.controller, 'approval')[0]?.state).toBe('established');
   });
 
   it('a decision on a superseded request never establishes', async () => {
@@ -285,8 +347,7 @@ describe('daemon controller: approvals and questions', () => {
     h.resolvePermission();
     await pending;
     h.emitDecision({ requestId: 'r1', applied: true });
-    const op = h.controller.operations.find((op) => op.kind === 'approval');
-    expect(op?.state).toBe('failed');
+    expect(opsOf(h.controller, 'approval')[0]?.state).toBe('failed');
     expect(h.controller.phase).toBe('idle');
   });
 
@@ -297,8 +358,59 @@ describe('daemon controller: approvals and questions', () => {
     h.resolvePermission();
     const result = await pending;
     expect(result.outcome).toBe('unsettled');
-    const op = h.controller.operations.find((op) => op.kind === 'approval');
-    expect(op?.state).toBe('unsettled');
+    expect(opsOf(h.controller, 'approval')[0]?.state).toBe('unsettled');
+  });
+
+  it('a retry after a failed decision earns its own evidence', async () => {
+    const h = harness();
+    h.emitCurrency('r1', true);
+    const first = h.controller.respondApproval('r1', 'allow');
+    h.resolvePermission();
+    await first;
+    h.emitDecision({ requestId: 'r1', applied: false });
+    expect(opsOf(h.controller, 'approval')[0]?.state).toBe('failed');
+
+    const retry = h.controller.respondApproval('r1', 'allow');
+    h.resolvePermission();
+    const retryResult = await retry;
+    // The retry must not inherit the previous attempt's failed verdict.
+    expect(retryResult.outcome).toBe('unsettled');
+    h.emitDecision({ requestId: 'r1', applied: true });
+    const approvals = opsOf(h.controller, 'approval');
+    expect(approvals[approvals.length - 1]?.state).toBe('established');
+  });
+
+  it('a rejected decision dispatch does not corrupt the correlation', async () => {
+    const h = harness();
+    h.emitCurrency('r1', true);
+    const rejected = h.controller.respondApproval('r1', 'allow');
+    h.resolvePermission('rejected');
+    const rejectedResult = await rejected;
+    expect(rejectedResult.admission).toBe('rejected');
+    expect(opsOf(h.controller, 'approval')).toHaveLength(0);
+
+    const accepted = h.controller.respondApproval('r1', 'allow');
+    h.resolvePermission();
+    await accepted;
+    h.emitDecision({ requestId: 'r1', applied: true });
+    expect(opsOf(h.controller, 'approval')[0]?.state).toBe('established');
+  });
+
+  it('a second decision dispatch while one is live is refused', async () => {
+    const h = harness();
+    h.emitCurrency('r1', true);
+    const first = h.controller.respondApproval('r1', 'allow');
+    h.resolvePermission();
+    await first;
+    const secondPromise = h.controller.respondApproval('r1', 'deny');
+    // If the second dispatch were not refused it would create a transport;
+    // resolve it so the case fails on the row count, not a hang.
+    h.resolvePermissionIfPending();
+    const second = await secondPromise;
+    expect(second.admission).toBe('rejected');
+    expect(opsOf(h.controller, 'approval')).toHaveLength(1);
+    h.emitDecision({ requestId: 'r1', applied: true });
+    expect(opsOf(h.controller, 'approval')[0]?.state).toBe('established');
   });
 
   it('a question answer applied to its request establishes', async () => {
@@ -310,8 +422,7 @@ describe('daemon controller: approvals and questions', () => {
     h.resolveQuestion();
     await pending;
     h.emitDecision({ requestId: 'q1', applied: true });
-    const op = h.controller.operations.find((op) => op.kind === 'question');
-    expect(op?.state).toBe('established');
+    expect(opsOf(h.controller, 'question')[0]?.state).toBe('established');
   });
 });
 
@@ -348,6 +459,12 @@ describe('daemon controller: pass-through facts and lifecycle', () => {
     expect(h.controller.statusFacts.queueLength).toBe(0);
     queueLength = 3;
     expect(h.controller.statusFacts.queueLength).toBe(3);
+  });
+
+  it('reports the settled failed phase when no operation holds it open', () => {
+    const h = harness({ settledPhase: 'failed' });
+    expect(h.controller.operations).toHaveLength(0);
+    expect(h.controller.phase).toBe('failed');
   });
 
   it('releases evidence subscriptions when the signal aborts', () => {

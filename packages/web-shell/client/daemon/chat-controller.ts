@@ -17,7 +17,10 @@ import type {
   SessionChatController,
   SessionOpsController,
 } from '../chat-core/contract.js';
-import type { OutcomeWitness } from '../chat-core/intent.js';
+import {
+  isTerminalOperation,
+  type OutcomeWitness,
+} from '../chat-core/intent.js';
 import {
   createDaemonChatIntents,
   type DaemonChatIntents,
@@ -103,7 +106,8 @@ export interface DaemonChatControllerDeps {
     listener: (requestId: string, live: boolean) => void,
   ): () => void;
 
-  // The phase to report when no operation holds it open.
+  // The phase to report when no operation holds it open. The binding hook
+  // populates it from the session's settled state (e.g. a failed session).
   readonly settledPhase?: 'idle' | 'failed';
 
   // When aborted, the evidence subscriptions are released. The binding hook
@@ -138,11 +142,14 @@ export function createDaemonChatController(
   const operationsByPromptId = new Map<string, Set<string>>();
   // A prompt has exactly one terminal event; retain it so an attempt bound
   // after the event arrived (a cancel dispatched while the turn was ending)
-  // still settles, and so the evidence is applied once admission resolves.
+  // still settles. Prompts get a fresh id per turn, so retention cannot leak
+  // one turn's verdict onto another.
   const terminalPromptWitness = new Map<string, OutcomeWitness>();
-  // The most recently admitted prompt is the turn in flight; a cancel binds to
-  // it. Recorded at admission, before the submit's dispatch returns.
-  let latestAdmittedPromptId: string | undefined;
+  // The live turns in admission order (the daemon's FIFO). A cancel targets the
+  // head — the active prompt — never the newest admitted id, which may be a
+  // queued prompt or a turn that already ended. A prompt leaves the queue when
+  // its terminal event arrives or its submit is rejected.
+  const livePromptQueue: string[] = [];
   // Identities this controller has dispatched but not yet bound (the POST is
   // in flight). They let prune keep an early terminal event for our own
   // attempt while dropping events for prompts/requests we never dispatched
@@ -150,10 +157,19 @@ export function createDaemonChatController(
   // accumulate as orphan witnesses.
   const inFlightPromptIds = new Set<string>();
   const inFlightRequestIds = new Set<string>();
-  // requestId -> the decision attempt it settles, plus evidence that arrived
-  // before the attempt could be named.
+  // requestId -> the decision attempt it settles. A request has at most one
+  // non-terminal decision attempt at a time (a second dispatch is refused), so
+  // a single slot cannot orphan a live sibling.
   const operationByRequestId = new Map<string, string>();
+  // A decision witness is retained only for the window between the event and
+  // its attempt's bind, then consumed: requestId is stable across attempts, so
+  // keeping it would let a retry inherit the previous attempt's verdict.
   const terminalDecisionWitness = new Map<string, OutcomeWitness>();
+
+  const removeFromQueue = (promptId: string): void => {
+    const index = livePromptQueue.indexOf(promptId);
+    if (index !== -1) livePromptQueue.splice(index, 1);
+  };
 
   // Correlation state is bounded by the engine's retention: once an attempt is
   // no longer among the retained operations (acknowledged or superseded), its
@@ -204,7 +220,6 @@ export function createDaemonChatController(
       operationsByPromptId.set(promptId, ids);
     }
     ids.add(operationId);
-    inFlightPromptIds.delete(promptId);
     const terminal = terminalPromptWitness.get(promptId);
     // Evidence that arrived while the POST was in flight is applied here, once
     // the attempt can be named; return its result so the intent reports the
@@ -224,10 +239,12 @@ export function createDaemonChatController(
     operationByRequestId.set(requestId, operationId);
     inFlightRequestIds.delete(requestId);
     const terminal = terminalDecisionWitness.get(requestId);
-    const settled =
-      terminal !== undefined
-        ? intents.settle(operationId, terminal)
-        : undefined;
+    let settled: IntentResult | undefined;
+    if (terminal !== undefined) {
+      settled = intents.settle(operationId, terminal);
+      // Consume: a retry on the same request must earn its own evidence.
+      terminalDecisionWitness.delete(requestId);
+    }
     pruneCorrelation();
     return settled;
   };
@@ -236,6 +253,8 @@ export function createDaemonChatController(
     (event) => {
       const witness = witnessForPromptOutcome(event.outcome);
       terminalPromptWitness.set(event.promptId, witness);
+      // The turn ended; it is no longer a live cancel target.
+      removeFromQueue(event.promptId);
       const ids = operationsByPromptId.get(event.promptId);
       if (ids) {
         for (const operationId of ids) intents.settle(operationId, witness);
@@ -247,9 +266,15 @@ export function createDaemonChatController(
   const unsubscribeDecisionSettlement = deps.subscribeDecisionSettlement(
     (event) => {
       const witness: OutcomeWitness = event.applied ? 'settled' : 'failed';
-      terminalDecisionWitness.set(event.requestId, witness);
       const operationId = operationByRequestId.get(event.requestId);
-      if (operationId) intents.settle(operationId, witness);
+      if (operationId) {
+        intents.settle(operationId, witness);
+        // Applied to the bound attempt; do not leave it for a later retry.
+        terminalDecisionWitness.delete(event.requestId);
+      } else {
+        // The attempt is still in flight; retain until its bind applies it.
+        terminalDecisionWitness.set(event.requestId, witness);
+      }
       pruneCorrelation();
     },
   );
@@ -272,6 +297,18 @@ export function createDaemonChatController(
     sessionId: deps.sessionId,
     ...extra,
   });
+
+  // A second decision dispatch for a request that already has a non-terminal
+  // attempt is refused: the decision event names the request, not the option,
+  // so a sibling could never be settled distinctly and would leak a permanent
+  // non-terminal row.
+  const hasLiveDecision = (requestId: string): boolean => {
+    const operationId = operationByRequestId.get(requestId);
+    if (!operationId) return false;
+    return intents.operations.some(
+      (op) => op.id === operationId && !isTerminalOperation(op.state),
+    );
+  };
 
   return {
     kind: 'daemon',
@@ -326,47 +363,76 @@ export function createDaemonChatController(
         () =>
           deps.submitPrompt(input, (id) => {
             promptId = id;
-            latestAdmittedPromptId = id;
+            livePromptQueue.push(id);
             inFlightPromptIds.add(id);
           }),
       );
-      const settled =
-        promptId !== undefined
-          ? bindPromptOperation(promptId, operationId)
-          : undefined;
+      // A rejected submit never became a turn: do not bind it (its dropped id
+      // would prune a retained witness) and drop it from the live queue.
+      if (result.admission === 'rejected') {
+        if (promptId !== undefined) {
+          removeFromQueue(promptId);
+          inFlightPromptIds.delete(promptId);
+        }
+        return result;
+      }
+      let settled: IntentResult | undefined;
+      if (promptId !== undefined) {
+        settled = bindPromptOperation(promptId, operationId);
+        inFlightPromptIds.delete(promptId);
+      }
       return settled ?? result;
     },
     async cancel(): Promise<IntentResult> {
+      // Resolve the target at dispatch time: the active (FIFO-head) live turn,
+      // never the newest admitted id. Captured before the transport so a turn
+      // ending mid-cancel still binds the attempt the cancel was issued against.
+      const cancelTarget = livePromptQueue[0];
       const { operationId, result } = await intents.dispatch(
         'cancel',
         target(),
         () => deps.cancelPrompt(),
       );
-      const settled =
-        latestAdmittedPromptId !== undefined
-          ? bindPromptOperation(latestAdmittedPromptId, operationId)
-          : undefined;
-      return settled ?? result;
+      if (result.admission === 'rejected') return result;
+      if (cancelTarget === undefined) {
+        // No live turn to cancel: terminalize so the phase does not latch.
+        return intents.settle(operationId, 'failed') ?? result;
+      }
+      return bindPromptOperation(cancelTarget, operationId) ?? result;
     },
     async respondApproval(id: string, optionId: string): Promise<IntentResult> {
+      if (hasLiveDecision(id)) {
+        return { admission: 'rejected', target: target({ requestId: id }) };
+      }
       inFlightRequestIds.add(id);
       const { operationId, result } = await intents.dispatch(
         'approval',
         target({ requestId: id }),
         () => deps.submitPermission(id, optionId),
       );
+      if (result.admission === 'rejected') {
+        inFlightRequestIds.delete(id);
+        return result;
+      }
       return bindDecisionOperation(id, operationId) ?? result;
     },
     async respondQuestion(
       id: string,
       answers: readonly QuestionAnswer[],
     ): Promise<IntentResult> {
+      if (hasLiveDecision(id)) {
+        return { admission: 'rejected', target: target({ requestId: id }) };
+      }
       inFlightRequestIds.add(id);
       const { operationId, result } = await intents.dispatch(
         'question',
         target({ requestId: id }),
         () => deps.submitQuestionAnswers(id, answers),
       );
+      if (result.admission === 'rejected') {
+        inFlightRequestIds.delete(id);
+        return result;
+      }
       return bindDecisionOperation(id, operationId) ?? result;
     },
   };
