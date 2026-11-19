@@ -418,6 +418,50 @@ describe('markdown image fallback', () => {
     }
   });
 
+  it.each([
+    [
+      '![screenshot](/Users/张三/Desktop/截图.png)',
+      '/Users/张三/Desktop/截图.png',
+    ],
+    [
+      '![screenshot](</Users/foo/My Screenshots/shot.png>)',
+      '/Users/foo/My Screenshots/shot.png',
+    ],
+  ])('shows the decoded path for %s', (markdown, path) => {
+    // micromark percent-encodes destinations; the chip must stay copyable.
+    const view = renderMd(markdown);
+    try {
+      expect(view.querySelector('[class*="imageFallback"]')?.textContent).toBe(
+        path,
+      );
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('exposes the alt text to plain-text extraction like the img it replaces', () => {
+    const view = renderMd('![screenshot](/Users/foo/shot.png)');
+    try {
+      expect(
+        view
+          .querySelector('[class*="imageFallback"]')
+          ?.getAttribute('data-markdown-image-alt'),
+      ).toBe('screenshot');
+    } finally {
+      cleanup(view);
+    }
+    const empty = renderMd('![](/Users/foo/shot.png)');
+    try {
+      expect(
+        empty
+          .querySelector('[class*="imageFallback"]')
+          ?.getAttribute('data-markdown-image-alt'),
+      ).toBe('');
+    } finally {
+      cleanup(empty);
+    }
+  });
+
   it('renders gate-failing local paths as text chips', () => {
     const view = renderMd('![shot](~/shots/shot.png)');
     try {

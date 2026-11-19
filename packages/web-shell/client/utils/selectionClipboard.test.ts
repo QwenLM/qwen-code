@@ -265,6 +265,24 @@ describe('selected reply plain text', () => {
     range.selectNodeContents(body);
     expect(getSelectedReplyText(body, range)).toBeNull();
   });
+
+  it('reads the image fallback chip as the alt of the img it replaces', () => {
+    const body = fixture(
+      '<p>Before <span data-markdown-image-alt="diagram">/Users/foo/shot.png</span> after.</p>',
+    );
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    expect(getSelectedReplyText(body, range)).toBe('Before diagram after.');
+  });
+
+  it('keeps the empty-alt fallback chip extraction empty', () => {
+    const body = fixture(
+      '<p><span data-markdown-image-alt="">Failed to load</span></p>',
+    );
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    expect(getSelectedReplyText(body, range)).toBeNull();
+  });
 });
 
 describe('nested selection boundaries', () => {

@@ -208,6 +208,7 @@
   line-height: 1.5;
   word-break: break-all;
   user-select: text;
+  unicode-bidi: plaintext;
 }
 
 .codeBlock {

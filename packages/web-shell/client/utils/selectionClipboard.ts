@@ -145,6 +145,8 @@ function plainText(node: Node): string {
   )
     return `${node.textContent}\n`;
   if (node instanceof HTMLImageElement) return node.alt;
+  if (node instanceof Element && node.hasAttribute('data-markdown-image-alt'))
+    return node.getAttribute('data-markdown-image-alt') ?? '';
   if (tag === 'BR') return '\n';
   if (tag === 'PRE') return `${node.textContent}\n`;
   const children = Array.from(node.childNodes).reduce((text, child) => {

@@ -985,6 +985,16 @@ export function isLocalFilePath(src: string | undefined): boolean {
   return !!src && LOCAL_FILE_PATH.test(src.trim());
 }
 
+// micromark percent-encodes markdown destinations, so spaces and non-ASCII
+// arrive encoded; the chip must show a path the reader can actually use.
+function safeDecodePath(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
   const renderMode = useTranscriptRenderMode();
   const { t } = useI18n();
@@ -998,11 +1008,22 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
     // passes https through and hidden copy sources render raw markdown in
     // document mode, so the chip itself must never echo src there. data:
     // URIs would dump a base64 blob into the chat in any mode.
-    const displaySrc = !documentMode && src && !/^data:/i.test(src) ? src : '';
+    const displaySrc =
+      !documentMode && src && !/^data:/i.test(src) ? safeDecodePath(src) : '';
     const text =
       (localPath ? displaySrc || alt : alt || displaySrc) ||
       t('common.failedToLoad');
-    return <span className={styles.imageFallback}>{text}</span>;
+    // plainText reads this attribute the way it reads img.alt, so reply-copy
+    // extraction keeps its pre-fallback semantics (empty alt stays empty and
+    // the raw-markdown fallback still fires).
+    return (
+      <span
+        className={styles.imageFallback}
+        data-markdown-image-alt={alt || ''}
+      >
+        {text}
+      </span>
+    );
   }
   // Document mode keeps the img even when the payload is undecodable: the
   // transcript-document browser gate pins src preservation for approved
