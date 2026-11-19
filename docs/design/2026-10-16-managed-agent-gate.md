@@ -2,9 +2,8 @@
 
 [English](2026-10-16-managed-agent-gate.md) | [简体中文](2026-10-16-managed-agent-gate.zh-CN.md)
 
-Status: proposed and implemented in `.github/workflows/managed-agent-gate.yml`;
-required-check enablement is pending a maintainer decision. Tracking issues:
-#14392, #14381.
+Status: implemented in `.github/workflows/managed-agent-gate.yml`; required-check
+enablement is tracked in #17039. Historical tracking issues: #14392, #14381.
 
 ## Problem
 

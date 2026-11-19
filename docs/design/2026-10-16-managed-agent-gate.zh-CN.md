@@ -2,8 +2,8 @@
 
 [English](2026-10-16-managed-agent-gate.md) | [简体中文](2026-10-16-managed-agent-gate.zh-CN.md)
 
-状态：已提出，并已在 `.github/workflows/managed-agent-gate.yml` 中实现；是否设为
-必需检查待维护者决定。跟踪 issue：#14392、#14381。
+状态：已在 `.github/workflows/managed-agent-gate.yml` 中实现；必需检查启用由 #17039
+跟踪。历史跟踪 issue：#14392、#14381。
 
 ## 问题
 
