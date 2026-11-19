@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import {
   fetchGitBranches,
   gitCheckout,
+  GitCheckoutFailure,
   gitCreateBranch,
   gitPush,
   gitPull,
@@ -455,7 +456,9 @@ export function sendGitError(
     res.status(404).json({ error: 'not_a_git_repository', message });
     return;
   }
-  if (/dirty|uncommitted|would be overwritten/i.test(message)) {
+  if (
+    /dirty|uncommitted|would be overwritten|would lose untracked/i.test(message)
+  ) {
     res.status(409).json({ error: 'dirty_working_tree', message });
     return;
   }
@@ -529,10 +532,43 @@ async function handleCheckout(
       .json({ error: 'invalid_ref', message: 'Invalid checkout ref' });
     return;
   }
+  if (body['stash'] !== undefined && typeof body['stash'] !== 'boolean') {
+    res
+      .status(400)
+      .json({ error: 'invalid_stash', message: 'stash must be a boolean' });
+    return;
+  }
+  if (body['force'] !== undefined && typeof body['force'] !== 'boolean') {
+    res
+      .status(400)
+      .json({ error: 'invalid_force', message: 'force must be a boolean' });
+    return;
+  }
+  const stash = body['stash'] === true;
+  const force = body['force'] === true;
+  if (stash && force) {
+    res.status(400).json({
+      error: 'invalid_stash_force',
+      message: 'stash and force are mutually exclusive',
+    });
+    return;
+  }
   try {
-    const result = await gitCheckout(cwd, ref.trim(), env);
+    const result = await gitCheckout(cwd, ref.trim(), { stash, force }, env);
     res.status(200).json(result);
   } catch (err) {
+    if (err instanceof GitCheckoutFailure) {
+      // A typed refusal or a failure the core already recovered from: the
+      // repository is in a known state and the code tells the client what
+      // it can offer next. A kept stash entry rides along as data so the
+      // client can render its whereabouts as a standing warning.
+      res.status(409).json({
+        error: err.code,
+        message: redactGitMessage(err.message, cwd),
+        ...(err.stashSha ? { stashSha: err.stashSha } : {}),
+      });
+      return;
+    }
     sendGitError(res, err, route, sendBridgeError, cwd);
   }
 }

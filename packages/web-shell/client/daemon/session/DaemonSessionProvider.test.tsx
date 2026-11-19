@@ -100,6 +100,7 @@ import { DaemonAvailabilityContext } from '../availability-context.js';
 
 interface MockSession {
   backgroundTurn?: import('@qwen-code/sdk/daemon').DaemonBackgroundTurn;
+  restoredArtifacts?: import('@qwen-code/sdk/daemon').DaemonSessionArtifact[];
   sessionId: string;
   workspaceCwd: string;
   clientId: string;
@@ -6584,6 +6585,115 @@ describe('DaemonSessionProvider', () => {
     expect(streamingState).toBe('idle');
   });
 
+  it.each([
+    [
+      'a message from another client',
+      'user_message_chunk',
+      'waiting',
+      undefined,
+    ],
+    [
+      'an answer from another client',
+      'agent_message_chunk',
+      'responding',
+      undefined,
+    ],
+    [
+      'a /send message recorded here',
+      'user_message_chunk',
+      'idle',
+      {
+        qwenAgentMessage: {
+          kind: 'agent_mention',
+          mentionedAgentIds: [],
+          sentTo: { sessionId: 'kid', workspaceCwd: '/work/b' },
+        },
+      },
+    ],
+  ] as const)(
+    'reads %s (%s) as %s',
+    async (_name, sessionUpdate, expected, meta) => {
+      const hold = createDeferred<void>();
+      const session = createMockSession({
+        events: async function* observedMessage(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          // This session's own earlier turn, settled: the page is idle.
+          yield {
+            v: 1,
+            id: 8,
+            type: 'session_update',
+            promptId: 'prompt-0',
+            sessionId: 'session-1',
+            data: {
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'hello' },
+              },
+            },
+          };
+          yield {
+            v: 1,
+            id: 9,
+            type: 'session_update',
+            promptId: 'prompt-0',
+            sessionId: 'session-1',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'hi' },
+              },
+            },
+          };
+          yield {
+            v: 1,
+            id: 10,
+            type: 'turn_complete',
+            promptId: 'prompt-0',
+            sessionId: 'session-1',
+            data: { promptId: 'prompt-0', stopReason: 'end_turn' },
+          };
+          yield {
+            v: 1,
+            id: 11,
+            type: 'session_update',
+            timestamp: '2025-01-01T00:00:00.000Z',
+            sessionId: 'session-1',
+            data: {
+              update: {
+                sessionUpdate,
+                content: { type: 'text', text: 'look at this' },
+                ...(meta ? { _meta: meta } : {}),
+              },
+            },
+          };
+          await Promise.race([
+            hold.promise,
+            new Promise<void>((resolve) =>
+              opts.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              }),
+            ),
+          ]);
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+
+      function Harness() {
+        streamingState = useDaemonStreamingState();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(streamingState).toBe(expected);
+      hold.resolve();
+    },
+  );
+
   it('settles non-blocking prompts when turn completion arrives before acceptance returns', async () => {
     const accepted = createDeferred<NonBlockingPromptAccepted>();
     const turnComplete = createDeferred<void>();
@@ -8373,6 +8483,163 @@ describe('DaemonSessionProvider', () => {
 
     expect(states.some((s) => s.status === 'connected')).toBe(true);
     expect(states.every((s) => !s.catchingUp)).toBe(true);
+  });
+
+  it('commits the load-embedded artifact snapshot before the replay injects', async () => {
+    // The initial autoConnect session has an empty transcript; the load target
+    // carries the embedded snapshot plus a replay that must NOT be injected at
+    // the early commit. Ordering is the assertion: a test that only checks the
+    // settled connection state passes with the flushSync removed.
+    sdkMocks.sessions.push(
+      createMockSession({ sessionId: 'session-1', events: createIdleEvents() }),
+      createMockSession({
+        sessionId: 'session-2',
+        restoredArtifacts: [
+          {
+            id: 'a1',
+            kind: 'link',
+            storage: 'external_url',
+            source: 'client',
+            status: 'available',
+            title: 'Early artifact',
+            url: 'https://example.com/early',
+            retention: 'restorable',
+            clientRetained: true,
+            createdAt: '2026-09-07T00:00:00.000Z',
+            updatedAt: '2026-09-07T00:00:00.000Z',
+          },
+        ],
+        replaySnapshot: createTextReplaySnapshot('replayed transcript'),
+        events: createIdleEvents(),
+      }),
+    );
+    const frames: Array<{
+      connection: DaemonConnectionState;
+      blocks: readonly DaemonTranscriptBlock[];
+    }> = [];
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      const connection = useDaemonConnection();
+      const blocks = useDaemonTranscriptBlocks();
+      frames.push({ connection, blocks });
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await requireActions(actions).loadSession('session-2', {
+        workspaceCwd: '/mock-workspace',
+        artifactCountHint: 7,
+      });
+      await flushPromises();
+    });
+
+    // The click-time hint rides the optimistic switch, keyed to the target.
+    const hinted = frames.find(
+      (frame) => frame.connection.artifactCountHint !== undefined,
+    );
+    expect(hinted?.connection.artifactCountHint).toBe(7);
+    expect(hinted?.connection.artifactCountHintSessionId).toBe('session-2');
+
+    const early = frames.find(
+      (frame) => frame.connection.restoredArtifacts !== undefined,
+    );
+    expect(early).toBeTruthy();
+    expect(early!.connection.sessionId).toBe('session-2');
+    expect(early!.connection.restoredArtifactsSessionId).toBe('session-2');
+    // Authoritative data landed: the early commit retires the hint.
+    expect(early!.connection.artifactCountHint).toBeUndefined();
+    expect(early!.connection.artifactCountHintSessionId).toBeUndefined();
+    // The replay has not injected yet at the early commit.
+    expect(
+      early!.blocks.some(
+        (block) =>
+          block.kind === 'assistant' && block.text === 'replayed transcript',
+      ),
+    ).toBe(false);
+    // …and it injects afterwards.
+    expect(frames[frames.length - 1]!.blocks).toMatchObject([
+      { kind: 'assistant', text: 'replayed transcript' },
+    ]);
+    expect(
+      frames[frames.length - 1]!.connection.artifactCountHint,
+    ).toBeUndefined();
+  });
+
+  it('does not early-commit the artifact key when the restore has no artifacts', async () => {
+    sdkMocks.sessions.push(
+      createMockSession({ sessionId: 'session-1', events: createIdleEvents() }),
+      createMockSession({
+        sessionId: 'session-2',
+        replaySnapshot: createTextReplaySnapshot('replayed transcript'),
+        events: createIdleEvents(),
+      }),
+    );
+    const frames: Array<{
+      connection: DaemonConnectionState;
+      blocks: readonly DaemonTranscriptBlock[];
+    }> = [];
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      const connection = useDaemonConnection();
+      const blocks = useDaemonTranscriptBlocks();
+      frames.push({ connection, blocks });
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await requireActions(actions).loadSession('session-2', {
+        workspaceCwd: '/mock-workspace',
+        artifactCountHint: 7,
+      });
+      await flushPromises();
+    });
+
+    // With no embedded snapshot the early commit must not run: no recorded
+    // connection state ever carries restoredArtifacts.
+    expect(
+      frames.every((frame) => frame.connection.restoredArtifacts === undefined),
+    ).toBe(true);
+    // The hint bridges the whole load window when no early commit runs, and
+    // the attach retires it once the session is bound.
+    expect(
+      frames.some(
+        (frame) =>
+          frame.connection.sessionId === 'session-2' &&
+          frame.connection.artifactCountHint === 7,
+      ),
+    ).toBe(true);
+    expect(
+      frames[frames.length - 1]!.connection.artifactCountHint,
+    ).toBeUndefined();
+    expect(
+      frames[frames.length - 1]!.connection.artifactCountHintSessionId,
+    ).toBeUndefined();
+    expect(frames[frames.length - 1]!.blocks).toMatchObject([
+      { kind: 'assistant', text: 'replayed transcript' },
+    ]);
+    // Ordering, not field absence: the attach update legitimately sets the key
+    // alongside an undefined snapshot, but only AFTER the replay injects. With
+    // the guard relaxed to `true`, flushSync would commit sessionId + key for
+    // session-2 in its own synchronous render before the store is reset, i.e.
+    // a frame carrying both before the replayed transcript appears.
+    const replayIdx = frames.findIndex((frame) =>
+      frame.blocks.some(
+        (block) =>
+          block.kind === 'assistant' && block.text === 'replayed transcript',
+      ),
+    );
+    expect(replayIdx).toBeGreaterThan(-1);
+    expect(
+      frames
+        .slice(0, replayIdx)
+        .some(
+          (frame) =>
+            frame.connection.sessionId === 'session-2' &&
+            frame.connection.restoredArtifactsSessionId === 'session-2',
+        ),
+    ).toBe(false);
   });
 
   it('clears prompt state and transcript when reconnect attaches a different session', async () => {
@@ -27925,6 +28192,7 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
     state: opts.state ?? {},
     hasActivePrompt: opts.hasActivePrompt ?? false,
     backgroundTurn: opts.backgroundTurn,
+    restoredArtifacts: opts.restoredArtifacts,
     historyHasMore: opts.historyHasMore ?? false,
     historyAnchorRecordId: opts.historyAnchorRecordId,
     replayDegraded: opts.replayDegraded ?? false,

@@ -69,7 +69,7 @@ class WorkspaceLifecycleStoreTest {
                 new DataSourceTransactionManager(fixture.jdbc.getDataSource())));
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc,
                 new JdbcManagedExtensionRecordStore(fixture.jdbc), null, executionStore, fixture.store, null, null, null,
-                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound());
         var journal = fixture.transactions.execute(ignored -> new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
         var templates = ManagedHookRecordContractTest.fixtures().get("templates");
         var data = new ManagedSessionStoreModels.CommitResource("hook-data", "hook-data", 1, 2,
@@ -246,6 +246,26 @@ class WorkspaceLifecycleStoreTest {
                     assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced");
                     assertThat(error.isRetryable()).isFalse();
                 });
+    }
+
+    /**
+     * A content-only extension child is a real Session in the same Workspace, generation and
+     * storage, and its owner was copied from the parent by the launch. The external-files profile
+     * does not admit child Sessions: {@code insertChildSession} refuses at creation, so the
+     * parent fails fast instead of minting a child that can never be admitted.
+     */
+    @Test
+    void externalFilesParentCannotAdmitAChildSession() {
+        var fixture = fixture();
+        fixture.jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES, "tenant", fixture.session);
+
+        assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> fixture.store.insertChildSessionCommand(
+                "tenant", fixture.session, "child-create", "digest", "child",
+                java.util.List.of(), "payload",
+                new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(fixture.session, fixture.session, "child-run", 1))))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("child_parent_unavailable"));
     }
 
     @Test
@@ -736,6 +756,51 @@ class WorkspaceLifecycleStoreTest {
         assertThat(fixture.store.findTurn("tenant", fixture.session, turn).orElseThrow().status()).isEqualTo("FAILED");
     }
 
+    @Test
+    void prEventInputBlocksCloseAndDeleteUntilItsTurnSettles() throws Exception {
+        var fixture = fixture();
+        fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?", WorkspaceToolProfiles.SHELL);
+        var journal = new ExtensionRecordJournal(com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc),
+                "tenant", "workspace", fixture.session);
+        fixture.transactions.executeWithoutResult(ignored -> journal.open());
+        var accepted = fixture.promptCommit("pr-event-turn", false, "pr_event");
+        fixture.transactions.executeWithoutResult(ignored -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc)
+                .commit("tenant", fixture.session, "extension-writer-token-0123456789", accepted));
+        // pr_event is deliberately absent from the non-blocking source list:
+        // an injected PR-event turn is real work, so close and delete must
+        // wait for its settlement instead of handing back or deleting the
+        // mount under a running turn.
+        assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> fixture.store.beginWorkspaceLifecycle(
+                "tenant", fixture.session, OperationKind.CLOSE, "owner", "a".repeat(64), "close-pr-event", "digest", true, 2)))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("turn_active"));
+        assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> fixture.store.beginWorkspaceLifecycle(
+                "tenant", fixture.session, OperationKind.DELETE, "owner", "a".repeat(64), "delete-pr-event", "digest", true, 2)))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("turn_active"));
+        var settled = fixture.turnSettledCommit("pr-event-turn");
+        fixture.transactions.executeWithoutResult(ignored -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc)
+                .commit("tenant", fixture.session, "extension-writer-token-0123456789", settled));
+        var admission = fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle(
+                "tenant", fixture.session, OperationKind.CLOSE, "owner", "a".repeat(64), "close-pr-event-settled", "digest", true, 2));
+        assertThat(admission).isNotNull();
+    }
+
+    @Test
+    void channelInputDoesNotBlockClose() throws Exception {
+        var fixture = fixture();
+        fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?", WorkspaceToolProfiles.SHELL);
+        var journal = new ExtensionRecordJournal(com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc),
+                "tenant", "workspace", fixture.session);
+        fixture.transactions.executeWithoutResult(ignored -> journal.open());
+        var accepted = fixture.promptCommit("channel-turn", false, "channel");
+        fixture.transactions.executeWithoutResult(ignored -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc)
+                .commit("tenant", fixture.session, "extension-writer-token-0123456789", accepted));
+        // channel stays a fire-and-forget source: its unsettled input must
+        // not block the lifecycle.
+        var admission = fixture.transactions.execute(ignored -> fixture.store.beginWorkspaceLifecycle(
+                "tenant", fixture.session, OperationKind.CLOSE, "owner", "a".repeat(64), "close-channel", "digest", true, 2));
+        assertThat(admission).isNotNull();
+    }
+
     @ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"expired-idle", "sealed-idle", "live-idle",
             "expired-pending", "expired-settled", "expired-other-settled", "expired-compacted", "missing-head", "stale-dispatch", "admitted",
@@ -866,6 +931,23 @@ class WorkspaceLifecycleStoreTest {
                     Base64.getEncoder().encodeToString(records.getBytes(StandardCharsets.UTF_8)), DigestUtils.sha256Hex(records),
                     List.of(new ManagedSessionStoreModels.CommitResource("late-input", "managed-session-input", 1, 2,
                             DigestUtils.sha256Hex("{}"), "e30=")));
+        }
+
+        /** The settlement revision chained after an unsettled promptCommit. */
+        ManagedSessionStoreModels.CommitTransactionRequest turnSettledCommit(String turn) {
+            ObjectNode terminal = json.createObjectNode().put("v", 1).put("sequence", 2)
+                    .put("eventId", "late-settled").put("kind", "turn.settled").put("occurredAt", 1_000);
+            terminal.putObject("sessionKey").put("tenantId", "tenant").put("workspaceId", "workspace")
+                    .put("sessionId", session);
+            terminal.putObject("payload").put("turnId", turn).put("outcome", "completed");
+            String records = "{\"subtype\":\"managed_session_event_v1\",\"managedSession\":" + terminal + "}\n"
+                    + "{\"subtype\":\"managed_session_commit_v1\"}\n";
+            return new ManagedSessionStoreModels.CommitTransactionRequest("workspace", "writer-extension", 1,
+                    2, 1, "late-transaction-settled", "completeTurn", "late-command-settled",
+                    DigestUtils.sha256Hex("late-command-settled"), 2, 2, 1, DigestUtils.sha256Hex("late-events-settled"),
+                    DigestUtils.sha256Hex("late-commit"), DigestUtils.sha256Hex("late-commit-settled"), 0, null, 2,
+                    Base64.getEncoder().encodeToString(records.getBytes(StandardCharsets.UTF_8)), DigestUtils.sha256Hex(records),
+                    List.of());
         }
 
         ObjectNode resource(String id, String kind, JsonNode body) throws Exception {

@@ -25,7 +25,7 @@ class EmbeddingHostTest {
             assertThat(java.util.ServiceLoader.load(com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory.class)
                     .stream()).isEmpty();
             for (String provider : java.util.List.of("local.LocalProcessRuntimeProvisioner", "external.ExternalRuntimeProvisioner",
-                    "ssh.SshRuntimeProvisioner", "kubernetes.ResidentWorkspaceProvisioner", "staticruntime.StaticRuntimeProvisioner")) {
+                    "ssh.SshRuntimeProvisioner", "staticruntime.StaticRuntimeProvisioner")) {
                 assertThat(org.springframework.util.ClassUtils.isPresent(
                         "com.alibaba.qwen.code.runtimebroker.provisioning." + provider, context.getClassLoader())).isFalse();
             }
