@@ -523,6 +523,22 @@ describe('native historical statistics', () => {
     ]);
   });
 
+  it('marks the compact header as the selected tab for the screen reader', () => {
+    mock.width = 20;
+    mock.height = 15;
+    render(<OpenTuiStatsDialog config={null} onClose={vi.fn()} />);
+    const compactTabs = mock.layouts.filter(
+      (node) =>
+        node.type === 'text' && String(node.props['id'] ?? '').endsWith('-tab'),
+    );
+    expect(compactTabs.length).toBeGreaterThan(0);
+    expect(
+      compactTabs.every(
+        (node) => node.props['id'] === 'screen-reader-selected-tab',
+      ),
+    ).toBe(true);
+  });
+
   it('resets the paged month when the range changes its window', () => {
     const view = render(<OpenTuiStatsDialog config={null} onClose={vi.fn()} />);
     const heatmapWindow = () =>
