@@ -28,9 +28,18 @@ export interface DebugLogger {
   info: (...args: unknown[]) => void;
   warn: (...args: unknown[]) => void;
   error: (...args: unknown[]) => void;
+  /**
+   * Best-effort WARN that reports whether this particular write reached the
+   * debug log file. Optional so logger mocks that only implement the base
+   * methods keep working.
+   */
+  warnWithDelivery?: (
+    onDelivery: (delivered: boolean) => void,
+    ...args: unknown[]
+  ) => void;
 }
 
-let ensureDebugDirPromise: Promise<void> | null = null;
+let ensureDebugDirPromise: Promise<boolean> | null = null;
 let ensuredDebugDirPath: string | null = null;
 let hasWriteFailure = false;
 let globalSession: DebugLogSession | null = null;
@@ -72,20 +81,21 @@ export function getActiveDebugSessionLogPath(): string | null {
     : Storage.getDebugLogPath(activeSessionId);
 }
 
-function ensureDebugDirExists(): Promise<void> {
+function ensureDebugDirExists(): Promise<boolean> {
   const debugDirPath = Storage.getGlobalDebugDir();
   if (!ensureDebugDirPromise || ensuredDebugDirPath !== debugDirPath) {
     ensuredDebugDirPath = debugDirPath;
     ensureDebugDirPromise = fs
       .mkdir(debugDirPath, { recursive: true })
-      .then(() => undefined)
+      .then(() => true)
       .catch(() => {
         hasWriteFailure = true;
         ensureDebugDirPromise = null;
         ensuredDebugDirPath = null;
+        return false;
       });
   }
-  return ensureDebugDirPromise ?? Promise.resolve();
+  return ensureDebugDirPromise ?? Promise.resolve(true);
 }
 
 function formatArgs(args: unknown[]): string {
@@ -125,8 +135,10 @@ function writeLog(
   level: LogLevel,
   tag: string | undefined,
   args: unknown[],
+  onDelivery?: (delivered: boolean) => void,
 ): void {
   if (!isDebugLogFileEnabled()) {
+    onDelivery?.(false);
     return;
   }
 
@@ -141,6 +153,13 @@ function writeLog(
   // logs right now, not just the last Config that was constructed.
   updateLatestDebugLogAlias(sessionId);
 
+  let reportedDelivery = false;
+  const reportDelivery = (delivered: boolean) => {
+    if (reportedDelivery) return;
+    reportedDelivery = true;
+    onDelivery?.(delivered);
+  };
+
   void ensureDebugDirExists()
     // Debug logs are best-effort diagnostic output: 1050+ call sites,
     // default-enabled, fire-and-forget. Per-line fsync would force
@@ -150,7 +169,20 @@ function writeLog(
     // degraded-mode UI. Kernel page-cache flush is sufficient here.
     // (JSONL session writes via writeLine/writeLineSync DO use
     // flush:true — those are the actual closure target.)
-    .then(() => fs.appendFile(logFilePath, line, 'utf8'))
+    .then((dirReady) => {
+      // A failed mkdir means this line cannot reach the debug log. Report
+      // that before the doomed append so retry state is not held in flight.
+      if (!dirReady) reportDelivery(false);
+      return fs.appendFile(logFilePath, line, 'utf8').then(
+        () => {
+          if (dirReady) reportDelivery(true);
+        },
+        () => {
+          hasWriteFailure = true;
+          if (dirReady) reportDelivery(false);
+        },
+      );
+    })
     .catch(() => {
       hasWriteFailure = true;
     });
@@ -304,6 +336,14 @@ export function createDebugLogger(tag?: string): DebugLogger {
       const session = getActiveSession();
       if (!session) return;
       writeLog(session, 'WARN', tag, args);
+    },
+    warnWithDelivery: (onDelivery, ...args) => {
+      const session = getActiveSession();
+      if (!session) {
+        onDelivery(false);
+        return;
+      }
+      writeLog(session, 'WARN', tag, args, onDelivery);
     },
     error: (...args: unknown[]) => {
       const session = getActiveSession();

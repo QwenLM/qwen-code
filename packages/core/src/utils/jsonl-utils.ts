@@ -339,9 +339,66 @@ export async function read<T = unknown>(
  * hot-path write (chat session JSONL appends).
  */
 const ensuredDirs = new Set<string>();
-const diagnosedTailReadFailures = new Set<string>();
+interface TailDiagnosticEntry {
+  attempts: number;
+  pending: boolean;
+  retained: boolean;
+}
+const diagnosedTailReadFailures = new Map<string, TailDiagnosticEntry>();
 const MAX_DIAGNOSED_TAIL_READ_FAILURES = 128;
+const MAX_TAIL_DIAGNOSTIC_DELIVERY_ATTEMPTS = 3;
 const tailProbeFlags = nodeConstants.O_RDONLY | (nodeConstants.O_NONBLOCK ?? 0);
+
+function reportUninspectableTail(
+  diagnosticKey: string,
+  filePath: string,
+  error: unknown,
+): void {
+  const previous = diagnosedTailReadFailures.get(diagnosticKey);
+  // An in-flight write already covers this key; a retained one needs no
+  // repeat, and a permanently broken sink must not be retried forever.
+  if (previous?.retained || previous?.pending) return;
+  if (previous && previous.attempts >= MAX_TAIL_DIAGNOSTIC_DELIVERY_ATTEMPTS) {
+    return;
+  }
+
+  const entry: TailDiagnosticEntry = {
+    attempts: (previous?.attempts ?? 0) + 1,
+    pending: true,
+    retained: false,
+  };
+  if (
+    !previous &&
+    diagnosedTailReadFailures.size >= MAX_DIAGNOSED_TAIL_READ_FAILURES
+  ) {
+    const oldest = diagnosedTailReadFailures.keys().next().value;
+    if (oldest !== undefined) diagnosedTailReadFailures.delete(oldest);
+  }
+  diagnosedTailReadFailures.set(diagnosticKey, entry);
+
+  const message = `Cannot inspect JSONL tail in ${filePath}; appending with a conservative newline separator:`;
+  const warnWithDelivery = debugLogger.warnWithDelivery;
+  if (warnWithDelivery) {
+    warnWithDelivery.call(
+      debugLogger,
+      (delivered) => {
+        // A stale completion must not replace state owned by a newer attempt.
+        if (diagnosedTailReadFailures.get(diagnosticKey) !== entry) return;
+        entry.pending = false;
+        entry.retained = delivered;
+      },
+      message,
+      error,
+    );
+    return;
+  }
+
+  // Compatibility loggers cannot report delivery, so preserve the previous
+  // at-most-once best-effort diagnostic instead of retrying blindly.
+  debugLogger.warn(message, error);
+  entry.pending = false;
+  entry.retained = true;
+}
 
 function canAppendWithoutTailInspection(
   filePath: string,
@@ -372,18 +429,11 @@ function canAppendWithoutTailInspection(
   if (!debugLogger.isEnabled() || !isDebugLogFileEnabled()) return true;
   const debugLogPath = getActiveDebugSessionLogPath();
   if (debugLogPath === null) return true;
-  const diagnosticKey = JSON.stringify([filePath, debugLogPath]);
-  if (!diagnosedTailReadFailures.has(diagnosticKey)) {
-    if (diagnosedTailReadFailures.size >= MAX_DIAGNOSED_TAIL_READ_FAILURES) {
-      const oldest = diagnosedTailReadFailures.values().next().value;
-      if (oldest !== undefined) diagnosedTailReadFailures.delete(oldest);
-    }
-    diagnosedTailReadFailures.add(diagnosticKey);
-    debugLogger.warn(
-      `Cannot inspect JSONL tail in ${filePath}; appending with a conservative newline separator:`,
-      error,
-    );
-  }
+  reportUninspectableTail(
+    JSON.stringify([filePath, debugLogPath]),
+    filePath,
+    error,
+  );
   return true;
 }
 

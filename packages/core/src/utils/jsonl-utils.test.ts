@@ -599,6 +599,31 @@ describe('writeLine / writeLineSync / write', () => {
         return openSync(...args);
       });
     };
+    const trackDebugAppends = (logPath: string) => {
+      const appendFile = fs.promises.appendFile.bind(fs.promises);
+      const attempts: Array<Promise<boolean>> = [];
+      const spy = vi.spyOn(fs.promises, 'appendFile').mockImplementation(((
+        ...args: Parameters<typeof fs.promises.appendFile>
+      ) => {
+        const attempt = appendFile(...args);
+        if (args[0] === logPath) {
+          attempts.push(
+            attempt.then(
+              () => true,
+              () => false,
+            ),
+          );
+        }
+        return attempt;
+      }) as typeof fs.promises.appendFile);
+      return { spy, attempts };
+    };
+    const settleDelivery = async (attempt: Promise<boolean>) => {
+      await attempt;
+      // The logger reports completion through another promise link; yield once
+      // so its callback updates the dedupe state before the next append.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    };
 
     it.each([
       {
@@ -691,6 +716,100 @@ describe('writeLine / writeLineSync / write', () => {
           );
         } finally {
           spy.mockRestore();
+        }
+      });
+    });
+
+    it('warns once after the blocked sink recovers at the same path', async () => {
+      const sessionId = `jsonl-tail-log-same-sink-${name}`;
+      await withDebugLog(sessionId, true, async () => {
+        const file = tmpFile('{"partial":');
+        const denySpy = denyTailProbe(
+          Object.assign(new Error('read denied'), { code: 'EACCES' }),
+        );
+        const runtime = tmpPath('same-sink-runtime');
+        fs.writeFileSync(runtime, 'not a directory');
+        Storage.setRuntimeBaseDir(runtime);
+        const logPath = Storage.getDebugLogPath(sessionId);
+        const { spy: appendSpy, attempts } = trackDebugAppends(logPath);
+
+        try {
+          await append(file, { stage: 'blocked' });
+          await vi.waitFor(() => {
+            expect(debugLogger.isDebugLoggingDegraded()).toBe(true);
+            expect(attempts).toHaveLength(1);
+          });
+          await settleDelivery(attempts[0]);
+          expect(tailWarnings(logPath, file)).toHaveLength(0);
+
+          fs.unlinkSync(runtime);
+          fs.mkdirSync(runtime);
+          expect(Storage.getDebugLogPath(sessionId)).toBe(logPath);
+
+          await append(file, { stage: 'recovered' });
+          await vi.waitFor(() => {
+            expect(attempts).toHaveLength(2);
+          });
+          await settleDelivery(attempts[1]);
+          expect(tailWarnings(logPath, file)).toHaveLength(1);
+
+          const marker = `${name}: positive sink health control`;
+          debugLogger.createDebugLogger('JSONL_TEST').warn(marker);
+          await vi.waitFor(() => {
+            expect(fs.readFileSync(logPath, 'utf8')).toContain(marker);
+          });
+          await settleDelivery(attempts[2]);
+
+          await append(file, { stage: 'deduplicated' });
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(attempts).toHaveLength(3);
+          expect(tailWarnings(logPath, file)).toHaveLength(1);
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"partial":\n{"stage":"blocked"}\n\n' +
+              '{"stage":"recovered"}\n\n{"stage":"deduplicated"}\n',
+          );
+        } finally {
+          appendSpy.mockRestore();
+          denySpy.mockRestore();
+        }
+      });
+    });
+
+    it('bounds tail diagnostics at three attempts for a broken sink', async () => {
+      const sessionId = `jsonl-tail-log-attempt-bound-${name}`;
+      await withDebugLog(sessionId, true, async () => {
+        const logPath = Storage.getDebugLogPath(sessionId);
+        fs.mkdirSync(logPath, { recursive: true });
+        const file = tmpFile('{"partial":');
+        const denySpy = denyTailProbe(
+          Object.assign(new Error('read denied'), { code: 'EACCES' }),
+        );
+        const { spy: appendSpy, attempts } = trackDebugAppends(logPath);
+
+        try {
+          for (let index = 0; index < 3; index++) {
+            await append(file, { index });
+            await vi.waitFor(() => {
+              expect(attempts).toHaveLength(index + 1);
+            });
+            await settleDelivery(attempts[index]);
+          }
+          expect(await Promise.all(attempts)).toEqual([false, false, false]);
+          expect(debugLogger.isDebugLoggingDegraded()).toBe(true);
+
+          for (let index = 3; index < 6; index++) {
+            await append(file, { index });
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            expect(attempts).toHaveLength(3);
+          }
+
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"partial":\n{"index":0}\n\n{"index":1}\n\n{"index":2}\n\n' +
+              '{"index":3}\n\n{"index":4}\n\n{"index":5}\n',
+          );
+        } finally {
+          appendSpy.mockRestore();
+          denySpy.mockRestore();
         }
       });
     });
