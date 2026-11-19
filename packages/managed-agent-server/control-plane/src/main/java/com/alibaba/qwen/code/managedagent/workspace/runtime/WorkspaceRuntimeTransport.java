@@ -87,6 +87,11 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     @Override
+    public CompletionStage<Void> reclaimMcp(RuntimeLease lease, RuntimeSession session) {
+        return delegate.reclaimMcp(lease, session);
+    }
+
+    @Override
     public CompletionStage<List<Map<String, Object>>> mcpDefinitions(RuntimeBindingRecord runtime) {
         RuntimeBindingRecord current = bindings.findById(runtime.getBindingId());
         if (current == null || current.getGeneration() != runtime.getGeneration()

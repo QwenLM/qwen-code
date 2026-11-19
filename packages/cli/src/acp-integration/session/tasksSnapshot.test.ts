@@ -622,6 +622,69 @@ describe('buildSessionTasksStatus workflow graph', () => {
     expect(entry?.dispatches[0]).not.toBe(source.dispatches?.[0]);
   });
 
+  it('carries the declared phases of live and saved runs, title and detail only', () => {
+    const meta = {
+      name: 'review-and-fix',
+      description: 'Review and fix',
+      phases: [
+        {
+          title: 'Review',
+          detail: 'One reviewer per dimension',
+          model: 'fast',
+        },
+        { title: 'Fix' },
+      ],
+    };
+    const live = {
+      kind: 'workflow',
+      id: 'wf_live',
+      runId: 'wf_live',
+      description: 'review-and-fix',
+      meta,
+      status: 'running',
+      startTime: 1_000,
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      recentLogs: [],
+      events: [],
+      pendingApprovals: [],
+    } as unknown as WorkflowTask;
+    const expected = [
+      { title: 'Review', detail: 'One reviewer per dimension' },
+      { title: 'Fix' },
+    ];
+
+    const snapshot = buildSessionTasksStatus(
+      'session-1',
+      configWith([], [live]),
+      2_000,
+      [workflowSnapshot({ meta })],
+      { includeWorkflows: true },
+    );
+
+    const byId = new Map(snapshot.tasks.map((task) => [task.id, task]));
+    expect(byId.get('wf_live')).toMatchObject({ plannedPhases: expected });
+    expect(byId.get('wf_saved')).toMatchObject({ plannedPhases: expected });
+    expect(
+      buildSessionTasksStatus(
+        'session-1',
+        configWith([]),
+        2_000,
+        [workflowSnapshot()],
+        {
+          includeWorkflows: true,
+        },
+      ).tasks[0],
+    ).not.toHaveProperty('plannedPhases');
+  });
+
   it('omits workflow tasks unless the caller opts in', () => {
     const snapshot = buildSessionTasksStatus(
       'session-1',

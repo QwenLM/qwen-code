@@ -3027,6 +3027,18 @@ describe('ui_telemetry timing frames', () => {
     });
   });
 
+  it('keeps the first visible offset separate from dispatch-based TTFT', () => {
+    expect(
+      timings(
+        timingMachine(),
+        telemetry('tel-1', {
+          ...API_RESPONSE_EVENT,
+          first_visible_offset_ms: 2544,
+        }),
+      ),
+    ).toMatchObject([{ ttftMs: 2344, firstVisibleOffsetMs: 2544 }]);
+  });
+
   it('carries the telemetry record as the emission source', () => {
     const emissions = [
       ...timingMachine().project(telemetry('tel-1', API_RESPONSE_EVENT)),
