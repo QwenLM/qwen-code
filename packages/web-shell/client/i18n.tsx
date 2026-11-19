@@ -1241,6 +1241,7 @@ const EN: Messages = {
   'approval.explanationFailed': 'Explanation failed',
   'approval.reExplain': 'Explain again',
   'approval.option.allowOnce': 'Yes, allow once',
+  'approval.option.approvalScopes': 'Approval options',
   'approval.option.allowOnceAndSwitchToDefault':
     'Allow once and switch to Default mode',
   'approval.option.restorePrevious': 'Yes, restore previous mode',
@@ -6651,7 +6652,8 @@ const ZH: Messages = {
   'approval.explanationThinking': '思考中…',
   'approval.explanationFailed': '解释失败',
   'approval.reExplain': '重新解释',
-  'approval.option.allowOnce': '是，允许一次',
+  'approval.option.allowOnce': '允许一次',
+  'approval.option.approvalScopes': '同意选项',
   'approval.option.allowOnceAndSwitchToDefault': '允许一次并切换到默认模式',
   'approval.option.restorePrevious': '是，恢复之前的模式',
   'approval.option.rejectOnce': '拒绝',

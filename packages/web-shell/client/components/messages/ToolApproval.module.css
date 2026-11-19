@@ -151,7 +151,7 @@
 
 .name {
   color: var(--foreground);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   line-height: 22px;
   min-width: 0;
@@ -162,7 +162,6 @@
 
 .desc {
   margin-top: 4px;
-  padding-inline-start: 24px;
   color: var(--muted-foreground);
   font-size: 12px;
   font-weight: 400;
@@ -177,8 +176,7 @@
 }
 
 .content {
-  margin-block: 10px 0;
-  margin-inline: 24px 0;
+  margin: 10px 0 0;
   padding: 6px 10px;
   background: var(--secondary);
   border-radius: 7px;
@@ -202,8 +200,7 @@
 .code {
   display: flex;
   flex-direction: column;
-  margin-block: 10px 0;
-  margin-inline: 24px 0;
+  margin: 10px 0 0;
   padding: 8px 12px;
   background: var(--secondary);
   border-radius: 7px;
@@ -278,16 +275,6 @@
   outline-offset: 2px;
 }
 
-.optionPlain {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--secondary-foreground);
-  font-size: 12px;
-  font-weight: 500;
-  box-shadow: none;
-}
-
 .optionSecondary {
   border-color: var(--border);
   background: var(--background);
@@ -302,6 +289,46 @@
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
+.splitAction {
+  display: inline-flex;
+  max-width: 100%;
+}
+
+.splitAction > .option:first-child {
+  border-start-end-radius: 0;
+  border-end-end-radius: 0;
+  white-space: normal;
+}
+
+.menuTrigger {
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.splitAction > .menuTrigger {
+  padding-inline: 8px;
+  border-start-start-radius: 0;
+  border-end-start-radius: 0;
+  border-inline-start-color: color-mix(
+    in srgb,
+    var(--primary-foreground) 30%,
+    transparent
+  );
+}
+
+.splitAction > .option:focus-visible {
+  position: relative;
+  z-index: 1;
+}
+
+.approvalMenu {
+  /* The floating approval sits 10 layers above the dialog backdrop. */
+  z-index: calc(var(--web-shell-dialog-backdrop-z-index, 50) + 11);
+  width: max-content;
+  max-width: min(22rem, var(--radix-dropdown-menu-content-available-width));
+  overflow-wrap: anywhere;
+}
+
 .option:hover {
   opacity: 0.85;
 }
@@ -311,18 +338,6 @@
   cursor: not-allowed;
 }
 
-.optionActive {
-  border-color: transparent;
-}
-
-.pointer {
-  display: none;
-}
-
-.num {
-  display: none;
-}
-
 .label {
   flex: 1;
 }
@@ -330,7 +345,6 @@
 @media (max-width: 760px) {
   .options {
     flex: 1 0 100%;
-    justify-content: flex-start;
     margin-inline-start: 0;
   }
 }

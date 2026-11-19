@@ -16,6 +16,17 @@
 /** The adapters the managed path enables. */
 export type ManagedChannelAdapter = 'email' | 'dingtalk' | 'github' | 'wecom';
 
+/**
+ * What a managed adapter can render beyond plain text segments (H5e of
+ * #12827). An adapter that declares `cards` renders one delivery as a single
+ * provider-native card and edits it per segment; an adapter that declares
+ * nothing keeps the text path. The declaration is a gate the adapter's own
+ * send path consumes, not a field the control plane reads.
+ */
+export interface ManagedChannelCapabilities {
+  cards: boolean;
+}
+
 /** The route policy pinned with the first binding of each route. */
 export interface ManagedChannelPolicy {
   adapter: ManagedChannelAdapter;
@@ -188,5 +199,12 @@ export interface ManagedChannelControlPlane {
     event: ManagedInboundEvent,
   ): Promise<{ inputId: string; sessionId: string; replayed: boolean }>;
   claimDeliveries(limit: number): Promise<ManagedClaimedDelivery[]>;
-  receipt(deliveryId: string, receipt: ManagedReceipt): Promise<void>;
+  /**
+   * Report one segment's outcome. Resolves to the control plane's settled
+   * delivery view (an object carrying `state`) when it provides one, so a
+   * persisting adapter can prune a completed delivery's card progress on
+   * `delivered` (H5e, R1-4); implementations that do not surface it resolve to
+   * undefined. Widened from void; callers that ignore the result are unchanged.
+   */
+  receipt(deliveryId: string, receipt: ManagedReceipt): Promise<unknown>;
 }

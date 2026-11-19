@@ -18,7 +18,10 @@ import {
   type MutableRefObject,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { useVirtualizer } from '@tanstack/react-virtual';
+import {
+  measureElement as measureVirtualElement,
+  useVirtualizer,
+} from '@tanstack/react-virtual';
 import type {
   DaemonContextMemoryDetail,
   DaemonSessionArtifact,
@@ -3804,8 +3807,12 @@ export const MessageList = memo(
     // (collapsed once complete). `displayItems` stays the full, pre-collapse
     // list — used only to locate rows hidden inside a collapsed turn — while
     // `visibleItems` is what actually renders.
-    const { collapseCompletedTurns, sourceReferences, assistantFeedback } =
-      useWebShellCustomization();
+    const {
+      collapseCompletedTurns,
+      sourceReferences,
+      assistantFeedback,
+      overscan = 15,
+    } = useWebShellCustomization();
     // `sourceSessionId` is the transcript's own session, which is what a mark
     // belongs to.
     const {
@@ -4772,7 +4779,25 @@ export const MessageList = memo(
       getScrollElement,
       getItemKey,
       estimateSize: estimateItemSize,
-      overscan: 20,
+      measureElement: (element, entry, instance) => {
+        if (
+          entry ||
+          !shouldFollow.current ||
+          restoringOlderHistoryRef.current ||
+          frozenViewportRef.current ||
+          !element.ownerDocument.defaultView?.ResizeObserver
+        ) {
+          return measureVirtualElement(element, entry, instance);
+        }
+        // When following the tail, let the observer measure newly mounted
+        // rows after layout instead of reading each height during commit.
+        const index = instance.indexFromElement(element);
+        return (
+          instance.itemSizeCache.get(getItemKey(index)) ??
+          estimateItemSize(index)
+        );
+      },
+      overscan,
       anchorTo: 'end',
       useFlushSync: false,
       useAnimationFrameWithResizeObserver: true,

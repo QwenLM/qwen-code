@@ -925,4 +925,63 @@ describe('LocalControlService', () => {
 
     expect(service.grantedExplicitCandidate).toBeUndefined();
   });
+
+  it('disable resolves over a paired upgraded peer that never answers close', async () => {
+    // closeAllConnections() does not reach sockets detached by an upgrade;
+    // without the tracked destroy in close(), disable() hangs forever on a
+    // non-reading paired ACP peer. The upgrade is accepted raw so the pin
+    // does not depend on the ACP transport.
+    const port = await unusedPort();
+    const service = new LocalControlService({
+      app: express(),
+      credentials: new CredentialStore(),
+      originAllowlist: new MutableOriginAllowlist({
+        allowAny: false,
+        origins: new Set(),
+      }),
+      attachWebSocket: (server) => {
+        server.on('upgrade', (_req, socket) => {
+          socket.write(
+            'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n',
+          );
+        });
+      },
+      detachWebSocket: () => {},
+      getPort: () => port,
+    });
+    await service.enable();
+    const client = await new Promise<NetSocket>((resolve, reject) => {
+      const sock = netConnect(port, '127.0.0.1', () => {
+        sock.write(
+          'GET /acp HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n',
+        );
+      });
+      sock.once('data', () => resolve(sock));
+      sock.on('error', reject);
+    });
+    try {
+      let timer: NodeJS.Timeout | undefined;
+      const bounded = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                'disable() did not resolve over a non-answering upgraded peer',
+              ),
+            ),
+          5_000,
+        );
+      });
+      await Promise.race([service.disable(), bounded]);
+      clearTimeout(timer);
+    } finally {
+      client.destroy();
+      // Bounded: on a mutant that hangs disable(), an unbounded await here
+      // would mask the explicit race rejection with a test timeout.
+      await Promise.race([
+        service.disable(),
+        new Promise<void>((resolve) => setTimeout(resolve, 1_000)),
+      ]).catch(() => undefined);
+    }
+  }, 10_000);
 });

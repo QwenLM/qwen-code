@@ -526,6 +526,16 @@ function touchEvent(
 }
 
 describe('EnhancedMarkdownTable', () => {
+  it('avoids scroll writes when mounting a table without a saved position', () => {
+    const setScrollTop = vi.spyOn(Element.prototype, 'scrollTop', 'set');
+    const setScrollLeft = vi.spyOn(Element.prototype, 'scrollLeft', 'set');
+    const container = renderTable();
+    const scroller = container.querySelector<HTMLElement>('[tabindex="0"]')!;
+    expect(scroller).not.toBeNull();
+    expect(setScrollTop.mock.contexts).not.toContain(scroller);
+    expect(setScrollLeft.mock.contexts).not.toContain(scroller);
+  });
+
   it('preserves table state and scroll position through fullscreen and restores focus', async () => {
     const container = renderTable();
     click(button(container, 'Sort by Score'));
