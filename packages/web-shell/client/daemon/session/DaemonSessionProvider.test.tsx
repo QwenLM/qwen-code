@@ -13009,6 +13009,123 @@ describe('DaemonSessionProvider', () => {
     expect(settlements).toEqual([]);
   });
 
+  it.each(['success', 'both fail', 'replay read fails'] as const)(
+    'keeps the Workflow catalog current through SSE delta replay (%s)',
+    async (reads) => {
+      const disconnect = createDeferred<void>();
+      const backlogDelivered = createDeferred<void>();
+      const finishReplay = createDeferred<void>();
+      const catalog = [
+        { name: 'before', source: 'project' as const },
+        { name: 'after', source: 'project' as const },
+      ];
+      const status = {
+        v: 1 as const,
+        sessionId: 'session-1',
+        availableCommands: [],
+        availableSkills: [],
+        workflowsEnabled: true,
+        savedWorkflows: catalog,
+      };
+      const latest = [
+        ...catalog,
+        { name: 'during-replay', source: 'project' as const },
+      ];
+      const supportedCommands = vi.fn(async () => ({
+        ...status,
+        savedWorkflows: latest,
+      }));
+      supportedCommands.mockResolvedValueOnce({
+        ...status,
+        workflowsEnabled: false,
+        savedWorkflows: [],
+      });
+      if (reads === 'both fail') {
+        supportedCommands.mockRejectedValueOnce(
+          new Error('Reconnect read failed'),
+        );
+      } else {
+        supportedCommands.mockResolvedValueOnce(status);
+      }
+      if (reads !== 'success') {
+        supportedCommands.mockRejectedValueOnce(
+          new Error('Replay read failed'),
+        );
+      }
+      const events = vi.fn(async function* (
+        opts: { signal?: AbortSignal } = {},
+      ): AsyncGenerator<DaemonEvent> {
+        if (events.mock.calls.length === 1) {
+          await disconnect.promise;
+          throw new Error('simulated SSE disconnect');
+        }
+        yield {
+          id: 6,
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionId: status.sessionId,
+            update: {
+              sessionUpdate: 'available_commands_update',
+              availableCommands: [],
+              _meta: {
+                workflowStatus: {
+                  workflowsEnabled: true,
+                  savedWorkflows: [catalog[0]],
+                },
+              },
+            },
+          },
+        };
+        backlogDelivered.resolve();
+        await finishReplay.promise;
+        yield { v: 1, type: 'replay_complete', data: { lastEventId: 6 } };
+        await untilAborted(opts.signal);
+      });
+      sdkMocks.sessions.push(
+        createMockSession({
+          sessionId: status.sessionId,
+          lastEventId: 5,
+          supportedCommands,
+          events,
+        }),
+      );
+      let connection: DaemonConnectionState | undefined;
+      function Harness() {
+        connection = useDaemonConnection();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      expect(connection?.supportedCommands?.workflowsEnabled).toBe(false);
+
+      await act(async () => {
+        disconnect.resolve();
+        await backlogDelivered.promise;
+      });
+      expect(connection?.supportedCommands?.savedWorkflows).toEqual(
+        reads === 'both fail' ? [] : catalog,
+      );
+
+      await act(async () => {
+        finishReplay.resolve();
+        await flushPromises();
+      });
+      expect(supportedCommands).toHaveBeenCalledTimes(3);
+      const expected = {
+        success: latest,
+        'both fail': [catalog[0]],
+        'replay read fails': catalog,
+      };
+      expect(connection?.supportedCommands?.savedWorkflows).toEqual(
+        expected[reads],
+      );
+    },
+  );
+
   it('does not let replay state events overwrite fresh connection status', async () => {
     sdkMocks.workspaceProviders.mockResolvedValueOnce({
       v: 1,

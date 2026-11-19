@@ -4047,6 +4047,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             sessionConfigGenerationRef.current.get(activeSession) ===
               configState;
           let acceptingConfig = activeSession.lastEventId === undefined;
+          let replayedWorkflowCommands: DaemonEvent | undefined;
           let initialConfigReadRequested = false;
           const refreshConfig = () => {
             if (!isConfigOwner()) return;
@@ -4117,7 +4118,60 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             if (sessionRef.current !== activeSession) {
               break;
             }
-            if (event.type === 'replay_complete') acceptingConfig = true;
+            if (event.type === 'replay_complete') {
+              acceptingConfig = true;
+              if (replayedWorkflowCommands) {
+                const fallback = replayedWorkflowCommands;
+                replayedWorkflowCommands = undefined;
+                const snapshot = connectionRef.current.supportedCommands;
+                const applyCurrent: Dispatch<
+                  SetStateAction<DaemonConnectionState>
+                > = (update) =>
+                  setConnectionSynchronous((current) => {
+                    if (
+                      !isConfigOwner() ||
+                      current.sessionId !== activeSession.sessionId ||
+                      current.supportedCommands !== snapshot
+                    ) {
+                      return current;
+                    }
+                    return typeof update === 'function'
+                      ? update(current)
+                      : update;
+                  });
+                void withActionTimeout(
+                  activeSession.supportedCommands(),
+                  'Refresh commands after replay timed out',
+                ).then(
+                  (status) => {
+                    if (status.sessionId !== activeSession.sessionId) return;
+                    applyCurrent((current) => ({
+                      ...current,
+                      ...mapSupportedCommands(status),
+                      supportedCommands: status,
+                    }));
+                  },
+                  () => {
+                    if (supportedCommands === undefined) {
+                      updateConnectionFromDaemonEvent(fallback, applyCurrent);
+                    }
+                  },
+                );
+              }
+            }
+            const replayUpdate =
+              !acceptingConfig &&
+              event.type === 'session_update' &&
+              isRecord(event.data)
+                ? event.data['update']
+                : undefined;
+            // Workflow snapshots in the backlog may predate the commands GET.
+            const isReplayedWorkflowCommands =
+              isRecord(replayUpdate) &&
+              replayUpdate['sessionUpdate'] === 'available_commands_update' &&
+              isRecord(replayUpdate['_meta']) &&
+              isRecord(replayUpdate['_meta']['workflowStatus']);
+            if (isReplayedWorkflowCommands) replayedWorkflowCommands = event;
             requestInitialConfigRead();
             const configUpdate = getConfigOptionsUpdate(event);
             if (configUpdate && acceptingConfig && isConfigOwner()) {
@@ -4251,6 +4305,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   if (sessionRef.current !== activeSession) return;
                   setConnectionSynchronous(update);
                 },
+                { updateConnection: !isReplayedWorkflowCommands },
               );
               const uiEvents = filterDaemonUiEventsForTranscript(
                 event,

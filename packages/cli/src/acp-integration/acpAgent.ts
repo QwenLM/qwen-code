@@ -270,6 +270,7 @@ import { getSubscriptionStartupFallbackModel } from '../config/modelProvidersSco
 import {
   getOperatorTrustSettings,
   loadSettings,
+  readSettingsSnapshot,
   reloadEnvironment,
   SettingScope,
 } from '../config/settings.js';
@@ -7903,24 +7904,49 @@ class QwenAgent implements Agent {
     after: PermissionRuleSet,
     settingScope: SettingScope,
     settingsCwd: string,
+    requestSettings: LoadedSettings,
     strict = false,
   ): Promise<void> {
     const workflowChanges: Array<{ session: Session; wasEnabled: boolean }> =
       [];
-    const effectiveRulesByWorkspace = new Map<string, PermissionRuleSet>();
-    const getEffectiveRules = (workspace: string): PermissionRuleSet => {
-      const cached = effectiveRulesByWorkspace.get(workspace);
-      if (cached) return cached;
-      const { merged } = this.loadRequestSettings(workspace);
-      const rules = readPermissionRuleSet(merged);
-      rules.allow.push(
-        ...normalizeDisabledToolList(merged.tools?.allowed),
-        ...(this.argv.allowedTools ?? []),
-      );
-      rules.deny.push(
-        ...normalizeDisabledToolList(merged.tools?.exclude),
-        ...(this.argv.excludeTools ?? []),
-      );
+    const effectiveRulesByWorkspace = new Map<
+      string,
+      PermissionRuleSet | undefined
+    >();
+    const getEffectiveRules = (workspace: string) => {
+      if (effectiveRulesByWorkspace.has(workspace)) {
+        return effectiveRulesByWorkspace.get(workspace);
+      }
+      let rules: PermissionRuleSet | undefined;
+      try {
+        const workspaceTrusted =
+          settingScope === SettingScope.Workspace
+            ? requestSettings.isTrusted
+            : (isWorkspaceTrusted(
+                getOperatorTrustSettings(requestSettings),
+                undefined,
+                workspace,
+              ).isTrusted ?? false);
+        const { merged } = readSettingsSnapshot(workspace, {
+          environment: process.env,
+          workspaceTrusted,
+        });
+        rules = readPermissionRuleSet(merged);
+        rules.allow.push(
+          ...normalizeDisabledToolList(merged.tools?.allowed),
+          ...(this.argv.allowedTools ?? []),
+        );
+        rules.deny.push(
+          ...normalizeDisabledToolList(merged.tools?.exclude),
+          ...(this.argv.excludeTools ?? []),
+        );
+      } catch (error) {
+        if (strict) throw error;
+        debugLogger.warn(
+          'Could not read permission rules for a live session:',
+          error,
+        );
+      }
       effectiveRulesByWorkspace.set(workspace, rules);
       return rules;
     };
@@ -7956,21 +7982,26 @@ class QwenAgent implements Agent {
         try {
           const workflowsWereEnabled =
             ruleType === 'deny' && config.isWorkflowsEnabled();
-          const effective = new Set(
-            getEffectiveRules(workspace)[ruleType].map((rule) => rule.trim()),
-          );
-          for (const rule of removed) {
-            // Another scope, a legacy setting, or argv may still supply it.
-            const normalized = rule.trim();
-            if (!effective.has(normalized)) {
-              while (pm.removePersistentRule(normalized, ruleType)) {
-                // Different settings entries can parse to the same string.
-              }
+          if (settingScope === SettingScope.User || requestSettings.isTrusted) {
+            for (const rule of added) {
+              pm.addPersistentRule(rule, ruleType);
             }
           }
-          for (const rule of added) {
-            if (effective.has(rule.trim())) {
-              pm.addPersistentRule(rule, ruleType);
+          if (removed.length > 0) {
+            const effective = getEffectiveRules(workspace);
+            // Preserve existing restrictions if their other sources can't be read.
+            if (effective || ruleType === 'allow') {
+              const retained = new Set(
+                effective?.[ruleType].map((rule) => rule.trim()),
+              );
+              for (const rule of removed) {
+                const normalized = rule.trim();
+                if (!retained.has(normalized)) {
+                  while (pm.removePersistentRule(normalized, ruleType)) {
+                    // Different settings entries can parse to the same string.
+                  }
+                }
+              }
             }
           }
           if (
@@ -11518,6 +11549,7 @@ class QwenAgent implements Agent {
                 readPermissionRuleSet(this.settings.forScope(scope).settings),
                 scope,
                 changeCwd,
+                this.settings,
                 true,
               );
               break;
@@ -15946,6 +15978,7 @@ class QwenAgent implements Agent {
           readPermissionRuleSet(settings.forScope(settingScope).settings),
           settingScope,
           settingsCwd,
+          settings,
         );
         return buildPermissionSettings(settings) as unknown as Record<
           string,

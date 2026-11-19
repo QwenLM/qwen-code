@@ -1048,21 +1048,25 @@ vi.mock('./runtimeOutputDirContext.js', () => ({
 vi.mock('./service/filesystem.js', () => ({
   AcpFileSystemService: vi.fn(),
 }));
-vi.mock('../config/settings.js', () => ({
-  getOperatorTrustSettings: (settings: LoadedSettings) => {
-    let enabled: boolean | undefined;
-    for (const scope of ['SystemDefaults', 'User', 'System']) {
-      enabled =
-        settings.forScope?.(
-          scope as import('../config/settings.js').SettingScope,
-        )?.settings.security?.folderTrust?.enabled ?? enabled;
-    }
-    return { security: { folderTrust: { enabled } } };
-  },
-  SettingScope: { User: 'User', Workspace: 'Workspace' },
-  loadSettings: vi.fn(),
-  reloadEnvironment: vi.fn(() => ({ updatedKeys: [], removedKeys: [] })),
-}));
+vi.mock('../config/settings.js', () => {
+  const loadSettings = vi.fn();
+  return {
+    getOperatorTrustSettings: (settings: LoadedSettings) => {
+      let enabled: boolean | undefined;
+      for (const scope of ['SystemDefaults', 'User', 'System']) {
+        enabled =
+          settings.forScope?.(
+            scope as import('../config/settings.js').SettingScope,
+          )?.settings.security?.folderTrust?.enabled ?? enabled;
+      }
+      return { security: { folderTrust: { enabled } } };
+    },
+    SettingScope: { User: 'User', Workspace: 'Workspace' },
+    loadSettings,
+    readSettingsSnapshot: vi.fn((cwd: string) => loadSettings(cwd)),
+    reloadEnvironment: vi.fn(() => ({ updatedKeys: [], removedKeys: [] })),
+  };
+});
 // Passthrough: the real cache would serve the first mockReturnValue to every
 // later same-cwd call, breaking tests that re-point loadSettings per call.
 vi.mock('../config/settings-cache.js', async () => {
@@ -1281,6 +1285,7 @@ import type {
 import { AgentSideConnection, RequestError } from '@agentclientprotocol/sdk';
 import {
   loadSettings,
+  readSettingsSnapshot,
   reloadEnvironment,
   SettingScope,
 } from '../config/settings.js';
@@ -22519,8 +22524,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('does not fan out a workspace-scoped setRules delta to sessions in other workspaces', async () => {
+  it.each([true, false])('scopes live rules (trusted=%s)', async (trusted) => {
     const settings = makeCoreSettings();
+    Object.assign(settings, { isTrusted: trusted });
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
 
     const worktreeRoot = '/work/project/.qwen/worktrees/slug-a';
@@ -22566,11 +22572,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       rules: ['Bash(git push:*)'],
     });
 
-    // The requesting session's manager is synced; the other workspace's is not.
-    expect(requestingPm.addPersistentRule).toHaveBeenCalledWith(
-      'Bash(git push:*)',
-      'allow',
-    );
+    if (trusted) {
+      expect(requestingPm.addPersistentRule).toHaveBeenCalledWith(
+        'Bash(git push:*)',
+        'allow',
+      );
+    } else {
+      expect(requestingPm.addPersistentRule).not.toHaveBeenCalled();
+    }
     expect(otherPm.addPersistentRule).not.toHaveBeenCalled();
     expect(otherPm.removePersistentRule).not.toHaveBeenCalled();
 
@@ -22691,6 +22700,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       permissions: { allow: [], ask: [], deny: [] },
     };
     const settings = {
+      isTrusted: true,
       get merged() {
         return mergedSettings;
       },
@@ -23936,6 +23946,39 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'ShellTool(git diff)',
       'allow',
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('applies a new user deny while preserving restrictions whose sources cannot be read', async () => {
+    const settings = makeCoreSettings();
+    settings.setValue(SettingScope.User, 'permissions.deny', ['ReadFile']);
+    const permissionManager = {
+      addPersistentRule: vi.fn(),
+      removePersistentRule: vi.fn(),
+    };
+    const innerConfig = await setupSessionMocks('test-session-id');
+    Object.assign(innerConfig, {
+      getPermissionManager: () => permissionManager,
+    });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    vi.mocked(readSettingsSnapshot).mockImplementationOnce(() => {
+      throw new Error('Unreadable workspace settings');
+    });
+
+    await agent.extMethod('qwen/permissions/setRules', {
+      scope: 'user',
+      ruleType: 'deny',
+      rules: ['Workflow'],
+    });
+
+    expect(permissionManager.addPersistentRule).toHaveBeenCalledWith(
+      'Workflow',
+      'deny',
+    );
+    expect(permissionManager.removePersistentRule).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
