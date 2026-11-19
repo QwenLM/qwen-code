@@ -1546,6 +1546,7 @@ function withPostToolBatchStop(
 interface CoreToolSchedulerOptions {
   onManagedRuntimeOutcomeUnknown?: (
     error: ManagedRuntimeOutcomeUnknownError,
+    callId: string,
   ) => void;
   onManagedRuntimeBatchFailed?: (
     error: ManagedRuntimeOutcomeUnknownError,
@@ -5811,7 +5812,7 @@ export class CoreToolScheduler {
         this.schedulerOptions.onManagedRuntimeOutcomeUnknown
       ) {
         this.finalizeToolSpan(callId, true);
-        this.schedulerOptions.onManagedRuntimeOutcomeUnknown(error);
+        this.schedulerOptions.onManagedRuntimeOutcomeUnknown(error, callId);
         throw error;
       }
       this.setStatusInternal(

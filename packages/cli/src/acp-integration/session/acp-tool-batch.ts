@@ -14,6 +14,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
+import type { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { createToolLifecycle } from '@qwen-code/qwen-code-core/telemetry/tool-lifecycle.js';
 import {
   canonicalToolName,
@@ -218,8 +219,9 @@ export async function runAcpToolBatch(
   };
   const latest = new Map<string, ToolCall>();
   const runningRuntimeCalls = new Set<string>();
+  let runtimeSettlement: Promise<void> | undefined;
   let resolveRuntimeSettlement: (() => void) | undefined;
-  let runtimeBatchFailed = false;
+  let runtimeBatchError: ManagedRuntimeOutcomeUnknownError | undefined;
   const answered = new WeakSet<ToolCallConfirmationDetails>();
   // The scheduler runs the batch from the last answer's `onConfirm`, so an
   // approval runs beside the updates, not in their queue.
@@ -400,12 +402,25 @@ export async function runAcpToolBatch(
     }
   };
 
-  const getPendingToolSettlement = () =>
-    runningRuntimeCalls.size > 0 || runtimeBatchFailed
-      ? new Promise<void>((resolve) => {
-          resolveRuntimeSettlement = resolve;
-        })
-      : undefined;
+  const getPendingToolSettlement = () => {
+    if (runningRuntimeCalls.size === 0) {
+      return runtimeBatchError && Promise.reject(runtimeBatchError);
+    }
+    runtimeSettlement ??= new Promise<void>((resolve) => {
+      resolveRuntimeSettlement = resolve;
+    });
+    return runtimeSettlement.then(() => {
+      if (runtimeBatchError) throw runtimeBatchError;
+    });
+  };
+
+  const markRuntimeCallSettled = (callId: string) => {
+    runningRuntimeCalls.delete(callId);
+    if (runningRuntimeCalls.size !== 0) return;
+    resolveRuntimeSettlement?.();
+    runtimeSettlement = undefined;
+    resolveRuntimeSettlement = undefined;
+  };
 
   const settle = ({
     request,
@@ -580,10 +595,11 @@ export async function runAcpToolBatch(
       toolSignal: tools.signal,
       ...(managed && { getPendingToolSettlement }),
       executor: createSchedulerExecutor(config, {
-        onManagedRuntimeOutcomeUnknown: (error) => {
-          runtimeBatchFailed = true;
+        onManagedRuntimeOutcomeUnknown: (error, callId) => {
+          runtimeBatchError ??= error;
           closed = true;
           tools.abort(error);
+          markRuntimeCallSettled(callId);
         },
         onToolCallsUpdate,
         outputUpdateHandler,
@@ -593,13 +609,11 @@ export async function runAcpToolBatch(
           if (state) state.execution = { status, durationMs };
         },
         ...(managed && {
+          getPendingToolSettlement,
           onManagedToolExecutionSettled: (callId) => {
             const state = states.get(callId);
             if (state) state.runtimeSettled = true;
-            runningRuntimeCalls.delete(callId);
-            if (runningRuntimeCalls.size === 0 && !runtimeBatchFailed) {
-              resolveRuntimeSettlement?.();
-            }
+            markRuntimeCallSettled(callId);
           },
         }),
         onToolResultFullTurnModel: options.onFullTurnModel,

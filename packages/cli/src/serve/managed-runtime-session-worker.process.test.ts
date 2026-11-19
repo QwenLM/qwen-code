@@ -621,9 +621,7 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     expect(modelRequests).toHaveLength(requestsBefore);
   }, 120_000);
 
-  it('cancels after Runtime settlement without publishing pending post-tool output', async () => {
-    sourceEnv['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = 'acp=1';
-    sourceEnv['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] = 'acp=1';
+  async function holdReadFilePostHook() {
     const ready = path.join(workspace, 'hook.ready');
     const release = path.join(workspace, 'hook.release');
     const settings = JSON.parse(await readFile(settingsFile, 'utf8')) as object;
@@ -648,6 +646,13 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
         },
       }),
     );
+    return { ready, release };
+  }
+
+  it('cancels after Runtime settlement without publishing pending post-tool output', async () => {
+    sourceEnv['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = 'acp=1';
+    sourceEnv['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] = 'acp=1';
+    const { ready, release } = await holdReadFilePostHook();
     const sessionId = await newSession();
     const file = path.join(workspace, 'input.txt');
     const knownOutput = 'content already returned by Runtime';
@@ -710,6 +715,77 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     expect((await prompt(sessionId)).stopReason).toBe('end_turn');
     expectCancelledToolMessage();
   }, 120_000);
+
+  it.each([
+    { mode: 'kernel cancellation', eventBus: 'acp=1', cancel: true },
+    { mode: 'kernel error', eventBus: 'acp=1', cancel: false },
+    { mode: 'shared error', eventBus: '0', cancel: false },
+  ])(
+    'reports an unknown outcome with a settled sibling still in a post-tool hook ($mode)',
+    async ({ eventBus, cancel }) => {
+      sourceEnv['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = 'acp=1';
+      sourceEnv['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] = eventBus;
+      const { ready, release } = await holdReadFilePostHook();
+      const sessionId = await newSession();
+      const marker = path.join(workspace, 'worker.txt');
+      turns.push(
+        {
+          toolCalls: [
+            { name: 'run_shell_command', args: recordWorker(marker) },
+          ],
+        },
+        { text: 'READY' },
+      );
+      expect((await prompt(sessionId)).stopReason).toBe('end_turn');
+      const worker = await readWorker(marker);
+      const fifo = path.join(workspace, 'wait.fifo');
+      execFileSync('mkfifo', [fifo]);
+      const file = path.join(workspace, 'fixture.txt');
+      await writeFile(file, 'fixture');
+      turns.push({
+        toolCalls: [
+          { name: 'read_file', args: { file_path: file } },
+          {
+            name: 'run_shell_command',
+            args: {
+              command: `cat ${JSON.stringify(fifo)}`,
+              description: 'Wait for the fixture',
+            },
+          },
+        ],
+      });
+      const running = prompt(sessionId);
+      const rejected = vi.fn();
+      void running.catch(rejected);
+      const unknownOutcome = {
+        data: { errorKind: 'managed_runtime_outcome_unknown' },
+      };
+      try {
+        await waitFor(() => existsSync(ready) || undefined);
+        await waitFor(
+          () =>
+            descendantArgs(worker.pid).some((args) => args.includes(fifo)) ||
+            undefined,
+        );
+        process.kill(worker.pid, 'SIGKILL');
+        const cancelling = cancel
+          ? bridge!.cancelSession(sessionId)
+          : undefined;
+        void cancelling?.catch(() => undefined);
+        const error = await waitFor(() => rejected.mock.calls[0]?.[0], 13_000);
+        expect(error).toMatchObject(unknownOutcome);
+        await cancelling;
+        const requestsBefore = modelRequests.length;
+        await expect(prompt(sessionId)).rejects.toMatchObject(unknownOutcome);
+        expect(modelRequests).toHaveLength(requestsBefore);
+      } finally {
+        if (isAlive(worker.pid)) process.kill(worker.pid, 'SIGKILL');
+        await writeFile(release, '');
+        await running.catch(() => undefined);
+      }
+    },
+    120_000,
+  );
 
   it('stops the worker and its command when the Managed child dies', async () => {
     const sessionId = await newSession();

@@ -2976,7 +2976,10 @@ describe('CoreToolScheduler', () => {
       await vi.waitFor(() => expect(onTimeout).toHaveBeenCalled());
       loseOutcome.resolve();
       await vi.waitFor(() =>
-        expect(onManagedRuntimeOutcomeUnknown).toHaveBeenCalledWith(unknown),
+        expect(onManagedRuntimeOutcomeUnknown).toHaveBeenCalledWith(
+          unknown,
+          'first',
+        ),
       );
       expect(onManagedRuntimeBatchFailed).not.toHaveBeenCalled();
       settleSibling.resolve();
@@ -3050,7 +3053,10 @@ describe('CoreToolScheduler', () => {
       await checkingThird.promise;
       loseOutcome.resolve();
       await vi.waitFor(() =>
-        expect(onManagedRuntimeOutcomeUnknown).toHaveBeenCalledWith(unknown),
+        expect(onManagedRuntimeOutcomeUnknown).toHaveBeenCalledWith(
+          unknown,
+          'second',
+        ),
       );
       admitThird.resolve(true);
       await vi.waitFor(() =>
