@@ -12,6 +12,7 @@ import express, { type Request, type Response } from 'express';
 import request from 'supertest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionService, type ChatRecord } from '@qwen-code/qwen-code-core';
+import { parseLineTolerantWithIntegrity } from '@qwen-code/qwen-code-core/utils/jsonl-utils.js';
 import {
   appendPromptLedgerRecord,
   type PromptLedgerRecord,
@@ -358,6 +359,47 @@ describe('POST /sessions/recovery', () => {
       .send({ workspaces: [fixture.runtime.workspaceId] });
 
     expect(response.body.workspaces[0].items).toEqual([]);
+  });
+
+  it('keeps a source-less session with canonical glued tail records', async () => {
+    const fixture = makeFixture();
+    const ordinary = randomUUID();
+    fixture.seed(ordinary, [inFlight('p1', Date.now())]);
+    const transcriptPath = path.join(
+      path.dirname(fixture.sessionService.getPromptLedgerPath(ordinary)),
+      `${ordinary}.jsonl`,
+    );
+    const serialized = [0, 1].map((index) =>
+      JSON.stringify({
+        uuid: `canonical-glued-${index}`,
+        parentUuid: null,
+        sessionId: ordinary,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: fixture.runtime.workspaceCwd,
+        version: '1.0.0',
+        message: {
+          role: 'user',
+          parts: [{ text: `canonical glued history ${index}` }],
+        },
+      }),
+    );
+    const gluedLine = serialized.join('');
+    const parsed = parseLineTolerantWithIntegrity(gluedLine, transcriptPath);
+    expect(parsed.complete).toBe(true);
+    expect(parsed.records).toHaveLength(2);
+    writeFileSync(transcriptPath, `${gluedLine}\n`, {
+      encoding: 'utf8',
+      flag: 'a',
+    });
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery')
+      .send({ workspaces: [fixture.runtime.workspaceId] });
+
+    expect(response.body.workspaces[0].items).toEqual([
+      expect.objectContaining({ sessionId: ordinary }),
+    ]);
   });
 
   it('omits a session when a torn record spans the whole tail window', async () => {

@@ -112,9 +112,12 @@ record is inside that bounded tail; an `in_flight` record older than the tail
 is not recovered by this scan (fail closed).
 
 When creation metadata has no source, the fallback also requires every
-non-empty JSONL record in the bounded transcript tail to parse. An invalid or
-torn record, including one truncated before the `session_source` subtype, is
-indeterminate metadata rather than evidence of an ordinary source-less session.
+non-empty physical line in the bounded transcript tail to be fully recoverable
+under the same `parseLineTolerantWithIntegrity` semantics as the canonical
+reader. Complete `}{`-glued object records therefore remain recoverable. An
+invalid or torn record, including one truncated before the `session_source`
+subtype, is indeterminate metadata rather than evidence of an ordinary
+source-less session.
 If the window contains no newline and consists solely of a clipped record
 fragment, discarding that fragment would leave no evidence to inspect; the
 fallback treats this case as indeterminate too.

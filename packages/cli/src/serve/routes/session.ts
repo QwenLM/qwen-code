@@ -17,6 +17,7 @@ import {
   withDaemonSpan,
 } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import { GENERATED_UI_CARD_ID_PATTERN } from '@qwen-code/qwen-code-core/services/generated-ui-state.js';
+import { parseLineTolerantWithIntegrity } from '@qwen-code/qwen-code-core/utils/jsonl-utils.js';
 import { writeSessionBranchSidecar } from '@qwen-code/qwen-code-core/services/session-branch-sidecar.js';
 import {
   APPROVAL_MODES,
@@ -11451,10 +11452,9 @@ export function registerSessionRoutes(
         }
       }
       for (const line of lines) {
-        if (line === '') continue;
-        try {
-          JSON.parse(line);
-        } catch {
+        const trimmed = line.trim();
+        if (trimmed === '') continue;
+        if (!parseLineTolerantWithIntegrity(trimmed, filePath).complete) {
           return false;
         }
       }
