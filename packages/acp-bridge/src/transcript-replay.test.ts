@@ -2817,6 +2817,8 @@ describe('createTranscriptReplayMachine', () => {
       'agent_message_chunk',
       'agent_message_chunk',
     ]);
+    expect(assistant[0]?._meta?.['source']).toBe('history_gap');
+    expect(assistant[1]?._meta?.['source']).toBeUndefined();
     expect(
       assistant
         .slice(0, 2)

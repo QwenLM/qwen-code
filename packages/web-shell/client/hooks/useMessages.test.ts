@@ -422,6 +422,30 @@ describe('transcriptBlocksToLocalizedMessages', () => {
     ).toBeUndefined();
   });
 
+  it('does not append a top-level reply to a streaming orphaned subagent row', () => {
+    const t = (key: string) => key;
+    const store = createDaemonTranscriptStore();
+    store.dispatch({
+      type: 'assistant.text.delta',
+      text: 'Subagent output',
+      parentToolCallId: 'missing-call',
+    });
+    store.dispatch({ type: 'assistant.text.delta', text: ' ' });
+    const { blocks } = store.getSnapshot();
+    const messages = transcriptBlocksToLocalizedMessages(blocks, t);
+    expect(messages).toMatchObject([{ content: 'Subagent output' }]);
+
+    store.dispatch({ type: 'assistant.text.delta', text: 'Model reply' });
+    const nextBlocks = store.getSnapshot().blocks;
+    expect(
+      projectStreamingTailMessages({ blocks, messages, t }, nextBlocks, t),
+    ).toBeUndefined();
+    expect(transcriptBlocksToLocalizedMessages(nextBlocks, t)).toMatchObject([
+      { content: 'Subagent output', parentToolCallId: 'missing-call' },
+      { content: ' Model reply' },
+    ]);
+  });
+
   it.each(['assistant', 'thought'] as const)(
     'updates streaming %s before trailing Mod logs and preserves row identities',
     (kind) => {

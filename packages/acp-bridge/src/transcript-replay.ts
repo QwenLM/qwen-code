@@ -1273,7 +1273,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           role: 'assistant',
           text: this.formatGap(gap),
           ...meta,
-          extra: { qwenDiscreteMessage: true },
+          extra: { source: 'history_gap', qwenDiscreteMessage: true },
         }),
       );
     }

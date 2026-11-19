@@ -16,6 +16,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
+import { normalizeDaemonEvent } from '@qwen-code/sdk/daemon';
 import { describe, expect, it } from 'vitest';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import { startFakeOpenAIServer } from '../fake-openai-server.js';
@@ -67,10 +68,15 @@ describe('Mod rows through the daemon', () => {
     writeFileSync(
       path.join(plugin, 'hooks/register.js'),
       `let renders = 0;
+      let turns = 0;
       export function register(on) {
         on('session.start', async ($, e, next) => {
           $.ui.log('start ' + e.surface + ' ' + e.isInteractive + ' '
             + JSON.stringify(await $.session.surfaces()));
+          return next(e);
+        });
+        on('turn.complete', ($, e, next) => {
+          $.ui.log('completed ' + ++turns);
           return next(e);
         });
         on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
@@ -235,16 +241,6 @@ describe('Mod rows through the daemon', () => {
         },
       ]);
 
-      const paged = await client.loadSession(session.sessionId, {
-        workspaceCwd: workspace,
-        historyPageSize: 200,
-      });
-      expect(
-        [...(paged.compactedReplay ?? []), ...(paged.liveJournal ?? [])]
-          .filter((event) => event.type === 'mod_log')
-          .map((event) => event.data),
-      ).toEqual(logs);
-
       expect(
         (
           await client.prompt(
@@ -255,6 +251,43 @@ describe('Mod rows through the daemon', () => {
           )
         ).stopReason,
       ).toBe('end_turn');
+      const paged = await client.loadSession(session.sessionId, {
+        workspaceCwd: workspace,
+        historyPageSize: 200,
+      });
+      const replay = [
+        ...(paged.compactedReplay ?? []),
+        ...(paged.liveJournal ?? []),
+      ];
+      const logEvent = (text: string) => ({
+        sessionId: session.sessionId,
+        plugin: 'row-probe',
+        text,
+      });
+      expect(
+        replay.filter((event) => event.type === 'mod_log').map((e) => e.data),
+      ).toEqual([...logs, logEvent('completed 1'), logEvent('completed 2')]);
+      const replayLines = replay
+        .flatMap((event) => normalizeDaemonEvent(event))
+        .flatMap((event) =>
+          event.type === 'user.text.delta' ||
+          event.type === 'assistant.text.delta' ||
+          (event.type === 'status' && event.source === 'mod_log')
+            ? [event.text]
+            : [],
+        );
+      expect(
+        replayLines.filter(
+          (line) => line !== '[Mod row-probe] start desktop true ["desktop"]',
+        ),
+      ).toEqual([
+        'Hello',
+        'Answer 1',
+        '[Mod row-probe] completed 1',
+        'Produce another reply',
+        'Answer 2',
+        '[Mod row-probe] completed 2',
+      ]);
       const pendingRow = client
         .askSessionModRow(
           session.sessionId,

@@ -57,11 +57,11 @@ The answer says one of three things. No hook in the session hears the site, and 
 
 ### What is a reply row
 
-The Web Shell offers assistant messages that hold the model's reply, including replies to background notifications. It excludes command output, a workspace agent's reply, local command output and subagent text inside tool cards. `isFirstOfReply` is true unless the preceding message is also reply text, skipping thinking and Mod log lines. The Web Shell keeps no response boundary, so this follows OpenTUI, which flags only a known continuation. The page draws the rewrite in the message's Markdown only. Copying, search and branching use the original, as `/copy` does in the terminals. A row keeps its answer after it scrolls away, so the rows above the viewport keep their height.
+The Web Shell offers assistant messages that hold the model's reply, including replies to background notifications. It excludes command output, a workspace agent's reply, local command output, history gap notices and subagent text. Subagent text stays excluded when its parent tool has left the transcript window. `isFirstOfReply` is true unless the preceding message is also reply text, skipping thinking and Mod log lines. The Web Shell keeps no response boundary, so this follows OpenTUI, which flags only a known continuation. The page draws the rewrite in the message's Markdown only. Copying, search and branching use the original, as `/copy` does in the terminals. A row keeps its answer after it scrolls away, so the rows above the viewport keep their height.
 
 ### Logs in the transcript
 
-The SDK shows each `mod_log` as an informational line, `[Mod <plugin>] <text>`, as the terminals print it. A line sits below the reply block it arrives during. Logs also leave split answers visible when the turn is collapsed. The daemon retains logs in memory. A paged reload of a live session includes retained logs alongside the page of persisted messages. A session restored from disk starts without earlier logs.
+The SDK shows each `mod_log` as an informational line, `[Mod <plugin>] <text>`, as the terminals print it. A line sits below the reply block it arrives during. Logs also leave split answers visible when the turn is collapsed. The daemon retains logs in memory. A paged reload places retained logs at persisted turn boundaries when timestamps determine their placement. The transcript drops Mod logs before conversation blocks when it reaches its block or byte limit. A session restored from disk starts without earlier logs.
 
 ### The setting
 

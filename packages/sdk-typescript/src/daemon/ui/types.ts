@@ -1430,9 +1430,9 @@ export interface DaemonTranscriptTruncationDetail {
   oldestRetainedRecordId?: string;
   /**
    * Set for `kind: 'blocks'`: whether the eviction removed blocks from the
-   * OLDEST end. True for retention trimming (oldest-first), which can evict
-   * the record an exclusive pagination anchor points at; false for a tail-only
-   * rewind. Replay replacement can also change the oldest retained anchor.
+   * OLDEST end of the record-bearing history. True when retention trims the
+   * history prefix, false for Mod-log-only eviction or a tail-only rewind.
+   * Replay replacement can also change the oldest retained anchor.
    * Consumers should only re-anchor pagination when this is true.
    */
   evictedOldest?: boolean;

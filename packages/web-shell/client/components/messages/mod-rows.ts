@@ -133,6 +133,7 @@ export function modReplyRows(
       message.role === 'assistant' &&
       (message.source === undefined ||
         message.source === 'background_notification_response') &&
+      message.parentToolCallId === undefined &&
       message.agentMessage === undefined &&
       message.author === undefined &&
       message.localCommandId === undefined;

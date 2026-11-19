@@ -20,6 +20,7 @@ import {
   transcriptBlocksToDaemonMessages,
 } from './transcriptToMessages.js';
 import { getToolDescription } from '../components/messages/toolFormatting';
+import { modReplyRows } from '../components/messages/mod-rows';
 
 it('preserves marked quota data when projecting a terminal error', () => {
   const subscriptionQuota = { type: 'subscription_quota', memberType: 'pro' };
@@ -1842,6 +1843,77 @@ describe('transcriptBlocksToDaemonMessages', () => {
     expect(messages).toMatchObject([
       { id: 'insight-1', role: 'assistant', content },
     ]);
+  });
+
+  it('keeps an incomplete-history warning out of the model reply rows', () => {
+    const warning = 'Some earlier messages are unavailable.';
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('gap', 'assistant', warning, 1, false, {
+        segmentId: 'record:0',
+        meta: { source: 'history_gap' },
+      }),
+      textBlock('answer', 'assistant', 'Model reply', 2, false, {
+        segmentId: 'record:1',
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      { id: 'gap', role: 'assistant', content: warning, source: 'history_gap' },
+      { id: 'answer', role: 'assistant', content: 'Model reply' },
+    ]);
+    expect([...modReplyRows(messages)]).toEqual([['answer', true]]);
+  });
+
+  it('keeps assistant text from a missing parent separate from the model reply', () => {
+    const parentToolCallId = 'missing-call';
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('first', 'assistant', 'Model before', 1),
+      textBlock('nested', 'assistant', 'Subagent', 2, false, {
+        parentToolCallId,
+      }),
+      textBlock('nested-continuation', 'assistant', ' output', 3, false, {
+        parentToolCallId,
+      }),
+      textBlock('answer', 'assistant', 'Model after', 4),
+    ]);
+
+    expect(messages).toMatchObject([
+      { id: 'first', role: 'assistant', content: 'Model before' },
+      {
+        id: 'nested',
+        role: 'assistant',
+        content: 'Subagent output',
+        parentToolCallId,
+      },
+      { id: 'answer', role: 'assistant', content: 'Model after' },
+    ]);
+    expect([...modReplyRows(messages)]).toEqual([
+      ['first', true],
+      ['answer', true],
+    ]);
+  });
+
+  it('keeps the parent on assistant text split around an insight', () => {
+    const parentToolCallId = 'missing-call';
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'nested',
+        'assistant',
+        'Before {"insight_ready":{"path":"/tmp/report.md"}} after',
+        1,
+        false,
+        { parentToolCallId },
+      ),
+      textBlock('answer', 'assistant', 'Model reply', 2),
+    ]);
+
+    expect(messages).toMatchObject([
+      { role: 'assistant', content: 'Before', parentToolCallId },
+      { role: 'insight_ready', path: '/tmp/report.md' },
+      { role: 'assistant', content: 'after', parentToolCallId },
+      { id: 'answer', role: 'assistant', content: 'Model reply' },
+    ]);
+    expect([...modReplyRows(messages)]).toEqual([['answer', true]]);
   });
 
   it('keeps parented assistant chunks inside a subagent', () => {

@@ -8464,6 +8464,114 @@ describe('createAcpSessionBridge', () => {
     },
   );
 
+  it('replays retained Mod logs before the next persisted prompt record', async () => {
+    const events: BridgeEvent[] = [];
+    const persisted = (
+      recordId: string,
+      timestamp: number | string,
+      sessionUpdate: string,
+      text: string,
+    ): BridgeEvent => ({
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate,
+        content: { type: 'text', text },
+        timestamp,
+        _meta: { timestamp, 'qwen.session.recordId': recordId },
+      },
+    });
+    let turns = 0;
+    const handle = makeChannel({
+      promptImpl: async ({ sessionId }) => {
+        await handle.agentConnection.extNotification(
+          'qwen/notify/session/mod-log',
+          { sessionId, plugin: 'mod', text: `turn ${++turns}` },
+        );
+        return { stopReason: 'end_turn' };
+      },
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript)
+          throw new Error(`unexpected ${method}`);
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events,
+          hasMore: true,
+          nextCursor: 'older-page',
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const { sessionId, clientId } = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+      });
+      const log = (text: string) =>
+        expect.objectContaining({
+          type: 'mod_log',
+          data: { sessionId, plugin: 'mod', text },
+        });
+      const prompt = () =>
+        bridge.sendPrompt(sessionId, {
+          sessionId,
+          prompt: [{ type: 'text', text: 'live prompt' }],
+        });
+      await handle.agentConnection.extNotification(
+        'qwen/notify/session/mod-log',
+        { sessionId, plugin: 'mod', text: 'startup' },
+      );
+      const nextTimestampAfter = (replay: 'liveJournal' | 'compactedTurns') =>
+        vi.waitFor(() => {
+          const latest = bridge
+            .getSessionReplaySnapshot(sessionId)
+            ?.[replay].findLast((event) => event.type === 'mod_log');
+          const timestamp = latest?._meta?.['serverTimestamp'];
+          if (typeof timestamp !== 'number')
+            throw new Error('Missing Mod log bridge timestamp');
+          expect(Date.now()).toBeGreaterThan(timestamp);
+          return timestamp + 1;
+        });
+      const firstTime = await nextTimestampAfter('liveJournal');
+      await prompt();
+      const nextTime = new Date(
+        await nextTimestampAfter('compactedTurns'),
+      ).toISOString();
+      await prompt();
+      events.push(
+        persisted(
+          'prompt-one',
+          firstTime,
+          'user_message_chunk',
+          'First prompt',
+        ),
+        persisted('reply-one', firstTime, 'agent_message_chunk', 'First reply'),
+        // A synthetic gap update can precede the message in the same record.
+        persisted('prompt-two', nextTime, 'agent_message_chunk', 'Gap notice'),
+        persisted('prompt-two', nextTime, 'user_message_chunk', 'Next prompt'),
+        persisted('prompt-two', nextTime, 'user_message_chunk', 'More input'),
+        persisted('reply-two', nextTime, 'agent_message_chunk', 'Next reply'),
+      );
+      const loaded = await bridge.loadSession({
+        sessionId,
+        clientId,
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+        historyPageSize: 20,
+      });
+      expect(loaded.compactedReplay).toEqual([
+        log('startup'),
+        ...events.slice(0, 2),
+        log('turn 1'),
+        ...events.slice(2),
+        log('turn 2'),
+      ]);
+      expect(loaded.historyHasMore).toBe(true);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('supplements a persisted page with tool lifecycle metadata only', async () => {
     const handle = makeChannel({
       extMethodImpl: (method, params) => {

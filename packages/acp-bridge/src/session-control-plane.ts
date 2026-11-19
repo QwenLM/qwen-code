@@ -8419,14 +8419,10 @@ export function createSessionControlPlane(
           entry.events.replayProjectionWatermark === projectionWatermark
         ) {
           const lifecycleSnapshot = entry.events.snapshotReplay();
-          // Mod logs live only in the event bus. Keep them in each replay
-          // section without splicing them into the persisted record order.
-          const compactedModLogs = lifecycleSnapshot?.compactedTurns.filter(
-            (event) => event.type === 'mod_log',
+          let compactedReplay = withCompactedModLogs(
+            page.events,
+            lifecycleSnapshot?.compactedTurns ?? [],
           );
-          let compactedReplay = compactedModLogs?.length
-            ? page.events.concat(compactedModLogs)
-            : page.events;
           const turnErrorEvent = entry.turnErrorEvent;
           if (turnErrorEvent) {
             // Append only while no newer turn content was journaled after
@@ -8550,6 +8546,77 @@ export function createSessionControlPlane(
       return undefined;
     const recordId = (meta as Record<string, unknown>)['qwen.session.recordId'];
     return typeof recordId === 'string' ? recordId : undefined;
+  }
+
+  function withCompactedModLogs(
+    pageEvents: BridgeEvent[],
+    compactedTurns: readonly BridgeEvent[],
+  ): BridgeEvent[] {
+    const logs = compactedTurns.filter((event) => event.type === 'mod_log');
+    if (logs.length === 0) return pageEvents;
+
+    const timestamps: number[] = [];
+    for (const log of logs) {
+      const timestamp = log._meta?.['serverTimestamp'];
+      if (
+        typeof timestamp !== 'number' ||
+        !Number.isFinite(timestamp) ||
+        timestamp < (timestamps.at(-1) ?? -Infinity)
+      ) {
+        return pageEvents.concat(logs);
+      }
+      timestamps.push(timestamp);
+    }
+
+    // Anchor to the start of each persisted main user record. A wall-clock
+    // timestamp alone can't place logs within a multi-frame reply safely.
+    const result: BridgeEvent[] = [];
+    let recordId: string | undefined;
+    let recordStart = 0;
+    let pageIndex = 0;
+    let logIndex = 0;
+    let lastPromptTimestamp = -Infinity;
+    for (const [index, event] of pageEvents.entries()) {
+      const id = transcriptEventRecordId(event);
+      if (id !== recordId) {
+        recordId = id;
+        recordStart = index;
+      }
+      const update = event.data;
+      if (
+        id === undefined ||
+        recordStart < pageIndex ||
+        !isRecord(update) ||
+        update['sessionUpdate'] !== 'user_message_chunk' ||
+        !isRecord(update['_meta']) ||
+        update['_meta']['source'] !== undefined ||
+        update['_meta']['qwenAgentMessage'] !== undefined
+      ) {
+        continue;
+      }
+      const rawTimestamp = update['timestamp'];
+      const timestamp =
+        typeof rawTimestamp === 'string'
+          ? Date.parse(rawTimestamp)
+          : rawTimestamp;
+      if (
+        typeof timestamp !== 'number' ||
+        !Number.isFinite(timestamp) ||
+        timestamp <= lastPromptTimestamp
+      ) {
+        return pageEvents.concat(logs);
+      }
+      lastPromptTimestamp = timestamp;
+      for (; pageIndex < recordStart; pageIndex++) {
+        result.push(pageEvents[pageIndex]!);
+      }
+      while (logIndex < logs.length && timestamps[logIndex]! < timestamp) {
+        result.push(logs[logIndex++]!);
+      }
+      pageIndex = recordStart + 1;
+      result.push(pageEvents[recordStart]!);
+    }
+    return result.concat(pageEvents.slice(pageIndex), logs.slice(logIndex));
   }
 
   /**

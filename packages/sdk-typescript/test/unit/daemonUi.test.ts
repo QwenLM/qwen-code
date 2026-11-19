@@ -4024,6 +4024,84 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
+  it.each(['block count', 'byte budget'] as const)(
+    'trims Mod logs before persisted dialogue at the %s limit',
+    (limit) => {
+      const page: DaemonUiEvent[] = [
+        { type: 'user.text.delta', text: 'Prompt', sourceRecordIds: ['r-1'] },
+        {
+          type: 'assistant.text.delta',
+          text: 'Answer',
+          sourceRecordIds: ['r-2'],
+        },
+      ];
+      const logs = [1, 2].flatMap((id) =>
+        normalizeDaemonEvent(
+          envelopeOf(
+            'mod_log',
+            { sessionId: 's1', plugin: 'mod', text: `log ${id}` },
+            id,
+          ),
+        ),
+      );
+      const pageBytes = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState(),
+        page,
+      ).retainedBytes;
+      const onTruncation = vi.fn();
+      const store = createDaemonTranscriptStore({
+        ...(limit === 'block count'
+          ? { maxBlocks: 2 }
+          : { maxRetainedBytes: pageBytes }),
+        onTruncation,
+      });
+      store.dispatch([...page, ...logs]);
+
+      const snapshot = store.getSnapshot();
+      expect(snapshot.blocks.map((block) => block.sourceRecordIds)).toEqual([
+        ['r-1'],
+        ['r-2'],
+      ]);
+      expect(snapshot.retainedBytes).toBe(pageBytes);
+      expect(snapshot.lastEventId).toBe(2);
+      expect(onTruncation).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          kind: 'blocks',
+          oldestRetainedRecordId: 'r-1',
+          evictedOldest: false,
+          blockCount: 2,
+        }),
+      );
+    },
+  );
+
+  it('keeps the newest Mod log in place when only one log must be evicted', () => {
+    const store = createDaemonTranscriptStore({ maxBlocks: 3 });
+    const log = (id: number) =>
+      normalizeDaemonEvent(
+        envelopeOf(
+          'mod_log',
+          { sessionId: 's1', plugin: 'mod', text: `log ${id}` },
+          id,
+        ),
+      );
+    store.dispatch([
+      ...log(1),
+      { type: 'user.text.delta', text: 'Prompt' },
+      ...log(2),
+      { type: 'assistant.text.delta', text: 'Answer' },
+    ]);
+
+    const { blocks, blockIndexById } = store.getSnapshot();
+    expect(blocks.map((block) => block.kind)).toEqual([
+      'user',
+      'status',
+      'assistant',
+    ]);
+    expect(blocks[1]).toMatchObject({ eventId: 2 });
+    expect(blocks.map((block) => blockIndexById[block.id])).toEqual([0, 1, 2]);
+  });
+
   it('stamps debugReason on unrecognized daemon events', () => {
     const events = normalizeDaemonEvent(
       envelopeOf('some_future_event', { sessionId: 's1' }),

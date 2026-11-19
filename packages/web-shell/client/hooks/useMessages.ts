@@ -243,7 +243,9 @@ export function projectStreamingTailMessages(
   if (
     (previousTail.role !== 'assistant' && previousTail.role !== 'thinking') ||
     previousTail.isStreaming !== true ||
-    (after.kind === 'assistant') !== (previousTail.role === 'assistant')
+    (after.kind === 'assistant') !== (previousTail.role === 'assistant') ||
+    (previousTail.role === 'assistant' &&
+      previousTail.parentToolCallId !== undefined)
   ) {
     return undefined;
   }
