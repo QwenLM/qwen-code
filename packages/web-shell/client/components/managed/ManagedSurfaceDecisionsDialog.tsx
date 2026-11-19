@@ -1,4 +1,4 @@
-import { useId } from 'react';
+import { useEffect, useId } from 'react';
 import { useI18n } from '../../i18n';
 import { useFilterInput } from '../../hooks/useFilterInput';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
@@ -61,6 +61,34 @@ function localized(
 function ManagedSurfaceDecisionsContent() {
   const { language } = useI18n();
   const id = useId();
+  useEffect(() => {
+    // Radix dismisses on document capture and prevents the native IME
+    // cancellation. Mask that listener only, then restore the key for the input.
+    const preserveImeEscape = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        (!event.isComposing && event.keyCode !== 229)
+      ) {
+        return;
+      }
+      Object.defineProperty(event, 'key', {
+        configurable: true,
+        value: 'Process',
+      });
+      document.addEventListener(
+        'keydown',
+        (currentEvent) => {
+          if (currentEvent === event) Reflect.deleteProperty(event, 'key');
+        },
+        { capture: true, once: true },
+      );
+    };
+    window.addEventListener('keydown', preserveImeEscape, { capture: true });
+    return () =>
+      window.removeEventListener('keydown', preserveImeEscape, {
+        capture: true,
+      });
+  }, []);
   const openExternalLink = useExternalLinkOpener();
   const { filterValue: query, inputProps } = useFilterInput();
   const text = (value: readonly [string, ...string[]]) =>

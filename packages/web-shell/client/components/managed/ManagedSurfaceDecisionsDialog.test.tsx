@@ -528,6 +528,7 @@ describe('ManagedSurfaceDecisionsDialog', () => {
       ['Tracked in', 35, 'settings'],
       ['#13396', 1, 'memory'],
       ['Configuration and workspace identity', 8, 'settings'],
+      ['cross-session artifact library', 1, 'workspace-artifacts'],
     ] as const) {
       await setFilterValue(search, query);
       expect(portal.querySelectorAll('[data-managed-surface]')).toHaveLength(
@@ -537,7 +538,7 @@ describe('ManagedSurfaceDecisionsDialog', () => {
         portal.querySelector(`[data-managed-surface="${id}"]`),
       ).not.toBeNull();
     }
-    expect(search.value).toBe('Configuration and workspace identity');
+    expect(search.value).toBe('cross-session artifact library');
   });
 
   it('keeps committed results during IME composition and filters on commit', async () => {
@@ -545,11 +546,14 @@ describe('ManagedSurfaceDecisionsDialog', () => {
     const search = portal.querySelector<HTMLInputElement>(
       'input[type="search"]',
     )!;
+    await setFilterValue(search, 'voice');
+    expect(portal.querySelectorAll('[data-managed-surface]')).toHaveLength(1);
     await act(async () =>
       search.dispatchEvent(new Event('compositionstart', { bubbles: true })),
     );
     await setFilterValue(search, 'xiaoxishanchu');
-    expect(portal.querySelectorAll('[data-managed-surface]')).toHaveLength(35);
+    expect(search.value).toBe('xiaoxishanchu');
+    expect(portal.querySelectorAll('[data-managed-surface]')).toHaveLength(1);
     expect(portal.querySelector('[role="status"]')).toBeNull();
     await act(async () => {
       Object.getOwnPropertyDescriptor(
@@ -563,6 +567,55 @@ describe('ManagedSurfaceDecisionsDialog', () => {
       portal.querySelector('[data-managed-surface="message-deletion"]'),
     ).not.toBeNull();
     expect(search.value).toBe('消息删除');
+  });
+
+  it('preserves both composition Escape variants but closes on a plain Escape', async () => {
+    await open();
+    const search = portal.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    )!;
+    await setFilterValue(search, 'voice');
+    for (const event of [
+      new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        cancelable: true,
+        isComposing: true,
+      }),
+      new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        cancelable: true,
+        keyCode: 229,
+      }),
+    ]) {
+      await act(async () => {
+        search.dispatchEvent(new Event('compositionstart', { bubbles: true }));
+        search.dispatchEvent(event);
+      });
+      expect(portal.querySelector('[role="dialog"]')).not.toBeNull();
+      expect(event.defaultPrevented).toBe(false);
+      expect(event.key).toBe('Escape');
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(search, 'voice');
+        search.dispatchEvent(new Event('compositionend', { bubbles: true }));
+      });
+      expect(search.value).toBe('voice');
+      expect(portal.querySelectorAll('[data-managed-surface]')).toHaveLength(1);
+    }
+    await act(async () => {
+      search.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(portal.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it('filters locally, reports an empty result and resets on close', async () => {
@@ -579,6 +632,9 @@ describe('ManagedSurfaceDecisionsDialog', () => {
     expect(
       portal.querySelector('[data-managed-surface="generated-ui-state"]'),
     ).not.toBeNull();
+    expect(
+      [...portal.querySelectorAll('h3')].map((heading) => heading.textContent),
+    ).toEqual(['Files, artifacts and sources']);
     await act(async () => {
       Object.getOwnPropertyDescriptor(
         HTMLInputElement.prototype,
