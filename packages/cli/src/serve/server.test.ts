@@ -52015,7 +52015,9 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       const chunk = await reader.read();
       if (chunk.done) break;
       buffer += decoder.decode(chunk.value, { stream: true });
-      for (const frame of buffer.split('\n\n')) {
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop() ?? '';
+      for (const frame of frames) {
         const dataLine = frame
           .split('\n')
           .find((line) => line.startsWith('data: '));
