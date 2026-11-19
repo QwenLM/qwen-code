@@ -311,6 +311,16 @@ invariants intact. It is mostly deletion and is the lowest-risk way to satisfy
   (`ManagedModelDiagnosticProjection:51`) to key on the same discriminator.
 - Keep `managed-action-decision`'s `v == (question ? 2 : 1)` as a kind gate.
 
+Implementation note (landed): permission keeps `v: 3` with optional `inputRef`
+and `continuationRef`; question keeps `v: 4`. The version-based continuation
+guards in `hosted-approval-continuation.ts` and `hosted-plan-mode.ts` became
+`continuationRef`-presence guards, preserving the former v1/v2 early-return
+behavior. `ManagedHostedRecoveryRecords.validateResource` skips the closure walk
+for action options without `continuationRef` (rather than removing the guard),
+which keeps missing-`inputRef` failures at action admission instead of moving
+them to commit-time closure validation. The floor promotion keys on
+`continuationRef` presence.
+
 ### Phase 3 — A2: remove server-side minimumReader negotiation
 
 - Make `minimumReader` optional in the shared parser

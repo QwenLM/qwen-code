@@ -112,6 +112,8 @@ Worker（TS）：
 - Server：把 `JdbcManagedActionStore`（`:216-285`）的逐版本闭集塌缩为单一的按字段存在性校验；更新 `ManagedActionService.inputPreview`（`:383,389`）、`ManagedUserQuestions`（`:29`）、`ManagedHostedRecoveryRecords`（`:66`）改按 kind/字段存在性而非 `v`。更新 floor 提升（`ManagedModelDiagnosticProjection:51`）按同一判别器。
 - 保留 `managed-action-decision` 的 `v == (question ? 2 : 1)` 作为 kind 门。
 
+实现要点（已落地）：permission 保留 `v: 3`，`inputRef` 与 `continuationRef` 可选；question 保留 `v: 4`。`hosted-approval-continuation.ts` 与 `hosted-plan-mode.ts` 中基于版本的 continuation 守卫改为按 `continuationRef` 存在性判断，保持原 v1/v2 的早退行为。`ManagedHostedRecoveryRecords.validateResource` 对无 `continuationRef` 的 action options 跳过闭包遍历（而非移除守卫），从而把缺失 `inputRef` 的失败保留在 action 准入阶段，而不是提前到 commit 期闭包校验。floor 提升按 `continuationRef` 存在性判断。
+
 ### 阶段 3 — A2：删除服务器侧 minimumReader 协商
 
 - 让 `minimumReader` 在共享解析器（`parseManagedSessionHeader`）中可选：缺省→接受；存在→仍按 reader 能力校验，使本地 `/2` 方言继续可用。
