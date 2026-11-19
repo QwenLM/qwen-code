@@ -8,8 +8,15 @@ import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadUsageDashboard } from './usage-dashboard-service.js';
+import {
+  buildUsageDashboard,
+  loadUsageDashboard,
+} from './usage-dashboard-service.js';
 import type { UsageSummaryRecord } from './usageHistoryService.js';
+import type {
+  TokenUsageDailyByModel,
+  TokenUsageDayModelTotals,
+} from './tokenUsageService.js';
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
@@ -62,6 +69,34 @@ function rec(o: {
     files: o.files ?? { linesAdded: 0, linesRemoved: 0 },
     ...(o.skills ? { skills: o.skills } : {}),
   };
+}
+
+/** One ledger day/model bucket; `total` defaults to input + output. */
+function ledgerDay(
+  model: string,
+  o: {
+    requests: number;
+    inputTokens: number;
+    outputTokens?: number;
+    cachedTokens?: number;
+    thoughtsTokens?: number;
+    totalTokens?: number;
+  },
+): Map<string, TokenUsageDayModelTotals> {
+  const outputTokens = o.outputTokens ?? 0;
+  return new Map([
+    [
+      model,
+      {
+        requests: o.requests,
+        inputTokens: o.inputTokens,
+        outputTokens,
+        cachedTokens: o.cachedTokens ?? 0,
+        thoughtsTokens: o.thoughtsTokens ?? 0,
+        totalTokens: o.totalTokens ?? o.inputTokens + outputTokens,
+      },
+    ],
+  ]);
 }
 
 /** Same local-date bucketing the service uses, so key assertions line up. */
@@ -225,7 +260,9 @@ describe('loadUsageDashboard', () => {
     expect(dash.summary.sessions).toBe(2);
     expect(dash.summary.requests).toBe(8);
     expect(dash.summary.inputTokens).toBe(3000);
-    expect(dash.summary.outputTokens).toBe(300);
+    // Session 'a' reports thoughts apart from output, so its output tile carries
+    // both (200 + 50); 'b' has none. Input + output still equals the total.
+    expect(dash.summary.outputTokens).toBe(350);
     expect(dash.summary.cachedTokens).toBe(2760);
     expect(dash.summary.thoughtsTokens).toBe(50);
     expect(dash.summary.totalTokens).toBe(3350);
@@ -233,6 +270,156 @@ describe('loadUsageDashboard', () => {
     expect(dash.summary.linesAdded).toBe(40);
     expect(dash.summary.linesRemoved).toBe(7);
     expect(dash.summary.cacheReadRate).toBeCloseTo(2760 / 3000, 6);
+  });
+
+  it('counts reasoning once in the output total under either provider convention', async () => {
+    const now = Date.now();
+    seed([
+      // Chat-completions convention: total is input + output because the output
+      // count already carries the reasoning tokens.
+      rec({
+        sessionId: 'output-includes-thoughts',
+        timestamp: now,
+        modelName: 'via-openai',
+        model: {
+          requests: 2,
+          inputTokens: 1000,
+          outputTokens: 200,
+          thoughtsTokens: 50,
+          totalTokens: 1200,
+        },
+      }),
+      // Gemini convention: thoughts are reported apart from the output count.
+      rec({
+        sessionId: 'output-excludes-thoughts',
+        timestamp: now,
+        modelName: 'via-gemini',
+        model: {
+          requests: 1,
+          inputTokens: 2000,
+          outputTokens: 100,
+          thoughtsTokens: 40,
+          totalTokens: 2140,
+        },
+      }),
+    ]);
+
+    const dash = await loadUsageDashboard();
+
+    expect(dash.summary.outputTokens).toBe(340);
+    // The raw reasoning count stays available on its own field.
+    expect(dash.summary.thoughtsTokens).toBe(90);
+    expect(dash.summary.inputTokens + dash.summary.outputTokens).toBe(
+      dash.summary.totalTokens,
+    );
+  });
+
+  it('replaces a ledger-covered day instead of adding the session-record copy', () => {
+    const now = Date.now();
+    // The same run appears in both sources: the session summary carries it once
+    // and the ledger carries its requests again. Summing them would double it.
+    const records = [
+      rec({
+        sessionId: 's',
+        timestamp: now,
+        model: {
+          requests: 10,
+          inputTokens: 1000,
+          outputTokens: 100,
+          totalTokens: 1100,
+        },
+        tools: { totalCalls: 7, totalSuccess: 7, totalFail: 0 },
+      }),
+    ];
+    const ledger: TokenUsageDailyByModel = new Map([
+      [
+        dayKey(now),
+        ledgerDay('qwen-max', {
+          requests: 3,
+          inputTokens: 300,
+          outputTokens: 30,
+        }),
+      ],
+    ]);
+
+    const dash = buildUsageDashboard(records, { range: 'today' }, ledger);
+
+    expect(dash.summary.totalTokens).toBe(330);
+    expect(dash.summary.requests).toBe(3);
+    // Session-granular tiles the ledger cannot supply stay on the records.
+    expect(dash.summary.sessions).toBe(1);
+    expect(dash.summary.toolCalls).toBe(7);
+  });
+
+  it('attributes tokens to the day each response happened, not the session end', () => {
+    const now = Date.now();
+    const yesterday = now - MS_PER_DAY;
+    // One session that ran across midnight and ended today.
+    const records = [
+      rec({
+        sessionId: 's',
+        timestamp: now,
+        model: {
+          requests: 6,
+          inputTokens: 800,
+          outputTokens: 100,
+          totalTokens: 900,
+        },
+      }),
+    ];
+    const ledger: TokenUsageDailyByModel = new Map([
+      [
+        dayKey(yesterday),
+        ledgerDay('qwen-max', { requests: 4, inputTokens: 600 }),
+      ],
+      [
+        dayKey(now),
+        ledgerDay('qwen-max', {
+          requests: 2,
+          inputTokens: 200,
+          outputTokens: 100,
+        }),
+      ],
+    ]);
+
+    // Without the ledger the whole session lands on its end day.
+    const legacy = buildUsageDashboard(records, { range: 'today' });
+    expect(legacy.summary.totalTokens).toBe(900);
+
+    const today = buildUsageDashboard(records, { range: 'today' }, ledger);
+    expect(today.summary.totalTokens).toBe(300);
+    expect(today.summary.requests).toBe(2);
+
+    const week = buildUsageDashboard(records, { range: 'week' }, ledger);
+    expect(week.summary.totalTokens).toBe(900);
+    expect(week.daily.find((d) => d.date === dayKey(yesterday))?.tokens).toBe(
+      600,
+    );
+    expect(week.daily.find((d) => d.date === dayKey(now))?.tokens).toBe(300);
+    expect(week.heatmap[dayKey(yesterday)]?.tokens).toBe(600);
+  });
+
+  it('keeps session-record tokens for days the ledger does not cover', () => {
+    const now = Date.now();
+    const old = now - 40 * MS_PER_DAY;
+    const records = [
+      rec({
+        sessionId: 'old',
+        timestamp: old,
+        model: { requests: 2, inputTokens: 500, totalTokens: 500 },
+      }),
+    ];
+    const ledger: TokenUsageDailyByModel = new Map([
+      [dayKey(now), ledgerDay('qwen-max', { requests: 1, inputTokens: 70 })],
+    ]);
+
+    const dash = buildUsageDashboard(records, { range: 'month' }, ledger);
+
+    // The 40-day-old session is outside the 30-day summary but inside the
+    // default heatmap, which must not lose pre-ledger history.
+    expect(dash.summary.totalTokens).toBe(70);
+    expect(dash.heatmap[dayKey(old)]?.tokens).toBe(500);
+    expect(dash.heatmap[dayKey(now)]?.tokens).toBe(70);
   });
 
   it('scopes summary totals to the selected range (today / week / month)', async () => {

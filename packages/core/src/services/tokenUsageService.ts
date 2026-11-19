@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fs from 'node:fs';
 import path from 'node:path';
+import readline from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
@@ -303,6 +305,115 @@ async function readRecordsForMonth(month: string): Promise<TokenUsageRecord[]> {
     );
   }
   return valid;
+}
+
+/** One local day's counters for one model, summed over that day's requests. */
+export interface TokenUsageDayModelTotals {
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  thoughtsTokens: number;
+  totalTokens: number;
+}
+
+/** `localDate` -> model -> counters. */
+export type TokenUsageDailyByModel = Map<
+  string,
+  Map<string, TokenUsageDayModelTotals>
+>;
+
+async function accumulateMonthByDay(
+  filePath: string,
+  sinceLocalDate: string,
+  table: TokenUsageDailyByModel,
+): Promise<void> {
+  const fileStream = fs.createReadStream(filePath);
+  const rl = readline.createInterface({
+    input: fileStream,
+    crlfDelay: Infinity,
+  });
+  let dropped = 0;
+  try {
+    for await (const line of rl) {
+      if (line.trim().length === 0) continue;
+      for (const record of jsonl.parseLineTolerant<unknown>(line, filePath)) {
+        if (!isTokenUsageRecord(record)) {
+          dropped++;
+          continue;
+        }
+        if (record.localDate < sinceLocalDate) continue;
+        let byModel = table.get(record.localDate);
+        if (!byModel) {
+          byModel = new Map();
+          table.set(record.localDate, byModel);
+        }
+        let totals = byModel.get(record.model);
+        if (!totals) {
+          totals = {
+            requests: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 0,
+          };
+          byModel.set(record.model, totals);
+        }
+        totals.requests += 1;
+        totals.inputTokens += record.inputTokens;
+        totals.outputTokens += record.outputTokens;
+        totals.cachedTokens += record.cachedTokens;
+        totals.thoughtsTokens += record.thoughtsTokens;
+        totals.totalTokens += record.totalTokens;
+      }
+    }
+  } finally {
+    rl.close();
+    fileStream.destroy();
+  }
+  if (dropped > 0) {
+    debugLogger.warn(`Dropped ${dropped} invalid record(s) from ${filePath}`);
+  }
+}
+
+/**
+ * Aggregate the per-request ledger into per-local-day, per-model counters,
+ * streaming each month file so a large history is never materialized. Only
+ * months at/after `sinceLocalDate`'s month are opened, and records older than
+ * `sinceLocalDate` are skipped.
+ *
+ * Unlike a session summary, a ledger record is written once, when the response
+ * arrives, and carries the local day it happened on — so these counters neither
+ * re-count a resumed conversation's replayed history nor attribute a session's
+ * whole spend to the day it ended.
+ *
+ * A missing usage directory yields an empty table (usage statistics may be
+ * disabled). Any other read error propagates: a partially read month would
+ * silently understate the window.
+ */
+export async function loadTokenUsageDailyByModel(
+  sinceLocalDate: string,
+): Promise<TokenUsageDailyByModel> {
+  const table: TokenUsageDailyByModel = new Map();
+  const dir = usageDir();
+  let files: string[];
+  try {
+    files = await fs.promises.readdir(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return table;
+    throw error;
+  }
+  const sinceMonth = sinceLocalDate.slice(0, 7);
+  for (const file of files.sort()) {
+    if (!file.startsWith(FILE_PREFIX) || !file.endsWith(FILE_EXTENSION)) {
+      continue;
+    }
+    const month = file.slice(FILE_PREFIX.length, -FILE_EXTENSION.length);
+    if (!isValidMonth(month) || month < sinceMonth) continue;
+    await accumulateMonthByDay(path.join(dir, file), sinceLocalDate, table);
+  }
+  return table;
 }
 
 function summarizeRecords(

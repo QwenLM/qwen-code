@@ -487,11 +487,14 @@ export {
   formatTokenUsageSummaryAsCsv,
   formatTokenUsageSummaryAsJson,
   getTokenUsageFilePath,
+  loadTokenUsageDailyByModel,
   queryTokenUsage,
   recordTokenUsageFromApiResponse,
   recordTokenUsageFromApiResponseBestEffort,
 } from './services/tokenUsageService.js';
 export type {
+  TokenUsageDailyByModel,
+  TokenUsageDayModelTotals,
   TokenUsageExportFormat,
   TokenUsageExportOptions,
   TokenUsageGroupSummary,

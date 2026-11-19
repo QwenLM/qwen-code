@@ -145,6 +145,24 @@ describe('UsageDashboardTab', () => {
     expect(grid!.querySelectorAll('div').length).toBeGreaterThan(150);
   });
 
+  it('shows the output tile without billing reasoning twice', () => {
+    // The server already counted reasoning once in outputTokens; thoughtsTokens
+    // is the raw subset of it. Adding the two would render 5.8M under a 746.7M
+    // hero whose input + output is 742.1M + 4.6M.
+    mockState = {
+      dashboard: makeDashboard({
+        summary: { ...makeDashboard().summary, thoughtsTokens: 1_200_000 },
+      }),
+      loading: false,
+      error: null,
+      reload,
+    };
+    renderTab();
+    const text = digits();
+    expect(text).toContain('4.6M');
+    expect(text).not.toContain('5.8M');
+  });
+
   it('renders model share, skill table, and daily charts', () => {
     mockState = {
       dashboard: makeDashboard(),

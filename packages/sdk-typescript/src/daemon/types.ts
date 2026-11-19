@@ -4066,8 +4066,10 @@ export type DaemonUsageRange = 'today' | 'week' | 'month';
 export interface DaemonUsageDashboardTotals {
   totalTokens: number;
   inputTokens: number;
+  /** Output tokens with reasoning counted once, so input + output = total. */
   outputTokens: number;
   cachedTokens: number;
+  /** Raw reasoning count; most providers already include it in outputTokens. */
   thoughtsTokens: number;
   requests: number;
   sessions: number;

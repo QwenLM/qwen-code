@@ -11,6 +11,12 @@ import {
   type TimeRange,
   type UsageSummaryRecord,
 } from './usageHistoryService.js';
+import {
+  loadTokenUsageDailyByModel,
+  type TokenUsageDailyByModel,
+  type TokenUsageDayModelTotals,
+} from './tokenUsageService.js';
+import { outputTokenCount } from '../telemetry/gen-ai-usage.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('USAGE_DASHBOARD');
@@ -20,6 +26,12 @@ const DEFAULT_HEATMAP_DAYS = 183;
 /** Cap on the per-day series length (guards a wide `range` like `all`). */
 const MAX_DAILY_DAYS = 92;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
+/**
+ * Trailing days of per-request ledger loaded for the dashboard. Matches the
+ * route's `heatmapDays` clamp, so one load covers every window a caller can ask
+ * for and the cached sources stay range-independent.
+ */
+const LEDGER_WINDOW_DAYS = 366;
 
 /**
  * Flattened totals for the selected range, powering the usage-dashboard hero +
@@ -28,8 +40,10 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
 export interface UsageDashboardTotals {
   totalTokens: number;
   inputTokens: number;
+  /** Output tokens with reasoning counted once, so input + output = total. */
   outputTokens: number;
   cachedTokens: number;
+  /** Raw reasoning count; most providers already include it in outputTokens. */
   thoughtsTokens: number;
   requests: number;
   sessions: number;
@@ -116,58 +130,90 @@ function startOfLocalDay(ms: number): Date {
   return d;
 }
 
-function buildHeatmap(
-  records: UsageSummaryRecord[],
-  startMs: number,
-  endMs: number,
-): Record<string, UsageHeatmapDay> {
-  const tokensByDay = new Map<string, number>();
-  const inputByDay = new Map<string, number>();
-  const cachedByDay = new Map<string, number>();
+/** Local day -> model -> counters. Every token-bearing output derives from it. */
+type DayModelTable = TokenUsageDailyByModel;
+
+/**
+ * Session-record tokens bucketed by the day the session ended. This is the
+ * fallback attribution for days the per-request ledger does not cover; it cannot
+ * split a session's spend across the days it actually ran.
+ */
+function tableFromRecords(records: UsageSummaryRecord[]): DayModelTable {
+  const table: DayModelTable = new Map();
   for (const r of records) {
-    if (r.timestamp < startMs || r.timestamp > endMs) continue;
     if (!r.models) continue;
-    const key = localDateKey(r.timestamp);
-    let tokens = 0;
-    let input = 0;
-    let cached = 0;
-    for (const m of Object.values(r.models)) {
-      tokens += modelTokens(m);
-      input += m.inputTokens;
-      cached += m.cachedTokens;
+    const day = localDateKey(r.timestamp);
+    let byModel = table.get(day);
+    if (!byModel) {
+      byModel = new Map();
+      table.set(day, byModel);
     }
-    tokensByDay.set(key, (tokensByDay.get(key) ?? 0) + tokens);
-    inputByDay.set(key, (inputByDay.get(key) ?? 0) + input);
-    cachedByDay.set(key, (cachedByDay.get(key) ?? 0) + cached);
+    for (const [model, m] of Object.entries(r.models)) {
+      const totals = byModel.get(model) ?? {
+        requests: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedTokens: 0,
+        thoughtsTokens: 0,
+        totalTokens: 0,
+      };
+      totals.requests += m.requests;
+      totals.inputTokens += m.inputTokens;
+      totals.outputTokens += m.outputTokens;
+      totals.cachedTokens += m.cachedTokens;
+      totals.thoughtsTokens += m.thoughtsTokens;
+      totals.totalTokens += m.totalTokens;
+      byModel.set(model, totals);
+    }
   }
+  return table;
+}
+
+function dayTokens(byModel: Map<string, TokenUsageDayModelTotals>): {
+  tokens: number;
+  input: number;
+  cached: number;
+} {
+  let tokens = 0;
+  let input = 0;
+  let cached = 0;
+  for (const m of byModel.values()) {
+    tokens += modelTokens(m);
+    input += m.inputTokens;
+    cached += m.cachedTokens;
+  }
+  return { tokens, input, cached };
+}
+
+function buildHeatmap(
+  table: DayModelTable,
+  startKey: string,
+  endKey: string,
+): Record<string, UsageHeatmapDay> {
   const heatmap: Record<string, UsageHeatmapDay> = {};
-  for (const [key, tokens] of tokensByDay) {
-    const input = inputByDay.get(key) ?? 0;
-    const cached = cachedByDay.get(key) ?? 0;
-    heatmap[key] = { tokens, cacheReadRate: input > 0 ? cached / input : 0 };
+  for (const [day, byModel] of table) {
+    if (day < startKey || day > endKey) continue;
+    const { tokens, input, cached } = dayTokens(byModel);
+    heatmap[day] = { tokens, cacheReadRate: input > 0 ? cached / input : 0 };
   }
   return heatmap;
 }
 
 /**
  * Per-day tokens + session counts over `[startMs, endMs]`, on a continuous day
- * axis (zero-filled) so the daily line/bar charts have no gaps.
+ * axis (zero-filled) so the daily line/bar charts have no gaps. Tokens come from
+ * the day table; session counts stay session-granular.
  */
 function buildDaily(
+  table: DayModelTable,
   records: UsageSummaryRecord[],
   startMs: number,
   endMs: number,
 ): UsageDailyPoint[] {
-  const tokenByDay = new Map<string, number>();
   const sessionByDay = new Map<string, number>();
   for (const r of records) {
     if (r.timestamp < startMs || r.timestamp > endMs) continue;
     const key = localDateKey(r.timestamp);
-    let tokens = 0;
-    if (r.models) {
-      for (const m of Object.values(r.models)) tokens += modelTokens(m);
-    }
-    tokenByDay.set(key, (tokenByDay.get(key) ?? 0) + tokens);
     sessionByDay.set(key, (sessionByDay.get(key) ?? 0) + 1);
   }
   const out: UsageDailyPoint[] = [];
@@ -176,9 +222,10 @@ function buildDaily(
   // Advance by calendar day (DST-safe) rather than fixed ms steps.
   while (cursor.getTime() <= last) {
     const key = localDateKey(cursor.getTime());
+    const byModel = table.get(key);
     out.push({
       date: key,
-      tokens: tokenByDay.get(key) ?? 0,
+      tokens: byModel ? dayTokens(byModel).tokens : 0,
       sessions: sessionByDay.get(key) ?? 0,
     });
     cursor.setDate(cursor.getDate() + 1);
@@ -195,6 +242,7 @@ function buildDaily(
 export function buildUsageDashboard(
   records: UsageSummaryRecord[],
   options: LoadUsageDashboardOptions = {},
+  ledgerDaily?: TokenUsageDailyByModel,
 ): UsageDashboard {
   const range: TimeRange = options.range ?? 'today';
   const heatmapDays =
@@ -202,16 +250,69 @@ export function buildUsageDashboard(
       ? Math.floor(options.heatmapDays)
       : DEFAULT_HEATMAP_DAYS;
 
+  // Sessions, tool calls, changed lines and skills only exist on session
+  // records; the ledger deliberately carries none of them.
   const report = aggregateUsage(records, range);
+
+  const now = Date.now();
+  const todayKey = localDateKey(now);
+  const rangeStartKey = localDateKey(getTimeRangeBounds(range).start.getTime());
+
+  const table = tableFromRecords(records);
+  // A day the ledger covers is authoritative and REPLACES the session-record
+  // copy: the same requests appear in both, so adding them would double count.
+  // Days it does not cover keep the session-record attribution, which is what
+  // preserves heatmap history from before the ledger existed.
+  if (ledgerDaily) {
+    for (const [day, byModel] of ledgerDaily) {
+      table.set(day, new Map(byModel));
+    }
+  }
+
+  const windowModels = new Map<string, TokenUsageDayModelTotals>();
+  let requests = 0;
+  for (const [day, byModel] of table) {
+    if (day < rangeStartKey || day > todayKey) continue;
+    for (const [model, m] of byModel) {
+      requests += m.requests;
+      const totals = windowModels.get(model) ?? {
+        requests: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedTokens: 0,
+        thoughtsTokens: 0,
+        totalTokens: 0,
+      };
+      totals.requests += m.requests;
+      totals.inputTokens += m.inputTokens;
+      totals.outputTokens += m.outputTokens;
+      totals.cachedTokens += m.cachedTokens;
+      totals.thoughtsTokens += m.thoughtsTokens;
+      totals.totalTokens += m.totalTokens;
+      windowModels.set(model, totals);
+    }
+  }
 
   let inputTokens = 0;
   let outputTokens = 0;
   let cachedTokens = 0;
   let thoughtsTokens = 0;
   let totalTokens = 0;
-  for (const m of Object.values(report.models)) {
+  for (const m of windowModels.values()) {
     inputTokens += m.inputTokens;
-    outputTokens += m.outputTokens;
+    // Providers disagree on whether the output count already carries reasoning,
+    // and a usage record has no auth type to consult. The reported total settles
+    // it: `outputTokenCount` accepts a total inside the band both conventions
+    // allow, so adding thoughtsTokens here would bill reasoning twice.
+    outputTokens += outputTokenCount(
+      {
+        input: m.inputTokens,
+        output: m.outputTokens,
+        thoughts: m.thoughtsTokens,
+        total: m.totalTokens,
+      },
+      undefined,
+    );
     cachedTokens += m.cachedTokens;
     thoughtsTokens += m.thoughtsTokens;
     totalTokens += modelTokens(m);
@@ -223,7 +324,7 @@ export function buildUsageDashboard(
     outputTokens,
     cachedTokens,
     thoughtsTokens,
-    requests: report.totalRequests,
+    requests,
     sessions: report.sessionCount,
     toolCalls: report.tools.totalCalls,
     linesAdded: report.files.linesAdded,
@@ -231,9 +332,7 @@ export function buildUsageDashboard(
     cacheReadRate: inputTokens > 0 ? cachedTokens / inputTokens : 0,
   };
 
-  const now = Date.now();
-
-  const models: UsageModelShare[] = Object.entries(report.models)
+  const models: UsageModelShare[] = [...windowModels]
     .map(([model, m]) => ({
       model,
       totalTokens: modelTokens(m),
@@ -251,14 +350,18 @@ export function buildUsageDashboard(
     getTimeRangeBounds(range).start.getTime(),
     now - MAX_DAILY_DAYS * MS_PER_DAY,
   );
-  const daily = buildDaily(records, dailyStart, now);
+  const daily = buildDaily(table, records, dailyStart, now);
 
   // The heatmap covers the trailing `heatmapDays` (~12 months in the UI),
   // independent of `range`.
-  const heatmap = buildHeatmap(records, now - heatmapDays * MS_PER_DAY, now);
+  const heatmap = buildHeatmap(
+    table,
+    localDateKey(now - heatmapDays * MS_PER_DAY),
+    todayKey,
+  );
 
   debugLogger.debug(
-    `built dashboard range=${range} records=${records.length} models=${models.length} skills=${skills.length} dailyPoints=${daily.length}`,
+    `built dashboard range=${range} records=${records.length} ledgerDays=${ledgerDaily?.size ?? 0} models=${models.length} skills=${skills.length} dailyPoints=${daily.length}`,
   );
 
   return {
@@ -273,17 +376,41 @@ export function buildUsageDashboard(
   };
 }
 
+/** The two sources the dashboard aggregates, loaded once and cached together. */
+export interface UsageDashboardSources {
+  records: UsageSummaryRecord[];
+  ledgerDaily: TokenUsageDailyByModel;
+}
+
+/**
+ * Load both dashboard sources: the session history (for sessions, tool calls,
+ * changed lines and skills) and the per-request ledger's per-day counters (for
+ * everything token-bearing). Read-only. The session history can be I/O heavy on
+ * large histories, so callers should cache the pair and re-run
+ * {@link buildUsageDashboard} per range.
+ */
+export async function loadUsageDashboardSources(): Promise<UsageDashboardSources> {
+  const [records, ledgerDaily] = await Promise.all([
+    loadUsageHistoryWithLive(),
+    loadTokenUsageDailyByModel(
+      localDateKey(Date.now() - LEDGER_WINDOW_DAYS * MS_PER_DAY),
+    ),
+  ]);
+  return { records, ledgerDaily };
+}
+
 /**
  * Read-only snapshot of local token usage for the daemon usage-dashboard API.
  * Loads the global cross-project history (`~/.qwen`) via
  * {@link loadUsageHistoryWithLive} — the persisted `usage_record.jsonl` unioned
- * with a replay of recent transcripts — so the totals include daemon / Web Shell
- * and in-progress sessions that the persisted file never captures. The load can
- * be I/O heavy on large histories, so callers should cache (the daemon route
- * caches the loaded records and re-runs {@link buildUsageDashboard} per range).
+ * with a replay of recent transcripts — so the session-granular tiles include
+ * daemon / Web Shell and in-progress sessions that the persisted file never
+ * captures, and the per-request ledger so token totals land on the day each
+ * response actually happened.
  */
 export async function loadUsageDashboard(
   options: LoadUsageDashboardOptions = {},
 ): Promise<UsageDashboard> {
-  return buildUsageDashboard(await loadUsageHistoryWithLive(), options);
+  const { records, ledgerDaily } = await loadUsageDashboardSources();
+  return buildUsageDashboard(records, options, ledgerDaily);
 }

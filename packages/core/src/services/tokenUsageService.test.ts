@@ -21,6 +21,7 @@ import {
   exportTokenUsageSummary,
   formatTokenUsageSummaryAsCsv,
   getTokenUsageFilePath,
+  loadTokenUsageDailyByModel,
   queryTokenUsage,
   recordTokenUsageFromApiResponse,
   recordTokenUsageFromApiResponseBestEffort,
@@ -613,6 +614,78 @@ describe('tokenUsageService', () => {
       readFile(getTokenUsageFilePath('2026-05'), 'utf-8'),
     );
     expect(fileContent).toContain('"model":"model-a"');
+  });
+
+  it('aggregates the ledger per local day and model', async () => {
+    const config = fakeConfig();
+    await recordUsage(config, 'model-a', 'p1', usage(100, 10, 110));
+    await recordUsage(config, 'model-a', 'p2', usage(200, 20, 220));
+    await recordUsage(config, 'model-b', 'p3', usage(5, 1, 6));
+    await recordUsage(config, 'model-a', 'p4', usage(7, 3, 10), {
+      timestamp: '2026-05-24T10:00:00.000Z',
+    });
+
+    const table = await loadTokenUsageDailyByModel('2026-05-01');
+
+    expect([...table.keys()].sort()).toEqual(['2026-05-24', '2026-05-25']);
+    expect(table.get('2026-05-25')?.get('model-a')).toEqual({
+      requests: 2,
+      inputTokens: 300,
+      outputTokens: 30,
+      cachedTokens: 0,
+      thoughtsTokens: 0,
+      totalTokens: 330,
+    });
+    expect(table.get('2026-05-25')?.get('model-b')?.requests).toBe(1);
+    expect(table.get('2026-05-24')?.get('model-a')?.totalTokens).toBe(10);
+  });
+
+  it('skips days and months before the requested start', async () => {
+    const config = fakeConfig();
+    await recordUsage(config, 'model-a', 'p1', usage(1, 1, 2));
+    await recordUsage(config, 'model-a', 'p2', usage(9, 9, 18), {
+      timestamp: '2026-05-24T10:00:00.000Z',
+    });
+    await recordUsage(config, 'model-a', 'p3', usage(50, 50, 100), {
+      timestamp: '2026-04-30T10:00:00.000Z',
+    });
+
+    const table = await loadTokenUsageDailyByModel('2026-05-25');
+
+    expect([...table.keys()]).toEqual(['2026-05-25']);
+    expect(table.get('2026-05-25')?.get('model-a')?.totalTokens).toBe(2);
+  });
+
+  it('returns an empty table when no ledger was ever written', async () => {
+    await expect(loadTokenUsageDailyByModel('2026-05-01')).resolves.toEqual(
+      new Map(),
+    );
+  });
+
+  it('drops invalid and future-schema records while keeping valid ones', async () => {
+    const config = fakeConfig();
+    await recordUsage(config, 'model-a', 'p1', usage(4, 6, 10));
+    const file = getTokenUsageFilePath('2026-05');
+    const valid = JSON.parse(
+      (await readFile(file, 'utf-8')).trim().split('\n')[0]!,
+    ) as Record<string, unknown>;
+    await jsonl.writeLine(file, { ...valid, schemaVersion: 99, id: 'future' });
+    // `undefined` drops the key on serialization, so the record fails validation.
+    await jsonl.writeLine(file, {
+      ...valid,
+      id: 'missing-count',
+      inputTokens: undefined,
+    });
+    const broken = await readFile(file, 'utf-8');
+    await writeFile(file, `${broken}{not json}\n`, 'utf-8');
+
+    const table = await loadTokenUsageDailyByModel('2026-05-01');
+
+    // Only the one well-formed record survives.
+    expect(table.get('2026-05-25')?.get('model-a')).toMatchObject({
+      requests: 1,
+      totalTokens: 10,
+    });
   });
 
   it('validates period values', async () => {
