@@ -33,6 +33,7 @@ import {
   LlmClient,
   SendMessageType,
   MAX_STOP_HOOK_CHAIN_PROMPT_IDS,
+  MAX_BACKGROUND_INTERACTION_PROMPT_IDS,
   recordUserTurn,
   type SendMessageOptions,
   type SteerInput,
@@ -10545,6 +10546,38 @@ Other open files:
       expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
     });
 
+    it('carries ledgerTurnKey through a stop-policy continuation (R17)', async () => {
+      mockTurnRunFn.mockReturnValue(textTurn('Done'));
+      installChat({
+        getHistory: vi
+          .fn()
+          .mockReturnValue([userText('A comment.'), modelText('Done')]),
+      });
+      const policy = {
+        continueAt: vi
+          .fn()
+          .mockResolvedValueOnce([{ text: 'Finish the todos.' }])
+          .mockResolvedValue(undefined),
+        onStopHookCap: vi.fn(),
+      };
+      const send = vi.spyOn(client, 'sendMessageStream');
+
+      await run([{ text: 'A comment.' }], 'prompt-id-ledger-key', {
+        type: SendMessageType.UserQuery,
+        ledgerTurnKey: 'prompt-id-ledger-key/goal/goal-runtime:t1',
+        stopPolicies: [policy],
+      });
+
+      expect(send).toHaveBeenCalledTimes(2);
+      // The continuation keeps the turn's base ledger key rather than reading
+      // its suffixed prompt id as a new turn; without the hostContinuationOptions
+      // forwarding this assertion fails and the consumed marks would reset.
+      expect(send.mock.calls[1][3]).toMatchObject({
+        type: SendMessageType.Hook,
+        ledgerTurnKey: 'prompt-id-ledger-key/goal/goal-runtime:t1',
+      });
+    });
+
     it('should run managed auto-memory extraction after a completed user query', async () => {
       mockMemoryManager.scheduleExtract.mockResolvedValue({
         touchedTopics: ['user'],
@@ -11929,6 +11962,33 @@ Other open files:
         undefined,
         undefined,
         true,
+        false,
+      );
+    });
+
+    it('stamps a Teammate turn entry with teammateTurn for the resume seed (R17-1)', async () => {
+      const recordNotification = vi.fn();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordNotification,
+        recordAttributionSnapshot: vi.fn(),
+        recordFileHistorySnapshot: vi.fn(),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      mockTurnRunFn.mockReturnValue(textTurn('Hello'));
+      installChat();
+
+      await run([{ text: 'teammate finished' }], 'prompt-id-teammate', {
+        type: SendMessageType.Teammate,
+      });
+
+      // A Teammate turn records like a notification but carries teammateTurn so
+      // the resume Prompts seed counts it (the live counter advances for it).
+      expect(recordNotification).toHaveBeenCalledWith(
+        [{ text: 'teammate finished' }],
+        undefined,
+        undefined,
+        undefined,
+        true,
+        true,
       );
     });
 
@@ -13186,6 +13246,262 @@ Other open files:
             expectedIdentity,
           );
         }
+      });
+
+      it('passes the explicit-Retry turn-boundary flag only for a Retry', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        for (const [type, expectedRetryFlag] of [
+          [SendMessageType.UserQuery, false],
+          [SendMessageType.Retry, true],
+          [SendMessageType.ToolResult, false],
+          [SendMessageType.Hook, false],
+          [SendMessageType.Cron, false],
+          [SendMessageType.Steer, false],
+        ] as const) {
+          await run([{ text: 'my prompt' }], 'session########5', { type });
+          expect(mockTurnConstructorFn.mock.calls.at(-1)?.[9]).toBe(
+            expectedRetryFlag,
+          );
+        }
+      });
+
+      it('marks ledger membership only for the live turn’s own sends', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+        // A Goal send admits through the goal runtime; an empty snapshot keeps
+        // admission permit-free so the membership slot is what the case pins.
+        mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue({
+          getSnapshot: () => emptyGoalSnapshot(),
+          permitForTurn: vi.fn(() => ({
+            goalId: 'membership-goal',
+            revision: 1,
+            turnId: 'membership-turn',
+          })),
+          beginTurn: vi.fn(() => undefined),
+          finishTurn: vi.fn().mockResolvedValue(undefined),
+          subscribe: vi.fn(() => vi.fn()),
+        } as unknown as GoalRuntime);
+
+        for (const [type, expectedMembership, extraOptions] of [
+          [SendMessageType.UserQuery, true, {}],
+          [SendMessageType.Retry, true, {}],
+          [SendMessageType.ToolResult, true, {}],
+          [SendMessageType.Cron, true, {}],
+          [
+            SendMessageType.Goal,
+            true,
+            {
+              goalPermit: {
+                goalId: 'membership-goal',
+                revision: 1,
+                turnId: 'membership-turn',
+              },
+            },
+          ],
+          [SendMessageType.Hook, true, {}],
+          [SendMessageType.Steer, true, {}],
+          [SendMessageType.Notification, false, {}],
+          [SendMessageType.Teammate, false, {}],
+        ] as const) {
+          await run([{ text: 'my prompt' }], 'session########6', {
+            type,
+            ...extraOptions,
+          });
+          expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(
+            expectedMembership,
+          );
+        }
+      });
+
+      it('passes ledgerTurnKey through to the Turn constructor (R16)', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+        // The client-to-Turn hop of the ledger-key chain: the sender's
+        // ledgerTurnKey must reach the Turn constructor's ledgerTurnKey slot.
+        await run([{ text: 'goal run' }], 'session########7', {
+          type: SendMessageType.UserQuery,
+          ledgerTurnKey: 'session########7/goal/goal-runtime:t1',
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[11]).toBe(
+          'session########7/goal/goal-runtime:t1',
+        );
+      });
+
+      it('excludes a concurrent side query and its unflagged continuation', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // The flagged first send claims the side interaction's prompt id.
+        await run([{ text: 'side' }], 'session########7', {
+          type: SendMessageType.UserQuery,
+          isConcurrentSideQuery: true,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // The tool-result continuation is resubmitted without the flag under
+        // the same prompt id; the registry must still exclude it, or it would
+        // rotate the live turn's ledger key.
+        await run([{ text: 'tool result' }], 'session########7', {
+          type: SendMessageType.ToolResult,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+      });
+
+      it('excludes a Notification and its continuation, not the next user turn', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // Notification first send is excluded by messageType and registered.
+        await run([{ text: 'notify' }], 'session########8', {
+          type: SendMessageType.Notification,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // Its unflagged Hook continuation reuses the Notification's id and must
+        // stay excluded by the registry, or it would rotate the live turn's key.
+        await run([{ text: 'continue' }], 'session########8', {
+          type: SendMessageType.Hook,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // The next user turn mints a NEW id because the CLI advanced the prompt
+        // counter for the Notification (R6-1/R7-1 root fix); it must remain a
+        // ledger member, not be dropped by the Notification registration.
+        await run([{ text: 'user' }], 'session########9', {
+          type: SendMessageType.UserQuery,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(true);
+      });
+
+      it('excludes a Teammate interaction’s unflagged continuation', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // Teammate first send is excluded by messageType and registered.
+        await run([{ text: 'teammate' }], 'session########10', {
+          type: SendMessageType.Teammate,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // Its unflagged Hook continuation reuses the Teammate's id and must stay
+        // excluded by the registry (the Teammate arm of the allowlist).
+        await run([{ text: 'continue' }], 'session########10', {
+          type: SendMessageType.Hook,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+      });
+
+      it('excludes Notification/Teammate by messageType even when the registry does not (R10-6)', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // The messageType arms are sender-decided defense-in-depth: a
+        // background first send must stay excluded even if the prompt-id
+        // registry fails to exclude it (a future registration regression or
+        // bounded eviction). Force the registry to report "not registered" so
+        // only the messageType arm can exclude the send.
+        const registry = (
+          client as unknown as {
+            backgroundInteractionPromptIds: Set<string>;
+          }
+        ).backgroundInteractionPromptIds;
+        const hasSpy = vi.spyOn(registry, 'has').mockReturnValue(false);
+        try {
+          for (const type of [
+            SendMessageType.Notification,
+            SendMessageType.Teammate,
+          ]) {
+            await run([{ text: 'background' }], `membership-arm-${type}`, {
+              type,
+            });
+            expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+          }
+          // A foreground UserQuery is still a member when the registry reports
+          // the id absent.
+          await run([{ text: 'user' }], 'membership-arm-user', {
+            type: SendMessageType.UserQuery,
+          });
+          expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(true);
+        } finally {
+          hasSpy.mockRestore();
+        }
+      });
+
+      it('clearBackgroundInteractionPromptIds lets a reused id be a member again (P2)', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // A Notification first send registers its id and is excluded.
+        await run([{ text: 'notify' }], 'session########clear', {
+          type: SendMessageType.Notification,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+        // Its unflagged continuation is excluded by the registry.
+        await run([{ text: 'continue' }], 'session########clear', {
+          type: SendMessageType.Hook,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // The session-boundary clear drops the registration, so a foreground
+        // turn reusing the id is a ledger member again rather than excluded.
+        client.clearBackgroundInteractionPromptIds();
+        await run([{ text: 'user' }], 'session########clear', {
+          type: SendMessageType.UserQuery,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(true);
+      });
+
+      it('bounds the background-interaction registry FIFO (R8-F11)', async () => {
+        // Pin the bound value itself: raising it must not silently pass (S2).
+        expect(MAX_BACKGROUND_INTERACTION_PROMPT_IDS).toBe(32);
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // Register one more background id than the bound retains. The oldest
+        // id is evicted FIFO, mirroring stopHookChains; its continuations have
+        // long drained by the time MAX newer interactions have registered.
+        for (let i = 0; i <= MAX_BACKGROUND_INTERACTION_PROMPT_IDS; i++) {
+          await run([{ text: 'notify' }], `session########bg-${i}`, {
+            type: SendMessageType.Notification,
+          });
+          expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+        }
+
+        // The newest registered id still excludes its unflagged continuation.
+        await run(
+          [{ text: 'continue' }],
+          `session########bg-${MAX_BACKGROUND_INTERACTION_PROMPT_IDS}`,
+          {
+            type: SendMessageType.Hook,
+          },
+        );
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // The evicted oldest id no longer excludes a continuation under it.
+        await run([{ text: 'continue' }], 'session########bg-0', {
+          type: SendMessageType.Hook,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(true);
       });
 
       it('restores stripped retry entries when only a concurrent send pushes', async () => {
