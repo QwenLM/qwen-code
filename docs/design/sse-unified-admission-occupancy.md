@@ -305,8 +305,10 @@ documented as-is.
   after the close timeout on the primary listener, immediately on the
   pairing listeners — including upgraded sockets, which
   `closeAllConnections()` alone does not reach — releasing their slots
-  (pinned by the shutdown tests for the primary and local-control listeners;
-  the remote-access listener shares the same tracked-destroy release path).
+  (slot release is pinned by the primary listener's shutdown tests and by the
+  pairing-listener disable test; the local-control service test pins that
+  `disable()` settles over a non-answering upgraded peer; the remote-access
+  listener shares the same tracked-destroy release path).
 
 ## Files affected
 
@@ -332,7 +334,11 @@ documented as-is.
   the arriving listener's occupancy/governing-bound pair.
 - `packages/cli/src/serve/local-control/service.ts`,
   `packages/cli/src/serve/remote-access.ts` — share the pairing budget
-  constant.
+  constant; both track accepted sockets and destroy the survivors on close
+  so a non-answering upgraded peer cannot hang disable()/drain.
+- `packages/cli/src/serve/serve-app-lifecycle.ts` — track accepted sockets
+  from 'connection' and destroy the survivors in the close force timers,
+  reaching upgraded sockets that closeAllConnections() alone does not.
 - `packages/cli/src/serve/run-qwen-serve.ts` — bootstrap status field.
 - `packages/sdk-typescript/src/daemon/types.ts` — additive mirror.
 - Docs listed above; new behavior tests (red-first) in a collocated

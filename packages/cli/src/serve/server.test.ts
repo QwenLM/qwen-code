@@ -51501,8 +51501,12 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
     };
   }
 
-  async function openInitializedWs(port: number): Promise<WebSocket> {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/acp`);
+  async function openInitializedWs(
+    port: number,
+    url = `ws://127.0.0.1:${port}/acp`,
+    headers?: Record<string, string>,
+  ): Promise<WebSocket> {
+    const ws = new WebSocket(url, headers ? { headers } : undefined);
     await new Promise<void>((resolve, reject) => {
       ws.on('error', reject);
       ws.on('open', () =>
@@ -52127,6 +52131,59 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       });
     }
   }, 30_000);
+
+  it('disable releases pairing-listener slots over a non-answering upgraded peer (issue #17712)', async () => {
+    // The local-control service pin asserts disable() settlement only; this
+    // pin asserts the counted slot returns to baseline through the
+    // tracked-destroy -> 'close' -> release-hook path on the LAN listener.
+    const pair = await enablePairingListener({ maxConnections: 256 });
+    handle = pair.handle;
+    const { lanBase, lanAuth } = pair;
+    const lanPort = Number(new URL(lanBase).port);
+    const before = getSseOccupancy();
+    const ws = await openInitializedWs(
+      lanPort,
+      `${lanBase.replace('http:', 'ws:')}/acp`,
+      lanAuth,
+    );
+    try {
+      await vi.waitFor(
+        () => {
+          expect(getSseOccupancy().byListener['local-control']).toBe(
+            before.byListener['local-control'] + 1,
+          );
+        },
+        { timeout: 5_000 },
+      );
+      const service = handle.getLocalControl();
+      if (!service) throw new Error('local control service unavailable');
+      let timer: NodeJS.Timeout | undefined;
+      const bounded = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                'disable() did not resolve over a non-answering upgraded peer',
+              ),
+            ),
+          5_000,
+        );
+      });
+      await Promise.race([service.disable(), bounded]);
+      clearTimeout(timer);
+      await vi.waitFor(
+        () => {
+          expect(getSseOccupancy().total).toBe(before.total);
+        },
+        { timeout: 5_000 },
+      );
+    } finally {
+      ws.close();
+      pair.restore();
+      await handle?.close();
+      handle = undefined;
+    }
+  }, 20_000);
 
   it('releases the slot when a client aborts inside the subscription handshake window', async () => {
     // The REST route counts late (after the async subscription handshake).

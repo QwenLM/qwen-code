@@ -264,8 +264,10 @@ deps 下发。每个 deps 项均可选：省略 caps 的直嵌与单元夹具保
   断开或该表面自身生命周期结束；cap 约束此类槽位同时存在的数量。shutdown
   是兜底：listener close 强制关闭剩余连接——主 listener 在 close 超时后、
   配对 listener 立即——含 `closeAllConnections()` 单独触及不到的已升级
-  socket——并释放其槽位（主与 local-control listener 由 shutdown 测试钉住；
-  remote-access listener 共享同一跟踪销毁释放路径）。
+  socket——并释放其槽位（槽位释放由主 listener 的 shutdown 测试与配对
+  listener 的 disable 测试钉住；local-control 服务级测试钉住 `disable()`
+  在不回应 close 的已升级对端上 settle；remote-access listener 共享同一
+  跟踪销毁释放路径）。
 
 ## 受影响文件
 
@@ -290,7 +292,12 @@ deps 下发。每个 deps 项均可选：省略 caps 的直嵌与单元夹具保
 - `packages/cli/src/serve/routes/health.ts` —— `connectedClients` 口径与
   到达 listener 的占用/管辖边界对。
 - `packages/cli/src/serve/local-control/service.ts`、
-  `packages/cli/src/serve/remote-access.ts` —— 共享配对预算常量。
+  `packages/cli/src/serve/remote-access.ts` —— 共享配对预算常量；两者均
+  跟踪已接受 socket 并在 close 时销毁幸存者，使不回应 close 的已升级对端
+  不能挂死 disable()/drain。
+- `packages/cli/src/serve/serve-app-lifecycle.ts` —— 从 'connection' 跟踪
+  已接受 socket，并在 close 强制计时器销毁幸存者，触及
+  closeAllConnections() 单独触及不到的已升级 socket。
 - `packages/cli/src/serve/run-qwen-serve.ts` —— bootstrap status 字段。
 - `packages/sdk-typescript/src/daemon/types.ts` —— additive 镜像。
 - 上文所列文档；新行为测试（先红）放在同目录 `sse-occupancy` 测试文件，
