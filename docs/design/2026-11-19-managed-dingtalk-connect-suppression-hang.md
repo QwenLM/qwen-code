@@ -10,7 +10,7 @@
 
 The managed DingTalk stream mutes `console.log` **process-wide** for as long as the SDK's connect promise is pending. The SDK's endpoint discovery has no timeout, so a server that accepts the connection and never answers leaves the whole process muted long after the attempt itself has given up.
 
-The adapter is not deaf in that state — the attempt budget rejects and the wrapper re-arms — but every other `console.log` in the CLI stays silenced, and the per-frame suppression scopes can no longer restore logging either, because they share the same depth counter.
+The attempt budget rejects, so the adapter is not left waiting forever: a first connect surfaces the failure to the operator, and a later one re-arms. Either way every other `console.log` in the CLI stays silenced, and the per-frame suppression scopes can no longer restore logging either, because they share the same depth counter.
 
 ## Current state
 
@@ -55,7 +55,7 @@ The discovery contract is small and stable: two URLs, two query names, four payl
   - Add a bounded endpoint discovery that performs the token GET and the gateway POST with `fetch` and an `AbortSignal`, mirroring the shape the package already uses for webhook sends. It writes `config.access_token`, `config.endpoint` and the private `dw_url`, and logs nothing.
   - Install it on the constructed client in place of the SDK's `getEndpoint`, so the SDK's own `connect()` → `_connect()` sequence is unchanged.
   - Drop `withConnectLoggingSuppressed` from the attempt. The per-frame `withConsoleLogSuppressedSync` scope stays.
-- `packages/channels/dingtalk/src/connect-logging.ts` — unchanged. The legacy channel still uses the async helper; its own exposure is recorded as out of scope below.
+- `packages/channels/dingtalk/src/connect-logging.ts` — header comment only, no behaviour change: the async helper is now the legacy channel's alone. Its own exposure is recorded as out of scope below.
 - Tests: a discovery witness (request shapes, abort, silence, assigned fields), a hang witness (a never-answering discovery leaves `console.log` intact past the attempt budget), and a contract pin against the SDK source.
 
 ## Scope boundaries

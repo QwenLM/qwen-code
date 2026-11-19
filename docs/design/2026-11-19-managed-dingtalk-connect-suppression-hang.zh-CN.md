@@ -10,7 +10,7 @@
 
 托管钉钉流在 SDK 的 connect promise 未落定期间，**进程级**静音 `console.log`。SDK 的端点发现没有任何超时，因此一个「接受连接但永不答复」的服务端会让整个进程在尝试早已放弃之后仍然保持静音。
 
-该状态下适配器并不失聪——尝试预算会 reject、wrapper 会重新排期——但 CLI 里其余所有 `console.log` 都被静音，而且逐帧的抑制作用域也再也无法恢复日志，因为它们共用同一个深度计数器。
+尝试预算会 reject，所以适配器不会无限等待：首连把失败上报给运维，之后的连接则重新排期。无论哪种， CLI 里其余所有 `console.log` 都被静音，而且逐帧的抑制作用域也再也无法恢复日志，因为它们共用同一个深度计数器。
 
 ## 现状
 
@@ -55,7 +55,7 @@ SDK（`dingtalk-stream-sdk-nodejs` 2.0.4，`dist/client.mjs`）在连接路径�
   - 新增有界端点发现：用 `fetch` 与 `AbortSignal` 执行 token GET 与网关 POST，沿用本包 webhook 发送已有的形态。它写入 `config.access_token`、`config.endpoint` 与私有的 `dw_url`，且不打印任何东西。
   - 把它装到已构造的 client 上取代 SDK 的 `getEndpoint`，SDK 自身的 `connect()` → `_connect()` 序列保持不变。
   - 从 attempt 中去掉 `withConnectLoggingSuppressed`。逐帧的 `withConsoleLogSuppressedSync` 作用域保留。
-- `packages/channels/dingtalk/src/connect-logging.ts` —— 不改。legacy 频道仍用该异步 helper，它自身的暴露面记在下面的范围外。
+- `packages/channels/dingtalk/src/connect-logging.ts` —— 仅改头注释，无行为变化：该异步 helper 现在只属于 legacy 频道。它自身的暴露面记在下面的范围外。
 - 测试：发现见证（请求形状、中止、静默、字段赋值）、挂死见证（永不答复的发现让 `console.log` 在尝试预算到期后仍保持原样），以及对 SDK 源码的契约钉。
 
 ## 范围边界
