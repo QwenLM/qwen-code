@@ -2,7 +2,7 @@
 
 [English](2026-11-19-managed-a1-layer2-storage-version-removal.md) | [简体中文](2026-11-19-managed-a1-layer2-storage-version-removal.zh-CN.md)
 
-状态：proposed；持久信号决策已锁定（head 布尔列）。本设计是
+状态：已实现并本地验证（focused Java + TS 套件绿；全仓 typecheck 净）；完整 Checkstyle/SpotBugs/MySQL/全套件门在 CI 跑。持久信号决策已锁定（head 布尔列）。本设计是
 [版本收敛设计](2026-11-19-managed-agent-version-convergence.md) 的 A1 Layer 2
 follow-up。A1 阶段1 已剥离滚动升级协商（reader 天花板、writer-grant
 `supportedStorageVersion`）；`storage_version` 列本身因仍表达活不变量而保留。本设计
@@ -114,9 +114,10 @@ worker 与 server 作为一个单元部署。
   `has_activity_diagnostics = has_activity_diagnostics OR ?`，参数为该提交的 activity
   探测（见下）；去掉 `Math.max` 提升。
 - 把 `ManagedModelDiagnosticProjection.storageFloor()` 替换为布尔 activity 探测器
-  `hasActivityDiagnostics(records, requested, validated)`，返回 `activity || measured`
-  （`>= 4` 条件）。`promotes → 2` 与 `diagnostics → 3` 档位变死代码并删除；路由仍直接用
-  `requiresVersionTwo`。
+  `hasActivityDiagnostics(records, validated)`，返回 `activity || measured`
+  （`>= 4` 条件）。`promotes → 2` 与 `diagnostics → 3` 档位变死代码并删除；`requested`
+  参数省略，因为它只喂已删除的 `promotes` 档位。路由仍直接用 `requiresVersionTwo`
+  （按事务，在 worker 侧）。
 - 门（`JournalCommit:105`）：`if (head.activityDiagnostics())`。
 - `rebuildBatch` / `rebuildActivityBatch`：以布尔替代 `storageVersion`；false 时跳过。
   `JournalWriterLifecycle:259,277` 传 `head.activityDiagnostics()`。

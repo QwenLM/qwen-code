@@ -2,7 +2,9 @@
 
 [English](2026-11-19-managed-a1-layer2-storage-version-removal.md) | [简体中文](2026-11-19-managed-a1-layer2-storage-version-removal.zh-CN.md)
 
-Status: proposed; the durable-signal decision is locked (boolean head column).
+Status: implemented and verified locally (focused Java + TS suites green; full
+typecheck clean). The full Checkstyle/SpotBugs/MySQL/full-suite gates run in CI.
+The durable-signal decision is locked (boolean head column).
 This is the A1 Layer 2 follow-up to the
 [version convergence design](2026-11-19-managed-agent-version-convergence.md).
 A1 Phase 1 already stripped the rolling-upgrade negotiation (reader ceiling,
@@ -138,10 +140,11 @@ version, so removing the column does not affect it.
   where the parameter is the commit's activity detection (below); drop the
   `Math.max` promotion.
 - Replace `ManagedModelDiagnosticProjection.storageFloor()` with a boolean
-  activity detector `hasActivityDiagnostics(records, requested, validated)`
-  returning `activity || measured` (the `>= 4` conditions). The `promotes → 2`
-  and `diagnostics → 3` tiers become dead and are removed; routing still uses
-  `requiresVersionTwo` directly.
+  activity detector `hasActivityDiagnostics(records, validated)` returning
+  `activity || measured` (the `>= 4` conditions). The `promotes → 2` and
+  `diagnostics → 3` tiers become dead and are removed; the `requested` parameter
+  is dropped because it only fed the removed `promotes` tier. Routing still uses
+  `requiresVersionTwo` directly (per transaction, in the worker).
 - Gate (`JournalCommit:105`): `if (head.activityDiagnostics())`.
 - `rebuildBatch` / `rebuildActivityBatch`: take a boolean instead of
   `storageVersion`; skip when false. `JournalWriterLifecycle:259,277` pass
