@@ -33,6 +33,7 @@ const SETTING_KEYS = {
   'setting:advisor-model': 'advisorModel',
   'setting:advisor-session-call-limit': 'advisorMaxUses',
   'setting:vision-model': 'visionModel',
+  'setting:vision-bridge-timeout': 'visionBridgeTimeoutMs',
   'setting:model-fallbacks': 'modelFallbacks',
   'setting:respect-git-ignore': 'context.fileFiltering.respectGitIgnore',
   'setting:respect-qwen-ignore': 'context.fileFiltering.respectQwenIgnore',

@@ -122,6 +122,12 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.label.visionModel': 'Vision Model',
   'settings.description.visionModel':
     'Image-capable model used as the vision bridge. Leave empty to auto-select.',
+  // `/model --vision --timeout` writes this setting; kept here with the
+  // settings strings so the transcript export drops them.
+  'model.setVisionTimeout': 'Set Vision Bridge Timeout',
+  'model.invalidOption': (v) => `Invalid /model option "${v?.option ?? ''}".`,
+  'model.invalidVisionTimeout': (v) =>
+    `Invalid --timeout value "${v?.value ?? ''}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.`,
 };
 
 export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
@@ -332,6 +338,13 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.visionModel': '视觉模型',
   'settings.description.visionModel':
     '用于视觉桥接的图像能力模型。留空则自动选择。',
+  'model.setVisionTimeout': '设置视觉桥接超时',
+  'model.invalidOption': (v) => `无效的 /model 选项“${v?.option ?? ''}”。`,
+  'model.invalidVisionTimeout': (v) =>
+    `无效的 --timeout 值 "${v?.value ?? ''}"。请使用正整数秒数，例如 60、60s 或 90000ms。`,
+  'settings.label.visionBridgeTimeoutMs': '视觉桥接超时（毫秒）',
+  'settings.description.visionBridgeTimeoutMs':
+    '视觉桥接图片转写调用的单次超时（毫秒，正整数，最大 2147483647）。留空使用内置的 30 秒。视觉端点较慢或经过代理时可调大。也可用 /model --vision --timeout <秒数> 设置。',
   'settings.label.modelFallbacks': '模型回退',
   'settings.description.modelFallbacks':
     '主模型遇到容量错误（429/503/529）时按序尝试的回退模型 ID 列表（逗号分隔，最多 3 个）。例如“qwen-plus,qwen-turbo”。可用 CLI --fallback-model 设置。',
