@@ -21,6 +21,7 @@
  * - exists() - Checks if file exists and is non-empty
  */
 
+import * as nodeConstants from 'node:constants';
 import fs from 'node:fs';
 import path from 'node:path';
 import { atomicWriteFileSync } from './atomicFileWrite.js';
@@ -336,7 +337,7 @@ export async function read<T = unknown>(
 const ensuredDirs = new Set<string>();
 const diagnosedTailReadFailures = new Set<string>();
 const MAX_DIAGNOSED_TAIL_READ_FAILURES = 128;
-const tailProbeFlags = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK;
+const tailProbeFlags = nodeConstants.O_RDONLY | (nodeConstants.O_NONBLOCK ?? 0);
 
 function canAppendWithoutTailInspection(
   filePath: string,

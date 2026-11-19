@@ -13,6 +13,7 @@ import {
   it,
   vi,
 } from 'vitest';
+import * as nodeConstants from 'node:constants';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -580,7 +581,8 @@ describe('writeLine / writeLineSync / write', () => {
     { name: 'writeLine', append: writeLine },
     { name: 'writeLineSync', append: writeLineSync },
   ])('$name', ({ name, append }) => {
-    const tailProbeFlags = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK;
+    const tailProbeFlags =
+      nodeConstants.O_RDONLY | (nodeConstants.O_NONBLOCK ?? 0);
     const denyTailProbe = (error: Error) => {
       if (name === 'writeLine') {
         const open = fs.promises.open.bind(fs.promises);
