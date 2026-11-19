@@ -6318,6 +6318,42 @@ describe('ShellTool', () => {
       expect(await pm.isCommandAllowed('git clean -fdx')).not.toBe('allow');
     });
 
+    it.each(['time', 'timeout 5', 'env FOO=1', 'sudo', 'nice -n 5'])(
+      'keeps the confirmation grant scoped behind %s',
+      async (prefix) => {
+        const command = `${prefix} git push origin main`;
+        const details = await detailsOf(build(command));
+        expect(details.permissionRules).toEqual([
+          'Bash(git push *)',
+          `Bash(${command})`,
+        ]);
+        const pm = new PermissionManager({
+          getPermissionsAllow: () => details.permissionRules,
+          getPermissionsAsk: () => [],
+          getPermissionsDeny: () => [],
+          getProjectRoot: () => '/test/dir',
+          getCwd: () => '/test/dir',
+        });
+        pm.initialize();
+        expect(await pm.isCommandAllowed(command)).toBe('allow');
+        expect(await pm.isCommandAllowed(`${prefix} git reset --hard`)).toBe(
+          'ask',
+        );
+      },
+    );
+
+    it.each([
+      "bash -c 'git > /dev/null push origin main'",
+      "FOO=1 bash -c 'git > /dev/null push origin main'",
+      "sh -c 'cd /tmp && git > /dev/null push origin main'",
+    ])(
+      'retains the enclosing shell boundary in confirmation for %s',
+      async (command) => {
+        const details = await detailsOf(build(command));
+        expect(details.permissionRules).toEqual([]);
+      },
+    );
+
     it('should exclude already-allowed sub-commands from confirmation details in compound commands', async () => {
       const pm = new PermissionManager({
         getPermissionsAllow: () => ['Bash(git add *)'],

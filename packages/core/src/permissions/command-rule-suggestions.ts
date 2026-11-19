@@ -262,15 +262,16 @@ export async function suggestCommandRules(
       // An outer shell wildcard would authorize every script passed to -c.
       continue;
     }
+    const ruleSource = unprefixed ?? part;
     let rules: string[] = [];
     try {
-      const tree = await parseShellCommand(part);
+      const tree = await parseShellCommand(ruleSource);
       const hasError = tree.rootNode.hasError;
       tree.delete();
       // A structure-only descriptor-close repair does not certify the
       // original parse's derived commands. Retain only the literal fallback.
       if (!hasError) {
-        rules = (await extractCommandRules(part)).filter(
+        rules = (await extractCommandRules(ruleSource)).filter(
           (rule) => !/^[*\s]*$/.test(rule),
         );
       }

@@ -3444,9 +3444,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Extract minimum-scope permission rules only for sub-commands that
     // actually need confirmation.
     const suggested = await suggestCommandRules(
-      command,
+      this.params.command,
       'Bash',
-      effectiveSubCommands,
+      command === this.params.command.trim() ? effectiveSubCommands : undefined,
     );
 
     // Flag command substitution ($(), backticks, <(), >()) so the user

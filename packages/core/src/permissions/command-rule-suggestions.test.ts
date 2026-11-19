@@ -56,6 +56,29 @@ describe.each([
   ['run_shell_command', 'Bash'],
   ['monitor', 'Monitor'],
 ] as const)('%s permission suggestions', (toolName, displayName) => {
+  it.each(['time', 'timeout 5', 'env FOO=1', 'sudo', 'nice -n 5'])(
+    'scopes a transparent %s prefix to its executable payload',
+    async (prefix) => {
+      const command = `${prefix} git push origin main`;
+      const { permissionRules = [] } = await suggestCommandRules(
+        command,
+        displayName,
+      );
+      expect(permissionRules).toEqual([
+        `${displayName}(git push *)`,
+        `${displayName}(${command})`,
+      ]);
+      const manager = makeManager(permissionRules);
+      expect(await manager.evaluate({ toolName, command })).toBe('allow');
+      expect(
+        await manager.evaluate({
+          toolName,
+          command: `${prefix} git reset --hard`,
+        }),
+      ).toBe('ask');
+    },
+  );
+
   it.each([
     ['git commit -m', 'git commit *'],
     ['echo', 'echo *'],
