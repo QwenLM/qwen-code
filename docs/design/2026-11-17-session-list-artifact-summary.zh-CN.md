@@ -124,8 +124,10 @@
   daemon/ACP 恢复漏斗经 `readRestoreProjection` 选择性读取、从不调用
   `loadSession`。对「投影定义且 apiHistory 为空」，它计数该投影实际交付的
   集合——`runtime.artifactSnapshot.artifacts` 经共享可恢复谓词过滤——并把
-  已有 sidecar 治愈到该计数，且受与 load 播种相同的权威门约束：部分读取
-  （`sourcesUnavailable`）、历史链断裂（`historyGaps`）、损坏的产物 journal
+  已有 sidecar 治愈到该计数，且受与 load 播种相同的权威门约束：读取不完整
+  （`sourceReadComplete`——与 load 播种门控同一信号；`sourcesUnavailable`
+  更宽，还会标记损坏的 sources 快照，而那并不收窄产物交付）、历史链断裂
+  （`historyGaps`）、损坏的产物 journal
   （`artifactJournalWarnings`——reader 从重建中穿出，即使没有快照存活）都
   不得覆盖正确计数。三个写者共用一个交付集合定义：transcript 从未有过对话
   轮次（每条记录都是 system 元数据）时，侧记录选择器纳入全部 artifact 记录，
@@ -138,8 +140,13 @@
   播种走共享助手，由它持有尺寸探测、辅助读取、归属校验、形状门与播种：读取
   与库变更读取同样以 64 MiB 为上限、同样的包含边界（正好 64 MiB 播种、超过
   跳过、尺寸探测失败跳过）；拒绝同时扣住计数与恢复载荷的快照（绝不从非权威
-  读取交付）。有对话的会话保持选择性读取的零额外 I/O 契约（由读取 spy 钉住）。
-  两个漏斗与库守卫共用同一个播种方法和同一个记录组合助手。播种还要求 journal
+  读取交付）。有对话的会话保持选择性读取的零额外 I/O 契约（由读取 spy 钉住），
+  且不在 daemon 漏斗播种：其计数来自 recorder 盖章与 CLI load 漏斗，因此仅经
+  daemon 首开一个无 sidecar 的 legacy 对话会话，在下一个产物事件之前不显示
+  计数——这是 #17518 既有的限制，作为跟进项跟踪，而非本播种覆盖的形状。
+  load 漏斗与库守卫共用同一个播种方法和同一个记录组合助手；投影漏斗共用
+  交付集合定义（侧记录选择器与可恢复谓词），计数自身交付而非调用播种方法。
+  播种还要求 journal
   具备权威性：无历史链缺口（断链会把 artifact 事件孤儿化出活跃分支而少计），
   且无记录级损坏警告——与库变更守卫同一判定
   （`hasDisqualifyingArtifactJournalWarning`）；单产物级跳过仍被容忍。两处

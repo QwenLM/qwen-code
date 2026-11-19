@@ -154,8 +154,11 @@ clicked, using the list data the sidebar already holds.
   apiHistory it counts exactly the set that projection delivers —
   `runtime.artifactSnapshot.artifacts` filtered by the shared restorable
   predicate — and heals an existing sidecar to that count, subject to the
-  same authority gates as the load seed: a partial read
-  (`sourcesUnavailable`), a broken history chain (`historyGaps`), or a
+  same authority gates as the load seed: an incomplete read
+  (`sourceReadComplete` — the same signal the load seed gates on;
+  `sourcesUnavailable` is broader and also flags a damaged sources
+  snapshot, which does not narrow artifact delivery), a broken history
+  chain (`historyGaps`), or a
   damaged artifact journal (`artifactJournalWarnings`, which the reader
   threads out of the rebuild even when no snapshot survives) must not
   overwrite a correct count. One delivered-set definition spans all three
@@ -178,8 +181,15 @@ clicked, using the list data the sidebar already holds.
   refusal withholds both the count and the restore payload's snapshot
   (never deliver from a non-authoritative read). Sessions with a
   conversation keep the selective read's zero-extra-I/O contract (pinned
-  by a read spy). Both funnels and the
-  library guard share one seed method and one record-composition helper. The
+  by a read spy) and are not seeded on the daemon funnel: their count
+  arrives via the recorder stamp and the CLI load funnel, so a daemon-only
+  first open of a legacy conversation session without a sidecar shows no
+  count until the next artifact event — a pre-existing #17518 limitation
+  tracked as a follow-up, not a shape this seed covers. The load funnel and
+  the library guard share one seed method and one record-composition
+  helper; the projection funnel shares the delivered-set definition (the
+  side-record selector and the restorable predicate) and counts its own
+  delivery rather than calling the seed method. The
   seed also requires an authoritative journal: no history gap (a broken chain
   can orphan artifact events off the active branch and undercount) and no
   record-level damage warnings — the same predicate the library mutation
