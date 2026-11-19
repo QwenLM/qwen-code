@@ -3529,6 +3529,10 @@ export const ZH_TW: Record<string, MessageValue> = {
   'model.disabled': '不啟用',
 
   'model.setVision': '設定視覺模型',
+  'model.setVisionTimeout': '設定視覺橋接逾時',
+  'model.invalidOption': (v) => `無效的 /model 選項「${v?.option ?? ''}」。`,
+  'model.invalidVisionTimeout': (v) =>
+    `無效的 --timeout 值 "${v?.value ?? ''}"。請使用正整數秒數，例如 60、60s 或 90000ms。`,
   'model.switch': '切換模型',
   'model.unknown': '未知',
   'resume.current': '當前',
@@ -4235,6 +4239,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'workflow.graph.omitted': (v) =>
     `為保證效能，執行圖已省略 ${v?.lanes ?? 0} 個階段、${v?.nodes ?? 0} 個 Agent 和 ${v?.edges ?? 0} 條連線。`,
   'workflow.noPhase': '未分階段',
+  'workflow.phase.notStarted': '未開始',
   'workflow.dispatchCount': (v) => `${v?.count ?? 0} 個排程`,
   'workflow.selectedDispatch': '已選排程',
   'workflow.dependencies': '依賴',
@@ -6048,10 +6053,10 @@ export const ZH_TW: Record<string, MessageValue> = {
     '啟用持久化的工作區 Agent 在共享任務執行緒上協作（實驗性）。與 Agent Team 相互獨立：兩個開關互不隱含。啟用只表示允許協作；把 Agent 開放給外部呼叫方、信任某個連線、註冊 host 仍各自需要顯式配置。也可透過 QWEN_CODE_ENABLE_AGENT_COLLABORATION=1 環境變數啟用。',
   'settings.label.experimental.unifiedAgentLoop': '統一 Agent Loop',
   'settings.description.experimental.unifiedAgentLoop':
-    '讓會話執行在共享的 agent loop 上。未設定時，每個入口使用自己的預設值：headless 會話（`-p` 與 stream-json）和 Ink TUI 執行在共享 loop 上，ACP 會話（Zed、VS Code、Web Shell、channel）、OpenTUI、子代理和 Hosted Harness 仍用各自的 loop（在這些入口上屬實驗性）。設為 `true` 時它們都執行在共享 loop 上（Hosted Harness 的模型輪執行在它上面，同時保留其 journal 化工具派發），設為 `false` 時它們都用各自的 loop，headless 和 Ink TUI 也是。QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP 環境變數按入口覆蓋此設定：`1` 開啟所有入口，`0` 關閉所有入口，逗號分隔的列表（如 `headless,acp=0`）強制指定入口（headless、acp、ink、opentui、agent-core、speculation、hosted）。裸 `1`/`0` 只作為整值識別，不在列表內生效；列表未點名的入口回退到此設定。專案級 `.env` 或 `settings.env` 無法設定該變數。',
+    '讓會話執行在共享的 agent loop 上。未設定時，每個入口使用自己的預設值：headless 會話（`-p` 與 stream-json）、ACP 會話（Zed、VS Code、Web Shell、channel）、Ink TUI、OpenTUI 和子代理執行在共享 loop 上，Hosted Harness 仍使用自己的 loop（在該入口上屬實驗性）。設為 `true` 時它們都執行在共享 loop 上（Hosted Harness 的模型輪執行在它上面，同時保留其 journal 化工具派發），設為 `false` 時它們都用各自的 loop，headless、ACP 會話、兩個 TUI 和子代理也是。QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP 環境變數按入口覆蓋此設定：`1` 開啟所有入口，`0` 關閉所有入口，逗號分隔的列表（如 `headless,acp=0`）強制指定入口（headless、acp、ink、opentui、agent-core、speculation、hosted）。裸 `1`/`0` 只作為整值識別，不在列表內生效；列表未點名的入口回退到此設定。專案級 `.env` 或 `settings.env` 無法設定該變數。',
   'settings.label.experimental.eventBusAgentLoop': '事件匯流排 Agent Loop',
   'settings.description.experimental.eventBusAgentLoop':
-    '讓共享 agent loop 執行在事件匯流排架構上（實驗性）。對執行在共享 agent loop 上的入口生效：預設是 headless 會話（`-p` 與 stream-json）和 Ink TUI，開啟 experimental.unifiedAgentLoop 時還有 ACP 會話（Zed、VS Code、Web Shell、channel）、OpenTUI 和子代理；其他 surface 保留現有的 loop 內部實現。QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP 環境變數覆蓋此設定：`1` 開啟，`0` 關閉，逗號分隔的列表（如 `headless=0`）強制指定入口（headless、acp、ink、opentui、agent-core；`speculation` 為保留名）。今天只有這些已接線的入口生效；裸 `1`/`0` 只作為整值識別，不在列表內生效，列表未點名的入口回退到此設定。專案級 `.env` 或 `settings.env` 無法設定該變數。',
+    '讓共享 agent loop 執行在事件匯流排架構上（實驗性）。對執行在共享 agent loop 上的入口生效：預設是 headless 會話（`-p` 與 stream-json）、ACP 會話（Zed、VS Code、Web Shell、channel）、Ink TUI、OpenTUI 和子代理；其他 surface 保留現有的 loop 內部實現。QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP 環境變數覆蓋此設定：`1` 開啟，`0` 關閉，逗號分隔的列表（如 `headless=0`）強制指定入口（headless、acp、ink、opentui、agent-core；`speculation` 為保留名）。今天只有這些已接線的入口生效；裸 `1`/`0` 只作為整值識別，不在列表內生效，列表未點名的入口回退到此設定。專案級 `.env` 或 `settings.env` 無法設定該變數。',
   'settings.label.experimental.modelAvailabilityTracking': '模型可用性台賬',
   'settings.description.experimental.modelAvailabilityTracking':
     '在會話內跨請求記住模型健康狀態（實驗性）。當某個 fallback 模型在容量錯誤（429/503/529）上耗盡重試後，模型 fallback 鏈在本輪剩餘請求中跳過它，並在下一輪重新探測一次；顯式重試也會重新探測被跳過的模型。primary 模型仍每個請求都會被嘗試。永久配額耗盡仍快速失敗，不視為瞬時容量跳過。關閉時 fallback 鏈行為與之前完全一致。',
@@ -6075,6 +6080,17 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.label.agents.arena.preserveArtifacts': '保留 Arena 產物',
   'settings.description.agents.arena.preserveArtifacts':
     '啟用後，Arena worktree 和會話狀態檔案會在會話結束或主智慧體退出後保留。',
+  'managed.artifactLibrary.title': '產物庫',
+  'managed.artifactLibrary.description':
+    '此工作區各會話產出的產物，按最新優先排列。',
+  'managed.artifactLibrary.empty': '此工作區還沒有產出產物。',
+  'managed.artifactLibrary.unavailable': '此伺服器不支援產物庫。',
+  'managed.artifactLibrary.workspaceGone': '此工作區已不再對你的帳戶可用。',
+  'managed.artifactLibrary.loadFailed': '無法載入產物庫：',
+  'managed.artifactLibrary.unavailableBadge': '不可用',
+  'managed.artifactLibrary.sessionFallback': '會話',
+  'managed.artifactLibrary.refresh': '重新整理',
+  'managed.artifactLibrary.close': '關閉',
   'managed.tasks.title': '會話任務',
   'managed.tasks.activeChildren': (v) => `活動子 Agent：${v?.count}`,
   'managed.tasks.awaitingApproval': '等待審批',

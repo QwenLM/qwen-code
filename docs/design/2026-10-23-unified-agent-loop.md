@@ -217,7 +217,7 @@ if (config.isUnifiedAgentLoopEnabled('headless')) {
 
 The current loop stays as the `else` branch and is not refactored while the setting exists. A surface that has not moved yet ignores the setting, and the setting's description names the surfaces it covers. ACP children started by `qwen serve` read the same settings, so the daemon and Web Shell follow the setting for the ACP turns that have moved. The Web Shell settings panel lists the setting from PR 2a on.
 
-Per-surface resolution landed in #17045 (block B): the environment override wins when it addresses the surface, else the explicit setting when set, else the surface's built-in default (`true` for headless, both TUIs and AgentCore, `false` for every other surface). The setting is tri-state at runtime — unset is distinct from explicitly off — and its schema has no default since headless's default flipped; a settings dialog's first toggle of the unset value writes `true`. See `2026-11-12-loop-rollout-switches.md` for the resolution rules and the rollout ladder.
+Per-surface resolution landed in #17045 (block B): the environment override wins when it addresses the surface, else the explicit setting when set, else the surface's built-in default (`true` for headless, ACP, both TUIs and AgentCore, `false` for every other surface). The setting is tri-state at runtime — unset is distinct from explicitly off — and its schema has no default since headless's default flipped; a settings dialog's first toggle of the unset value writes `true`. See `2026-11-12-loop-rollout-switches.md` for the resolution rules and the rollout ladder.
 
 ### Headless on the shared loop (PR 1)
 

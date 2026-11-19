@@ -133,8 +133,9 @@ describe('ToolApproval', () => {
     act(() => root.unmount());
   });
 
-  it('orders permission options according to the product hierarchy', () => {
+  it('orders and localizes the offered approval scopes', () => {
     const container = document.createElement('div');
+    document.body.appendChild(container);
     const root = createRoot(container);
     const request: PermissionRequest = {
       id: 'approval-4',
@@ -185,30 +186,40 @@ describe('ToolApproval', () => {
     const ids = Array.from(container.querySelectorAll('[data-option-id]')).map(
       (el) => el.getAttribute('data-option-id'),
     );
-    expect(ids).toEqual([
-      'cancel',
+    expect(ids).toEqual(['cancel', 'proceed_once']);
+
+    const trigger = container.querySelector('button[aria-haspopup="menu"]')!;
+    act(() => {
+      trigger.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    const items = Array.from(document.querySelectorAll('[role="menuitem"]'));
+    expect(items.map((item) => item.getAttribute('data-option-id'))).toEqual([
+      'proceed_once',
       'proceed_always_user',
       'proceed_always_project',
       'proceed_always_server',
       'proceed_always_tool',
-      'proceed_once',
     ]);
 
     // The fixture's server labels deliberately differ from the i18n strings
     // (e.g. 'Always Allow in project' vs 'Always allow in this project'), so
     // asserting the rendered text proves localization overrides server labels.
-    const labels = Array.from(
-      container.querySelectorAll('[data-web-shell-option-label]'),
-    ).map((el) => el.textContent);
+    const labels = items.map((el) => el.textContent);
     expect(labels).toEqual([
-      'Reject',
+      'Yes, allow once',
       'Always allow for this user',
       'Always allow in this project',
       'Always allow for this server',
       'Always allow for this tool',
-      'Yes, allow once',
     ]);
 
     act(() => root.unmount());
+    container.remove();
   });
 });

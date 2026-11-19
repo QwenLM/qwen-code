@@ -25,6 +25,25 @@ import type {
 // network) is `unknown` for the lease reconciler to settle.
 
 const SECONDARY_RATE_LIMIT_MESSAGE = /secondary rate limit|abuse detection/i;
+// The daemon's CI definition (core aggregateChecks' FAILING_CHECK_RUN_CONCLUSIONS,
+// lowercased for the REST API): a cancelled, timed-out, action-required,
+// startup-failed or stale run counts as failing, not pending — each leaves the
+// head without a passing result. Deliberately NOT the retired channel watch's
+// aggregate, which excluded cancelled/stale; the bound-session design reuses
+// the daemon's semantics so a PR watched by either world sees one CI verdict.
+const FAILING_CHECK_RUN_CONCLUSIONS = new Set([
+  'failure',
+  'cancelled',
+  'timed_out',
+  'action_required',
+  'startup_failure',
+  'stale',
+]);
+// The retired watch's evidence cap: name at most five failed checks.
+const MAX_REPORTED_FAILED_CHECKS = 5;
+// GitHub-derived check names ride into a prompt's evidence line; cap each like
+// the Legacy prompt's other GitHub-derived display values (%title%, %sender%).
+const MAX_CHECK_NAME_CHARS = 200;
 // Mirror the Legacy guard (GithubAdapter.ts MAX_TIMER_DELAY_MS): a hint above
 // Node's 32-bit timer limit is clamped to ~1 ms, turning a rate-limit cooldown
 // into an immediate retry storm against the already-limited endpoint.
@@ -54,9 +73,10 @@ function rateLimitRemaining(err: unknown): number | undefined {
 /**
  * A 403 or 429 carrying one of GitHub's rate-limit signals: an exhausted
  * budget, `retry-after`, or the secondary-limit wording. Same shape as the
- * Legacy classifier; no single signal is required.
+ * Legacy classifier; no single signal is required. Exported for the adapter's
+ * watch-pass abort classifier (the retired watch's isWatchPassAbortError).
  */
-function isRateLimitAnswer(err: unknown): boolean {
+export function isRateLimitAnswer(err: unknown): boolean {
   const e = err as GithubRequestError;
   return (
     (e.status === 403 || e.status === 429) &&
@@ -244,6 +264,129 @@ async function createClient(
           isDefinitiveSendRefusal(error),
         );
       }
+    },
+    getPullRequest: async (owner, repo, prNumber) => {
+      const { data } = await octokit.rest.pulls.get({
+        owner,
+        repo,
+        pull_number: prNumber,
+      });
+      return {
+        // Empty strings normalize to absent: the state validator refuses an
+        // empty baseline field, so the writer must never persist one.
+        headSha: data.head?.sha ? data.head.sha : undefined,
+        // mergeable === null means GitHub is still computing; the daemon maps
+        // UNKNOWN to undefined so it never overwrites the last known state.
+        mergeableState:
+          data.mergeable !== null &&
+          typeof data.mergeable_state === 'string' &&
+          data.mergeable_state.length > 0
+            ? data.mergeable_state
+            : undefined,
+        state: data.state,
+      };
+    },
+    getCiStatus: async (owner, repo, headSha) => {
+      let sawFailure = false;
+      let sawPending = false;
+      let sawSuccess = false;
+      // The retired watch's honesty marker: the failed-check list handed to
+      // the bound agent may be partial (early pagination stop or name cap).
+      let namesIncomplete = false;
+      const failedChecks: string[] = [];
+      const reportedNames = new Set<string>();
+      await octokit.paginate(
+        octokit.rest.checks.listForRef,
+        { owner, repo, ref: headSha, per_page: 100 },
+        (response, done) => {
+          // Octokit's conclusion union omits members the API does return
+          // (startup_failure, stale); read them as strings, as the retired
+          // watch's aggregate did.
+          const runs = response.data as Array<{
+            name?: string | null;
+            status?: string | null;
+            conclusion?: string | null;
+          }>;
+          for (const run of runs) {
+            if (run.status !== 'completed') {
+              sawPending = true;
+              continue;
+            }
+            if (
+              typeof run.conclusion === 'string' &&
+              FAILING_CHECK_RUN_CONCLUSIONS.has(run.conclusion)
+            ) {
+              sawFailure = true;
+              if (typeof run.name === 'string' && run.name.length > 0) {
+                const name = run.name.slice(0, MAX_CHECK_NAME_CHARS);
+                // One check's re-runs must not spend the whole name budget:
+                // dedupe before counting against the cap. The marker stays
+                // conservative — any failing run whose name is not listed (a
+                // repeat or past the cap) means the list names only part of
+                // the breakage.
+                if (
+                  reportedNames.has(name) ||
+                  failedChecks.length >= MAX_REPORTED_FAILED_CHECKS
+                ) {
+                  namesIncomplete = true;
+                } else {
+                  reportedNames.add(name);
+                  failedChecks.push(name);
+                }
+              }
+            } else if (run.conclusion) {
+              // Any other concluded run (success, neutral, skipped) counts as
+              // passing, one definition with core's aggregateChecks.
+              sawSuccess = true;
+            } else {
+              sawPending = true;
+            }
+          }
+          // A failure decides the aggregate: no later page can overturn it,
+          // so stop paging instead of spending one request per page of a head
+          // that carries hundreds of check runs (the retired watch's #16665).
+          // The stop is only honest if the unread pages are flagged.
+          if (sawFailure) {
+            const link = (response.headers as { link?: string }).link ?? '';
+            if (/<[^<>]+>;\s*rel="next"/.test(link)) namesIncomplete = true;
+            done();
+          }
+          return [];
+        },
+      );
+      // A check run already failed, so the combined status could only confirm
+      // it — skip the request rather than pay for a decided aggregate.
+      if (!sawFailure) {
+        const { data: combined } =
+          await octokit.rest.repos.getCombinedStatusForRef({
+            owner,
+            repo,
+            ref: headSha,
+          });
+        // GitHub returns {state:"pending", total_count:0} for a SHA with no
+        // legacy commit statuses; an empty combined status must not count as
+        // active CI (it would certify every check-less head as pending).
+        if (combined.total_count > 0) {
+          if (combined.state === 'failure' || combined.state === 'error') {
+            sawFailure = true;
+          } else if (combined.state === 'pending') {
+            sawPending = true;
+          } else {
+            sawSuccess = true;
+          }
+        }
+      }
+      return {
+        aggregate: sawFailure
+          ? 'failing'
+          : sawPending
+            ? 'pending'
+            : sawSuccess
+              ? 'passing'
+              : 'none',
+        failedChecks,
+        namesIncomplete,
+      };
     },
     pollIntervalFloorMs: () =>
       Math.min(

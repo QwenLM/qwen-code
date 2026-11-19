@@ -1631,7 +1631,13 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         false, foregroundShell(session, worktree),
                         visible && session.modelConfigDigest() == null && modelSelectionSupported && mayChangeContext,
                         visible && approvalSupported && mayChangeContext && !Boolean.FALSE.equals(foregroundShell(session, worktree)),
-                        visible && maySubmit && !WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && harness.supportsInputAttachments(),
+                        // Unbound Turns skip the Workspace admission conjuncts
+                        // (requireSubmitterFacts only enforces them when bound),
+                        // so an ACTIVE unbound Session advertises attachments
+                        // on the same harness capability instead of hiding them.
+                        visible && (maySubmit || (session.workspace() == null && !publicChild
+                                && "ACTIVE".equals(session.status())))
+                                && !WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && harness.supportsInputAttachments(),
                         visible && "ACTIVE".equals(session.status()) && renameSupported
                                 && (session.workspace() == null || maySubmit),
                         visible && approvalExecutable && compressionSupported && compression.available(),
