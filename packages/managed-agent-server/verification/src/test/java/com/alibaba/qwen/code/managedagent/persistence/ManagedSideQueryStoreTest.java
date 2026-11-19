@@ -60,9 +60,9 @@ class ManagedSideQueryStoreTest {
         jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified,tenant_key,session_key,session_scope_key)"
                         + " VALUES (?,?,'qwen-code',1,1,?,?,?)", tenant, session, ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(session), scope);
         jdbc.update("INSERT INTO ma_event_stream (tenant_id,session_id,stream_kind,stream_id,gmt_modified) VALUES (?,?,'SESSION','',1)", tenant, session);
-        jdbc.update("INSERT INTO ma_session_head (tenant_id,workspace_id,session_id,storage_version,state,writer_generation,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_id,workspace_id,session_id,state,writer_generation,"
                         + "journal_revision,committed_sequence,activation_epoch,gmt_create,gmt_modified,tenant_key,harness_key,harness_session_id,head_kind)"
-                        + " VALUES (?,'ws',?,1,'ACTIVE',0,0,0,0,1,1,?,?,?,'MANAGED_SESSION')",
+                        + " VALUES (?,'ws',?,'ACTIVE',0,0,0,0,1,1,?,?,?,'MANAGED_SESSION')",
                 tenant, session, ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(session), session);
         var registry = mock(ManagedWorkspaceRegistry.class);
         when(registry.isSessionOwner(tenant, actor, session)).thenReturn(true);

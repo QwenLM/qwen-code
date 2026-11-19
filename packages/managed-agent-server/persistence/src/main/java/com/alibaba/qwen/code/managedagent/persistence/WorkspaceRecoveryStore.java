@@ -618,7 +618,7 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
                     && "READY".equals(head.get("recovery_status")), "source_drift");
             ObjectNode value = source.putObject("head");
             fields(value, head, "tenantId", "tenant_id", "workspaceId", "workspace_id", "sessionId", "session_id",
-                    "state", "state", "storageVersion", "storage_version", "writerId", "writer_id",
+                    "state", "state", "writerId", "writer_id",
                     "writerGeneration", "writer_generation", "writerLeaseUntil", "writer_lease_fingerprint",
                     "journalRevision", "journal_revision", "committedSequence", "committed_sequence",
                     "lastCommitDigest", "last_commit_digest", "activationEpoch", "activation_epoch",

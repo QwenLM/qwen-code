@@ -265,7 +265,7 @@ final class JournalHistoryQueries {
         try {
             JournalStoreRows.HeadRow head = storeRows.requireHead(tenantId, sessionId);
             if (!Set.of("ACTIVE", "SEALED").contains(head.state())
-                    || !"READY".equals(head.recoveryStatus()) || head.storageVersion() != JournalStoreRows.STORAGE_VERSION
+                    || !"READY".equals(head.recoveryStatus())
                     || head.compactedThroughRevision() != 0 || head.latestCheckpointResourceId() != null
                     || head.journalRevision() < 1 || head.committedSequence() < 0
                     || workspaceId != null && !workspaceId.equals(head.workspaceId())) {

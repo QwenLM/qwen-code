@@ -142,7 +142,7 @@ public final class ToolPublicationAdmissionStore {
                 "Original referenced publication conflicts");
         long revision = positiveCounter(publication.get("receipt_revision"));
         long sequence = positiveCounter(publication.get("receipt_sequence"));
-        var head = jdbc.query("SELECT journal_revision, committed_sequence, storage_version FROM ma_session_head"
+        var head = jdbc.query("SELECT journal_revision, committed_sequence FROM ma_session_head"
                 + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?" + suffix, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), ManagedSchemaKeys.key(text(key, "tenantId")), ManagedSchemaKeys.key(text(key, "sessionId")), text(key, "tenantId"), text(key, "sessionId")).getFirst();
         require(positiveCounter(head.get("journal_revision")) >= revision
                 && positiveCounter(head.get("committed_sequence")) >= sequence,

@@ -417,7 +417,7 @@ class ManagedSessionStoreIntegrationTest {
     }
 
     @Test
-    void promotesStorageAtomicallyAndReplaysTheCommit() throws Exception {
+    void nonActivityCommitReplaysAndRestoresWithoutTheDiagnosticsFlag() throws Exception {
         String session = "g3-reader-" + UUID.randomUUID();
         String base = "/internal/managed-session-store/v1/sessions/" + session;
         var writer = writerRequest(WRITER_A);
@@ -431,18 +431,18 @@ class ManagedSessionStoreIntegrationTest {
         byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
         ObjectNode commit = genesisRequest("{\"subtype\":\"session_execution_engine\"}\n{\"subtype\":\"managed_session_header_v1\"}\n", bytes);
         ((ObjectNode) commit.withArray("resources").get(0)).put("kind", "hosted-turn-cleanup");
-        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head WHERE session_id = ?", Integer.class, session)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT has_activity_diagnostics FROM ma_session_head WHERE session_id = ?", Boolean.class, session)).isFalse();
         mvc.perform(post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
                 .contentType(MediaType.APPLICATION_JSON).content(commit.toString())).andExpect(status().isOk());
-        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head WHERE session_id = ?", Integer.class, session)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT has_activity_diagnostics FROM ma_session_head WHERE session_id = ?", Boolean.class, session)).isFalse();
         mvc.perform(post(base + "/transactions:commit").header(TenantContextFilter.HEADER, TENANT)
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
                 .contentType(MediaType.APPLICATION_JSON).content(commit.toString()))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.replayed").value(true));
         mvc.perform(get(base + "/restore").header(TenantContextFilter.HEADER, TENANT)
                 .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
-                .param("workspaceId", WORKSPACE)).andExpect(status().isOk()).andExpect(jsonPath("$.storageVersion").value(2));
+                .param("workspaceId", WORKSPACE)).andExpect(status().isOk()).andExpect(jsonPath("$.activityDiagnostics").value(false));
     }
 
     @Test

@@ -68,9 +68,9 @@ class JournalPackDeletionRegressionTest {
         jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, workspace_id,"
                         + " session_id, harness_session_id, head_kind, state, journal_revision,"
                         + " committed_sequence, compacted_through_revision, packed_through_revision,"
-                        + " writer_generation, activation_epoch, storage_version, writer_lease_until,"
+                        + " writer_generation, activation_epoch, writer_lease_until,"
                         + " gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'MANAGED_SESSION',"
-                        + " 'ACTIVE', 0, 0, 0, 0, 1, 0, 1, 1, 1, 1)",
+                        + " 'ACTIVE', 0, 0, 0, 0, 1, 0, 1, 1, 1)",
                 ManagedSchemaKeys.key(TENANT), ManagedSchemaKeys.key(SESSION), TENANT, WORKSPACE,
                 SESSION, SESSION);
     }
@@ -260,7 +260,7 @@ class JournalPackDeletionRegressionTest {
     }
 
     private JournalStoreRows.HeadRow activationHead() {
-        return new JournalStoreRows.HeadRow(TENANT, WORKSPACE, SESSION, "ACTIVE", 1, 1, "worker", null, null,
+        return new JournalStoreRows.HeadRow(TENANT, WORKSPACE, SESSION, "ACTIVE", false, 1, "worker", null, null,
                 1, 0, "digest", 2, null, 0, 0, "READY", null, "current", "active", 2L, EXPIRES_AT, 1L);
     }
 }

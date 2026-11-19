@@ -200,9 +200,8 @@ final class JournalWriterLifecycle {
                         sessionId);
         if (!kinds.isEmpty() && "HARNESS".equals(kinds.getFirst())) {
             jdbc.update(
-                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, storage_version = ?, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, wake_head_revision = 0, cleanup_head_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
+                    "UPDATE ma_session_head SET head_kind = 'MANAGED_SESSION', workspace_id = ?, has_activity_diagnostics = 0, state = 'ACTIVE', writer_generation = 1, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, journal_revision = 0, wake_head_revision = 0, cleanup_head_revision = 0, committed_sequence = 0, activation_epoch = 0, compacted_through_revision = 0, recovery_status = 'READY', gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'HARNESS'",
                     request.workspaceId(),
-                    JournalStoreRows.STORAGE_VERSION,
                     request.writerId(),
                     initialLeaseUntil.getTime(),
                     tokenHash,
@@ -215,7 +214,7 @@ final class JournalWriterLifecycle {
         }
         try {
             jdbc.update(
-                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, cleanup_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, ?, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 0, 'READY', ?, ?)",
+                    "INSERT INTO ma_session_head (tenant_key, harness_key, harness_session_id, head_kind, tenant_id, workspace_id, session_id, has_activity_diagnostics, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, wake_head_revision, cleanup_head_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES (?, ?, ?, 'MANAGED_SESSION', ?, ?, ?, 0, 'ACTIVE', 1, ?, ?, ?, 0, 0, 0, 0, 0, 0, 'READY', ?, ?)",
                     RuntimeAdmissionFences
                             .harnessDrainKey(tenantId),
                     RuntimeAdmissionFences
@@ -224,7 +223,6 @@ final class JournalWriterLifecycle {
                     tenantId,
                     request.workspaceId(),
                     sessionId,
-                    JournalStoreRows.STORAGE_VERSION,
                     request.writerId(),
                     initialLeaseUntil.getTime(),
                     tokenHash,
@@ -256,7 +254,7 @@ final class JournalWriterLifecycle {
                     || !JournalFencing.secureEquals(tokenHash, head.leaseTokenHash())) {
                 throw JournalFencing.writerConflict();
             }
-            if (!extensionRecords.rebuildActivityBatch(tenantId, request.workspaceId(), sessionId, head.storageVersion(), head.journalRevision(), head.committedSequence(), head.lastCommitDigest(),
+            if (!extensionRecords.rebuildActivityBatch(tenantId, request.workspaceId(), sessionId, head.activityDiagnostics(), head.journalRevision(), head.committedSequence(), head.lastCommitDigest(),
                     id -> storeRows.storedResource(scope, tenantId, request.workspaceId(), sessionId, id))) {
                 return null;
             }
@@ -274,7 +272,7 @@ final class JournalWriterLifecycle {
         }
         long generation = JournalStoreRows.increment(head.writerGeneration(),
                 "writer generation");
-        if (!extensionRecords.rebuildActivityBatch(tenantId, request.workspaceId(), sessionId, head.storageVersion(), head.journalRevision(), head.committedSequence(), head.lastCommitDigest(),
+        if (!extensionRecords.rebuildActivityBatch(tenantId, request.workspaceId(), sessionId, head.activityDiagnostics(), head.journalRevision(), head.committedSequence(), head.lastCommitDigest(),
                 id -> storeRows.storedResource(scope, tenantId, request.workspaceId(), sessionId, id))) {
             return null;
         }

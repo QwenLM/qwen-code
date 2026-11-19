@@ -565,7 +565,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
     }
 
     private Prefix prefix(String tenant, String session) {
-        var heads = jdbc.queryForList("SELECT journal_revision,committed_sequence,last_commit_digest,storage_version FROM ma_session_head"
+        var heads = jdbc.queryForList("SELECT journal_revision,committed_sequence,last_commit_digest FROM ma_session_head"
                 + " WHERE tenant_id=? AND session_id=? AND head_kind='MANAGED_SESSION' FOR UPDATE", tenant, session);
         if (heads.size() != 1) {
             throw error(409, "side_query_history_unavailable");

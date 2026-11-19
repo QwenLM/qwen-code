@@ -95,7 +95,7 @@ class ManagedActivityDiagnosticsTest {
         assertThat(page.hasMore()).isTrue();
         assertThat(records.listActivity(TENANT, SESSION, ManagedActivityDiagnostics.TOOLS, 2, page.lastTime(), page.lastKey(), 2).items()).hasSize(2);
         assertThat(records.findActivityStatistics("other-tenant", SESSION)).isNull();
-        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head WHERE session_id = ?", Integer.class, SESSION)).isEqualTo(4);
+        assertThat(jdbc.queryForObject("SELECT has_activity_diagnostics FROM ma_session_head WHERE session_id = ?", Boolean.class, SESSION)).isTrue();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record WHERE task_kind IS NOT NULL", Integer.class)).isZero();
         JdbcManagedExtensionRecordStore restarted = new JdbcManagedExtensionRecordStore(jdbc);
         assertThat(restarted.findActivityStatistics(TENANT, SESSION)).isEqualTo(summary);
@@ -140,7 +140,7 @@ class ManagedActivityDiagnosticsTest {
         assertThat(summary.path("files").path("measurements").path("executionDurationSamples").asText()).isEqualTo("1");
         assertThat(summary.path("files").path("measurements").path("modelLinesAdded").asText()).isEqualTo("3");
         assertThat(summary.path("files").path("measurements").path("appliedLinesAdded").asText()).isEqualTo("2");
-        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head WHERE session_id = ?", Integer.class, SESSION)).isEqualTo(5);
+        assertThat(jdbc.queryForObject("SELECT has_activity_diagnostics FROM ma_session_head WHERE session_id = ?", Boolean.class, SESSION)).isTrue();
         var api = new ManagedSessionActivityService(mock(ManagedAgentService.class), records);
         assertThat(api.list(TENANT, "reader", SESSION, "tools", null, 100).toString()).doesNotContain("_measurementEvidenceDigest", "_measurementOutcomeKnown", "resultDigest");
         transactions.executeWithoutResult(status -> {
@@ -271,6 +271,24 @@ class ManagedActivityDiagnosticsTest {
         journal.acquire();
         assertThat(records.findActivityStatistics(TENANT, SESSION)).isEqualTo(before);
         assertThat(records.listActivity(TENANT, SESSION, ManagedActivityDiagnostics.TOOLS, 2, null, null, 100).items()).hasSize(4);
+    }
+
+    @Test
+    void commitIsRefusedWhileTheActivityProjectionRebuildsAndAdmittedOnceReady() {
+        commitRequests();
+        commit(results());
+        transactions.executeWithoutResult(status -> {
+            jdbc.update("DELETE FROM ma_resource_ref WHERE owner_kind = 'SESSION_RECORD' AND session_id = ?", SESSION);
+            jdbc.update("DELETE FROM ma_session_record WHERE session_id = ?", SESSION);
+        });
+        assertThat(jdbc.queryForObject("SELECT has_activity_diagnostics FROM ma_session_head WHERE session_id = ?", Boolean.class, SESSION)).isTrue();
+        var next = message("after-wipe", "assistant", evidence("message:after-wipe"), json.createArrayNode());
+        assertThatThrownBy(() -> transactions.executeWithoutResult(status -> journal.commit(next)))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("managed_activity_rebuilding"));
+        journal.acquire();
+        assertThat(records.findActivityStatistics(TENANT, SESSION).path("readiness").asText()).isEqualTo("ready");
+        commit(next);
     }
 
     @Test

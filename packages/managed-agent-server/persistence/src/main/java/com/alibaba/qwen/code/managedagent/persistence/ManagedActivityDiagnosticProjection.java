@@ -359,9 +359,9 @@ final class ManagedActivityDiagnosticProjection {
     private record ActivityRow(String resource, long time, String key, long firstSequence) { }
 
     /** Called only while acquiring the fenced writer, never by diagnostic reads. */
-    boolean rebuildBatch(String tenant, String workspace, String session, long storageVersion, long headRevision, long headSequence, String headDigest,
+    boolean rebuildBatch(String tenant, String workspace, String session, boolean activityDiagnostics, long headRevision, long headSequence, String headDigest,
             Function<String, StoredResource> resources) {
-        if (storageVersion < 4) {
+        if (!activityDiagnostics) {
             return true;
         }
         ObjectNode summary = (ObjectNode) find(tenant, session, ManagedActivityDiagnostics.STATS, "latest");

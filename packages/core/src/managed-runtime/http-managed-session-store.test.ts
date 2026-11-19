@@ -2880,7 +2880,6 @@ describe('HTTP Managed Session store', () => {
     const server = new FakeManagedSessionStore();
     const { stores, session } = await bootStoresAndSession(server);
     try {
-      server.headOverrides['storageVersion'] = 3;
       expect(stores.supportsModelDiagnostics()).toBe(true);
       await enableManagedSessionDiagnostics(session);
       await new ManagedHookActivationController(session).runTurn(
@@ -2902,7 +2901,6 @@ describe('HTTP Managed Session store', () => {
     const { stores, session } = await bootStoresAndSession(server);
     try {
       expect(stores.supportsExecutionDiagnostics()).toBe(true);
-      server.headOverrides['storageVersion'] = 4;
       await enableManagedExecutionDiagnostics(session);
       const record = {
         uuid: 'activity-request',
@@ -2930,7 +2928,7 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
-  it('continues writing and cold restores after diagnostics promote storage to version 3', async () => {
+  it('continues writing and cold restores after diagnostics commits', async () => {
     const server = new FakeManagedSessionStore();
     const first = await bootStoresAndSession(server);
     try {
@@ -2940,7 +2938,6 @@ describe('HTTP Managed Session store', () => {
         async (scope) => {
           const complete = await scope.beginMainAttempt('model');
           await complete(true, []);
-          server.headOverrides['storageVersion'] = 3;
         },
       );
       await appendMessage(
@@ -4339,7 +4336,6 @@ describe('HTTP Managed Session store', () => {
         sessionKey: SESSION_KEY,
         head: {
           state: 'ACTIVE',
-          storageVersion: 1,
           writerGeneration: 1,
           journalRevision: transactions.length,
           committedSequence: session.authority.committedSequence,
@@ -4559,7 +4555,6 @@ describe('HTTP Managed Session store', () => {
       sessionKey: SESSION_KEY,
       head: {
         state: 'ACTIVE',
-        storageVersion: 1,
         writerGeneration: 1,
         journalRevision: transactions.length,
         committedSequence: first.authority.committedSequence,
@@ -4660,7 +4655,6 @@ describe('HTTP Managed Session store', () => {
     const leaseUntil = Date.now() + 60_000;
     const head = {
       state: 'ACTIVE',
-      storageVersion: 1,
       writerGeneration: 2,
       journalRevision: 5,
       committedSequence: 5,
@@ -7048,7 +7042,6 @@ describe('HTTP Managed Session store', () => {
         sessionKey: SESSION_KEY,
         head: {
           state: 'ACTIVE',
-          storageVersion: 1,
           writerGeneration: 1,
           journalRevision: transactions.length,
           committedSequence: first.authority.committedSequence,
@@ -7617,7 +7610,6 @@ describe('HTTP Managed Session store', () => {
         sessionKey: SESSION_KEY,
         head: {
           state: 'ACTIVE',
-          storageVersion: 1,
           writerGeneration: 1,
           journalRevision: transactions.length,
           committedSequence: session.authority.committedSequence,
@@ -7743,7 +7735,6 @@ describe('HTTP Managed Session store', () => {
         sessionKey: SESSION_KEY,
         head: {
           state: 'ACTIVE',
-          storageVersion: 1,
           writerGeneration: 1,
           journalRevision: transactions.length,
           committedSequence: session.authority.committedSequence,
@@ -7939,7 +7930,6 @@ describe('HTTP Managed Session store', () => {
         sessionKey: SESSION_KEY,
         head: {
           state: 'ACTIVE',
-          storageVersion: 1,
           writerGeneration: 1,
           journalRevision: transactions.length,
           committedSequence: session.authority.committedSequence,
@@ -8066,7 +8056,6 @@ describe('HTTP Managed Session store', () => {
       lastCommitDigest: last['commitDigest'] ?? null,
       activationEpoch: last['activationEpoch'],
       latestCheckpointResourceId: checkpoint,
-      storageVersion: 1,
       pageCount: coverage,
       resourceCount: resources.size,
       lastPageDigest: previous,
@@ -9407,7 +9396,6 @@ describe('HTTP Managed Session store', () => {
       sessionKey: SESSION_KEY,
       head: {
         state: 'ACTIVE',
-        storageVersion: 1,
         writerGeneration: 1,
         journalRevision: transactions.length,
         committedSequence: first.authority.committedSequence,
@@ -9624,7 +9612,7 @@ class FakeManagedSessionStore {
           ? { activationLease: this.activationLease }
           : {}),
         state: this.state,
-        storageVersion: 1,
+        activityDiagnostics: false,
         writerGeneration: this.writerGeneration,
         journalRevision: this.transactions.length,
         committedSequence: this.committedSequence,

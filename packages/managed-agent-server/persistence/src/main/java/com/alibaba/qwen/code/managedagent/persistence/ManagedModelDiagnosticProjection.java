@@ -39,35 +39,15 @@ final class ManagedModelDiagnosticProjection {
         this.store = store;
     }
 
-    static int storageFloor(byte[] records,
-            List<com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource> requested,
+    static boolean hasActivityDiagnostics(byte[] records,
             List<JournalResourceWrites.ValidatedResource> validated) {
-        boolean promotes = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHostedRecoveryRecords.requiresVersionTwo(records, requested)
-                || validated.stream().anyMatch(resource -> {
-                    if (!"managed-action-options".equals(resource.resource().kind()) || resource.bytes() == null) {
-                        return false;
-                    }
-                    JsonNode body = ManagedExtensionRecordStore.parse(new String(resource.bytes(), java.nio.charset.StandardCharsets.UTF_8));
-                    return body != null && body.has("continuationRef");
-                });
-        boolean diagnostics = validated.stream().anyMatch(resource -> {
-            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(resource.resource().kind())) {
-                return true;
-            }
-            if (!"managed-history_maintenance".equals(resource.resource().kind()) || resource.bytes() == null) {
-                return false;
-            }
-            JsonNode body = ManagedExtensionRecordStore.parse(
-                    new String(resource.bytes(), java.nio.charset.StandardCharsets.UTF_8));
-            return body != null && body.path("schemaVersion").asInt() == 2;
-        });
         boolean activity = validated.stream().anyMatch(resource ->
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.KIND.equals(resource.resource().kind()));
         boolean measured = new String(records, StandardCharsets.UTF_8).lines().anyMatch(line -> {
             JsonNode envelope = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(line);
             return envelope != null && "tool.measured".equals(envelope.path("managedSession").path("kind").asText());
         });
-        return measured ? 5 : activity ? 4 : diagnostics ? 3 : promotes ? 2 : 1;
+        return activity || measured;
     }
 
     static void validateResource(StoredResource resource) {

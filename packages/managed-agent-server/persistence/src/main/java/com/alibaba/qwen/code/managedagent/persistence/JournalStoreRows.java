@@ -43,7 +43,7 @@ final class JournalStoreRows {
                         result.getString("workspace_id"),
                         result.getString("session_id"),
                         result.getString("state"),
-                        result.getInt("storage_version"),
+                        result.getBoolean("has_activity_diagnostics"),
                         result.getLong("writer_generation"),
                         result.getString("writer_id"),
                         ManagedSchemaTime.timestamp(result, "writer_lease_until"),
@@ -139,7 +139,7 @@ final class JournalStoreRows {
                         + " AND activation_epoch = ? AND activation_lease_until IS NOT NULL LIMIT 1",
                 head.tenantId(), head.sessionId(), head.activationEpoch()).isEmpty();
         var lease = renewed ? activationLeaseRow(head).lease() : null;
-        return new RestoreHead(head.state(), head.storageVersion(),
+        return new RestoreHead(head.state(), head.activityDiagnostics(),
                 head.writerGeneration(), head.journalRevision(),
                 head.committedSequence(), head.lastCommitDigest(),
                 head.activationEpoch(), head.latestCheckpointResourceId(),
@@ -720,7 +720,7 @@ final class JournalStoreRows {
     }
 
     record HeadRow(String tenantId, String workspaceId,
-            String sessionId, String state, int storageVersion,
+            String sessionId, String state, boolean activityDiagnostics,
             long writerGeneration, String writerId,
             Timestamp writerLeaseUntil, String leaseTokenHash,
             long journalRevision, long committedSequence,
