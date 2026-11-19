@@ -85,13 +85,35 @@ public class JdbcChildResultRelayStore
     // Debts sort after every other due row: they accumulate one per
     // finished child where close is unavailable, and ahead of the page
     // they would keep a newer launch from ever being reached.
+    // H2 otherwise retains the first branch limit across repeated executions.
     private static final String PENDING_SQL =
             "SELECT pending.tenant_id, pending.session_id, pending.record_id, pending.revision, pending.delivery_state, pending.record_resource_id FROM ("
-                    + " SELECT r.tenant_id, r.session_id, r.record_id, r.revision, r.delivery_state, r.record_resource_id,"
+                    + " SELECT tenant_id, session_id, record_id, revision, delivery_state, record_resource_id, priority, gmt_create"
+                    + " FROM (SELECT r.tenant_id, r.session_id, r.record_id, r.revision, r.delivery_state, r.record_resource_id,"
                     + " 0 AS priority, r.gmt_create FROM ma_session_record r LEFT JOIN ma_operation l"
                     + " ON l.scope_key = r.session_scope_key AND l.operation_id = r.record_id"
                     + " AND l.operation_kind = 'CHILD_SESSION_START' WHERE r.domain = 'child_run'"
-                    + " AND r.task_kind IN " + CHILD_SESSION_KINDS_SQL + " AND NOT EXISTS (SELECT 1 FROM ma_operation c WHERE c.scope_key = r.session_scope_key AND c.operation_id = r.record_id AND c.operation_kind = 'CHILD_SESSION_CLOSE') AND ((r.delivery_state IN ('planned', 'accepting', 'unknown') AND (l.state IS NULL OR l.state NOT IN ('done', 'orphaned', 'unknown'))) OR (r.delivery_state IN ('accepted', 'consumed', 'cancelled') AND l.state NOT IN ('done', 'orphaned', 'unknown'))) AND (l.available_at IS NULL OR l.available_at <= ?) AND (l.claim_until IS NULL OR l.claim_until <= ? OR l.claim_owner = ?) UNION ALL SELECT o.tenant_id, o.session_id, o.operation_id AS record_id, COALESCE(r.revision, 0) AS revision, COALESCE(r.delivery_state, 'accepted') AS delivery_state, r.record_resource_id, 1 AS priority, o.gmt_create FROM ma_operation o LEFT JOIN ma_session_record r ON r.session_scope_key = o.scope_key AND r.domain = 'child_run' AND r.record_id = o.operation_id WHERE o.operation_kind = 'CHILD_SESSION_CLOSE' AND o.state = 'close_debt' AND o.available_at <= ? AND (o.claim_until IS NULL OR o.claim_until <= ? OR o.claim_owner = ?) ) pending ORDER BY pending.priority, pending.gmt_create, pending.session_id, pending.record_id LIMIT ?";
+                    + " AND r.task_kind IN " + CHILD_SESSION_KINDS_SQL
+                    + " AND NOT EXISTS (SELECT 1 FROM ma_operation c WHERE c.scope_key = r.session_scope_key"
+                    + " AND c.operation_id = r.record_id AND c.operation_kind = 'CHILD_SESSION_CLOSE')"
+                    + " AND ((r.delivery_state IN ('planned', 'accepting', 'unknown')"
+                    + " AND (l.state IS NULL OR l.state NOT IN ('done', 'orphaned', 'unknown')))"
+                    + " OR (r.delivery_state IN ('accepted', 'consumed', 'cancelled')"
+                    + " AND l.state NOT IN ('done', 'orphaned', 'unknown')))"
+                    + " AND (l.available_at IS NULL OR l.available_at <= ?)"
+                    + " AND (l.claim_until IS NULL OR l.claim_until <= ? OR l.claim_owner = ?)"
+                    + " ORDER BY r.gmt_create, r.session_id, r.record_id LIMIT ?) due_work"
+                    + " UNION ALL SELECT tenant_id, session_id, record_id, revision, delivery_state, record_resource_id, priority, gmt_create"
+                    + " FROM (SELECT o.tenant_id, o.session_id, o.operation_id AS record_id,"
+                    + " COALESCE(r.revision, 0) AS revision, COALESCE(r.delivery_state, 'accepted') AS delivery_state,"
+                    + " r.record_resource_id, 1 AS priority, o.gmt_create FROM ma_operation o"
+                    + " LEFT JOIN ma_session_record r ON r.session_scope_key = o.scope_key"
+                    + " AND r.domain = 'child_run' AND r.record_id = o.operation_id"
+                    + " WHERE o.operation_kind = 'CHILD_SESSION_CLOSE' AND o.state = 'close_debt'"
+                    + " AND o.available_at <= ?"
+                    + " AND (o.claim_until IS NULL OR o.claim_until <= ? OR o.claim_owner = ?)"
+                    + " ORDER BY o.gmt_create, o.session_id, o.operation_id LIMIT ?) close_work"
+                    + " ) pending ORDER BY pending.priority, pending.gmt_create, pending.session_id, pending.record_id LIMIT ?";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -121,8 +143,8 @@ public class JdbcChildResultRelayStore
                 result.getString("tenant_id"), result.getString("session_id"),
                 result.getString("record_id"), result.getLong("revision"),
                 result.getString("delivery_state"),
-                result.getString("record_resource_id")), now, now, workerId,
-                now, now, workerId, limit);
+                result.getString("record_resource_id")), now, now, workerId, limit,
+                now, now, workerId, limit, limit);
     }
 
     /** The record's delivery state as committed NOW, for the worker that

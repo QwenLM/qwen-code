@@ -113,17 +113,9 @@ public class JdbcAutomationLedgerStore
     /** The mirror's terminal task states, as the projection maps them. */
     private static final Set<String> TERMINAL_MIRROR_STATES = Set.of(
             "completed", "failed", "cancelled");
+    private static final int RUN_READ_BATCH_SIZE = 256;
 
     private record RunIdentity(String sessionId, String runId) { }
-
-    private record OccurrenceOutcome(String outcome, String sessionId,
-            String runId) { }
-
-    private static final String OCCURRENCE_OUTCOME_SELECT = "SELECT"
-            + " o.outcome, o.session_id, o.run_id FROM"
-            + " ma_schedule_occurrence o"
-            + " WHERE o.tenant_id = ? AND o.schedule_id = ?"
-            + " AND o.outcome IN (?, ?)";
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate commands;
@@ -144,45 +136,45 @@ public class JdbcAutomationLedgerStore
      */
 
     /**
-     * Each run's mirror task_state by its exact projection PK, in one batch keyed to the pair every
-     * index on the mirror table leads with.
+     * Each run's mirror task_state by its exact projection PK, in bounded batches keyed to the pair
+     * every index on the mirror table leads with.
      */
-    private Map<String, String> readTaskStates(String tenantId,
+    private Map<RunIdentity, String> readTaskStates(String tenantId,
             List<RunIdentity> identities) {
         if (identities.isEmpty()) {
             return Map.of();
         }
-        StringBuilder sql = new StringBuilder(
-                "SELECT session_scope_key, record_key, task_state FROM"
-                        + " ma_session_record WHERE ");
-        List<Object> args = new ArrayList<>(identities.size() * 2);
-        Map<String, String> byRecordKey = new HashMap<>();
-        Map<String, String> runByRecordKey = new HashMap<>();
-        for (int index = 0; index < identities.size(); index += 1) {
-            if (index > 0) {
-                sql.append(" OR ");
+        Map<RunIdentity, String> byIdentity = new HashMap<>();
+        for (int start = 0; start < identities.size(); start += RUN_READ_BATCH_SIZE) {
+            int end = Math.min(start + RUN_READ_BATCH_SIZE, identities.size());
+            StringBuilder sql = new StringBuilder(
+                    "SELECT session_scope_key, record_key,"
+                            + " CASE WHEN task_kind IS NOT NULL THEN task_state END AS task_state FROM"
+                            + " ma_session_record WHERE ");
+            List<Object> args = new ArrayList<>((end - start) * 2);
+            Map<String, RunIdentity> runByRecordKey = new HashMap<>();
+            for (int index = start; index < end; index += 1) {
+                if (index > start) {
+                    sql.append(" OR ");
+                }
+                sql.append("(session_scope_key = ? AND record_key = ?)");
+                String recordKey = ManagedExtensionProjection.recordKey(
+                        identities.get(index).sessionId(), "automation_run",
+                        identities.get(index).runId());
+                args.add(ManagedSessionStore.sessionScopeKey(tenantId,
+                        identities.get(index).sessionId()));
+                args.add(recordKey);
+                runByRecordKey.put(recordKey, identities.get(index));
             }
-            sql.append("(session_scope_key = ? AND record_key = ?)");
-            String recordKey = ManagedExtensionProjection.recordKey(
-                    identities.get(index).sessionId(), "automation_run",
-                    identities.get(index).runId());
-            args.add(ManagedSessionStore.sessionScopeKey(tenantId,
-                    identities.get(index).sessionId()));
-            args.add(recordKey);
-            runByRecordKey.put(recordKey, identities.get(index).runId());
+            for (String[] pair : jdbc.query(sql.toString(),
+                    (result, row) -> new String[] {
+                            result.getString("record_key"),
+                            result.getString("task_state") },
+                    args.toArray())) {
+                byIdentity.put(runByRecordKey.get(pair[0]), pair[1]);
+            }
         }
-        for (String[] pair : jdbc.query(sql.toString(),
-                (result, row) -> new String[] {
-                        result.getString("record_key"),
-                        result.getString("task_state") },
-                args.toArray())) {
-            byRecordKey.put(pair[0], pair[1]);
-        }
-        Map<String, String> byRunId = new HashMap<>();
-        for (Map.Entry<String, String> entry : byRecordKey.entrySet()) {
-            byRunId.put(runByRecordKey.get(entry.getKey()), entry.getValue());
-        }
-        return byRunId;
+        return byIdentity;
     }
 
     // --- definition mirror ---
@@ -201,6 +193,7 @@ public class JdbcAutomationLedgerStore
             throw new IllegalStateException(
                     "Schedule projection requires the journal transaction.");
         }
+        ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, sessionId);
         String actorId = jdbc.query("SELECT creator_actor_key FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 (result, row) -> {
@@ -460,22 +453,27 @@ public class JdbcAutomationLedgerStore
      */
     public Optional<OccurrenceRow> recordOccurrence(OccurrenceRow row,
             String owner) {
-        jdbc.update("INSERT IGNORE INTO ma_schedule_occurrence"
-                        + " (tenant_id, schedule_id, occurrence_key, run_id,"
-                        + " session_id, slot, trigger_kind, outcome, reason,"
-                        + " definition_revision, fence, attempts,"
-                        + " next_retry_at, last_error, gmt_create, gmt_modified)"
-                        + " SELECT s.tenant_id, s.schedule_id, ?, ?, ?, ?, ?,"
-                        + " ?, ?, ?, s.fence, 0, 0, NULL, ?, ?"
-                        + " FROM ma_schedule s"
-                        + " WHERE s.tenant_id = ? AND s.schedule_id = ?"
-                        + " AND s.lease_owner = ? AND s.fence = ?",
-                row.occurrenceKey(), row.runId(), row.sessionId(), row.slot(),
-                row.trigger(), row.outcome(), row.reason(),
-                row.definitionRevision(), row.createdAt(), row.updatedAt(),
-                row.tenantId(), row.scheduleId(), owner, row.fence());
-        return findOccurrence(row.tenantId(), row.scheduleId(),
-                row.occurrenceKey());
+        return commands.execute(status -> {
+            ToolPublicationRetentionStore.lockSessionRoot(jdbc, row.tenantId(), row.sessionId());
+            boolean terminal = readRunTerminal(row.tenantId(), row.sessionId(), row.runId());
+            jdbc.update("INSERT IGNORE INTO ma_schedule_occurrence"
+                            + " (tenant_id, schedule_id, occurrence_key, run_id,"
+                            + " session_id, slot, trigger_kind, outcome, reason,"
+                            + " definition_revision, fence, attempts,"
+                            + " next_retry_at, last_error, gmt_create, gmt_modified, is_run_terminal)"
+                            + " SELECT s.tenant_id, s.schedule_id, ?, ?, ?, ?, ?,"
+                            + " ?, ?, ?, s.fence, 0, 0, NULL, ?, ?, ?"
+                            + " FROM ma_schedule s"
+                            + " WHERE s.tenant_id = ? AND s.schedule_id = ?"
+                            + " AND s.lease_owner = ? AND s.fence = ?",
+                    row.occurrenceKey(), row.runId(), row.sessionId(), row.slot(),
+                    row.trigger(), row.outcome(), row.reason(),
+                    row.definitionRevision(), row.createdAt(), row.updatedAt(), terminal ? 1 : 0,
+                    row.tenantId(), row.scheduleId(), owner, row.fence());
+            return jdbc.query(OCCURRENCE_SELECT + " AND o.occurrence_key = ? FOR UPDATE",
+                    OCCURRENCE, row.tenantId(), row.scheduleId(), row.occurrenceKey())
+                    .stream().findFirst();
+        });
     }
 
     public Optional<OccurrenceRow> findOccurrence(String tenantId,
@@ -494,26 +492,64 @@ public class JdbcAutomationLedgerStore
     public boolean settleOccurrence(String tenantId, String scheduleId,
             String occurrenceKey, String outcome, String reason, String owner,
             long fence, long now) {
-        return jdbc.update("UPDATE ma_schedule_occurrence o"
-                        + " SET o.outcome = ?, o.reason = ?, o.gmt_modified = ?"
-                        + " WHERE o.tenant_id = ? AND o.schedule_id = ?"
-                        + " AND o.occurrence_key = ? AND o.outcome = ?" + HELD,
-                outcome, reason, now, tenantId, scheduleId, occurrenceKey,
-                OUTCOME_FIRING, tenantId, scheduleId, owner, fence) == 1;
+        return settleOccurrence(tenantId, scheduleId, occurrenceKey, outcome, reason,
+                null, false, owner, fence, now);
     }
 
     /** A firing row settled with the detail that decided it, in `last_error`. */
     public boolean settleOccurrence(String tenantId, String scheduleId,
             String occurrenceKey, String outcome, String reason,
             String lastError, String owner, long fence, long now) {
-        return jdbc.update("UPDATE ma_schedule_occurrence o"
-                        + " SET o.outcome = ?, o.reason = ?, o.last_error = ?,"
-                        + " o.gmt_modified = ?"
-                        + " WHERE o.tenant_id = ? AND o.schedule_id = ?"
-                        + " AND o.occurrence_key = ? AND o.outcome = ?" + HELD,
-                outcome, reason, StringUtils.truncate(lastError, 1024), now,
-                tenantId, scheduleId, occurrenceKey, OUTCOME_FIRING, tenantId,
-                scheduleId, owner, fence) == 1;
+        return settleOccurrence(tenantId, scheduleId, occurrenceKey, outcome, reason,
+                lastError, true, owner, fence, now);
+    }
+
+    private boolean settleOccurrence(String tenantId, String scheduleId,
+            String occurrenceKey, String outcome, String reason, String lastError,
+            boolean replaceError, String owner, long fence, long now) {
+        return Boolean.TRUE.equals(commands.execute(status -> {
+            // Discover immutable identity without locking the occurrence before the Session root.
+            Optional<RunIdentity> identity = jdbc.query("SELECT session_id, run_id"
+                            + " FROM ma_schedule_occurrence WHERE tenant_id = ? AND schedule_id = ?"
+                            + " AND occurrence_key = ?",
+                    (result, row) -> new RunIdentity(result.getString("session_id"),
+                            result.getString("run_id")), tenantId, scheduleId, occurrenceKey)
+                    .stream().findFirst();
+            if (identity.isEmpty()) {
+                return false;
+            }
+            RunIdentity run = identity.get();
+            ToolPublicationRetentionStore.lockSessionRoot(jdbc, tenantId, run.sessionId());
+            boolean terminal = readRunTerminal(tenantId, run.sessionId(), run.runId());
+            List<Object> args = new ArrayList<>();
+            args.add(outcome);
+            args.add(reason);
+            args.add(now);
+            args.add(terminal ? 1 : 0);
+            if (replaceError) {
+                args.add(StringUtils.truncate(lastError, 1024));
+            }
+            args.addAll(List.of(tenantId, scheduleId, occurrenceKey, OUTCOME_FIRING,
+                    run.sessionId(), run.runId(), tenantId, scheduleId, owner, fence));
+            // UPDATE rechecks identity, decision and fence against current rows, not an outer RR snapshot.
+            return jdbc.update("UPDATE ma_schedule_occurrence o"
+                            + " SET o.outcome = ?, o.reason = ?, o.gmt_modified = ?, o.is_run_terminal = ?"
+                            + (replaceError ? ", o.last_error = ?" : "")
+                            + " WHERE o.tenant_id = ? AND o.schedule_id = ?"
+                            + " AND o.occurrence_key = ? AND o.outcome = ?"
+                            + " AND o.session_id = ? AND o.run_id = ?" + HELD,
+                    args.toArray()) == 1;
+        }));
+    }
+
+    private boolean readRunTerminal(String tenantId, String sessionId, String runId) {
+        return jdbc.query("SELECT task_state FROM ma_session_record"
+                        + " WHERE session_scope_key = ? AND record_key = ?"
+                        + " AND task_kind IS NOT NULL FOR UPDATE",
+                (result, row) -> result.getString("task_state"),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedExtensionProjection.recordKey(sessionId, "automation_run", runId))
+                .stream().anyMatch(state -> state != null && TERMINAL_MIRROR_STATES.contains(state));
     }
 
     /** A firing claim re-pinned to the definition revision now live. */
@@ -556,68 +592,54 @@ public class JdbcAutomationLedgerStore
     /**
      * The definition's occurrences whose run is not terminal: firing rows, and fired rows whose run
      * record is still pending or running (a fired row with no visible record counts, so a lag never
-     * admits an overlap). The mirror fact arrives through exact point lookups of each run's
-     * (session_scope_key, record_key): the extension-record table's own indexes all lead with that
-     * pair, and a raw-column join rescans the whole journal mirror per call (Q3-45).
+     * admits an overlap). Both index ranges are counted in one SQL snapshot; terminal history
+     * and the run mirrors are not read.
      */
     public int countActive(String tenantId, String scheduleId) {
-        List<OccurrenceOutcome> outcomes = jdbc.query(
-                OCCURRENCE_OUTCOME_SELECT,
-                (result, row) -> new OccurrenceOutcome(
-                        result.getString("outcome"),
-                        result.getString("session_id"),
-                        result.getString("run_id")),
-                tenantId, scheduleId, OUTCOME_FIRING, OUTCOME_FIRED);
-        int firing = 0;
-        List<RunIdentity> identities = new ArrayList<>();
-        for (OccurrenceOutcome outcome : outcomes) {
-            if (OUTCOME_FIRING.equals(outcome.outcome())) {
-                firing += 1;
-            } else {
-                identities.add(new RunIdentity(outcome.sessionId(),
-                        outcome.runId()));
-            }
-        }
-        Map<String, String> states = readTaskStates(tenantId, identities);
-        int count = firing;
-        for (RunIdentity identity : identities) {
-            String state = states.get(identity.runId());
-            if (state == null || !TERMINAL_MIRROR_STATES.contains(state)) {
-                count += 1;
-            }
-        }
-        return count;
+        return jdbc.queryForObject("SELECT"
+                        + " (SELECT COUNT(*) FROM ma_schedule_occurrence"
+                        + " WHERE tenant_id = ? AND schedule_id = ? AND outcome = ?)"
+                        + " + (SELECT COUNT(*) FROM ma_schedule_occurrence"
+                        + " WHERE tenant_id = ? AND schedule_id = ? AND outcome = ? AND is_run_terminal = 0)",
+                Integer.class, tenantId, scheduleId, OUTCOME_FIRING,
+                tenantId, scheduleId, OUTCOME_FIRED);
     }
 
     /**
      * The fired occurrences whose run keeps the overlap admission closed: the same set {@link
      * #countActive} counts behind {@code firing} claims, named with their run ids so the scanner
      * can ask the Harness to reconcile the ones its wake turn died on (oldest first, bounded, so
-     * one decision's reconcile fan-out stays small). The fired history walks oldest-first in pages,
-     * each page's mirror states a batch of exact PK point lookups instead of one full-table rescan
-     * (Q3-45).
+     * one decision's reconcile fan-out stays small). Only active candidates are paged oldest-first;
+     * their mirror states are read in bounded batches of exact PK point lookups.
      */
     public List<OccurrenceView> findBlockingRuns(String tenantId,
             String scheduleId, int limit) {
         List<OccurrenceView> blocking = new ArrayList<>();
-        int offset = 0;
+        OccurrenceRow cursor = null;
         while (blocking.size() < limit) {
+            List<Object> args = new ArrayList<>(List.of(tenantId, scheduleId, OUTCOME_FIRED));
+            String after = "";
+            if (cursor != null) {
+                after = " AND (o.gmt_create > ? OR (o.gmt_create = ? AND o.occurrence_key > ?))";
+                args.add(cursor.createdAt());
+                args.add(cursor.createdAt());
+                args.add(cursor.occurrenceKey());
+            }
+            args.add(RUN_READ_BATCH_SIZE);
             List<OccurrenceRow> page = jdbc.query(OCCURRENCE_SELECT
-                            + " AND o.outcome = ?"
-                            + " ORDER BY o.gmt_create, o.occurrence_key"
-                            + " LIMIT ? OFFSET ?",
-                    OCCURRENCE, tenantId, scheduleId, OUTCOME_FIRED, 256,
-                    offset);
+                            + " AND o.outcome = ? AND o.is_run_terminal = 0" + after
+                            + " ORDER BY o.gmt_create, o.occurrence_key LIMIT ?",
+                    OCCURRENCE, args.toArray());
             if (page.isEmpty()) {
                 return blocking;
             }
-            Map<String, String> states = readTaskStates(tenantId,
+            Map<RunIdentity, String> states = readTaskStates(tenantId,
                     page.stream()
                             .map(row -> new RunIdentity(row.sessionId(),
                                     row.runId()))
                             .toList());
             for (OccurrenceRow row : page) {
-                String state = states.get(row.runId());
+                String state = states.get(new RunIdentity(row.sessionId(), row.runId()));
                 if (state == null || !TERMINAL_MIRROR_STATES.contains(state)) {
                     blocking.add(new OccurrenceView(row, state));
                     if (blocking.size() == limit) {
@@ -625,10 +647,10 @@ public class JdbcAutomationLedgerStore
                     }
                 }
             }
-            if (page.size() < 256) {
+            if (page.size() < RUN_READ_BATCH_SIZE) {
                 return blocking;
             }
-            offset += page.size();
+            cursor = page.getLast();
         }
         return blocking;
     }
@@ -652,7 +674,7 @@ public class JdbcAutomationLedgerStore
                         readTaskStates(tenantId,
                                 List.of(new RunIdentity(row.sessionId(),
                                         row.runId())))
-                                .get(row.runId())));
+                                .get(new RunIdentity(row.sessionId(), row.runId()))));
     }
 
     public OccurrencePage listOccurrences(String tenantId, String scheduleId,
@@ -667,11 +689,11 @@ public class JdbcAutomationLedgerStore
                         + " LIMIT ?", OCCURRENCE, tenantId, scheduleId,
                         cursor.createdAt(), cursor.createdAt(),
                         cursor.occurrenceKey(), limit + 1);
-        Map<String, String> states = readTaskStates(tenantId, rows.stream()
+        Map<RunIdentity, String> states = readTaskStates(tenantId, rows.stream()
                 .map(row -> new RunIdentity(row.sessionId(), row.runId()))
                 .toList());
         List<OccurrenceView> views = rows.stream()
-                .map(row -> new OccurrenceView(row, states.get(row.runId())))
+                .map(row -> new OccurrenceView(row, states.get(new RunIdentity(row.sessionId(), row.runId()))))
                 .toList();
         boolean hasMore = views.size() > limit;
         return new OccurrencePage(hasMore ? views.subList(0, limit) : views,
