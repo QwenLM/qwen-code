@@ -41,7 +41,7 @@ class ManagedExtensionRecordContractTest {
     void validatesTheFixturesAgainstTheSchema() throws IOException {
         JsonNode schema = read("managed-extension-record-v1.schema.json");
 
-        assertTrue(SCHEMAS.getSchema(schema).validate(fixtures()).isEmpty());
+        assertEquals(List.of(), SCHEMAS.getSchema(schema).validate(fixtures()));
         // A case the validator accepts must satisfy the schema as well.
         List<String> wrong = new ArrayList<>();
         for (Map.Entry<String, String[]> list : Map.of(
