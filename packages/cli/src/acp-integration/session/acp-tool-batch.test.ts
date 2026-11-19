@@ -83,6 +83,13 @@ const write: ToolCallRequestInfo = {
   isClientInitiated: false,
   prompt_id: 'prompt',
 };
+const todoWrite: ToolCallRequestInfo = {
+  callId: 'call_todo',
+  name: 'todo_write',
+  args: { todos: [] },
+  isClientInitiated: false,
+  prompt_id: 'prompt',
+};
 const invocation = {
   getDescription: () => 'Writing to a.txt',
   toolLocations: () => [],
@@ -180,6 +187,11 @@ describe('runAcpToolBatch', () => {
         emitError: record('error'),
         emitLifecycle: record('lifecycle'),
         mapToolKind: () => 'edit',
+        resolveToolMetadata: (name: string) => ({
+          title: name,
+          locations: [],
+          kind: name === 'todo_write' ? 'think' : 'other',
+        }),
       },
       messageEmitter: { emitAgentMessage: record('message') },
       sendUpdate: record('update'),
@@ -706,6 +718,35 @@ describe('runAcpToolBatch', () => {
     });
 
     expect(events()).toEqual([['result', false]]);
+  });
+
+  it('stamps card metadata on a replayed todo_write without a start frame', async () => {
+    batch.run = async (shared) => {
+      shared.onToolResult({
+        ...executed(todoWrite),
+        status: 'error',
+        origin: 'replayed',
+      });
+      return { parts: [] };
+    };
+
+    await runAcpToolBatch(host, {
+      requests: [todoWrite],
+      loop,
+      signal: new AbortController().signal,
+      duplicates: { handled: new Map(), responded: new Set() },
+    });
+
+    expect(log.at(-1)).toEqual([
+      'update',
+      expect.objectContaining({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call_todo',
+        status: 'failed',
+        title: 'todo_write',
+        kind: 'think',
+      }),
+    ]);
   });
 
   it('forwards shell heartbeats of a running call', async () => {

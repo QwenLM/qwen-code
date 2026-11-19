@@ -711,12 +711,18 @@ function emitDuplicate(
   emit: (task: () => Promise<unknown>, what: string) => void,
 ): void {
   if (request.name === ToolNames.TODO_WRITE) {
+    const metadata = host.toolCallEmitter.resolveToolMetadata(
+      request.name,
+      undefined,
+    );
     emit(
       () =>
         host.sendUpdate({
           sessionUpdate: 'tool_call_update',
           toolCallId: response.callId,
           status: 'failed',
+          title: metadata.title,
+          kind: metadata.kind,
           content: [
             {
               type: 'content',

@@ -16813,10 +16813,16 @@ export class Session implements SessionContext {
           const provenance = ToolCallEmitter.resolveToolProvenance(
             request.name,
           );
+          const metadata = this.toolCallEmitter.resolveToolMetadata(
+            request.name,
+            undefined,
+          );
           await this.sendUpdate({
             sessionUpdate: 'tool_call_update',
             toolCallId: response.callId,
             status: 'failed',
+            title: metadata.title,
+            kind: metadata.kind,
             content: [
               {
                 type: 'content',

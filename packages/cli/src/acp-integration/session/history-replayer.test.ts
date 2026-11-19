@@ -1119,6 +1119,10 @@ describe('HistoryReplayer', () => {
           sessionUpdate: 'tool_call_update',
           toolCallId: 'call-123',
           status: 'failed',
+          // Replay skips the todo_write start frame, so the terminal frame has
+          // to restate the card metadata or channel transports drop it.
+          title: 'todo_write',
+          kind: 'other',
         }),
       );
     });

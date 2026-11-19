@@ -964,6 +964,10 @@ describe('ToolCallEmitter', () => {
             sessionUpdate: 'tool_call_update',
             toolCallId: 'call-todo-failed',
             status: 'failed',
+            // No `tool_call` start exists for todo_write, and the channel
+            // transports drop a kindless update for an unknown call id.
+            title: ToolNames.TODO_WRITE,
+            kind: 'other',
             content: [
               {
                 type: 'content',
@@ -992,6 +996,8 @@ describe('ToolCallEmitter', () => {
           expect.objectContaining({
             toolCallId: 'call-todo-error',
             status: 'failed',
+            title: ToolNames.TODO_WRITE,
+            kind: 'other',
             content: [
               {
                 type: 'content',
@@ -1041,6 +1047,23 @@ describe('ToolCallEmitter', () => {
         ],
         _meta: { toolName: 'test_tool', provenance: 'builtin' },
       });
+    });
+
+    it('stamps TodoWrite card metadata so the channel transports keep the frame', async () => {
+      await emitter.emitError(
+        'call-todo',
+        ToolNames.TODO_WRITE,
+        new Error('x'),
+      );
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolCallId: 'call-todo',
+          status: 'failed',
+          title: ToolNames.TODO_WRITE,
+          kind: 'other',
+        }),
+      );
     });
   });
 

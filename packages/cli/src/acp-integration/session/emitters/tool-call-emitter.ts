@@ -240,10 +240,23 @@ export class ToolCallEmitter extends BaseEmitter {
       await this.sendUpdate(update);
       return;
     }
-    // `title` and `kind` make the client render this as a card instead of
-    // silently dropping an update for a block it never had.
+    await this.sendUpdate({
+      ...update,
+      ...this.todoWriteCardMetadata(toolName),
+    });
+  }
+
+  /**
+   * `title` and `kind` for a `todo_write` frame that has no `tool_call` start
+   * of its own. Both channel transports drop a kindless `tool_call_update` for
+   * a call id they never saw (DaemonChannelBridge flags it as malformed), so a
+   * frame without them is invisible there.
+   */
+  private todoWriteCardMetadata(
+    toolName: string,
+  ): Pick<ResolvedToolMetadata, 'title' | 'kind'> {
     const { title, kind } = this.resolveToolMetadata(toolName, undefined);
-    await this.sendUpdate({ ...update, title, kind });
+    return { title, kind };
   }
 
   /**
@@ -347,19 +360,22 @@ export class ToolCallEmitter extends BaseEmitter {
       toolName,
       subagentMeta,
     );
+    const update = createTranscriptToolCallResultUpdate({
+      toolName,
+      callId,
+      success: false,
+      errorMessage: error.message,
+      extra: {
+        ...timing,
+        ...subagentMeta,
+        provenance: provenance.provenance,
+        ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
+      },
+    });
     await this.sendUpdate(
-      createTranscriptToolCallResultUpdate({
-        toolName,
-        callId,
-        success: false,
-        errorMessage: error.message,
-        extra: {
-          ...timing,
-          ...subagentMeta,
-          provenance: provenance.provenance,
-          ...(provenance.serverId ? { serverId: provenance.serverId } : {}),
-        },
-      }),
+      this.isTodoWriteTool(toolName)
+        ? { ...update, ...this.todoWriteCardMetadata(toolName) }
+        : update,
     );
   }
 

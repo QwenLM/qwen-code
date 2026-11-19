@@ -188,6 +188,13 @@ export interface TranscriptToolCallResultOptions extends UpdateMetaOptions {
   readonly artifacts?: readonly unknown[];
   readonly contentPrefix?: readonly ToolCallContent[];
   /**
+   * Card metadata for a tool that never emits a `tool_call` start frame of its
+   * own. The channel transports drop a kindless update for a call id they have
+   * never seen, so replay must restate it on the terminal frame.
+   */
+  readonly title?: string;
+  readonly kind?: ToolKind;
+  /**
    * Producer identity for the AgentTool call this result closes. Rebuilt by
    * replay from the `task_execution` display so a reloaded session carries
    * the same `_meta.agent` the live wire had.
@@ -1060,6 +1067,8 @@ export function createTranscriptToolCallResultUpdate(
     sessionUpdate: 'tool_call_update',
     toolCallId: options.callId,
     status: options.success ? 'completed' : 'failed',
+    ...(options.title !== undefined ? { title: options.title } : {}),
+    ...(options.kind !== undefined ? { kind: options.kind } : {}),
     content,
     _meta: buildUpdateMeta({
       ...options,
@@ -1722,6 +1731,10 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       if (!failed) return;
     }
 
+    const cardMetadata =
+      toolName === 'todo_write'
+        ? this.resolveToolMetadata(toolName, {}, record.uuid)
+        : undefined;
     yield emit(
       createTranscriptToolCallResultUpdate({
         toolName,
@@ -1733,6 +1746,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         errorMessage: extractErrorMessage(result?.['error']),
         message: record.message?.parts,
         resultDisplay,
+        ...(cardMetadata
+          ? { title: cardMetadata.title, kind: cardMetadata.kind }
+          : {}),
         artifacts: Array.isArray(result?.['artifacts'])
           ? result['artifacts']
           : undefined,
