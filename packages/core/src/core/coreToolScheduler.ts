@@ -1269,7 +1269,7 @@ const createErrorResponse = (
   };
 };
 
-const createCancelledResponse = (
+export const createCancelledResponse = (
   request: ToolCallRequestInfo,
   reason: string,
   executionStatus: ToolExecutionStatus,
@@ -1556,10 +1556,7 @@ interface CoreToolSchedulerOptions {
     status: ToolExecutionStatus,
     durationMs: number,
   ) => void;
-  onManagedToolExecutionSettled?: (
-    callId: string,
-    result: ToolResult | undefined,
-  ) => void;
+  onManagedToolExecutionSettled?: (callId: string) => void;
   config: Config;
   outputUpdateHandler?: OutputUpdateHandler;
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
@@ -6719,7 +6716,7 @@ export class CoreToolScheduler {
       } catch (error) {
         debugLogger.warn('Tool lifecycle end observer failed:', error);
       }
-      this.schedulerOptions.onManagedToolExecutionSettled?.(callId, toolResult);
+      this.schedulerOptions.onManagedToolExecutionSettled?.(callId);
       if (execSpan) {
         const completedExecSpan = execSpan;
         execSpan = undefined;
@@ -7800,10 +7797,7 @@ export class CoreToolScheduler {
         throw executionError;
       }
       if (executionThrew) {
-        this.schedulerOptions.onManagedToolExecutionSettled?.(
-          callId,
-          undefined,
-        );
+        this.schedulerOptions.onManagedToolExecutionSettled?.(callId);
       }
 
       const cancelMessage = executionThrew

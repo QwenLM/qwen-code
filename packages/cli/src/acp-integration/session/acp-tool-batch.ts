@@ -23,7 +23,6 @@ import { enforceFunctionResponseBudget } from '@qwen-code/qwen-code-core/tools/t
 import {
   isShellProgressData,
   ToolConfirmationOutcome,
-  type ToolResult,
 } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { USER_CANCEL_ABORT_REASON } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -34,8 +33,7 @@ import {
   type AgentLoopToolResult,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import {
-  convertToFunctionErrorResponse,
-  convertToFunctionResponse,
+  createCancelledResponse,
   type ToolCall,
   type WaitingToolCall,
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
@@ -129,7 +127,7 @@ interface CallState {
   name: string;
   lifecycle?: ReturnType<typeof createToolLifecycle>;
   execution?: { status: ToolExecutionStatus; durationMs: number };
-  runtimeOutcome?: ToolResult;
+  runtimeSettled?: boolean;
   approvalModeAtStart?: ApprovalMode;
   settleRelatedAgent?: (succeeded: boolean) => void;
   invocation?: unknown;
@@ -595,9 +593,9 @@ export async function runAcpToolBatch(
           if (state) state.execution = { status, durationMs };
         },
         ...(managed && {
-          onManagedToolExecutionSettled: (callId, result) => {
+          onManagedToolExecutionSettled: (callId) => {
             const state = states.get(callId);
-            if (state && result) state.runtimeOutcome = result;
+            if (state) state.runtimeSettled = true;
             runningRuntimeCalls.delete(callId);
             if (runningRuntimeCalls.size === 0 && !runtimeBatchFailed) {
               resolveRuntimeSettlement?.();
@@ -643,6 +641,7 @@ export async function runAcpToolBatch(
         let result = results.get(request);
         if (!result && !seen.has(request.callId)) {
           const call = latest.get(request.callId);
+          const state = states.get(request.callId);
           if (
             call?.status === 'success' ||
             call?.status === 'error' ||
@@ -655,45 +654,23 @@ export async function runAcpToolBatch(
               status: call.status,
               origin: 'executed',
             };
-            if (call.response.executionStatus !== 'not_started') {
-              config
-                .getLlmClient()
-                .recordCompletedToolCall(call.request.name, call.request.args);
-            }
-          }
-          const outcome = states.get(request.callId)?.runtimeOutcome;
-          if (!result && call && outcome) {
-            const error = outcome.error && new Error(outcome.error.message);
-            const status = error ? 'error' : 'success';
+          } else if (call && state?.runtimeSettled && state.execution) {
+            // The Runtime settled, but PostToolUse may still withhold its output.
             result = {
               request,
               executionRequest: call.request,
-              response: {
-                callId: request.callId,
-                executionStatus: status,
-                responseParts: error
-                  ? convertToFunctionErrorResponse(
-                      request.name,
-                      request.callId,
-                      outcome.llmContent,
-                      error.message,
-                    )
-                  : convertToFunctionResponse(
-                      request.name,
-                      request.callId,
-                      outcome.llmContent,
-                    ),
-                resultDisplay: outcome.returnDisplay,
-                error,
-                errorType: outcome.error?.type,
-                persistedOutputFiles: outcome.persistedOutputFiles,
-              },
-              status,
+              response: createCancelledResponse(
+                call.request,
+                'The turn was cancelled before the tool output was ready. Stop and await further instructions; do not retry.',
+                state.execution.status,
+              ),
+              status: 'cancelled',
               origin: 'executed',
             };
-            config
-              .getLlmClient()
-              .recordCompletedToolCall(call.request.name, call.request.args);
+          }
+          if (result && result.response.executionStatus !== 'not_started') {
+            const { name, args } = result.executionRequest;
+            config.getLlmClient().recordCompletedToolCall(name, args);
           }
         }
         seen.add(request.callId);
@@ -716,7 +693,7 @@ export async function runAcpToolBatch(
         const { request, response, status, executionRequest } = result;
         const { responseParts } = budgeted[index];
         const call = latest.get(request.callId);
-        if (call && states.get(request.callId)?.runtimeOutcome) {
+        if (call && states.get(request.callId)?.runtimeSettled) {
           settle({ ...call, status, response: { ...response, responseParts } });
         }
         config.getChatRecordingService()?.recordToolResult(

@@ -621,7 +621,7 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     expect(modelRequests).toHaveLength(requestsBefore);
   }, 120_000);
 
-  it('cancels a slow post-tool hook after the Runtime receipt has landed', async () => {
+  it('cancels after Runtime settlement without publishing pending post-tool output', async () => {
     sourceEnv['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = 'acp=1';
     sourceEnv['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] = 'acp=1';
     const ready = path.join(workspace, 'hook.ready');
@@ -651,6 +651,14 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     const sessionId = await newSession();
     const file = path.join(workspace, 'input.txt');
     const knownOutput = 'content already returned by Runtime';
+    const expectCancelledToolMessage = () => {
+      const toolMessages = modelRequests
+        .at(-1)
+        ?.messages?.filter(({ role }) => role === 'tool');
+      expect(toolMessages).toHaveLength(1);
+      expect(JSON.stringify(toolMessages)).toContain('[Operation Cancelled]');
+      expect(JSON.stringify(toolMessages)).not.toContain(knownOutput);
+    };
     await writeFile(file, knownOutput);
     turns.push({
       toolCalls: [{ name: 'read_file', args: { file_path: file } }],
@@ -669,24 +677,38 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
       expect((await running).stopReason).toBe('cancelled');
       await cancelling;
       expect(
-        updates.filter(
-          (update) =>
-            update.sessionUpdate === 'tool_call_update' &&
-            update.status === 'completed' &&
-            update._meta?.['toolName'] === 'read_file',
+        updates.flatMap((update) =>
+          update.sessionUpdate === 'tool_call_update' &&
+          update._meta?.['toolName'] === 'read_file' &&
+          (update.status === 'completed' || update.status === 'failed')
+            ? [update.status]
+            : [],
         ),
-      ).toHaveLength(1);
+      ).toEqual(['failed']);
+      expect(
+        updates.map((update) => update._meta?.['toolLifecycle']),
+      ).toContainEqual(
+        expect.objectContaining({
+          toolName: 'read_file',
+          phase: 'ended',
+          outcome: 'cancelled',
+          executionStatus: 'success',
+        }),
+      );
+      expect(JSON.stringify(updates)).not.toContain(knownOutput);
       turns.push({ text: 'CONTINUED' });
       expect((await prompt(sessionId)).stopReason).toBe('end_turn');
-      const toolMessages = modelRequests
-        .at(-1)
-        ?.messages?.filter(({ role }) => role === 'tool');
-      expect(toolMessages).toHaveLength(1);
-      expect(JSON.stringify(toolMessages)).toContain(knownOutput);
+      expectCancelledToolMessage();
     } finally {
       await writeFile(release, '');
       await running.catch(() => undefined);
     }
+
+    await bridge!.closeSession(sessionId);
+    await bridge!.loadSession({ sessionId, workspaceCwd: workspace });
+    turns.push({ text: 'RESTORED' });
+    expect((await prompt(sessionId)).stopReason).toBe('end_turn');
+    expectCancelledToolMessage();
   }, 120_000);
 
   it('stops the worker and its command when the Managed child dies', async () => {
