@@ -338,9 +338,13 @@ const AgentRow: React.FC<{ row: RowData; now: number }> = ({ row, now }) => {
   const { glyph, color } = statusGlyph(row.status);
   // sanitizeMultilineForDisplay on the name too: agent names are
   // LLM/session-generated and can carry the same bare C0 controls the
-  // activity line already guards against (#17386, same class as the
-  // ToolConfirmationMessage fix in #17346).
-  const safeName = sanitizeMultilineForDisplay(escapeAnsiCtrlCodes(row.name));
+  // activity line already guards against (#17386). The name cell is a
+  // ONE-line row, and the multiline sanitizer deliberately preserves
+  // newlines, so flatten them to spaces — a model-supplied \n must not
+  // paint a second terminal row (review R3-1).
+  const safeName = sanitizeMultilineForDisplay(
+    escapeAnsiCtrlCodes(row.name),
+  ).replaceAll('\n', ' ');
   const displayName = truncateMiddle(safeName, NAME_COL_WIDTH);
   // sanitizeMultilineForDisplay: LLM-generated descriptions can carry bare
   // C0 controls that escapeAnsiCtrlCodes passes through — matches the
