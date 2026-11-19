@@ -2,7 +2,7 @@
 
 [English](2026-11-19-managed-control-plane-wake.md) | [简体中文](2026-11-19-managed-control-plane-wake.zh-CN.md)
 
-状态：提案，实现前设计。经一轮对抗式代码级评审、PR #17805 第一轮评审（6 P1 + 2 P2）、一轮 Simplicity First 自审、第二轮复审（5 P1 + 3 P2，含对作者参数误读的纠正）、第三轮复审（5 P1 + 2 P2，全部采纳；其中两条经 MySQL 8.4.11 实测）后修订。本文是[无状态 Hosted Harness 设计](2026-11-16-managed-stateless-harness.md)（#17527）的 Phase 3 设计，对照 `main` 的 `4ed278b37c` 核实，该提交包含已合并的 Phase 1（#17690，merge `7150c58a01`）与 Phase 2（#17749，merge `4ed278b37c`）。父设计的 Phase 3「仅定义边界；实现前先出独立设计」；本文把该边界展开为提案、成本模型、与 Phase 1/2 的交互、测量计划与可行性结论。下文所有成本占比都是**代码级分析估算，尚未实测**；测量是启用门槛，与父设计和 Phase 2 的要求一致。
+状态：提案，实现前设计。经一轮对抗式代码级评审、PR #17805 第一轮评审（6 P1 + 2 P2）、一轮 Simplicity First 自审、第二轮复审（5 P1 + 3 P2，含对作者参数误读的纠正）、第三轮复审（5 P1 + 2 P2）、第四轮多方评审（3 P1 + 1 P2 + 一条 3b 验收）、第五轮（凭据/writer 获取 TOCTOU 与加载计数口径精化，及若干澄清）后修订。全部发现均已采纳；多条经 MySQL 8.4.11 与生产类 H2 实测。本文是[无状态 Hosted Harness 设计](2026-11-16-managed-stateless-harness.md)（#17527）的 Phase 3 设计，对照 `main` 的 `4ed278b37c` 核实，该提交包含已合并的 Phase 1（#17690，merge `7150c58a01`）与 Phase 2（#17749，merge `4ed278b37c`）。父设计的 Phase 3「仅定义边界；实现前先出独立设计」；本文把该边界展开为提案、成本模型、与 Phase 1/2 的交互、测量计划与可行性结论。下文所有成本占比都是**代码级分析估算，尚未实测**；测量是启用门槛，与父设计和 Phase 2 的要求一致。
 
 **交付建议。** 3a（wake 调度）小且可独立交付；定稿前先解决其第三轮四条发现。3b（Runtime 持有观测）是捕获状态机重写加 staging 管线，应作为独立后续设计；其第三轮三条发现（字节重传、通道交接、原始字节保留）在此精化为它必须契合的边界，并在该设计中定案。
 
@@ -119,8 +119,9 @@ worker 侧的四个事实界定了 3b 必须改什么：
 
 1. **扫描到期——仅已知且到期。** 快速扫描选择 head `wake_due_at IS NOT NULL AND wake_due_at <= NOW` 的无主、`ACTIVE` 公开、未退役 Session，按 `wake_due_at` 排序，有界页（候选 8）。它**不** OR 入 `is_wake_pending`：远期任务在接受时即带 `is_wake_pending = 1`，OR 入它会每 tick 重选一小时后的任务（8.4.11 实测：`wake_due_at <= 100 OR is_wake_pending = 1` 选中 `wake_due_at = 3600000` 行）。pending 但到期时间未知（提示尚未刷新）的 Session 由独立限流修复趟处理或留给兜底，不进快速扫描。稳定游标翻过剩余，而非重读队头同一批。到期扫描索引按实际查询计划核对（§7）。
 2. **证明并认领。** 复用既有 journal proof（带 §4.1 四态结果）确认有到期 pending 输入并刷新提示；proof 的 child 终态/策略过滤在失效候选消耗 wake 前丢弃它们，应用 §4.1「仍欠结算」区分。按 Session 认领（lease + 单调 fence，automation 账本之形）防止两节点同时分发一个 Session；租约至少为冷开上界，使慢加载不会让自己的认领过期。兜底的 `wake_retry_at` 保持不动。
-3. **唤醒——仅对可证正常挂起者主动，其余被动。** 无主候选集既包括干净 sealed 的 writer，也包括 writer lease 已过期的 `ACTIVE` head（writer 崩溃），且拒载也留 `SEALED + released`，故 `SEALED` 本身不足证正常挂起。主动动词 `activateForWake` 走接管路径，对已绑定 Harness 且无可复用附件者驱动 Runtime 恢复（`driveRuntimeRecovery=true`，`QwenHostedHarnessConnector.java:2358-2360`），可对在途前台工具调 `broker.execute`（`hosted-runtime-recovery.ts:2967-2978`）——这是兜底被动 `recoverForWake` 明确避免的副作用（「never drives an unrelated foreground Turn」）。因此 3a **仅**对携带有效正常挂起证明（§4.6 凭据，加载前即时核对仍对应当前 head）的候选调 `activateForWake`；lease 过期 `ACTIVE`、拒载 `SEALED`、及任何证据不足的候选走被动 `recoverForWake`，把前台 turn 的推进留给其原有协调流程。transport 触发的加载遵守同一条件。主动加载重建泵，泵投递到期输入并为仍在未来的输入重新武装延迟定时器。3a 不需要新 Harness 动词。
-4. **失败节奏。** 瞬态拒绝（`hosted_session_open_busy`、`hosted_session_closing`、pool 所有权等待）以 backoff 重试，受 #17681 建立的同一 churn cap 限制（`WAIT_CHURN_BUDGET_FACTOR = 4`，`HarnessCoordinator.java:101`）；确定性拒绝记录其自身代码并停止分发该 Session 直到 journal 前进。
+3. **唤醒——仅对可证正常挂起者主动，其余被动。** 无主候选集既包括干净 sealed 的 writer，也包括 writer lease 已过期的 `ACTIVE` head（writer 崩溃），且拒载也留 `SEALED + released`，故 `SEALED` 本身不足证正常挂起。主动动词 `activateForWake` 走接管路径，对已绑定 Harness 且无可复用附件者驱动 Runtime 恢复（`driveRuntimeRecovery=true`，`QwenHostedHarnessConnector.java:2358-2360`），可对在途前台工具调 `broker.execute`（`hosted-runtime-recovery.ts:2967-2978`）——这是兜底被动 `recoverForWake` 明确避免的副作用（「never drives an unrelated foreground Turn」）。因此 3a **仅**对携带有效正常挂起证明（§4.6 凭据，加载前即时核对仍对应当前 head）的候选调 `activateForWake`；lease 过期 `ACTIVE`、拒载 `SEALED`、及任何证据不足的候选走被动 `recoverForWake`，把前台 turn 的推进留给其原有协调流程。transport 触发的加载遵守同一条件。加载重建泵，泵投递到期输入并为仍在未来的输入重新武装延迟定时器。3a 不需要新 Harness 动词。
+
+**凭据复核必须围栏进 writer 获取，而非仅在加载前做一次。** 对照当前 head 复核凭据后再发 `activateForWake` 是 TOCTOU：`LoadHarnessSession` 请求不带 journal revision 或 writer generation（`QwenHostedHarnessConnector.java:2053-2059`），Store 按取得行锁时的 head 授予下一代 writer（`JournalWriterLifecycle.java:280-300`）。若另一请求在该间隔接管、留下未结算前台工具调用、再失去 writer，旧 wake 请求仍可取得 writer 并进入主动 `broker.execute` 分支——单 writer 围栏保护写入资格，但旧请求选主动模式所依据的状态已变。因此 3a **wake-pump 入口优先用被动 `recoverForWake`**（被动加载成功即 kick pump、从不驱动前台恢复，彻底消除主动模式 TOCTOU）；保留主动模式处，把预期 journal revision 与上一代 writer generation 带到 writer 获取环节核验，失配退回被动。dispatcher 与 transport 遵守同一规则。注意由此产生的划分：因 §4.6 凭据被任何后续提交失效，**挂起期间**提交的立即输入恒走被动臂，主动动词实际服务武装于 seal 前的种群（§7.1 常驻 rig）；被动臂仍投递到期工作——`recoverForWake` 加载的 wake pump 拥有其输入——故凭据门不会搁浅主 3a 场景。4. **失败节奏。** 瞬态拒绝（`hosted_session_open_busy`、`hosted_session_closing`、pool 所有权等待）以 backoff 重试，受 #17681 建立的同一 churn cap 限制（`WAIT_CHURN_BUDGET_FACTOR = 4`，`HarnessCoordinator.java:101`）；确定性拒绝记录其自身代码并停止分发该 Session 直到 journal 前进。
 
 **突发控制与 takeover 路径。** wake 加载继承每实例冷开上限（`HOSTED_COLD_OPEN_LIMIT = 8`，`hosted-session-suspension.ts:18`；拒绝 `409 hosted_session_open_busy`，在 `HarnessConflictCodes.java:23-29` 分类为瞬态）。placement 路径有两种情形：
 
@@ -250,6 +251,8 @@ Phase 1 选择无配置开关；Phase 2 引入 `mcpParkable` 作为发布控制�
 - **proof 结果须区分仅未来与未完。** `Optional<Boolean>.empty()` 把「前缀未完」与「仅未来输入」混为一谈；四态结果是把提示刷新为余下未来时间而不提前清除所必需的。
 - **proof 缓存槽位生命周期。** 以 `complete=false` 存入的完整仅未来证明钉住 128 条缓存中一个不可逐出槽位（缓存满分支拒绝逐出可续读持有者），所以远期挂起 Session 种群——3a 使之成为常态——可使到期 Session 的证明无法入缓存、在 32 页预算后饿死。完整仅未来结果须在写回 `T` 后释放/可逐出其槽位，且不得复用 `complete=true` 的「到期」快捷分支。兜底共享缓存，故快扫选择性本身不消除该压力。
 - **主动 vs 被动唤醒。** `activateForWake` 的接管路径驱动 Runtime 恢复、可对在途前台工具 `broker.execute`；仅携带有效正常挂起凭据（加载前对照当前 head 复核）的候选可被主动唤醒。lease 过期 `ACTIVE`、拒载 `SEALED`、证据不足者走被动 `recoverForWake`；transport 触发的加载遵守同一规则。
+- **凭据/writer TOCTOU。** 加载前复核凭据与 writer 获取非原子（加载请求不带 revision/generation，Store 按取行锁时授予下一代）；该间隔内的接管可使旧请求依据陈旧状态选择主动模式。wake 入口优先被动加载，或把预期 revision + 上一代 generation 围栏进 writer 获取、失配退被动。
+- **加载计数口径。** 「每次 wake 一个加载」不是不变量：transport 与兜底认领可分别成功，`recoverForWake` 有缓存也发 RPC。不变量是单有效 writer 与每个到期 `turnId` 恰好结算一次；加载 RPC/冷开/结算分别计数，≤1 加载请求的成本目标须显式共享认领 + 接手。
 - **transport 到期复核。** 晚到的 `wake.requested` 通知（无 `notBefore`）在 seal 后送达会冷启动仍在未来的 loop 并重置其空闲时钟；快速路径加载前须复核是否有 pending 输入到期，覆盖所有 pending 输入以免陈旧 loop 通知压住立即输入。
 - **proof 重放成本。** head 提示以每个到期候选一次按需 proof 重放换取按输入索引。目录规模下这是测量（§7.3）门控的成本；按输入索引是不可接受时的退路，而非第一版。
 - **快速扫描选择性。** 把 `is_wake_pending` OR 入到期谓词会每 tick 重选远期任务；快速扫描须仅选已知且到期，未知时间 pending Session 按独立限流预算。
@@ -275,14 +278,15 @@ Phase 1 选择无配置开关；Phase 2 引入 `mcpParkable` 作为发布控制�
 
 - **3a 挂起**：唯一欠的工作是未尝试排队或延迟 wake 输入的 Session 在空闲期后挂起；其 writer seal、activation release、续约停止，恢复视图在 proof 当前性当前且输入可证明未尝试时报 `ready`。
 - **3a head 提示空安全**：空 head 先接收首个延迟输入 `T` 再接收立即输入（无 `notBefore`），读回依次为 `T`、`0`；同一事务接受多个输入，head 等于其中最早时刻。
-- **3a head 提示未知态**：关闭 transport，预置一条未结算立即输入使 head 为 `pending=1, due=NULL`，在修复运行前接受一个未来 loop；旧立即输入在快扫界内恰好执行一次，结算后 head 刷为 `T`，未来 loop 仅在 `T` 运行。以真正空 head 与已知 `due=0` head 作对照。
+- **3a head 提示未知态**：关闭 transport，预置一条未结算立即输入使 head 为 `pending=1, due=NULL`，在修复运行前接受一个未来 loop；旧立即输入在**限流修复趟**的预算内恰好执行一次（本验收测量的是修复臂——兜底臂达不到快界，因其认领把 `wake_retry_at` 推到 `NOW + 30 s`，`JdbcWakeRecoveryStore.java:33,123`），结算后 head 刷为 `T`，未来 loop 仅在 `T` 运行。以真正空 head 与已知 `due=0` head 作对照。
 - **3a proof 刷新**：同时有立即输入与 `T` 时刻 loop 的 Session，结算立即输入并回放超过 32 事务的 journal 后，第一批边界不清除提示，完整回放后写入 `T`，到 `T` 时只交付一次。
 - **3a proof 缓存饱和**：128 个远期 Session 经兜底完成证明后，一个含立即输入、33 笔事务的到期 Session 能读到第 33 笔并在延迟界内启动一次（空缓存对照第 2 轮证完）；这 128 个远期 Session 在到期前不因缓存命中被提前唤醒。
 - **3a 主动/被动划分**：关闭 transport，三个 Session——可证正常挂起、lease 过期 `ACTIVE`、拒载 `SEALED`——后两者各留到期 wake 与未结算前台工具调用：正常挂起的到期输入被及时处理，后两者 wake 路径对该前台调用的 `broker.execute` 计数为 0（由其原有恢复流程接管）。
 - **3a transport 延迟通知**：一小时后到期的 loop 通知在 writer seal 后投递，到期前冷启动数为 0、到期后恰好交付一次；若同 Session 另有立即输入，该输入被及时处理而未来 loop 仍等 `T`。
 - **3a 到期分发**：延迟输入在其 `notBefore` 的实测延迟界内触发（非兜底的分钟级）；挂起期间提交的立即输入被分发；过期输入恰好迟到触发一次；无追赶计数。到可达 owner 的正常 wake 不受 writer lease 门控（§4.2）。
 - **3a 快速扫描选择性**：大量一小时后 Session、一个立即任务、少量未知时间 pending 项下，远期 Session 在到期前退出快速扫描，未知时间项按独立预算，立即任务延迟保持界内。
-- **3a 无双跑**：两个竞争分发器（或分发器 + transport + 兜底）每次 wake 加载一个 Session 一次；writer 获取围栏；输入在其 `turnId` 下结算一次。
+- **3a 单 writer、恰好结算一次**：dispatcher、transport、兜底同时看到同一笔到期输入并同步放行时，正确性不变量是**同一时刻仅一个有效 writer**与**每个到期 `turnId` 恰好结算一次**——而非「一个加载 RPC」。transport 认领（`wake_covered_sequence`）与兜底认领（`wake_retry_at`）可分别成功（MySQL 8.4.11 实测：两次 UPDATE 各影响 1 行、重试 0 行），且 `recoverForWake` 即便有缓存也发加载 RPC，故分别记录加载 RPC 数、成功冷开数、结算数，仅断言这两个不变量。若成本目标要求至多一个加载请求，设计须另行规定三入口发送前如何共享认领、认领节点发送前退出时谁接手；该接手须验收（认领节点发送前退出，另一节点在界内接手，输入仍只结算一次）。
+- **3a 凭据/writer TOCTOU**：在旧 wake 请求凭据复核后、加载前暂停它；让另一 writer 接管、留下未结算前台工具调用、再失去 writer；放行旧请求。wake 路径对该前台调用的 `broker.execute` 计数为 0（由原有前台恢复流程接管）；以无竞争的正常挂起作对照，其到期输入按时结算一次。
 - **3a 已尝试工作仍常驻**：有先前 transcript 尝试、恢复持续返回 `busy` 跨过空闲期的 channel 输入不 seal writer；它留在恢复路径，分发器不启动第二 turn。
 - **3a 冷态未尝试证明**：两个均 `SEALED + released`、水位均等于 journal revision 的 Session——一个未尝试输入正常挂起，一个已尝试且加载被拒——控制面重启后只有前者返回 `nextTurnAllowed=true`。
 - **3a 失效与无饿死**：父 run 终态的 child 通知、已停止 run 的 message 输入，经 proof 离开候选集且不空转 wake–load–suspend 循环；8 个失效候选领先第 9 个有效到期 Session 时，第 9 个在分发器界内启动。
