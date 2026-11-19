@@ -555,12 +555,17 @@ interface EnvelopeSpan {
  * The envelopes at the start and at the end of `value`, the two places a
  * writer puts one. Writers stack them there: the CLI prepends one reminder
  * over another, and a tool result can end with more than one, so each end
- * holds a run of envelopes apart only by whitespace (#15936 R3-3). The
- * writers escape tags inside an envelope's body, so the first closing tag
- * after a leading opening, and the last opening tag before a trailing closing
- * tag, are the envelope's own. The text around them, such as a file a tool
- * read or what the user typed, is not escaped, so a tag inside it is never
- * taken for an envelope.
+ * holds a run of envelopes apart only by whitespace (#15936 R3-3). The first
+ * closing tag after a leading opening, and the last opening tag before a
+ * trailing closing tag, are taken as the envelope's own. That is exact where
+ * the writer escapes tags inside the body, as the hook-context writer, the
+ * task-notification writers and several reminder writers do. Not every
+ * writer does: the reminder a todo-list result ends with holds the list as
+ * JSON, unescaped, so an opening tag a todo quotes is taken for that
+ * reminder's own (#15936 R11-1). The text around the envelopes, such as a
+ * file a tool read or what the user typed, is not escaped either; an envelope
+ * is read only from a tag at either end of `value`, so a tag in the middle of
+ * such text is not taken for one.
  */
 function envelopesAtEnds(value: string): EnvelopeSpan[] {
   const spans = leadingEnvelopes(value);
@@ -687,7 +692,7 @@ function closesOfBlocksOpenAt(value: string, cutAt: number): string[] {
  * closes that block after the marker too. Wherever the text ends, every block
  * open there is closed, the inner one first: an envelope can hold another
  * block, and a file's contents carried in a tool call's arguments are not
- * escaped the way an envelope's body is (#15936 R8-1).
+ * escaped the way most envelope bodies are (#15936 R8-1).
  */
 function truncateKeepingEnvelopes(value: string, maxTextChars: number): string {
   const span = envelopesAtEnds(value).find(
