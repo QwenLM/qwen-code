@@ -1783,7 +1783,7 @@ describe('OpenTuiEffortDialog', () => {
       user: { settings: userSettings },
       workspace: { settings: workspaceSettings },
       merged: {
-        providerProtocol: { 'my-gateway': 'openai' },
+        providerProtocol: { 'my-gateway': 'openai', 'my.gateway': 'openai' },
         ...(options.placeholderKey
           ? {
               modelProviders: {
@@ -2241,6 +2241,62 @@ describe('OpenTuiEffortDialog', () => {
       else process.env['TEST_KEY'] = previousKey;
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('skips static cleanup for a provider id containing a dot', () => {
+    const harness = renderEffortDialog(
+      'max',
+      undefined,
+      false,
+      'my.gateway',
+      undefined,
+    );
+    press('down');
+    press('return');
+
+    const providerWrites = harness.setValue.mock.calls.filter(([, key]) =>
+      String(key).startsWith('modelProviders.'),
+    );
+    expect(providerWrites).toHaveLength(0);
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.reasoningEffort',
+      'high',
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+  });
+
+  it('skips static cleanup when duplicate candidates remain ambiguous', () => {
+    const sibling = {
+      id: 'deepseek-v4-pro',
+      generationConfig: {
+        extra_body: { reasoning_effort: 'max' },
+        samplingParams: { reasoning_effort: 'max' },
+      },
+    };
+    const harness = renderEffortDialog(
+      'max',
+      undefined,
+      false,
+      'openai',
+      undefined,
+      { sibling },
+    );
+    press('down');
+    press('return');
+
+    const providerWrites = harness.setValue.mock.calls.filter(([, key]) =>
+      String(key).startsWith('modelProviders.'),
+    );
+    expect(providerWrites).toHaveLength(0);
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.reasoningEffort',
+      'high',
+      undefined,
+      { throwOnWriteFailure: true },
+    );
   });
 
   it('does not rewrite a System-owned provider bucket', () => {
