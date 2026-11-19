@@ -48,7 +48,7 @@ final class ManagedModelDiagnosticProjection {
                         return false;
                     }
                     JsonNode body = ManagedExtensionRecordStore.parse(new String(resource.bytes(), java.nio.charset.StandardCharsets.UTF_8));
-                    return body != null && (body.path("v").asInt() == 3 || body.path("v").asInt() == 4);
+                    return body != null && body.has("continuationRef");
                 });
         boolean diagnostics = validated.stream().anyMatch(resource -> {
             if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(resource.resource().kind())) {

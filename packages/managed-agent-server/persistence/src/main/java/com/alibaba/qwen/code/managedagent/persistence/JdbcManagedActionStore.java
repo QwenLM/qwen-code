@@ -222,10 +222,10 @@ public class JdbcManagedActionStore
                     "createdAt",
                     "expiresAt",
                     question ? "questions" : "options"));
-            if (question || options.path("v").asLong() == 2 || options.path("v").asLong() == 3 && options.has("inputRef")) {
+            if (options.has("inputRef")) {
                 optionFields.add("inputRef");
             }
-            if (question || options.path("v").asLong() == 3) {
+            if (options.has("continuationRef")) {
                 optionFields.add("continuationRef");
             }
             if (options.has("requiresHumanDecision")) {
@@ -235,8 +235,8 @@ public class JdbcManagedActionStore
             closed(options, optionFields.toArray(String[]::new));
             require(
                     safeNumber(options.path("v"))
-                            && (options.path("v").asLong() == 1
-                                    || options.path("v").asLong() == 2 || options.path("v").asLong() == 3 || question)
+                            && (options.path("v").asLong() == 3 || question)
+                            && (!question || options.has("inputRef") && options.has("continuationRef"))
                             && id.equals(options.path("requestId").asText())
                             && safeNumber(options.path("inputRevision"))
                             && options.path("inputRevision").asLong()
@@ -280,7 +280,7 @@ public class JdbcManagedActionStore
                             && options.path("functionCallId").equals(continuation.path("calls").get(ordinal).path("call").path("callId")));
                 }
             }
-            if (question || options.path("v").asLong() == 3) {
+            if (options.has("continuationRef")) {
                 ManagedHostedRecoveryRecords.reference(options.path("continuationRef"), "hosted-approval-continuation", tenantId, workspaceId, sessionId, resources, hostedReferences);
             }
             Action previous = find(tenantId, sessionId, id).orElse(null);

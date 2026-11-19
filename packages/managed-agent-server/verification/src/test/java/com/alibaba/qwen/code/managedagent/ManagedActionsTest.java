@@ -428,7 +428,7 @@ class ManagedActionsTest {
                     .withInput(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{\"content\":\"foreign secret\"}}"));
             foreign.change("requested", null);
             ActionJournal local = new ActionJournal(journals, tenant, session, 100, 1000);
-            local.options.put("v", 2);
+            local.options.put("v", 3);
             local.options.set("inputRef", foreign.options.path("inputRef").deepCopy());
             assertThatThrownBy(() -> local.change("requested", null))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode())
@@ -501,7 +501,7 @@ class ManagedActionsTest {
             switch (fault) {
                 case "oldExtra" -> journal.options.putNull("inputRef");
                 case "missingRef" -> journal.options.put("v", 2);
-                case "version" -> journal.options.put("v", 3);
+                case "version" -> journal.options.put("v", 5);
                 case "extra" -> {
                     journal.withInput(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{}}"));
                     journal.options.put("extra", true);

@@ -380,7 +380,7 @@ public class ManagedActionService {
         JsonNode options = action.options();
         String tool = options.path("toolName").asText();
         if (!"requested".equals(action.state())
-                || !List.of(2L, 3L).contains(options.path("v").asLong())
+                || options.path("v").asLong() != 3
                 || !PREVIEW_TOOLS.contains(tool)) {
             return null;
         }

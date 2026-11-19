@@ -10701,7 +10701,7 @@ describe('Hosted Harness no-tool session', () => {
           'managed-action-options',
           Buffer.from(
             JSON.stringify({
-              v: 1,
+              v: 3,
               requestId,
               turnId: channelTurn,
               functionCallId: 'approval-call',

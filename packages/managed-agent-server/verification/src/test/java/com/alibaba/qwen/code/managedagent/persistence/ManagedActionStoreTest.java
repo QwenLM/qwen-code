@@ -493,7 +493,7 @@ class ManagedActionStoreTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"1,true", "2,true", "3,true", "1,false", "2,false", "3,false"})
+    @CsvSource({"3,true", "3,false"})
     void actionOptionsPreserveOnlyAnExplicitHumanDecisionRequirement(int version, boolean required) {
         ObjectNode options = planExitOptions().put("v", version).put("requiresHumanDecision", required);
         if (version < 3) {
@@ -599,7 +599,7 @@ class ManagedActionStoreTest {
     }
 
     private void project(String state, JsonNode answer, long sequence, long expiresAt) {
-        ObjectNode options = JSON.createObjectNode().put("v", 1).put("requestId", ACTION).put("turnId", "turn")
+        ObjectNode options = JSON.createObjectNode().put("v", 3).put("requestId", ACTION).put("turnId", "turn")
                 .put("functionCallId", "call").put("toolName", "write_file").put("policyRevision", "hosted-tool-approval/1")
                 .put("inputRevision", 1).put("createdAt", 1).put("expiresAt", expiresAt);
         options.putArray("options").addObject().put("id", "allow").put("label", "Allow");
