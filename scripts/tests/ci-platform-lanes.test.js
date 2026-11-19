@@ -336,6 +336,52 @@ it('gives the shared Linux test lane one ceiling on both pools', () => {
   expect(ci.jobs.test.strategy.matrix.shard).toEqual([1, 2]);
 });
 
+it.each([
+  'test_build',
+  'test',
+  'lint_and_static',
+  'web_shell_e2e_smoke',
+  'integration_no_ak',
+])(
+  'uses HTTP/1.1 for %s checkout without persisting Git configuration',
+  (job) => {
+    const checkout = ci.jobs[job].steps.find(
+      (step) => step.name === 'Checkout',
+    );
+    expect(checkout.env).toEqual({
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'http.version',
+      GIT_CONFIG_VALUE_0: 'HTTP/1.1',
+    });
+    expect(
+      execFileSync('git', ['config', '--get', 'http.version'], {
+        env: { ...process.env, ...checkout.env },
+        encoding: 'utf8',
+      }).trim(),
+    ).toBe('HTTP/1.1');
+    expect(ci.jobs[job].env?.GIT_CONFIG_COUNT).toBeUndefined();
+    expect(ci.env.GIT_CONFIG_COUNT).toBeUndefined();
+  },
+);
+
+it('initializes missing machine identity before Linux SSH runtime tests', () => {
+  const steps = ci.jobs.test.steps;
+  const identityIndex = steps.findIndex(
+    (step) => step.name === 'Initialize machine identity for SSH runtime tests',
+  );
+  expect(identityIndex).toBeGreaterThanOrEqual(0);
+  expect(identityIndex).toBeLessThan(
+    steps.findIndex((step) => step.id === 'unit_tests'),
+  );
+  const identity = steps[identityIndex];
+  expect(identity.if).toContain("needs.test_build.result == 'success'");
+  expect(identity.if).toContain("ci_profile == 'full'");
+  expect(identity.if).toContain("runner.os == 'Linux'");
+  expect(identity.run).toContain('test -s /etc/machine-id ||');
+  expect(identity.run).toContain('/proc/sys/kernel/random/boot_id');
+  expect(identity.run).toContain('sudo -n');
+});
+
 it('skips every build-consuming shard step when test_build failed', () => {
   // `!cancelled()` is true when a needed job fails, so without this term a
   // failed build still starts both shards: each pays a full install and
