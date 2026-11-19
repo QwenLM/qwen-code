@@ -35,11 +35,11 @@ worker 已经无条件广告 `public-child-agents/1`——单实例与池实例 
 protocol 1 删除（D3）、public child 放宽（本改动）。
 
 **范围外——CSI resident Workspace（`kubernetes-workspace`）。** resident
-Workspace 是 files-only、单会话、workspace 级隔离：
-`ResidentWorkspaces.requireCreation` 拒绝 Shell profile 与任何第二个开放会话，
-配置层 resident Workspace 与 Workspace Shell 互斥。它们不是放宽对象；决策里的
+Workspace 是 files-only、单会话、workspace 级隔离。它们不是放宽对象；决策里的
 「k8s」指池化 Harness worker（Kubernetes pod），2026-11-19 已与用户确认。
-准入里的 `!resident` 排除保留。
+其排除是结构性的，而非 resident 准入门：provisioner 能力臂只准入持久
+local-process 与 SSH runtime，且 `WorkspaceToolProfiles.isPublicShell` 拒绝
+resident Workspace 所持的 files-only profile，public child 根门因此永不准入。
 
 ## 当前门链
 
@@ -51,11 +51,12 @@ Workspace 是 files-only、单会话、workspace 级隔离：
    `public-child-agents/1` feature（构建于 `approval-selection/1` 之上）+
    lifecycle v2 Shell。
 3. 根准入（`AgentSessionAdmissions`）——`workspaceChildAgentsEnabled &&
-publicChildrenSupported && !resident && (!sshWorkspace ||
+publicChildrenSupported && (!sshWorkspace ||
 managedExtensionExecutionEnabled) && (managedExtensionExecutionEnabled ||
 无 definition digest 的内置 qwen-code) && isPublicShell(profile)`。
-4. child 准入（`AgentSessionAdmissions.insertChildSession`）——resident 父拒绝、
-   深度 1、launch snapshot v1/v2 校验不变。
+4. child 准入（`AgentSessionAdmissions.insertChildSession`）——父必须带
+   `publicChildAgentsVersion == 1`（resident/CSI 父永不满足）、深度 1、
+   launch snapshot v1/v2 校验不变。
 5. `QwenHostedHarnessConnector.foregroundOnly(session)`——SSH Workspace 强制
    `foregroundOnly`，除非会话是 public child 根且两个扩展开关都开；worker 仅在
    `!foregroundOnly` 时挂 `childRuns`/`childAgents`，并以
@@ -64,7 +65,12 @@ managedExtensionExecutionEnabled) && (managedExtensionExecutionEnabled ||
 
 ## 改动
 
-无协议、schema 或 worker 改动。五个控制面门控放宽；所有既有能力检查保留。
+无协议或 schema 改动，D5′ 放宽本身也不需要 worker 改动。随附的 D3 files-on-v2
+改动确实改变 worker 契约广告：`hosted-harness-contract.ts` 把
+`hosted-workspace-files/1` 加入 `LIFECYCLE_V2_PROFILES` 与默认 profile 列表，
+旧 worker 无法广告它（`createHostedHarnessContract` 拒绝未知 profile）。
+因此控制面与 worker 必须一起部署——v2 列表缺 `files/1` 的旧 worker 会使普通
+files close 返回 409。五个控制面门控放宽；所有既有能力检查保留。
 
 1. **配置**——`admitsPublicChildAgents()` 保留 local 臂
    （`durableLocalProcess` + `local-process`），新增 SSH 臂，镜像既有
@@ -82,21 +88,24 @@ managedExtensionExecutionEnabled) && (managedExtensionExecutionEnabled ||
 4. **根准入**——去掉 SSH 专属的扩展执行合取项
    `(!sshWorkspace || managedExtensionExecutionEnabled)`。SSH 根与 local 根
    同臂准入 child：无 definition digest 的内置 `qwen-code`，或 managed
-   extension execution 开启时的任何已准入 agent。`!resident`、public Shell
-   profile 要求、`publicChildrenSupported` harness 能力保留。
+   extension execution 开启时的任何已准入 agent。public Shell profile 要求与
+   `publicChildrenSupported` harness 能力保留；resident/CSI Workspace 仍被
+   结构性排除（provisioner 臂 + `isPublicShell`）。
 5. **foregroundOnly**——SSH 例外改为能力谓词（`publicChildAgentsVersion == 1`
-   - 配置准入 + harness 能力），取代两个扩展开关。有能力的 SSH public child
-     会话保留背景表面——根与其深度 1 child alike，既有 SSH 扩展 child 不因放宽
-     被收紧。无能力部署保持 foreground-only，fail-closed。发起门仍仅限根：
-     `publicChildLaunchAvailable` 附加无 lineage 合取项，child 的 `agent` 工具
-     仍被抑制（深度 1）。
+   且配置准入且 harness 能力，三者合取），取代两个扩展开关。有能力的 SSH public child
+   会话保留背景表面——根与其深度 1 child alike，既有 SSH 扩展 child 不因放宽
+   被收紧。无能力部署保持 foreground-only，fail-closed。发起门仍仅限根：
+   `publicChildLaunchAvailable` 附加无 lineage 合取项，child 的 `agent` 工具
+   仍被抑制（深度 1）。
 
 `configuration-descriptions.json` 与 README 描述放宽后的准入（能力门控、
 local-process 或 SSH、单或池化 Harness）。
 
 ## 保留的不变量
 
-- CSI resident 排除：配置互斥加根/child 准入的 `!resident` 门。
+- CSI resident 排除：结构性——provisioner 能力臂只准入 local-process/SSH，
+  `isPublicShell` 拒绝 resident 的 files-only profile；child 门经父的
+  `publicChildAgentsVersion` 继承该排除。
 - 深度 1、launch snapshot v1/v2 校验、model-route 与 extension-agent snapshot
   检查：不变。
 - bound Session 的 session 隔离（SSH 恒用）；child Workspace（独立的
@@ -140,7 +149,8 @@ local-process 或 SSH、单或池化 Harness）。
   准入 public child；缺 token 的 pool 拒绝。
 - CSI resident Workspace、深度 > 1、非法 snapshot、无能力 worker 的拒绝与
   之前完全一致。
-- 无 worker、协议或 schema 改动；配置描述与放宽后的准入一致。
+- 无协议或 schema 改动；worker 契约广告新增 `hosted-workspace-files/1`（D3），
+  控制面与 worker 须一起部署；配置描述与 README 与放宽后的准入一致。
 
 ## 开放问题
 

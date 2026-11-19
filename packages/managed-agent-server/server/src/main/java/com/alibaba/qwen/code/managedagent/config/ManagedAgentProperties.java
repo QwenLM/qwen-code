@@ -120,9 +120,10 @@ public class ManagedAgentProperties
     public boolean admitsPublicChildAgents() {
         // D5′: public children ride the parent's Workspace on a session-scoped
         // worker, so the durable local-process arm and the SSH arm (the same
-        // capability expression sshFiles uses) both admit them; CSI resident
-        // stays excluded by the Shell/resident configuration exclusivity and
-        // the admission gates.
+        // capability expression sshFiles uses) both admit them. CSI resident
+        // stays excluded structurally: these provisioner arms never match a
+        // resident Workspace, and isPublicShell refuses its files-only
+        // profile — there is no resident admission gate.
         return harness.isWorkspaceChildAgentsEnabled() && harness.isWorkspaceShellEnabled()
                 && "session".equals(runtimeBroker.getBoundSessionIsolationClass())
                 && (runtimeBroker.isDurableLocalProcess()

@@ -2550,11 +2550,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private boolean foregroundOnly(SessionRecord session) {
-        // D5′: public child Sessions keep the background surface on SSH when
-        // the deployment admits the capability — roots and their depth-1
-        // children alike, so an existing SSH child is not tightened. Incapable
-        // deployments stay foreground-only, fail-closed.
-        return sshWorkspace(session) && !publicChildCapabilityAdmitted(session);
+        // D5′: an admitted public child Session (persisted version 1) keeps its
+        // background surface on SSH — roots and depth-1 children alike. The
+        // worker refuses a version-1 attach that carries foregroundOnly:true,
+        // so this follows the persisted capability, NOT the mutable
+        // workspace-child-agents-enabled switch: toggling that switch stops new
+        // launches (publicChildLaunchAvailable) but must not strand an already
+        // admitted Session's attach surface.
+        return sshWorkspace(session) && session.publicChildAgentsVersion() != 1;
     }
 
     private boolean sshWorkspace(SessionRecord session) {

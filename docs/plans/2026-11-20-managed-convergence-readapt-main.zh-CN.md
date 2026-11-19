@@ -2,7 +2,7 @@
 
 [English](2026-11-20-managed-convergence-readapt-main.md) | [简体中文](2026-11-20-managed-convergence-readapt-main.zh-CN.md)
 
-状态：已拍板决策（2026-11-20），实施留待新会话。
+状态：已拍板决策（2026-11-20），已随本改动实施（2026-11-20）。普通 files-on-v2 不带 rollout 开关——能力协商即门控（投产前硬切）。
 实施基线：`origin/main`（先 fetch；旧分支落后约 303 提交）。
 参考提交（复用其逻辑，**不要 merge**）：分支 `worktree-d1-profile-rollout` 上的 `8e6ad15b72`（D1/D3）与 `e54fde47e2`（D5′）。
 
@@ -29,7 +29,7 @@
 - `QwenHostedHarnessConnector.foregroundOnly(session)`：`sshWorkspace && !(publicChildAgentsVersion==1 && extensions.enabled && managedExtensions.enabled)`——与 D5′ 前形态一致；D5′ 用能力谓词替换该例外。
 - `HarnessPoolConnector`：无 `supportsPublicChildAgents` override（继承默认 false）。D5′ 新增。
 - worker `hosted-harness-contract.ts`：`LIFECYCLE_V2_PROFILES` 允许集从 `shell/1` 起（读完整列表——含 shell 阶梯与 mcp）；env 默认 `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` = `hosted-workspace-shell/1`。Phase A 把 `files/1` 加入允许集与默认。
-- `AgentSessionAdmissions` 根 public-child 门仍有 `(!sshWorkspace || managedExtensionExecutionEnabled)`；D5′ 删该合取项（保留 `!resident`）。
+- `AgentSessionAdmissions` 根 public-child 门仍有 `(!sshWorkspace || managedExtensionExecutionEnabled)`；D5′ 删该合取项。main 没有 `!resident` 合取项——resident/CSI 排除是结构性的（provisioner 能力臂 + `isPublicShell`）。
 - `AgentLifecycleOperations` v1-close 拒绝：`protocolVersion == 1 && !workspaceFilesEnabled && !ExternalWorkspaceSessionPolicies.admitsLegacyClose(session, workspaces)`。**保留此形态**（external 豁免）；不要套用旧 Phase B 删除。
 
 ## 实施步骤（新会话）
@@ -46,7 +46,7 @@
    - `ManagedAgentProperties.admitsPublicChildAgents()`：加 SSH 臂（ssh-process + 节点 + 双 session 隔离），保留 local 臂。
    - `HarnessPoolConnector.supportsPublicChildAgents()`：新 override，读协商 contract 的 `public-child-agents/1` feature（含 `approval-selection/1` 依赖）+ `supportsLifecycle(SHELL)`。
    - `QwenHostedHarnessConnector.supportsPublicChildAgents()`：删 `poolEndpoint == null`。
-   - `AgentSessionAdmissions`：删 `(!sshWorkspace || managedExtensionExecutionEnabled)`，保留 `!resident`。
+   - `AgentSessionAdmissions`：删 `(!sshWorkspace || managedExtensionExecutionEnabled)`。不存在 `!resident` 合取项；resident/CSI 排除保持结构性（provisioner 能力臂 + `isPublicShell`）。
    - `foregroundOnly`：抽 `publicChildCapabilityAdmitted`（version==1 + 配置准入 + harness 能力，**不含 lineage**）作 SSH 例外；`publicChildLaunchAvailable` 保留无 lineage 合取（发起门仅根，深度 1）。
 4. **测试**——从参考提交移植相关测试，适配 main 阶梯：
    - Phase A：`WorkspaceProfileLifecycleTest` files-v2 用例、`SessionLifecycleProtocolChoiceTest`、preflight files-v2、worker contract files 默认。保留 external-v1 与 shell 阶梯测试。
@@ -67,4 +67,4 @@
 ## 开放问题
 
 - A 系列（A2/A5）去留：另行决策，不在本范围。
-- 普通 files-on-v2 在 main 是否需要 rollout 开关（旧 Phase A 设为默认；确认 main 没有须翻动的 files-v1 rollout 守卫）。
+- 已解决：普通 files-on-v2 不需要 rollout 开关。投产前硬切、无存量生产数据；能力协商门控旧 worker（v2 列表缺 `files/1` 的 worker 拒绝 files lifecycle v2）。部署前提：先 drain/结算所有未完成的 protocol-1 files 生命周期操作——见[生命周期设计](../design/workspace-profile-lifecycle.zh-CN.md)的发布章节。

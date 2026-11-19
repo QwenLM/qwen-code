@@ -241,8 +241,10 @@ final class AgentSessionAdmissions {
         }
         // D5′: SSH roots admit children under the same arms as local roots;
         // the configuration and harness capability gates, not the Workspace
-        // transport, decide. Resident Workspaces stay excluded by the
-        // Shell/resident configuration exclusivity.
+        // transport, decide. Resident/CSI Workspaces stay excluded
+        // structurally, not by a resident gate: the provisioner capability
+        // arms admit only local-process/SSH, and isPublicShell refuses their
+        // files-only profile.
         if (workspaceChildAgentsEnabled && publicChildrenSupported
                 && (managedExtensionExecutionEnabled || "qwen-code".equals(agentId) && pin.digest() == null)
                 && WorkspaceToolProfiles.isPublicShell(pin.toolProfile())) {

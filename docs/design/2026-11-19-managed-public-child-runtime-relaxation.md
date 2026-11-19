@@ -39,12 +39,13 @@ fix the shape: canonical `/1` profiles kept, retired suffixes refused, lifecycle
 protocol 1 removed (D3), and public children relaxed (this change).
 
 **Out of scope — CSI resident Workspaces (`kubernetes-workspace`).** Resident
-Workspaces are files-only, single-Session, workspace-isolated:
-`ResidentWorkspaces.requireCreation` refuses the Shell profile and any second
-open Session, and the configuration makes resident Workspaces and Workspace
-Shell mutually exclusive. They are not a relaxation target; "k8s" in the
-decision means the pooled Harness workers (Kubernetes pods), confirmed with the
-user on 2026-11-19. The `!resident` admission exclusion stays.
+Workspaces are files-only, single-Session, workspace-isolated. They are not a
+relaxation target; "k8s" in the decision means the pooled Harness workers
+(Kubernetes pods), confirmed with the user on 2026-11-19. Their exclusion is
+structural, not a resident admission gate: the provisioner capability arms
+admit only durable local-process and SSH runtimes, and
+`WorkspaceToolProfiles.isPublicShell` refuses the files-only profile a resident
+Workspace carries, so the public-child root gate never admits one.
 
 ## Current gate chain
 
@@ -56,11 +57,12 @@ user on 2026-11-19. The `!resident` admission exclusion stays.
    `public-child-agents/1` feature (which builds on `approval-selection/1`) +
    lifecycle v2 Shell.
 3. Root admission (`AgentSessionAdmissions`) — `workspaceChildAgentsEnabled &&
-publicChildrenSupported && !resident && (!sshWorkspace ||
+publicChildrenSupported && (!sshWorkspace ||
 managedExtensionExecutionEnabled) && (managedExtensionExecutionEnabled ||
 built-in qwen-code without a definition digest) && isPublicShell(profile)`.
-4. Child admission (`AgentSessionAdmissions.insertChildSession`) — resident
-   parent refused, depth 1, launch snapshot v1/v2 validation unchanged.
+4. Child admission (`AgentSessionAdmissions.insertChildSession`) — the parent
+   must carry `publicChildAgentsVersion == 1` (a resident/CSI parent never
+   does), depth 1, launch snapshot v1/v2 validation unchanged.
 5. `QwenHostedHarnessConnector.foregroundOnly(session)` — SSH Workspace forces
    `foregroundOnly` unless the Session is a public child root and both extension
    switches are on; the worker attaches `childRuns`/`childAgents` only when
@@ -70,8 +72,14 @@ built-in qwen-code without a definition digest) && isPublicShell(profile)`.
 
 ## Change
 
-No protocol, schema, or worker change. Five control-plane gates relax; every
-existing capability check stays.
+No protocol or schema change, and the D5′ relaxation itself needs no worker
+change. The accompanying D3 files-on-v2 change does change the worker contract
+advertisement: `hosted-harness-contract.ts` adds `hosted-workspace-files/1` to
+`LIFECYCLE_V2_PROFILES` and to the default profile list, and an old worker
+cannot advertise it (`createHostedHarnessContract` refuses unknown profiles).
+Control plane and workers must therefore deploy together — an old worker whose
+v2 list lacks `files/1` makes ordinary files close answer 409. Five
+control-plane gates relax; every existing capability check stays.
 
 1. **Configuration** — `admitsPublicChildAgents()` keeps the local arm
    (`durableLocalProcess` + `local-process`) and adds an SSH arm mirroring the
@@ -92,8 +100,9 @@ existing capability check stays.
    `(!sshWorkspace || managedExtensionExecutionEnabled)`. SSH roots admit
    children under the same arms as local roots: built-in `qwen-code` without a
    definition digest, or any admitted agent while managed extension execution is
-   on. `!resident`, the public Shell profile requirement, and the
-   `publicChildrenSupported` harness capability stay.
+   on. The public Shell profile requirement and the `publicChildrenSupported`
+   harness capability stay; resident/CSI Workspaces remain structurally
+   excluded (provisioner arms + `isPublicShell`).
 5. **foregroundOnly** — the SSH exception becomes a capability predicate
    (`publicChildAgentsVersion == 1` + configuration admission + harness
    capability) instead of the two extension switches. Capable SSH public child
@@ -108,8 +117,10 @@ existing capability check stays.
 
 ## Invariants preserved
 
-- CSI resident exclusion: configuration mutual exclusion plus the `!resident`
-  root and child admission gates.
+- CSI resident exclusion: structural — the provisioner capability arms admit
+  only local-process/SSH, and `isPublicShell` refuses the resident files-only
+  profile; the child gate inherits it through the parent's
+  `publicChildAgentsVersion`.
 - Depth 1, launch snapshot v1/v2 validation, model-route and extension-agent
   snapshot checks: unchanged.
 - Session isolation for bound Sessions (SSH always uses it); child Workspaces
@@ -162,8 +173,9 @@ existing capability check stays.
   lifecycle v2 Shell admits public children; a pool without the token refuses.
 - CSI resident Workspaces, depth > 1, invalid snapshots, and incapable workers
   refuse exactly as before.
-- No worker, protocol, or schema change; configuration descriptions match the
-  relaxed admission.
+- No protocol or schema change; the worker contract advertisement gains
+  `hosted-workspace-files/1` (D3), so control plane and workers deploy together;
+  configuration descriptions and the README match the relaxed admission.
 
 ## Open questions
 

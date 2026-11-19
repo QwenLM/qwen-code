@@ -2,7 +2,7 @@
 
 [English](2026-11-20-managed-convergence-readapt-main.md) | [简体中文](2026-11-20-managed-convergence-readapt-main.zh-CN.md)
 
-Status: Approved decisions (2026-11-20), implementation pending in a fresh session.
+Status: Approved decisions (2026-11-20); implemented in this change (2026-11-20). Ordinary files-on-v2 ships with no rollout switch — the capability negotiation is the gate (pre-production hard cut).
 Implementation baseline: `origin/main` (fetch first; the old branch was ~303 commits behind).
 Reference commits (logic to reuse, NOT to merge): `8e6ad15b72` (D1/D3) and `e54fde47e2` (D5′) on branch `worktree-d1-profile-rollout`.
 
@@ -29,7 +29,7 @@ Net implementation scope = **old Phase A (files-on-v2) + D5′**, re-applied on 
 - `QwenHostedHarnessConnector.foregroundOnly(session)`: `sshWorkspace && !(publicChildAgentsVersion==1 && extensions.enabled && managedExtensions.enabled)` — identical to the pre-D5′ form; D5′ replaces the exception with the capability predicate.
 - `HarnessPoolConnector`: no `supportsPublicChildAgents` override (inherits default false). D5′ adds it.
 - Worker `hosted-harness-contract.ts`: `LIFECYCLE_V2_PROFILES` allowed set starts at `shell/1` (read the full list — it includes the shell ladder and mcp); env default `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` = `hosted-workspace-shell/1`. Phase A adds `files/1` to the allowed set and the default.
-- `AgentSessionAdmissions` root public-child gate still has `(!sshWorkspace || managedExtensionExecutionEnabled)`; D5′ removes that conjunct (keeps `!resident`).
+- `AgentSessionAdmissions` root public-child gate still has `(!sshWorkspace || managedExtensionExecutionEnabled)`; D5′ removes that conjunct. Main has no `!resident` conjunct — resident/CSI exclusion is structural (provisioner capability arms + `isPublicShell`).
 - `AgentLifecycleOperations` v1-close refusal: `protocolVersion == 1 && !workspaceFilesEnabled && !ExternalWorkspaceSessionPolicies.admitsLegacyClose(session, workspaces)`. **Keep this shape** (external exemption); do not apply the old Phase B deletion.
 
 ## Implementation steps (fresh session)
@@ -46,7 +46,7 @@ Net implementation scope = **old Phase A (files-on-v2) + D5′**, re-applied on 
    - `ManagedAgentProperties.admitsPublicChildAgents()`: add the SSH arm (ssh-process + nodes + session isolation on both classes), keep the local arm.
    - `HarnessPoolConnector.supportsPublicChildAgents()`: new override reading the negotiated contract feature `public-child-agents/1` (with `approval-selection/1` dependency) + `supportsLifecycle(SHELL)`.
    - `QwenHostedHarnessConnector.supportsPublicChildAgents()`: drop `poolEndpoint == null`.
-   - `AgentSessionAdmissions`: drop `(!sshWorkspace || managedExtensionExecutionEnabled)`, keep `!resident`.
+   - `AgentSessionAdmissions`: drop `(!sshWorkspace || managedExtensionExecutionEnabled)`. No `!resident` conjunct exists; resident/CSI exclusion stays structural (provisioner capability arms + `isPublicShell`).
    - `foregroundOnly`: extract `publicChildCapabilityAdmitted` (version==1 + config admission + harness capability, NO lineage) for the SSH exception; `publicChildLaunchAvailable` keeps the no-lineage conjunct (launch gating root-only, depth 1).
 4. **Tests** — port the relevant tests from the reference commits, adapted to main's ladder:
    - Phase A: `WorkspaceProfileLifecycleTest` files-v2 cases, `SessionLifecycleProtocolChoiceTest`, preflight files-v2, worker contract files default. Keep external-v1 and shell-ladder tests intact.
@@ -67,4 +67,4 @@ Net implementation scope = **old Phase A (files-on-v2) + D5′**, re-applied on 
 ## Open questions
 
 - A-series (A2/A5) fate: separate decision, out of scope here.
-- Whether ordinary files-on-v2 needs a rollout switch in main (the old Phase A made it the default; confirm main has no files-v1 rollout guard that must be flipped).
+- Resolved: ordinary files-on-v2 needs no rollout switch. This is a pre-production hard cut with no stored production data; the capability negotiation gates old workers (a worker whose v2 list lacks `files/1` refuses files lifecycle v2). Deploy precondition: drain/settle all open protocol-1 files lifecycle operations first — see the rollout section of the [lifecycle design](../design/workspace-profile-lifecycle.md).

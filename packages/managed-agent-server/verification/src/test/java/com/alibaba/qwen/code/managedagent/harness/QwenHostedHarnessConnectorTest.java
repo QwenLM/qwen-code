@@ -39,6 +39,7 @@ import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeStorage;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -1381,6 +1382,68 @@ class QwenHostedHarnessConnectorTest {
                 assertThat(wire).containsEntry("foregroundOnly", true);
             }
         }
+    }
+
+    @Test
+    void sshPublicChildSurfaceSurvivesTheChildAgentsSwitchOff() {
+        var client = mock(HostedHarnessClient.class);
+        var capabilities = mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(capabilities.getFeatures()).thenReturn(List.of("public-child-agents/1", "approval-selection/1",
+                "session-extension-packages/1", "client-files/1"));
+        when(capabilities.getLifecycleV2Profiles()).thenReturn(List.of("hosted-workspace-shell/1"));
+        var attached = mock(HarnessSessionRef.class);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn("default");
+        when(client.createSession(any())).thenReturn(attached);
+        when(client.loadSession(any())).thenReturn(attached);
+        var sessions = sessions();
+        var session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null, null, "ACTIVE",
+                null, null, 0, 0, 0, 1, 1, null, 1,
+                new ContextBinding("tenant-a", "selected-workspace", 1, "storage", ".",
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "default", "hosted-workspace-shell/1", null, 1);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        var settings = properties();
+        settings.getExtensions().setEnabled(true);
+        settings.getManagedExtensions().setEnabled(true);
+        settings.getHarness().setWorkspaceFilesEnabled(true);
+        settings.getHarness().setWorkspaceShellEnabled(true);
+        // Every admission arm stays on except the mutable launch switch.
+        settings.getHarness().setWorkspaceChildAgentsEnabled(false);
+        settings.getRuntimeBroker().setDurableLocalProcess(true);
+        settings.getRuntimeBroker().setProvisioner(RuntimeProviderKinds.LOCAL_PROCESS);
+        var actions = mock(JdbcManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        var ssh = mock(JdbcSshWorkspaceStore.class);
+        when(ssh.runtimeStorage("tenant-a", "storage")).thenReturn(new SshRuntimeStorage("node", "storage", "/remote",
+                Map.of("identity", Map.of("root", "/remote"), "marker", Map.of("root", "/remote", "storageId", "storage"),
+                        "qwenVersion", "0.25.1")));
+        for (boolean loadExisting : List.of(false, true)) {
+            var connector = new QwenHostedHarnessConnector(settings, sessions, mock(JdbcWorkspaceExecutionStore.class), actions, null, null, ssh);
+            ReflectionTestUtils.setField(connector, "client", client);
+            connector.createOrLoad("tenant-a", SESSION_ID, loadExisting);
+        }
+        var create = ArgumentCaptor.forClass(CreateHarnessSession.class);
+        var load = ArgumentCaptor.forClass(LoadHarnessSession.class);
+        verify(client).createSession(create.capture());
+        verify(client).loadSession(load.capture());
+        Map<String, Object> created = ReflectionTestUtils.invokeMethod(create.getValue(), "toJson");
+        Map<String, Object> loaded = ReflectionTestUtils.invokeMethod(load.getValue(), "toJson");
+        // The worker refuses a version-1 attach that carries foregroundOnly:true,
+        // so the surface follows the persisted capability, NOT the mutable
+        // workspace-child-agents-enabled switch: the switch gates new launches
+        // (suppressChildAgents) and must not strand an admitted Session's
+        // attach surface. Reading the switch in foregroundOnly reds this.
+        for (var wire : List.of(created, loaded)) {
+            assertThat(wire).containsEntry("publicChildAgentsVersion", 1)
+                    .containsEntry("suppressChildAgents", true)
+                    .doesNotContainKey("foregroundOnly");
+        }
+        var connector = new QwenHostedHarnessConnector(settings, sessions, mock(JdbcWorkspaceExecutionStore.class), actions, null, null, ssh);
+        ReflectionTestUtils.setField(connector, "client", client);
+        assertThat(ReflectionTestUtils.<Boolean>invokeMethod(connector, "publicChildLaunchAvailable", session)).isFalse();
+        assertThat(connector.supportsClientFiles(session)).isTrue();
     }
 
     @Test

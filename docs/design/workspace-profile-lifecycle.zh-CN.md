@@ -73,4 +73,4 @@ Harness 默认声明 `hosted-workspace-files/1,hosted-workspace-shell/1` 的 v2 
 
 真实 MySQL 与进程故障测试覆盖 Hook/effects、drain、publication seal、detach、stop、tombstone 前的切断；claim 接管不能重复 Hook 或业务效果。公开 API 删除 Shell 后直接触发 O4-2 回收，不使用测试接缝。close 不运行 SessionDelete，删除与退役原子提交。完成前执行 build、typecheck、bundle、针对性测试与 review；实际结果单独记录，不能以设计替代验证。macOS 开发环境的结果不能替代 Linux 原 worker/H3 cgroup 用例及完整 MCP transport 释放矩阵；这些仍是发布门槛，不能以 Shell 默认能力声明代替部署验收。
 
-先升级全部 Java/Broker 生命周期消费者，再部署声明 v2 的 Harness。Shell 验证通过后再启用 MCP。有未完成 v2 操作时不得降级到仅支持 v1 的消费者。没有未决产品问题。
+先升级全部 Java/Broker 生命周期消费者，再部署声明 v2 的 Harness。files-on-v2 是投产前硬切、不带 rollout 开关：部署前先 drain/结算所有未完成的 files 生命周期操作，不得残留进行中的 protocol-1 files CLOSE/DELETE。已持久化的 protocol-1 files 操作不会迁移，协议守卫会拒绝它们——恢复 protocol-1 files 操作时，面对新的 `lifecycleProtocol(FILES)==2` 返回 409 `workspace_lifecycle_protocol_unavailable`。Shell 验证通过后再启用 MCP。有未完成 v2 操作时不得降级到仅支持 v1 的消费者。没有未决产品问题。
