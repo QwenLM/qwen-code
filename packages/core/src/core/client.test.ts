@@ -40,6 +40,7 @@ import {
   type UserPromptAdmission,
 } from './client.js';
 import { MESSAGE_DISPLAY_DEBOUNCE_MS } from './message-display-buffer.js';
+import { isTypedPrompt } from '../utils/typed-prompt.js';
 import { detectTurnInterruption } from './turn-interruption.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
@@ -1841,6 +1842,82 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
+  describe('typed-prompt mark (#9455)', () => {
+    beforeEach(() => {
+      mockTurnRunFn.mockImplementation(() => textTurn('ok'));
+    });
+
+    /** Texts of the sent parts that carry the typed-prompt mark. */
+    const markedTexts = () =>
+      ((mockTurnRunFn.mock.lastCall?.[1] ?? []) as Array<string | Part>)
+        .filter((part) => typeof part !== 'string' && isTypedPrompt(part))
+        .map((part) => (part as Part).text);
+
+    it.each<[string, PartListUnion, string]>([
+      ['a string', 'port the parser', 'port the parser'],
+      [
+        'a text part ahead of what it attached',
+        [
+          { text: 'port @a.ts' },
+          { text: '\n--- Content from referenced files ---' },
+          { text: 'Content from @a.ts:\nbody' },
+        ],
+        'port @a.ts',
+      ],
+    ])(
+      "marks only the first text part of a person's prompt sent as %s",
+      async (_label, request, typed) => {
+        await run(request, 'typed-prompt', {
+          type: SendMessageType.UserQuery,
+          humanInput: { text: typed },
+        });
+        expect(markedTexts()).toEqual([typed]);
+      },
+    );
+
+    it.each<[string, SendMessageOptions]>([
+      ['a prompt with no humanInput', { type: SendMessageType.UserQuery }],
+      ...[
+        SendMessageType.Retry,
+        SendMessageType.Cron,
+        SendMessageType.Notification,
+        SendMessageType.Steer,
+        SendMessageType.Hook,
+      ].map((type): [string, SendMessageOptions] => [
+        `an internal ${type} send`,
+        { type, humanInput: { text: 'port the parser' } },
+      ]),
+      [
+        "a Mod's prompt",
+        {
+          type: SendMessageType.UserQuery,
+          humanInput: { text: 'port the parser' },
+          submittedByMod: 'mod',
+        },
+      ],
+      [
+        'a concurrent side query',
+        {
+          type: SendMessageType.UserQuery,
+          humanInput: { text: 'port the parser' },
+          isConcurrentSideQuery: true,
+        },
+      ],
+    ])('marks nothing for %s', async (_label, options) => {
+      await run('port the parser', 'typed-prompt-none', options);
+      expect(markedTexts()).toEqual([]);
+    });
+
+    it('marks nothing when the first text part is empty, not a later one', async () => {
+      await run(
+        [{ text: '' }, { text: '\n--- Content from referenced files ---' }],
+        'typed-prompt-empty',
+        { type: SendMessageType.UserQuery, humanInput: { text: '' } },
+      );
+      expect(markedTexts()).toEqual([]);
+    });
+  });
+
   describe('DW03: human workflow intent', () => {
     beforeEach(() => {
       Object.assign(mockConfig, {
@@ -1867,7 +1944,10 @@ describe('Gemini Client (client.ts)', () => {
       await run([{ text: 'expanded request' }], 'dw03-human', options);
       expect(notices()).toHaveLength(1);
       const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
-      expect(parts).toContainEqual({ text: 'expanded request' });
+      // The prompt part also carries the typed-prompt mark (#9455).
+      expect(parts).toContainEqual(
+        expect.objectContaining({ text: 'expanded request' }),
+      );
       expect(
         parts.some(
           (part) =>

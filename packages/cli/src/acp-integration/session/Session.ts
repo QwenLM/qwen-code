@@ -64,6 +64,7 @@ import {
   getLastApiPromptCancellation,
   markApiHistoryPrompt,
 } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import { markTypedPrompt } from '@qwen-code/qwen-code-core/utils/typed-prompt.js';
 import {
   getTurnToolCallCapHalt,
   shouldRemindTurnToolCallCap,
@@ -7740,7 +7741,14 @@ export class Session implements SessionContext {
               parts = await this.#resolvePrompt(
                 modelPromptBlocks,
                 pendingSend.signal,
-                { promptLast: true, onFullTurnModel },
+                {
+                  promptLast: true,
+                  // A model-only prompt and a runtime Goal continuation are
+                  // written by code, not by the person (#9455).
+                  markTyped:
+                    modelPrompt === undefined && goalTurn?.origin !== 'runtime',
+                  onFullTurnModel,
+                },
               );
             }
 
@@ -20844,6 +20852,11 @@ export class Session implements SessionContext {
     // stays first and keeps carrying the "[User message received...]" prefix.
     options: {
       promptLast?: boolean;
+      /**
+       * The text blocks are what a person wrote: mark them for compaction
+       * (#9455). Not for a model-only prompt or a runtime Goal continuation.
+       */
+      markTyped?: boolean;
       onFullTurnModel?: (model: string) => boolean;
       deferBridgeConversions?: boolean;
     } = {},
@@ -20856,6 +20869,26 @@ export class Session implements SessionContext {
     const extensionMentions = new Map<string, string>();
     const mcpServerMentions = new Map<string, string>();
     const textPathSpecsToRead = new Map<string, string>();
+    // The text blocks of the request, apart from the pointers built below
+    // for resources and files. When a person wrote them (`markTyped`) they
+    // are marked, so a compaction that has to cut the turn down keeps their
+    // words; every other caller leaves them unmarked.
+    const typedTextParts = new Set<Part>();
+    const typedText = (text: string): Part => {
+      const part: Part = { text };
+      typedTextParts.add(part);
+      return part;
+    };
+    const hasTypedText = () =>
+      [...typedTextParts].some((part) => part.text?.trim());
+    const markTyped = (parts: Part[]): Part[] =>
+      options.markTyped
+        ? parts.map((part) =>
+            typedTextParts.has(part) && part.text?.trim()
+              ? markTypedPrompt(part)
+              : part,
+          )
+        : parts;
     const preserveUnsupportedImageForBridge = shouldRunVisionBridge(
       this.config,
     );
@@ -20880,7 +20913,7 @@ export class Session implements SessionContext {
       }
       switch (part.type) {
         case 'text':
-          if (sshWorkspace) return { text: part.text };
+          if (sshWorkspace) return typedText(part.text);
           collectExtensionMentionRefs(part.text, extensionMentions);
           collectMcpServerMentionRefs(part.text, mcpServerMentions);
           for (const pathSpec of extractAtPathCommands(part.text)) {
@@ -20907,7 +20940,7 @@ export class Session implements SessionContext {
               textPathSpecsToRead.set(canonicalPath, pathSpec);
             }
           }
-          return { text: part.text };
+          return typedText(part.text);
         case 'image':
           if (preserveUnsupportedImageForBridge) {
             return {
@@ -21029,7 +21062,7 @@ export class Session implements SessionContext {
       extensionParts.length === 0 &&
       mcpServerParts.length === 0
     ) {
-      return finish(partsToSend);
+      return finish(markTyped(partsToSend));
     }
 
     if (
@@ -21037,7 +21070,11 @@ export class Session implements SessionContext {
       embeddedContext.length === 0 &&
       attachmentParts.length === 0
     ) {
-      return finish([...partsToSend, ...extensionParts, ...mcpServerParts]);
+      return finish([
+        ...markTyped(partsToSend),
+        ...extensionParts,
+        ...mcpServerParts,
+      ]);
     }
 
     // Construct the initial part of the query for the LLM
@@ -21137,7 +21174,12 @@ export class Session implements SessionContext {
     // trims as before.
     const promptText =
       pathSpecsToRead.length > 0 ? initialQueryText : initialQueryText.trim();
-    const promptPart: Part = { text: promptText };
+    // The instruction carries the person's text blocks and the pointers to
+    // what they attached; the attached content itself follows unmarked.
+    const promptPart: Part =
+      options.markTyped && hasTypedText()
+        ? markTypedPrompt({ text: promptText })
+        : { text: promptText };
     // promptLast → instruction trails the reference content (prominence fix).
     // Default → original order (instruction first), byte-identical to the
     // pre-change behaviour the mid-turn drain path depends on.

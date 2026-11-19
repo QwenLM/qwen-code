@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Part } from '@google/genai';
+import type { Part, PartListUnion, PartUnion } from '@google/genai';
 
 /**
  * `partMetadata` key on the part that holds what the user typed, set where
@@ -29,11 +29,39 @@ export function markTypedPrompt(part: Part): Part {
 /** Whether `part` is a text part marked as the text the user typed. */
 export function isTypedPrompt(part: Part): boolean {
   return (
-    part.partMetadata?.[TYPED_PROMPT_METADATA] === true &&
-    typeof part.text === 'string' &&
-    !part.thought &&
-    !part.functionCall &&
-    !part.functionResponse
+    part.partMetadata?.[TYPED_PROMPT_METADATA] === true && isPlainTextPart(part)
+  );
+}
+
+/** Whether `part` can hold what the user typed: plain text, not a call or thought. */
+function isPlainTextPart(part: PartUnion): boolean {
+  return (
+    typeof part === 'string' ||
+    (typeof part.text === 'string' &&
+      !part.thought &&
+      !part.functionCall &&
+      !part.functionResponse)
+  );
+}
+
+/**
+ * `request` with its first text part marked as what the user typed. The
+ * front ends that send a person's prompt put the text they submitted first,
+ * ahead of what they attached; leading reminders spliced into that part are
+ * set apart by compaction, which reads them as blocks. A request whose
+ * first text part is empty, or that has none, is returned as it is: a later
+ * part is never taken in its place.
+ */
+export function markFirstTextPart(request: PartListUnion): PartListUnion {
+  const parts = Array.isArray(request) ? request : [request];
+  const index = parts.findIndex(isPlainTextPart);
+  const first = parts[index];
+  const text = typeof first === 'string' ? first : first?.text;
+  if (!text) return request;
+  return parts.map((part, i) =>
+    i === index
+      ? markTypedPrompt(typeof part === 'string' ? { text: part } : part)
+      : part,
   );
 }
 

@@ -6,9 +6,11 @@
 
 import { describe, expect, it } from 'vitest';
 import type { Content, Part } from '@google/genai';
+import type { PartListUnion } from '@google/genai';
 import {
   isBareTextPart,
   isTypedPrompt,
+  markFirstTextPart,
   markTypedPrompt,
   TYPED_PROMPT_METADATA,
 } from './typed-prompt.js';
@@ -76,6 +78,51 @@ describe('typed-prompt mark', () => {
     ['no text', { inlineData: { mimeType: 'image/png', data: '' } }, false],
   ])('reads %s as a bare text part: %s', (_label, part, expected) => {
     expect(isBareTextPart(part)).toBe(expected);
+  });
+});
+
+describe('markFirstTextPart', () => {
+  const image: Part = { inlineData: { mimeType: 'image/png', data: '' } };
+  const header: Part = { text: '\n--- Content from referenced files ---' };
+
+  it.each<[string, PartListUnion, PartListUnion]>([
+    ['a string', 'typed', [markTypedPrompt({ text: 'typed' })]],
+    [
+      'a lone text part',
+      { text: 'typed' },
+      [markTypedPrompt({ text: 'typed' })],
+    ],
+    [
+      'the first text part, past an image',
+      [image, { text: 'typed' }, header],
+      [image, markTypedPrompt({ text: 'typed' }), header],
+    ],
+    [
+      'a string element',
+      ['typed', header],
+      [markTypedPrompt({ text: 'typed' }), header],
+    ],
+    [
+      'past a thought, not into it',
+      [{ text: 'thinking', thought: true }, { text: 'typed' }],
+      [{ text: 'thinking', thought: true }, markTypedPrompt({ text: 'typed' })],
+    ],
+  ])('marks %s', (_label, request, expected) => {
+    expect(markFirstTextPart(request)).toEqual(expected);
+  });
+
+  it.each<[string, PartListUnion]>([
+    ['an empty string', ''],
+    ['an empty first text part', [{ text: '' }, header]],
+    ['no text part', [image]],
+  ])('leaves %s as it is', (_label, request) => {
+    expect(markFirstTextPart(request)).toBe(request);
+  });
+
+  it('leaves the request it was given unchanged', () => {
+    const request: Part[] = [{ text: 'typed' }, header];
+    markFirstTextPart(request);
+    expect(request).toEqual([{ text: 'typed' }, header]);
   });
 });
 

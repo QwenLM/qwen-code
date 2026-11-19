@@ -219,6 +219,7 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
+import { markFirstTextPart } from '../utils/typed-prompt.js';
 import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
@@ -4075,6 +4076,13 @@ export class LlmClient {
       options?.humanInput
         ? { text: options.humanInput.text }
         : undefined;
+    // A front end sends `humanInput` only with a prompt a person submitted
+    // (not a slash command, a Mod's prompt or a scheduled one), and puts that
+    // prompt's text first in the request. Marking it lets a compaction that
+    // has to cut this turn down keep the person's own words.
+    if (humanInput && options?.submittedByMod === undefined) {
+      request = markFirstTextPart(request);
+    }
     const onWorkflowIntentApplied = options?.onWorkflowIntentApplied;
     const workflowModeEligible =
       options?.workflowModeEligible === true &&
