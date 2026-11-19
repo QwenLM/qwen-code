@@ -36,6 +36,31 @@ const SOCKET_OPEN = 1; // ws.WebSocket.OPEN
 // a rate-limited chunk's whole delivery rejected and never send the rest.
 const TRANSIENT_ERRCODES = new Set([-1, 88, 410100, 130101]);
 
+// One proxy dispatcher per call, destroyed afterwards, shared by endpoint
+// discovery and the webhook send so both egress the same way. In the bundled
+// CLI a dynamic import of the CJS undici package is default-only, so a named
+// destructure would bind undefined and throw before the first request; read
+// the constructor off the default namespace. The Legacy sender uses this shape
+// too.
+async function withProxyDispatcher<T>(
+  proxy: string | undefined,
+  fn: (dispatcher: import('undici').Dispatcher | undefined) => Promise<T>,
+): Promise<T> {
+  let dispatcher: import('undici').Dispatcher | undefined;
+  try {
+    if (proxy) {
+      const { default: undici } = await import('undici');
+      dispatcher = new undici.EnvHttpProxyAgent({
+        httpProxy: proxy,
+        httpsProxy: proxy,
+      });
+    }
+    return await fn(dispatcher);
+  } finally {
+    await dispatcher?.destroy().catch(() => undefined);
+  }
+}
+
 // Bounded, abortable and silent endpoint discovery. Every failure message is a
 // static string: the token URL carries the appsecret and the gateway response
 // carries the connect ticket, so neither the payload nor the transport error
@@ -53,20 +78,12 @@ async function discoverEndpoint(
   const tokenUrl =
     `${TOKEN_URL}?appkey=${encodeURIComponent(config.clientId)}` +
     `&appsecret=${encodeURIComponent(config.clientSecret)}`;
-  // Route discovery through the same resolved proxy the webhook send uses,
-  // with a per-call dispatcher destroyed afterwards. Relying on the ambient
-  // global dispatcher instead would make egress depend on who installed it:
-  // the CLI installs one, a daemon worker may not, and the SDK's axios ignored
-  // it entirely — so the same setting would mean different egress per path.
-  let dispatcher: import('undici').Dispatcher | undefined;
-  try {
-    if (proxy) {
-      const { default: undici } = await import('undici');
-      dispatcher = new undici.EnvHttpProxyAgent({
-        httpProxy: proxy,
-        httpsProxy: proxy,
-      });
-    }
+  // Route discovery through the same resolved proxy the webhook send uses.
+  // Relying on the ambient global dispatcher instead would make egress depend
+  // on who installed it: the CLI installs one, a daemon worker may not, and
+  // the SDK's axios ignored it entirely — so the same setting would mean
+  // different egress per path.
+  return withProxyDispatcher(proxy, async (dispatcher) => {
     const via = dispatcher ? { dispatcher } : {};
     // No redirect following on either leg: the token URL carries the appsecret
     // and the gateway request carries the access token, so a redirect would
@@ -121,9 +138,7 @@ async function discoverEndpoint(
       endpoint: gateway.endpoint,
       ticket: gateway.ticket,
     };
-  } finally {
-    await dispatcher?.destroy().catch(() => undefined);
-  }
+  });
 }
 
 function createStreamClient(
@@ -394,22 +409,10 @@ async function sendWebhook(
     throw webhookFailure('DingTalk webhook URL rejected.', true);
   }
   // In a proxy-only egress the reply must still leave: route this send through
-  // the resolved proxy with a per-send dispatcher (the Legacy sender's shape),
-  // destroyed afterwards so it never leaks. Only the webhook send is proxied —
-  // the internal control-plane traffic is left untouched.
-  let dispatcher: import('undici').Dispatcher | undefined;
-  try {
-    if (proxy) {
-      // Read the constructor off the default namespace: in the bundled CLI a
-      // dynamic import of the CJS undici package is default-only, so a named
-      // destructure would bind undefined and throw before the POST. The Legacy
-      // sender uses this same shape.
-      const { default: undici } = await import('undici');
-      dispatcher = new undici.EnvHttpProxyAgent({
-        httpProxy: proxy,
-        httpsProxy: proxy,
-      });
-    }
+  // the resolved proxy with a per-send dispatcher, destroyed afterwards so it
+  // never leaks. Endpoint discovery uses the same helper; the SDK's internal
+  // control-plane traffic is left untouched.
+  return withProxyDispatcher(proxy, async (dispatcher) => {
     // DingTalk caps one text message at DINGTALK_MAX_CHUNK_LENGTH units, while
     // a ledger segment can be larger; split and send the chunks in order. One
     // receipt still covers the whole ledger segment. Each chunk gets its own
@@ -444,9 +447,7 @@ async function sendWebhook(
         clearTimeout(timer);
       }
     }
-  } finally {
-    await dispatcher?.destroy().catch(() => undefined);
-  }
+  });
 }
 
 async function postTextChunk(

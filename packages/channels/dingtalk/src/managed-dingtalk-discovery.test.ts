@@ -156,9 +156,12 @@ describe('managed DingTalk endpoint discovery (#17173 R11)', () => {
     expect(token!.init?.redirect).toBe('error');
     expect(gateway!.init?.redirect).toBe('error');
     expect(gateway!.init?.method).toBe('POST');
-    expect(
-      (gateway!.init?.headers as Record<string, string>)['access-token'],
-    ).toBe('tok');
+    const headers = gateway!.init?.headers as Record<string, string>;
+    expect(headers['access-token']).toBe('tok');
+    // The SDK marks Accept as load-bearing (without it the gateway answers
+    // XML); Content-Type is what makes the JSON body readable.
+    expect(headers['Accept']).toBe('application/json');
+    expect(headers['Content-Type']).toBe('application/json');
     expect(JSON.parse(String(gateway!.init?.body))).toMatchObject({
       clientId: SETTINGS.clientId,
       clientSecret: SETTINGS.clientSecret,
@@ -193,6 +196,11 @@ describe('managed DingTalk endpoint discovery (#17173 R11)', () => {
         () => 'resolved',
         (error: Error) => error.message,
       );
+      // The redacted message is a constant, so it cannot discriminate the
+      // branches. The request count can: a token-side refusal must
+      // short-circuit before the authenticated gateway POST goes out.
+      const gatewaySide = m === 'gateway-refused' || m === 'no-ticket';
+      expect(calls).toHaveLength(gatewaySide ? 2 : 1);
       expect(message).toMatch(/check the clientId\/clientSecret and network/);
       expect(message).not.toContain(SETTINGS.clientSecret);
       // The token URL carries the encoded form, so the raw check alone is blind.
@@ -236,29 +244,87 @@ describe('managed DingTalk endpoint discovery (#17173 R11)', () => {
     stream.disconnect();
   });
 
-  it('routes discovery through the resolved proxy, as the webhook send does', async () => {
-    const { createStreamClient } = createManagedDingtalkDeps(
-      'http://proxy.invalid:8080',
-    );
-    const stream = createStreamClient(SETTINGS, () => true);
-    // The proxy dispatcher loads behind a dynamic import, which does not
-    // settle under a fake clock — the webhook proxy cases run on real timers
-    // for the same reason.
+  // The undici double exposes ONLY the default namespace, as the bundled CJS
+  // interop does: a named destructure binds undefined and throws before the
+  // first request. It also records how the agent was built and destroyed, so
+  // "some dispatcher arrived" is not enough to pass.
+  const withUndiciDouble = async (
+    run: (
+      built: Array<Record<string, unknown>>,
+      destroys: () => number,
+    ) => Promise<void>,
+  ) => {
     vi.useRealTimers();
-    const connecting = stream.connect();
-    for (let i = 0; i < 500 && wsState.instances.length === 0; i++) {
-      await new Promise((r) => setImmediate(r));
+    const built: Array<Record<string, unknown>> = [];
+    let destroyed = 0;
+    vi.resetModules();
+    vi.doMock('undici', () => ({
+      default: {
+        EnvHttpProxyAgent: class {
+          constructor(options: Record<string, unknown>) {
+            built.push(options);
+          }
+          async destroy() {
+            destroyed += 1;
+          }
+        },
+      },
+    }));
+    try {
+      await run(built, () => destroyed);
+    } finally {
+      vi.doUnmock('undici');
+      vi.resetModules();
     }
-    latest().open();
-    await connecting;
+  };
 
-    expect(calls).toHaveLength(2);
-    for (const call of calls) {
-      expect(
-        (call.init as { dispatcher?: unknown } | undefined)?.dispatcher,
-      ).toBeDefined();
-    }
-    stream.disconnect();
+  const PROXY = 'http://proxy.invalid:8080';
+
+  it('builds the proxy dispatcher from the resolved proxy and destroys it', async () => {
+    await withUndiciDouble(async (built, destroys) => {
+      const fresh = await import('./managed-dingtalk-deps.js');
+      const stream = fresh
+        .createManagedDingtalkDeps(PROXY)
+        .createStreamClient(SETTINGS, () => true);
+      const connecting = stream.connect();
+      try {
+        // Condition wait, not a turn count: a cold dynamic import takes far
+        // longer than any fixed number of event-loop turns.
+        await vi.waitFor(() => expect(wsState.instances).toHaveLength(1), {
+          timeout: 10_000,
+        });
+        latest().open();
+        await connecting;
+      } finally {
+        // Never leave with a connect in flight: afterEach unstubs fetch.
+        stream.disconnect();
+      }
+
+      expect(built).toEqual([{ httpProxy: PROXY, httpsProxy: PROXY }]);
+      expect(calls).toHaveLength(2);
+      for (const call of calls) {
+        expect(
+          (call.init as { dispatcher?: unknown } | undefined)?.dispatcher,
+        ).toBeDefined();
+      }
+      expect(destroys()).toBe(1);
+    });
+  });
+
+  it('destroys the proxy dispatcher when discovery fails too', async () => {
+    mode = 'transport';
+    await withUndiciDouble(async (built, destroys) => {
+      const fresh = await import('./managed-dingtalk-deps.js');
+      const stream = fresh
+        .createManagedDingtalkDeps(PROXY)
+        .createStreamClient(SETTINGS, () => true);
+      await expect(stream.connect()).rejects.toThrow(
+        /check the clientId\/clientSecret and network/,
+      );
+      stream.disconnect();
+      expect(built).toEqual([{ httpProxy: PROXY, httpsProxy: PROXY }]);
+      expect(destroys()).toBe(1);
+    });
   });
 
   it('leaves discovery on the ambient dispatcher when no proxy is configured', async () => {
@@ -315,6 +381,7 @@ describe('managed DingTalk endpoint discovery (#17173 R11)', () => {
     // the header would let a rename of any of these pass while discovery kept
     // sending the old names, failing every managed connect.
     for (const literal of [
+      'Accept: "application/json"',
       'appkey=${this.config.clientId}',
       'appsecret=${this.config.clientSecret}',
       'clientId: this.config.clientId',

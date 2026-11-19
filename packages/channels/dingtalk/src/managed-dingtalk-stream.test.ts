@@ -18,6 +18,7 @@ const mockState = vi.hoisted(() => ({
   constructorOptions: null as unknown,
   // Mirror the SDK getEndpoint() credential log when armed (R12).
   logEndpoint: false,
+  getEndpointCalls: 0,
   // Whether the constructed socket ever emits 'open'. The real SDK resolves
   // connect() on construction; the deps wrapper must wait for 'open' (R10-1).
   socketOpen: true,
@@ -59,6 +60,7 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => {
     // replaces getEndpoint with its own silent discovery (#17173 R11), so this
     // log is what must never run.
     async getEndpoint(): Promise<this> {
+      mockState.getEndpointCalls += 1;
       if (mockState.logEndpoint) {
         // eslint-disable-next-line no-console -- mirrors the real SDK credential log
         console.log('getEndpoint config', {
@@ -172,6 +174,7 @@ beforeEach(() => {
   mockState.acks = [];
   mockState.constructorOptions = null;
   mockState.logEndpoint = false;
+  mockState.getEndpointCalls = 0;
   mockState.socketOpen = true;
   mockState.socketFailEvent = null;
   mockState.socket = null;
@@ -412,7 +415,10 @@ describe('managed DingTalk stream SDK wiring pins (#17173 R12)', () => {
     // SDK does. The wrapper replaces that method with silent discovery, so the
     // log must never run — not be muted after the fact (#17173 R11).
     expect(logSpy).not.toHaveBeenCalled();
-    // Suppression is scoped to the attempt: logging works again afterwards.
+    // A mute would also leave the spy uncalled, so pin the replacement itself:
+    // the SDK's own discovery must not have run at all.
+    expect(mockState.getEndpointCalls).toBe(0);
+    // Logging is untouched throughout: it works again afterwards.
     // eslint-disable-next-line no-console -- probing the restored console
     console.log('after connect');
     expect(logSpy).toHaveBeenCalledTimes(1);

@@ -47,7 +47,7 @@ This removes the hang by removing its cause rather than by shortening the mute, 
 
 The two bounds are **not** additive. `attempt()` arms its 20 s timer before it calls the SDK's connect, and that connect awaits discovery, so one clock covers discovery and the wss upgrade together. Discovery's abort therefore shares the attempt's horizon instead of taking a shorter one: a shorter bound would narrow the allowance discovery already had under the budget, and a tenant whose two discovery calls legitimately take longer than that shorter bound would start failing every attempt where it previously succeeded. What the abort adds at the same horizon is cancellation of the abandoned request, not a second, earlier deadline.
 
-The discovery contract is small and stable: two URLs, two query names, four payload keys, one header. Every one of those is pinned against the pinned SDK version by a test that reads the SDK's own published source, so a bump that renames any of them reds the suite instead of letting discovery keep sending the old names.
+The discovery contract is small and stable: two URLs, two query names, four payload keys, two headers. Every one of those is pinned against the pinned SDK version by a test that reads the SDK's own published source, so a bump that renames any of them reds the suite instead of letting discovery keep sending the old names.
 
 ## Changes
 
@@ -60,7 +60,7 @@ The discovery contract is small and stable: two URLs, two query names, four payl
 
 ## Scope boundaries
 
-- The legacy `DingtalkAdapter` connect path keeps the existing helper and therefore keeps the same hang. It is a separate surface with its own connection manager; changing it here would double the blast radius. Recorded as a follow-up on #17173.
+- The legacy `DingtalkAdapter` connect path keeps the existing helper and therefore keeps the same hang. It is a separate surface with its own connection manager; changing it here would double the blast radius. Out of scope here, and not yet tracked as its own item.
 - No change to reconnect arbitration, the attempt budget value, the heartbeat retire, or the ledger.
 - No change to the frame-suppression scope or to the depth counter semantics.
 
