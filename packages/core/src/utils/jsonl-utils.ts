@@ -334,13 +334,42 @@ export async function read<T = unknown>(
  * hot-path write (chat session JSONL appends).
  */
 const ensuredDirs = new Set<string>();
+const diagnosedTailReadFailures = new Set<string>();
+
+function canAppendWithoutTailInspection(
+  filePath: string,
+  error: unknown,
+): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (code === 'ENOENT') return true;
+
+  // Node --permission reports a read denial with its own structured error.
+  const readDeniedByPermissionModel =
+    code === 'ERR_ACCESS_DENIED' &&
+    (error as { permission?: string }).permission === 'FileSystemRead';
+  if (code !== 'EACCES' && code !== 'EPERM' && !readDeniedByPermissionModel) {
+    return false;
+  }
+
+  // Preserve append-only files when the tail cannot be read, but expose that
+  // the delimiter repair was skipped without flooding every subsequent line.
+  if (!diagnosedTailReadFailures.has(filePath)) {
+    diagnosedTailReadFailures.add(filePath);
+    debugLogger.warn(
+      `Cannot inspect JSONL tail in ${filePath}; appending without delimiter repair:`,
+      error,
+    );
+  }
+  return true;
+}
 
 /**
- * Test-only: clear the per-directory mkdir cache. Needed when tests mutate
- * fs state at the same directory path across cases.
+ * Test-only: clear the per-write caches. Needed when tests mutate fs state at
+ * the same paths across cases.
  */
 export function _resetEnsuredDirsCacheForTest(): void {
   ensuredDirs.clear();
+  diagnosedTailReadFailures.clear();
 }
 
 /**
@@ -372,9 +401,7 @@ export async function writeLine(
           prefix = bytesRead === 1 && lastByte[0] === 0x0a ? '' : '\n';
         }
       } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        // Preserve append-only files when the tail cannot be read.
-        if (code !== 'ENOENT' && code !== 'EACCES' && code !== 'EPERM') {
+        if (!canAppendWithoutTailInspection(filePath, error)) {
           throw error;
         }
       } finally {
@@ -437,9 +464,7 @@ export function writeLineSync(filePath: string, data: unknown): void {
       prefix = bytesRead === 1 && lastByte[0] === 0x0a ? '' : '\n';
     }
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    // Preserve append-only files when the tail cannot be read.
-    if (code !== 'ENOENT' && code !== 'EACCES' && code !== 'EPERM') {
+    if (!canAppendWithoutTailInspection(filePath, error)) {
       throw error;
     }
   } finally {
