@@ -2594,11 +2594,14 @@ export function useComposerCore(
     };
   }, [resetImageIngestion]);
   const [composerTags, setComposerTagsState] = useState<WebShellComposerTag[]>(
-    () =>
-      persistFileReferences
-        ? (loadComposerDraftData(composerDraftStorageKey, isTouchComposer)
-            ?.tags ?? [])
-        : [],
+    () => {
+      // Without persistFileReferences only quote chips round-trip: file
+      // references are never stored in the draft.
+      const stored =
+        loadComposerDraftData(composerDraftStorageKey, isTouchComposer)?.tags ??
+        [];
+      return persistFileReferences ? stored : stored.filter(isQuoteComposerTag);
+    },
   );
   const composerTagsRef = useRef<WebShellComposerTag[]>([]);
   composerTagsRef.current = composerTags;
@@ -2636,8 +2639,12 @@ export function useComposerCore(
       ({ tag }) => tag.kind === 'quote',
     );
     if (!persistFileReferencesRef.current) {
-      return quotePlacements.length > 0
-        ? { inlineTags: quotePlacements, tags: [] }
+      // The textarea backend has no inline chips, so a quote chip lives only
+      // as a top tag; carry quote top tags through so the quote still
+      // round-trips a draft even when file references are not persisted.
+      const quoteTags = composerTagsRef.current.filter(isQuoteComposerTag);
+      return quotePlacements.length > 0 || quoteTags.length > 0
+        ? { inlineTags: quotePlacements, tags: quoteTags }
         : undefined;
     }
     return {
@@ -4654,10 +4661,12 @@ export function useComposerCore(
       );
     }
 
-    const nextTags =
-      persistFileReferencesRef.current && !adoptUnscopedInMemoryDraft
-        ? (storedReferenceDraft?.tags ?? [])
-        : [];
+    const storedTags = storedReferenceDraft?.tags ?? [];
+    const nextTags = adoptUnscopedInMemoryDraft
+      ? []
+      : persistFileReferencesRef.current
+        ? storedTags
+        : storedTags.filter(isQuoteComposerTag);
     composerTagsRef.current = nextTags;
     setComposerTags(nextTags);
     if (view) {

@@ -361,6 +361,72 @@ describe('useComposerCore mobile textarea backend', () => {
     });
   });
 
+  it('keeps a quote chip through a mobile draft remount without persistFileReferences', async () => {
+    mockTouchDevice();
+    const tag = {
+      id: 'quote:7a1e2b3c-2',
+      kind: 'quote' as const,
+      value: 'quoted fragment',
+      serialized: '<quoted-message>quoted fragment</quoted-message>',
+    };
+    // The chat hosts never pass persistFileReferences: in the default
+    // configuration the quote must still round-trip the draft, while file
+    // references stay out of the stored draft.
+    await mount({ sessionId: 'session-a' });
+    typeText('explain this');
+    act(() => latest!.addTags([tag], { placement: 'top' }));
+    act(() => window.dispatchEvent(new Event('pagehide')));
+    act(() => root!.unmount());
+    root = null;
+    container?.remove();
+    container = null;
+    const { onSubmit } = await mount({ sessionId: 'session-a' });
+    expect(latest!.composerTags).toEqual([tag]);
+    act(() => latest!.submitText());
+    expect(onSubmit.mock.calls[0]?.[4]).toMatchObject({
+      inputAnnotations: [
+        expect.objectContaining({
+          text: tag.serialized,
+          reference: expect.objectContaining({
+            id: tag.id,
+            kind: 'quote',
+            value: tag.value,
+          }),
+        }),
+      ],
+    });
+  });
+
+  it('restores only quote tags, not file references, when persistFileReferences is off', async () => {
+    mockTouchDevice();
+    const quote = {
+      id: 'quote:7a1e2b3c-3',
+      kind: 'quote' as const,
+      value: 'quoted fragment',
+      serialized: '<quoted-message>quoted fragment</quoted-message>',
+    };
+    const file = {
+      id: 'file:a',
+      kind: 'file' as const,
+      value: 'a.ts',
+      serialized: '@a.ts',
+    };
+    // A draft written while the flag was on carries both kinds; restoring
+    // it in the default configuration keeps only the quote chip.
+    localStorage.setItem(
+      getSessionDraftKey('session-a'),
+      '\0qwen-file-draft:1:' +
+        JSON.stringify({
+          text: 'explain this',
+          inlineTags: [],
+          tags: [file, quote],
+        }),
+    );
+    await mount({ sessionId: 'session-a' });
+    expect(latest!.composerTags).toEqual([quote]);
+    expect(latest!.getText()).toBe('explain this');
+  });
+
   it('keeps restored inline snapshots when mobile adds another top file', async () => {
     mockTouchDevice();
     const inline = {
