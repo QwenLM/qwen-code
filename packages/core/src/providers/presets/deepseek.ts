@@ -10,7 +10,7 @@ import type { ProviderConfig } from '../types.js';
 export const deepseekProvider: ProviderConfig = {
   id: 'deepseek',
   label: 'DeepSeek API Key',
-  description: 'Quick setup for DeepSeek (deepseek-v4-flash, deepseek-v4-pro)',
+  description: 'Quick setup for DeepSeek (deepseek-flash, deepseek-v4-pro)',
   protocol: AuthType.USE_OPENAI,
   baseUrl: 'https://api.deepseek.com',
   envKey: 'DEEPSEEK_API_KEY',
@@ -18,9 +18,29 @@ export const deepseekProvider: ProviderConfig = {
     {
       id: 'deepseek-v4-pro',
       contextWindowSize: 1000000,
-      enableThinking: true,
+      capabilities: {
+        reasoning: {
+          profile: 'deepseek-openai',
+          thinking: true,
+          efforts: ['low', 'high', 'max'],
+          defaultEffort: 'high',
+          disableField: 'thinking',
+        },
+      },
     },
-    { id: 'deepseek-v4-flash', contextWindowSize: 1000000 },
+    {
+      id: 'deepseek-flash',
+      capabilities: {
+        reasoning: {
+          profile: 'deepseek-openai',
+          thinking: true,
+          efforts: ['low', 'high', 'max'],
+          defaultEffort: 'high',
+          disableField: 'thinking',
+        },
+      },
+      contextWindowSize: 1000000,
+    },
   ],
   modelsEditable: true,
   modelNamePrefix: 'DeepSeek',

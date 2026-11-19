@@ -14,6 +14,10 @@ import {
   type ChatRecord,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../../runtime/agent-session-source.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -214,6 +218,10 @@ async function loadRecentThreads(
         ).listSessions({
           size: MAX_RECENT_THREADS,
           archiveState: 'active',
+          excludeSourceTypes: [
+            AGENT_HOST_SESSION_SOURCE_TYPE,
+            AGENT_SESSION_SOURCE_TYPE,
+          ],
         });
         return page.items.map(recentThread);
       }),

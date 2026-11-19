@@ -11,7 +11,10 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
 import type { LocalFilesStatus } from '../local-files/useLocalFilesBridge';
-import { LocalFilesPanel } from './LocalFilesControl';
+import {
+  LocalFilesPanel,
+  type LocalFilesPanelProps,
+} from './LocalFilesControl';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -107,60 +110,106 @@ describe('LocalFilesPanel degradation matrix', () => {
   // EN[key] ?? key), and nothing in the type system enforces that EN and ZH
   // stay in sync — so every state this panel can render is checked in
   // Chinese against its actual zh string.
-  it.each<[string, LocalFilesStatus, string]>([
-    ['idle', { phase: 'idle', blocker: null }, '未连接'],
+  it.each<[string, LocalFilesStatus, string[]]>([
+    ['idle', { phase: 'idle', blocker: null }, ['未连接']],
     [
       'needs-gesture',
       { phase: 'needs-gesture', blocker: null, rootName: 'd' },
-      '需要重新连接',
+      ['需要重新连接'],
     ],
     [
       'needs-session',
       { phase: 'needs-session', blocker: null, rootName: 'd' },
-      '等待会话',
+      ['等待会话'],
     ],
     [
       'held-elsewhere',
       { phase: 'held-elsewhere', blocker: null },
-      '已在其他标签页连接',
+      ['已在其他标签页连接'],
     ],
-    ['connecting', { phase: 'connecting', blocker: null }, '连接中'],
-    ['registering', { phase: 'registering', blocker: null }, '注册中'],
+    ['connecting', { phase: 'connecting', blocker: null }, ['连接中']],
+    ['registering', { phase: 'registering', blocker: null }, ['注册中']],
     [
       'reconnecting',
       { phase: 'reconnecting', blocker: null, message: 'x' },
-      '重连中',
+      ['重连中'],
     ],
     [
       'connected',
       { phase: 'connected', blocker: null, rootName: 'd', toolCount: 4 },
-      '已连接',
+      ['已连接'],
     ],
-    ['failed', { phase: 'failed', blocker: null, message: 'boom' }, '连接失败'],
+    [
+      'failed',
+      { phase: 'failed', blocker: null, message: 'boom' },
+      ['连接失败'],
+    ],
     [
       'unavailable/insecure',
       { phase: 'unavailable', blocker: 'insecure-context' },
-      '安全上下文',
+      ['安全上下文'],
     ],
     [
       'unavailable/cross-origin',
       { phase: 'unavailable', blocker: 'cross-origin-frame' },
-      '跨源 iframe',
+      ['跨源 iframe'],
     ],
     [
       'unavailable/unsupported',
       { phase: 'unavailable', blocker: 'unsupported-browser' },
-      '当前浏览器没有',
+      ['当前浏览器没有'],
     ],
     [
       'unavailable/workspace-ineligible',
       { phase: 'unavailable', blocker: 'workspace-ineligible' },
-      '该会话的工作区不能托管本地目录',
+      ['该会话的工作区不能托管本地目录'],
+    ],
+    [
+      'unavailable/workspace-resolving',
+      { phase: 'unavailable', blocker: 'workspace-resolving' },
+      // Every string this render emits, including the transient status
+      // line: t() falls back to English silently, so the blocker sentence
+      // alone would pass with a half-English panel.
+      ['尚不能确定该会话所属的工作区', '解析中…'],
+    ],
+    [
+      'unavailable/unsupported-daemon',
+      { phase: 'unavailable', blocker: 'unsupported-daemon' },
+      ['该 daemon 未启用客户端文件桥'],
     ],
   ])('renders %s fully translated', (_label, status, zh) => {
     mount(status, 'zh-CN');
     expect(text()).not.toContain('localFiles.');
-    expect(text()).toContain(zh);
+    for (const line of zh) {
+      expect(text()).toContain(line);
+    }
+  });
+
+  it.each([
+    ['workspace-resolving'],
+    ['workspace-ineligible'],
+    ['unsupported-daemon'],
+  ])('keeps revoke reachable for %s with a stored grant', (blocker) => {
+    // Disconnect is the only store.clear() caller: a withheld entry that
+    // names its stored grant must keep the affordance, not just the copy.
+    mount({
+      phase: 'unavailable',
+      blocker: blocker as LocalFilesStatus['blocker'],
+      rootName: 'ai_coding',
+    });
+    expect(buttonByLabel('Disconnect')).toBeDefined();
+    expect(buttonByLabel('Connect a directory…')).toBeUndefined();
+    expect(text()).toContain('ai_coding');
+  });
+
+  it('presents the resolving blocker as transient, not permanent', () => {
+    mount({ phase: 'unavailable', blocker: 'workspace-resolving' });
+    // The one transient blocker must not pair its copy with the permanent
+    // "Unavailable here" header, and must show progress instead.
+    expect(container?.querySelector('[data-slot="spinner"]')).not.toBeNull();
+    expect(text()).toContain('Resolving…');
+    expect(text()).not.toContain('Unavailable here');
+    expect(buttons()).toHaveLength(0);
   });
 });
 
@@ -241,5 +290,262 @@ describe('LocalFilesPanel affordances', () => {
     });
     expect(handlers.onDisconnect).toHaveBeenCalledOnce();
     expect(handlers.onConnect).not.toHaveBeenCalled();
+  });
+});
+
+describe('LocalFilesPanel usability affordances', () => {
+  function mountExtra(
+    status: LocalFilesStatus,
+    extra: Partial<LocalFilesPanelProps> = {},
+    language: 'en' | 'zh-CN' = 'en',
+  ): void {
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const handlers = {
+      onConnect: vi.fn(),
+      onDisconnect: vi.fn(),
+      onOpenInNewTab: vi.fn(),
+    };
+    act(() => {
+      root!.render(
+        <I18nProvider language={language}>
+          <LocalFilesPanel status={status} {...handlers} {...extra} />
+        </I18nProvider>,
+      );
+    });
+  }
+
+  const connected: LocalFilesStatus = {
+    phase: 'connected',
+    blocker: null,
+    rootName: 'ai_coding',
+    toolCount: 4,
+  };
+
+  it('offers change directory only while connected and fires the prop', () => {
+    const onChangeDirectory = vi.fn();
+    mountExtra(connected, { onChangeDirectory });
+    const button = buttonByLabel('Change directory…');
+    expect(button).toBeDefined();
+    act(() => {
+      button!.click();
+    });
+    expect(onChangeDirectory).toHaveBeenCalledOnce();
+  });
+
+  it('does not offer change directory when another tab owns the bridge', () => {
+    mountExtra(
+      { phase: 'held-elsewhere', blocker: null, rootName: 'ai_coding' },
+      { onChangeDirectory: vi.fn() },
+    );
+    expect(buttonByLabel('Change directory…')).toBeUndefined();
+  });
+
+  it('omits change directory when the host does not provide it', () => {
+    mountExtra(connected);
+    expect(buttonByLabel('Change directory…')).toBeUndefined();
+  });
+
+  it('names the bound session when connected', () => {
+    mountExtra(connected, { sessionName: 'My task' });
+    expect(text()).toContain('Session');
+    expect(text()).toContain('My task');
+  });
+
+  it('omits the session row when no name is known', () => {
+    mountExtra(connected);
+    expect(text()).not.toContain('Session');
+  });
+
+  it('offers new session in needs-session and fires the prop', () => {
+    const onNewSession = vi.fn();
+    mountExtra({ phase: 'needs-session', blocker: null }, { onNewSession });
+    const button = buttonByLabel('New session');
+    expect(button).toBeDefined();
+    act(() => {
+      button!.click();
+    });
+    expect(onNewSession).toHaveBeenCalledOnce();
+  });
+
+  it('omits new session when the host does not provide it', () => {
+    mountExtra({ phase: 'needs-session', blocker: null });
+    expect(buttonByLabel('New session')).toBeUndefined();
+  });
+
+  it('omits new session outside needs-session even when provided (R4-4)', () => {
+    mountExtra(connected, { onNewSession: vi.fn() });
+    expect(buttonByLabel('New session')).toBeUndefined();
+  });
+
+  it('omits the session row outside connected even when named (R4-4)', () => {
+    mountExtra(
+      { phase: 'needs-session', blocker: null, rootName: 'ai_coding' },
+      { sessionName: 'My task' },
+    );
+    expect(text()).not.toContain('Session');
+    expect(text()).not.toContain('My task');
+  });
+
+  it('keeps a substitutable port in the port-less insecure instruction (R4-1)', () => {
+    // The Managed surface renders this blocker with no tunnel command and no
+    // port; pointing at bare http://localhost would land on port 80 where
+    // nothing serves the shell.
+    mountExtra({ phase: 'unavailable', blocker: 'insecure-context' });
+    expect(text()).toContain('http://localhost:<port>');
+  });
+
+  it('labels a failed bridge with a stored grant as Retry', () => {
+    mountExtra({
+      phase: 'failed',
+      blocker: null,
+      rootName: 'ai_coding',
+      message: 'boom',
+    });
+    expect(buttonByLabel('Retry')).toBeDefined();
+    expect(buttonByLabel('Connect a directory…')).toBeUndefined();
+  });
+
+  it('keeps Connect a directory for a failed bridge without a grant', () => {
+    mountExtra({ phase: 'failed', blocker: null, message: 'boom' });
+    expect(buttonByLabel('Connect a directory…')).toBeDefined();
+    expect(buttonByLabel('Retry')).toBeUndefined();
+  });
+
+  it('copies the daemon startup command for unsupported-daemon', () => {
+    const onCopyCommand = vi.fn();
+    mountExtra(
+      { phase: 'unavailable', blocker: 'unsupported-daemon' },
+      { onCopyCommand },
+    );
+    const button = buttonByLabel('Copy startup command');
+    expect(button).toBeDefined();
+    act(() => {
+      button!.click();
+    });
+    // Pin the literal, not the exported constant (R1-12): a command that does
+    // not enable the reverse channel must make this go red.
+    expect(onCopyCommand).toHaveBeenCalledWith(
+      'QWEN_SERVE_CLIENT_MCP_OVER_WS=1 qwen serve',
+    );
+  });
+
+  it('copies the platform-specific startup command when provided (R5-3)', () => {
+    const onCopyCommand = vi.fn();
+    mountExtra(
+      { phase: 'unavailable', blocker: 'unsupported-daemon' },
+      {
+        onCopyCommand,
+        daemonCommand: '$env:QWEN_SERVE_CLIENT_MCP_OVER_WS=1; qwen serve',
+      },
+    );
+    act(() => {
+      buttonByLabel('Copy startup command')!.click();
+    });
+    // PowerShell cannot parse the POSIX env-prefix form.
+    expect(onCopyCommand).toHaveBeenCalledWith(
+      '$env:QWEN_SERVE_CLIENT_MCP_OVER_WS=1; qwen serve',
+    );
+  });
+
+  it('copies the tunnel command for insecure-context when provided', () => {
+    const onCopyCommand = vi.fn();
+    const tunnelCommand = 'ssh -L 4170:localhost:4170 daemon.example';
+    mountExtra(
+      { phase: 'unavailable', blocker: 'insecure-context' },
+      { onCopyCommand, tunnelCommand },
+    );
+    const button = buttonByLabel('Copy SSH tunnel command');
+    expect(button).toBeDefined();
+    act(() => {
+      button!.click();
+    });
+    expect(onCopyCommand).toHaveBeenCalledWith(tunnelCommand);
+  });
+
+  it('renders no tunnel copy button without a command', () => {
+    mountExtra(
+      { phase: 'unavailable', blocker: 'insecure-context' },
+      { onCopyCommand: vi.fn() },
+    );
+    expect(buttonByLabel('Copy SSH tunnel command')).toBeUndefined();
+  });
+
+  it('names the local tunnel port in the instruction (R3-15)', () => {
+    // With the privileged-port clamp the command's only 'localhost' token is
+    // the REMOTE side; the instruction must name the local bind to open.
+    mountExtra(
+      { phase: 'unavailable', blocker: 'insecure-context' },
+      {
+        onCopyCommand: vi.fn(),
+        tunnelCommand: 'ssh -L 8080:localhost:80 host',
+        tunnelLocalPort: 8080,
+      },
+    );
+    expect(text()).toContain('not a secure context');
+    expect(text()).toContain('http://localhost:8080');
+  });
+
+  it('names the local tunnel port in Chinese (R3-15)', () => {
+    mountExtra(
+      { phase: 'unavailable', blocker: 'insecure-context' },
+      {
+        onCopyCommand: vi.fn(),
+        tunnelCommand: 'ssh -L 8080:localhost:80 host',
+        tunnelLocalPort: 8080,
+      },
+      'zh-CN',
+    );
+    expect(text()).not.toContain('localFiles.');
+    expect(text()).toContain('安全上下文');
+    expect(text()).toContain('http://localhost:8080');
+  });
+
+  it('renders no copy buttons when the host provides no copy handler', () => {
+    mountExtra({ phase: 'unavailable', blocker: 'unsupported-daemon' });
+    expect(buttonByLabel('Copy startup command')).toBeUndefined();
+  });
+
+  it('states the next step for an ineligible workspace', () => {
+    mountExtra({ phase: 'unavailable', blocker: 'workspace-ineligible' });
+    expect(text()).toContain('trusted, regular workspace');
+  });
+
+  it('renders the new affordances fully translated in Chinese', () => {
+    const onCopyCommand = vi.fn();
+    mountExtra(
+      connected,
+      {
+        onChangeDirectory: vi.fn(),
+        sessionName: '我的任务',
+        onCopyCommand,
+      },
+      'zh-CN',
+    );
+    expect(text()).not.toContain('localFiles.');
+    expect(text()).toContain('更换目录…');
+    expect(text()).toContain('会话');
+    expect(text()).toContain('我的任务');
+  });
+
+  it('renders the new-session and retry affordances in Chinese', () => {
+    mountExtra(
+      { phase: 'needs-session', blocker: null },
+      { onNewSession: vi.fn() },
+      'zh-CN',
+    );
+    expect(text()).not.toContain('localFiles.');
+    expect(text()).toContain('新建会话');
+  });
+
+  it('renders the copy buttons in Chinese', () => {
+    mountExtra(
+      { phase: 'unavailable', blocker: 'unsupported-daemon' },
+      { onCopyCommand: vi.fn() },
+      'zh-CN',
+    );
+    expect(text()).not.toContain('localFiles.');
+    expect(text()).toContain('复制启动命令');
   });
 });

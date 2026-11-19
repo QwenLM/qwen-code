@@ -24,11 +24,8 @@ fades over 400 milliseconds while the cursor stays available. Moving the human
 pointer over the synthetic cursor temporarily reveals the name again, and
 moving it away hides the name.
 Hiding and revealing the cursor also shows the badge again. Hover reveal uses
-the native global-pointer APIs on macOS, Windows, and X11. Stock Wayland does
-not expose another client's global pointer position, so native Wayland keeps
-the timed reveal but cannot offer hover reveal without a compositor-owned
-adapter. The click-through overlay never captures pointer input to fake this
-capability.
+the native global-pointer APIs on macOS, Windows, and X11. The click-through
+overlay never captures pointer input to fake this capability.
 
 Delivery and target context appears as up to two chips inside the same badge.
 The delivery chip comes first and is filled; the target chip comes second and
@@ -48,8 +45,7 @@ move the agent cursor to that target before dispatch. Actions without a spatial
 target, such as typing into the already focused desktop application, keep the
 cursor at its current location and only change the semantic animation.
 During a drag, the native gesture's endpoints, step count, and wall-clock
-duration drive the same shared pointer-anchor transform on macOS, Windows, X11,
-and supported Wayland input routes, so the synthetic cursor follows the held
+duration drive the same shared pointer-anchor transform on macOS, Windows, and X11, so the synthetic cursor follows the held
 gesture instead of moving only after release.
 
 The cursor is a visual aid for people watching an agent. It is not a security

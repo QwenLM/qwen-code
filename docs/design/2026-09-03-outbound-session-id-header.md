@@ -34,3 +34,12 @@ Non-LLM traffic, other domains, MCP requests, tool fetches, subprocesses, `trace
 ## Verification
 
 Unit tests cover exact-host and HTTPS matching, rejection of lookalike hosts, invalid URLs, preservation and precedence of combined `Request` and init headers, empty values, session rotation, and the shared runtime-fetch wrapper. Provider tests verify the OpenAI-compatible construction paths install a working correlation layer, and Gemini tests cover constructor destinations, generation, embedding, and successive requests observing a changed session ID.
+
+## Follow-up: user-configurable `${session_id}` in `customHeaders`
+
+A later change (for #10995) lets a `modelProviders[].generationConfig.customHeaders` value contain the placeholder `${session_id}`, expanded per request from the same `Config.getSessionId()`. The built-in header above is unchanged and keeps precedence over customHeaders entries on every path. The follow-up answers the threat-model questions §12.7 of the outbound-propagation design asked for:
+
+- **Consent.** The placeholder is inert until the global `outboundCorrelation.allowDynamicHeaderValues` switch is on (default off). A gate-off, empty, or unresolvable value drops the header — the literal `${session_id}` is never sent.
+- **Recipient set.** Whichever hosts the user attached the header to. Scope comes from the provider entry rather than a separate allowlist: the user already chose the endpoint when writing `baseUrl`, and providers that must not receive the value simply do not carry the header.
+- **De-anonymization window.** One session: the value is stable for the life of a conversation (that stability is the feature — gateways key on it) and rotates on `/new` and `/resume`. A recipient can group the requests of one conversation, never across conversations.
+- **Per-request UUID companion.** Deliberately not provided: a per-request value would defeat the session affinity the gateway requires. The placeholder set is closed at one entry and should not grow without the same review this seam received.

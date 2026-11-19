@@ -5,10 +5,41 @@
  */
 
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
-import { MAX_DAEMON_WORKSPACES } from '@qwen-code/acp-bridge/channelControlTimeouts';
 import { isWithinRoot } from '../config/path-comparison.js';
 
-export const MAX_REGISTERED_WORKSPACES = MAX_DAEMON_WORKSPACES;
+export const MAX_REGISTERED_WORKSPACES = 256;
+export const MAX_CONFIGURED_REGISTERED_WORKSPACES = 256;
+export const QWEN_SERVE_MAX_WORKSPACES_ENV = 'QWEN_SERVE_MAX_WORKSPACES';
+
+export function resolveMaxRegisteredWorkspaces(
+  configured: number | undefined,
+  env: Readonly<NodeJS.ProcessEnv>,
+): number {
+  const raw = env[QWEN_SERVE_MAX_WORKSPACES_ENV];
+  const value =
+    configured ??
+    (raw === undefined
+      ? MAX_REGISTERED_WORKSPACES
+      : /^\d+$/.test(raw.trim())
+        ? Number(raw.trim())
+        : Number.NaN);
+  if (
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > MAX_CONFIGURED_REGISTERED_WORKSPACES
+  ) {
+    // Name the source that actually supplied the value: an embedder who passed
+    // a bad option must not be sent grepping for an env var they never set.
+    const source =
+      configured === undefined
+        ? `${QWEN_SERVE_MAX_WORKSPACES_ENV}=${JSON.stringify(raw)}`
+        : `maxRegisteredWorkspaces option ${String(configured)}`;
+    throw new TypeError(
+      `Invalid ${source}: must be an integer from 1 to ${MAX_CONFIGURED_REGISTERED_WORKSPACES}.`,
+    );
+  }
+  return value;
+}
 
 export class DuplicateWorkspaceInputError extends Error {
   constructor(workspace: string) {

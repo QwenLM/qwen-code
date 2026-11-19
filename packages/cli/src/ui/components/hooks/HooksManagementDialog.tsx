@@ -11,7 +11,8 @@ import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
-import { loadSettings, SettingScope } from '../../../config/settings.js';
+import { useSettings } from '../../contexts/SettingsContext.js';
+import { SettingScope } from '../../../config/settings.js';
 import {
   HooksConfigSource,
   type HookDefinition,
@@ -125,6 +126,7 @@ export function HooksManagementDialog({
   onClose,
 }: HooksManagementDialogProps): React.JSX.Element {
   const config = useConfig();
+  const settings = useSettings();
   const { columns: width } = useTerminalSize();
   const boxWidth = width - 4;
 
@@ -290,7 +292,6 @@ export function HooksManagementDialog({
   const fetchHooksData = useCallback((): HookEventDisplayInfo[] => {
     if (!config) return [];
 
-    const settings = loadSettings();
     const userSettings = settings.forScope(SettingScope.User).settings;
     const workspaceSettings = settings.forScope(
       SettingScope.Workspace,
@@ -346,7 +347,13 @@ export function HooksManagementDialog({
                 config: hookConfig,
                 source: HooksConfigSource.Project,
                 sourceDisplay: sourceDisplayMap[HooksConfigSource.Project],
-                enabled: true,
+                // Match the execution accessor: pending/rejected withholds;
+                // otherwise the block runs exactly when getProjectHooks()
+                // serves it (approved, or explicitly trusted, or headless).
+                enabled:
+                  !config.isProjectHooksPendingApproval() &&
+                  config.getProjectHooks() !== undefined,
+                rejected: config.isProjectHooksRejected(),
               },
               groupByMatcher,
             );
@@ -415,7 +422,7 @@ export function HooksManagementDialog({
     }
 
     return result;
-  }, [config]);
+  }, [config, settings]);
 
   useEffect(() => {
     let cancelled = false;
@@ -517,7 +524,11 @@ export function HooksManagementDialog({
     switch (currentStep) {
       case HOOKS_MANAGEMENT_STEPS.HOOKS_LIST:
         return (
-          <HooksListStep hooks={hooks} selectedIndex={listSelectedIndex} />
+          <HooksListStep
+            hooks={hooks}
+            selectedIndex={listSelectedIndex}
+            hooksReloadable={Boolean(config?.getHookSystem())}
+          />
         );
 
       case HOOKS_MANAGEMENT_STEPS.HOOK_DETAIL:

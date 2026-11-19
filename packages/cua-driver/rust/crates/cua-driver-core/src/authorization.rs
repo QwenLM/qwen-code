@@ -270,8 +270,12 @@ const DESKTOP_INPUT_OPERATIONS: &[&str] = &[
     "type_text",
     "type_text_chars",
     "press_key",
+    "key_down",
+    "key_up",
     "hotkey",
     "set_value",
+    "paste",
+    "select_text",
     "perform_secondary_action",
     "bring_to_front",
     "set_window_frame",
@@ -857,8 +861,12 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "type_text"
         | "type_text_chars"
         | "press_key"
+        | "key_down"
+        | "key_up"
         | "hotkey"
         | "set_value"
+        | "paste"
+        | "select_text"
         | "perform_secondary_action"
         | "invoke_menu"
         | "launch_app"
@@ -878,6 +886,11 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         "zoom"
         | "clipboard_read"
         | "list_apps"
+        | "get_state"
+        | "get_app"
+        | "get_ax_state"
+        | "get_screenshot"
+        | "get_ax_state_and_screenshot"
         | "list_windows"
         | "debug_window_info"
         | "check_permissions"
@@ -1149,8 +1162,12 @@ fn enforce_hard_invariants(
             | "type_text"
             | "type_text_chars"
             | "press_key"
+            | "key_down"
+            | "key_up"
             | "hotkey"
             | "set_value"
+            | "paste"
+            | "select_text"
             | "perform_secondary_action"
             | "kill_app"
             | "bring_to_front"
@@ -1469,6 +1486,19 @@ mod tests {
     }
 
     #[test]
+    fn app_observation_aliases_have_reviewed_private_content_risk() {
+        for tool in [
+            "get_state",
+            "get_app",
+            "get_ax_state",
+            "get_screenshot",
+            "get_ax_state_and_screenshot",
+        ] {
+            assert_eq!(advertised_risk_for(tool).class, RiskClass::R2, "{tool}");
+        }
+    }
+
+    #[test]
     fn unknown_tools_are_unclassified_and_denied() {
         let error = authorize_tool_call("new_unreviewed_tool", &serde_json::json!({}))
             .expect_err("unknown risk must fail closed");
@@ -1491,6 +1521,19 @@ mod tests {
         assert_eq!(risk.class, RiskClass::R1);
         assert_eq!(risk.enforcement, RiskEnforcement::MetadataOnly);
         assert!(!risk.operation_sensitive);
+    }
+
+    #[test]
+    fn native_text_operations_use_the_existing_desktop_input_adapter() {
+        for tool in ["paste", "select_text"] {
+            let risk = classify_tool_call(tool, &serde_json::json!({"pid":42,"window_id":7}));
+            assert_eq!(risk.class, RiskClass::R1);
+            assert_eq!(risk.enforcement, RiskEnforcement::Active);
+            assert!(
+                enforce_hard_invariants(tool, &serde_json::json!({"pid":std::process::id()}))
+                    .is_err()
+            );
+        }
     }
 
     #[test]

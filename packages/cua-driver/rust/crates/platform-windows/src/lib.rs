@@ -100,3 +100,10 @@ pub fn register_tools_with_cursor_and_provider(
     }
     tools::build_registry_with_provider(compat, provider)
 }
+
+#[cfg(any(windows, test))]
+mod browser_launch_token;
+#[cfg(windows)]
+mod browser_standard_user;
+#[cfg(windows)]
+pub mod standard_user_launch;

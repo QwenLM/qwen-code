@@ -79,6 +79,17 @@ describe('Live Host OSS mirror workflow', () => {
     );
   });
 
+  it('publishes qwen-live from the committed pnpm graph', () => {
+    const install = getWorkflowStep(
+      getWorkflowJob(releaseWorkflow, 'publish'),
+      'Install dependencies',
+    );
+    expect(install).toContain(
+      'corepack pnpm install --frozen-lockfile --ignore-scripts',
+    );
+    expect(install).not.toContain("run: 'npm install");
+  });
+
   it('uploads and verifies one release without an OSS state machine', () => {
     const sync = getWorkflowJob(syncWorkflow, 'sync');
     expect(sync).toContain("name: 'production-release'");

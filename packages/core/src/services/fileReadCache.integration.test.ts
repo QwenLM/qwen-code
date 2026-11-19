@@ -14,6 +14,7 @@ import { FileReadCache } from './fileReadCache.js';
 import { ReadFileTool } from '../tools/read-file.js';
 import { microcompactHistory } from './microcompaction/microcompact.js';
 import { StandardFileSystemService } from './fileSystemService.js';
+import { content, fnCall, fnResponse } from '../test-utils/model-fixtures.js';
 
 function makeConfig(targetDir: string, cache: FileReadCache, disabled = false) {
   const explicit: Record<string, unknown> = {
@@ -85,28 +86,15 @@ describe('FileReadCache integration: read after history rewrite', () => {
     // microcompact's keepRecent=1 will clear the oldest 5.
     const history: Content[] = [];
     for (let i = 0; i < 6; i++) {
-      history.push({
-        role: 'model',
-        parts: [
-          {
-            functionCall: {
-              name: 'read_file',
-              args: { file_path: filePath },
-            },
-          },
-        ],
-      });
-      history.push({
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: 'read_file',
-              response: { output: r1.llmContent as string },
-            },
-          },
-        ],
-      });
+      history.push(
+        content('model', fnCall('read_file', { file_path: filePath })),
+      );
+      history.push(
+        content(
+          'user',
+          fnResponse('read_file', { output: r1.llmContent as string }),
+        ),
+      );
     }
 
     // STEP 3 — microcompact fires (>60min idle).
@@ -135,9 +123,7 @@ describe('FileReadCache integration: read after history rewrite', () => {
     );
 
     // THE BUG: returned content is the placeholder, NOT the real file.
-    expect(r2.llmContent as string).toContain(
-      'unchanged since last read in this session',
-    );
+    expect(r2.llmContent as string).toContain('Wasted call');
     expect(r2.llmContent as string).not.toContain('export function hello');
 
     // The model now has:
@@ -174,9 +160,7 @@ describe('FileReadCache integration: read after history rewrite', () => {
     );
 
     expect(r2.llmContent as string).toContain('export function hello');
-    expect(r2.llmContent as string).not.toContain(
-      'unchanged since last read in this session',
-    );
+    expect(r2.llmContent as string).not.toContain('Wasted call');
   });
 
   it('worst case: when microcompact removes every prior read of a file, the placeholder leaves zero recoverable bytes for the model', async () => {
@@ -200,50 +184,10 @@ describe('FileReadCache integration: read after history rewrite', () => {
     // Build history: 1 foo.ts read, then 1 other.ts read (kept).
     const fooContent = fs.readFileSync(filePath, 'utf-8');
     const history: Content[] = [
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: {
-              name: 'read_file',
-              args: { file_path: filePath },
-            },
-          },
-        ],
-      },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: 'read_file',
-              response: { output: fooContent },
-            },
-          },
-        ],
-      },
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: {
-              name: 'read_file',
-              args: { file_path: otherPath },
-            },
-          },
-        ],
-      },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: 'read_file',
-              response: { output: 'unrelated\n' },
-            },
-          },
-        ],
-      },
+      content('model', fnCall('read_file', { file_path: filePath })),
+      content('user', fnResponse('read_file', { output: fooContent })),
+      content('model', fnCall('read_file', { file_path: otherPath })),
+      content('user', fnResponse('read_file', { output: 'unrelated\n' })),
     ];
 
     const mc = microcompactHistory(history, Date.now() - 90 * 60_000, {
@@ -267,9 +211,7 @@ describe('FileReadCache integration: read after history rewrite', () => {
       new AbortController().signal,
     );
 
-    expect(r.llmContent as string).toContain(
-      'unchanged since last read in this session',
-    );
+    expect(r.llmContent as string).toContain('Wasted call');
     // Total foo.ts content reachable to the model:
     //   history → 0 bytes
     //   fresh tool result → placeholder, 0 bytes

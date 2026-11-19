@@ -27,7 +27,16 @@ export type ParsedChannelConfig = Awaited<
 export interface ParsedChannel {
   name: string;
   config: ParsedChannelConfig;
+  /**
+   * The pre-parse channel entry. parseChannelConfig injects policy defaults
+   * (privatePolicy/senderPolicy/groupPolicy) into `config`, so a provider that
+   * must tell an operator's explicit choice from an injected default reads the
+   * raw entry here.
+   */
+  rawConfig?: Record<string, unknown>;
 }
+
+export { resolveChannelLocale } from '../../utils/channel-locale.js';
 
 export function sessionsPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'sessions.json');
@@ -338,6 +347,7 @@ export async function parseConfiguredChannels(
           opts.defaultCwd,
           { resolveEnvVars: 'available' },
         ),
+        rawConfig: rawConfig as Record<string, unknown>,
       });
     } catch (err) {
       throw new Error(

@@ -5,6 +5,8 @@
  */
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { EventEmitter } from 'node:events';
+import * as path from 'node:path';
 import { SettingsWatcher } from './settingsWatcher.js';
 import {
   SettingScope,
@@ -153,6 +155,41 @@ describe('SettingsWatcher', () => {
   });
 
   describe('lifecycle', () => {
+    it('detaches settings events without native close during macOS process exit', async () => {
+      vi.resetModules();
+      const { SettingsWatcher: FreshSettingsWatcher } = await import(
+        './settingsWatcher.js'
+      );
+      const { prepareFileWatchersForProcessExit } = await import(
+        '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js'
+      );
+      const platform = process.platform;
+      const nativeWatcher = Object.assign(new EventEmitter(), {
+        close: vi.fn().mockResolvedValue(undefined),
+      });
+      mockWatch.mockReturnValueOnce(nativeWatcher);
+      const freshWatcher = new FreshSettingsWatcher(
+        makeLoadedSettings({ workspaceSettingsActive: false }),
+      );
+      try {
+        freshWatcher.startWatching();
+        expect(nativeWatcher.listenerCount('all')).toBe(1);
+        expect(nativeWatcher.listenerCount('error')).toBe(1);
+        Object.defineProperty(process, 'platform', { value: 'darwin' });
+        prepareFileWatchersForProcessExit();
+
+        freshWatcher.stopWatching();
+
+        expect(nativeWatcher.close).not.toHaveBeenCalled();
+        expect(nativeWatcher.listenerCount('all')).toBe(0);
+        expect(nativeWatcher.listenerCount('error')).toBe(1);
+      } finally {
+        freshWatcher.stopWatching();
+        Object.defineProperty(process, 'platform', { value: platform });
+        vi.resetModules();
+      }
+    });
+
     it('should create chokidar watchers for user and workspace directories', () => {
       watcher.startWatching();
 
@@ -243,6 +280,43 @@ describe('SettingsWatcher', () => {
       );
     });
 
+    it('watches only the settings file and its parent directory', () => {
+      watcher.startWatching();
+
+      const ignored = mockWatch.mock.calls[0][1].ignored as (
+        filePath: string,
+      ) => boolean;
+      expect(ignored('/home/user/.qwen')).toBe(false);
+      expect(ignored('/home/user/.qwen/settings.json')).toBe(false);
+      for (const unrelated of [
+        'installation_id',
+        'output-language.md',
+        'sessions',
+        'sessions/settings.json',
+        'settings.json.write-private',
+      ]) {
+        expect(ignored(`/home/user/.qwen/${unrelated}`)).toBe(true);
+      }
+    });
+
+    it('normalizes the configured target path before filtering', () => {
+      const customPath = path.normalize('/custom/config/preferences.json');
+      const customWatcher = new SettingsWatcher(
+        makeLoadedSettings({
+          user: { path: customPath },
+          workspaceSettingsActive: false,
+        }),
+      );
+      customWatcher.startWatching();
+      const ignored = mockWatch.mock.calls[0][1].ignored as (
+        filePath: string,
+      ) => boolean;
+      expect(ignored('/custom/config')).toBe(false);
+      expect(ignored('/custom/config/preferences.json')).toBe(false);
+      expect(ignored('/custom/config/settings.json')).toBe(true);
+      customWatcher.stopWatching();
+    });
+
     it('should pass ignored filter that rejects special file types', () => {
       watcher.startWatching();
 
@@ -258,13 +332,13 @@ describe('SettingsWatcher', () => {
       const ignoredFn = watchCall[1].ignored;
 
       expect(
-        ignoredFn('/some/file', {
+        ignoredFn('/home/user/.qwen/settings.json', {
           isFile: () => true,
           isDirectory: () => false,
         }),
       ).toBe(false);
       expect(
-        ignoredFn('/some/socket', {
+        ignoredFn('/home/user/.qwen/settings.json', {
           isFile: () => false,
           isDirectory: () => false,
         }),
@@ -894,6 +968,34 @@ describe('SettingsWatcher', () => {
       expect(mockWatchers[1].dir).toBe('/home/user/.qwen');
 
       w.stopWatching();
+    });
+
+    it('ignores private save directories and their child events without rebootstrap', async () => {
+      const loaded = makeLoadedSettings({ workspaceSettingsActive: false });
+      const watcher = new SettingsWatcher(loaded);
+      watcher.startWatching();
+      for (const [event, changed] of [
+        ['addDir', '/home/user/.qwen/settings.json.write-private'],
+        [
+          'add',
+          '/home/user/.qwen/settings.json.write-private/settings.json.tmp',
+        ],
+        [
+          'change',
+          '/home/user/.qwen/settings.json.write-private/settings.json.orig',
+        ],
+        [
+          'unlink',
+          '/home/user/.qwen/settings.json.write-private/settings.json.tmp',
+        ],
+        ['unlinkDir', '/home/user/.qwen/settings.json.write-private'],
+      ])
+        fireAllEvent(0, event, changed);
+      await vi.advanceTimersByTimeAsync(SettingsWatcher.DEBOUNCE_MS + 10);
+      expect(loaded.reloadScopeFromDisk).not.toHaveBeenCalled();
+      expect(mockWatchers).toHaveLength(1);
+      expect(mockWatchers[0].instance.close).not.toHaveBeenCalled();
+      watcher.stopWatching();
     });
 
     it('should demote back to bootstrap when .qwen is removed', async () => {

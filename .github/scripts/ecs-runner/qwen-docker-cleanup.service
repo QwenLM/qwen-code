@@ -1,0 +1,21 @@
+[Unit]
+Description=Clean stale Qwen CI Docker resources
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+# Type=oneshot units do NOT inherit DefaultTimeoutStartSec (systemd disables
+# the start timeout by default for oneshot), so this is the unit's only bound.
+# Keep it: without one, a wedged docker call hangs the run forever holding the
+# /run mutex, and every later elapse then skips. 1h clears the script's worst
+# case instead of cutting the sweep off mid-prune.
+TimeoutStartSec=1h
+ExecStart=/usr/local/sbin/qwen-docker-cleanup
+# Enforce the /etc/tmpfiles.d/tmp.conf (1d) retention here rather than
+# relying on the distro's systemd-tmpfiles-clean.timer: on hardened images
+# that timer can be masked, and it reports "static" on stock Ubuntu —
+# unverifiable via is-enabled — while the fleet's measured 120-260k
+# temp files/day regrows past the tmpfs inode ceiling without an
+# enforcement agent (the 2026-10-31 incident class).
+ExecStartPost=/usr/bin/systemd-tmpfiles --clean --prefix=/tmp

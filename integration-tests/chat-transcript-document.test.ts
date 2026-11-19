@@ -19,12 +19,14 @@ import {
   toHtml,
 } from '../packages/cli/src/ui/utils/export/formatters/html.js';
 import { escapeJsonForHtmlScriptData } from '../packages/cli/src/ui/utils/export/html-script-data.js';
+import { documentExportBudgetMs } from './document-export-budget.js';
 
 const RENDERER_VERSION = EXPORT_TRANSCRIPT_RENDERER_VERSION;
 const RENDERER_URL = `https://unpkg.com/@qwen-code/qwen-code@${RENDERER_VERSION.split('+')[0]}/export-transcript-document.js`;
+const RENDERER_CSS_URL = `https://unpkg.com/@qwen-code/qwen-code@${RENDERER_VERSION.split('+')[0]}/export-transcript-document.css`;
 const EXPORTED_AT = '2026-08-16T01:00:00.000Z';
 const CANARY = 'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT';
-const MAX_DOCUMENT_DURATION_MS = 60_000;
+const MAX_DOCUMENT_DURATION_MS = documentExportBudgetMs(process.env);
 const MAX_HEAP_DELTA_BYTES = 512 * 1024 * 1024;
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixtureRoot = resolve(
@@ -43,6 +45,11 @@ const rendererAssetPath = resolve(
   'packages/web-templates/src/export-html/dist/export-transcript-document.js',
 );
 const rendererAsset = readFileSync(rendererAssetPath, 'utf8');
+const rendererCssAssetPath = resolve(
+  repoRoot,
+  'packages/web-templates/src/export-html/dist/export-transcript-document.css',
+);
+const rendererCssAsset = readFileSync(rendererCssAssetPath, 'utf8');
 
 const expectedNetwork = JSON.parse(
   readFileSync(
@@ -281,10 +288,12 @@ function createMaximumDocument(): ExportTranscriptDocumentV1 {
 
 async function installNetworkAndCspProbe(page: Page): Promise<{
   allowedScriptRequests: string[];
+  allowedStyleRequests: string[];
   unexpectedRequests: string[];
   cspErrors: string[];
 }> {
   const allowedScriptRequests: string[] = [];
+  const allowedStyleRequests: string[] = [];
   const unexpectedRequests: string[] = [];
   const cspErrors: string[] = [];
   await page.route('**/*', async (route) => {
@@ -298,6 +307,15 @@ async function installNetworkAndCspProbe(page: Page): Promise<{
       });
       return;
     }
+    if (url === RENDERER_CSS_URL) {
+      allowedStyleRequests.push(url);
+      await route.fulfill({
+        body: rendererCssAsset,
+        contentType: 'text/css',
+        headers: { 'access-control-allow-origin': '*' },
+      });
+      return;
+    }
     unexpectedRequests.push(url);
     await route.abort('blockedbyclient');
   });
@@ -305,7 +323,12 @@ async function installNetworkAndCspProbe(page: Page): Promise<{
     const text = message.text();
     if (/content security policy|refused to/i.test(text)) cspErrors.push(text);
   });
-  return { allowedScriptRequests, unexpectedRequests, cspErrors };
+  return {
+    allowedScriptRequests,
+    allowedStyleRequests,
+    unexpectedRequests,
+    cspErrors,
+  };
 }
 
 async function expectConnectSrcCspEnforced(page: Page): Promise<void> {
@@ -415,167 +438,194 @@ describe('ExportTranscriptDocument browser gate', () => {
     visit(schema);
   });
 
-  it('opens, searches, copies, and prints the maximum document with its pinned npm runtime', async () => {
-    const exportDocument = createMaximumDocument();
-    const serialized = JSON.stringify(exportDocument);
-    const html = renderExportTranscriptDocumentToHtml(exportDocument);
-    expect(exportDocument.blocks).toHaveLength(
-      EXPORT_TRANSCRIPT_LIMITS_V1.maxBlocks,
-    );
-    expect(exportDocument.metadata).toMatchObject({
-      complete: true,
-      truncated: false,
-    });
-    const envelopeBytes = new TextEncoder().encode(
-      escapeJsonForHtmlScriptData(serialized),
-    ).byteLength;
-    expect(envelopeBytes).toBeLessThanOrEqual(
-      EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes,
-    );
-    expect(serialized).not.toContain(CANARY);
+  it(
+    'opens, searches, copies, and prints the maximum document with its pinned npm runtime',
+    async () => {
+      const exportDocument = createMaximumDocument();
+      const serialized = JSON.stringify(exportDocument);
+      const html = renderExportTranscriptDocumentToHtml(exportDocument);
+      expect(exportDocument.blocks).toHaveLength(
+        EXPORT_TRANSCRIPT_LIMITS_V1.maxBlocks,
+      );
+      expect(exportDocument.metadata).toMatchObject({
+        complete: true,
+        truncated: false,
+      });
+      const envelopeBytes = new TextEncoder().encode(
+        escapeJsonForHtmlScriptData(serialized),
+      ).byteLength;
+      expect(envelopeBytes).toBeLessThanOrEqual(
+        EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes,
+      );
+      expect(serialized).not.toContain(CANARY);
 
-    browser = await chromium.launch({
-      headless: true,
-      args: ['--enable-precise-memory-info'],
-    });
-    const page = await browser.newPage();
-    const probe = await installNetworkAndCspProbe(page);
-    const startedAt = nodePerformance.now();
-    const heapBefore = await page.evaluate(
-      () =>
-        (
-          globalThis.performance as Performance & {
-            memory?: { usedJSHeapSize: number };
-          }
-        ).memory?.usedJSHeapSize ?? 0,
-    );
+      browser = await chromium.launch({
+        headless: true,
+        args: ['--enable-precise-memory-info'],
+      });
+      const page = await browser.newPage();
+      const probe = await installNetworkAndCspProbe(page);
+      const startedAt = nodePerformance.now();
+      const heapBefore = await page.evaluate(
+        () =>
+          (
+            globalThis.performance as Performance & {
+              memory?: { usedJSHeapSize: number };
+            }
+          ).memory?.usedJSHeapSize ?? 0,
+      );
 
-    await page.setContent(html, { waitUntil: 'load' });
-    await expect
-      .poll(() => page.locator('body').getAttribute('data-render-complete'))
-      .toBe('true');
-    expect(await page.locator('[data-document-metadata]').isVisible()).toBe(
-      true,
-    );
-    const expandAll = page.locator('[data-document-expand-all]');
-    const collapseAll = page.locator('[data-document-collapse-all]');
-    const themeToggle = page.locator('[data-document-theme-toggle]');
-    expect(await expandAll.isDisabled()).toBe(true);
-    expect(await collapseAll.isEnabled()).toBe(true);
-    expect(await themeToggle.isVisible()).toBe(true);
-    await collapseAll.click();
-    expect(await expandAll.isEnabled()).toBe(true);
-    expect(await collapseAll.isDisabled()).toBe(true);
-    await expandAll.click();
-    expect(await expandAll.isDisabled()).toBe(true);
-    await themeToggle.click();
-    expect(await page.locator('html').getAttribute('class')).toContain('light');
-    // Since #11091 a document does not render diagrams: mermaid is stubbed out
-    // of this bundle, and the fence degrades to its own source in a plain <pre>
-    // so it stays readable, selectable and findable. Math is deliberately kept,
-    // which is why `.katex` below still has to be there.
-    expect(await page.locator('div[class*="mermaidInline"]').count()).toBe(0);
-    expect(
-      await page.evaluate(() => globalThis.document.body.innerText),
-    ).toContain('graph TD; A[Export] --> B[Document]');
-    expect(await page.locator('.katex').count()).toBeGreaterThan(0);
-    expect(
-      await page.locator('[data-agent-status]').count(),
-    ).toBeGreaterThanOrEqual(2);
-    const renderedItemCount = await page
-      .locator('[data-message-row-key]')
-      .count();
-    expect(renderedItemCount).toBeGreaterThan(0);
-    const interaction = await page.evaluate(() => {
-      const bodyText = globalThis.document.body.innerText;
-      const range = globalThis.document.createRange();
-      range.selectNodeContents(globalThis.document.body);
-      const selection = window.getSelection();
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-      const copiedLength = selection?.toString().length ?? 0;
-      selection?.removeAllRanges();
-      const clippedByMaxHeight = Array.from(
-        globalThis.document.querySelectorAll<HTMLElement>('*'),
-      )
-        .filter((element) => {
-          const style = getComputedStyle(element);
-          return (
-            style.display !== 'none' &&
-            style.maxHeight !== 'none' &&
-            element.scrollHeight > element.clientHeight + 1
-          );
-        })
-        .map((element) => ({
-          tag: element.tagName.toLowerCase(),
-          className: element.className,
-          maxHeight: getComputedStyle(element).maxHeight,
-        }));
-      return {
-        firstFound: bodyText.includes('FIRST_SEARCH_NEEDLE'),
-        lastFound: bodyText.includes('LAST_SEARCH_NEEDLE'),
-        thinkingFound: bodyText.includes('DOCUMENT_THINKING_DETAIL'),
-        toolFound: bodyText.includes('DOCUMENT_TOOL_DETAIL'),
-        richFound: bodyText.includes('DOCUMENT_RICH_CONTENT'),
-        chartFallbackFound: bodyText.includes('DOCUMENT_CHART_FALLBACK'),
-        subagentResultFound: bodyText.includes('DOCUMENT_SUBAGENT_RESULT'),
-        subagentStreamFound: bodyText.includes('DOCUMENT_SUBAGENT_STREAM'),
-        nestedToolFound: bodyText.includes('DOCUMENT_NESTED_TOOL_DETAIL'),
-        parallelAgentFound: bodyText.includes('DOCUMENT_PARALLEL_AGENT_RESULT'),
-        userShellFound: bodyText.includes('DOCUMENT_USER_SHELL_DETAIL'),
-        diffFound: bodyText.includes('DOCUMENT_DIFF_DETAIL'),
-        copiedLength,
-        clippedByMaxHeight,
-      };
-    });
-    const pdf = await page.pdf({ printBackground: false });
-    const heapAfter = await page.evaluate(
-      () =>
-        (
-          globalThis.performance as Performance & {
-            memory?: { usedJSHeapSize: number };
-          }
-        ).memory?.usedJSHeapSize ?? 0,
-    );
-    const durationMs = nodePerformance.now() - startedAt;
+      await page.setContent(html, { waitUntil: 'load' });
+      await expect
+        .poll(() => page.locator('body').getAttribute('data-render-complete'))
+        .toBe('true');
+      expect(await page.locator('[data-document-metadata]').isVisible()).toBe(
+        true,
+      );
+      const expandAll = page.locator('[data-document-expand-all]');
+      const collapseAll = page.locator('[data-document-collapse-all]');
+      const themeToggle = page.locator('[data-document-theme-toggle]');
+      expect(await expandAll.isDisabled()).toBe(true);
+      expect(await collapseAll.isEnabled()).toBe(true);
+      expect(await themeToggle.isVisible()).toBe(true);
+      await collapseAll.click();
+      expect(await expandAll.isEnabled()).toBe(true);
+      expect(await collapseAll.isDisabled()).toBe(true);
+      await expandAll.click();
+      expect(await expandAll.isDisabled()).toBe(true);
+      await themeToggle.click();
+      // `document-main.tsx` toggles `dark` and `light` on <html> mutually
+      // exclusively, so the attribute is exactly one of them.
+      await expect
+        .poll(() => page.locator('html').getAttribute('class'))
+        .toBe('light');
+      // Since #11091 a document does not render diagrams: mermaid is stubbed out
+      // of this bundle, and the fence degrades to its own source in a plain <pre>
+      // so it stays readable, selectable and findable. Math is deliberately kept,
+      // which is why `.katex` below still has to be there.
+      expect(await page.locator('div[class*="mermaidInline"]').count()).toBe(0);
+      expect(
+        await page.evaluate(() => globalThis.document.body.innerText),
+      ).toContain('graph TD; A[Export] --> B[Document]');
+      expect(await page.locator('.katex').count()).toBeGreaterThan(0);
+      // Keep a smoke-check for the stylesheet link, while the KaTeX font-family
+      // is the cascade oracle: that rule comes only from the split stylesheet.
+      const styled = await page.evaluate(() => {
+        const link = document.getElementById(
+          'transcript-stylesheet',
+        ) as HTMLLinkElement | null;
+        const katex = document.querySelector('.katex');
+        return {
+          sheetLoaded: link !== null && link.sheet !== null,
+          katexFontFamily: katex ? getComputedStyle(katex).fontFamily : '',
+        };
+      });
+      expect(styled.sheetLoaded).toBe(true);
+      expect(styled.katexFontFamily).toContain('KaTeX');
+      expect(
+        await page.locator('[data-agent-status]').count(),
+      ).toBeGreaterThanOrEqual(2);
+      const renderedItemCount = await page
+        .locator('[data-message-row-key]')
+        .count();
+      expect(renderedItemCount).toBeGreaterThan(0);
+      const interaction = await page.evaluate(() => {
+        const bodyText = globalThis.document.body.innerText;
+        const range = globalThis.document.createRange();
+        range.selectNodeContents(globalThis.document.body);
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        const copiedLength = selection?.toString().length ?? 0;
+        selection?.removeAllRanges();
+        const clippedByMaxHeight = Array.from(
+          globalThis.document.querySelectorAll<HTMLElement>('*'),
+        )
+          .filter((element) => {
+            const style = getComputedStyle(element);
+            return (
+              style.display !== 'none' &&
+              style.maxHeight !== 'none' &&
+              element.scrollHeight > element.clientHeight + 1
+            );
+          })
+          .map((element) => ({
+            tag: element.tagName.toLowerCase(),
+            className: element.className,
+            maxHeight: getComputedStyle(element).maxHeight,
+          }));
+        return {
+          firstFound: bodyText.includes('FIRST_SEARCH_NEEDLE'),
+          lastFound: bodyText.includes('LAST_SEARCH_NEEDLE'),
+          thinkingFound: bodyText.includes('DOCUMENT_THINKING_DETAIL'),
+          toolFound: bodyText.includes('DOCUMENT_TOOL_DETAIL'),
+          richFound: bodyText.includes('DOCUMENT_RICH_CONTENT'),
+          chartFallbackFound: bodyText.includes('DOCUMENT_CHART_FALLBACK'),
+          subagentResultFound: bodyText.includes('DOCUMENT_SUBAGENT_RESULT'),
+          subagentStreamFound: bodyText.includes('DOCUMENT_SUBAGENT_STREAM'),
+          nestedToolFound: bodyText.includes('DOCUMENT_NESTED_TOOL_DETAIL'),
+          parallelAgentFound: bodyText.includes(
+            'DOCUMENT_PARALLEL_AGENT_RESULT',
+          ),
+          userShellFound: bodyText.includes('DOCUMENT_USER_SHELL_DETAIL'),
+          diffFound: bodyText.includes('DOCUMENT_DIFF_DETAIL'),
+          copiedLength,
+          clippedByMaxHeight,
+        };
+      });
+      const pdf = await page.pdf({ printBackground: false });
+      const heapAfter = await page.evaluate(
+        () =>
+          (
+            globalThis.performance as Performance & {
+              memory?: { usedJSHeapSize: number };
+            }
+          ).memory?.usedJSHeapSize ?? 0,
+      );
+      const durationMs = nodePerformance.now() - startedAt;
 
-    expect(interaction).toMatchObject({
-      firstFound: true,
-      lastFound: true,
-      thinkingFound: true,
-      toolFound: true,
-      richFound: true,
-      chartFallbackFound: true,
-      subagentResultFound: true,
-      subagentStreamFound: true,
-      nestedToolFound: true,
-      parallelAgentFound: true,
-      userShellFound: true,
-      diffFound: true,
-      clippedByMaxHeight: [],
-    });
-    expect(interaction.copiedLength).toBeGreaterThan(7_000_000);
-    expect(pdf.byteLength).toBeGreaterThan(1_000);
-    expect(probe.unexpectedRequests).toHaveLength(
-      expectedNetwork.unexpectedRequests,
-    );
-    expect(probe.allowedScriptRequests).toEqual(
-      expect.arrayContaining([RENDERER_URL]),
-    );
-    expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
-      expectedNetwork.cspViolations,
-    );
-    expect(await page.locator('body').innerText()).not.toMatch(
-      /(?:1969-12-31|1970-01-01)/,
-    );
-    await expectConnectSrcCspEnforced(page);
-    expect(durationMs).toBeLessThan(MAX_DOCUMENT_DURATION_MS);
-    const heapDeltaBytes = Math.max(0, heapAfter - heapBefore);
-    expect(heapDeltaBytes).toBeLessThan(MAX_HEAP_DELTA_BYTES);
-    await page.close();
-    await browser.close();
-    browser = undefined;
-  }, 90_000);
+      expect(interaction).toMatchObject({
+        firstFound: true,
+        lastFound: true,
+        thinkingFound: true,
+        toolFound: true,
+        richFound: true,
+        chartFallbackFound: true,
+        subagentResultFound: true,
+        subagentStreamFound: true,
+        nestedToolFound: true,
+        parallelAgentFound: true,
+        userShellFound: true,
+        diffFound: true,
+        clippedByMaxHeight: [],
+      });
+      expect(interaction.copiedLength).toBeGreaterThan(7_000_000);
+      expect(pdf.byteLength).toBeGreaterThan(1_000);
+      expect(probe.unexpectedRequests).toHaveLength(
+        expectedNetwork.unexpectedRequests,
+      );
+      expect(probe.allowedScriptRequests).toEqual(
+        expect.arrayContaining([RENDERER_URL]),
+      );
+      expect(probe.allowedStyleRequests).toEqual(
+        expect.arrayContaining([RENDERER_CSS_URL]),
+      );
+      expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
+        expectedNetwork.cspViolations,
+      );
+      expect(await page.locator('body').innerText()).not.toMatch(
+        /(?:1969-12-31|1970-01-01)/,
+      );
+      await expectConnectSrcCspEnforced(page);
+      expect(durationMs).toBeLessThan(MAX_DOCUMENT_DURATION_MS);
+      const heapDeltaBytes = Math.max(0, heapAfter - heapBefore);
+      expect(heapDeltaBytes).toBeLessThan(MAX_HEAP_DELTA_BYTES);
+      await page.close();
+      await browser.close();
+      browser = undefined;
+    },
+    MAX_DOCUMENT_DURATION_MS + 30_000,
+  );
 
   it('renders a stable error page for incompatible document envelopes', async () => {
     const document = createExportTranscriptDocumentV1(
@@ -616,6 +666,7 @@ describe('ExportTranscriptDocument browser gate', () => {
         'Unable to open this chat export',
       );
       expect(probe.allowedScriptRequests).toEqual([RENDERER_URL]);
+      expect(probe.allowedStyleRequests).toEqual([RENDERER_CSS_URL]);
       expect(probe.unexpectedRequests).toHaveLength(
         expectedNetwork.unexpectedRequests,
       );
@@ -647,7 +698,14 @@ describe('ExportTranscriptDocument browser gate', () => {
     for (const rendererBody of [null, 'throw new Error("broken renderer");']) {
       const page = await browser.newPage();
       await page.route('**/*', async (route) => {
-        if (rendererBody && route.request().url() === RENDERER_URL) {
+        const url = route.request().url();
+        if (url === RENDERER_CSS_URL) {
+          await route.fulfill({
+            body: rendererCssAsset,
+            contentType: 'text/css',
+            headers: { 'access-control-allow-origin': '*' },
+          });
+        } else if (rendererBody && url === RENDERER_URL) {
           await route.fulfill({
             body: rendererBody,
             contentType: 'text/javascript',
@@ -664,10 +722,54 @@ describe('ExportTranscriptDocument browser gate', () => {
         .poll(() => page.locator('body').getAttribute('data-render-complete'))
         .toBe('error');
       expect(await page.getByRole('alert').textContent()).toContain(
-        'Unable to load this chat export',
+        'published renderer or stylesheet',
       );
       await page.close();
     }
+  });
+
+  it('fails closed when the CDN stylesheet is unavailable', async () => {
+    const document = createExportTranscriptDocumentV1(
+      [record('css-error', null, 'user', 'CSS error probe')],
+      {
+        startTime: '2026-08-16T00:00:00.000Z',
+        metadata: {
+          sessionId: 'css-error',
+          startTime: '2026-08-16T00:00:00.000Z',
+          exportTime: EXPORTED_AT,
+          cwd: '/workspace/project',
+          promptCount: 1,
+          uniqueFiles: [],
+        },
+      },
+      { rendererVersion: RENDERER_VERSION, exportedAt: EXPORTED_AT },
+    );
+
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    // The renderer loads, but the stylesheet request is refused — the document
+    // must fail closed exactly as it does when the renderer is missing.
+    await page.route('**/*', async (route) => {
+      if (route.request().url() === RENDERER_URL) {
+        await route.fulfill({
+          body: rendererAsset,
+          contentType: 'text/javascript',
+          headers: { 'access-control-allow-origin': '*' },
+        });
+      } else {
+        await route.abort('blockedbyclient');
+      }
+    });
+    await page.setContent(renderExportTranscriptDocumentToHtml(document), {
+      waitUntil: 'load',
+    });
+    await expect
+      .poll(() => page.locator('body').getAttribute('data-render-complete'))
+      .toBe('error');
+    expect(await page.getByRole('alert').textContent()).toContain(
+      'published renderer or stylesheet',
+    );
+    await page.close();
   });
 
   it('runs the real HTML export entry point with its pinned npm runtime', async () => {
@@ -740,6 +842,7 @@ describe('ExportTranscriptDocument browser gate', () => {
       expectedNetwork.unexpectedRequests,
     );
     expect(probe.allowedScriptRequests).toEqual([RENDERER_URL]);
+    expect(probe.allowedStyleRequests).toEqual([RENDERER_CSS_URL]);
     expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
       expectedNetwork.cspViolations,
     );

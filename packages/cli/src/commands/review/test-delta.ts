@@ -49,7 +49,7 @@ import {
 } from './build-test.js';
 import { refuseUnsandboxedPhase } from './lib/sandboxed-exec.js';
 import { failingFilesOf } from './lib/failing-files.js';
-import { TEST_COMMAND_RE } from './lib/npm-toolchain.js';
+import { foundNoTests, TEST_COMMAND_RE } from './lib/npm-toolchain.js';
 
 /**
  * The exact shapes `build-test` emits for a test command — and the only ones
@@ -68,7 +68,8 @@ import { TEST_COMMAND_RE } from './lib/npm-toolchain.js';
  * round-trips through the report into a shell.
  *
  * Restricting to the emitter's own grammar costs nothing real — `build-test`
- * produces `npm test` and `npm test --workspace="<dir>"`, both matched — and
+ * produces `npm test`, `npm test --workspace="<dir>"` and the related run
+ * (`npm exec … -- vitest related --run "<path>"…`), all matched — and
  * anything outside it is skipped and disclosed rather than run, which is
  * the same treatment every other thing this command cannot do gets.
  */
@@ -347,8 +348,19 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
     // here from a green base. Reading it as green promotes every PR-side
     // failure to netNew — the strongest evidence this command emits,
     // manufactured from a base that never ran a test.
+    // ...and so does a related run (`vitest related`) that found no test to
+    // run on base: it exits 0 ("No test files found", `passWithNoTests`), and
+    // read as green it would promote a failure the base selection merely
+    // left out to netNew. A green base that RAN tests keeps its zero — that
+    // is the measurement this command exists for.
+    const baseRanNothing =
+      base.exitCode === 0 &&
+      baseFailingFiles.length === 0 &&
+      foundNoTests(base.output);
     const baseUnusable =
-      base.timedOut || (base.exitCode !== 0 && baseFailingFiles.length === 0);
+      base.timedOut ||
+      baseRanNothing ||
+      (base.exitCode !== 0 && baseFailingFiles.length === 0);
     entries.push({
       command: t.command,
       prFailingFiles,
@@ -408,9 +420,10 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   if (unusable.length) {
     parts.push(
       `${unusable.length} command(s) could not be attributed — the base rerun ${unusable
-        .map(
-          (e) =>
-            `\`${e.command}\` failed (exit ${e.base.exitCode}) without naming a failing file, so it did not measure the base (an unbuilt tree, a missing install, a workspace absent at base)`,
+        .map((e) =>
+          e.base.exitCode === 0
+            ? `\`${e.command}\` found no test to run on base, so it measured nothing there`
+            : `\`${e.command}\` failed (exit ${e.base.exitCode}) without naming a failing file, so it did not measure the base (an unbuilt tree, a missing install, a workspace absent at base)`,
         )
         .join('; ')}; judge those failures by the diff as before`,
     );

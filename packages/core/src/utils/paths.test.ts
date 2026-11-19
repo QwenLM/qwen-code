@@ -34,18 +34,36 @@ import {
 } from './paths.js';
 import type { Config } from '../config/config.js';
 
-function createConfigStub({
-  targetDir,
-  allowedDirectories,
-}: {
-  targetDir: string;
-  allowedDirectories: string[];
-}): Config {
+const { sep } = path;
+const homeDir = os.homedir();
+
+// One test per row: [title, ...checks], where each check is [...args,
+// expected] and runs one toBe assertion, in order. The test is named by
+// substituting the row title for %s in `name`.
+function table<A extends unknown[]>(
+  name: string,
+  fn: (...args: A) => unknown,
+  rows: Array<[string, ...Array<[...A, unknown]>]>,
+) {
+  const named = rows.map(([title, ...checks]): (typeof rows)[number] => [
+    name.replace('%s', () => title),
+    ...checks,
+  ]);
+  it.each(named)('%s', (_title, ...checks) => {
+    for (const check of checks) {
+      expect(fn(...(check.slice(0, -1) as A))).toBe(check[check.length - 1]);
+    }
+  });
+}
+
+function createConfigStub(
+  targetDir: string,
+  allowedDirectories: string[],
+): Config {
   const resolvedTargetDir = path.resolve(targetDir);
   const resolvedDirectories = allowedDirectories.map((dir) =>
     path.resolve(dir),
   );
-
   const workspaceContext = {
     isPathWithinWorkspace(testPath: string) {
       const resolvedPath = path.resolve(testPath);
@@ -57,205 +75,191 @@ function createConfigStub({
         );
       });
     },
-    getDirectories() {
-      return resolvedDirectories;
-    },
+    getDirectories: () => resolvedDirectories,
   };
-
   return {
     getTargetDir: () => resolvedTargetDir,
     getWorkspaceContext: () => workspaceContext,
   } as unknown as Config;
 }
 
+// A temp workspace containing subdir/, which is the target and only allowed
+// directory of `config`.
+function useWorkspace(prefix: string) {
+  const ws = {
+    root: '',
+    config: {} as Config,
+    // Creates <root>/<name> for the duration of fn.
+    withFile(name: string, fn: (filePath: string) => void) {
+      const filePath = path.join(ws.root, name);
+      fs.writeFileSync(filePath, 'content');
+      try {
+        fn(filePath);
+      } finally {
+        fs.rmSync(filePath);
+      }
+    },
+    // Runs fn with an extra temp dir and a config that also allows it.
+    withExtraDir(dirPrefix: string, fn: (dir: string, config: Config) => void) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), dirPrefix));
+      try {
+        fn(dir, createConfigStub(ws.root, [ws.root, dir]));
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  };
+  beforeAll(() => {
+    ws.root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+    fs.mkdirSync(path.join(ws.root, 'subdir'));
+    ws.config = createConfigStub(ws.root, [ws.root]);
+  });
+  afterAll(() => {
+    fs.rmSync(ws.root, { recursive: true, force: true });
+  });
+  return ws;
+}
+
 describe('escapePath', () => {
-  it('should escape spaces', () => {
-    expect(escapePath('my file.txt')).toBe('my\\ file.txt');
-  });
-
-  it('should escape tabs', () => {
-    expect(escapePath('file\twith\ttabs.txt')).toBe('file\\\twith\\\ttabs.txt');
-  });
-
-  it('should escape parentheses', () => {
-    expect(escapePath('file(1).txt')).toBe('file\\(1\\).txt');
-  });
-
-  it('should escape square brackets', () => {
-    expect(escapePath('file[backup].txt')).toBe('file\\[backup\\].txt');
-  });
-
-  it('should escape curly braces', () => {
-    expect(escapePath('file{temp}.txt')).toBe('file\\{temp\\}.txt');
-  });
-
-  it('should escape semicolons', () => {
-    expect(escapePath('file;name.txt')).toBe('file\\;name.txt');
-  });
-
-  it('should escape ampersands', () => {
-    expect(escapePath('file&name.txt')).toBe('file\\&name.txt');
-  });
-
-  it('should escape pipes', () => {
-    expect(escapePath('file|name.txt')).toBe('file\\|name.txt');
-  });
-
-  it('should escape asterisks', () => {
-    expect(escapePath('file*.txt')).toBe('file\\*.txt');
-  });
-
-  it('should escape question marks', () => {
-    expect(escapePath('file?.txt')).toBe('file\\?.txt');
-  });
-
-  it('should escape dollar signs', () => {
-    expect(escapePath('file$name.txt')).toBe('file\\$name.txt');
-  });
-
-  it('should escape backticks', () => {
-    expect(escapePath('file`name.txt')).toBe('file\\`name.txt');
-  });
-
-  it('should escape single quotes', () => {
-    expect(escapePath("file'name.txt")).toBe("file\\'name.txt");
-  });
-
-  it('should escape double quotes', () => {
-    expect(escapePath('file"name.txt')).toBe('file\\"name.txt');
-  });
-
-  it('should escape hash symbols', () => {
-    expect(escapePath('file#name.txt')).toBe('file\\#name.txt');
-  });
-
-  it('should escape exclamation marks', () => {
-    expect(escapePath('file!name.txt')).toBe('file\\!name.txt');
-  });
-
-  it('should escape tildes', () => {
-    expect(escapePath('file~name.txt')).toBe('file\\~name.txt');
-  });
-
-  it('should escape less than and greater than signs', () => {
-    expect(escapePath('file<name>.txt')).toBe('file\\<name\\>.txt');
-  });
-
-  it('should handle multiple special characters', () => {
-    expect(escapePath('my file (backup) [v1.2].txt')).toBe(
-      'my\\ file\\ \\(backup\\)\\ \\[v1.2\\].txt',
-    );
-  });
-
-  it('should not double-escape already escaped characters', () => {
-    expect(escapePath('my\\ file.txt')).toBe('my\\ file.txt');
-    expect(escapePath('file\\(name\\).txt')).toBe('file\\(name\\).txt');
-  });
-
-  it('should handle escaped backslashes correctly', () => {
-    // Double backslash (escaped backslash) followed by space should escape the space
-    expect(escapePath('path\\\\ file.txt')).toBe('path\\\\\\ file.txt');
-    // Triple backslash (escaped backslash + escaping backslash) followed by space should not double-escape
-    expect(escapePath('path\\\\\\ file.txt')).toBe('path\\\\\\ file.txt');
-    // Quadruple backslash (two escaped backslashes) followed by space should escape the space
-    expect(escapePath('path\\\\\\\\ file.txt')).toBe('path\\\\\\\\\\ file.txt');
-  });
-
-  it('should handle complex escaped backslash scenarios', () => {
-    // Escaped backslash before special character that needs escaping
-    expect(escapePath('file\\\\(test).txt')).toBe('file\\\\\\(test\\).txt');
-    // Multiple escaped backslashes
-    expect(escapePath('path\\\\\\\\with space.txt')).toBe(
-      'path\\\\\\\\with\\ space.txt',
-    );
-  });
-
-  it('should handle paths without special characters', () => {
-    expect(escapePath('normalfile.txt')).toBe('normalfile.txt');
-    expect(escapePath('path/to/normalfile.txt')).toBe('path/to/normalfile.txt');
-  });
-
-  it('should handle complex real-world examples', () => {
-    expect(escapePath('My Documents/Project (2024)/file [backup].txt')).toBe(
-      'My\\ Documents/Project\\ \\(2024\\)/file\\ \\[backup\\].txt',
-    );
-    expect(escapePath('file with $special &chars!.txt')).toBe(
-      'file\\ with\\ \\$special\\ \\&chars\\!.txt',
-    );
-  });
-
-  it('should handle empty strings', () => {
-    expect(escapePath('')).toBe('');
-  });
-
-  it('should handle paths with only special characters', () => {
-    expect(escapePath(' ()[]{};&|*?$`\'"#!~<>,')).toBe(
-      '\\ \\(\\)\\[\\]\\{\\}\\;\\&\\|\\*\\?\\$\\`\\\'\\"\\#\\!\\~\\<\\>\\,',
-    );
-  });
+  table('should escape %s', escapePath, [
+    ['spaces', ['my file.txt', 'my\\ file.txt']],
+    ['tabs', ['file\twith\ttabs.txt', 'file\\\twith\\\ttabs.txt']],
+    ['parentheses', ['file(1).txt', 'file\\(1\\).txt']],
+    ['square brackets', ['file[backup].txt', 'file\\[backup\\].txt']],
+    ['curly braces', ['file{temp}.txt', 'file\\{temp\\}.txt']],
+    ['semicolons', ['file;name.txt', 'file\\;name.txt']],
+    ['ampersands', ['file&name.txt', 'file\\&name.txt']],
+    ['pipes', ['file|name.txt', 'file\\|name.txt']],
+    ['asterisks', ['file*.txt', 'file\\*.txt']],
+    ['question marks', ['file?.txt', 'file\\?.txt']],
+    ['dollar signs', ['file$name.txt', 'file\\$name.txt']],
+    ['backticks', ['file`name.txt', 'file\\`name.txt']],
+    ['single quotes', ["file'name.txt", "file\\'name.txt"]],
+    ['double quotes', ['file"name.txt', 'file\\"name.txt']],
+    ['hash symbols', ['file#name.txt', 'file\\#name.txt']],
+    ['exclamation marks', ['file!name.txt', 'file\\!name.txt']],
+    ['tildes', ['file~name.txt', 'file\\~name.txt']],
+    [
+      'less than and greater than signs',
+      ['file<name>.txt', 'file\\<name\\>.txt'],
+    ],
+  ]);
+  table('%s', escapePath, [
+    [
+      'should handle multiple special characters',
+      [
+        'my file (backup) [v1.2].txt',
+        'my\\ file\\ \\(backup\\)\\ \\[v1.2\\].txt',
+      ],
+    ],
+    [
+      'should not double-escape already escaped characters',
+      ['my\\ file.txt', 'my\\ file.txt'],
+      ['file\\(name\\).txt', 'file\\(name\\).txt'],
+    ],
+    [
+      'should handle escaped backslashes correctly',
+      // Double backslash (escaped backslash) + space: the space is escaped.
+      ['path\\\\ file.txt', 'path\\\\\\ file.txt'],
+      // Triple backslash (escaped backslash + escaping backslash) + space: not
+      // double-escaped.
+      ['path\\\\\\ file.txt', 'path\\\\\\ file.txt'],
+      // Quadruple backslash (two escaped backslashes) + space: space escaped.
+      ['path\\\\\\\\ file.txt', 'path\\\\\\\\\\ file.txt'],
+    ],
+    [
+      'should handle complex escaped backslash scenarios',
+      // Escaped backslash before a special character that needs escaping.
+      ['file\\\\(test).txt', 'file\\\\\\(test\\).txt'],
+      // Multiple escaped backslashes.
+      ['path\\\\\\\\with space.txt', 'path\\\\\\\\with\\ space.txt'],
+    ],
+    [
+      'should handle paths without special characters',
+      ['normalfile.txt', 'normalfile.txt'],
+      ['path/to/normalfile.txt', 'path/to/normalfile.txt'],
+    ],
+    [
+      'should handle complex real-world examples',
+      [
+        'My Documents/Project (2024)/file [backup].txt',
+        'My\\ Documents/Project\\ \\(2024\\)/file\\ \\[backup\\].txt',
+      ],
+      [
+        'file with $special &chars!.txt',
+        'file\\ with\\ \\$special\\ \\&chars\\!.txt',
+      ],
+    ],
+    ['should handle empty strings', ['', '']],
+    [
+      'should handle paths with only special characters',
+      [
+        ' ()[]{};&|*?$`\'"#!~<>,',
+        '\\ \\(\\)\\[\\]\\{\\}\\;\\&\\|\\*\\?\\$\\`\\\'\\"\\#\\!\\~\\<\\>\\,',
+      ],
+    ],
+  ]);
 });
 
 describe('unescapePath', () => {
   const isWindows = process.platform === 'win32';
 
-  // On Windows, backslashes are path separators, not shell escape chars.
+  // On Windows, backslashes are path separators, not shell escape chars, so
   // unescapePath is intentionally a no-op on win32.
   it.skipIf(!isWindows)('should be a no-op on Windows', () => {
-    expect(unescapePath('C:\\Users\\my file.txt')).toBe(
+    for (const p of [
       'C:\\Users\\my file.txt',
-    );
-    expect(unescapePath('C:\\(v2)\\file.txt')).toBe('C:\\(v2)\\file.txt');
-    expect(unescapePath('path\\to\\file\\ name.txt')).toBe(
+      'C:\\(v2)\\file.txt',
       'path\\to\\file\\ name.txt',
-    );
+    ]) {
+      expect(unescapePath(p)).toBe(p);
+    }
   });
 
   describe.skipIf(isWindows)('on Unix', () => {
-    it('should unescape spaces', () => {
-      expect(unescapePath('my\\ file.txt')).toBe('my file.txt');
-    });
-
-    it('should unescape tabs', () => {
-      expect(unescapePath('file\\\twith\\\ttabs.txt')).toBe(
-        'file\twith\ttabs.txt',
-      );
-    });
-
-    it('should unescape parentheses', () => {
-      expect(unescapePath('file\\(1\\).txt')).toBe('file(1).txt');
-    });
-
-    it('should unescape square brackets', () => {
-      expect(unescapePath('file\\[backup\\].txt')).toBe('file[backup].txt');
-    });
-
-    it('should unescape curly braces', () => {
-      expect(unescapePath('file\\{temp\\}.txt')).toBe('file{temp}.txt');
-    });
-
-    it('should unescape multiple special characters', () => {
-      expect(unescapePath('my\\ file\\ \\(backup\\)\\ \\[v1.2\\].txt')).toBe(
-        'my file (backup) [v1.2].txt',
-      );
-    });
-
-    it('should handle paths without escaped characters', () => {
-      expect(unescapePath('normalfile.txt')).toBe('normalfile.txt');
-      expect(unescapePath('path/to/normalfile.txt')).toBe(
-        'path/to/normalfile.txt',
-      );
-    });
-
-    it('should handle all special characters', () => {
-      expect(
-        unescapePath(
+    table('should unescape %s', unescapePath, [
+      ['spaces', ['my\\ file.txt', 'my file.txt']],
+      ['tabs', ['file\\\twith\\\ttabs.txt', 'file\twith\ttabs.txt']],
+      ['parentheses', ['file\\(1\\).txt', 'file(1).txt']],
+      ['square brackets', ['file\\[backup\\].txt', 'file[backup].txt']],
+      ['curly braces', ['file\\{temp\\}.txt', 'file{temp}.txt']],
+      [
+        'multiple special characters',
+        [
+          'my\\ file\\ \\(backup\\)\\ \\[v1.2\\].txt',
+          'my file (backup) [v1.2].txt',
+        ],
+      ],
+    ]);
+    table('%s', unescapePath, [
+      [
+        'should handle paths without escaped characters',
+        ['normalfile.txt', 'normalfile.txt'],
+        ['path/to/normalfile.txt', 'path/to/normalfile.txt'],
+      ],
+      [
+        'should handle all special characters',
+        [
           '\\ \\(\\)\\[\\]\\{\\}\\;\\&\\|\\*\\?\\$\\`\\\'\\"\\#\\!\\~\\<\\>',
-        ),
-      ).toBe(' ()[]{};&|*?$`\'"#!~<>');
-    });
+          ' ()[]{};&|*?$`\'"#!~<>',
+        ],
+      ],
+      ['should handle empty strings', ['', '']],
+      [
+        'should not affect backslashes not followed by special characters',
+        ['file\\name.txt', 'file\\name.txt'],
+        ['path\\to\\file.txt', 'path\\to\\file.txt'],
+      ],
+      [
+        'should handle escaped backslashes in unescaping',
+        ['path\\\\\\ file.txt', 'path\\\\ file.txt'],
+        ['path\\\\\\\\\\ file.txt', 'path\\\\\\\\ file.txt'],
+        ['file\\\\\\(test\\).txt', 'file\\\\(test).txt'],
+      ],
+    ]);
 
     it('should be the inverse of escapePath', () => {
-      const testCases = [
+      for (const testCase of [
         'my file.txt',
         'file(1).txt',
         'file[backup].txt',
@@ -263,285 +267,193 @@ describe('unescapePath', () => {
         'file with $special &chars!.txt',
         ' ()[]{};&|*?$`\'"#!~<>',
         'file\twith\ttabs.txt',
-      ];
-
-      testCases.forEach((testCase) => {
+      ]) {
         expect(unescapePath(escapePath(testCase))).toBe(testCase);
-      });
-    });
-
-    it('should handle empty strings', () => {
-      expect(unescapePath('')).toBe('');
-    });
-
-    it('should not affect backslashes not followed by special characters', () => {
-      expect(unescapePath('file\\name.txt')).toBe('file\\name.txt');
-      expect(unescapePath('path\\to\\file.txt')).toBe('path\\to\\file.txt');
-    });
-
-    it('should handle escaped backslashes in unescaping', () => {
-      // Should correctly unescape when there are escaped backslashes
-      expect(unescapePath('path\\\\\\ file.txt')).toBe('path\\\\ file.txt');
-      expect(unescapePath('path\\\\\\\\\\ file.txt')).toBe(
-        'path\\\\\\\\ file.txt',
-      );
-      expect(unescapePath('file\\\\\\(test\\).txt')).toBe('file\\\\(test).txt');
+      }
     });
   });
 });
 
 describe('isSubpath', () => {
-  it('should return true for a direct subpath', () => {
-    expect(isSubpath('/a/b', '/a/b/c')).toBe(true);
-  });
-
-  it('should return true for the same path', () => {
-    expect(isSubpath('/a/b', '/a/b')).toBe(true);
-  });
-
-  it('should return false for a parent path', () => {
-    expect(isSubpath('/a/b/c', '/a/b')).toBe(false);
-  });
-
-  it('should return false for a completely different path', () => {
-    expect(isSubpath('/a/b', '/x/y')).toBe(false);
-  });
-
-  it('should handle relative paths', () => {
-    expect(isSubpath('a/b', 'a/b/c')).toBe(true);
-    expect(isSubpath('a/b', 'a/c')).toBe(false);
-  });
-
-  it('should handle paths with ..', () => {
-    expect(isSubpath('/a/b', '/a/b/../b/c')).toBe(true);
-    expect(isSubpath('/a/b', '/a/c/../b')).toBe(true);
-  });
-
-  it('should handle root paths', () => {
-    expect(isSubpath('/', '/a')).toBe(true);
-    expect(isSubpath('/a', '/')).toBe(false);
-  });
-
-  it('should handle trailing slashes', () => {
-    expect(isSubpath('/a/b/', '/a/b/c')).toBe(true);
-    expect(isSubpath('/a/b', '/a/b/c/')).toBe(true);
-    expect(isSubpath('/a/b/', '/a/b/c/')).toBe(true);
-  });
+  table('%s', isSubpath, [
+    ['should return true for a direct subpath', ['/a/b', '/a/b/c', true]],
+    ['should return true for the same path', ['/a/b', '/a/b', true]],
+    ['should return false for a parent path', ['/a/b/c', '/a/b', false]],
+    [
+      'should return false for a completely different path',
+      ['/a/b', '/x/y', false],
+    ],
+    [
+      'should handle relative paths',
+      ['a/b', 'a/b/c', true],
+      ['a/b', 'a/c', false],
+    ],
+    [
+      'should handle paths with ..',
+      ['/a/b', '/a/b/../b/c', true],
+      ['/a/b', '/a/c/../b', true],
+    ],
+    ['should handle root paths', ['/', '/a', true], ['/a', '/', false]],
+    [
+      'should handle trailing slashes',
+      ['/a/b/', '/a/b/c', true],
+      ['/a/b', '/a/b/c/', true],
+      ['/a/b/', '/a/b/c/', true],
+    ],
+  ]);
 });
 
 describe('isSubpath on Windows', () => {
   const originalPlatform = process.platform;
+  const setPlatform = (value: string) => {
+    Object.defineProperty(process, 'platform', { value });
+  };
+  beforeAll(() => setPlatform('win32'));
+  afterAll(() => setPlatform(originalPlatform));
 
-  beforeAll(() => {
-    Object.defineProperty(process, 'platform', {
-      value: 'win32',
-    });
-  });
-
-  afterAll(() => {
-    Object.defineProperty(process, 'platform', {
-      value: originalPlatform,
-    });
-  });
-
-  it('should return true for a direct subpath on Windows', () => {
-    expect(isSubpath('C:\\Users\\Test', 'C:\\Users\\Test\\file.txt')).toBe(
-      true,
-    );
-  });
-
-  it('should return true for the same path on Windows', () => {
-    expect(isSubpath('C:\\Users\\Test', 'C:\\Users\\Test')).toBe(true);
-  });
-
-  it('should return false for a parent path on Windows', () => {
-    expect(isSubpath('C:\\Users\\Test\\file.txt', 'C:\\Users\\Test')).toBe(
-      false,
-    );
-  });
-
-  it('should return false for a different drive on Windows', () => {
-    expect(isSubpath('C:\\Users\\Test', 'D:\\Users\\Test')).toBe(false);
-  });
-
-  it('should be case-insensitive for drive letters on Windows', () => {
-    expect(isSubpath('c:\\Users\\Test', 'C:\\Users\\Test\\file.txt')).toBe(
-      true,
-    );
-  });
-
-  it('should be case-insensitive for path components on Windows', () => {
-    expect(isSubpath('C:\\Users\\Test', 'c:\\users\\test\\file.txt')).toBe(
-      true,
-    );
-  });
-
-  it('should handle mixed slashes on Windows', () => {
-    expect(isSubpath('C:/Users/Test', 'C:\\Users\\Test\\file.txt')).toBe(true);
-  });
-
-  it('should handle trailing slashes on Windows', () => {
-    expect(isSubpath('C:\\Users\\Test\\', 'C:\\Users\\Test\\file.txt')).toBe(
-      true,
-    );
-  });
-
-  it('should handle relative paths correctly on Windows', () => {
-    expect(isSubpath('Users\\Test', 'Users\\Test\\file.txt')).toBe(true);
-    expect(isSubpath('Users\\Test\\file.txt', 'Users\\Test')).toBe(false);
-  });
+  const dir = 'C:\\Users\\Test';
+  const file = 'C:\\Users\\Test\\file.txt';
+  table('%s on Windows', isSubpath, [
+    ['should return true for a direct subpath', [dir, file, true]],
+    ['should return true for the same path', [dir, dir, true]],
+    ['should return false for a parent path', [file, dir, false]],
+    [
+      'should return false for a different drive',
+      [dir, 'D:\\Users\\Test', false],
+    ],
+    [
+      'should be case-insensitive for drive letters',
+      ['c:\\Users\\Test', file, true],
+    ],
+    [
+      'should be case-insensitive for path components',
+      [dir, 'c:\\users\\test\\file.txt', true],
+    ],
+    ['should handle mixed slashes', ['C:/Users/Test', file, true]],
+    ['should handle trailing slashes', ['C:\\Users\\Test\\', file, true]],
+    [
+      'should handle relative paths correctly',
+      ['Users\\Test', 'Users\\Test\\file.txt', true],
+      ['Users\\Test\\file.txt', 'Users\\Test', false],
+    ],
+  ]);
 });
 
 describe('resolvePath', () => {
-  it('resolves relative paths against the provided base directory', () => {
-    const result = resolvePath('/home/user/project', 'src/main.ts');
-    expect(result).toBe(path.resolve('/home/user/project', 'src/main.ts'));
+  // Relative inputs resolve like path.resolve against the base (or cwd).
+  it.each([
+    [
+      'resolves relative paths against the provided base directory',
+      '/home/user/project',
+      'src/main.ts',
+    ],
+    [
+      'resolves relative paths against cwd when baseDir is undefined',
+      undefined,
+      'src/main.ts',
+    ],
+    [
+      'resolves empty paths against the provided base directory',
+      '/base/dir',
+      '',
+    ],
+    [
+      'uses baseDir when provided for relative paths',
+      '/custom/base',
+      './relative/path',
+    ],
+    ['handles dot paths correctly', '/base/dir', '.'],
+    ['handles parent directory references', '/base/dir/subdir', '..'],
+  ])('%s', (_title, base, rel) => {
+    expect(resolvePath(base, rel)).toBe(
+      path.resolve(base ?? process.cwd(), rel),
+    );
   });
 
-  it('resolves relative paths against cwd when baseDir is undefined', () => {
-    const cwd = process.cwd();
-    const result = resolvePath(undefined, 'src/main.ts');
-    expect(result).toBe(path.resolve(cwd, 'src/main.ts'));
-  });
-
-  it('resolves empty paths against the provided base directory', () => {
-    const result = resolvePath('/base/dir', '');
-    expect(result).toBe(path.resolve('/base/dir', ''));
-  });
-
-  it('returns absolute paths unchanged', () => {
-    const absolutePath = '/absolute/path/to/file.ts';
-    const result = resolvePath('/some/base', absolutePath);
-    expect(result).toBe(absolutePath);
-  });
-
-  it('expands tilde to home directory', () => {
-    const homeDir = os.homedir();
-    const result = resolvePath(undefined, '~');
-    expect(result).toBe(homeDir);
-  });
-
-  it('expands tilde-prefixed paths to home directory', () => {
-    const homeDir = os.homedir();
-    const result = resolvePath(undefined, '~/documents/file.txt');
-    expect(result).toBe(path.join(homeDir, 'documents/file.txt'));
-  });
-
-  it('expands Windows-style tilde-prefixed paths to home directory', () => {
-    const homeDir = os.homedir();
-    const result = resolvePath('/some/base', '~\\documents\\file.txt');
-    expect(result).toBe(path.join(homeDir, 'documents', 'file.txt'));
-  });
-
-  it('uses baseDir when provided for relative paths', () => {
-    const baseDir = '/custom/base';
-    const result = resolvePath(baseDir, './relative/path');
-    expect(result).toBe(path.resolve(baseDir, './relative/path'));
-  });
-
-  it('handles tilde expansion regardless of baseDir', () => {
-    const homeDir = os.homedir();
-    const result = resolvePath('/some/base', '~/file.txt');
-    expect(result).toBe(path.join(homeDir, 'file.txt'));
-  });
-
-  it('handles dot paths correctly', () => {
-    const result = resolvePath('/base/dir', '.');
-    expect(result).toBe(path.resolve('/base/dir', '.'));
-  });
-
-  it('handles parent directory references', () => {
-    const result = resolvePath('/base/dir/subdir', '..');
-    expect(result).toBe(path.resolve('/base/dir/subdir', '..'));
-  });
+  table('%s', resolvePath, [
+    [
+      'returns absolute paths unchanged',
+      ['/some/base', '/absolute/path/to/file.ts', '/absolute/path/to/file.ts'],
+    ],
+    ['expands tilde to home directory', [undefined, '~', homeDir]],
+    [
+      'expands tilde-prefixed paths to home directory',
+      [
+        undefined,
+        '~/documents/file.txt',
+        path.join(homeDir, 'documents/file.txt'),
+      ],
+    ],
+    [
+      'expands Windows-style tilde-prefixed paths to home directory',
+      [
+        '/some/base',
+        '~\\documents\\file.txt',
+        path.join(homeDir, 'documents', 'file.txt'),
+      ],
+    ],
+    [
+      'handles tilde expansion regardless of baseDir',
+      ['/some/base', '~/file.txt', path.join(homeDir, 'file.txt')],
+    ],
+  ]);
 });
 
 describe('validatePath', () => {
-  let workspaceRoot: string;
-  let config: Config;
-
-  beforeAll(() => {
-    workspaceRoot = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'validate-path-test-'),
-    );
-    fs.mkdirSync(path.join(workspaceRoot, 'subdir'));
-    config = createConfigStub({
-      targetDir: workspaceRoot,
-      allowedDirectories: [workspaceRoot],
-    });
-  });
+  const ws = useWorkspace('validate-path-test-');
+  const validate = (p: string, options?: { allowFiles?: boolean }) => () =>
+    validatePath(ws.config, p, options);
 
   beforeEach(() => {
-    // Module-level isDirectory cache persists across tests; tests here
-    // mutate the same absolute paths between cases (create file, remove,
-    // re-create as potentially-different type) so we reset to avoid stale
-    // lookups masking regressions.
+    // The module-level isDirectory cache persists across tests, and these
+    // cases mutate the same absolute paths (create, remove, re-create as a
+    // possibly different type), so reset it to keep stale lookups from
+    // masking regressions.
     _resetValidatePathCacheForTest();
   });
 
-  afterAll(() => {
-    fs.rmSync(workspaceRoot, { recursive: true, force: true });
-  });
-
   it('validates paths within workspace boundaries', () => {
-    const validPath = path.join(workspaceRoot, 'subdir');
-    expect(() => validatePath(config, validPath)).not.toThrow();
+    expect(validate(path.join(ws.root, 'subdir'))).not.toThrow();
   });
 
   it('throws when path is outside workspace boundaries', () => {
-    const outsidePath = path.join(os.tmpdir(), 'outside');
-    expect(() => validatePath(config, outsidePath)).toThrowError(
+    expect(validate(path.join(os.tmpdir(), 'outside'))).toThrowError(
       /Path is not within workspace/,
     );
   });
 
   it('throws when path does not exist', () => {
-    const nonExistentPath = path.join(workspaceRoot, 'nonexistent');
-    expect(() => validatePath(config, nonExistentPath)).toThrowError(
+    expect(validate(path.join(ws.root, 'nonexistent'))).toThrowError(
       /Path does not exist:/,
     );
   });
 
   it('throws when path is a file, not a directory (default behavior)', () => {
-    const filePath = path.join(workspaceRoot, 'test-file.txt');
-    fs.writeFileSync(filePath, 'content');
-    try {
-      expect(() => validatePath(config, filePath)).toThrowError(
-        /Path is not a directory/,
-      );
-    } finally {
-      fs.rmSync(filePath);
-    }
+    ws.withFile('test-file.txt', (filePath) => {
+      expect(validate(filePath)).toThrowError(/Path is not a directory/);
+    });
   });
 
   it('allows files when allowFiles option is true', () => {
-    const filePath = path.join(workspaceRoot, 'test-file.txt');
-    fs.writeFileSync(filePath, 'content');
-    try {
-      expect(() =>
-        validatePath(config, filePath, { allowFiles: true }),
-      ).not.toThrow();
-    } finally {
-      fs.rmSync(filePath);
-    }
+    ws.withFile('test-file.txt', (filePath) => {
+      expect(validate(filePath, { allowFiles: true })).not.toThrow();
+    });
   });
 
   it('validates paths at workspace root', () => {
-    expect(() => validatePath(config, workspaceRoot)).not.toThrow();
+    expect(validate(ws.root)).not.toThrow();
   });
 
   it('does not cache ENOENT — recreating the path between calls succeeds', () => {
-    // Regression guard: a path that's missing at first-check, then created,
-    // must NOT be rejected on the second call. Positive stats are cached;
-    // ENOENT paths are not. This lets the model create a file with Edit
-    // and then have the next tool call see it.
-    const ephemeralDir = path.join(workspaceRoot, 'late-created');
-    expect(() => validatePath(config, ephemeralDir)).toThrowError(
-      /Path does not exist:/,
-    );
+    // Regression guard: a path missing at the first check and then created
+    // must NOT be rejected on the second call. Positive stats are cached,
+    // ENOENT is not, so a file the model creates with Edit is visible to the
+    // next tool call.
+    const ephemeralDir = path.join(ws.root, 'late-created');
+    expect(validate(ephemeralDir)).toThrowError(/Path does not exist:/);
     fs.mkdirSync(ephemeralDir);
     try {
-      expect(() => validatePath(config, ephemeralDir)).not.toThrow();
+      expect(validate(ephemeralDir)).not.toThrow();
     } finally {
       fs.rmSync(ephemeralDir, { recursive: true, force: true });
     }
@@ -549,11 +461,11 @@ describe('validatePath', () => {
 
   it('caches positive isDirectory — repeat call does not re-stat', () => {
     const spy = vi.spyOn(fs, 'statSync');
-    const dir = path.join(workspaceRoot, 'subdir');
+    const dir = path.join(ws.root, 'subdir');
     try {
-      validatePath(config, dir);
+      validatePath(ws.config, dir);
       const afterFirst = spy.mock.calls.length;
-      validatePath(config, dir);
+      validatePath(ws.config, dir);
       expect(spy.mock.calls.length).toBe(afterFirst);
     } finally {
       spy.mockRestore();
@@ -561,214 +473,146 @@ describe('validatePath', () => {
   });
 
   it('validates paths in allowed directories', () => {
-    const extraDir = fs.mkdtempSync(path.join(os.tmpdir(), 'validate-extra-'));
-    try {
-      const configWithExtra = createConfigStub({
-        targetDir: workspaceRoot,
-        allowedDirectories: [workspaceRoot, extraDir],
-      });
-      expect(() => validatePath(configWithExtra, extraDir)).not.toThrow();
-    } finally {
-      fs.rmSync(extraDir, { recursive: true, force: true });
-    }
+    ws.withExtraDir('validate-extra-', (extraDir, config) => {
+      expect(() => validatePath(config, extraDir)).not.toThrow();
+    });
   });
 });
 
 describe('resolveAndValidatePath', () => {
-  let workspaceRoot: string;
-  let config: Config;
-
-  beforeAll(() => {
-    workspaceRoot = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'resolve-and-validate-'),
-    );
-    fs.mkdirSync(path.join(workspaceRoot, 'subdir'));
-    config = createConfigStub({
-      targetDir: workspaceRoot,
-      allowedDirectories: [workspaceRoot],
-    });
-  });
-
-  afterAll(() => {
-    fs.rmSync(workspaceRoot, { recursive: true, force: true });
-  });
+  const ws = useWorkspace('resolve-and-validate-');
+  const resolveIn = (p: string) => () => resolveAndValidatePath(ws.config, p);
 
   it('returns the target directory when no path is provided', () => {
-    expect(resolveAndValidatePath(config)).toBe(workspaceRoot);
+    expect(resolveAndValidatePath(ws.config)).toBe(ws.root);
   });
 
   it('resolves relative paths within the workspace', () => {
-    const expected = path.join(workspaceRoot, 'subdir');
-    expect(resolveAndValidatePath(config, 'subdir')).toBe(expected);
+    expect(resolveAndValidatePath(ws.config, 'subdir')).toBe(
+      path.join(ws.root, 'subdir'),
+    );
   });
 
   it('allows absolute paths that are permitted by the workspace context', () => {
-    const extraDir = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'resolve-and-validate-extra-'),
-    );
-    try {
-      const configWithExtra = createConfigStub({
-        targetDir: workspaceRoot,
-        allowedDirectories: [workspaceRoot, extraDir],
-      });
-      expect(resolveAndValidatePath(configWithExtra, extraDir)).toBe(extraDir);
-    } finally {
-      fs.rmSync(extraDir, { recursive: true, force: true });
-    }
+    ws.withExtraDir('resolve-and-validate-extra-', (extraDir, config) => {
+      expect(resolveAndValidatePath(config, extraDir)).toBe(extraDir);
+    });
   });
 
   it('expands tilde-prefixed paths using the home directory', () => {
-    const fakeHome = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'resolve-and-validate-home-'),
-    );
-    const homeSubdir = path.join(fakeHome, 'project');
-    fs.mkdirSync(homeSubdir);
-
-    const homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
-    try {
-      const configWithHome = createConfigStub({
-        targetDir: workspaceRoot,
-        allowedDirectories: [workspaceRoot, fakeHome],
-      });
-      expect(resolveAndValidatePath(configWithHome, '~/project')).toBe(
-        homeSubdir,
-      );
-      expect(resolveAndValidatePath(configWithHome, '~\\project')).toBe(
-        homeSubdir,
-      );
-      expect(resolveAndValidatePath(configWithHome, '~')).toBe(fakeHome);
-    } finally {
-      homedirSpy.mockRestore();
-      fs.rmSync(fakeHome, { recursive: true, force: true });
-    }
+    ws.withExtraDir('resolve-and-validate-home-', (fakeHome, config) => {
+      const homeSubdir = path.join(fakeHome, 'project');
+      fs.mkdirSync(homeSubdir);
+      const homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
+      try {
+        expect(resolveAndValidatePath(config, '~/project')).toBe(homeSubdir);
+        expect(resolveAndValidatePath(config, '~\\project')).toBe(homeSubdir);
+        expect(resolveAndValidatePath(config, '~')).toBe(fakeHome);
+      } finally {
+        homedirSpy.mockRestore();
+      }
+    });
   });
 
   it('throws when the path resolves outside of the workspace', () => {
-    expect(() => resolveAndValidatePath(config, '../outside')).toThrowError(
+    expect(resolveIn('../outside')).toThrowError(
       /Path is not within workspace/,
     );
   });
 
   it('throws when the path does not exist', () => {
-    expect(() => resolveAndValidatePath(config, 'missing')).toThrowError(
-      /Path does not exist:/,
-    );
+    expect(resolveIn('missing')).toThrowError(/Path does not exist:/);
   });
 
   it('throws when the path points to a file (default behavior)', () => {
-    const filePath = path.join(workspaceRoot, 'file.txt');
-    fs.writeFileSync(filePath, 'content');
-    try {
-      expect(() => resolveAndValidatePath(config, 'file.txt')).toThrowError(
+    ws.withFile('file.txt', (filePath) => {
+      expect(resolveIn('file.txt')).toThrowError(
         `Path is not a directory: ${filePath}`,
       );
-    } finally {
-      fs.rmSync(filePath);
-    }
+    });
   });
 
   it('allows file paths when allowFiles option is true', () => {
-    const filePath = path.join(workspaceRoot, 'file.txt');
-    fs.writeFileSync(filePath, 'content');
-    try {
-      const result = resolveAndValidatePath(config, 'file.txt', {
-        allowFiles: true,
-      });
-      expect(result).toBe(filePath);
-    } finally {
-      fs.rmSync(filePath);
-    }
+    ws.withFile('file.txt', (filePath) => {
+      expect(
+        resolveAndValidatePath(ws.config, 'file.txt', { allowFiles: true }),
+      ).toBe(filePath);
+    });
   });
 });
 
 describe('tildeifyPath', () => {
-  it('replaces home directory with tilde', () => {
-    const homeDir = os.homedir();
-    const result = tildeifyPath(path.join(homeDir, 'documents', 'file.txt'));
-    expect(result).toBe(`~${path.sep}documents${path.sep}file.txt`);
-  });
-
-  it('returns path unchanged if it does not start with home directory', () => {
-    const result = tildeifyPath('/var/log/app.log');
-    expect(result).toBe('/var/log/app.log');
-  });
-
-  it('handles exact home directory path', () => {
-    const homeDir = os.homedir();
-    const result = tildeifyPath(homeDir);
-    expect(result).toBe('~');
-  });
-
-  it('does not replace paths that only share the home directory prefix', () => {
-    const homeDir = os.homedir();
-    const siblingPath = `${homeDir}2${path.sep}project${path.sep}file.txt`;
-    const result = tildeifyPath(siblingPath);
-    expect(result).toBe(siblingPath);
-  });
-
-  it('handles paths with home directory in the middle', () => {
-    const homeDir = os.homedir();
-    const result = tildeifyPath(`/mnt/backup${homeDir}/data`);
-    // Should not replace home dir in the middle
-    expect(result).toBe(`/mnt/backup${homeDir}/data`);
-  });
+  const siblingPath = `${homeDir}2${sep}project${sep}file.txt`;
+  const tildeify = (p: string) => tildeifyPath(p);
+  table('%s', tildeify, [
+    [
+      'replaces home directory with tilde',
+      [
+        path.join(homeDir, 'documents', 'file.txt'),
+        `~${sep}documents${sep}file.txt`,
+      ],
+    ],
+    [
+      'returns path unchanged if it does not start with home directory',
+      ['/var/log/app.log', '/var/log/app.log'],
+    ],
+    ['handles exact home directory path', [homeDir, '~']],
+    [
+      'does not replace paths that only share the home directory prefix',
+      [siblingPath, siblingPath],
+    ],
+    [
+      // The home dir is not replaced in the middle of a path.
+      'handles paths with home directory in the middle',
+      [`/mnt/backup${homeDir}/data`, `/mnt/backup${homeDir}/data`],
+    ],
+  ]);
 });
 
 describe('formatDisplayPath', () => {
-  const root = path.resolve(path.sep, 'projects', 'my-app');
+  const root = path.resolve(sep, 'projects', 'my-app');
+  const homeRoot = path.join(homeDir, 'work', 'proj');
+  const outside = path.resolve(sep, 'other', 'place', 'file.txt');
 
-  it('renders project-internal paths relative to the root', () => {
-    const target = path.join(root, 'src', 'index.ts');
-    expect(formatDisplayPath(target, root)).toBe(path.join('src', 'index.ts'));
-  });
-
-  it('renders the project root itself as .', () => {
-    expect(formatDisplayPath(root, root)).toBe('.');
-  });
-
-  it('resolves relative input against the root before formatting', () => {
-    expect(formatDisplayPath(path.join('src', 'app'), root)).toBe(
-      path.join('src', 'app'),
-    );
-    expect(formatDisplayPath('.', root)).toBe('.');
-  });
-
-  it('keeps paths outside the project absolute', () => {
-    const outside = path.resolve(path.sep, 'other', 'place', 'file.txt');
-    expect(formatDisplayPath(outside, root)).toBe(outside);
-  });
-
-  it('shortens the home directory to ~ for paths outside the project', () => {
-    const homeDir = os.homedir();
-    const target = path.join(homeDir, 'elsewhere', 'file.txt');
-    expect(formatDisplayPath(target, root)).toBe(
-      `~${path.sep}elsewhere${path.sep}file.txt`,
-    );
-  });
-
-  it('does not tildeify project-internal paths when the project is under home', () => {
-    const homeRoot = path.join(os.homedir(), 'work', 'proj');
-    const target = path.join(homeRoot, 'src', 'main.ts');
-    expect(formatDisplayPath(target, homeRoot)).toBe(
-      path.join('src', 'main.ts'),
-    );
-  });
-
-  it('expands a tilde-prefixed input like other tool paths', () => {
-    expect(formatDisplayPath(path.join('~', 'data'), root)).toBe(
-      `~${path.sep}data`,
-    );
-  });
+  const format = (target: string, r: string) => formatDisplayPath(target, r);
+  table('%s', format, [
+    [
+      'renders project-internal paths relative to the root',
+      [path.join(root, 'src', 'index.ts'), root, path.join('src', 'index.ts')],
+    ],
+    ['renders the project root itself as .', [root, root, '.']],
+    [
+      'resolves relative input against the root before formatting',
+      [path.join('src', 'app'), root, path.join('src', 'app')],
+      ['.', root, '.'],
+    ],
+    ['keeps paths outside the project absolute', [outside, root, outside]],
+    [
+      'shortens the home directory to ~ for paths outside the project',
+      [
+        path.join(homeDir, 'elsewhere', 'file.txt'),
+        root,
+        `~${sep}elsewhere${sep}file.txt`,
+      ],
+    ],
+    [
+      'does not tildeify project-internal paths when the project is under home',
+      [
+        path.join(homeRoot, 'src', 'main.ts'),
+        homeRoot,
+        path.join('src', 'main.ts'),
+      ],
+    ],
+    [
+      'expands a tilde-prefixed input like other tool paths',
+      [path.join('~', 'data'), root, `~${sep}data`],
+    ],
+  ]);
 
   it('compresses overlong paths with shortenPath semantics', () => {
     const target = path.join(
       root,
-      'very',
-      'deeply',
-      'nested',
-      'directory',
-      'structure',
-      'file.ts',
+      'very/deeply/nested/directory/structure/file.ts',
     );
     const result = formatDisplayPath(target, root, 25);
     expect(result.length).toBeLessThanOrEqual(25);
@@ -777,96 +621,84 @@ describe('formatDisplayPath', () => {
   });
 });
 
-describe('realpathNearestExisting', () => {
-  let root: string;
+const itPosix = it.skipIf(process.platform === 'win32');
 
+// A temp root holding real/file.txt. The base itself is realpath'd so
+// assertions do not trip over macOS's /var -> /private/var symlink.
+function useRealRoot(prefix: string) {
+  let root = '';
   beforeAll(() => {
-    // realpathSync the base itself so assertions do not trip over macOS's
-    // /var -> /private/var symlink.
-    root = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'realpath-nearest-')),
-    );
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
     fs.mkdirSync(path.join(root, 'real'), { recursive: true });
     fs.writeFileSync(path.join(root, 'real', 'file.txt'), 'x', 'utf8');
   });
-
   afterAll(() => {
     fs.rmSync(root, { recursive: true, force: true });
   });
+  const at = (...segments: string[]) => path.join(root, ...segments);
+  return {
+    at,
+    real: (...segments: string[]) => at('real', ...segments),
+    // Creates <root>/<name> as a symlink to target and returns its path.
+    link(name: string, target: string, type?: 'dir') {
+      fs.symlinkSync(target, at(name), type);
+      return at(name);
+    },
+  };
+}
 
-  it('returns an existing path canonicalized', () => {
-    const target = path.join(root, 'real', 'file.txt');
-    expect(realpathNearestExisting(target)).toBe(target);
+const absent = path.resolve(sep, 'no', 'such', 'ancestor', 'x');
+
+describe('realpathNearestExisting', () => {
+  const { at, real, link } = useRealRoot('realpath-nearest-');
+
+  it.each([
+    ['returns an existing path canonicalized', () => real('file.txt')],
+    [
+      'appends segments that do not exist yet to the resolved prefix',
+      () => real('a', 'b.txt'),
+    ],
+    ['returns the lexical path when no ancestor can be resolved', () => absent],
+  ])('%s', (_title, target) => {
+    expect(realpathNearestExisting(target())).toBe(target());
   });
 
-  it('appends segments that do not exist yet to the resolved prefix', () => {
-    expect(realpathNearestExisting(path.join(root, 'real', 'a', 'b.txt'))).toBe(
-      path.join(root, 'real', 'a', 'b.txt'),
+  itPosix('follows a symlink to its target', () => {
+    const l = link('link-to-file', real('file.txt'));
+    expect(realpathNearestExisting(l)).toBe(real('file.txt'));
+  });
+
+  itPosix('follows a dangling symlink to its non-existent target', () => {
+    // fs.existsSync() follows links and reports a dangling one as missing,
+    // so a naive nearest-existing walk would classify this by where the
+    // link sits rather than where it points.
+    const l = link('dangling', real('absent.txt'));
+    expect(realpathNearestExisting(l)).toBe(real('absent.txt'));
+  });
+
+  itPosix('resolves an intermediate directory symlink', () => {
+    const dirLink = link('dirlink', real(), 'dir');
+    expect(realpathNearestExisting(path.join(dirLink, 'file.txt'))).toBe(
+      real('file.txt'),
+    );
+    expect(realpathNearestExisting(path.join(dirLink, 'absent.txt'))).toBe(
+      real('absent.txt'),
     );
   });
 
-  it('returns the lexical path when no ancestor can be resolved', () => {
-    const absent = path.resolve(path.sep, 'no', 'such', 'ancestor', 'x');
-    expect(realpathNearestExisting(absent)).toBe(absent);
-  });
-
-  it.skipIf(process.platform === 'win32')(
-    'follows a symlink to its target',
-    () => {
-      const link = path.join(root, 'link-to-file');
-      fs.symlinkSync(path.join(root, 'real', 'file.txt'), link);
-      expect(realpathNearestExisting(link)).toBe(
-        path.join(root, 'real', 'file.txt'),
-      );
-    },
-  );
-
-  it.skipIf(process.platform === 'win32')(
-    'follows a dangling symlink to its non-existent target',
-    () => {
-      // fs.existsSync() follows links and reports a dangling one as missing,
-      // so a naive nearest-existing walk would classify this by where the
-      // link sits rather than where it points.
-      const link = path.join(root, 'dangling');
-      fs.symlinkSync(path.join(root, 'real', 'absent.txt'), link);
-      expect(realpathNearestExisting(link)).toBe(
-        path.join(root, 'real', 'absent.txt'),
-      );
-    },
-  );
-
-  it.skipIf(process.platform === 'win32')(
-    'resolves an intermediate directory symlink',
-    () => {
-      const dirLink = path.join(root, 'dirlink');
-      fs.symlinkSync(path.join(root, 'real'), dirLink, 'dir');
-      expect(realpathNearestExisting(path.join(dirLink, 'file.txt'))).toBe(
-        path.join(root, 'real', 'file.txt'),
-      );
-      expect(realpathNearestExisting(path.join(dirLink, 'absent.txt'))).toBe(
-        path.join(root, 'real', 'absent.txt'),
-      );
-    },
-  );
-
-  it.skipIf(process.platform === 'win32')(
+  itPosix(
     'resolves a relative symlink target against the real parent of the link',
     () => {
-      const link = path.join(root, 'real', 'rel-link');
-      fs.symlinkSync('file.txt', link);
-      expect(realpathNearestExisting(link)).toBe(
-        path.join(root, 'real', 'file.txt'),
-      );
+      const l = link(path.join('real', 'rel-link'), 'file.txt');
+      expect(realpathNearestExisting(l)).toBe(real('file.txt'));
     },
   );
 
-  it.skipIf(process.platform === 'win32')(
+  itPosix(
     'gives up safely on a symlink cycle instead of looping forever',
     () => {
-      const a = path.join(root, 'cycle-a');
-      const b = path.join(root, 'cycle-b');
-      fs.symlinkSync(b, a);
-      fs.symlinkSync(a, b);
+      const a = link('cycle-a', at('cycle-b'));
+      link('cycle-b', a);
       // Bounded by SYMLOOP_MAX hops; the caller still range-checks the result.
       expect(() => realpathNearestExisting(a)).not.toThrow();
     },
@@ -874,101 +706,94 @@ describe('realpathNearestExisting', () => {
 });
 
 describe('realpathNearestExistingAsync', () => {
-  let root: string;
-
-  beforeAll(() => {
-    root = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'realpath-nearest-async-')),
-    );
-    fs.mkdirSync(path.join(root, 'real'), { recursive: true });
-    fs.writeFileSync(path.join(root, 'real', 'file.txt'), 'x', 'utf8');
-  });
-
-  afterAll(() => {
-    fs.rmSync(root, { recursive: true, force: true });
-  });
+  const { real, link } = useRealRoot('realpath-nearest-async-');
 
   it('matches the sync variant across the canonicalization cases', async () => {
-    const cases = [
-      path.join(root, 'real', 'file.txt'),
-      path.join(root, 'real', 'a', 'b.txt'),
-      path.resolve(path.sep, 'no', 'such', 'ancestor', 'x'),
-    ];
-    for (const target of cases) {
+    for (const target of [real('file.txt'), real('a', 'b.txt'), absent]) {
       await expect(realpathNearestExistingAsync(target)).resolves.toBe(
         realpathNearestExisting(target),
       );
     }
   });
 
-  it.skipIf(process.platform === 'win32')(
-    'follows a dangling symlink to its non-existent target',
-    async () => {
-      const link = path.join(root, 'dangling-async');
-      fs.symlinkSync(path.join(root, 'real', 'absent.txt'), link);
-      await expect(realpathNearestExistingAsync(link)).resolves.toBe(
-        path.join(root, 'real', 'absent.txt'),
-      );
-    },
-  );
+  itPosix('follows a dangling symlink to its non-existent target', async () => {
+    const l = link('dangling-async', real('absent.txt'));
+    await expect(realpathNearestExistingAsync(l)).resolves.toBe(
+      real('absent.txt'),
+    );
+  });
 });
 
 describe('shortenPath', () => {
-  const sep = path.sep;
   const sepForRegex = sep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // abs('a/b') is `${sep}a${sep}b`.
+  const abs = (p: string) => sep + p.split('/').join(sep);
 
-  it('returns path unchanged if it is already short enough', () => {
-    expect(shortenPath('/short/path', 50)).toBe('/short/path');
-    expect(shortenPath('/a/b/c.txt', 100)).toBe('/a/b/c.txt');
-  });
+  const shorten = (p: string, maxLen: number) => shortenPath(p, maxLen);
+  table('%s', shorten, [
+    [
+      'returns path unchanged if it is already short enough',
+      ['/short/path', 50, '/short/path'],
+      ['/a/b/c.txt', 100, '/a/b/c.txt'],
+    ],
+    [
+      'returns path unchanged if length equals maxLen',
+      ['/exact/length', '/exact/length'.length, '/exact/length'],
+    ],
+    ['handles paths with only root', ['/', 10, '/'], ['/', 1, '/']],
+  ]);
 
-  it('returns path unchanged if length equals maxLen', () => {
-    const testPath = '/exact/length';
-    expect(shortenPath(testPath, testPath.length)).toBe(testPath);
-  });
-
-  it('shortens long paths by showing start and end with ellipsis in between', () => {
-    const longPath = `${sep}home${sep}user${sep}projects${sep}qwen-code${sep}packages${sep}core${sep}src${sep}file.ts`;
-    const result = shortenPath(longPath, 40);
-
-    // Should include root + first segment and ellipsis
-    expect(result).toContain(`${sep}home${sep}...${sep}`);
-    // Should end with file.ts
-    expect(result).toContain('file.ts');
-    // Should be within maxLen
-    expect(result.length).toBeLessThanOrEqual(40);
-  });
-
-  it('includes as many end segments as possible', () => {
-    const testPath = `${sep}home${sep}user${sep}workspace${sep}projects${sep}subdir${sep}file.txt`;
-    const result = shortenPath(testPath, 35);
-
-    // Should have: /home/.../subdir/file.txt (fitting as many end segments as possible)
-    expect(result).toContain('...');
-    expect(result).toContain('file.txt');
-    expect(result.length).toBeLessThanOrEqual(35);
+  // Each row is shortened to fit maxLen and contains every listed part.
+  it.each<[string, string, number, ...string[]]>([
+    [
+      'shortens long paths by showing start and end with ellipsis in between',
+      abs('home/user/projects/qwen-code/packages/core/src/file.ts'),
+      40,
+      // root + first segment, then the ellipsis; ends with file.ts
+      `${sep}home${sep}...${sep}`,
+      'file.ts',
+    ],
+    [
+      // e.g. /home/.../subdir/file.txt, fitting as many end segments as possible
+      'includes as many end segments as possible',
+      abs('home/user/workspace/projects/subdir/file.txt'),
+      35,
+      '...',
+      'file.txt',
+    ],
+    [
+      'handles paths with single segment after root',
+      '/verylongfilenamethatshouldbetruncated.txt',
+      20,
+      '...',
+    ],
+    ['handles paths with two segments', abs('home/file.txt'), 10, '...'],
+    [
+      // shortenPath works with any string, though it usually gets absolute paths.
+      'handles relative-looking paths correctly',
+      'very/long/relative/path/to/file.txt',
+      20,
+      '...',
+    ],
+    [
+      // Falls back to simple truncation.
+      'handles paths where even minimum representation is too long',
+      '/verylongdirectoryname/verylongfilename.txt',
+      15,
+      '...',
+    ],
+  ])('%s', (_title, p, maxLen, ...parts) => {
+    const result = shortenPath(p, maxLen);
+    for (const part of parts) expect(result).toContain(part);
+    expect(result.length).toBeLessThanOrEqual(maxLen);
   });
 
   it('shows all segments when they all fit after including ellipsis space', () => {
-    const testPath = `${sep}a${sep}b${sep}c${sep}d.txt`;
-    // This path is short, should not need ellipsis
+    // Short enough to need no ellipsis.
+    const testPath = abs('a/b/c/d.txt');
     const result = shortenPath(testPath, 50);
     expect(result).toBe(testPath);
     expect(result).not.toContain('...');
-  });
-
-  it('handles paths with single segment after root', () => {
-    const result = shortenPath(
-      '/verylongfilenamethatshouldbetruncated.txt',
-      20,
-    );
-    expect(result).toContain('...');
-    expect(result.length).toBeLessThanOrEqual(20);
-  });
-
-  it('handles paths with only root', () => {
-    expect(shortenPath('/', 10)).toBe('/');
-    expect(shortenPath('/', 1)).toBe('/');
   });
 
   it('handles very short maxLen values', () => {
@@ -977,56 +802,29 @@ describe('shortenPath', () => {
     expect(result.length).toBe(5);
   });
 
-  it('handles paths with two segments', () => {
-    const testPath = `${sep}home${sep}file.txt`;
-    const result = shortenPath(testPath, 10);
-
-    expect(result).toContain('...');
-    expect(result.length).toBeLessThanOrEqual(10);
-  });
-
   it('preserves the root directory in shortened paths', () => {
-    const result = shortenPath(`${sep}a${sep}b${sep}c${sep}d${sep}e.txt`, 15);
+    const result = shortenPath(abs('a/b/c/d/e.txt'), 15);
     expect(result.startsWith(sep)).toBe(true);
   });
 
-  it('handles relative-looking paths correctly', () => {
-    // Note: shortenPath works with any string, but typically gets absolute paths
-    const result = shortenPath('very/long/relative/path/to/file.txt', 20);
-    expect(result).toContain('...');
-    expect(result.length).toBeLessThanOrEqual(20);
-  });
-
   it('creates ellipsis only when segments are actually omitted', () => {
-    const shortPath = `${sep}a${sep}b${sep}c.txt`;
-    const result1 = shortenPath(shortPath, 100);
-    expect(result1).not.toContain('...');
-
-    const result2 = shortenPath(shortPath, 8);
-    expect(result2).toContain('...');
+    const shortPath = abs('a/b/c.txt');
+    expect(shortenPath(shortPath, 100)).not.toContain('...');
+    expect(shortenPath(shortPath, 8)).toContain('...');
   });
 
   it('uses default maxLen of 80 when not specified', () => {
-    const longPath = Array(100).fill('a').join('');
-    const result = shortenPath(longPath);
-    expect(result.length).toBeLessThanOrEqual(80);
-  });
-
-  it('handles paths where even minimum representation is too long', () => {
-    const path1 = '/verylongdirectoryname/verylongfilename.txt';
-    const result = shortenPath(path1, 15);
-    // Should use simple truncation fallback
-    expect(result).toContain('...');
-    expect(result.length).toBeLessThanOrEqual(15);
+    expect(shortenPath('a'.repeat(100)).length).toBeLessThanOrEqual(80);
   });
 
   it('correctly calculates length including ellipsis', () => {
-    const testPath = `${sep}home${sep}user${sep}workspace${sep}project${sep}src${sep}components${sep}app.tsx`;
     const maxLen = 40;
-    const result = shortenPath(testPath, maxLen);
-
+    const result = shortenPath(
+      abs('home/user/workspace/project/src/components/app.tsx'),
+      maxLen,
+    );
     expect(result.length).toBeLessThanOrEqual(maxLen);
-    // If ellipsis is present, verify proper structure
+    // With an ellipsis, the result is exactly two parts around it.
     if (result.includes('...')) {
       const parts = result.split('...');
       expect(parts.length).toBe(2);
@@ -1035,23 +833,17 @@ describe('shortenPath', () => {
   });
 
   it('maintains path separator consistency', () => {
-    const testPath = `${sep}a${sep}b${sep}c${sep}d${sep}e${sep}f.txt`;
-    const result = shortenPath(testPath, 20);
-
-    // All separators should be consistent
-    const separators = result.match(new RegExp(`\\${sep}`, 'g'));
-    if (separators) {
-      separators.forEach((s) => {
-        expect(s).toBe(sep);
-      });
+    const result = shortenPath(abs('a/b/c/d/e/f.txt'), 20);
+    // Every separator is the platform one.
+    for (const s of result.match(new RegExp(`\\${sep}`, 'g')) ?? []) {
+      expect(s).toBe(sep);
     }
   });
 
   it('example from documentation: /path/to/a/very/long/file.txt', () => {
-    const testPath = `${sep}path${sep}to${sep}a${sep}very${sep}long${sep}directory${sep}file.txt`;
+    const testPath = abs('path/to/a/very/long/directory/file.txt');
     const result = shortenPath(testPath, 35);
-
-    // Should show start and end with ellipsis
+    // Start and end with an ellipsis between.
     expect(result).toMatch(
       new RegExp(`^${sepForRegex}path${sepForRegex}\\.\\.\\..+file\\.txt$`),
     );
@@ -1060,168 +852,124 @@ describe('shortenPath', () => {
 });
 
 describe('getProjectHash', () => {
-  it('should generate consistent hashes for the same path', () => {
-    const projectRoot = '/test/project';
-    const hash1 = getProjectHash(projectRoot);
-    const hash2 = getProjectHash(projectRoot);
+  // Runs fn while os.platform() reports the given platform.
+  function onPlatform(platform: NodeJS.Platform, fn: () => void) {
+    const platformSpy = vi.spyOn(os, 'platform').mockReturnValue(platform);
+    try {
+      fn();
+    } finally {
+      platformSpy.mockRestore();
+    }
+  }
 
-    expect(hash1).toBe(hash2);
+  it('should generate consistent hashes for the same path', () => {
+    const hash1 = getProjectHash('/test/project');
+    expect(hash1).toBe(getProjectHash('/test/project'));
     expect(hash1).toHaveLength(64); // SHA256 produces 64 hex characters
   });
 
   it('should generate different hashes for different paths', () => {
-    const hash1 = getProjectHash('/test/project1');
-    const hash2 = getProjectHash('/test/project2');
-
-    expect(hash1).not.toBe(hash2);
+    expect(getProjectHash('/test/project1')).not.toBe(
+      getProjectHash('/test/project2'),
+    );
   });
 
   it('should generate case-insensitive hashes on Windows', () => {
-    const platformSpy = vi.spyOn(os, 'platform');
-
-    // Simulate Windows platform
-    platformSpy.mockReturnValue('win32');
-
-    const lowerCasePath = 'c:\\users\\test\\project';
-    const upperCasePath = 'C:\\Users\\Test\\Project';
-    const mixedCasePath = 'c:\\Users\\TEST\\project';
-
-    const hash1 = getProjectHash(lowerCasePath);
-    const hash2 = getProjectHash(upperCasePath);
-    const hash3 = getProjectHash(mixedCasePath);
-
-    // On Windows, all different case variations should produce the same hash
-    expect(hash1).toBe(hash2);
-    expect(hash2).toBe(hash3);
-
-    platformSpy.mockRestore();
+    onPlatform('win32', () => {
+      const [hash1, hash2, hash3] = [
+        'c:\\users\\test\\project',
+        'C:\\Users\\Test\\Project',
+        'c:\\Users\\TEST\\project',
+      ].map((p) => getProjectHash(p));
+      // On Windows, all case variations produce the same hash.
+      expect(hash1).toBe(hash2);
+      expect(hash2).toBe(hash3);
+    });
   });
 
   it('should generate case-sensitive hashes on non-Windows platforms', () => {
-    const platformSpy = vi.spyOn(os, 'platform');
-
-    // Simulate Unix/Linux platform
-    platformSpy.mockReturnValue('linux');
-
-    const lowerCasePath = '/home/user/project';
-    const upperCasePath = '/HOME/USER/PROJECT';
-
-    const hash1 = getProjectHash(lowerCasePath);
-    const hash2 = getProjectHash(upperCasePath);
-
-    // On non-Windows platforms, different case should produce different hashes
-    expect(hash1).not.toBe(hash2);
-
-    platformSpy.mockRestore();
+    onPlatform('linux', () => {
+      expect(getProjectHash('/home/user/project')).not.toBe(
+        getProjectHash('/HOME/USER/PROJECT'),
+      );
+    });
   });
 
   it('should handle Windows drive letter variations', () => {
-    const platformSpy = vi.spyOn(os, 'platform');
-    platformSpy.mockReturnValue('win32');
-
-    // Common Windows scenarios where users might have different drive letter cases
-    const scenarios = [
-      ['e:\\work', 'E:\\work'],
-      ['e:\\work', 'E:\\WORK'],
-      ['c:\\projects\\myapp', 'C:\\Projects\\MyApp'],
-    ];
-
-    for (const [path1, path2] of scenarios) {
-      const hash1 = getProjectHash(path1);
-      const hash2 = getProjectHash(path2);
-      expect(hash1).toBe(hash2);
-    }
-
-    platformSpy.mockRestore();
+    // Common cases where users type the drive letter in a different case.
+    onPlatform('win32', () => {
+      for (const [path1, path2] of [
+        ['e:\\work', 'E:\\work'],
+        ['e:\\work', 'E:\\WORK'],
+        ['c:\\projects\\myapp', 'C:\\Projects\\MyApp'],
+      ]) {
+        expect(getProjectHash(path1)).toBe(getProjectHash(path2));
+      }
+    });
   });
 });
 
 describe('expandHomeDir', () => {
-  const homeDir = os.homedir();
+  const home = path.normalize(homeDir);
+  const homeSlash = path.normalize(homeDir + sep);
+  const documents = path.join(homeDir, 'documents');
+  const documentsSlash = path.normalize(documents + sep);
 
-  it('should return empty string for empty input', () => {
-    expect(expandHomeDir('')).toBe('');
-  });
-
-  it('should expand ~ to home directory', () => {
-    expect(expandHomeDir('~')).toBe(path.normalize(homeDir));
-  });
-
-  it('should preserve trailing separators for home directory paths', () => {
-    expect(expandHomeDir('~/')).toBe(path.normalize(homeDir + path.sep));
-    expect(expandHomeDir('~\\')).toBe(path.normalize(homeDir + path.sep));
-  });
-
-  it('should expand ~/path to home directory path', () => {
-    expect(expandHomeDir('~/documents')).toBe(path.join(homeDir, 'documents'));
-  });
-
-  it('should expand Windows-style ~\\path to home directory path', () => {
-    expect(expandHomeDir('~\\documents')).toBe(path.join(homeDir, 'documents'));
-  });
-
-  it('should preserve trailing separators in Windows-style tilde paths', () => {
-    expect(expandHomeDir('~\\documents\\')).toBe(
-      path.normalize(path.join(homeDir, 'documents') + path.sep),
-    );
-  });
-
-  it('should handle mixed separators in Windows-style tilde paths', () => {
-    expect(expandHomeDir('~\\foo/bar\\baz')).toBe(
-      path.join(homeDir, 'foo', 'bar', 'baz'),
-    );
-  });
-
-  it('should preserve legacy POSIX tilde path semantics', () => {
-    expect(expandHomeDir('~/foo\\bar')).toBe(
-      path.normalize(path.join(homeDir, 'foo\\bar')),
-    );
-  });
-
-  it('should not expand ~path (no slash)', () => {
-    expect(expandHomeDir('~documents')).toBe('~documents');
-  });
-
-  it('should expand %userprofile% (case-insensitive) to home directory', () => {
-    expect(expandHomeDir('%userprofile%')).toBe(path.normalize(homeDir));
-    expect(expandHomeDir('%USERPROFILE%')).toBe(path.normalize(homeDir));
-  });
-
-  it('should expand %userprofile%\\path to home directory path', () => {
-    const result = expandHomeDir('%userprofile%\\documents');
-    expect(result).toBe(path.join(homeDir, 'documents'));
-  });
-
-  it('should expand %USERPROFILE%/path with forward-slash separator', () => {
-    expect(expandHomeDir('%USERPROFILE%/documents')).toBe(
-      path.join(homeDir, 'documents'),
-    );
-  });
-
-  it('should preserve trailing separators for %USERPROFILE% paths', () => {
-    expect(expandHomeDir('%USERPROFILE%/')).toBe(
-      path.normalize(homeDir + path.sep),
-    );
-    expect(expandHomeDir('%USERPROFILE%\\documents\\')).toBe(
-      path.normalize(path.join(homeDir, 'documents') + path.sep),
-    );
-  });
-
-  it('should preserve legacy %USERPROFILE% prefix semantics without a separator', () => {
-    expect(expandHomeDir('%USERPROFILE%foo')).toBe(
-      path.normalize(`${homeDir}foo`),
-    );
-  });
-
-  it('should return regular absolute path unchanged (but normalized)', () => {
-    expect(expandHomeDir('/absolute/path')).toBe(
-      path.normalize('/absolute/path'),
-    );
-  });
-
-  it('should return relative path unchanged (but normalized)', () => {
-    expect(expandHomeDir('relative/path')).toBe(
-      path.normalize('relative/path'),
-    );
-  });
+  table('%s', expandHomeDir, [
+    ['should return empty string for empty input', ['', '']],
+    ['should expand ~ to home directory', ['~', home]],
+    [
+      'should preserve trailing separators for home directory paths',
+      ['~/', homeSlash],
+      ['~\\', homeSlash],
+    ],
+    ['should expand ~/path to home directory path', ['~/documents', documents]],
+    [
+      'should expand Windows-style ~\\path to home directory path',
+      ['~\\documents', documents],
+    ],
+    [
+      'should preserve trailing separators in Windows-style tilde paths',
+      ['~\\documents\\', documentsSlash],
+    ],
+    [
+      'should handle mixed separators in Windows-style tilde paths',
+      ['~\\foo/bar\\baz', path.join(homeDir, 'foo', 'bar', 'baz')],
+    ],
+    [
+      'should preserve legacy POSIX tilde path semantics',
+      ['~/foo\\bar', path.normalize(path.join(homeDir, 'foo\\bar'))],
+    ],
+    ['should not expand ~path (no slash)', ['~documents', '~documents']],
+    [
+      'should expand %userprofile% (case-insensitive) to home directory',
+      ['%userprofile%', home],
+      ['%USERPROFILE%', home],
+    ],
+    [
+      'should expand %userprofile%\\path to home directory path',
+      ['%userprofile%\\documents', documents],
+    ],
+    [
+      'should expand %USERPROFILE%/path with forward-slash separator',
+      ['%USERPROFILE%/documents', documents],
+    ],
+    [
+      'should preserve trailing separators for %USERPROFILE% paths',
+      ['%USERPROFILE%/', homeSlash],
+      ['%USERPROFILE%\\documents\\', documentsSlash],
+    ],
+    [
+      'should preserve legacy %USERPROFILE% prefix semantics without a separator',
+      ['%USERPROFILE%foo', path.normalize(`${homeDir}foo`)],
+    ],
+    [
+      'should return regular absolute path unchanged (but normalized)',
+      ['/absolute/path', path.normalize('/absolute/path')],
+    ],
+    [
+      'should return relative path unchanged (but normalized)',
+      ['relative/path', path.normalize('relative/path')],
+    ],
+  ]);
 });

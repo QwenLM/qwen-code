@@ -5,6 +5,10 @@
  */
 
 import type { Dispatch, SetStateAction } from 'react';
+import {
+  getSessionUpdatePayload,
+  parseDaemonBackgroundTurn,
+} from '@qwen-code/sdk/daemon';
 import type {
   DaemonAvailableCommand,
   DaemonEvent,
@@ -129,6 +133,17 @@ export function mapSessionContextModels(
         getString(model, 'value');
       if (!modelId) continue;
       const meta = getRecord(model?.['_meta']);
+      const rawModalities = getRecord(meta?.['modalities']);
+      const modalities: DaemonModelInfo['modalities'] = rawModalities
+        ? {}
+        : undefined;
+      if (rawModalities && modalities) {
+        for (const key of ['image', 'pdf', 'audio', 'video'] as const) {
+          if (typeof rawModalities[key] === 'boolean') {
+            modalities[key] = rawModalities[key];
+          }
+        }
+      }
       const modelContextWindow =
         getNumber(meta, 'contextLimit') ??
         getNumber(meta, 'contextWindow') ??
@@ -144,16 +159,32 @@ export function mapSessionContextModels(
       models.push({
         id: modelId,
         baseModelId:
-          getString(model, 'baseModelId') ?? stripAcpAuthSuffix(modelId),
+          getString(meta, 'baseModelId') ??
+          getString(model, 'baseModelId') ??
+          stripAcpAuthSuffix(modelId),
         label: getString(model, 'name') ?? getString(model, 'label') ?? modelId,
+        ...(getString(meta, 'authType') !== undefined
+          ? { authType: getString(meta, 'authType') }
+          : {}),
         ...(modelContextWindow !== undefined
           ? { contextWindow: modelContextWindow }
+          : {}),
+        ...(modalities !== undefined ? { modalities } : {}),
+        ...(getString(meta, 'baseUrl') !== undefined
+          ? { baseUrl: getString(meta, 'baseUrl') }
+          : {}),
+        ...(getString(meta, 'envKey') !== undefined
+          ? { envKey: getString(meta, 'envKey') }
+          : {}),
+        ...(typeof meta?.['isRuntime'] === 'boolean'
+          ? { isRuntime: meta['isRuntime'] }
           : {}),
       });
     }
   }
 
-  if (!currentModel && models.length === 0) return undefined;
+  if (!currentModel && models.length === 0 && !Array.isArray(availableModels))
+    return undefined;
   return { models, currentModel, contextWindow };
 }
 
@@ -188,6 +219,7 @@ export function mapReasoningControls(
       enabled: currentValue !== 'none',
       effort: 'default',
       efforts: [],
+      ...(reasoningMeta?.['canEnable'] === false ? { canEnable: false } : {}),
       ...(thinkingMandatory ? { canDisable: false } : {}),
     };
   }
@@ -204,8 +236,117 @@ export function mapReasoningControls(
     effort,
     efforts: effortValues,
     ...(defaultEffort ? { defaultEffort } : {}),
+    ...(reasoningMeta?.['canEnable'] === false ? { canEnable: false } : {}),
+    ...(reasoningMeta?.['enableValue'] === 'default'
+      ? { enableValue: 'default' as const }
+      : {}),
     ...(thinkingMandatory ? { canDisable: false } : {}),
   };
+}
+
+export function mapWorkflowMode(
+  configOptions: unknown,
+): Pick<DaemonConnectionState, 'workflowMode' | 'workflowModeStatus'> {
+  const unknown = {
+    workflowMode: undefined,
+    workflowModeStatus: 'unknown' as const,
+  };
+  if (!Array.isArray(configOptions)) return unknown;
+  const matches = configOptions
+    .map(getRecord)
+    .filter((item) => item?.['id'] === 'workflow_mode');
+  if (matches.length === 0) {
+    return { workflowMode: undefined, workflowModeStatus: 'unsupported' };
+  }
+  if (matches.length !== 1) return unknown;
+  const option = matches[0];
+  const value = option?.['currentValue'];
+  const choices = option?.['options'];
+  const meta = getRecord(getRecord(option?.['_meta'])?.['qwen.workflowMode']);
+  if (
+    option?.['type'] !== 'select' ||
+    (value !== 'on' && value !== 'off') ||
+    !Array.isArray(choices) ||
+    !['on', 'off'].every((choice) =>
+      choices.some((item) => getRecord(item)?.['value'] === choice),
+    ) ||
+    typeof meta?.['available'] !== 'boolean' ||
+    typeof meta['effective'] !== 'boolean' ||
+    meta['effective'] !== (value === 'on' && meta['available']) ||
+    (meta['reason'] !== undefined && typeof meta['reason'] !== 'string')
+  )
+    return unknown;
+  return {
+    workflowModeStatus: 'ready',
+    workflowMode: {
+      requested: value === 'on',
+      available: meta['available'],
+      effective: meta['effective'],
+      ...(typeof meta['reason'] === 'string' ? { reason: meta['reason'] } : {}),
+    },
+  };
+}
+
+export function getConfigOptionsUpdate(
+  event: DaemonEvent,
+): { configOptions: unknown } | undefined {
+  if (event.type !== 'session_update') return undefined;
+  const update = getSessionUpdatePayload(event.data);
+  return update?.sessionUpdate === 'config_option_update'
+    ? { configOptions: update.configOptions }
+    : undefined;
+}
+
+export function applyConfigOptions(
+  current: DaemonConnectionState,
+  configOptions: unknown,
+): DaemonConnectionState {
+  const mode = mapWorkflowMode(configOptions);
+  return {
+    ...current,
+    ...mode,
+    ...(mode.workflowModeStatus === 'unknown'
+      ? { workflowMode: current.workflowMode }
+      : {}),
+    reasoning: mapReasoningControls(configOptions),
+    context:
+      current.context && Array.isArray(configOptions)
+        ? {
+            ...current.context,
+            state: { ...current.context.state, configOptions },
+          }
+        : current.context,
+  };
+}
+
+export function applySessionConfigContext(
+  current: DaemonConnectionState,
+  context: DaemonSessionContextStatus,
+): DaemonConnectionState {
+  const models = mapSessionContextModels(context);
+  const mode = getCurrentMode(context);
+  return applyConfigOptions(
+    {
+      ...current,
+      ...(models &&
+      (models.models.length > 0 ||
+        Array.isArray(getRecord(context.state.models)?.['availableModels']))
+        ? { models: models.models }
+        : {}),
+      currentModel: models?.currentModel ?? current.currentModel,
+      currentMode: mode ?? current.currentMode,
+      planExecutionMode:
+        mode !== undefined
+          ? getPlanExecutionMode(context)
+          : current.planExecutionMode,
+      contextWindow: models?.contextWindow ?? current.contextWindow,
+      context: {
+        ...context,
+        recovery: current.context?.recovery ?? context.recovery,
+      },
+    },
+    context.state.configOptions ?? [],
+  );
 }
 
 export function mapSessionContextReasoning(
@@ -317,6 +458,22 @@ export function updateConnectionFromDaemonEvent(
 ): void {
   if (event.type === 'session_update') {
     const update = getRecord(getRecord(event.data)?.['update']);
+    const meta = getRecord(update?.['_meta']);
+    const backgroundTurn = parseDaemonBackgroundTurn(meta?.['backgroundTurn']);
+    if (
+      backgroundTurn &&
+      meta?.['source'] === 'background_notification_turn_started'
+    ) {
+      setConnection((current) =>
+        current.finishedBackgroundTurnId === backgroundTurn.turnId
+          ? current
+          : {
+              ...current,
+              backgroundTurn,
+              backgroundTurnObservedAt: performance.now(),
+            },
+      );
+    }
     const tokenUsage = getUsageTokenUsage(update);
     if (tokenUsage) {
       setConnection((current) => ({
@@ -349,6 +506,22 @@ export function updateConnectionFromDaemonEvent(
   }
 
   switch (event.type) {
+    case 'turn_complete':
+    case 'turn_error': {
+      const promptId =
+        getString(getRecord(event.data), 'promptId') ?? event.promptId;
+      setConnection((current) =>
+        current.backgroundTurn?.turnId === promptId
+          ? {
+              ...current,
+              backgroundTurn: undefined,
+              finishedBackgroundTurnId: promptId,
+              backgroundTurnObservedAt: performance.now(),
+            }
+          : current,
+      );
+      break;
+    }
     case 'git_branch_changed': {
       const data = getRecord(event.data);
       const workspaceCwd = getString(data, 'workspaceCwd');
@@ -401,22 +574,40 @@ export function updateConnectionFromDaemonEvent(
       break;
     }
     case 'model_switched': {
-      const modelId = getString(getRecord(event.data), 'modelId');
-      if (modelId) {
+      const modelId = getRecord(event.data)?.['modelId'];
+      if (typeof modelId === 'string') {
         setConnection((current) => ({
           ...current,
-          currentModel: modelId,
+          currentModel: modelId || undefined,
+          ...(modelId ? {} : { contextWindow: undefined }),
           reasoning:
             current.currentModel === modelId ? current.reasoning : undefined,
         }));
       }
       break;
     }
+    case 'session_snapshot': {
+      const data = getRecord(event.data);
+      const mode = getString(data, 'currentApprovalMode');
+      if (mode)
+        setConnection((current) => ({
+          ...current,
+          currentMode: mode,
+          planExecutionMode:
+            mode === 'plan' ? getString(data, 'planExecutionMode') : undefined,
+        }));
+      break;
+    }
     case 'approval_mode_changed': {
       const data = getRecord(event.data);
       const mode = getString(data, 'next') ?? getString(data, 'mode');
       if (mode) {
-        setConnection((current) => ({ ...current, currentMode: mode }));
+        setConnection((current) => ({
+          ...current,
+          currentMode: mode,
+          planExecutionMode:
+            mode === 'plan' ? getString(data, 'planExecutionMode') : undefined,
+        }));
       }
       break;
     }
@@ -645,6 +836,10 @@ function getGoalState(
   const recordId = evidenceCursor?.['recordId'];
   const turnCount = getNumber(source, 'turnCount');
   const activeTimeMs = getNumber(source, 'activeTimeMs');
+  const tokensUsed = getNumber(source, 'tokensUsed');
+  const tokenBudget = getNumber(source, 'tokenBudget');
+  const turnBudget = getNumber(source, 'turnBudget');
+  const activeTimeBudgetMs = getNumber(source, 'activeTimeBudgetMs');
   const createdAt = getNumber(source, 'createdAt');
   const updatedAt = getNumber(source, 'updatedAt');
   if (
@@ -669,7 +864,9 @@ function getGoalState(
   const limitKind =
     limitKindRaw === 'evidence_catalog' ||
     limitKindRaw === 'checkpoint_request' ||
-    limitKindRaw === 'token_budget'
+    limitKindRaw === 'token_budget' ||
+    limitKindRaw === 'turn_budget' ||
+    limitKindRaw === 'time_budget'
       ? limitKindRaw
       : undefined;
   return {
@@ -683,6 +880,10 @@ function getGoalState(
       evidenceCursor: { recordId },
       turnCount,
       activeTimeMs,
+      ...(tokensUsed !== undefined ? { tokensUsed } : {}),
+      ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+      ...(turnBudget !== undefined ? { turnBudget } : {}),
+      ...(activeTimeBudgetMs !== undefined ? { activeTimeBudgetMs } : {}),
       createdAt,
       updatedAt,
       ...(lastReason ? { lastReason } : {}),
@@ -703,6 +904,14 @@ export function getCurrentMode(
 ): string | undefined {
   const modes = getRecord(status?.state?.modes);
   return getString(modes, 'currentModeId') ?? getString(modes, 'currentMode');
+}
+
+export function getPlanExecutionMode(
+  status: DaemonSessionContextStatus | undefined,
+): string | undefined {
+  if (getCurrentMode(status) !== 'plan') return undefined;
+  const modes = getRecord(status?.state?.modes);
+  return getString(getRecord(modes?.['_meta']), 'planExecutionMode');
 }
 
 export function getCurrentModel(
@@ -747,7 +956,7 @@ export function getReplayTokenUsage(
     try {
       const event = events[i];
       if (event.type !== 'session_update') continue;
-      const update = getRecord(getRecord(event.data)?.['update']);
+      const update = getSessionUpdatePayload(event.data);
       const tokenUsage = getUsageTokenUsage(update);
       if (tokenUsage) return tokenUsage;
     } catch {

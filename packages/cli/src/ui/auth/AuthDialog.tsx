@@ -5,6 +5,8 @@
  */
 
 import type React from 'react';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { subscriptionModelUnavailable } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import { useState, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
@@ -16,32 +18,35 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { t } from '../../i18n/index.js';
+import { getRawModelProviders } from '../../config/loadedSettingsAdapter.js';
 import {
   findProviderById,
-  findProviderByCredentials,
+  QWENCLOUD_PROVIDERS,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
 } from '@qwen-code/qwen-code-core/providers/all-providers.js';
 import { customProvider } from '@qwen-code/qwen-code-core/providers/presets/custom-provider.js';
-import {
-  findExistingProviderModels,
-  getDefaultModelIds,
-} from '@qwen-code/qwen-code-core/providers/provider-config.js';
+import { findExistingProviderModels } from '@qwen-code/qwen-code-core/providers/provider-config.js';
 import type { ProviderConfig } from '@qwen-code/qwen-code-core/providers/types.js';
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
+import { SubscriptionDialog } from './SubscriptionDialog.js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 type ViewLevel =
+  | 'subscription'
   | 'main'
+  | 'qwencloud-select'
   | 'alibaba-select'
   | 'thirdparty-select'
   | 'provider-setup';
 
 type MainOption =
+  | 'QWEN_SUBSCRIPTION'
+  | 'QWENCLOUD'
   | 'ALIBABA_MODELSTUDIO'
   | 'THIRD_PARTY_PROVIDERS'
   | 'CUSTOM_PROVIDER';
@@ -51,6 +56,15 @@ type MainOption =
 // ---------------------------------------------------------------------------
 
 const MAIN_ITEMS = [
+  {
+    key: 'QWENCLOUD',
+    title: t('QwenCloud'),
+    label: t('QwenCloud'),
+    description: t(
+      'Official recommended setup: Token Plan or Standard API Key',
+    ),
+    value: 'QWENCLOUD' as MainOption,
+  },
   {
     key: 'ALIBABA_MODELSTUDIO',
     title: t('Alibaba ModelStudio'),
@@ -94,6 +108,7 @@ function providerToItem(config: ProviderConfig) {
 
 function getStepLabel(step: string | null, p: ProviderConfig): string {
   if (step === 'protocol') return t('Protocol');
+  if (step === 'wireApi') return t('API');
   if (step === 'baseUrl') {
     if (p.uiLabels?.baseUrlStepTitle) return t(p.uiLabels.baseUrlStepTitle);
     return Array.isArray(p.baseUrl) ? t('Endpoint') : t('Base URL');
@@ -109,34 +124,153 @@ function getStepLabel(step: string | null, p: ProviderConfig): string {
 // View titles
 // ---------------------------------------------------------------------------
 
-const VIEW_TITLES: Record<string, string> = {
-  main: t('Connect a Provider'),
-  'alibaba-select': t('Alibaba ModelStudio · Access Method'),
-  'thirdparty-select': t('Third-party Providers · Provider'),
+const VIEW_TITLES: Record<string, () => string> = {
+  main: () => t('Connect a Provider'),
+  'qwencloud-select': () => t('QwenCloud · Access Method'),
+  'alibaba-select': () => t('Alibaba ModelStudio · Access Method'),
+  'thirdparty-select': () => t('Third-party Providers · Provider'),
 };
 
 // ---------------------------------------------------------------------------
 // AuthDialog
 // ---------------------------------------------------------------------------
 
+const TERMS_URL =
+  'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/';
+
+function ProviderMenu<T>({
+  title,
+  items,
+  initialIndex,
+  onSelect,
+  onHighlight,
+  width,
+  error,
+  showTerms = false,
+}: {
+  title: string;
+  items: Array<{
+    key: string;
+    title: string;
+    description: string;
+    value: T;
+    isNew?: boolean;
+  }>;
+  initialIndex: number;
+  onSelect: (value: T) => void;
+  onHighlight: (value: T) => void;
+  width: number;
+  error: string | null;
+  showTerms?: boolean;
+}): React.JSX.Element {
+  const contentWidth = Math.max(1, width - 4);
+  const hint = t('Enter to select, ↑↓ to navigate, Esc to go back');
+  const termsLabel = `${t('Terms of Services and Privacy Notice')}:`;
+
+  return (
+    <Box
+      borderStyle="single"
+      borderColor={theme.border.default}
+      flexDirection="column"
+      flexShrink={0}
+      padding={1}
+      width="100%"
+    >
+      <Text bold wrap="truncate">
+        {title}
+      </Text>
+      <Box marginTop={1} flexShrink={0}>
+        <DescriptiveRadioButtonSelect
+          items={items.map((item) => ({
+            ...item,
+            title: item.isNew ? (
+              <Text>
+                {item.title} <Text color={theme.text.accent}>New</Text>
+              </Text>
+            ) : (
+              item.title
+            ),
+          }))}
+          initialIndex={initialIndex}
+          onSelect={onSelect}
+          onHighlight={onHighlight}
+          itemGap={1}
+          maxItemsToShow={items.length}
+        />
+      </Box>
+      {error && (
+        <Box marginTop={1} flexShrink={0}>
+          <Text color={theme.status.error}>{error}</Text>
+        </Box>
+      )}
+      {showTerms ? (
+        <Box flexDirection="column" flexShrink={0}>
+          <Box marginY={1} flexShrink={0}>
+            <Text color={theme.border.default}>{'─'.repeat(contentWidth)}</Text>
+          </Box>
+          <Text>{termsLabel}</Text>
+          <Link url={TERMS_URL} fallback={false}>
+            <Text color={theme.text.secondary} underline>
+              {TERMS_URL}
+            </Text>
+          </Link>
+        </Box>
+      ) : (
+        <Box marginTop={1} flexShrink={0}>
+          <Text color={theme.text.secondary}>{hint}</Text>
+        </Box>
+      )}
+    </Box>
+  );
+}
+
 export function AuthDialog(): React.JSX.Element {
   const {
-    auth: { authError },
+    auth: { authError, isAuthDialogDismissible },
+    mainAreaWidth,
   } = useUIState();
   const {
-    auth: { closeAuthDialog, handleProviderSubmit, onAuthError },
+    auth: {
+      closeAuthDialog,
+      handleProviderSubmit,
+      handleSubscriptionSubmit,
+      onAuthError,
+    },
   } = useUIActions();
   const config = useConfig();
   const settings = useSettings();
+  const mainItems = [
+    {
+      key: 'QWEN_SUBSCRIPTION',
+      title: t('Qwen Account with Subscription'),
+      isNew: true,
+      label: t('Qwen Account with Subscription'),
+      description: t(
+        'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
+      ),
+      value: 'QWEN_SUBSCRIPTION' as MainOption,
+    },
+    ...MAIN_ITEMS,
+  ];
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
   const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
 
-  const [mainIndex, setMainIndex] = useState<number | null>(null);
+  const [mainIndex, setMainIndex] = useState(0);
   const [subMenuIndex, setSubMenuIndex] = useState<Record<string, number>>({});
 
-  const setupFlow = useProviderSetupFlow(handleProviderSubmit);
+  const setupFlow = useProviderSetupFlow(
+    handleProviderSubmit,
+    settings.merged.modelProviders,
+    settings.merged.providerProtocol,
+    {
+      authType: settings.merged.security?.auth?.selectedType,
+      id: settings.merged.model?.name,
+      baseUrl: settings.merged.model?.baseUrl,
+    },
+    getRawModelProviders(settings),
+  );
 
   // -- Navigation -----------------------------------------------------------
 
@@ -167,6 +301,10 @@ export function AuthDialog(): React.JSX.Element {
 
   // -- Sub-menu definitions (data-driven) -----------------------------------
 
+  const qwencloudItems = useMemo(
+    () => QWENCLOUD_PROVIDERS.map(providerToItem),
+    [],
+  );
   const alibabaItems = useMemo(() => ALIBABA_PROVIDERS.map(providerToItem), []);
   const thirdPartyItems = useMemo(
     () => THIRD_PARTY_PROVIDERS.map(providerToItem),
@@ -175,14 +313,25 @@ export function AuthDialog(): React.JSX.Element {
 
   const existingEnv = (settings.merged.env ?? {}) as Record<string, string>;
 
-  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
-    const saved = findExistingProviderModels(
+  // The saved route and ids the wizard reopens with. Both must come from the
+  // same lookup: seeding the ids of a Responses install while the API step
+  // defaults to Chat Completions would restamp them onto the other wire.
+  const findSavedModels = (providerConfig: ProviderConfig) =>
+    findExistingProviderModels(
       providerConfig,
-      settings.merged.modelProviders as Record<string, unknown> | undefined,
+      settings.merged.modelProviders,
+      settings.merged.providerProtocol,
+      {
+        authType: settings.merged.security?.auth?.selectedType,
+        id: settings.merged.model?.name,
+        baseUrl: settings.merged.model?.baseUrl,
+      },
     );
+
+  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
+    const saved = findSavedModels(providerConfig);
     if (!saved) return [];
-    const builtinIds = new Set(getDefaultModelIds(providerConfig));
-    return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
+    return saved.models.map((m) => m.id);
   };
 
   const handleProviderSelect = (providerId: string) => {
@@ -191,7 +340,7 @@ export function AuthDialog(): React.JSX.Element {
     if (!providerConfig) return;
     setupFlow.start(
       providerConfig,
-      undefined,
+      findSavedModels(providerConfig)?.protocol,
       existingEnv,
       getExistingModelIds(providerConfig),
     );
@@ -205,6 +354,10 @@ export function AuthDialog(): React.JSX.Element {
       onSelect: (v: string) => void;
     }
   > = {
+    'qwencloud-select': {
+      items: qwencloudItems,
+      onSelect: handleProviderSelect,
+    },
     'alibaba-select': {
       items: alibabaItems,
       onSelect: handleProviderSelect,
@@ -217,29 +370,17 @@ export function AuthDialog(): React.JSX.Element {
 
   const activeSubMenu = subMenus[viewLevel];
 
-  // -- Default main index from current auth state ---------------------------
-
-  const contentGenConfig = config.getContentGeneratorConfig();
-  const matchedProvider = findProviderByCredentials(
-    contentGenConfig?.baseUrl,
-    contentGenConfig?.apiKeyEnvKey,
-  );
-
-  // Land on the tab that matches the active provider's uiGroup so a DeepSeek
-  // / MiniMax / OpenRouter user opens Third-party Providers, not Alibaba.
-  // (resolveMetadataKey returns config.id for *any* provider with a static
-  // models[], so it can't be used to detect "Alibaba" specifically.)
-  const defaultMainIndex = useMemo(() => {
-    if (matchedProvider?.uiGroup === 'third-party') return 1;
-    if (matchedProvider?.uiGroup === 'custom') return 2;
-    return 0;
-  }, [matchedProvider]);
-
   // -- Handlers -------------------------------------------------------------
 
   const handleMainSelect = (value: MainOption) => {
     clearErrors();
     switch (value) {
+      case 'QWEN_SUBSCRIPTION':
+        pushView('subscription');
+        break;
+      case 'QWENCLOUD':
+        pushView('qwencloud-select');
+        break;
       case 'ALIBABA_MODELSTUDIO':
         pushView('alibaba-select');
         break;
@@ -249,7 +390,7 @@ export function AuthDialog(): React.JSX.Element {
       case 'CUSTOM_PROVIDER':
         setupFlow.start(
           customProvider,
-          undefined,
+          findSavedModels(customProvider)?.protocol,
           existingEnv,
           getExistingModelIds(customProvider),
         );
@@ -269,6 +410,17 @@ export function AuthDialog(): React.JSX.Element {
           goBack();
           return;
         }
+        if (
+          isAuthDialogDismissible ||
+          (settings.merged.security?.auth?.selectedType ===
+            AuthType.QWEN_SUBSCRIPTION &&
+            authError?.includes(
+              subscriptionModelUnavailable(config.getModel()),
+            ))
+        ) {
+          closeAuthDialog();
+          return;
+        }
         if (errorMessage) return;
         if (config.getAuthType() === undefined) {
           setErrorMessage(
@@ -281,18 +433,20 @@ export function AuthDialog(): React.JSX.Element {
         closeAuthDialog();
       }
     },
-    { isActive: true },
+    {
+      isActive: viewLevel !== 'subscription',
+    },
   );
 
   // -- View title -----------------------------------------------------------
 
   const viewTitle = useMemo(() => {
     if (viewLevel !== 'provider-setup') {
-      return VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'];
+      return (VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'])();
     }
     const p = setupFlow.state.provider;
     if (!p) return t('Provider Setup');
-    const flowTitle = p.uiLabels?.flowTitle ?? p.label;
+    const flowTitle = t(p.uiLabels?.flowTitle ?? p.label);
     const { stepIndex, totalSteps, step } = setupFlow.state;
     return t('{{flowTitle}} · Step {{step}}/{{total}} · {{stepLabel}}', {
       flowTitle,
@@ -304,6 +458,60 @@ export function AuthDialog(): React.JSX.Element {
 
   // -- Render ---------------------------------------------------------------
 
+  if (viewLevel === 'subscription') {
+    return (
+      <SubscriptionDialog
+        onBack={goBack}
+        onModelSelectionRequired={closeAuthDialog}
+        onConnect={handleSubscriptionSubmit}
+        onSwitchProvider={() => {
+          clearErrors();
+          setViewStack([]);
+          setViewLevel('main');
+        }}
+        suppressBrowserLaunch={config.isBrowserLaunchSuppressed()}
+      />
+    );
+  }
+
+  if (viewLevel === 'main') {
+    return (
+      <ProviderMenu
+        title={viewTitle}
+        items={mainItems}
+        initialIndex={mainIndex}
+        onSelect={handleMainSelect}
+        onHighlight={(value) => {
+          setMainIndex(mainItems.findIndex((item) => item.value === value));
+        }}
+        width={mainAreaWidth ?? 80}
+        error={authError || errorMessage}
+        showTerms
+      />
+    );
+  }
+
+  if (activeSubMenu) {
+    return (
+      <ProviderMenu
+        title={viewTitle}
+        items={activeSubMenu.items}
+        initialIndex={subMenuIndex[viewLevel] ?? 0}
+        onSelect={activeSubMenu.onSelect}
+        onHighlight={(value) => {
+          setSubMenuIndex((prev) => ({
+            ...prev,
+            [viewLevel]: activeSubMenu.items.findIndex(
+              (item) => item.value === value,
+            ),
+          }));
+        }}
+        width={mainAreaWidth ?? 80}
+        error={authError || errorMessage}
+      />
+    );
+  }
+
   return (
     <Box
       borderStyle="single"
@@ -314,48 +522,6 @@ export function AuthDialog(): React.JSX.Element {
     >
       <Text bold>{viewTitle}</Text>
 
-      {viewLevel === 'main' && (
-        <Box marginTop={1}>
-          <DescriptiveRadioButtonSelect
-            items={MAIN_ITEMS}
-            initialIndex={mainIndex != null ? mainIndex : defaultMainIndex}
-            onSelect={handleMainSelect}
-            onHighlight={(value) => {
-              setMainIndex(
-                MAIN_ITEMS.findIndex((item) => item.value === value),
-              );
-            }}
-            itemGap={1}
-          />
-        </Box>
-      )}
-
-      {activeSubMenu && (
-        <>
-          <Box marginTop={1}>
-            <DescriptiveRadioButtonSelect
-              items={activeSubMenu.items}
-              initialIndex={subMenuIndex[viewLevel] ?? 0}
-              onSelect={activeSubMenu.onSelect}
-              onHighlight={(value) => {
-                setSubMenuIndex((prev) => ({
-                  ...prev,
-                  [viewLevel]: activeSubMenu.items.findIndex(
-                    (i) => i.value === value,
-                  ),
-                }));
-              }}
-              itemGap={1}
-            />
-          </Box>
-          <Box marginTop={1}>
-            <Text color={theme?.text?.secondary}>
-              {t('Enter to select, ↑↓ to navigate, Esc to go back')}
-            </Text>
-          </Box>
-        </>
-      )}
-
       {viewLevel === 'provider-setup' && (
         <ProviderSetupSteps flow={setupFlow} />
       )}
@@ -364,29 +530,6 @@ export function AuthDialog(): React.JSX.Element {
         <Box marginTop={1}>
           <Text color={theme.status.error}>{authError || errorMessage}</Text>
         </Box>
-      )}
-
-      {viewLevel === 'main' && (
-        <>
-          <Box marginY={1}>
-            <Text color={theme.border.default}>{'─'.repeat(80)}</Text>
-          </Box>
-          <Box>
-            <Text color={theme.text.primary}>
-              {t('Terms of Services and Privacy Notice')}:
-            </Text>
-          </Box>
-          <Box>
-            <Link
-              url="https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/"
-              fallback={false}
-            >
-              <Text color={theme.text.secondary} underline>
-                https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/
-              </Text>
-            </Link>
-          </Box>
-        </>
       )}
     </Box>
   );

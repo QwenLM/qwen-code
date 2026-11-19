@@ -9,6 +9,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonClient } from '@qwen-code/sdk/daemon';
+import { DaemonAvailabilityContext } from '../../daemon/availability-context.js';
+import type { DaemonAvailability } from '../../daemon/availability.js';
+import { offlineDaemon } from '../../daemon/availability.test-fixtures.js';
 import {
   WORKSPACE_OVERVIEW_MAX_MISSES,
   WORKSPACE_OVERVIEW_POLL_MS,
@@ -73,9 +76,19 @@ async function render(
   client: DaemonClient,
   cwd: string | undefined,
   options: UseWorkspaceOverviewOptions,
+  availability?: DaemonAvailability,
 ): Promise<void> {
   await act(async () => {
-    root.render(<Probe client={client} cwd={cwd} options={options} />);
+    const probe = <Probe client={client} cwd={cwd} options={options} />;
+    root.render(
+      availability ? (
+        <DaemonAvailabilityContext.Provider value={availability}>
+          {probe}
+        </DaemonAvailabilityContext.Provider>
+      ) : (
+        probe
+      ),
+    );
   });
 }
 
@@ -439,6 +452,47 @@ describe('useWorkspaceOverview', () => {
     await flush();
     // The third unanswered round expires the facet: unavailable, not frozen.
     expect(latest?.overview?.mcp).toBeUndefined();
+  });
+
+  it('expires the shown facets when the shared daemon goes unavailable', async () => {
+    const { availability } = offlineDaemon('http://daemon');
+    try {
+      await render(
+        makeClient(fullHandle),
+        '/w',
+        { enabled: true, items: ['mcp'] },
+        availability,
+      );
+      await flush();
+      expect(latest?.overview?.mcp).toBeDefined();
+      // Close the popover before the outage: the `!active` branch clears the
+      // live snapshot, so only the retained one could still show the facets.
+      await render(
+        makeClient(fullHandle),
+        '/w',
+        { enabled: false, items: ['mcp'] },
+        availability,
+      );
+      await flush();
+      expect(latest?.overview).toBeUndefined();
+      await act(async () => {
+        await availability.check(true);
+      });
+      await flush();
+      // Reopening during the outage must overwrite the retained snapshot with
+      // a defined, facet-less one instead of leaving it untouched.
+      await render(
+        makeClient(fullHandle),
+        '/w',
+        { enabled: true, items: ['mcp'] },
+        availability,
+      );
+      await flush();
+      expect(latest?.overview).toBeDefined();
+      expect(latest?.overview?.mcp).toBeUndefined();
+    } finally {
+      availability.dispose();
+    }
   });
 
   it('does not book a round from before a cwd round trip into the new session', async () => {

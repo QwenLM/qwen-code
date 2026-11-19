@@ -10,6 +10,28 @@ Messaging channels use a separate persistent scheduler so results can be pushed 
 
 > **Tip:** Scheduled tasks are enabled by default. To disable them, set `experimental.cron: false` in your [settings](../configuration/settings.md), or set `QWEN_CODE_DISABLE_CRON=1` in your environment.
 
+## Workspace in Web Shell
+
+The **Scheduled Tasks** page shows each task's workspace on its card. When creating or editing a task, the **Workspace** field shows where it runs. With a single workspace, this field is read-only; if an embedded Web Shell has a workspace fixed by its host, it also displays **Fixed by host**. Hover over the workspace label to see its full path.
+
+With multiple workspaces, choose a workspace when creating a task. An existing task stays in its original workspace. Workspace labels require workspace information from the daemon or host; a missing label does not mean the task runs without a workspace.
+
+## Deliver Web Shell task results to a Channel
+
+In `qwen serve`, open **Scheduled Tasks** and create or edit a task in its workspace. Choose a persistent run destination (a dedicated session, or the current session when available), then choose a **Delivery Channel**.
+
+For Channels with a configured destination, such as [DingTalk webhooks](./channels/dingtalk-webhook.md), selecting the Channel uses that destination without requiring a type or ID. If an existing task's saved destination differs, the form preserves it and offers **Use configured destination** to replace it explicitly.
+
+For other Channels, choose a user or chat destination type and a destination ID. Recent observed contacts are optional suggestions; check the Channel name, type, and raw ID before selecting one. You can also enter an ID directly. If an ID has leading or trailing whitespace, the form warns you and offers **Remove surrounding whitespace**; it never changes the ID automatically. The configured Channel must support sending to that destination.
+
+Delivery is off by default. Configuring a Channel alone does not enable delivery for any task. When enabled, a successfully completed scheduled run's final response is sent through the selected Channel; this does not guarantee receipt or add durable retries or failure alerts. The task card displays a delivery line only when it has a saved destination.
+
+To remove delivery, edit the task and select **Delivery off** under **Delivery Channel**. Editing other fields preserves the saved target, including a target no longer found in recent contacts. Loading failures or missing Channels do not clear it. Changing the workspace while creating a task resets the draft destination; an existing task remains in its original workspace.
+
+If delivery support becomes unavailable after you change a destination, choose **Discard delivery changes** to restore the original destination and keep editing the task's other fields. On a new task, this removes the draft destination. Saving then leaves any existing delivery configuration unchanged.
+
+Tasks that create a fresh session for each run (`per_run`) do not support delivery. Switching to that mode keeps your draft destination visible and asks you to explicitly turn delivery off or return to a persistent mode before saving. Delivery controls require the daemon's `channel_delivery` capability; existing destinations remain visible with older daemons, but cannot be changed there.
+
 ## Schedule a recurring prompt with /loop
 
 The `/loop` [bundled skill](skills.md) is the quickest way to schedule a recurring prompt. Pass an optional interval and a prompt, and Qwen Code sets up a cron job that fires in the background while the session stays open.
@@ -82,6 +104,22 @@ in 45 minutes, check whether the integration tests passed
 
 Qwen Code pins the fire time to a specific minute and hour using a cron expression and confirms when it will fire.
 
+## Wake the session only when something changed
+
+A recurring task can carry a **gate**: a shell command that runs at each fire time, outside the model. If it prints nothing and exits 0, the fire is skipped — no turn runs and nothing is added to the conversation. If it prints output, the task's prompt runs with that output attached and marked as data produced by the command. A command that fails, prints binary data or runs longer than 60 seconds is reported once, then counted silently until it succeeds again or is blocked; `CronList` shows the count.
+
+Use a gate for watches that are usually quiet, with a command that keeps its own cursor and prints only what changed:
+
+```text
+every 2 minutes, run ./check-pr.sh 15057 as a gate; when it prints something, handle the events it lists
+```
+
+Qwen Code calls `CronCreate` with `gate: "./check-pr.sh 15057"` and confirms the command the way it confirms a `Monitor` command: once, when the task is created, with the option to always allow it. The command then runs unattended from the project directory with the session's environment. A durable gated task keeps working after a restart when the command is read-only, a saved `Monitor(...)` or `Bash(...)` rule allows it, or the session runs in auto or yolo mode; otherwise the next fire reports the rule to add instead of running the command. That rule is the one `Monitor`'s "always allow" would save, and for a compound command (a test of a command substitution, an `if`, a heredoc) it may not cover every part; put such a probe in a script and allow the script instead. A deny rule for the command stops the gate in every mode.
+
+A gate must finish in the foreground, so a command that puts any part of itself in the background with `&` is refused, and so is one made only of comments. A gate already runs in a shell, so write the command itself rather than a shell wrapper around it: `bash -c '…'` is refused, so that the permission rules check exactly the text that runs; the error names the command they would have checked. The `&` check reads the text rather than running it, so where it is unsure it refuses: an `&` inside a comment, a heredoc or `(( … ))` is refused too, so put such a command in a script and use the script as the gate. A spelling it cannot follow (`eval`, a script piped into `sh`) is caught when the gate runs instead: a gate that exits with nothing on stdout while something it started in the background still holds its stdout is reported as a failure, not skipped quietly, and what it left running in its process group is stopped (on Linux and macOS; a part that moved to a process group of its own, as `setsid` does, is not). Under the bwrap shell execution sandbox (not available to `qwen serve` sessions) the background part ends with the command, so only the text check applies there.
+
+Write a gated prompt as instructions ("for each event in the gate output, …"), not as a slash command. In a `qwen serve` daemon, the Web Shell's scheduled-task form offers the same gate command, the task card shows its recent outcomes, and "Run now" on a gated task asks the model to run the gate itself first, exactly as written, and to follow the task only when the command exits 0 and prints something on standard output (a scheduled fire ignores warnings on standard error, and so should the model); a task bound to the current daemon conversation (`sessionMode: "current"`) can carry a gate too.
+
 ## Manage scheduled tasks
 
 Ask Qwen Code in natural language to list or cancel tasks, or reference the underlying tools directly.
@@ -96,17 +134,17 @@ cancel the deploy check job
 
 Under the hood, Qwen Code uses these tools:
 
-| Tool         | Purpose                                                                                                         |
-| :----------- | :-------------------------------------------------------------------------------------------------------------- |
-| `CronCreate` | Schedule a new task. Accepts a 5-field cron expression, the prompt to run, and whether it recurs or fires once. |
-| `CronList`   | List all scheduled tasks with their IDs, schedules, and prompts.                                                |
-| `CronDelete` | Cancel a task by ID.                                                                                            |
+| Tool         | Purpose                                                                                                                                   |
+| :----------- | :---------------------------------------------------------------------------------------------------------------------------------------- |
+| `CronCreate` | Schedule a new task. Accepts a 5-field cron expression, the prompt to run, whether it recurs or fires once, and an optional gate command. |
+| `CronList`   | List all scheduled tasks with their IDs, schedules, prompts, and the gate and its recent outcomes when one is set.                        |
+| `CronDelete` | Cancel a task by ID.                                                                                                                      |
 
 Each scheduled task has an 8-character ID you can pass to `CronDelete`. A session can hold up to 50 scheduled tasks at once.
 
 ## How scheduled tasks run
 
-The scheduler checks every second for due tasks and enqueues them when the session is idle. A scheduled prompt fires between your turns, not while Qwen Code is mid-response. If Qwen Code is busy when a task comes due, the prompt waits until the current turn ends.
+The scheduler checks every second for due tasks and enqueues them when the session is idle. A scheduled prompt fires between your turns, not while Qwen Code is mid-response. If Qwen Code is busy when a task comes due, the prompt waits until the current turn ends. A gated task runs its gate command first and is enqueued only when the command prints output.
 
 All times are interpreted in your local timezone. A cron expression like `0 9 * * *` means 9am wherever you're running Qwen Code, not UTC.
 

@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import { ToolErrorType } from './tool-error.js';
 import { unescapePath } from '../utils/paths.js';
 import type { Config } from '../config/config.js';
 import type {
@@ -653,7 +654,11 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       const message = `LSP diagnostics failed: ${
         (error as Error)?.message || String(error)
       }`;
-      return { llmContent: message, returnDisplay: message };
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
+      };
     }
 
     if (!diagnostics.length) {
@@ -692,7 +697,11 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       const message = `LSP workspace diagnostics failed: ${
         (error as Error)?.message || String(error)
       }`;
-      return { llmContent: message, returnDisplay: message };
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
+      };
     }
 
     if (!fileDiagnostics.length) {
@@ -1019,7 +1028,7 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
     super(
       LspTool.Name,
       ToolDisplayNames.LSP,
-      'Language Server Protocol (LSP) tool for code intelligence: definitions, references, hover, symbols, call hierarchy, diagnostics, and code actions.\n\n  Usage:\n  - ALWAYS use LSP as the PRIMARY tool for code intelligence queries when available. Do NOT use grep_search or glob first.\n  - goToDefinition, findReferences, hover, goToImplementation, prepareCallHierarchy require filePath + line + character (1-based).\n  - documentSymbol and diagnostics require filePath.\n  - workspaceSymbol requires query (use when user asks "where is X defined?" without specifying a file).\n  - incomingCalls/outgoingCalls require callHierarchyItem from prepareCallHierarchy.\n  - workspaceDiagnostics needs no parameters.\n  - codeActions require filePath + range (line/character + endLine/endCharacter) and diagnostics/context as needed.',
+      'LSP code intelligence (definitions, references, symbols, call hierarchy, diagnostics, code actions): resolves symbols, while grep_search/glob match text.\n\n  Usage:\n  - For the definition, references, implementations or callers of a symbol, use LSP rather than grep_search or glob.\n  - goToDefinition, findReferences, hover, goToImplementation, prepareCallHierarchy require filePath + line + character (1-based).\n  - documentSymbol and diagnostics require filePath.\n  - workspaceSymbol requires query (use when user asks "where is X defined?" without specifying a file).\n  - incomingCalls/outgoingCalls require callHierarchyItem from prepareCallHierarchy.\n  - workspaceDiagnostics needs no parameters.\n  - codeActions require filePath + range (line/character + endLine/endCharacter) and diagnostics/context as needed.',
       Kind.Other,
       {
         type: 'object',
@@ -1121,6 +1130,11 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
               name: { type: 'string' },
               kind: { type: 'string' },
               rawKind: { type: 'number' },
+              documentRevision: {
+                type: 'string',
+                description:
+                  'Client freshness token. Echo unchanged; if absent or stale for a file URI, prepare call hierarchy again. Non-file items cannot be traversed; prepare at a file location instead.',
+              },
               detail: { type: 'string' },
               uri: { type: 'string' },
               range: { $ref: '#/definitions/LspRange' },
@@ -1149,7 +1163,7 @@ export class LspTool extends BaseDeclarativeTool<LspToolParams, ToolResult> {
       },
       false, // isOutputMarkdown
       false, // canUpdateOutput
-      true, // shouldDefer — loaded on demand via ToolSearch
+      true, // shouldDefer — reached on demand via ToolSearch + ToolCall
       false, // alwaysLoad
       'lsp language server definition references hover symbol diagnostics code actions',
     );

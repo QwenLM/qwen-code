@@ -5,11 +5,34 @@ export default defineConfig({
   test: {
     include: ['src/**/*.test.ts'],
     globals: true,
+    reporters: ['default', 'junit'],
+    outputFile: {
+      junit: 'junit.xml',
+    },
     // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
     dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
+    // Shared-pool ceiling; see scripts/tests/unit-vitest-configs.test.ts.
+    // Raised only on the ECS pool, where the same suite runs ~5x slower
+    // depending on which host it lands on (#10490); off the pool this stays
+    // `undefined` so vitest's 5s default keeps catching a genuine hang fast.
+    testTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : undefined,
+    // The heartbeat witness (#17173 R5) mocks the SDK's OWN ws/axios imports
+    // to run the real SDK against a fake network; externalized node_modules
+    // bypass vi.mock, so the SDK must be inlined for those mocks to apply.
+    server: {
+      deps: {
+        inline: ['dingtalk-stream-sdk-nodejs'],
+      },
+    },
   },
   resolve: {
     alias: {
+      '@qwen-code/channel-base/markdown-chunks': path.resolve(
+        __dirname,
+        '../base/src/markdown-chunks.ts',
+      ),
       // Resolve the in-repo channel-base to its live SOURCE so a package-local
       // test run (e.g. `cd packages/channels/dingtalk && vitest`) doesn't depend
       // on a prior `tsc --build` of base — its dist may be absent or stale during

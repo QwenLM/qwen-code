@@ -15,6 +15,7 @@ import { useKeypress, type Key } from '../../hooks/useKeypress.js';
 import { theme } from '../../semantic-colors.js';
 import type { DialogEntry } from '../../hooks/useBackgroundTaskView.js';
 import { t } from '../../../i18n/index.js';
+import { isActiveWorkflowStatus } from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
 
 const KIND_NAMES = {
   agent: { singular: 'local agent', plural: 'local agents' },
@@ -34,6 +35,65 @@ export function hasPendingApproval(entries: readonly DialogEntry[]): boolean {
     (e) =>
       (e.kind === 'agent' || e.kind === 'workflow') &&
       (e.pendingApprovals?.length ?? 0) > 0,
+  );
+}
+
+/** A tool call a background agent or workflow has parked for approval. */
+export interface PendingBackgroundApproval {
+  /** Stable across snapshots; unique among all parked approvals. */
+  key: string;
+  toolName: string;
+  /** Emission timestamp (ms). */
+  at: number;
+}
+
+/**
+ * Every approval {@link hasPendingApproval} sees, oldest first. Workflow
+ * approvals carry their own id; agent tool-call ids are scoped to the
+ * originating runtime, including nested agents that share a parent entry.
+ */
+export function getPendingBackgroundApprovals(
+  entries: readonly DialogEntry[],
+): PendingBackgroundApproval[] {
+  const approvals: PendingBackgroundApproval[] = [];
+  for (const entry of entries) {
+    if (entry.kind === 'agent') {
+      for (const approval of entry.pendingApprovals ?? []) {
+        approvals.push({
+          key: JSON.stringify([
+            'agent',
+            entry.agentId,
+            approval.subagentId ?? null,
+            approval.callId,
+          ]),
+          toolName: approval.name,
+          at: approval.at,
+        });
+      }
+    } else if (entry.kind === 'workflow') {
+      for (const approval of entry.pendingApprovals ?? []) {
+        approvals.push({
+          key: `workflow:${approval.approvalId}`,
+          toolName: approval.name,
+          at: approval.at,
+        });
+      }
+    }
+  }
+  return approvals.sort((a, b) => a.at - b.at);
+}
+
+/**
+ * True if a workflow that is still active has been flagged as large. Settled
+ * runs are left out: the marker is a nudge to stop something, and they have
+ * stopped.
+ */
+export function hasLargeWorkflow(entries: readonly DialogEntry[]): boolean {
+  return entries.some(
+    (e) =>
+      e.kind === 'workflow' &&
+      isActiveWorkflowStatus(e.status) &&
+      e.sizeWarning !== undefined,
   );
 }
 
@@ -136,6 +196,7 @@ export const BackgroundTasksPill: React.FC = () => {
 
   const label = getPillLabel(entries);
   const needsApproval = hasPendingApproval(entries);
+  const largeWorkflow = hasLargeWorkflow(entries);
 
   return (
     <>
@@ -151,6 +212,11 @@ export const BackgroundTasksPill: React.FC = () => {
       {needsApproval && (
         <Text color={theme.status.warning} wrap="truncate">
           {` ⚠ ${t('needs approval')}`}
+        </Text>
+      )}
+      {largeWorkflow && (
+        <Text color={theme.status.warning} wrap="truncate">
+          {` ⚠ ${t('Large workflow')}`}
         </Text>
       )}
     </>

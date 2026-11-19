@@ -19,6 +19,7 @@ import test from 'node:test';
 
 import {
   DRIVE_COMPLETE_MARKER,
+  INITIALIZE_TIMEOUT_MS,
   SCENARIOS,
   SID,
   admissionOnly,
@@ -30,6 +31,7 @@ import {
   isPlainObject,
   readTranscriptFixture,
   retargetTranscript,
+  serveArgs,
 } from './serve-ab-drive.mjs';
 
 test('chatsDirFor mirrors the daemon project-dir layout', () => {
@@ -560,4 +562,20 @@ test('captureScenarios aborts when a setup request fails', async () => {
     DRIVE_COMPLETE_MARKER,
     'health-deep-with-session.json',
   ]);
+});
+
+test('the daemon gets a CI-sized ACP handshake budget, not the 10s default', () => {
+  // #13266: under runner contention the 10s default expired mid-setup and the
+  // daemon killed its own ACP child. Both legs share these args, so the budget
+  // cannot show up as a diff.
+  const args = serveArgs({
+    cliEntry: 'cli.js',
+    port: 1234,
+    token: 't',
+    home: '/tmp/h',
+  });
+  const i = args.indexOf('--initialize-timeout-ms');
+  assert.notEqual(i, -1);
+  assert.equal(args[i + 1], String(INITIALIZE_TIMEOUT_MS));
+  assert.ok(INITIALIZE_TIMEOUT_MS >= 60_000);
 });

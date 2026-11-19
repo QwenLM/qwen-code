@@ -893,13 +893,11 @@ pub mod macos {
 
 #[cfg(target_os = "linux")]
 pub mod linux {
-    use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
     use std::time::Duration;
 
-    use serde::Deserialize;
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{
         AtomEnum, ConnectionExt, MapState, Rectangle, Window, WindowClass,
@@ -914,9 +912,6 @@ pub mod linux {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum SessionKind {
         X11,
-        Sway,
-        Gnome,
-        CuaCompositor,
         Missing,
     }
 
@@ -929,21 +924,7 @@ pub mod linux {
 
     impl LinuxObserver {
         pub fn new() -> Self {
-            let explicit_wayland = std::env::var("XDG_SESSION_TYPE")
-                .map(|value| value.eq_ignore_ascii_case("wayland"))
-                .unwrap_or(false)
-                || std::env::var_os("WAYLAND_DISPLAY").is_some();
-            let session = if explicit_wayland {
-                if cua_compositor_available() {
-                    SessionKind::CuaCompositor
-                } else if sway_available() {
-                    SessionKind::Sway
-                } else if gnome_windows().is_ok() {
-                    SessionKind::Gnome
-                } else {
-                    SessionKind::Missing
-                }
-            } else if std::env::var_os("DISPLAY").is_some() {
+            let session = if std::env::var_os("DISPLAY").is_some() {
                 if x11_window_manager_ready() {
                     SessionKind::X11
                 } else {
@@ -976,14 +957,7 @@ pub mod linux {
                     cursor: true,
                     leaked_input: false,
                 },
-                SessionKind::Sway | SessionKind::Gnome | SessionKind::CuaCompositor => {
-                    ObserverCapabilities {
-                        focus: true,
-                        z_order: true,
-                        cursor: false,
-                        leaked_input: false,
-                    }
-                }
+
                 SessionKind::Missing => ObserverCapabilities::default(),
             }
         }
@@ -991,9 +965,7 @@ pub mod linux {
         fn snapshot(&self, target: TargetWindow) -> Result<DesktopSnapshot, ObserverError> {
             match self.session {
                 SessionKind::X11 => x11_snapshot(target),
-                SessionKind::Sway => sway_snapshot(target),
-                SessionKind::Gnome => gnome_snapshot(target),
-                SessionKind::CuaCompositor => cua_compositor_snapshot(target),
+
                 SessionKind::Missing => Ok(DesktopSnapshot {
                     foreground: None,
                     input_focus: None,
@@ -1018,9 +990,7 @@ pub mod linux {
             self.sampler = Some(std::thread::spawn(move || {
                 let focus_identity = || match session {
                     SessionKind::X11 => x11_focus_identity(),
-                    SessionKind::Sway => sway_focus_identity(),
-                    SessionKind::Gnome => gnome_focus_identity(),
-                    SessionKind::CuaCompositor => cua_compositor_focus_identity(),
+
                     SessionKind::Missing => Ok(None),
                 };
                 let mut previous = focus_identity().ok().flatten();
@@ -1066,366 +1036,6 @@ pub mod linux {
     fn x11_connection() -> Result<(RustConnection, usize), ObserverError> {
         x11rb::connect(None)
             .map_err(|error| ObserverError::new(format!("X11 connect failed: {error}")))
-    }
-
-    #[derive(Default)]
-    struct SwayTreeState {
-        focused: Option<u64>,
-        focused_workspace: Option<u64>,
-        focused_fullscreen: Option<u64>,
-        target: Option<(u64, bool, Option<u64>)>,
-    }
-
-    fn sway_tree() -> Result<serde_json::Value, ObserverError> {
-        let output = Command::new("swaymsg")
-            .args(["-r", "-t", "get_tree"])
-            .output()
-            .map_err(|error| ObserverError::new(format!("swaymsg get_tree failed: {error}")))?;
-        if !output.status.success() {
-            return Err(ObserverError::new(format!(
-                "swaymsg get_tree exited with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-        serde_json::from_slice(&output.stdout)
-            .map_err(|error| ObserverError::new(format!("invalid sway tree JSON: {error}")))
-    }
-
-    fn sway_available() -> bool {
-        std::env::var_os("SWAYSOCK").is_some_and(|value| !value.is_empty()) && sway_tree().is_ok()
-    }
-
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    struct CuaCompositorState {
-        focused_pid: Option<u64>,
-        target_z: TargetZ,
-    }
-
-    fn parse_cua_compositor_state(line: &str) -> Result<CuaCompositorState, ObserverError> {
-        let mut fields = line.split_whitespace();
-        if fields.next() != Some("state") {
-            return Err(ObserverError::new(format!(
-                "invalid cua-compositor observer response: {line:?}"
-            )));
-        }
-        let focused_pid = fields
-            .next()
-            .ok_or_else(|| ObserverError::new("cua-compositor state omitted focused pid"))?
-            .parse::<u64>()
-            .map_err(|error| ObserverError::new(format!("invalid focused pid: {error}")))?;
-        let target_z = match fields.next() {
-            Some("foreground") => TargetZ::Foreground,
-            Some("background_occluded") => TargetZ::BackgroundOccluded,
-            Some("background_visible") => TargetZ::BackgroundVisible,
-            Some("not_found") => TargetZ::NotFound,
-            Some(value) => {
-                return Err(ObserverError::new(format!(
-                    "invalid cua-compositor target state: {value}"
-                )))
-            }
-            None => {
-                return Err(ObserverError::new(
-                    "cua-compositor state omitted target state",
-                ))
-            }
-        };
-        if fields.next().is_some() {
-            return Err(ObserverError::new(
-                "cua-compositor state contained trailing fields",
-            ));
-        }
-        Ok(CuaCompositorState {
-            focused_pid: (focused_pid != 0).then_some(focused_pid),
-            target_z,
-        })
-    }
-
-    fn cua_compositor_state(target_pid: u32) -> Result<CuaCompositorState, ObserverError> {
-        use std::io::{BufRead, BufReader, Write};
-        use std::os::unix::net::UnixStream;
-
-        let socket = std::env::var("CUA_INJECT_SOCKET")
-            .map_err(|_| ObserverError::new("CUA_INJECT_SOCKET is not set"))?;
-        let stream = UnixStream::connect(&socket).map_err(|error| {
-            ObserverError::new(format!("connect cua-compositor observer socket: {error}"))
-        })?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .map_err(|error| ObserverError::new(format!("set observer timeout: {error}")))?;
-        let mut writer = stream
-            .try_clone()
-            .map_err(|error| ObserverError::new(format!("clone observer socket: {error}")))?;
-        let mut reader = BufReader::new(stream);
-
-        writeln!(writer, "cua-inject v1")
-            .and_then(|_| writer.flush())
-            .map_err(|error| ObserverError::new(format!("write observer handshake: {error}")))?;
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .map_err(|error| ObserverError::new(format!("read observer handshake: {error}")))?;
-        if line.trim() != "cua-inject v1" {
-            return Err(ObserverError::new(format!(
-                "cua-compositor observer handshake mismatch: {:?}",
-                line.trim()
-            )));
-        }
-
-        writeln!(writer, "q {target_pid}")
-            .and_then(|_| writer.flush())
-            .map_err(|error| ObserverError::new(format!("write observer query: {error}")))?;
-        line.clear();
-        let read = reader
-            .read_line(&mut line)
-            .map_err(|error| ObserverError::new(format!("read observer query: {error}")))?;
-        if read == 0 {
-            return Err(ObserverError::new(
-                "cua-compositor closed the observer query",
-            ));
-        }
-        parse_cua_compositor_state(&line)
-    }
-
-    fn cua_compositor_available() -> bool {
-        std::env::var_os("CUA_INJECT_SOCKET").is_some() && cua_compositor_state(0).is_ok()
-    }
-
-    fn cua_compositor_snapshot(target: TargetWindow) -> Result<DesktopSnapshot, ObserverError> {
-        let state = cua_compositor_state(target.pid)?;
-        Ok(DesktopSnapshot {
-            foreground: state.focused_pid,
-            input_focus: state.focused_pid,
-            target_z: state.target_z,
-            cursor_pos: None,
-        })
-    }
-
-    fn cua_compositor_focus_identity() -> Result<Option<u64>, ObserverError> {
-        Ok(cua_compositor_state(0)?.focused_pid)
-    }
-
-    #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-    struct GnomeWindow {
-        id: u64,
-        pid: u32,
-        title: String,
-        x: i64,
-        y: i64,
-        w: i64,
-        h: i64,
-        focused: bool,
-        minimized: bool,
-        visible: bool,
-        stacking: u64,
-    }
-
-    fn gnome_windows() -> Result<Vec<GnomeWindow>, ObserverError> {
-        let mut child = Command::new("gdbus")
-            .args([
-                "call",
-                "--session",
-                "--dest",
-                "org.cua.WinRects",
-                "--object-path",
-                "/org/cua/WinRects",
-                "--method",
-                "org.cua.WinRects.GetRects",
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| ObserverError::new(format!("gdbus GetRects failed: {error}")))?;
-        let deadline = std::time::Instant::now() + Duration::from_millis(800);
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => {
-                    let output = child.wait_with_output().map_err(|error| {
-                        ObserverError::new(format!("gdbus GetRects output failed: {error}"))
-                    })?;
-                    if !output.status.success() {
-                        return Err(ObserverError::new(format!(
-                            "gdbus GetRects exited with {}: {}",
-                            output.status,
-                            String::from_utf8_lossy(&output.stderr)
-                        )));
-                    }
-                    return parse_gnome_windows(&String::from_utf8_lossy(&output.stdout));
-                }
-                Ok(None) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(15))
-                }
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(ObserverError::new("gdbus GetRects timed out"));
-                }
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(ObserverError::new(format!(
-                        "gdbus GetRects wait failed: {error}"
-                    )));
-                }
-            }
-        }
-    }
-
-    fn parse_gnome_windows(raw: &str) -> Result<Vec<GnomeWindow>, ObserverError> {
-        let start = raw
-            .find('[')
-            .ok_or_else(|| ObserverError::new("GetRects response had no JSON array"))?;
-        let end = raw
-            .rfind(']')
-            .filter(|end| *end >= start)
-            .ok_or_else(|| ObserverError::new("GetRects response had no complete JSON array"))?;
-        serde_json::from_str(&raw[start..=end])
-            .map_err(|error| ObserverError::new(format!("invalid GetRects JSON: {error}")))
-    }
-
-    fn gnome_target<'a>(
-        windows: &'a [GnomeWindow],
-        target: TargetWindow,
-    ) -> Option<&'a GnomeWindow> {
-        let matching = windows.iter().filter(|window| window.pid == target.pid);
-        matching
-            .clone()
-            .find(|window| window.id == target.native_id)
-            .or_else(|| matching.max_by_key(|window| window.stacking))
-    }
-
-    fn fully_covers(cover: &GnomeWindow, target: &GnomeWindow) -> bool {
-        let valid_rects = target.w > 0 && target.h > 0 && cover.w > 0 && cover.h > 0;
-        let covers_declared_frame = cover.x <= target.x
-            && cover.y <= target.y
-            && cover.x.saturating_add(cover.w) >= target.x.saturating_add(target.w)
-            && cover.y.saturating_add(cover.h) >= target.y.saturating_add(target.h);
-        let test_sentinel_covers_visible_frame = cover.title.starts_with("CuaTestHarness Sentinel")
-            && cover.x == 0
-            && cover.y == 0
-            && target.x < cover.w
-            && target.y < cover.h
-            && target.x.saturating_add(target.w) > 0
-            && target.y.saturating_add(target.h) > 0;
-        valid_rects && (covers_declared_frame || test_sentinel_covers_visible_frame)
-    }
-
-    fn classify_gnome_target(windows: &[GnomeWindow], target: TargetWindow) -> TargetZ {
-        let Some(target) = gnome_target(windows, target) else {
-            return TargetZ::NotFound;
-        };
-        if target.focused {
-            TargetZ::Foreground
-        } else if target.minimized || !target.visible {
-            TargetZ::Minimized
-        } else if windows.iter().any(|window| {
-            window.stacking > target.stacking
-                && window.visible
-                && !window.minimized
-                && fully_covers(window, target)
-        }) {
-            TargetZ::BackgroundOccluded
-        } else {
-            TargetZ::BackgroundVisible
-        }
-    }
-
-    fn gnome_focus_identity_from(windows: &[GnomeWindow]) -> Option<u64> {
-        windows
-            .iter()
-            .find(|window| window.focused)
-            .map(|window| window.id)
-    }
-
-    fn gnome_snapshot(target: TargetWindow) -> Result<DesktopSnapshot, ObserverError> {
-        let windows = gnome_windows()?;
-        let focused = gnome_focus_identity_from(&windows);
-        Ok(DesktopSnapshot {
-            foreground: focused,
-            input_focus: focused,
-            target_z: classify_gnome_target(&windows, target),
-            cursor_pos: None,
-        })
-    }
-
-    fn gnome_focus_identity() -> Result<Option<u64>, ObserverError> {
-        Ok(gnome_focus_identity_from(&gnome_windows()?))
-    }
-
-    fn walk_sway_tree(
-        node: &serde_json::Value,
-        target_pid: u32,
-        workspace: Option<u64>,
-        state: &mut SwayTreeState,
-    ) -> bool {
-        let id = node["id"].as_u64();
-        let workspace = if node["type"].as_str() == Some("workspace") {
-            id
-        } else {
-            workspace
-        };
-        let focused = node["focused"].as_bool().unwrap_or(false);
-        if focused {
-            state.focused = id;
-            state.focused_workspace = workspace;
-        }
-        if node["pid"].as_u64() == Some(u64::from(target_pid)) {
-            if let Some(id) = id {
-                state.target = Some((id, node["visible"].as_bool().unwrap_or(true), workspace));
-            }
-        }
-        let mut subtree_focused = focused;
-        for child in ["nodes", "floating_nodes"]
-            .into_iter()
-            .flat_map(|key| node[key].as_array().into_iter().flatten())
-        {
-            subtree_focused |= walk_sway_tree(child, target_pid, workspace, state);
-        }
-        // Sway commonly puts fullscreen_mode on a container while focus belongs
-        // to a descendant surface. Treat the focused subtree as fullscreen so a
-        // sibling hidden behind that container is classified as occluded.
-        if subtree_focused && node["fullscreen_mode"].as_i64().unwrap_or(0) != 0 {
-            state.focused_fullscreen = id;
-        }
-        subtree_focused
-    }
-
-    fn classify_sway_target(state: &SwayTreeState) -> TargetZ {
-        match state.target {
-            None => TargetZ::NotFound,
-            Some((id, _, _)) if state.focused == Some(id) => TargetZ::Foreground,
-            Some((_, _, target_workspace))
-                if state.focused_fullscreen.is_some()
-                    && target_workspace == state.focused_workspace =>
-            {
-                // Sway reports windows hidden behind a fullscreen sibling as
-                // visible=false. They are occluded, not minimized.
-                TargetZ::BackgroundOccluded
-            }
-            Some((_, false, _)) => TargetZ::Minimized,
-            Some(_) => TargetZ::BackgroundVisible,
-        }
-    }
-
-    fn sway_snapshot(target: TargetWindow) -> Result<DesktopSnapshot, ObserverError> {
-        let tree = sway_tree()?;
-        let mut state = SwayTreeState::default();
-        let _ = walk_sway_tree(&tree, target.pid, None, &mut state);
-        let target_z = classify_sway_target(&state);
-        Ok(DesktopSnapshot {
-            foreground: state.focused,
-            input_focus: state.focused,
-            target_z,
-            cursor_pos: None,
-        })
-    }
-
-    fn sway_focus_identity() -> Result<Option<u64>, ObserverError> {
-        let tree = sway_tree()?;
-        let mut state = SwayTreeState::default();
-        let _ = walk_sway_tree(&tree, 0, None, &mut state);
-        Ok(state.focused)
     }
 
     fn x11_snapshot(target: TargetWindow) -> Result<DesktopSnapshot, ObserverError> {
@@ -1685,10 +1295,6 @@ pub mod linux {
     mod tests {
         use super::*;
 
-        fn gnome_payload() -> &'static str {
-            r#"('[{"id":10,"pid":100,"title":"target","x":10,"y":20,"w":300,"h":200,"focused":false,"minimized":false,"visible":true,"stacking":0},{"id":20,"pid":200,"title":"sentinel","x":0,"y":0,"w":800,"h":600,"focused":true,"minimized":false,"visible":true,"stacking":1}]',)"#
-        }
-
         #[test]
         fn occlusion_samples_corners_and_center() {
             let bounds = Rectangle {
@@ -1725,159 +1331,6 @@ pub mod linux {
             };
             assert!(!rectangle_fully_contains(partial, target, 2));
             assert!(rectangle_fully_contains(full, target, 2));
-        }
-
-        #[test]
-        fn sway_hidden_target_behind_fullscreen_sibling_is_occluded() {
-            let state = SwayTreeState {
-                focused: Some(30),
-                focused_workspace: Some(10),
-                focused_fullscreen: Some(30),
-                target: Some((20, false, Some(10))),
-            };
-            assert_eq!(classify_sway_target(&state), TargetZ::BackgroundOccluded);
-        }
-
-        #[test]
-        fn sway_fullscreen_ancestor_of_focused_surface_occludes_target() {
-            let tree = serde_json::json!({
-                "id": 1,
-                "type": "root",
-                "nodes": [{
-                    "id": 10,
-                    "type": "workspace",
-                    "nodes": [
-                        {
-                            "id": 20,
-                            "pid": 100,
-                            "visible": false,
-                            "focused": false,
-                            "fullscreen_mode": 0,
-                            "nodes": []
-                        },
-                        {
-                            "id": 30,
-                            "focused": false,
-                            "fullscreen_mode": 1,
-                            "nodes": [{
-                                "id": 31,
-                                "pid": 200,
-                                "visible": true,
-                                "focused": true,
-                                "fullscreen_mode": 0,
-                                "nodes": []
-                            }]
-                        }
-                    ]
-                }]
-            });
-            let mut state = SwayTreeState::default();
-            assert!(walk_sway_tree(&tree, 100, None, &mut state));
-            assert_eq!(state.focused, Some(31));
-            assert_eq!(state.focused_fullscreen, Some(30));
-            assert_eq!(classify_sway_target(&state), TargetZ::BackgroundOccluded);
-        }
-
-        #[test]
-        fn sway_hidden_target_on_another_workspace_is_not_occluded() {
-            let state = SwayTreeState {
-                focused: Some(30),
-                focused_workspace: Some(10),
-                focused_fullscreen: Some(30),
-                target: Some((20, false, Some(11))),
-            };
-            assert_eq!(classify_sway_target(&state), TargetZ::Minimized);
-        }
-
-        #[test]
-        fn cua_compositor_state_is_strict_and_pid_based() {
-            assert_eq!(
-                parse_cua_compositor_state("state 200 background_occluded\n")
-                    .expect("valid compositor state"),
-                CuaCompositorState {
-                    focused_pid: Some(200),
-                    target_z: TargetZ::BackgroundOccluded,
-                }
-            );
-            assert_eq!(
-                parse_cua_compositor_state("state 0 not_found")
-                    .expect("zero means no focused client"),
-                CuaCompositorState {
-                    focused_pid: None,
-                    target_z: TargetZ::NotFound,
-                }
-            );
-            assert!(parse_cua_compositor_state("ok").is_err());
-            assert!(parse_cua_compositor_state("state 1 unknown").is_err());
-            assert!(parse_cua_compositor_state("state 1 foreground trailing").is_err());
-        }
-
-        #[test]
-        fn gnome_json_and_focus_identity_are_compositor_derived() {
-            let windows = parse_gnome_windows(gnome_payload()).expect("GNOME JSON");
-            assert_eq!(windows.len(), 2);
-            assert_eq!(gnome_focus_identity_from(&windows), Some(20));
-            assert!(parse_gnome_windows(r#"('[{"pid":100}]',)"#).is_err());
-        }
-
-        #[test]
-        fn gnome_only_full_higher_cover_occludes() {
-            let mut windows = parse_gnome_windows(gnome_payload()).expect("GNOME JSON");
-            let target = TargetWindow {
-                pid: 100,
-                native_id: 10,
-            };
-            assert_eq!(
-                classify_gnome_target(&windows, target),
-                TargetZ::BackgroundOccluded
-            );
-            windows[1].w = 200;
-            assert_eq!(
-                classify_gnome_target(&windows, target),
-                TargetZ::BackgroundVisible
-            );
-            windows[1].w = 800;
-            windows[1].visible = false;
-            assert_eq!(
-                classify_gnome_target(&windows, target),
-                TargetZ::BackgroundVisible
-            );
-        }
-
-        #[test]
-        fn gnome_fullscreen_test_sentinel_covers_the_visible_part_of_an_oversized_target() {
-            let mut windows = parse_gnome_windows(gnome_payload()).expect("GNOME JSON");
-            let target = TargetWindow {
-                pid: 100,
-                native_id: 10,
-            };
-            windows[0].x = 66;
-            windows[0].w = 1020;
-            windows[1].title = "CuaTestHarness Sentinel [cdp=12345]".to_owned();
-            assert_eq!(
-                classify_gnome_target(&windows, target),
-                TargetZ::BackgroundOccluded
-            );
-
-            windows[1].title = "ordinary window".to_owned();
-            assert_eq!(
-                classify_gnome_target(&windows, target),
-                TargetZ::BackgroundVisible
-            );
-        }
-
-        #[test]
-        fn gnome_focused_and_minimized_are_direct() {
-            let mut windows = parse_gnome_windows(gnome_payload()).expect("GNOME JSON");
-            let target = TargetWindow {
-                pid: 100,
-                native_id: 10,
-            };
-            windows[0].focused = true;
-            assert_eq!(classify_gnome_target(&windows, target), TargetZ::Foreground);
-            windows[0].focused = false;
-            windows[0].minimized = true;
-            assert_eq!(classify_gnome_target(&windows, target), TargetZ::Minimized);
         }
     }
 }

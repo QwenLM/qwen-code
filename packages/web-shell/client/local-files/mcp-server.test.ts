@@ -31,6 +31,7 @@ function fakeFs(overrides: Partial<LocalFilesFs> = {}): LocalFilesFs {
       filesScanned: 0,
       bytesScanned: 0,
       filesSkipped: 0,
+      dirsScanned: 0,
       truncated: false,
       truncatedBy: null,
     }),
@@ -258,6 +259,7 @@ describe('tools/call', () => {
         filesScanned: 12,
         bytesScanned: 3400,
         filesSkipped: 3,
+        dirsScanned: 2500,
         truncated: true,
         truncatedBy: 'files',
       }),
@@ -268,7 +270,7 @@ describe('tools/call', () => {
     });
     const text = resultText(response);
     expect(text).toContain('a/b.ts:7: const needle = 1;');
-    expect(text).toContain('scanned 12 file(s), 3400 bytes');
+    expect(text).toContain('scanned 12 file(s), 3400 bytes, 2500 dir(s)');
     expect(text).toMatch(/stopped early: hit the files budget/);
   });
 
@@ -280,6 +282,7 @@ describe('tools/call', () => {
         filesScanned: 4,
         bytesScanned: 900,
         filesSkipped: 2,
+        dirsScanned: 0,
         truncated: false,
         truncatedBy: null,
       }),
@@ -309,6 +312,7 @@ describe('tools/call', () => {
         filesScanned: 3,
         bytesScanned: 20_000_000,
         filesSkipped: 0,
+        dirsScanned: 0,
         truncated: true,
         truncatedBy: 'bytes',
       }),
@@ -388,6 +392,7 @@ describe('tools/call', () => {
       filesScanned: 0,
       bytesScanned: 0,
       filesSkipped: 0,
+      dirsScanned: 0,
       truncated: false,
       truncatedBy: null,
     }));

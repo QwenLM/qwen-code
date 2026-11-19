@@ -139,6 +139,10 @@ export function extractOpenAiRequestAttributes(request: object): Attributes {
     ownValue(record, 'presence_penalty'),
   );
   assignStopSequences(attributes, ownValue(record, 'stop'), true);
+  const reasoningEffort = ownValue(record, 'reasoning_effort');
+  if (typeof reasoningEffort === 'string' && reasoningEffort.length > 0) {
+    attributes['gen_ai.request.reasoning.level'] = reasoningEffort;
+  }
   return attributes;
 }
 
@@ -299,6 +303,33 @@ export class GenAiExchangeController {
       this.output.discardContent();
       this.responseConversionFailed = true;
       debugLogger.debug('Failed to convert GenAI response content');
+    }
+  }
+
+  /**
+   * Stamp one attribute contributed by the provider's HTTP response (headers
+   * or a wire field the normalized response drops). Call sites gate on their
+   * own conditions; this only enforces that a finalized or foreign-generation
+   * attempt cannot still write to the span.
+   */
+  recordResponseAttribute(
+    handle: GenAiAttemptHandle | undefined,
+    key: string,
+    value: string | undefined,
+  ): void {
+    if (
+      !handle ||
+      handle.controller !== this ||
+      handle.generation !== this.generation ||
+      this.finalized ||
+      value === undefined
+    ) {
+      return;
+    }
+    try {
+      this.span.setAttribute(key, value);
+    } catch {
+      debugLogger.debug(`Failed to set ${key} span attribute`);
     }
   }
 

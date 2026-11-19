@@ -136,12 +136,12 @@ const ENVIRONMENT_KEYS = [
             type: 'command',
             command: `& '${escapePowerShell(process.execPath)}' '${escapePowerShell(hookPath)}'`,
             shell: 'powershell',
-            timeout: 8000,
+            timeout: 8,
           }
         : {
             type: 'command',
             command: `exec '${escapePosix(process.execPath)}' '${escapePosix(hookPath)}'`,
-            timeout: 8000,
+            timeout: 8,
           };
 
     rig.mkdir('.qwen-home');

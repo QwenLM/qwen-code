@@ -9,6 +9,22 @@ import { renderResult } from './profile.js';
 import type { ExternalContextItem } from './types.js';
 
 describe('external context result rendering', () => {
+  it('skips overlong IDs instead of turning them into another record ID', () => {
+    const id = 'x'.repeat(128);
+    expect(
+      renderedItems(
+        renderResult([
+          { id: id + 'y', content: 'must not masquerade as the next record' },
+          { id, content: 'actual target' },
+          { id: '😀'.repeat(128), content: '128 code points' },
+          { id: '😀'.repeat(129), content: 'overlong' },
+        ]),
+      ),
+    ).toEqual([
+      { id, content: 'actual target' },
+      { id: '😀'.repeat(128), content: '128 code points' },
+    ]);
+  });
   it('keeps at most five valid items in provider order', () => {
     const result = renderResult(
       Array.from({ length: 6 }, (_, index) => ({
@@ -46,13 +62,13 @@ describe('external context result rendering', () => {
 
   it('truncates fields and keeps the longest content prefix that fits', () => {
     const prefix = (character: string): ExternalContextItem => ({
-      id: character.repeat(200),
+      id: character.repeat(128),
       content: character.repeat(1200),
       title: character.repeat(100),
       uri: character.repeat(200),
     });
     const last: ExternalContextItem = {
-      id: 'z'.repeat(200),
+      id: 'z'.repeat(128),
       content: 'y'.repeat(1200),
       title: 't'.repeat(300),
       uri: 'u'.repeat(600),

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { MAX_REGISTERED_WORKSPACES } from './workspace-inputs.js';
 import type { ServeProtocolVersions } from './capabilities.js';
 import type { AcpHttpHandle, AcpHttpSnapshot } from './acp-http/index.js';
 import {
@@ -42,6 +43,11 @@ import { isLoopbackBind } from './loopback-binds.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { ServeOptions } from './types.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type { ChannelRestoreFailure } from './channel-restore-failures.js';
+import {
+  MAX_CHANNEL_STARTUP_FAILURES,
+  MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+} from './channel-worker-startup-ipc.js';
 import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import type { DaemonMetricsBucket } from './daemon-metrics-ring.js';
 import type {
@@ -49,8 +55,13 @@ import type {
   WorkspaceRequestContext,
 } from './workspace-service/index.js';
 import type { TotalSessionAdmissionSnapshot } from './total-session-admission.js';
-import type { WorkspaceRegistry } from './workspace-registry.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from './workspace-registry.js';
 import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
+import type { ListenerKind } from './local-control/listener-identity.js';
+import type { StreamOccupancySnapshot } from './sse-occupancy.js';
 
 // Re-export so downstream consumers (server.ts, routes, the SDK type mirror)
 // import the bucket shape from the status module alongside the rest of the
@@ -102,6 +113,7 @@ export interface DaemonStatusIssue {
     | 'workspace_status_unavailable'
     | 'channel_worker_exited'
     | 'channel_worker_partial_connect'
+    | 'channel_restore_failed'
     | 'daemon_runtime_starting'
     | 'daemon_runtime_failed'
     | 'daemon_log_degraded'
@@ -127,6 +139,7 @@ export interface BuildDaemonStatusOptions {
   acpHandle?: AcpHttpHandle;
   rateLimiter?: RateLimiterInstance;
   getRestSseActive: () => number;
+  getStreamOccupancy: () => StreamOccupancySnapshot;
   features: readonly string[];
   protocolVersions: ServeProtocolVersions;
   supportedDeviceFlowProviders: readonly string[];
@@ -135,11 +148,15 @@ export interface BuildDaemonStatusOptions {
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  getChannelRestoreFailures?: () => readonly ChannelRestoreFailure[];
+  maxChannelControlWorkspaces?: number;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
   getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
   /** Returns undefined when no policy was built — direct-embed, or no budget. */
   getChildHeapPolicySnapshot?: () => ChildHeapPolicySnapshot | undefined;
+  getCommittedAcpChildCount?: () => number;
+  childAdmissionEnforced?: boolean;
 }
 
 interface DaemonStatusSection<T> {
@@ -183,11 +200,27 @@ interface DaemonStatusSecurity {
 }
 
 interface DaemonStatusLimits {
+  maxRegisteredWorkspaces: number;
+  maxChannelControlWorkspaces?: number;
   maxSessions: number | null;
   maxTotalSessions: number | null;
   maxPendingPromptsPerSession: number | null;
   listenerMaxConnections: number | null;
+  /**
+   * Effective admission cap for concurrent long-lived streams across every
+   * surface (`runtime.transport.streamOccupancy.total` is the live
+   * occupancy; `restSseActive` remains the REST event surface alone).
+   * `null` = unlimited (listener cap disabled, or explicit opt-out).
+   */
+  maxSseConnections?: number | null;
+  /**
+   * Per-listener admission clamps paired with `maxSseConnections`
+   * (issue #17554). Each pairing listener keeps its own short-request
+   * headroom; `null` = unlimited. Additive — older daemons omit it.
+   */
+  maxSseConnectionsPerListener?: Record<ListenerKind, number | null>;
   eventRingSize: number;
+  eventRingMaxBytes: number;
   compactedReplayMaxBytes: number;
   maxJournalEvents: number;
   maxJournalBytes: number;
@@ -203,27 +236,21 @@ interface DaemonStatusLimits {
   acpPreAttachMaxPayloadBytesPerConnection: number | null;
   acpPreAttachMaxPayloadBytesGlobal: number | null;
   /**
-   * The daemon's resolved memory figures. Observed and reported only: nothing
-   * consumes them to size a child. `null` on paths that resolve none, such as
-   * direct-embed bridges.
+   * The daemon's resolved memory figures and child policy. `null` on paths
+   * that resolve none, such as direct-embed bridges.
    */
   memory: DaemonStatusMemoryLimits | null;
 }
 
 export interface DaemonStatusMemoryLimits {
   /**
-   * False, and required — scoped to the CHILD-HEAP model: every figure in
-   * this section except `journalGrowth` is resolved input or a model of a
-   * policy that does not exist yet; nothing sizes or bounds a child
-   * process. The flag exists so a client can never mistake the modeled
-   * partition for enforcement that has not shipped. Adaptive live-journal
-   * growth IS a runtime effect of the budget and is reported separately
-   * under `journalGrowth`.
+   * True only when managed child-count admission and the fixed old-space
+   * ceiling are both applied. Does not bound total process RSS. Adaptive
+   * journal growth is reported separately under `journalGrowth`.
    */
-  enforced: false;
+  enforced: boolean;
   /**
-   * Adaptive live-journal growth derived from this budget — the one figure
-   * in this section with runtime effect: session journal caps really do
+   * Adaptive live-journal growth derived from this budget: session caps really do
    * grow within this pool mid-turn (per-session effective limits appear on
    * each session diagnostic in `detail=full`). `null` when growth is
    * disabled (an operator-pinned journal cap, or a budget that leaves no
@@ -237,11 +264,12 @@ export interface DaemonStatusMemoryLimits {
     baselineMaxBytes: number;
   } | null;
   /**
-   * The per-child heap partition the daemon models but does not apply.
+   * The fixed per-child heap partition, applied only under `enforce`.
    * `null` when no policy was built.
    */
   childHeap: {
     mode: ChildHeapMode;
+    admissionEnforced: boolean;
     /**
      * Children the pool could host at once. 0 when no partition can be
      * modeled — either the pool cannot cover one child at the minimum heap,
@@ -251,15 +279,15 @@ export interface DaemonStatusMemoryLimits {
      */
     maxConcurrentChildren: number | null;
     /**
-     * What each would receive. Never 0 and never below
+     * What each receives under `enforce`. Never 0 and never below
      * `modeled.minChildHeapMb`; `null` instead, both under `off` and wherever
      * the partition cannot be modeled within that floor.
      */
     perChildCeilingMb: number | null;
     /**
      * Spawns that would have exceeded `maxConcurrentChildren`. Admission
-     * pressure only: 0 does **not** mean the partition is safe to apply,
-     * because children still run on the much larger host-derived ceiling.
+     * pressure only: 0 does **not** prove the workload fits the ceiling.
+     * Under `observe` and `admit`, children retain the legacy heap arguments.
      *
      * Two known sources of counts that are not capacity pressure: a channel
      * swap on a daemon already at `maxConcurrentChildren` books one, because
@@ -279,9 +307,8 @@ export interface DaemonStatusMemoryLimits {
   availableMemorySource: 'constrained' | 'host';
   insufficientMemory: boolean;
   /**
-   * Derived figures for a capacity policy that has not shipped. Grouped, and
-   * named for what they are, so they cannot read as memory already reserved or
-   * limits already applied.
+   * Derived memory model used to calculate child-count admission and the
+   * fixed old-space ceiling. These values do not reserve physical memory.
    */
   modeled: {
     rootReserveMb: number;
@@ -301,14 +328,16 @@ export function toDaemonStatusMemoryLimits(
   budget: DaemonMemoryBudget | undefined,
   childHeap?: ChildHeapPolicySnapshot,
   journalGrowth?: DaemonStatusMemoryLimits['journalGrowth'],
+  admissionEnforced = false,
 ): DaemonStatusMemoryLimits | null {
   if (!budget) return null;
   return {
-    enforced: false,
+    enforced: admissionEnforced && childHeap?.mode === 'enforce',
     journalGrowth: journalGrowth ?? null,
     childHeap: childHeap
       ? {
           mode: childHeap.mode,
+          admissionEnforced,
           maxConcurrentChildren: childHeap.maxConcurrentChildren,
           perChildCeilingMb: childHeap.perChildCeilingMb,
           refusals: childHeap.refusals,
@@ -348,6 +377,13 @@ interface DaemonStatusRuntime {
   channelWorkers?: ChannelWorkerGroupSnapshot[];
   transport: {
     restSseActive: number;
+    /**
+     * Listener-slot occupancy across every long-lived stream surface
+     * (issue #17554), broken down by surface and by listener. Includes
+     * ACP WebSocket connections: the gauge measures slots, not frames.
+     * Additive — older daemons omit it.
+     */
+    streamOccupancy?: StreamOccupancySnapshot;
     acp: {
       enabled: boolean;
       connections: number;
@@ -415,6 +451,7 @@ interface DaemonStatusRuntimeMemory {
    * need an in-flight spawn count to admit without racing.
    */
   activeAcpChildren: number;
+  committedAcpChildren: number | null;
   /**
    * Which children the daemon's RSS sampling covers: every ACP child with a
    * live channel, i.e. the same set `activeAcpChildren` counts. Still not
@@ -468,8 +505,9 @@ interface DaemonStatusRuntimeMemory {
      * all while children keep running. Publishing zeros there would assert
      * that no child needs any heap.
      *
-     * Observational. Nothing here sizes a child or refuses a spawn; see
-     * `limits.memory.enforced`, which stays `false`.
+     * Observational. Nothing in this block sizes a child or refuses a spawn;
+     * `limits.memory.enforced` reports whether the modeled child ceiling is
+     * currently applied.
      */
     heap: {
       /** Committed high-water. Rises with the ceiling the child was given, so
@@ -662,18 +700,21 @@ export async function buildDaemonStatusResponse(
   const memoryBudget = input.opts.daemonMemoryBudget;
   let runtimeMemory: DaemonStatusRuntimeMemory | undefined;
   if (memoryBudget) {
-    // Count managed runtimes whose channel is live (non-dying), not what is
+    // Count the live (non-dying) channels of managed runtimes, not what is
     // merely active-state. `list()` (active-state only) drops workspaces
     // mid-replacement or blocked, which would under-report children in exactly
     // the window an admission policy must not treat as free capacity.
     // `listManaged()` is the managed set; `listEntries()` is the registration
     // count. A workspace whose kill has started but whose child has not exited
     // is excluded (dying channel); registered-but-dormant workspaces have no
-    // live child, so the registered count remains unsafe to divide by.
+    // live child, so the registered count remains unsafe to divide by. A
+    // paired runtime holds up to one live child per engine.
     const managedRuntimes = input.workspaceRegistry?.listManaged();
+    const liveChildren = (runtime: WorkspaceRuntime): number =>
+      runtime.bridge.liveChannelCount ??
+      (runtime.bridge.isChannelLive() ? 1 : 0);
     const activeAcpChildCount = managedRuntimes
-      ? managedRuntimes.filter((runtime) => runtime.bridge.isChannelLive())
-          .length
+      ? managedRuntimes.reduce((sum, runtime) => sum + liveChildren(runtime), 0)
       : workspaceSnapshots.filter((item) => item.snapshot.channelLive).length;
     const registeredWorkspaceCount = input.workspaceRegistry
       ? (
@@ -709,11 +750,14 @@ export async function buildDaemonStatusResponse(
       // leaning on it would make `sampled <= activeAcpChildren` — the one
       // thing this block promises — hold by coincidence instead of by
       // construction.
-      if (!runtime.bridge.isChannelLive()) continue;
+      const children = liveChildren(runtime);
+      if (children === 0) continue;
       const snapshot = runtime.bridge.getChildResourceSnapshot?.();
       if (!snapshot) continue;
       childRssBytesTotal += snapshot.rssBytes;
-      childRssSampled += 1;
+      // Capped by the same count `activeAcpChildCount` added for this runtime.
+      const sampled = Math.min(children, snapshot.children ?? 1);
+      childRssSampled += sampled;
       // Absent on bridges predating the field; such a child still counts
       // toward the sum, it just cannot say how old its reading is.
       if (snapshot.ageMs !== undefined) {
@@ -727,7 +771,7 @@ export async function buildDaemonStatusResponse(
       // honest denominator for the maxima.
       const heap = snapshot.heap;
       if (!heap) continue;
-      heapReported += 1;
+      heapReported += Math.min(sampled, snapshot.heapReported ?? 1);
       peakOldGenerationBytes = Math.max(
         peakOldGenerationBytes,
         heap.peakOldGenerationBytes,
@@ -758,6 +802,7 @@ export async function buildDaemonStatusResponse(
     runtimeMemory = {
       registeredWorkspaces: registeredWorkspaceCount,
       activeAcpChildren: activeAcpChildCount,
+      committedAcpChildren: input.getCommittedAcpChildCount?.() ?? null,
       childRssCoverage: 'active_children',
       children: {
         rssBytes: childRssBytesTotal,
@@ -976,17 +1021,36 @@ export async function buildDaemonStatusResponse(
       sessionShellCommandEnabled: input.sessionShellCommandEnabled,
     },
     limits: {
+      maxRegisteredWorkspaces:
+        input.opts.maxRegisteredWorkspaces ?? MAX_REGISTERED_WORKSPACES,
+      ...(input.maxChannelControlWorkspaces !== undefined
+        ? { maxChannelControlWorkspaces: input.maxChannelControlWorkspaces }
+        : {}),
       maxSessions: bridgeSnapshot.limits.maxSessions,
       maxTotalSessions: positiveFiniteOrNull(input.opts.maxTotalSessions),
       maxPendingPromptsPerSession:
         bridgeSnapshot.limits.maxPendingPromptsPerSession,
       listenerMaxConnections: listenerMaxConnections(input.opts.maxConnections),
+      maxSseConnections: sseMaxConnections(
+        input.opts.maxConnections,
+        input.opts.maxSseConnections,
+      ),
+      maxSseConnectionsPerListener: sseListenerCapsForStatus(
+        input.opts.maxConnections,
+        input.opts.maxSseConnections,
+      ),
       eventRingSize: bridgeSnapshot.limits.eventRingSize,
+      eventRingMaxBytes: bridgeSnapshot.limits.eventRingMaxBytes,
       compactedReplayMaxBytes: bridgeSnapshot.limits.compactedReplayMaxBytes,
       maxJournalEvents: bridgeSnapshot.limits.maxJournalEvents,
       maxJournalBytes: bridgeSnapshot.limits.maxJournalBytes,
       promptDeadlineMs: positiveFiniteOrNull(input.opts.promptDeadlineMs),
-      writerIdleTimeoutMs: positiveFiniteOrNull(input.opts.writerIdleTimeoutMs),
+      // Effective budget, not the raw flag: the reaper is default-on, so
+      // `null` here means "disabled" (direct embeds passing 0), never
+      // "no writer eviction" — an unset flag reports the 60s default.
+      writerIdleTimeoutMs: positiveFiniteOrNull(
+        resolveWriterIdleBudgetMs(input.opts.writerIdleTimeoutMs),
+      ),
       channelIdleTimeoutMs: bridgeSnapshot.limits.channelIdleTimeoutMs,
       sessionIdleTimeoutMs: bridgeSnapshot.limits.sessionIdleTimeoutMs,
       sessionPromptSettledCloseGraceMs:
@@ -1018,6 +1082,7 @@ export async function buildDaemonStatusResponse(
               baselineMaxBytes: bridgeSnapshot.limits.maxJournalBytes,
             }
           : null,
+        input.childAdmissionEnforced,
       ),
     },
     ...(workspaceRuntimes && workspaceRuntimes.length > 1
@@ -1055,6 +1120,7 @@ export async function buildDaemonStatusResponse(
         : {}),
       transport: {
         restSseActive: input.getRestSseActive(),
+        streamOccupancy: input.getStreamOccupancy(),
         acp: {
           enabled: acpSnapshot !== undefined,
           connections: acpAggregate?.connectionCount ?? 0,
@@ -1347,6 +1413,47 @@ function pushRuntimeIssues(
   const workers = groupedWorkers ?? [channelWorker];
   for (const worker of workers) {
     pushChannelWorkerIssues(issues, worker, groupedWorkers !== undefined);
+  }
+  pushChannelRestoreIssues(issues, input.getChannelRestoreFailures?.() ?? []);
+}
+
+// A channel that failed to restore has no worker, so nothing above sees it.
+// One issue per workspace, naming each channel with its own error; the same
+// error is the channel's `runtime.lastError` in the workspace channel list.
+// Exported because the bootstrap status route builds its own response, and
+// boot records are written before the runtime app that serves the other one.
+export function pushChannelRestoreIssues(
+  issues: DaemonStatusIssue[],
+  failures: readonly ChannelRestoreFailure[],
+): void {
+  const byWorkspace = new Map<string, ChannelRestoreFailure[]>();
+  for (const failure of failures) {
+    const list = byWorkspace.get(failure.workspaceCwd) ?? [];
+    list.push(failure);
+    byWorkspace.set(failure.workspaceCwd, list);
+  }
+  for (const [workspaceCwd, list] of byWorkspace) {
+    // Bounded the way the sibling surface bounds the same class of data: a
+    // `serve.channels` list is not length-limited, and this message is
+    // returned on every status poll.
+    const shown = list.slice(0, MAX_CHANNEL_STARTUP_FAILURES);
+    const omitted = list.length - shown.length;
+    issues.push({
+      code: 'channel_restore_failed',
+      severity: 'warning',
+      message:
+        `serve.channels for workspace ${workspaceCwd} were not restored: ` +
+        `${shown
+          .map(
+            (failure) =>
+              `${failure.channel.slice(
+                0,
+                MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+              )} (${failure.message})`,
+          )
+          .join('; ')}` +
+        `${omitted > 0 ? `; and ${omitted} more` : ''}.`,
+    });
   }
 }
 
@@ -1642,10 +1749,144 @@ export function listenerMaxConnections(
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
+/**
+ * Fraction of the listener cap reserved for long-lived REST SSE streams.
+ * The remainder is headroom for short requests (`/health`, static assets,
+ * JSON API calls) so SSE accumulation can never silently occupy every
+ * listener slot and take the whole HTTP surface down at accept time.
+ */
+export const SSE_LISTENER_CAP_FRACTION = 0.8;
+
+/**
+ * Effective admission cap for concurrent REST SSE streams (`null` means
+ * unlimited). Without an explicit `maxSseConnections`, the cap derives
+ * from the effective listener cap (80%, at least one stream); a disabled
+ * listener cap disables the derived SSE cap too. An explicit value is
+ * honoured downward but normalised: fractional values floor to at least
+ * one stream (so `0.8` cannot collapse into the enforcement site's
+ * `> 0` "unlimited" gate while status publishes `0`), and the result is
+ * clamped to the listener's headroom ceiling so an explicit cap above the
+ * listener budget cannot silently erase the reserved short-request
+ * headroom. `0` / `Infinity` keep meaning unlimited even when the
+ * listener cap is disabled — an explicit cap still applies in that case.
+ */
+export function sseMaxConnections(
+  listenerCap: number | undefined,
+  sseCap: number | undefined,
+): number | null {
+  const listener = listenerMaxConnections(listenerCap);
+  // At least one stream must be admittable even for tiny listener caps.
+  const ceiling =
+    listener === null
+      ? null
+      : Math.max(1, Math.floor(listener * SSE_LISTENER_CAP_FRACTION));
+  if (sseCap !== undefined) {
+    if (sseCap === 0 || sseCap === Infinity) return null;
+    if (!Number.isFinite(sseCap) || sseCap < 0) return null;
+    const floor = Math.max(1, Math.floor(sseCap));
+    return ceiling === null ? floor : Math.min(ceiling, floor);
+  }
+  return ceiling;
+}
+
+/**
+ * Socket budget of the pairing listeners (local-control and remote-access).
+ * Shared by `local-control/service.ts` and `remote-access.ts` so the budget
+ * and the per-listener SSE clamp derived from it cannot drift.
+ */
+export const PAIRING_LISTENER_MAX_CONNECTIONS = 64;
+
+/**
+ * Admission caps for long-lived stream surfaces (issue #17554). `undefined`
+ * means unlimited. `aggregate` bounds the daemon-wide total across every
+ * surface and listener; `byListener` additionally clamps each listener so
+ * the pairing surfaces keep the same short-request headroom guarantee as
+ * the primary listener.
+ */
+export interface SseAdmissionCaps {
+  aggregate: number | undefined;
+  byListener: Record<ListenerKind, number | undefined>;
+}
+
+/**
+ * Resolve the effective admission caps. The aggregate reuses
+ * {@link sseMaxConnections} unchanged (explicit override floors/clamps;
+ * `0`/`Infinity` and a disabled listener cap derive unlimited). The primary
+ * listener's clamp IS the aggregate — it is already clamped to the primary
+ * listener's headroom ceiling. Each pairing listener clamps at 80% of its
+ * own 64-socket budget while the aggregate is enabled; when the operator
+ * disables the cap, the per-listener clamps are disabled too (parity with
+ * the primary listener's opt-out semantics).
+ */
+export function resolveSseAdmissionCaps(opts: {
+  maxConnections?: number;
+  maxSseConnections?: number;
+}): SseAdmissionCaps {
+  const aggregate =
+    sseMaxConnections(opts.maxConnections, opts.maxSseConnections) ?? undefined;
+  const pairing =
+    aggregate === undefined
+      ? undefined
+      : Math.max(
+          1,
+          Math.floor(
+            PAIRING_LISTENER_MAX_CONNECTIONS * SSE_LISTENER_CAP_FRACTION,
+          ),
+        );
+  return {
+    aggregate,
+    byListener: {
+      primary: aggregate,
+      'local-control': pairing,
+      'remote-access': pairing,
+    },
+  };
+}
+
+/** Status-payload view of the per-listener clamps (`null` = unlimited). */
+export function sseListenerCapsForStatus(
+  listenerCap: number | undefined,
+  sseCap: number | undefined,
+): Record<ListenerKind, number | null> {
+  const { byListener } = resolveSseAdmissionCaps({
+    maxConnections: listenerCap,
+    maxSseConnections: sseCap,
+  });
+  return {
+    primary: byListener.primary ?? null,
+    'local-control': byListener['local-control'] ?? null,
+    'remote-access': byListener['remote-access'] ?? null,
+  };
+}
+
 export function positiveFiniteOrNull(value: number | undefined): number | null {
   return value !== undefined && Number.isFinite(value) && value > 0
     ? value
     : null;
+}
+
+/**
+ * Default writer-stall budget applied when `--writer-idle-timeout-ms` is
+ * unset. The reaper only fires while a write is stuck waiting for `drain`
+ * (the consumer stopped reading and the kernel send buffer is full), so
+ * healthy idle streams — whose 15s heartbeats keep flushing — are never
+ * evicted regardless of this value. 60s bounds how long a stalled writer
+ * can pin a listener slot before it is force-evicted.
+ */
+export const DEFAULT_WRITER_IDLE_TIMEOUT_MS = 60_000;
+
+/**
+ * Resolve the effective writer-stall budget. Unset ⇒ default-on reaper;
+ * an explicit positive value wins; non-positive (direct embeds only — the
+ * CLI flag validates positive integers) disables the reaper. Lives here
+ * (not in the route module) so status surfaces can report the effective
+ * budget without importing route code.
+ */
+export function resolveWriterIdleBudgetMs(
+  flagValue: number | undefined,
+): number {
+  if (flagValue === undefined) return DEFAULT_WRITER_IDLE_TIMEOUT_MS;
+  return flagValue > 0 ? flagValue : 0;
 }
 
 function zeroRateHits(): Record<RateLimitTier, number> {

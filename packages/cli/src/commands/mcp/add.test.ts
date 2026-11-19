@@ -218,6 +218,114 @@ describe('mcp add command', () => {
     });
   });
 
+  it('should split comma-separated include and exclude tools', async () => {
+    await parser.parseAsync(
+      'add my-server /path/to/server ' +
+        '--include-tools "read_text_file, list_directory" ' +
+        '--exclude-tools write_file,edit_file',
+    );
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.objectContaining({
+        includeTools: ['read_text_file', 'list_directory'],
+        excludeTools: ['write_file', 'edit_file'],
+      }),
+    });
+  });
+
+  it('should keep accepting repeated include-tools flags', async () => {
+    await parser.parseAsync(
+      'add my-server /path/to/server ' +
+        '--include-tools read_text_file --include-tools list_directory',
+    );
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.objectContaining({
+        includeTools: ['read_text_file', 'list_directory'],
+      }),
+    });
+  });
+
+  it('should split comma-separated values given across repeated flags', async () => {
+    await parser.parseAsync(
+      'add my-server /path/to/server ' +
+        '--exclude-tools write_file,edit_file --exclude-tools move_file',
+    );
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.objectContaining({
+        excludeTools: ['write_file', 'edit_file', 'move_file'],
+      }),
+    });
+  });
+
+  it('should treat negated tool flags as unset instead of crashing', async () => {
+    await parser.parseAsync(
+      'add my-server /path/to/server --no-include-tools --no-exclude-tools',
+    );
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.not.objectContaining({
+        includeTools: expect.anything(),
+      }),
+    });
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.not.objectContaining({
+        excludeTools: expect.anything(),
+      }),
+    });
+  });
+
+  it.each([
+    '--include-tools a --no-include-tools',
+    '--no-include-tools --include-tools a',
+  ])(
+    'should keep values given alongside a negated tool flag (%s)',
+    async (flags) => {
+      await parser.parseAsync(`add my-server /path/to/server ${flags}`);
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        { 'my-server': expect.objectContaining({ includeTools: ['a'] }) },
+      );
+    },
+  );
+
+  it('should drop empty segments from comma-separated tool lists', async () => {
+    await parser.parseAsync(
+      'add my-server /path/to/server --include-tools "a,,b" --exclude-tools write_file,',
+    );
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.objectContaining({
+        includeTools: ['a', 'b'],
+        excludeTools: ['write_file'],
+      }),
+    });
+  });
+
+  it('should keep a present-but-empty tool list as an empty array', async () => {
+    await parser.parseAsync('add my-server /path/to/server --include-tools ""');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.objectContaining({ includeTools: [] }),
+    });
+  });
+
+  it.each(['--include-tools', '--include-tools='])(
+    'should keep a valueless %s as an empty array',
+    async (flag) => {
+      await parser.parseAsync(`add my-server /path/to/server ${flag}`);
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        { 'my-server': expect.objectContaining({ includeTools: [] }) },
+      );
+    },
+  );
+
   describe('when handling scope and directory', () => {
     const serverName = 'test-server';
     const command = 'echo';
@@ -532,6 +640,22 @@ describe('mcp add command', () => {
             }),
           }),
         }),
+      );
+    });
+
+    it('should treat --no-oauth-scopes as unset instead of crashing', async () => {
+      await parser.parseAsync(
+        'add oauth-server https://example.com/mcp --transport http --no-oauth-scopes',
+      );
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        {
+          'oauth-server': expect.not.objectContaining({
+            oauth: expect.anything(),
+          }),
+        },
       );
     });
   });

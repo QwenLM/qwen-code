@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline';
-import { fileURLToPath } from 'node:url';
+import { pathToFileURL } from 'node:url';
 
 async function loadExportApi() {
   try {
@@ -184,13 +184,28 @@ async function main() {
   console.log(`Wrote HTML export to: ${outputPath}`);
 }
 
+/**
+ * Node realpath-resolves `import.meta.url` for the ESM main module but leaves
+ * `process.argv[1]` as it was invoked, so compare realpaths. Comparing the raw
+ * spellings makes any symlinked invocation skip `main()` and exit 0 having
+ * written nothing.
+ */
+export function isMainModule(argv1, metaUrl) {
+  if (typeof argv1 !== 'string') return false;
+  let resolved;
+  try {
+    resolved = fs.realpathSync(argv1);
+  } catch {
+    resolved = path.resolve(argv1);
+  }
+  return metaUrl === pathToFileURL(resolved).href;
+}
+
 // Only run when invoked as the CLI. Importing this module (the test does)
 // must not execute a render or touch process state.
-const invokedDirectly =
-  typeof process.argv[1] === 'string' &&
-  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+const isMain = isMainModule(process.argv[1], import.meta.url);
 
-if (invokedDirectly) {
+if (isMain) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

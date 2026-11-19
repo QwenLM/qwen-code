@@ -13,6 +13,13 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import {
+  SUBSCRIPTION_MODELS_CACHED,
+  SUBSCRIPTION_MODELS_UNAVAILABLE,
+} from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
+import { MessageType } from '../types.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
   AuthType,
@@ -20,15 +27,21 @@ import {
   type Config,
   isImageCapable,
   isImageGenerationCapable,
-  parseVisionModelSetting,
   resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import {
+  ACP_ROUTE_ID_PREFIX,
   isInlineModelOverrideAllowed,
   parseAcpModelOption,
+  resolveAcpFastModelSelector,
 } from '../../utils/acpModelUtils.js';
+import { formatAuxModelSelectorForDisplay } from '../../utils/aux-model-selector.js';
 import { recordDaemonSessionModelFromConfig } from '../../acp-integration/session-model-persistence.js';
+import {
+  modelAuthPolicyError,
+  switchPrimaryModel,
+} from '../models/primary-model-switch.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
@@ -111,12 +124,40 @@ function persistScopeSpread(
   return {};
 }
 
-function formatVisionModelSettingForDisplay(setting: string): string {
-  const parsed = parseVisionModelSetting(setting);
-  if (!parsed) return setting.replace(/\0/g, '\\0');
-  return parsed.baseUrl
-    ? `${parsed.selector} (${parsed.baseUrl})`
-    : parsed.selector;
+/**
+ * `/model --fast <id>` prints and accepts the selector half of a persisted
+ * `authType:id\0<baseUrl>` pin; re-entering that printed value must not
+ * silently drop the live endpoint pin and rebind the first same-id registry
+ * entry (#12760). Keep the pinned setting when it names the same model; an
+ * argument carrying its own `\0` endpoint, or naming a different model, is
+ * persisted as given.
+ */
+function preservedAuxModelSetting(
+  persisted: unknown,
+  modelName: string,
+  selector: { authType?: AuthType; modelId: string },
+): string {
+  if (
+    typeof persisted !== 'string' ||
+    !persisted.includes('\0') ||
+    modelName.includes('\0')
+  ) {
+    return modelName;
+  }
+  try {
+    const pinned = resolveModelId(persisted.trim().split('\0', 1)[0]);
+    if (
+      pinned?.modelId === selector.modelId &&
+      (!selector.authType ||
+        !pinned?.authType ||
+        pinned.authType === selector.authType)
+    ) {
+      return persisted;
+    }
+  } catch {
+    // An unparseable pin is not preserved.
+  }
+  return modelName;
 }
 
 function persistSetting(
@@ -132,18 +173,19 @@ async function switchMainModel(
   config: Config,
   settings: LoadedSettings,
   currentAuthType: AuthType,
-  modelArg: string,
+  parsed: ReturnType<typeof parseAcpModelOption>,
   scopeOverride?: SettingScope,
   persistSelection = true,
 ): Promise<string> {
-  const parsed = parseAcpModelOption(modelArg);
-
   if (parsed.authType) {
-    await config.switchModel(
+    await switchPrimaryModel(
+      config,
+      settings,
       parsed.authType,
       parsed.modelId,
-      parsed.authType !== currentAuthType &&
-        parsed.authType === AuthType.QWEN_OAUTH
+      parsed.authType === AuthType.QWEN_OAUTH &&
+        (parsed.authType !== currentAuthType ||
+          !config.getContentGeneratorConfig()?.authType)
         ? { requireCachedCredentials: true }
         : undefined,
     );
@@ -165,12 +207,12 @@ async function switchMainModel(
     return parsed.modelId;
   }
 
-  await config.switchModel(currentAuthType, modelArg, undefined);
+  await switchPrimaryModel(config, settings, currentAuthType, parsed.modelId);
   if (persistSelection) {
-    persistSetting(settings, 'model.name', modelArg, scopeOverride);
+    persistSetting(settings, 'model.name', parsed.modelId, scopeOverride);
     persistSetting(settings, 'model.baseUrl', '', scopeOverride);
   }
-  return modelArg;
+  return parsed.modelId;
 }
 
 function formatUnavailableModelMessage(
@@ -619,8 +661,15 @@ export const modelCommand: SlashCommand = {
       if (!modelName) {
         // Open model dialog in fast-model mode (interactive) or return current fast model (non-interactive)
         if (context.executionMode !== 'interactive') {
+          // The picker persists `authType:id\0<baseUrl>`; report the selector.
+          // A hand-edited settings.json can hold a non-string value (the
+          // workspace-models routes test that shape) — report "not set"
+          // instead of throwing on `.split`.
+          const rawFastModel = context.services.settings?.merged?.fastModel;
           const fastModel =
-            context.services.settings?.merged?.fastModel ?? 'not set';
+            (typeof rawFastModel === 'string'
+              ? rawFastModel.trim().split('\0', 1)[0]
+              : '') || 'not set';
           return {
             type: 'message',
             messageType: 'info',
@@ -652,14 +701,24 @@ export const modelCommand: SlashCommand = {
         };
       }
 
+      const fastModelSelector =
+        modelName.startsWith(ACP_ROUTE_ID_PREFIX) ||
+        parseAcpModelOption(modelName).authType
+          ? resolveAcpFastModelSelector(
+              modelName,
+              config.getAllConfiguredModels(),
+            )
+          : modelName;
       const selector = (() => {
         try {
-          return resolveModelId(modelName);
+          return fastModelSelector
+            ? resolveModelId(fastModelSelector)
+            : undefined;
         } catch {
           return undefined;
         }
       })();
-      if (!selector) {
+      if (!selector || !fastModelSelector) {
         return {
           type: 'message',
           messageType: 'error',
@@ -687,10 +746,15 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      persistSetting(settings, 'fastModel', modelName, scopeOverride);
+      const fastModelToPersist = preservedAuxModelSetting(
+        settings.merged?.fastModel,
+        fastModelSelector,
+        selector,
+      );
+      persistSetting(settings, 'fastModel', fastModelToPersist, scopeOverride);
       // Sync the runtime Config so forked agents pick up the change immediately
       // without requiring a restart.
-      config.setFastModel(modelName);
+      config.setFastModel(fastModelToPersist);
       return {
         type: 'message',
         messageType: 'info',
@@ -715,7 +779,7 @@ export const modelCommand: SlashCommand = {
               'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
               {
                 visionModel: visionModel
-                  ? formatVisionModelSettingForDisplay(visionModel)
+                  ? formatAuxModelSelectorForDisplay(visionModel)
                   : t('not set'),
               },
             ),
@@ -839,9 +903,15 @@ export const modelCommand: SlashCommand = {
           };
         }
         if (context.executionMode !== 'interactive') {
+          // The picker persists `authType:id\0<baseUrl>`; report the selector.
+          // A hand-edited settings.json can hold a non-string value — report
+          // "not set" instead of throwing on `.trim`.
+          const rawCompactionModel =
+            context.services.settings?.merged?.compactionModel;
           const compactionModel =
-            context.services.settings?.merged?.compactionModel?.trim() ||
-            t('not set (falls back to the main model)');
+            (typeof rawCompactionModel === 'string'
+              ? rawCompactionModel.trim().split('\0', 1)[0]
+              : '') || t('not set (falls back to the main model)');
           return {
             type: 'message',
             messageType: 'info',
@@ -905,9 +975,19 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      persistSetting(settings, 'compactionModel', modelName, scopeOverride);
+      const compactionModelToPersist = preservedAuxModelSetting(
+        settings.merged?.compactionModel,
+        modelName,
+        selector,
+      );
+      persistSetting(
+        settings,
+        'compactionModel',
+        compactionModelToPersist,
+        scopeOverride,
+      );
       // Sync runtime Config so the compression service picks it up immediately.
-      config.setCompactionModel(modelName);
+      config.setCompactionModel(compactionModelToPersist);
       return {
         type: 'message',
         messageType: 'info',
@@ -930,7 +1010,7 @@ export const modelCommand: SlashCommand = {
               'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.',
               {
                 imageModel: imageModel
-                  ? formatVisionModelSettingForDisplay(imageModel)
+                  ? formatAuxModelSelectorForDisplay(imageModel)
                   : t('not set'),
               },
             ),
@@ -1030,24 +1110,6 @@ export const modelCommand: SlashCommand = {
       };
     }
 
-    const contentGeneratorConfig = config.getContentGeneratorConfig();
-    if (!contentGeneratorConfig) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Content generator configuration not available.'),
-      };
-    }
-
-    const authType = contentGeneratorConfig.authType;
-    if (!authType) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Authentication type not available.'),
-      };
-    }
-
     // `/model <id>` switches the session model; `/model <id> <prompt>` runs the
     // prompt on <id> for this turn only (inline one-shot override) without
     // changing or persisting the session model.
@@ -1057,8 +1119,73 @@ export const modelCommand: SlashCommand = {
       firstSpace === -1 ? trimmedArgs : trimmedArgs.slice(0, firstSpace);
     const inlinePrompt =
       firstSpace === -1 ? '' : trimmedArgs.slice(firstSpace + 1).trim();
+    const parsed = parseAcpModelOption(modelName);
+    const contentGeneratorConfig = config.getContentGeneratorConfig();
+    const authType =
+      contentGeneratorConfig?.authType ??
+      (settings.merged.security?.auth?.selectedType ===
+      AuthType.QWEN_SUBSCRIPTION
+        ? AuthType.QWEN_SUBSCRIPTION
+        : parsed.authType);
+    if (!authType && !trimmedArgs && context.executionMode === 'interactive') {
+      return {
+        type: 'dialog',
+        dialog: 'model',
+        ...persistScopeSpread(scopeOverride),
+      };
+    }
+    const requestedAuthType = parsed.authType ?? authType;
+    const policyError =
+      modelName && modelAuthPolicyError(settings, requestedAuthType);
+    if (policyError) {
+      return { type: 'message', messageType: 'error', content: policyError };
+    }
+    if (modelName && requestedAuthType === AuthType.QWEN_SUBSCRIPTION) {
+      context.ui.addItem(
+        { type: MessageType.INFO, text: t('Loading models from provider…') },
+        Date.now(),
+      );
+      try {
+        const result = await config.refreshSubscriptionModels(
+          context.abortSignal,
+        );
+        if (result.cached)
+          context.ui.addItem(
+            { type: MessageType.WARNING, text: SUBSCRIPTION_MODELS_CACHED },
+            Date.now(),
+          );
+      } catch (error) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content:
+            error instanceof SubscriptionOAuthError
+              ? subscriptionErrorMessage(error)
+              : SUBSCRIPTION_MODELS_UNAVAILABLE,
+        };
+      }
+    }
+    if (
+      !contentGeneratorConfig &&
+      authType !== AuthType.QWEN_SUBSCRIPTION &&
+      !parsed.authType
+    ) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Content generator configuration not available.'),
+      };
+    }
+
+    if (!authType) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Authentication type not available.'),
+      };
+    }
+
     if (modelName) {
-      const parsed = parseAcpModelOption(modelName);
       const targetAuthType = parsed.authType ?? authType;
       const availableModels = config
         .getAvailableModelsForAuthType(targetAuthType)
@@ -1153,7 +1280,7 @@ export const modelCommand: SlashCommand = {
         config,
         settings,
         authType,
-        modelName,
+        parsed,
         scopeOverride,
         context.executionPolicy?.persistModelSelection !== false,
       );

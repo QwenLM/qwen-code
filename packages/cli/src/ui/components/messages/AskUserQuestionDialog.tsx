@@ -561,7 +561,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
                 }}
                 onSubmit={handleCustomInputSubmit}
                 placeholder={t('Type something...')}
-                isActive={true}
+                isActive={isFocused}
                 inputWidth={50}
               />
             </Box>

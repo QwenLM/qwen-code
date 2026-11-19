@@ -9,7 +9,9 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "types": ["node"]
   },
   "include": ["src/**/*.ts"]
 }

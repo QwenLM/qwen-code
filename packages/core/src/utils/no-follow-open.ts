@@ -96,8 +96,8 @@ function noFollowRejection(
  */
 function assertSameIdentity(
   filePath: string,
-  before: fs.Stats,
-  after: fs.Stats,
+  before: { dev: number | bigint; ino: number | bigint },
+  after: { dev: number | bigint; ino: number | bigint },
 ): void {
   if (!hasVerifiableInode(before.ino)) {
     throw noFollowRejection(
@@ -107,7 +107,10 @@ function assertSameIdentity(
       UNVERIFIABLE_IDENTITY_CODE,
     );
   }
-  if (before.dev !== after.dev || before.ino !== after.ino) {
+  if (
+    BigInt(before.dev) !== BigInt(after.dev) ||
+    BigInt(before.ino) !== BigInt(after.ino)
+  ) {
     throw noFollowRejection(
       filePath,
       'the file identity changed between the pre-open check and the open ' +
@@ -137,13 +140,13 @@ export function openSyncNoFollow(filePath: string): number {
     return fs.openSync(filePath, baseFlags | noFollowFlag);
   }
 
-  const before = fs.lstatSync(filePath);
+  const before = fs.lstatSync(filePath, { bigint: true });
   if (before.isSymbolicLink()) {
     throw noFollowRejection(filePath, 'the path is a symlink');
   }
   const fd = fs.openSync(filePath, baseFlags);
   try {
-    assertSameIdentity(filePath, before, fs.fstatSync(fd));
+    assertSameIdentity(filePath, before, fs.fstatSync(fd, { bigint: true }));
   } catch (error) {
     try {
       fs.closeSync(fd);
@@ -166,27 +169,30 @@ export function openSyncNoFollow(filePath: string): number {
  * {@link UNVERIFIABLE_IDENTITY_CODE}. The caller owns closing the returned
  * handle.
  *
- * Deliberately read-only with no `flags`/`mode` parameters: no caller needs
- * them, and an `fs.open`-shaped signature would invite write/create flags
- * through a helper whose semantics and tests cover only the read-only case.
- * Re-add them (with a caller and tests) in the PR that first needs them.
+ * `nonBlocking` adds `O_NONBLOCK` where available so callers can check the
+ * opened handle's type before reading. The helper always opens read-only.
  */
-export async function openNoFollow(filePath: string): Promise<FileHandle> {
+export async function openNoFollow(
+  filePath: string,
+  { nonBlocking = false }: { nonBlocking?: boolean } = {},
+): Promise<FileHandle> {
   // Optional chain so strict vitest mocks of node:fs that omit `constants`
   // degrade to plain O_RDONLY (= 0) instead of throwing at call time.
-  const baseFlags = fs.constants?.O_RDONLY ?? 0;
+  const baseFlags =
+    (fs.constants?.O_RDONLY ?? 0) |
+    (nonBlocking ? (fs.constants?.O_NONBLOCK ?? 0) : 0);
   const noFollowFlag = getNoFollowFlag();
   if (typeof noFollowFlag === 'number') {
     return fs.promises.open(filePath, baseFlags | noFollowFlag);
   }
 
-  const before = await fs.promises.lstat(filePath);
+  const before = await fs.promises.lstat(filePath, { bigint: true });
   if (before.isSymbolicLink()) {
     throw noFollowRejection(filePath, 'the path is a symlink');
   }
   const handle = await fs.promises.open(filePath, baseFlags);
   try {
-    assertSameIdentity(filePath, before, await handle.stat());
+    assertSameIdentity(filePath, before, await handle.stat({ bigint: true }));
   } catch (error) {
     await handle.close().catch(() => {
       // The rejection below is the primary error; closing is best-effort.

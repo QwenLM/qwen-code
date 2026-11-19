@@ -223,7 +223,9 @@ function interpolate(
 }
 
 // Language setting helpers
-function resolveLanguage(lang: SupportedLanguage | 'auto'): SupportedLanguage {
+export function resolveLanguage(
+  lang: SupportedLanguage | 'auto',
+): SupportedLanguage {
   if (lang === 'auto') {
     return detectSystemLanguage();
   }
@@ -256,8 +258,13 @@ export function setLanguage(lang: SupportedLanguage | 'auto'): void {
 export async function setLanguageAsync(
   lang: SupportedLanguage | 'auto',
 ): Promise<void> {
-  currentLanguage = resolveLanguage(lang);
-  translations = await loadTranslationsAsync(currentLanguage);
+  const resolved = resolveLanguage(lang);
+  const loaded = await loadTranslationsAsync(resolved);
+  // Assigned together: a reader that sees the new language while `t()` still
+  // returns the old strings would reseed its dedupe state against the wrong
+  // dictionary and replay everything once the swap lands.
+  currentLanguage = resolved;
+  translations = loaded;
 }
 
 export function getCurrentLanguage(): SupportedLanguage {

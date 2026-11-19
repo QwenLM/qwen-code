@@ -12,7 +12,8 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import type { Stats } from 'node:fs';
+import type { BigIntStats, Stats } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -32,6 +33,58 @@ function makeTempDir(): string {
   return dir;
 }
 
+/** Writes `content` to data.txt in a fresh temp dir; returns its path. */
+function writeTempFile(content: string): string {
+  const filePath = join(makeTempDir(), 'data.txt');
+  writeFileSync(filePath, content);
+  return filePath;
+}
+
+/** Plants link.txt -> target.txt ('secret'); returns the link path. */
+function plantSymlink(): string {
+  const dir = makeTempDir();
+  const targetPath = join(dir, 'target.txt');
+  const linkPath = join(dir, 'link.txt');
+  writeFileSync(targetPath, 'secret');
+  symlinkSync(targetPath, linkPath);
+  return linkPath;
+}
+
+async function readAndClose(handle: FileHandle): Promise<string> {
+  try {
+    const buffer = Buffer.alloc(16);
+    const { bytesRead } = await handle.read(buffer, 0, 16, 0);
+    return buffer.toString('utf8', 0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
+function readSyncAndClose(fd: number): string {
+  try {
+    // readFileSync(fd) reads from offset 0 without closing the fd, so it
+    // proves the fd is a live read descriptor for the right file.
+    return readFileSync(fd, 'utf8');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+const expectThrowsCode = (open: () => unknown, code: string) =>
+  expect(open).toThrow(expect.objectContaining({ code }));
+
+const rejectionCode = async (promise: Promise<unknown>) =>
+  ((await promise.catch((e) => e)) as NodeJS.ErrnoException).code;
+
+function thrownBy(open: () => unknown): NodeJS.ErrnoException | undefined {
+  try {
+    open();
+    return undefined;
+  } catch (e) {
+    return e as NodeJS.ErrnoException;
+  }
+}
+
 afterEach(() => {
   for (const dir of tmpDirs) {
     rmSync(dir, { recursive: true, force: true });
@@ -46,10 +99,10 @@ const itNoSymlink = process.platform === 'win32' ? it.skip : it;
 
 // Copy a Stats object with identity fields patched, keeping the prototype
 // so isSymbolicLink()/isFile() keep working on the perturbed result.
-function perturbedStats(
-  stats: Stats,
-  patch: Partial<Pick<Stats, 'dev' | 'ino'>>,
-): Stats {
+function perturbedStats<T extends BigIntStats | Stats>(
+  stats: T,
+  patch: Partial<Pick<T, 'dev' | 'ino'>>,
+): T {
   return Object.assign(
     Object.create(Object.getPrototypeOf(stats)),
     stats,
@@ -57,16 +110,22 @@ function perturbedStats(
   );
 }
 
+function differentIdentity<T extends bigint | number>(value: T): T {
+  return (
+    typeof value === 'bigint' ? (value === 1n ? 2n : 1n) : value === 1 ? 2 : 1
+  ) as T;
+}
+
+type FsOverrides = (
+  actual: typeof import('node:fs'),
+) => Record<string, unknown>;
+
 // Install a node:fs mock with O_NOFOLLOW removed so the module under test
 // takes the lstat/open/fstat fallback path. The `default` member is
 // LOAD-BEARING: no-follow-open.ts binds node:fs through a DEFAULT import,
 // so a mock without it hands the helper the real O_NOFOLLOW and the
 // fallback tests would silently pass on the native branch.
-function mockNoFollowFs(
-  build: (
-    actual: typeof import('node:fs'),
-  ) => Record<string, unknown> = () => ({}),
-): void {
+function mockNoFollowFs(build: FsOverrides = () => ({})): void {
   vi.resetModules();
   vi.doMock('node:fs', async (importOriginal) => {
     const actual = await importOriginal<typeof import('node:fs')>();
@@ -81,72 +140,41 @@ function mockNoFollowFs(
 
 describe('openNoFollow (native O_NOFOLLOW available)', () => {
   it('opens a regular file for reading', async () => {
-    const dir = makeTempDir();
-    const filePath = join(dir, 'data.txt');
-    writeFileSync(filePath, 'payload');
-
-    const handle = await openNoFollow(filePath);
-    try {
-      const buffer = Buffer.alloc(7);
-      await handle.read(buffer, 0, 7, 0);
-      expect(buffer.toString('utf8')).toBe('payload');
-    } finally {
-      await handle.close();
-    }
+    const filePath = writeTempFile('payload');
+    expect(await readAndClose(await openNoFollow(filePath))).toBe('payload');
   });
 
   it('opens a regular file synchronously', () => {
-    const dir = makeTempDir();
-    const filePath = join(dir, 'data.txt');
-    writeFileSync(filePath, 'sync-payload');
-
-    const fd = openSyncNoFollow(filePath);
-    try {
-      // readFileSync(fd) reads from offset 0 without closing the fd, so it
-      // proves the fd is a live read descriptor for the right file.
-      expect(readFileSync(fd, 'utf8')).toBe('sync-payload');
-    } finally {
-      closeSync(fd);
-    }
+    const filePath = writeTempFile('sync-payload');
+    expect(readSyncAndClose(openSyncNoFollow(filePath))).toBe('sync-payload');
   });
 
   itNoSymlink('refuses a symlinked path (async)', async () => {
-    const dir = makeTempDir();
-    const targetPath = join(dir, 'target.txt');
-    const linkPath = join(dir, 'link.txt');
-    writeFileSync(targetPath, 'secret');
-    symlinkSync(targetPath, linkPath);
-
-    const error = await openNoFollow(linkPath).catch((e) => e);
+    const error = await openNoFollow(plantSymlink()).catch((e) => e);
     expect(error).toBeInstanceOf(Error);
     expect((error as NodeJS.ErrnoException).code).toBe('ELOOP');
   });
 
   itNoSymlink('refuses a symlinked path (sync)', () => {
-    const dir = makeTempDir();
-    const targetPath = join(dir, 'target.txt');
-    const linkPath = join(dir, 'link.txt');
-    writeFileSync(targetPath, 'secret');
-    symlinkSync(targetPath, linkPath);
-
-    expect(() => openSyncNoFollow(linkPath)).toThrow(
-      expect.objectContaining({ code: 'ELOOP' }),
-    );
+    const linkPath = plantSymlink();
+    expectThrowsCode(() => openSyncNoFollow(linkPath), 'ELOOP');
   });
 
   it('propagates ENOENT for missing paths', async () => {
     const dir = makeTempDir();
-    const error = await openNoFollow(join(dir, 'missing.txt')).catch((e) => e);
-    expect((error as NodeJS.ErrnoException).code).toBe('ENOENT');
-    expect(() => openSyncNoFollow(join(dir, 'missing.txt'))).toThrow(
-      expect.objectContaining({ code: 'ENOENT' }),
+    expect(await rejectionCode(openNoFollow(join(dir, 'missing.txt')))).toBe(
+      'ENOENT',
+    );
+    expectThrowsCode(
+      () => openSyncNoFollow(join(dir, 'missing.txt')),
+      'ENOENT',
     );
   });
 });
 
 describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
-  async function importWithoutNoFollow() {
-    mockNoFollowFs();
+  async function importWithoutNoFollow(build?: FsOverrides) {
+    mockNoFollowFs(build);
     const mockedFs = await import('node:fs');
     const { openNoFollow: openFallback, openSyncNoFollow: openSyncFallback } =
       await import('./no-follow-open.js');
@@ -159,34 +187,18 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
   });
 
   it('opens a regular file through the lstat/open/fstat fallback', async () => {
-    const dir = makeTempDir();
-    const filePath = join(dir, 'data.txt');
-    writeFileSync(filePath, 'fallback-payload');
-
+    const filePath = writeTempFile('fallback-payload');
     const { openFallback } = await importWithoutNoFollow();
-    const handle = await openFallback(filePath);
-    try {
-      const buffer = Buffer.alloc(16);
-      const { bytesRead } = await handle.read(buffer, 0, 16, 0);
-      expect(buffer.toString('utf8', 0, bytesRead)).toBe('fallback-payload');
-    } finally {
-      await handle.close();
-    }
+    expect(await readAndClose(await openFallback(filePath))).toBe(
+      'fallback-payload',
+    );
   });
 
   itNoSymlink('refuses a symlinked path via the pre-open lstat', async () => {
-    const dir = makeTempDir();
-    const targetPath = join(dir, 'target.txt');
-    const linkPath = join(dir, 'link.txt');
-    writeFileSync(targetPath, 'secret');
-    symlinkSync(targetPath, linkPath);
-
+    const linkPath = plantSymlink();
     const { openFallback, openSyncFallback } = await importWithoutNoFollow();
-    const error = await openFallback(linkPath).catch((e) => e);
-    expect((error as NodeJS.ErrnoException).code).toBe('ELOOP');
-    expect(() => openSyncFallback(linkPath)).toThrow(
-      expect.objectContaining({ code: 'ELOOP' }),
-    );
+    expect(await rejectionCode(openFallback(linkPath))).toBe('ELOOP');
+    expectThrowsCode(() => openSyncFallback(linkPath), 'ELOOP');
   });
 
   it('refuses when the file identity changes between lstat and open', async () => {
@@ -197,15 +209,12 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     // the fs mock (the async FileHandle.stat() path bypasses fs.fstatSync
     // and cannot be intercepted this way; the identity predicate is shared
     // between the two variants).
-    const dir = makeTempDir();
-    const filePath = join(dir, 'data.txt');
-    writeFileSync(filePath, 'payload');
-
+    const filePath = writeTempFile('payload');
     const closeSpy = vi.fn();
-    mockNoFollowFs((actual) => ({
+    const { openSyncFallback } = await importWithoutNoFollow((actual) => ({
       fstatSync: ((fd: number) => {
         const stats = actual.fstatSync(fd);
-        return perturbedStats(stats, { ino: stats.ino + 1 });
+        return perturbedStats(stats, { ino: differentIdentity(stats.ino) });
       }) as typeof actual.fstatSync,
       // Pin the rejection-path fd close: without it every sync fallback
       // refusal leaks the raw fd it opened for the identity re-check.
@@ -215,12 +224,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
       }) as typeof actual.closeSync,
     }));
 
-    const { openSyncNoFollow: openSyncFallback } = await import(
-      './no-follow-open.js'
-    );
-    expect(() => openSyncFallback(filePath)).toThrow(
-      expect.objectContaining({ code: 'ELOOP' }),
-    );
+    expectThrowsCode(() => openSyncFallback(filePath), 'ELOOP');
     expect(closeSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -229,46 +233,87 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     // only per-device, so a path swapped to a DIFFERENT device carrying a
     // colliding inode (attacker-controlled second mount, bind mount) must
     // still be refused. Mirrors the ino-mismatch variant with dev + 1.
-    const dir = makeTempDir();
-    const filePath = join(dir, 'data.txt');
-    writeFileSync(filePath, 'payload');
-
-    mockNoFollowFs((actual) => ({
+    const filePath = writeTempFile('payload');
+    const { openSyncFallback } = await importWithoutNoFollow((actual) => ({
       fstatSync: ((fd: number) => {
         const stats = actual.fstatSync(fd);
-        return perturbedStats(stats, { dev: stats.dev + 1 });
+        return perturbedStats(stats, { dev: differentIdentity(stats.dev) });
       }) as typeof actual.fstatSync,
     }));
 
-    const { openSyncNoFollow: openSyncFallback } = await import(
-      './no-follow-open.js'
-    );
-    expect(() => openSyncFallback(filePath)).toThrow(
-      expect.objectContaining({ code: 'ELOOP' }),
-    );
+    expectThrowsCode(() => openSyncFallback(filePath), 'ELOOP');
+  });
+
+  it('refuses an identity that differs only above 2^53 (NTFS file index)', async () => {
+    // NTFS reports a 64-bit file index that Node rounds at the JS number
+    // boundary, so these ids are distinct as bigints yet the SAME double. A
+    // number-backed comparison waves the swap through; `{ bigint: true }` at
+    // the stat call sites is the only thing keeping the re-check exact on
+    // such a volume, and only this case observes it (Linux and macOS inodes
+    // are small, so every other test passes with it removed).
+    //
+    // The offsets sit above 2^60, where double spacing is 256: both round to
+    // 2^60. 2^53+1 and 2^53+2 would NOT collapse (spacing there is 2).
+    //
+    // The mock mirrors Node: a BigIntStats with the exact id for the bigint
+    // call, a Stats with the rounded one otherwise. ELOOP (not EUNVERIFIABLE)
+    // pins the mismatch branch: core's hasVerifiableInode is
+    // `Number(ino) !== 0`, so this id is still verifiable and compared.
+    const filePath = writeTempFile('payload');
+
+    const PRE_OPEN_INO = 2n ** 60n + 1n;
+    const SWAPPED_INO = 2n ** 60n + 2n;
+    // Fixture guard: without it, editing the constants could silently turn
+    // the case into a no-op (they must collapse as doubles, not as bigints).
+    expect(PRE_OPEN_INO).not.toBe(SWAPPED_INO);
+    expect(Number(PRE_OPEN_INO)).toBe(Number(SWAPPED_INO));
+
+    const wantsBigint = (opts: unknown): boolean =>
+      typeof opts === 'object' &&
+      opts !== null &&
+      (opts as { bigint?: boolean }).bigint === true;
+
+    const { openSyncFallback } = await importWithoutNoFollow((actual) => ({
+      lstatSync: ((...args: Parameters<typeof actual.lstatSync>) => {
+        if (wantsBigint(args[1])) {
+          return perturbedStats(actual.lstatSync(args[0], { bigint: true }), {
+            ino: PRE_OPEN_INO,
+          });
+        }
+        return perturbedStats(actual.lstatSync(args[0]), {
+          ino: Number(PRE_OPEN_INO),
+        });
+      }) as typeof actual.lstatSync,
+      fstatSync: ((...args: Parameters<typeof actual.fstatSync>) => {
+        if (wantsBigint(args[1])) {
+          return perturbedStats(actual.fstatSync(args[0], { bigint: true }), {
+            ino: SWAPPED_INO,
+          });
+        }
+        return perturbedStats(actual.fstatSync(args[0]), {
+          ino: Number(SWAPPED_INO),
+        });
+      }) as typeof actual.fstatSync,
+    }));
+
+    expectThrowsCode(() => openSyncFallback(filePath), 'ELOOP');
   });
 
   it('refuses when the file identity changes between lstat and open (async)', async () => {
-    // Async counterpart of the sync identity-change test. The real opened
+    // Async counterpart of the sync identity-change test. The opened
     // FileHandle's stat() cannot be intercepted through fs mocks, so the
-    // pre-open lstat is doctored instead (same prototype trick, ino + 1)
-    // and the identity re-check on the opened handle then mismatches it.
-    // This pins the async try/assertSameIdentity/catch-and-close block in
-    // openNoFollow: the symlink refusal tests all reject at the earlier
-    // isSymbolicLink() check, so deleting that block keeps them green
-    // while silently leaking the rejection-path handle unclosed.
-    const dir = makeTempDir();
-    const filePath = join(dir, 'data.txt');
-    writeFileSync(filePath, 'payload');
-
+    // pre-open lstat is doctored instead (same prototype trick, ino + 1).
+    // This pins openNoFollow's try/assertSameIdentity/catch-and-close block:
+    // the symlink tests all reject earlier at isSymbolicLink(), so deleting
+    // that block keeps them green while leaking the rejection-path handle.
+    const filePath = writeTempFile('payload');
     let closeSpy: ReturnType<typeof vi.spyOn> | undefined;
-
-    mockNoFollowFs((actual) => ({
+    const { openFallback } = await importWithoutNoFollow((actual) => ({
       promises: {
         ...actual.promises,
         lstat: (async (p: string) => {
           const stats = await actual.promises.lstat(p);
-          return perturbedStats(stats, { ino: stats.ino + 1 });
+          return perturbedStats(stats, { ino: differentIdentity(stats.ino) });
         }) as typeof actual.promises.lstat,
         open: (async (...args: Parameters<typeof actual.promises.open>) => {
           const handle = await actual.promises.open(...args);
@@ -278,9 +323,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
       },
     }));
 
-    const { openNoFollow: openFallback } = await import('./no-follow-open.js');
-    const error = await openFallback(filePath).catch((e) => e);
-    expect((error as NodeJS.ErrnoException).code).toBe('ELOOP');
+    expect(await rejectionCode(openFallback(filePath))).toBe('ELOOP');
     expect(closeSpy).toBeDefined();
     expect(closeSpy).toHaveBeenCalledTimes(1);
   });
@@ -290,74 +333,55 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
   // so an implementation re-basing the comparison on a fresh post-open
   // lstat would see the perturbed stats, mismatch the fd, and throw ELOOP;
   // the correct single-lstat implementation opens and reads the payload.
-  function mockNoFollowFsWithPerturbedSnapshot(): void {
+  function perturbedSnapshotFs(): FsOverrides {
     let lstatCalls = 0;
-    mockNoFollowFs((actual) => {
-      const snapshotStats = (stats: Stats): Stats => {
+    return (actual) => {
+      const snapshotStats = <T extends BigIntStats | Stats>(stats: T): T => {
         lstatCalls += 1;
         return lstatCalls === 1
           ? stats
-          : perturbedStats(stats, { ino: stats.ino + 1 });
+          : perturbedStats(stats, { ino: differentIdentity(stats.ino) });
       };
       return {
-        lstatSync: ((p: string) =>
-          snapshotStats(actual.lstatSync(p))) as typeof actual.lstatSync,
+        lstatSync: ((...args: Parameters<typeof actual.lstatSync>) => {
+          const stats = actual.lstatSync(...args);
+          return stats ? snapshotStats(stats) : stats;
+        }) as typeof actual.lstatSync,
         promises: {
           ...actual.promises,
-          lstat: (async (p: string) =>
+          lstat: (async (...args: Parameters<typeof actual.promises.lstat>) =>
             snapshotStats(
-              await actual.promises.lstat(p),
+              await actual.promises.lstat(...args),
             )) as typeof actual.promises.lstat,
         },
       };
-    });
+    };
   }
 
   it('compares the opened fd against the PRE-OPEN lstat snapshot (sync)', async () => {
-    const dir = makeTempDir();
-    const filePath = join(dir, 'data.txt');
-    writeFileSync(filePath, 'snapshot-payload');
-
-    mockNoFollowFsWithPerturbedSnapshot();
-
-    const { openSyncNoFollow: openSyncFallback } = await import(
-      './no-follow-open.js'
+    const filePath = writeTempFile('snapshot-payload');
+    const { openSyncFallback } = await importWithoutNoFollow(
+      perturbedSnapshotFs(),
     );
-    const fd = openSyncFallback(filePath);
-    try {
-      expect(readFileSync(fd, 'utf8')).toBe('snapshot-payload');
-    } finally {
-      closeSync(fd);
-    }
+    expect(readSyncAndClose(openSyncFallback(filePath))).toBe(
+      'snapshot-payload',
+    );
   });
 
   it('compares the opened handle against the PRE-OPEN lstat snapshot (async)', async () => {
-    const dir = makeTempDir();
-    const filePath = join(dir, 'data.txt');
-    writeFileSync(filePath, 'snapshot-payload');
-
-    mockNoFollowFsWithPerturbedSnapshot();
-
-    const { openNoFollow: openFallback } = await import('./no-follow-open.js');
-    const handle = await openFallback(filePath);
-    try {
-      const buffer = Buffer.alloc(16);
-      const { bytesRead } = await handle.read(buffer, 0, 16, 0);
-      expect(buffer.toString('utf8', 0, bytesRead)).toBe('snapshot-payload');
-    } finally {
-      await handle.close();
-    }
+    const filePath = writeTempFile('snapshot-payload');
+    const { openFallback } = await importWithoutNoFollow(perturbedSnapshotFs());
+    expect(await readAndClose(await openFallback(filePath))).toBe(
+      'snapshot-payload',
+    );
   });
 
   it('refuses when the filesystem cannot prove identity (inode 0)', async () => {
     // FAT/exFAT/SMB volumes report ino 0 for every file; the comparison
     // would be vacuous there, so the helper fails closed (#8290 posture).
-    const dir = makeTempDir();
-    const filePath = join(dir, 'data.txt');
-    writeFileSync(filePath, 'payload');
-
+    const filePath = writeTempFile('payload');
     const closeSpy = vi.fn();
-    mockNoFollowFs((actual) => ({
+    const { openSyncFallback } = await importWithoutNoFollow((actual) => ({
       lstatSync: ((p: string) =>
         perturbedStats(actual.lstatSync(p), {
           ino: 0,
@@ -369,21 +393,11 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
       }) as typeof actual.closeSync,
     }));
 
-    const { openSyncNoFollow: openSyncFallback } = await import(
-      './no-follow-open.js'
-    );
     // Distinct from a genuine symlink refusal: the code must NOT be
     // 'ELOOP', or consumers' ELOOP-specific handling (symlink-escape
     // flags, "not a regular file" errors, binary-row collapses) misfires
     // on legitimate files that merely live on an inode-0 volume.
-    const error = (() => {
-      try {
-        openSyncFallback(filePath);
-        return undefined;
-      } catch (e) {
-        return e as NodeJS.ErrnoException;
-      }
-    })();
+    const error = thrownBy(() => openSyncFallback(filePath));
     expect(error).toBeDefined();
     expect(error?.code).toBe(UNVERIFIABLE_IDENTITY_CODE);
     expect(error?.code).not.toBe('ELOOP');
@@ -393,39 +407,27 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
 
   it('still rejects with ELOOP when the rejection-path close fails (sync)', async () => {
     // The identity-mismatch close is best-effort: if closeSync itself
-    // throws, the pinned ELOOP refusal must still surface, not the
-    // close error. Deleting the swallow around fs.closeSync in
-    // openSyncNoFollow makes this test fail with the close error.
-    const dir = makeTempDir();
-    const filePath = join(dir, 'data.txt');
-    writeFileSync(filePath, 'payload');
-
-    mockNoFollowFs((actual) => ({
+    // throws, the pinned ELOOP refusal must still surface, not the close
+    // error (deleting the swallow around fs.closeSync fails this test).
+    const filePath = writeTempFile('payload');
+    const { openSyncFallback } = await importWithoutNoFollow((actual) => ({
       fstatSync: ((fd: number) => {
         const stats = actual.fstatSync(fd);
-        return perturbedStats(stats, { ino: stats.ino + 1 });
+        return perturbedStats(stats, { ino: differentIdentity(stats.ino) });
       }) as typeof actual.fstatSync,
       closeSync: (() => {
         throw Object.assign(new Error('close failed'), { code: 'EBADF' });
       }) as typeof actual.closeSync,
     }));
 
-    const { openSyncNoFollow: openSyncFallback } = await import(
-      './no-follow-open.js'
-    );
-    expect(() => openSyncFallback(filePath)).toThrow(
-      expect.objectContaining({ code: 'ELOOP' }),
-    );
+    expectThrowsCode(() => openSyncFallback(filePath), 'ELOOP');
   });
 
   it('still rejects with EUNVERIFIABLE when the rejection-path close fails (inode 0)', async () => {
     // Same best-effort-close pin for the inode-0 refusal: a throwing
     // closeSync must not mask the UNVERIFIABLE_IDENTITY_CODE error.
-    const dir = makeTempDir();
-    const filePath = join(dir, 'data.txt');
-    writeFileSync(filePath, 'payload');
-
-    mockNoFollowFs((actual) => ({
+    const filePath = writeTempFile('payload');
+    const { openSyncFallback } = await importWithoutNoFollow((actual) => ({
       lstatSync: ((p: string) =>
         perturbedStats(actual.lstatSync(p), {
           ino: 0,
@@ -435,36 +437,22 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
       }) as typeof actual.closeSync,
     }));
 
-    const { openSyncNoFollow: openSyncFallback } = await import(
-      './no-follow-open.js'
-    );
-    const error = (() => {
-      try {
-        openSyncFallback(filePath);
-        return undefined;
-      } catch (e) {
-        return e as NodeJS.ErrnoException;
-      }
-    })();
+    const error = thrownBy(() => openSyncFallback(filePath));
     expect(error).toBeDefined();
     expect(error?.code).toBe(UNVERIFIABLE_IDENTITY_CODE);
   });
 
   it('still rejects with ELOOP when the rejection-path close fails (async)', async () => {
-    // Async best-effort-close pin: a rejecting handle.close() must not
-    // mask the pinned ELOOP refusal. Deleting the .catch(() => {}) on
-    // handle.close() in openNoFollow makes this test fail with the
-    // close rejection instead.
-    const dir = makeTempDir();
-    const filePath = join(dir, 'data.txt');
-    writeFileSync(filePath, 'payload');
-
-    mockNoFollowFs((actual) => ({
+    // Async best-effort-close pin: a rejecting handle.close() must not mask
+    // the pinned ELOOP refusal (deleting the .catch(() => {}) on
+    // handle.close() in openNoFollow fails this test with the rejection).
+    const filePath = writeTempFile('payload');
+    const { openFallback } = await importWithoutNoFollow((actual) => ({
       promises: {
         ...actual.promises,
         lstat: (async (p: string) => {
           const stats = await actual.promises.lstat(p);
-          return perturbedStats(stats, { ino: stats.ino + 1 });
+          return perturbedStats(stats, { ino: differentIdentity(stats.ino) });
         }) as typeof actual.promises.lstat,
         open: (async (...args: Parameters<typeof actual.promises.open>) => {
           const handle = await actual.promises.open(...args);
@@ -476,18 +464,18 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
       },
     }));
 
-    const { openNoFollow: openFallback } = await import('./no-follow-open.js');
-    const error = await openFallback(filePath).catch((e) => e);
-    expect((error as NodeJS.ErrnoException).code).toBe('ELOOP');
+    expect(await rejectionCode(openFallback(filePath))).toBe('ELOOP');
   });
 
   it('propagates ENOENT for missing paths', async () => {
     const dir = makeTempDir();
     const { openFallback, openSyncFallback } = await importWithoutNoFollow();
-    const error = await openFallback(join(dir, 'missing.txt')).catch((e) => e);
-    expect((error as NodeJS.ErrnoException).code).toBe('ENOENT');
-    expect(() => openSyncFallback(join(dir, 'missing.txt'))).toThrow(
-      expect.objectContaining({ code: 'ENOENT' }),
+    expect(await rejectionCode(openFallback(join(dir, 'missing.txt')))).toBe(
+      'ENOENT',
+    );
+    expectThrowsCode(
+      () => openSyncFallback(join(dir, 'missing.txt')),
+      'ENOENT',
     );
   });
 });

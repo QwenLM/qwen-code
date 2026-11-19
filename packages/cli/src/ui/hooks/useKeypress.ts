@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 import type { KeypressHandler, Key } from '../contexts/KeypressContext.js';
 import { useKeypressContext } from '../contexts/KeypressContext.js';
+import { useContextMenu } from '../context-menu/ContextMenuContext.js';
 
 export type { Key };
 
@@ -22,9 +23,15 @@ export function useKeypress(
   { isActive }: { isActive: boolean },
 ) {
   const { subscribe, unsubscribe } = useKeypressContext();
+  const { menu, isMenuOpen } = useContextMenu();
   const onKeypressRef = useRef(onKeypress);
 
-  onKeypressRef.current = onKeypress;
+  onKeypressRef.current = (key) => {
+    // A right-click and key can share one stdin chunk. Until the menu renders,
+    // existing subscribers still hold the previous view's focus and callbacks.
+    if (menu === null && isMenuOpen()) return;
+    onKeypress(key);
+  };
 
   const handleKeypress = useCallback<KeypressHandler>((key) => {
     onKeypressRef.current(key);

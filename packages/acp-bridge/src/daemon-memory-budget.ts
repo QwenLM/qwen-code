@@ -95,8 +95,8 @@ function clamp(value: number, low: number, high: number): number {
  * Memory available to the daemon process tree, in MB.
  *
  * `process.constrainedMemory()` already reads cgroup v1 and v2 through libuv.
- * It is clamped to the host total because cgroup v1 reports "unlimited" as a
- * huge sentinel value rather than as an absent limit.
+ * It is clamped to the host total because cgroup v1/v2 may report "unlimited"
+ * as a huge sentinel value rather than as an absent limit.
  *
  * `packages/core/src/services/memoryPressureMonitor.ts` has a fuller cgroup
  * walk with its own sentinel handling; it is a private method on a class the
@@ -120,25 +120,7 @@ export function detectAvailableMemoryMb(): {
   return { memoryMb: Math.floor(totalBytes / (1024 * 1024)), source: 'host' };
 }
 
-/**
- * Approximately the ceiling `getAcpMemoryArgs()` applies today with no budget:
- * half of available memory, capped at 16 GB. Reported so the gap between
- * current behavior and a future policy is visible.
- *
- * Two known divergences from the spawn path, both in the direction of this
- * figure being the more conservative one:
- *
- * - the spawn path drops the flag entirely when the target is below the
- *   spawning daemon's own heap limit, in which case the child inherits V8's
- *   default and can end up higher;
- * - the spawn path treats any `constrainedMemory() > 0` as the total, so under
- *   cgroup v1 with an "unlimited" sentinel it computes from that sentinel and
- *   lands on the 16 GB cap, while `detectAvailableMemoryMb` rejects the
- *   sentinel and computes from the host total instead.
- *
- * Aligning them belongs with the change that actually applies a ceiling; doing
- * it here would mean adopting the sentinel bug to match.
- */
+// The raise-only spawn guard can leave a child above this modeled ceiling.
 export function legacyChildCeilingMb(availableMemoryMb?: number): number {
   const memoryMb = availableMemoryMb ?? detectAvailableMemoryMb().memoryMb;
   return Math.min(

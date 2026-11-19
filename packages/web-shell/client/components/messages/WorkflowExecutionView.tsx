@@ -22,6 +22,8 @@ import {
   XIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import type { OpenSubagentDetails } from '../../subagentDetailsContext';
+import { useWorkflowAgentDetails } from './workflow-agent-details';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { formatContextTokens } from '../../utils/formatTokenCount';
 import { formatTimestamp } from '../MessageTimestamp';
@@ -65,7 +67,13 @@ export interface WorkflowGraphLayout {
   height: number;
   laneWidth: number;
   nodeWidth: number;
-  lanes: Array<{ id: string | null; title: string; index: number }>;
+  lanes: Array<{
+    id: string | null;
+    title: string;
+    index: number;
+    /** Declared in `meta.phases` and not reached yet; it has no dispatches. */
+    planned?: { detail?: string };
+  }>;
   nodes: WorkflowGraphNode[];
   edges: WorkflowGraphEdge[];
   dispatchCountByLaneId: ReadonlyMap<string | null, number>;
@@ -74,6 +82,10 @@ export interface WorkflowGraphLayout {
   omittedNodes: number;
   omittedEdges: number;
 }
+
+const ACTIVE_RUN_STATUSES: ReadonlySet<
+  DaemonSessionWorkflowTaskStatus['status']
+> = new Set(['running', 'paused', 'pausing']);
 
 export function buildWorkflowGraphLayout(
   task: DaemonSessionWorkflowTaskStatus,
@@ -91,7 +103,16 @@ export function buildWorkflowGraphLayout(
     0,
     WORKFLOW_GRAPH_RENDER_LIMITS.lanes - (hasUnphased ? 1 : 0),
   );
-  const lanes = [
+  // Declared phases the script has not reached yet, while it can still reach
+  // them. A phase counts as reached once any visit carries its title.
+  const reachedTitles = new Set(task.phaseVisits.map((visit) => visit.title));
+  const plannedPhases =
+    !task.isHistorical && ACTIVE_RUN_STATUSES.has(task.status)
+      ? (task.plannedPhases ?? []).filter(
+          (phase) => !reachedTitles.has(phase.title),
+        )
+      : [];
+  const lanes: WorkflowGraphLayout['lanes'] = [
     ...(hasUnphased ? [{ id: null, title: 'No phase', index: 0 }] : []),
     ...task.phaseVisits.slice(0, phaseLaneLimit).map((visit, index) => ({
       id: visit.id,
@@ -99,6 +120,15 @@ export function buildWorkflowGraphLayout(
       index: index + (hasUnphased ? 1 : 0),
     })),
   ];
+  for (const [position, phase] of plannedPhases.entries()) {
+    if (lanes.length >= WORKFLOW_GRAPH_RENDER_LIMITS.lanes) break;
+    lanes.push({
+      id: `planned:${position}`,
+      title: phase.title,
+      index: lanes.length,
+      planned: phase.detail === undefined ? {} : { detail: phase.detail },
+    });
+  }
   if (lanes.length === 0) lanes.push({ id: null, title: 'No phase', index: 0 });
 
   const laneIndexById = new Map(lanes.map((lane) => [lane.id, lane.index]));
@@ -169,7 +199,10 @@ export function buildWorkflowGraphLayout(
     dispatchStatusById,
     omittedLanes: Math.max(
       0,
-      task.phaseVisits.length + (hasUnphased ? 1 : 0) - lanes.length,
+      task.phaseVisits.length +
+        (hasUnphased ? 1 : 0) +
+        plannedPhases.length -
+        lanes.length,
     ),
     omittedNodes: Math.max(0, task.dispatches.length - nodes.length),
     omittedEdges: Math.max(0, totalEdgeCount - edges.length),
@@ -238,7 +271,20 @@ function downloadWorkflowHistory(
       exportedAt: new Date().toISOString(),
       runs: runs.map((run) => ({
         id: run.id,
+        toolUseId: run.toolUseId,
         sourceRunId: run.sourceRunId,
+        sourceRef: run.sourceRef,
+        workflowCallsTruncated: run.workflowCallsTruncated,
+        workflowCalls: run.workflowCalls?.map(
+          ({ id, stepId, workflowName, status, startedAt, endedAt }) => ({
+            id,
+            stepId,
+            workflowName,
+            status,
+            startedAt,
+            endedAt,
+          }),
+        ),
         startMode: run.startMode,
         status: run.status,
         startTime: run.startTime,
@@ -256,6 +302,8 @@ function downloadWorkflowHistory(
           ({
             id,
             phaseVisitId,
+            stepId,
+            workflowCallId,
             status,
             dependsOn,
             queuedAt,
@@ -264,6 +312,8 @@ function downloadWorkflowHistory(
           }) => ({
             id,
             phaseVisitId,
+            stepId,
+            workflowCallId,
             status,
             dependsOn,
             queuedAt,
@@ -302,6 +352,7 @@ export function WorkflowExecutionView({
   historyActionBusy = false,
   onDeleteHistory,
   actions,
+  onOpenSubagent,
 }: {
   task: DaemonSessionWorkflowTaskStatus;
   sourceTask?: DaemonSessionWorkflowTaskStatus;
@@ -310,8 +361,10 @@ export function WorkflowExecutionView({
   onDeleteHistory?: (runId: string) => void;
   /** Run controls (pause / stop / rerun …) shown at the end of the metrics strip. */
   actions?: ReactNode;
+  onOpenSubagent?: OpenSubagentDetails;
 }) {
   const { t } = useI18n();
+  const openAgentDetails = useWorkflowAgentDetails(task, onOpenSubagent);
   const markerId = `workflow-arrow-${useId().replaceAll(':', '')}`;
   const [viewportElement, setViewportElement] = useState<HTMLDivElement | null>(
     null,
@@ -711,7 +764,10 @@ export function WorkflowExecutionView({
     </>
   );
 
-  if (task.dispatches.length === 0) {
+  if (
+    task.dispatches.length === 0 &&
+    !layout.lanes.some((lane) => lane.planned)
+  ) {
     return (
       <div className={styles.root} data-plan-interactive>
         {history}
@@ -803,6 +859,7 @@ export function WorkflowExecutionView({
                   key={lane.id ?? 'no-phase'}
                   className={styles.lane}
                   data-workflow-lane={lane.id ?? 'no-phase'}
+                  data-planned={lane.planned ? true : undefined}
                   data-active={lane.id === activePhaseVisitId || undefined}
                   data-last={isLast || undefined}
                   style={{
@@ -822,9 +879,16 @@ export function WorkflowExecutionView({
                       {lane.id === null ? t('workflow.noPhase') : lane.title}
                     </strong>
                     <small>
-                      {t('workflow.dispatchCount', { count: dispatchCount })}
+                      {lane.planned
+                        ? t('workflow.phase.notStarted')
+                        : t('workflow.dispatchCount', { count: dispatchCount })}
                     </small>
                   </div>
+                  {lane.planned?.detail && (
+                    <p className={styles.plannedDetail}>
+                      {lane.planned.detail}
+                    </p>
+                  )}
                 </div>
               );
             })}
@@ -893,7 +957,10 @@ export function WorkflowExecutionView({
                   data-workflow-approval={approval?.approvalId}
                   data-path-emphasis={pathEmphasis}
                   aria-pressed={dispatch.id === selected?.id}
-                  onClick={() => setSelectedId(dispatch.id)}
+                  onClick={() => {
+                    setSelectedId(dispatch.id);
+                    openAgentDetails(dispatch);
+                  }}
                   onMouseEnter={() => setHoveredDispatchId(dispatch.id)}
                   onMouseLeave={() => setHoveredDispatchId('')}
                   onFocus={() => {

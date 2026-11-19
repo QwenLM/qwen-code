@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use x11rb::connection::Connection;
+use x11rb::protocol::res::{ClientIdMask, ClientIdSpec, ConnectionExt as _};
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 
@@ -25,7 +26,7 @@ pub struct WindowInfo {
 
 /// List top-level windows, optionally filtered by pid.
 pub fn list_windows(filter_pid: Option<u32>) -> Vec<WindowInfo> {
-    match list_windows_inner(filter_pid) {
+    match try_list_windows(filter_pid) {
         Ok(w) => w,
         Err(_) => Vec::new(),
     }
@@ -37,30 +38,96 @@ pub fn list_windows(filter_pid: Option<u32>) -> Vec<WindowInfo> {
 /// PID after the original application exits. The XID owner binds the two parts
 /// of a `get_window_state` target and fails closed when either is stale.
 pub fn window_belongs_to_pid(xid: u64, pid: u32) -> bool {
+    window_owner_matches(window_owner_pid(xid), pid)
+}
+
+pub(crate) fn window_owner_pid(xid: u64) -> Option<u32> {
+    let Ok(xid) = u32::try_from(xid) else {
+        return None;
+    };
+    let Ok((conn, _)) = RustConnection::connect(None) else {
+        return None;
+    };
+    OwnerResolver::new(&conn).owner_pid(xid)
+}
+
+pub(crate) fn is_minimized(xid: u64) -> bool {
     let Ok(xid) = u32::try_from(xid) else {
         return false;
     };
     let Ok((conn, _)) = RustConnection::connect(None) else {
         return false;
     };
-    window_owner_matches(get_window_pid(&conn, xid).ok().flatten(), pid)
+    let Ok(atom) = get_atom(&conn, "WM_STATE") else {
+        return false;
+    };
+    conn.get_property(false, xid, atom, atom, 0, 2)
+        .ok()
+        .and_then(|reply| reply.reply().ok())
+        .and_then(|reply| reply.value32().and_then(|mut values| values.next()))
+        == Some(3)
+}
+
+pub(crate) fn wait_for_restored_capture(xid: u64) -> Result<()> {
+    use std::time::{Duration, Instant};
+    let xid = u32::try_from(xid)?;
+    let (conn, screen) = RustConnection::connect(None)?;
+    let root = conn.setup().roots[screen].root;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let attributes = conn.get_window_attributes(xid)?.reply()?;
+        let geometry = conn.get_geometry(xid)?.reply()?;
+        let origin = conn.translate_coordinates(xid, root, 0, 0)?.reply()?;
+        let desktop = conn.get_geometry(root)?.reply()?;
+        // A WM can report active/viewable before moving an iconic window back
+        // from its off-screen parking position. Full-window XGetImage needs
+        // the restored rectangle inside the screen, not just confirmed focus.
+        if attributes.map_state == MapState::VIEWABLE
+            && geometry.width > 0
+            && geometry.height > 0
+            && origin.dst_x >= 0
+            && origin.dst_y >= 0
+            && i32::from(origin.dst_x) + i32::from(geometry.width) <= i32::from(desktop.width)
+            && i32::from(origin.dst_y) + i32::from(geometry.height) <= i32::from(desktop.height)
+        {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "app_window_unavailable: restored X11 window is not ready for a full screenshot"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn window_owner_matches(owner: Option<u32>, requested_pid: u32) -> bool {
     owner == Some(requested_pid)
 }
 
-fn list_windows_inner(filter_pid: Option<u32>) -> Result<Vec<WindowInfo>> {
+pub fn try_list_windows(filter_pid: Option<u32>) -> Result<Vec<WindowInfo>> {
+    try_list_windows_inner(filter_pid, false)
+}
+
+pub fn try_list_app_windows(pid: u32) -> Result<Vec<WindowInfo>> {
+    try_list_windows_inner(Some(pid), true)
+}
+
+fn try_list_windows_inner(
+    filter_pid: Option<u32>,
+    include_untitled: bool,
+) -> Result<Vec<WindowInfo>> {
+    crate::require_x11()?;
     let (conn, screen_num) = RustConnection::connect(None)?;
     let screen = &conn.setup().roots[screen_num];
     let root = screen.root;
 
     // Get _NET_CLIENT_LIST_STACKING (or fallback to _NET_CLIENT_LIST).
-    let windows = get_window_list(&conn, root)?;
+    let (windows, stacking_known) = get_window_list(&conn, root)?;
 
+    let owners = OwnerResolver::new(&conn);
     let mut result = Vec::new();
     for (z_index, xid) in windows.into_iter().enumerate() {
-        let pid = get_window_pid(&conn, xid).ok().flatten();
+        let pid = owners.owner_pid(xid);
         if let Some(fp) = filter_pid {
             if pid != Some(fp) {
                 continue;
@@ -68,7 +135,7 @@ fn list_windows_inner(filter_pid: Option<u32>) -> Result<Vec<WindowInfo>> {
         }
 
         let title = get_window_title(&conn, xid).unwrap_or_default();
-        if title.trim().is_empty() {
+        if !include_untitled && title.trim().is_empty() {
             continue;
         }
         let app_name = get_window_class(&conn, xid)
@@ -98,7 +165,7 @@ fn list_windows_inner(filter_pid: Option<u32>) -> Result<Vec<WindowInfo>> {
             app_name,
             title,
             is_on_screen,
-            z_index: Some(z_index_from_bottom_to_top(z_index)),
+            z_index: stacking_known.then(|| z_index_from_bottom_to_top(z_index)),
             x,
             y,
             width: w,
@@ -109,11 +176,124 @@ fn list_windows_inner(filter_pid: Option<u32>) -> Result<Vec<WindowInfo>> {
     Ok(result)
 }
 
+pub(crate) fn window_manager_name() -> Option<String> {
+    let (conn, screen) = RustConnection::connect(None).ok()?;
+    let root = conn.setup().roots[screen].root;
+    let atom = get_atom(&conn, "_NET_SUPPORTING_WM_CHECK").ok()?;
+    let read = |window| {
+        conn.get_property(false, window, atom, AtomEnum::WINDOW, 0, 1)
+            .ok()?
+            .reply()
+            .ok()?
+            .value32()?
+            .next()
+    };
+    let window = read(root).filter(|window| *window != 0)?;
+    (read(window) == Some(window))
+        .then(|| get_window_title(&conn, window).ok())
+        .flatten()
+}
+
+pub fn resolve_app_window(windows: &[WindowInfo]) -> Option<u64> {
+    let (conn, screen) = RustConnection::connect(None).ok()?;
+    let atom = get_atom(&conn, "_NET_ACTIVE_WINDOW").ok()?;
+    let reply = conn
+        .get_property(
+            false,
+            conn.setup().roots[screen].root,
+            atom,
+            AtomEnum::WINDOW,
+            0,
+            1,
+        )
+        .ok()?
+        .reply()
+        .ok()?;
+    let active = reply
+        .value32()
+        .and_then(|mut values| values.next())
+        .map(u64::from);
+    select_app_window_with_owner(windows, active, |window| {
+        let reply = conn
+            .get_property(
+                false,
+                window as u32,
+                AtomEnum::WM_TRANSIENT_FOR,
+                AtomEnum::WINDOW,
+                0,
+                1,
+            )
+            .ok()?
+            .reply()
+            .ok()?;
+        let owner = reply.value32()?.next().map(u64::from);
+        owner
+    })
+}
+
+fn select_app_window_with_owner(
+    windows: &[WindowInfo],
+    active: Option<u64>,
+    mut owner_of: impl FnMut(u64) -> Option<u64>,
+) -> Option<u64> {
+    let selected = select_app_window(windows, active)?;
+    let transients: Vec<_> = windows
+        .iter()
+        .filter(|w| w.is_on_screen && w.xid != selected)
+        .filter(|w| {
+            let mut current = w.xid;
+            for _ in 0..32 {
+                let Some(owner) = owner_of(current) else {
+                    return false;
+                };
+                if owner == selected {
+                    return true;
+                }
+                if owner == current {
+                    return false;
+                }
+                current = owner;
+            }
+            false
+        })
+        .cloned()
+        .collect();
+    if transients.is_empty() {
+        Some(selected)
+    } else {
+        select_app_window(&transients, active)
+    }
+}
+
+pub(crate) fn select_app_window(windows: &[WindowInfo], active: Option<u64>) -> Option<u64> {
+    let visible: Vec<_> = windows.iter().filter(|w| w.is_on_screen).collect();
+    if visible.is_empty() && windows.len() == 1 {
+        return Some(windows[0].xid);
+    }
+    if let Some(window) = visible.iter().find(|w| Some(w.xid) == active) {
+        return Some(window.xid);
+    }
+    if visible.len() == 1 {
+        return Some(visible[0].xid);
+    }
+    // Only native stacking order can identify the app's last active surface.
+    let top = visible
+        .iter()
+        .filter_map(|w| w.z_index.map(|z| (z, w.xid)))
+        .max()?;
+    if visible.iter().any(|w| w.z_index.is_none())
+        || visible.iter().filter(|w| w.z_index == Some(top.0)).count() != 1
+    {
+        return None;
+    }
+    Some(top.1)
+}
+
 fn z_index_from_bottom_to_top(position: usize) -> usize {
     position
 }
 
-fn get_window_list(conn: &RustConnection, root: Window) -> Result<Vec<Window>> {
+fn get_window_list(conn: &RustConnection, root: Window) -> Result<(Vec<Window>, bool)> {
     let atom_names = ["_NET_CLIENT_LIST_STACKING", "_NET_CLIENT_LIST"];
     for name in &atom_names {
         if let Ok(atom) = get_atom(conn, name) {
@@ -126,7 +306,7 @@ fn get_window_list(conn: &RustConnection, root: Window) -> Result<Vec<Window>> {
                     .map(|iter| iter.collect())
                     .unwrap_or_default();
                 if client_list_property(reply.type_, windows.as_slice()).is_some() {
-                    return Ok(windows);
+                    return Ok((windows, *name == "_NET_CLIENT_LIST_STACKING"));
                 }
             }
         }
@@ -136,17 +316,19 @@ fn get_window_list(conn: &RustConnection, root: Window) -> Result<Vec<Window>> {
     // that case only expose mapped root children; unmapped Electron children
     // can otherwise be reported before a late-starting WM reparents them.
     let tree = conn.query_tree(root)?.reply()?;
-    Ok(tree
-        .children
-        .into_iter()
-        .filter(|window| {
-            conn.get_window_attributes(*window)
-                .ok()
-                .and_then(|cookie| cookie.reply().ok())
-                .map(|attributes| fallback_window_is_listable(attributes.map_state))
-                .unwrap_or(false)
-        })
-        .collect())
+    Ok((
+        tree.children
+            .into_iter()
+            .filter(|window| {
+                conn.get_window_attributes(*window)
+                    .ok()
+                    .and_then(|cookie| cookie.reply().ok())
+                    .map(|attributes| fallback_window_is_listable(attributes.map_state))
+                    .unwrap_or(false)
+            })
+            .collect(),
+        true,
+    ))
 }
 
 fn client_list_property(property_type: Atom, windows: &[Window]) -> Option<&[Window]> {
@@ -175,11 +357,10 @@ pub fn set_window_frame(
     let xid = u32::try_from(xid).map_err(|_| anyhow::anyhow!("window_id is out of X11 range"))?;
     let (conn, screen_num) = RustConnection::connect(None)?;
     let root = conn.setup().roots[screen_num].root;
-    let owner = get_window_pid(&conn, xid)?;
-    match owner {
+    match OwnerResolver::new(&conn).owner_pid(xid) {
         Some(owner) if owner == pid => {}
         Some(owner) => anyhow::bail!("window_id {xid} belongs to pid {owner}, not pid {pid}"),
-        None => anyhow::bail!("window_id {xid} has no verifiable _NET_WM_PID owner"),
+        None => anyhow::bail!("window_id {xid} has no verifiable owner pid ({UNATTRIBUTED_OWNER})"),
     }
 
     let atom = get_atom(&conn, "_NET_MOVERESIZE_WINDOW")?;
@@ -234,6 +415,118 @@ fn get_window_pid(conn: &RustConnection, window: Window) -> Result<Option<u32>> 
         .get_property(false, window, atom, AtomEnum::CARDINAL, 0, 1)?
         .reply()?;
     Ok(reply.value32().and_then(|mut i| i.next()))
+}
+
+/// Why an X11 toplevel can be listed with no owner pid.
+const UNATTRIBUTED_OWNER: &str = "the client publishes no _NET_WM_PID and the X server's \
+X-Resource extension could not attribute it to a local process: XRes 1.2 is unavailable, \
+the client is remote or forwarded, or the server is outside this PID namespace";
+
+/// Owner pid of client-list toplevels: `_NET_WM_PID` when published, else
+/// the X-Resource `LocalClientPID` of the connection that created the window,
+/// subject to the fail-closed rules in [`crate::x11_client_pid`]. The XRes
+/// probe runs at most once per connection and only for windows that lack
+/// `_NET_WM_PID`.
+struct OwnerResolver<'c> {
+    conn: &'c RustConnection,
+    xres: std::cell::OnceCell<bool>,
+    hostname: std::cell::OnceCell<Option<String>>,
+}
+
+impl<'c> OwnerResolver<'c> {
+    fn new(conn: &'c RustConnection) -> Self {
+        Self {
+            conn,
+            xres: std::cell::OnceCell::new(),
+            hostname: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn owner_pid(&self, window: Window) -> Option<u32> {
+        match get_window_pid(self.conn, window) {
+            Ok(Some(pid)) => Some(pid),
+            Ok(None) => self.xres_pid(window),
+            Err(_) => None,
+        }
+    }
+
+    fn xres_pid(&self, window: Window) -> Option<u32> {
+        use crate::x11_client_pid::{
+            client_base, client_machine_is_local, select_owner_pid, xres_supports_client_ids,
+            XresClientValue,
+        };
+        let available = *self.xres.get_or_init(|| {
+            self.conn
+                .res_query_version(1, 2)
+                .ok()
+                .and_then(|cookie| cookie.reply().ok())
+                .is_some_and(|v| xres_supports_client_ids(v.server_major, v.server_minor))
+        });
+        if !available {
+            return None;
+        }
+        let machine = get_client_machine(self.conn, window).ok()?;
+        let hostname = self.hostname.get_or_init(|| {
+            std::fs::read_to_string("/proc/sys/kernel/hostname")
+                .ok()
+                .map(|h| h.trim().to_owned())
+        });
+        if !client_machine_is_local(machine.as_deref(), hostname.as_deref()) {
+            return None;
+        }
+        let setup = self.conn.setup();
+        let own_base = setup.resource_id_base;
+        let specs = [
+            ClientIdSpec {
+                client: own_base,
+                mask: ClientIdMask::LOCAL_CLIENT_PID,
+            },
+            ClientIdSpec {
+                client: window,
+                mask: ClientIdMask::LOCAL_CLIENT_PID,
+            },
+        ];
+        let reply = self.conn.res_query_client_ids(&specs).ok()?.reply().ok()?;
+        let values: Vec<XresClientValue<'_>> = reply
+            .ids
+            .iter()
+            .map(|id| XresClientValue {
+                client: id.spec.client,
+                mask: u32::from(id.spec.mask),
+                value: &id.value,
+            })
+            .collect();
+        let pid = select_owner_pid(
+            &values,
+            own_base,
+            std::process::id(),
+            client_base(window, setup.resource_id_mask),
+        )?;
+        // The server keys the query by the client slot in the XID. A window
+        // that still exists after the reply proves its creator held that slot
+        // when the server answered, so a recycled slot cannot be attributed.
+        self.conn.get_window_attributes(window).ok()?.reply().ok()?;
+        Some(pid)
+    }
+}
+
+/// `WM_CLIENT_MACHINE`, `None` when unset. Errors when the window is gone.
+fn get_client_machine(conn: &RustConnection, window: Window) -> Result<Option<String>> {
+    let reply = conn
+        .get_property(
+            false,
+            window,
+            AtomEnum::WM_CLIENT_MACHINE,
+            AtomEnum::ANY,
+            0,
+            256,
+        )?
+        .reply()?;
+    if reply.type_ == x11rb::NONE {
+        return Ok(None);
+    }
+    let value = String::from_utf8_lossy(&reply.value);
+    Ok(Some(value.trim_end_matches('\0').to_owned()))
 }
 
 fn get_window_title(conn: &RustConnection, window: Window) -> Result<String> {
@@ -305,6 +598,53 @@ fn get_window_class(conn: &RustConnection, xid: Window) -> Option<(String, Strin
 mod tests {
     use super::*;
 
+    fn app_window(xid: u64, z_index: Option<usize>) -> WindowInfo {
+        WindowInfo {
+            xid,
+            pid: Some(42),
+            app_name: "Fixture".into(),
+            title: String::new(),
+            is_on_screen: true,
+            z_index,
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        }
+    }
+
+    #[test]
+    fn app_target_follows_active_window_and_owned_dialog_then_returns_to_owner() {
+        let mut windows = vec![app_window(1, Some(0)), app_window(2, Some(1))];
+        assert_eq!(
+            select_app_window_with_owner(&windows, Some(1), |id| (id == 2).then_some(1)),
+            Some(2)
+        );
+        windows.pop();
+        assert_eq!(
+            select_app_window_with_owner(&windows, Some(99), |_| None),
+            Some(1)
+        );
+        windows.push(app_window(3, Some(2)));
+        assert_eq!(select_app_window(&windows, Some(99)), Some(3));
+        assert_eq!(select_app_window(&windows, Some(1)), Some(1));
+        windows[1].z_index = None;
+        assert_eq!(select_app_window(&windows, Some(99)), None);
+    }
+
+    #[test]
+    fn app_selection_uses_focus_without_stacking_and_keeps_minimized_identity() {
+        let mut windows = vec![app_window(1, None), app_window(2, None)];
+        assert_eq!(select_app_window(&windows, Some(2)), Some(2));
+        assert_eq!(select_app_window(&windows, None), None);
+        for window in &mut windows {
+            window.is_on_screen = false;
+        }
+        assert_eq!(select_app_window(&windows, None), None);
+        windows.pop();
+        assert_eq!(select_app_window(&windows, None), Some(1));
+    }
+
     #[test]
     fn empty_present_client_list_does_not_fall_back_to_query_tree() {
         assert_eq!(client_list_property(1, &[]), Some([].as_slice()));
@@ -335,4 +675,41 @@ mod tests {
         assert_eq!(indices, vec![0, 1, 2]);
         assert!(indices[2] > indices[0]);
     }
+}
+
+pub fn window_info(xid: u64) -> Option<WindowInfo> {
+    let window = u32::try_from(xid).ok()?;
+    let (conn, screen_num) = RustConnection::connect(None).ok()?;
+    let root = conn.setup().roots[screen_num].root;
+    let attributes = conn.get_window_attributes(window).ok()?.reply().ok()?;
+    let geom = conn.get_geometry(window).ok()?.reply().ok()?;
+    let trans = conn
+        .translate_coordinates(window, root, 0, 0)
+        .ok()?
+        .reply()
+        .ok()?;
+    let pid = OwnerResolver::new(&conn).owner_pid(window);
+    let title = get_window_title(&conn, window).unwrap_or_default();
+    let app_name = get_window_class(&conn, window)
+        .map(|(instance, class)| if class.is_empty() { instance } else { class })
+        .unwrap_or_default();
+    Some(WindowInfo {
+        xid,
+        pid,
+        app_name,
+        title,
+        is_on_screen: attributes.map_state == MapState::VIEWABLE,
+        z_index: None,
+        x: i32::from(trans.dst_x),
+        y: i32::from(trans.dst_y),
+        width: u32::from(geom.width),
+        height: u32::from(geom.height),
+    })
+}
+
+// Parent/child walks must not attribute a window-manager frame to the manager.
+pub fn window_pid(xid: u64) -> Option<u32> {
+    let xid = u32::try_from(xid).ok()?;
+    let (conn, _) = RustConnection::connect(None).ok()?;
+    get_window_pid(&conn, xid).ok().flatten()
 }

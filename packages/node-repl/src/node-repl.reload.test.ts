@@ -38,8 +38,8 @@ function makeTmpDir(): string {
   return dir;
 }
 
-afterEach(() => {
-  while (managers.length > 0) managers.pop()?.dispose();
+afterEach(async () => {
+  await Promise.all(managers.splice(0).map((manager) => manager.dispose()));
   while (tmpDirs.length > 0) {
     const dir = tmpDirs.pop();
     if (dir) fs.rmSync(dir, { recursive: true, force: true });

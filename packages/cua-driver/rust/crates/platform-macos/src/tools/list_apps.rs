@@ -21,8 +21,9 @@ fn def() -> &'static ToolDef {
             - kind: `\"desktop\"` for `.app` bundles on macOS.\n\
             - last_used: RFC3339 timestamp from the bundle's filesystem mtime, \
             when readable; otherwise null.\n\n\
-            Only apps with NSApplicationActivationPolicyRegular are included — \
-            background helpers and system UI agents are filtered out. Installed \
+            Standalone running entries include Regular- and Accessory-policy apps, \
+            including menu-bar apps outside the installed-app directories. \
+            Prohibited-policy background helpers outside installed apps stay excluded. Installed \
             apps come from scanning /Applications, /Applications/Utilities, \
             ~/Applications, /System/Applications, and /System/Applications/Utilities.\n\n\
             Use this for \"is X installed?\" as well as \"is X running?\". For \
@@ -33,7 +34,9 @@ fn def() -> &'static ToolDef {
             .into(),
         input_schema: serde_json::json!({
             "type": "object",
-            "properties": {},
+            "properties": {
+                "running_only": { "type": "boolean", "description": "Return only live applications, including menu-bar accessory apps." }
+            },
             "additionalProperties": false
         }),
         read_only: true,
@@ -49,10 +52,20 @@ impl Tool for ListAppsTool {
         def()
     }
 
-    async fn invoke(&self, _args: Value) -> ToolResult {
-        let apps = tokio::task::spawn_blocking(crate::apps::list_all_apps)
-            .await
-            .unwrap_or_default();
+    async fn invoke(&self, args: Value) -> ToolResult {
+        let running_only = args
+            .get("running_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let apps = tokio::task::spawn_blocking(move || {
+            let mut apps = crate::apps::list_all_apps();
+            if running_only {
+                apps.retain(|app| app.running);
+            }
+            apps
+        })
+        .await
+        .unwrap_or_default();
         let text = crate::apps::format_app_list(&apps);
         // Single flat array. Each entry is the unified shape — existing
         // fields (`pid`, `name`, `bundle_id`, `running`, `active`) are

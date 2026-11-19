@@ -292,6 +292,36 @@ function stampReviewSourceDigest(root, distDir) {
 }
 
 /**
+ * Whether this host's Node.js links against musl rather than glibc. The
+ * report header only carries `glibcVersionRuntime` on a glibc runtime.
+ */
+function hostUsesMusl() {
+  if (process.platform !== 'linux') return false;
+  try {
+    return !process.report?.getReport?.()?.header?.glibcVersionRuntime;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether an `@opentui/core-*` package holds a native library this host
+ * cannot load: the Linux packages ship one library per libc, and npm
+ * installs both flavors on a glibc host because only `libc` (not `os`/`cpu`)
+ * separates them.
+ *
+ * Shipping the foreign one is not merely dead weight. Both are ELF files, so
+ * AppImage packaging walks them with `ldd` while deploying dependencies; the
+ * musl library needs `libc.so`, which no glibc system resolves, so `ldd`
+ * exits non-zero and aborts linuxdeploy. That is what broke the Linux job of
+ * desktop release 0.2.3-preview.0, which bundles this dist tree verbatim.
+ */
+function isForeignLibcPackage(entry, musl = hostUsesMusl()) {
+  if (!entry.startsWith('core-linux-')) return false;
+  return entry.endsWith('-musl') !== musl;
+}
+
+/**
  * OpenTUI renderer runtime assets (tree-sitter grammars, the parser worker,
  * `web-tree-sitter` runtime and the native render library) relocated next to
  * the bundle.
@@ -314,7 +344,11 @@ function stampReviewSourceDigest(root, distDir) {
  * callers/tests can assert on it. Never fails the bundle: a missing
  * @opentui/core (e.g. an install without the renderer) only warns.
  */
-export function copyOpenTuiAssets({ root = defaultRoot, distDir } = {}) {
+export function copyOpenTuiAssets({
+  root = defaultRoot,
+  distDir,
+  musl = hostUsesMusl(),
+} = {}) {
   distDir ??= join(root, 'dist');
   const destRoot = join(distDir, 'opentui-assets');
   // Start from a clean tree: the runtime gate below checks key existence
@@ -402,17 +436,19 @@ export function copyOpenTuiAssets({ root = defaultRoot, distDir } = {}) {
   }
 
   // 4. Native render libraries for every installed @opentui platform package
-  //    (core-darwin-arm64, core-linux-x64-musl, …). The runtime only needs
-  //    the current platform's, but shipping the installed set keeps the
-  //    completeness check satisfiable wherever the bundle runs next. The
-  //    platform packages live beside @opentui/core or hoisted at the repo
-  //    root; scan both scope directories.
+  //    (core-darwin-arm64, core-win32-x64, …), minus the Linux packages built
+  //    for the other libc (see isForeignLibcPackage). The runtime only needs
+  //    the current platform's, but shipping the rest of the installed set
+  //    keeps the completeness check satisfiable wherever the bundle runs
+  //    next. The platform packages live beside @opentui/core or hoisted at
+  //    the repo root; scan both scope directories.
   const scopeDirs = [dirname(coreDir), join(root, 'node_modules', '@opentui')];
   const seenPackages = new Set();
   for (const scopeDir of scopeDirs) {
     if (!existsSync(scopeDir)) continue;
     for (const entry of fs.readdirSync(scopeDir)) {
       if (!entry.startsWith('core-') || seenPackages.has(entry)) continue;
+      if (isForeignLibcPackage(entry, musl)) continue;
       const packageDir = join(scopeDir, entry);
       if (!statSync(packageDir).isDirectory()) continue;
       let copiedFromPackage = false;
@@ -435,6 +471,37 @@ export function copyOpenTuiAssets({ root = defaultRoot, distDir } = {}) {
   return copied;
 }
 
+export function copyGeneratedUiAssets({
+  root = defaultRoot,
+  distDir = join(root, 'dist'),
+} = {}) {
+  const sourceDir = join(root, 'integrations', 'generated-ui', 'dist');
+  if (!existsSync(join(sourceDir, '..', 'package.json'))) return;
+  const files = [
+    ['bundled-main.js', 'main.js'],
+    ['app.html', 'app.html'],
+    ['skills/generated-ui/SKILL.md', 'skills/generated-ui/SKILL.md'],
+    ['THIRD_PARTY_NOTICES.txt', 'THIRD_PARTY_NOTICES.txt'],
+  ];
+  for (const [source] of files) {
+    if (
+      !statSync(join(sourceDir, source), { throwIfNoEntry: false })?.isFile()
+    ) {
+      throw new Error(
+        `Generated UI asset not found: ${join(sourceDir, source)}. ` +
+          'Run npm run build --workspace=@qwen-code/generated-ui first.',
+      );
+    }
+  }
+  const targetDir = join(distDir, 'generated-ui');
+  fs.rmSync(targetDir, { recursive: true, force: true });
+  for (const [source, target] of files) {
+    const destination = join(targetDir, target);
+    mkdirSync(dirname(destination), { recursive: true });
+    copyFileSync(join(sourceDir, source), destination);
+  }
+}
+
 export function copyBundleAssets({ root = defaultRoot } = {}) {
   const distDir = join(root, 'dist');
   const coreVendorDir = join(root, 'packages', 'core', 'vendor');
@@ -443,6 +510,8 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
   if (!existsSync(distDir)) {
     mkdirSync(distDir);
   }
+
+  copyGeneratedUiAssets({ root, distDir });
 
   // Find and copy all .sb files from packages to the root of the dist directory
   const sbFiles = glob.sync('packages/**/*.sb', { cwd: root });
@@ -480,8 +549,11 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
       // DESIGN.md files are maintainer design narratives, not runtime inputs;
       // shipping one would hand a review a ~125 KB read_file target that
       // outweighs the context the slimmed skill saves.
-      skipEntry: (entry) =>
-        isBundledSkillTestFile(entry) || entry === 'DESIGN.md',
+      skipEntry: (entry, sourcePath) =>
+        isBundledSkillTestFile(entry) ||
+        entry === 'DESIGN.md' ||
+        sourcePath === join(bundledSkillsDir, 'browser-use') ||
+        sourcePath === join(bundledSkillsDir, 'computer-use'),
     });
     console.log('Copied bundled skills to dist/bundled/');
   } else {
@@ -556,6 +628,14 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
     mkdirSync(destWebShellDir, { recursive: true });
     copyFileSync(webShellIndexHtml, join(destWebShellDir, 'index.html'));
     copyRecursiveSync(webShellAssetsDir, join(destWebShellDir, 'assets'));
+    for (const file of ['manifest.webmanifest', 'sw.js']) {
+      const source = join(webShellDistDir, file);
+      if (existsSync(source)) {
+        copyFileSync(source, join(destWebShellDir, file));
+      } else {
+        console.warn(`Warning: Web Shell PWA asset not found: ${source}`);
+      }
+    }
     console.log('Copied Web Shell UI to dist/web-shell/');
   } else {
     console.warn(
@@ -574,15 +654,34 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
     'dist',
     'export-transcript-document.js',
   );
-  if (existsSync(exportTranscriptRenderer)) {
+  const exportTranscriptCss = join(
+    root,
+    'packages',
+    'web-templates',
+    'src',
+    'export-html',
+    'dist',
+    'export-transcript-document.css',
+  );
+  if (existsSync(exportTranscriptRenderer) && existsSync(exportTranscriptCss)) {
     copyFileSync(
       exportTranscriptRenderer,
       join(distDir, 'export-transcript-document.js'),
     );
+    copyFileSync(
+      exportTranscriptCss,
+      join(distDir, 'export-transcript-document.css'),
+    );
     console.log('Copied HTML export renderer to dist/');
   } else {
+    const missingExportTranscriptAssets = [
+      exportTranscriptRenderer,
+      exportTranscriptCss,
+    ].filter((assetPath) => !existsSync(assetPath));
     console.warn(
-      'Warning: HTML export renderer not found; run a full `npm run build` before bundling.',
+      `Warning: HTML export renderer assets not found at ${missingExportTranscriptAssets.join(', ')}; ` +
+        'dist/ will carry no HTML export renderer. ' +
+        'Run a full `npm run build` before bundling to include it.',
     );
   }
 
@@ -649,11 +748,11 @@ function copyRecursiveSync(src, dest, options = {}) {
 
     const entries = fs.readdirSync(src);
     for (const entry of entries) {
-      if (entry === '.DS_Store' || options.skipEntry?.(entry)) {
+      const srcPath = join(src, entry);
+      if (entry === '.DS_Store' || options.skipEntry?.(entry, srcPath)) {
         continue;
       }
 
-      const srcPath = join(src, entry);
       const destPath = join(dest, entry);
       copyRecursiveSync(srcPath, destPath, options);
     }

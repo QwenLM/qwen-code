@@ -71,7 +71,12 @@ export const updateCommand: SlashCommand = {
     }
 
     const info = updateCheck.info;
-    const installInfo = getInstallationInfo(projectRoot || process.cwd(), true);
+    const isAutoUpdateEnabled =
+      settings.merged.general?.enableAutoUpdate !== false;
+    const installInfo = getInstallationInfo(
+      projectRoot || process.cwd(),
+      isAutoUpdateEnabled,
+    );
     const manualInstructions = () => {
       const lines = [
         info.message,
@@ -99,8 +104,6 @@ export const updateCommand: SlashCommand = {
         };
       }
       const hostUpdateRelaunch = process.env[HOST_UPDATE_RELAUNCH_ENV_VAR];
-      const isAutoUpdateEnabled =
-        settings.merged.general?.enableAutoUpdate !== false;
       if (hostUpdateRelaunch === 'true' && isAutoUpdateEnabled) {
         await relaunchForUpdate();
         return;
@@ -124,7 +127,11 @@ export const updateCommand: SlashCommand = {
       return manualInstructions();
     }
 
-    if (installInfo.isStandalone && installInfo.standaloneDir) {
+    if (
+      isAutoUpdateEnabled &&
+      installInfo.isStandalone &&
+      installInfo.standaloneDir
+    ) {
       try {
         const result = await performStandaloneUpdate(
           installInfo.standaloneDir,

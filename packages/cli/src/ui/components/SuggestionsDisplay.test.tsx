@@ -8,10 +8,7 @@
 
 import { render } from 'ink-testing-library';
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
-import {
-  SuggestionsDisplay,
-  normalizeDescription,
-} from './SuggestionsDisplay.js';
+import { SuggestionsDisplay } from './SuggestionsDisplay.js';
 import { setLanguageAsync } from '../../i18n/index.js';
 
 describe('SuggestionsDisplay', () => {
@@ -263,11 +260,5 @@ describe('SuggestionsDisplay tabs', () => {
       />,
     );
     expect(lastFrame()).not.toContain('Files');
-  });
-});
-
-describe('normalizeDescription', () => {
-  it('collapses all whitespace runs into single spaces and trims', () => {
-    expect(normalizeDescription('  a\n\nb\t c  ')).toBe('a b c');
   });
 });

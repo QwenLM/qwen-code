@@ -7,10 +7,6 @@
 import type * as vscode from 'vscode';
 import type { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import type { ConversationStore } from '../../services/conversationStore.js';
-import type {
-  PermissionResponseMessage,
-  AskUserQuestionResponseMessage,
-} from '../../types/webviewMessageTypes.js';
 import { MessageRouter } from '../handlers/MessageRouter.js';
 
 /**
@@ -57,26 +53,14 @@ export class MessageHandler {
   }
 
   /**
-   * Set permission handler
-   */
-  setPermissionHandler(
-    handler: (message: PermissionResponseMessage) => void,
-  ): void {
-    this.router.setPermissionHandler(handler);
-  }
-
-  /**
-   * Set ask user question handler
-   */
-  setAskUserQuestionHandler(
-    handler: (message: AskUserQuestionResponseMessage) => void,
-  ): void {
-    this.router.setAskUserQuestionHandler(handler);
-  }
-
-  /**
    * Set auth interactive handler — interactive auth flow.
    */
+  setSubscriptionAuthHandler(
+    handler: (action?: 'logout' | 'upgrade') => Promise<void>,
+  ): void {
+    this.router.setSubscriptionAuthHandler(handler);
+  }
+
   setAuthInteractiveHandler(
     handler: (
       config: import('@qwen-code/qwen-code-core').ProviderConfig,

@@ -46,6 +46,29 @@ describe('artifact html helpers', () => {
       expect(validateSelfContained(ok)).toBeNull();
     });
 
+    it('accepts scripts that generate image data locally', () => {
+      expect(
+        validateSelfContained(
+          '<canvas id="c"></canvas><script>const img = new Image(); img.src = document.querySelector("#c").toDataURL();</script>',
+        ),
+      ).toBeNull();
+    });
+
+    it.each([
+      '<script>const u = URL.createObjectURL(blob)</script>',
+      '<script>canvas.toDataURL("image/png")</script>',
+      '<script>new URL("./data", document.baseURI)</script>',
+      '<script>URL.revokeObjectURL(u)</script>',
+      "<script>o.innerHTML = '<img src=\"' + dataUrl + '\">'</script>",
+      '<img alt="Set src=x in the config" src="data:image/png;base64,iVBOR=">',
+      '<script>fetch("data:application/json,{}")</script>',
+      '<pre><code>fetch(&quot;/api/users&quot;)</code></pre>',
+      '<style>@import url(data:text/css;base64,Ym9keXt9);</style>',
+      '<img src="" alt="placeholder">',
+    ])('preserves existing self-contained input support: %s', (html) => {
+      expect(validateSelfContained(html)).toBeNull();
+    });
+
     it('accepts external hyperlinks', () => {
       const ok = `<a href="https://github.com/QwenLM/qwen-code/pull/1">PR</a>`;
       expect(validateSelfContained(ok)).toBeNull();

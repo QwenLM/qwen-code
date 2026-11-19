@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import type { Socket } from 'node:net';
 import { performance } from 'node:perf_hooks';
 import {
   addDaemonRequestAttribute,
@@ -13,7 +14,7 @@ import {
   runWithDaemonTelemetryContext,
 } from '@qwen-code/qwen-code-core';
 import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
-import type { Application } from 'express';
+import type { Application, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
@@ -38,13 +39,29 @@ import { omitSkillDetailsForSdkSurface } from '../skill-details-redaction.js';
 import { redactWorkflowsFromAvailableCommandsEvent } from '../workflow-session-gate.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
+import type { ResolveSubagentSessionRuntime } from './session.js';
 import { requireSessionRuntime } from './session-runtime.js';
 import {
   parseVirtualSubagentSessionId,
   type VirtualSubagentSessions,
 } from '../virtual-subagent-sessions.js';
 
-let activeSseCount = 0;
+// The writer-stall budget constant/resolver live in daemon-status.ts so
+// status surfaces can report the effective budget without importing route
+// code; re-exported here for the route's callers and tests.
+import {
+  resolveWriterIdleBudgetMs,
+  type SseAdmissionCaps,
+} from '../daemon-status.js';
+export {
+  DEFAULT_WRITER_IDLE_TIMEOUT_MS,
+  resolveWriterIdleBudgetMs,
+} from '../daemon-status.js';
+import {
+  checkSseAdmission,
+  countSseStream,
+  getSurfaceCount,
+} from '../sse-occupancy.js';
 
 const SSE_STREAM_ID_HEADER = 'X-Qwen-SSE-Stream-Id';
 // Keep in sync with the REST transport's response-header validator.
@@ -114,7 +131,59 @@ function boundedDiagnosticString(value: string): string {
 }
 
 export function getActiveSseCount(): number {
-  return activeSseCount;
+  return getSurfaceCount('restEvents');
+}
+
+/**
+ * Force-close an SSE response so the listener slot is actually freed.
+ * A plain res.destroy() / socket close() with unsent data in the kernel
+ * send buffer performs a GRACEFUL shutdown: the FIN queues behind the
+ * unsent bytes and a stalled peer (zero receive window) never ACKs it,
+ * leaving the socket in FIN-WAIT-1 indefinitely — Node still counts it
+ * against server.maxConnections. resetAndDestroy() sends RST instead,
+ * dropping the connection immediately (Node >= 18.3; engines >= 22).
+ *
+ * TLS caveat: TLSSocket inherits resetAndDestroy from net.Socket, but its
+ * TLSWrap handle rejects the call with ERR_INVALID_HANDLE_TYPE WITHOUT
+ * closing anything. The RST must be sent on the underlying TCP socket
+ * (TLSSocket._parent); a final destroy() fallback guarantees the close
+ * is at least attempted if both reset paths fail.
+ */
+function forceCloseSseResponse(res: Response): void {
+  const socket = res.socket;
+  if (!socket || socket.destroyed) {
+    try {
+      res.destroy();
+    } catch {
+      /* already destroyed */
+    }
+    return;
+  }
+  try {
+    socket.resetAndDestroy();
+    return;
+  } catch {
+    // Expected on TLSSocket (ERR_INVALID_HANDLE_TYPE); fall through to
+    // the underlying TCP socket below.
+  }
+  const parent = (socket as unknown as { _parent?: Socket })._parent;
+  try {
+    if (
+      parent &&
+      !parent.destroyed &&
+      typeof parent.resetAndDestroy === 'function'
+    ) {
+      parent.resetAndDestroy();
+      return;
+    }
+  } catch {
+    /* fall through to the graceful destroy fallback */
+  }
+  try {
+    socket.destroy();
+  } catch {
+    /* already destroyed */
+  }
 }
 
 interface RegisterSseEventsRoutesDeps {
@@ -122,8 +191,16 @@ interface RegisterSseEventsRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
   daemonLog?: DaemonLogger;
   writerIdleTimeoutMs?: number;
+  /**
+   * Admission caps shared by every stream surface (issue #17554). Absent
+   * means unlimited. Enforced BEFORE the subscription handshake so a
+   * saturated SSE fleet is rejected with an explicit `503` while short
+   * requests (`/health`, static assets) still reach the listener.
+   */
+  admissionCaps?: SseAdmissionCaps;
   sendBridgeError: SendBridgeError;
   virtualSubagentSessions?: VirtualSubagentSessions;
+  resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime;
   conversationRuntimeActivity?: ConversationRuntimeActivityGate;
 }
 
@@ -174,12 +251,41 @@ export function registerSseEventsRoutes(
   app: Application,
   deps: RegisterSseEventsRoutesDeps,
 ): void {
-  const { workspaceRegistry, daemonLog, sendBridgeError, writerIdleTimeoutMs } =
-    deps;
+  const {
+    workspaceRegistry,
+    daemonLog,
+    sendBridgeError,
+    writerIdleTimeoutMs,
+    admissionCaps,
+  } = deps;
 
   app.get('/session/:id/events', async (req, res) => {
     const sessionId = req.params['id'];
     const diagnosticSessionId = boundedDiagnosticString(sessionId);
+    // SSE admission cap, shared with every other stream surface
+    // (issue #17554). Long-lived streams share the listener's
+    // `server.maxConnections` quota with every short request; once the
+    // listener is full Node closes new sockets at accept time WITHOUT an
+    // HTTP response, so `/health` and the Web Shell go dark with no 503,
+    // no log line, and no metric. Rejecting here — before the subscription
+    // handshake — keeps the failure explicit (503 + Retry-After) and keeps
+    // listener headroom for short requests. `EventSource` treats 5xx as
+    // terminal and does not auto-reconnect, so a rejected client backs off
+    // instead of amplifying the load (same rationale as the per-session
+    // 429 below). The reservation-free overshoot window is documented on
+    // `checkSseAdmission`.
+    if (
+      !checkSseAdmission({
+        surface: 'restEvents',
+        req,
+        res,
+        caps: admissionCaps,
+        daemonLog,
+        logContext: { sessionId: diagnosticSessionId },
+      })
+    ) {
+      return;
+    }
     const streamId = randomUUID();
     const clientId = parseSseClientId(req.headers['x-qwen-client-id']);
     const connectReason = parseSseConnectReason(req.query['connectReason']);
@@ -214,6 +320,8 @@ export function registerSseEventsRoutes(
     };
     let slowWarningCount = 0;
     let eventBusEvictionReason: string | undefined;
+    let closeReason: SseCloseReason | undefined;
+    let terminalEventType: string | undefined;
     const onSubscriberDiagnostic = (
       diagnostic: EventBusSubscriberDiagnostic,
     ): boolean => {
@@ -322,6 +430,23 @@ export function registerSseEventsRoutes(
               : {}),
           },
         );
+        closeReason = 'event_bus_evicted';
+        terminalEventType = 'client_evicted';
+        const evictionData = { ...diagnostic.data };
+        Reflect.deleteProperty(evictionData, 'triggerEventType');
+        Reflect.deleteProperty(evictionData, 'triggerEventBytes');
+        try {
+          res.write(
+            formatSseFrame({
+              v: 1,
+              type: 'client_evicted',
+              data: evictionData,
+            }),
+          );
+        } catch {
+          /* socket already destroyed; reconnect still proceeds. */
+        }
+        forceCloseSseResponse(res);
       }
       return handled;
     };
@@ -343,13 +468,19 @@ export function registerSseEventsRoutes(
     const abort = new AbortController();
     try {
       const virtualKey = parseVirtualSubagentSessionId(sessionId);
-      const runtime = requireSessionRuntime({
-        sessionId: virtualKey?.parentSessionId ?? sessionId,
-        route: 'GET /session/:id/events',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
+      const runtime = virtualKey
+        ? await deps.resolveSubagentSessionRuntime(
+            res,
+            'GET /session/:id/events',
+            virtualKey.parentSessionId,
+          )
+        : requireSessionRuntime({
+            sessionId,
+            route: 'GET /session/:id/events',
+            res,
+            workspaceRegistry,
+            daemonLog,
+          });
       if (!runtime) return;
       workspaceTrusted = runtime.trusted;
       const snapshot = req.query['snapshot'] === '1';
@@ -449,9 +580,7 @@ export function registerSseEventsRoutes(
     }
 
     const openedAt = performance.now();
-    let closeReason: SseCloseReason | undefined;
     let terminalCandidate: SseCloseReason | undefined;
-    let terminalEventType: string | undefined;
     let eventFramesWriteSettled = 0;
     let lastEventIdWritten: number | undefined;
     let backpressureCount = 0;
@@ -460,7 +589,7 @@ export function registerSseEventsRoutes(
     let maxLivePublishToWriteSettledMs = 0;
     let liveTimingEnabled = lastEventId === undefined;
     let finalized = false;
-    let sseCounted = false;
+    let releaseSseCount: (() => void) | undefined = undefined;
     const finalize = () => {
       if (finalized) return;
       finalized = true;
@@ -531,10 +660,7 @@ export function registerSseEventsRoutes(
       } catch {
         // Diagnostics must not interfere with stream cleanup.
       }
-      if (sseCounted) {
-        sseCounted = false;
-        activeSseCount--;
-      }
+      releaseSseCount?.();
     };
 
     res.status(200);
@@ -553,8 +679,11 @@ export function registerSseEventsRoutes(
     res.setHeader(SSE_STREAM_ID_HEADER, streamId);
     res.prependOnceListener('finish', finalize);
     res.prependOnceListener('close', finalize);
-    activeSseCount++;
-    sseCounted = true;
+    // Pass res so the module's destroyed-guard/close-hook backstop covers a
+    // client abort inside the async handshake window above: 'close' can fire
+    // before the finalize listeners register, and without the backstop the
+    // shared slot would leak permanently (finalize never runs on that path).
+    releaseSseCount = countSseStream('restEvents', req, res);
     for (const [key, value] of Object.entries(telemetryBaseAttributes)) {
       addDaemonRequestAttribute(key, value);
     }
@@ -610,21 +739,20 @@ export function registerSseEventsRoutes(
     // waits for the previous write to settle before scheduling its own.
     type WriteOutcome = 'settled' | 'closed';
     let writeChain: Promise<void> = Promise.resolve();
-    // T2.9: epoch (ms) of the last write that fully resolved — either
-    // synchronous `res.write` returned `true`, or the async `drain`
-    // fired. The idle-timeout interval below compares
-    // `Date.now() - lastWriteAt` against the configured budget; a
-    // writer that stalls indefinitely on `drain` will never refresh
-    // this stamp, so the timer fires and forces cleanup. Initialized
-    // to "now" because cleanup runs only after the FIRST stall, and
-    // the SSE handshake itself counts as activity.
+    // Writer-stall reaper budget. Enabled BY DEFAULT (60s) — a writer
+    // stuck on `drain` pins a listener slot indefinitely otherwise, and
+    // enough stalled writers take the whole HTTP surface down at accept
+    // time (see the admission cap above). An explicit flag value wins;
+    // direct embeds may pass 0 to disable.
     //
-    // Gated on `trackWriterIdle` so the default (flag unset) avoids
-    // a per-chunk `Date.now()` on a chatty stream — SSE writers can
-    // be in the hundreds-to-thousands of frames per session.
-    const trackWriterIdle =
-      writerIdleTimeoutMs !== undefined && writerIdleTimeoutMs > 0;
-    let lastWriteAt = trackWriterIdle ? Date.now() : 0;
+    // Zero per-chunk overhead: the reaper keys on `activeDrainStartedAt`,
+    // which the backpressure branch below ALREADY stamps when
+    // `res.write()` returns false and `settleDrainMeasurement()` clears
+    // when `drain` (or close/error) fires. A healthy stream — including
+    // an idle one whose 15s heartbeats keep flushing — never enters that
+    // branch, so the timer finds no unresolved stall and does nothing.
+    // No `Date.now()` on the normal write path.
+    const writerIdleBudgetMs = resolveWriterIdleBudgetMs(writerIdleTimeoutMs);
     const settleDrainMeasurement = () => {
       if (activeDrainStartedAt === undefined) return;
       maxDrainWaitMs = Math.max(
@@ -656,17 +784,19 @@ export function registerSseEventsRoutes(
           return;
         }
         if (ok) {
-          if (trackWriterIdle) lastWriteAt = Date.now();
           resolve('settled');
           return;
         }
         backpressureCount += 1;
+        // Stall start stamp — the ONLY timestamp the idle reaper reads.
+        // If `drain` never fires (consumer stopped reading, kernel send
+        // buffer full), this stays set and the reaper evicts after the
+        // budget. Cleared by settleDrainMeasurement() on drain/close/error.
         activeDrainStartedAt = performance.now();
         const onDrain = () => {
           res.off('close', onClose);
           res.off('error', onError);
           settleDrainMeasurement();
-          if (trackWriterIdle) lastWriteAt = Date.now();
           resolve('settled');
         };
         const onClose = () => {
@@ -710,16 +840,13 @@ export function registerSseEventsRoutes(
     // notice a dead client through write-back-pressure. Comment frame is
     // ignored by EventSource.
     //
-    // The 15s heartbeat detects a TCP-dead writer
-    // via `drain` back-pressure on the comment frame itself. The
-    // `--writer-idle-timeout-ms` flag below adds the orthogonal
-    // application-level guard: if the LAST SUCCESSFUL FLUSH (any
-    // write — heartbeat, replay frame, live event) is older than the
-    // configured budget, the writer is considered stuck (NAT silently
-    // dropping flows, peer process frozen, etc.) and we force a
-    // terminal `client_evicted` frame + cleanup. The historical "Stage
-    // 2 may add an explicit application-level idle timeout" gap
-    // referenced here is now closed when the flag is set.
+    // The 15s heartbeat keeps attempting writes even on an idle stream,
+    // which is what lets the writer-stall reaper below observe a dead
+    // consumer: once the kernel send buffer fills, the heartbeat's
+    // `res.write()` returns false and the stall stamp is set. The reaper
+    // (default 60s, `--writer-idle-timeout-ms` to override) then forces a
+    // terminal `client_evicted` frame + cleanup if the stall outlives the
+    // budget.
     const heartbeatTimer = setInterval(() => {
       if (!res.writableEnded) {
         // Heartbeat writes are best-effort; failure swallowed via the
@@ -729,9 +856,9 @@ export function registerSseEventsRoutes(
     }, 15_000);
     heartbeatTimer.unref();
 
-    // T2.9: declare the idle-timer slot up-front so `cleanup` below can
-    // clear it unconditionally. The actual interval is armed only when
-    // `--writer-idle-timeout-ms` is configured.
+    // Declare the idle-timer slot up-front so `cleanup` below can clear
+    // it unconditionally. Armed whenever the stall budget is positive
+    // (the default) — see writerIdleBudgetMs above.
     let idleTimer: NodeJS.Timeout | undefined;
 
     const cleanup = () => {
@@ -740,31 +867,30 @@ export function registerSseEventsRoutes(
       abort.abort();
     };
 
-    // T2.9: arm the SSE writer idle timeout (if configured). Distinct
-    // from the heartbeat above: heartbeat = "try to ping every 15s";
-    // this = "if no write SUCCEEDED for N ms, force-evict." Values
-    // BELOW the 15s heartbeat interval WILL evict otherwise-healthy
-    // idle connections before the first heartbeat fires — they're not
-    // a no-op. Production deployments should pick a value comfortably
-    // above 15s (e.g. 30000–300000ms) so legitimate idle streams stay
-    // alive and only genuinely stuck writers are reaped; small values
-    // are useful for tests / short-lived dev sessions. The interval
-    // polls at 1/4 the budget (bounded by [250ms, 5s]) so tests
-    // using short budgets still detect promptly, while long
-    // production budgets stay cheap. Values below roughly 1000ms all
-    // use the 250ms polling floor, so eviction can lag until the next
-    // tick instead of landing at exact millisecond precision.
-    if (trackWriterIdle) {
-      // Narrowed by `trackWriterIdle`; the const assertion keeps
-      // TypeScript happy inside the closure without re-reading opts.
-      const writerIdleTimeoutMsValue = writerIdleTimeoutMs as number;
+    // Arm the writer-stall reaper. Distinct from the heartbeat above:
+    // heartbeat = "try to ping every 15s"; this = "if a write has been
+    // stuck waiting for `drain` for N ms, force-evict." The check keys
+    // on the unresolved-stall stamp (`activeDrainStartedAt`), NOT on the
+    // last successful flush, so healthy idle streams are never evicted
+    // at any budget — only genuinely stuck writers are reaped. The
+    // interval polls at 1/4 the budget (bounded by [250ms, 5s]) so tests
+    // using short budgets still detect promptly, while long production
+    // budgets stay cheap. Values below roughly 1000ms all use the 250ms
+    // polling floor, so eviction can lag until the next tick instead of
+    // landing at exact millisecond precision.
+    if (writerIdleBudgetMs > 0) {
+      const writerIdleTimeoutMsValue = writerIdleBudgetMs;
       const checkIntervalMs = Math.max(
         250,
         Math.min(5_000, Math.floor(writerIdleTimeoutMsValue / 4)),
       );
       idleTimer = setInterval(() => {
         if (res.writableEnded) return;
-        const idleForMs = Date.now() - lastWriteAt;
+        // No unresolved drain stall ⇒ the writer is healthy (idle or
+        // flushing); nothing to reap. This is the zero-overhead default
+        // path: no per-chunk timestamps are taken anywhere.
+        if (activeDrainStartedAt === undefined) return;
+        const idleForMs = performance.now() - activeDrainStartedAt;
         if (idleForMs < writerIdleTimeoutMsValue) return;
         closeReason = 'writer_idle_timeout';
         terminalEventType = 'client_evicted';
@@ -774,13 +900,18 @@ export function registerSseEventsRoutes(
         // differentiator. Write DIRECTLY here
         // (bypassing `writeWithBackpressure`) because the chain may
         // already be stuck on a `drain` that will never come — which
-        // is the exact scenario this timer exists to catch. If the
-        // kernel send buffer has room the client sees the frame; if
-        // not, the client gets EPIPE on next read. Either way the
-        // socket is closed in the next two statements, so any drop
-        // is bounded.
+        // is the exact scenario this timer exists to catch. The frame
+        // is buffered even when the write returns false; the close
+        // below is bounded so a peer that never resumes cannot pin the
+        // slot indefinitely.
+        // `res.write` returning false does NOT mean the frame was lost:
+        // the chunk is buffered and the buffer is at/above the high-water
+        // mark. Only a THROW means the frame could not be queued. Branch
+        // on the throw so a consumer that resumes reading still receives
+        // the terminal frame (review R1-7).
+        let evictionFrameFailed = false;
         try {
-          const settled = res.write(
+          const evictionFrameSettled = res.write(
             formatSseFrame({
               v: 1,
               type: 'client_evicted',
@@ -792,9 +923,13 @@ export function registerSseEventsRoutes(
               },
             }),
           );
-          if (settled) eventFramesWriteSettled += 1;
+          // Same accounting as the main write loop's immediate-settle
+          // branch: a true return means the frame flushed below the
+          // high-water mark. A false return still QUEUES the frame
+          // (drain pending), so it is not counted as settled here.
+          if (evictionFrameSettled) eventFramesWriteSettled += 1;
         } catch {
-          /* socket already destroyed; nothing to send. */
+          evictionFrameFailed = true;
         }
         // Wrap stderr + res.end so an
         // EPIPE on the stderr pipe (or a synchronous throw from
@@ -836,8 +971,29 @@ export function registerSseEventsRoutes(
           },
         );
         cleanup();
+        // Closing must actually free the listener slot. A graceful
+        // res.end() queues a FIN BEHIND the unsent data in a full kernel
+        // send buffer — exactly the state this reaper exists for — so
+        // the FIN can never be sent and the connection lingers in
+        // FIN-WAIT-1 until the peer disconnects. When the terminal frame
+        // could not be queued at all (write threw), RST the socket
+        // immediately: 'close' → finalize → occupancy release frees the
+        // slot, matching the bus-eviction path above. When the frame WAS
+        // buffered (write returned true OR false), end gracefully so a
+        // consumer that resumes reading still sees the terminal frame,
+        // with a bounded RST fallback in case the peer never resumes and
+        // the FIN lingers anyway.
         try {
-          if (!res.writableEnded) res.end();
+          if (!evictionFrameFailed) {
+            if (!res.writableEnded) res.end();
+            const forceCloseTimer = setTimeout(() => {
+              forceCloseSseResponse(res);
+            }, 5_000);
+            forceCloseTimer.unref();
+            res.once('close', () => clearTimeout(forceCloseTimer));
+          } else {
+            forceCloseSseResponse(res);
+          }
         } catch {
           /* socket already destroyed; nothing more to do. */
         }
@@ -1050,7 +1206,7 @@ export function registerSseEventsRoutes(
         }
       } finally {
         cleanup();
-        if (!res.writableEnded) res.end();
+        if (!res.destroyed && !res.writableEnded) res.end();
       }
     })();
   });

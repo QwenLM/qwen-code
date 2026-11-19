@@ -5,8 +5,7 @@
 //! 2. Persistent plain `XGetImage` via x11rb — still in-process
 //! 3. `import -window <xid> png:-` (ImageMagick compatibility fallback)
 //!
-//! Main-display capture keeps its own dispatch (Wayland cascade → ImageMagick →
-//! root `XGetImage`). Wayland-native per-window paths are not routed into XShm.
+//! Main-display capture uses ImageMagick then root `XGetImage`.
 //!
 //! x11rb MIT-SHM API (pinned 0.13.2):
 //! - https://docs.rs/x11rb/0.13.2/x11rb/protocol/shm/trait.ConnectionExt.html
@@ -20,7 +19,8 @@
 
 use anyhow::{anyhow, bail, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection as _;
@@ -33,6 +33,7 @@ const MAX_CAPTURE_BYTES: usize = 1 << 30;
 /// After MIT-SHM init/extension failure, same-DISPLAY may be probed again only
 /// after this backoff. Request/capture failures never use this path.
 const XSHM_INIT_RETRY_BACKOFF: Duration = Duration::from_secs(30);
+const IMPORT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Capture a window by X11 XID. Returns raw PNG bytes.
 pub fn screenshot_window_bytes(xid: u64) -> Result<Vec<u8>> {
@@ -87,19 +88,67 @@ fn capture_window_with_backends(
 }
 
 fn capture_via_import(xid: u64) -> Result<Vec<u8>> {
-    let out = Command::new("import")
-        .args(["-window", &xid.to_string(), "png:-"])
-        .output()
+    capture_import_target(&xid.to_string())
+}
+
+fn capture_import_target(target: &str) -> Result<Vec<u8>> {
+    let mut child = Command::new("import")
+        .args(["-window", target, "png:-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| anyhow!("failed to launch ImageMagick import: {e}"))?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = child.stdout.take().expect("piped import stdout");
+    let stderr = child.stderr.take().expect("piped import stderr");
+    let (status, stdout, stderr) = std::thread::scope(|scope| -> Result<_> {
+        fn read(mut pipe: impl Read) -> std::io::Result<Vec<u8>> {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).map(|_| bytes)
+        }
+        // Drain both pipes while waiting: a PNG can exceed the pipe capacity.
+        let stdout = scope.spawn(move || read(stdout));
+        let stderr = scope.spawn(move || read(stderr));
+        let deadline = Instant::now() + IMPORT_TIMEOUT;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                result => {
+                    // A destroyed XID can leave import holding an X server grab.
+                    // Kill and reap it before returning so other clients recover.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break match result {
+                        Err(error) => {
+                            Err(anyhow!("failed to wait for ImageMagick import: {error}"))
+                        }
+                        _ => Err(anyhow!(
+                            "ImageMagick import timed out after {IMPORT_TIMEOUT:?}"
+                        )),
+                    };
+                }
+            }
+        };
+        let stdout = stdout
+            .join()
+            .map_err(|_| anyhow!("import stdout reader panicked"))??;
+        let stderr = stderr
+            .join()
+            .map_err(|_| anyhow!("import stderr reader panicked"))??;
+        Ok((status?, stdout, stderr))
+    })?;
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
         let detail = stderr.trim().chars().take(512).collect::<String>();
-        bail!("ImageMagick import exited {}: {detail}", out.status);
+        bail!("ImageMagick import exited {status}: {detail}");
     }
-    if out.stdout.is_empty() {
+    if stdout.is_empty() {
         bail!("ImageMagick import returned empty stdout");
     }
-    Ok(out.stdout)
+    Ok(stdout)
 }
 
 // ── shared pixel conversion ───────────────────────────────────────────────
@@ -119,12 +168,13 @@ struct PackedLayout {
     len: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PixelDecoder {
     layout: PackedLayout,
     red_mask: u32,
     green_mask: u32,
     blue_mask: u32,
+    direct_colors: Option<Vec<[u8; 3]>>,
 }
 
 impl PixelCatalog {
@@ -185,14 +235,24 @@ impl PixelCatalog {
         })
     }
 
-    fn decoder(&self, w: u32, h: u32, depth: u8, visual_id: u32) -> Result<PixelDecoder> {
+    fn decoder(
+        &self,
+        w: u32,
+        h: u32,
+        depth: u8,
+        visual_id: u32,
+        query_colormap: impl FnOnce(&Visualtype) -> Result<Vec<[u8; 3]>>,
+    ) -> Result<PixelDecoder> {
         let layout = self.packed_layout(w, h, depth)?;
         let visual = self
             .visuals
             .iter()
             .find(|visual| visual.visual_id == visual_id)
             .ok_or_else(|| anyhow!("unknown X11 visual 0x{visual_id:x} for depth {depth}"))?;
-        if visual.class != VisualClass::TRUE_COLOR {
+        if !matches!(
+            visual.class,
+            VisualClass::TRUE_COLOR | VisualClass::DIRECT_COLOR
+        ) {
             bail!(
                 "unsupported X11 visual class {:?} for visual 0x{visual_id:x}",
                 visual.class
@@ -211,13 +271,63 @@ impl PixelCatalog {
         {
             bail!("overlapping RGB masks for X11 visual 0x{visual_id:x}");
         }
+        let direct_colors = if visual.class == VisualClass::DIRECT_COLOR {
+            Some(query_colormap(visual)?)
+        } else {
+            None
+        };
         Ok(PixelDecoder {
             layout,
             red_mask: visual.red_mask,
             green_mask: visual.green_mask,
             blue_mask: visual.blue_mask,
+            direct_colors,
         })
     }
+}
+
+/// DirectColor masks address separate color ramps, not RGB intensities. Fetch
+/// them from the window on every frame: applications can replace the colormap
+/// or change its entries without changing the pixels or the visual.
+fn query_direct_colors(
+    conn: &x11rb::rust_connection::RustConnection,
+    window: u32,
+    visual: &Visualtype,
+) -> Result<Vec<[u8; 3]>> {
+    use x11rb::protocol::xproto::ConnectionExt as _;
+
+    let masks = [visual.red_mask, visual.green_mask, visual.blue_mask];
+    let entries = masks
+        .iter()
+        .map(|mask| (mask >> mask.trailing_zeros()) + 1)
+        .max()
+        .unwrap_or(0);
+    if entries == 0 || entries > u32::from(visual.colormap_entries) {
+        bail!("DirectColor masks exceed the visual's colormap entries");
+    }
+    let attributes = conn.get_window_attributes(window)?.reply()?;
+    if attributes.visual != visual.visual_id {
+        bail!("X11 capture visual differs from window visual");
+    }
+    let mut colors = Vec::with_capacity(entries as usize);
+    // Fit ordinary X11 request limits even for 16-bit component maps.
+    for start in (0..entries).step_by(1024) {
+        let pixels: Vec<_> = (start..entries.min(start + 1024))
+            .map(|index| {
+                masks.iter().fold(0, |pixel, mask| {
+                    pixel | ((index << mask.trailing_zeros()) & mask)
+                })
+            })
+            .collect();
+        let reply = conn.query_colors(attributes.colormap, &pixels)?.reply()?;
+        if reply.colors.len() != pixels.len() {
+            bail!("X11 QueryColors returned an incomplete DirectColor map");
+        }
+        colors.extend(reply.colors.iter().map(|color| {
+            [color.red, color.green, color.blue].map(|value| ((u32::from(value) + 128) / 257) as u8)
+        }));
+    }
+    Ok(colors)
 }
 
 fn checked_capture_dimensions(w: u32, h: u32) -> Result<()> {
@@ -278,12 +388,17 @@ fn packed_zpixmap_to_png(data: &[u8], w: u32, h: u32, decoder: PixelDecoder) -> 
             } else {
                 bail!("unsupported X11 image byte order");
             };
-            rgba.extend_from_slice(&[
-                component_to_u8(pixel, decoder.red_mask),
-                component_to_u8(pixel, decoder.green_mask),
-                component_to_u8(pixel, decoder.blue_mask),
-                255,
-            ]);
+            let masks = [decoder.red_mask, decoder.green_mask, decoder.blue_mask];
+            for (channel, mask) in masks.into_iter().enumerate() {
+                let value = match &decoder.direct_colors {
+                    Some(colors) => {
+                        colors[((pixel & mask) >> mask.trailing_zeros()) as usize][channel]
+                    }
+                    None => component_to_u8(pixel, mask),
+                };
+                rgba.push(value);
+            }
+            rgba.push(255);
         }
     }
     cua_driver_core::image_utils::encode_rgba_to_png(&rgba, w, h)
@@ -597,7 +712,11 @@ impl XShmSession {
             data,
             w,
             h,
-            decoder: self.pixels.decoder(w, h, reply.depth, reply.visual)?,
+            decoder: self
+                .pixels
+                .decoder(w, h, reply.depth, reply.visual, |visual| {
+                    query_direct_colors(&self.conn, window, visual)
+                })?,
         })
     }
 }
@@ -823,7 +942,9 @@ impl XGetImageSession {
             data: img.data,
             w,
             h,
-            decoder: self.pixels.decoder(w, h, img.depth, img.visual)?,
+            decoder: self.pixels.decoder(w, h, img.depth, img.visual, |visual| {
+                query_direct_colors(&self.conn, window, visual)
+            })?,
         })
     }
 }
@@ -840,48 +961,16 @@ pub fn png_dimensions_pub(data: &[u8]) -> Result<(u32, u32)> {
 // `CUA_DRIVER_RS_DEDUP_AUDIT.md`. RGBA-encoding callers below now go
 // through `cua_driver_core::image_utils::encode_rgba_to_png`.
 
-/// Capture the primary display (root window) as raw PNG bytes.
-///
-/// Dispatch:
-/// - Native Wayland (`CUA_DRIVER_RS_ENABLE_WAYLAND=1` + Wayland session):
-///   routes through [`crate::wayland::screenshot_display_dispatch`] which
-///   owns the complete GNOME helper → wlroots screencopy →
-///   ext-image-copy-capture-v1 → portal Screenshot → X11 cascade. An
-///   available GNOME helper's capture failure is terminal.
-/// - X11 / Wayland-disabled: ImageMagick `import` → x11rb `XGetImage`.
+/// Capture the X11 primary display as raw PNG bytes.
 pub fn screenshot_display_bytes() -> Result<Vec<u8>> {
-    screenshot_display_bytes_with_dispatch(
-        crate::wayland::is_wayland(),
-        crate::wayland::screenshot_display_dispatch,
-        screenshot_display_bytes_x11,
-    )
+    crate::require_x11()?;
+    screenshot_display_bytes_x11()
 }
 
-fn screenshot_display_bytes_with_dispatch(
-    wayland_enabled: bool,
-    wayland_capture: impl FnOnce() -> Result<Vec<u8>>,
-    x11_capture: impl FnOnce() -> Result<Vec<u8>>,
-) -> Result<Vec<u8>> {
-    if wayland_enabled {
-        wayland_capture()
-    } else {
-        x11_capture()
-    }
-}
-
-/// X11-only display capture path — extracted so the wayland cascade in
-/// [`crate::wayland::screenshot_display_dispatch`] can call it as a final
-/// fallback without re-entering [`screenshot_display_bytes`] (which would
-/// loop forever once we're on Wayland).
 pub(crate) fn screenshot_display_bytes_x11() -> Result<Vec<u8>> {
     // Try `import -window root png:-` (ImageMagick).
-    let out = Command::new("import")
-        .args(["-window", "root", "png:-"])
-        .output();
-    if let Ok(o) = out {
-        if o.status.success() && !o.stdout.is_empty() {
-            return Ok(o.stdout);
-        }
+    if let Ok(bytes) = capture_import_target("root") {
+        return Ok(bytes);
     }
     // Fallback: x11rb XGetImage on the root window.
     use x11rb::connection::Connection;
@@ -978,6 +1067,7 @@ mod tests {
             red_mask: 0x00ff_0000,
             green_mask: 0x0000_ff00,
             blue_mask: 0x0000_00ff,
+            direct_colors: None,
         };
         // Width 3 at 24bpp with 32-bit scanline padding: 9 payload bytes +
         // 3 ignored padding bytes per row. Colors are deliberately varied.
@@ -1007,6 +1097,7 @@ mod tests {
             red_mask: 0xf800,
             green_mask: 0x07e0,
             blue_mask: 0x001f,
+            direct_colors: None,
         };
         let packed = [0xf8, 0x00, 0x07, 0xe0];
         let png = packed_zpixmap_to_png(&packed, 2, 1, decoder).expect("decode big-endian");
@@ -1033,17 +1124,54 @@ mod tests {
             }],
             visuals: vec![valid],
         };
-        let decoder = catalog.decoder(3, 2, 24, 0x21).expect("valid decoder");
+        let decoder = catalog
+            .decoder(3, 2, 24, 0x21, |_| {
+                panic!("TrueColor does not query a colormap")
+            })
+            .expect("valid decoder");
         assert_eq!(decoder.layout.bytes_per_pixel, 3);
         assert_eq!(decoder.layout.stride, 12);
         assert_eq!(decoder.layout.len, 24);
 
         catalog.visuals[0].red_mask = 0x00f0_f000;
         let err = catalog
-            .decoder(3, 2, 24, 0x21)
+            .decoder(3, 2, 24, 0x21, |_| {
+                panic!("TrueColor does not query a colormap")
+            })
             .err()
             .expect("non-contiguous mask must fail");
         assert!(format!("{err:#}").contains("not contiguous"));
+    }
+
+    #[test]
+    fn directcolor_decoder_uses_independent_rgb565_indices() {
+        let catalog = PixelCatalog {
+            image_byte_order: ImageOrder::MSB_FIRST,
+            formats: vec![Format {
+                depth: 16,
+                bits_per_pixel: 16,
+                scanline_pad: 32,
+            }],
+            visuals: vec![Visualtype {
+                visual_id: 0x42,
+                class: VisualClass::DIRECT_COLOR,
+                bits_per_rgb_value: 8,
+                colormap_entries: 64,
+                red_mask: 0xf800,
+                green_mask: 0x07e0,
+                blue_mask: 0x001f,
+            }],
+        };
+        let decoder = catalog
+            .decoder(1, 1, 16, 0x42, |_| {
+                Ok((0..64)
+                    .map(|index| [100 + index, 200 - index, index * 2])
+                    .collect())
+            })
+            .expect("DirectColor decoder");
+        let png = packed_zpixmap_to_png(&[0x08, 0x43, 0xde, 0xad], 1, 1, decoder)
+            .expect("decode independently indexed channels and skip padding");
+        assert_eq!(decode_png_rgba(&png), vec![101, 198, 6, 255]);
     }
 
     #[test]
@@ -1168,43 +1296,6 @@ mod tests {
             XShmState::after_capture_retry_failure(),
             XShmState::Unsupported { .. }
         ));
-    }
-
-    #[test]
-    fn available_gnome_helper_failure_is_terminal_at_public_boundary() {
-        let x11_called = Cell::new(false);
-
-        let result = screenshot_display_bytes_with_dispatch(
-            true,
-            || Err(anyhow::anyhow!("GNOME compositor helper capture failed")),
-            || {
-                x11_called.set(true);
-                Ok(vec![1, 2, 3])
-            },
-        );
-
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "GNOME compositor helper capture failed"
-        );
-        assert!(!x11_called.get(), "public boundary retried X11 capture");
-    }
-
-    #[test]
-    fn wayland_disabled_uses_x11_capture() {
-        let wayland_called = Cell::new(false);
-
-        let result = screenshot_display_bytes_with_dispatch(
-            false,
-            || {
-                wayland_called.set(true);
-                Err(anyhow::anyhow!("Wayland capture should not run"))
-            },
-            || Ok(vec![1, 2, 3]),
-        );
-
-        assert_eq!(result.unwrap(), vec![1, 2, 3]);
-        assert!(!wayland_called.get());
     }
 
     #[test]
@@ -1418,6 +1509,121 @@ mod tests {
             .expect("fixture sync reply");
     }
 
+    /// DirectColor pixels index independently mutable red, green and blue maps.
+    /// A non-linear map and a map-only update distinguish correct capture from
+    /// treating the pixel masks as TrueColor intensities or caching the palette.
+    #[test]
+    #[ignore = "requires a live X11 server with DirectColor and MIT-SHM 1.2"]
+    fn live_directcolor_capture_tracks_window_colormap() {
+        use x11rb::protocol::xproto::{
+            ColorFlag, Coloritem, ColormapAlloc, ConnectionExt as _, CreateWindowAux, WindowClass,
+        };
+        use x11rb::rust_connection::RustConnection;
+
+        let display = std::env::var("DISPLAY").expect("DISPLAY must be set");
+        let (conn, screen_num) = RustConnection::connect(Some(&display)).expect("connect fixture");
+        let screen = &conn.setup().roots[screen_num];
+        let visual = screen
+            .allowed_depths
+            .iter()
+            .filter(|depth| depth.depth == 24)
+            .flat_map(|depth| &depth.visuals)
+            .find(|visual| {
+                visual.class == VisualClass::DIRECT_COLOR
+                    && visual.red_mask == 0xff0000
+                    && visual.green_mask == 0xff00
+                    && visual.blue_mask == 0xff
+            })
+            .expect("24-bit DirectColor visual");
+        let colormap = conn.generate_id().expect("colormap id");
+        conn.create_colormap(ColormapAlloc::ALL, colormap, screen.root, visual.visual_id)
+            .unwrap()
+            .check()
+            .unwrap();
+        let window = conn.generate_id().expect("window id");
+        conn.create_window(
+            24,
+            window,
+            screen.root,
+            0,
+            0,
+            67,
+            43,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            visual.visual_id,
+            &CreateWindowAux::new()
+                .background_pixel(0x175ba8)
+                .border_pixel(0)
+                .colormap(colormap),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        conn.map_window(window).unwrap().check().unwrap();
+        let fixture = LiveFixture { conn, window };
+        paint_live_fixture(&fixture, 67, 43);
+        let mut shm = XShmSession::connect(display.clone()).expect("connect SHM capture");
+        let mut xget = XGetImageSession::connect(display).expect("connect XGetImage capture");
+        for phase in 0..2u16 {
+            let colors: Vec<_> = (0..256u16)
+                .map(|index| Coloritem {
+                    pixel: u32::from(index) * 0x010101,
+                    red: ((index + 73 + phase * 19) % 256) * 257,
+                    green: (255 - index) * 257,
+                    blue: ((index * 3 + phase * 31) % 256) * 257,
+                    flags: ColorFlag::RED | ColorFlag::GREEN | ColorFlag::BLUE,
+                })
+                .collect();
+            fixture
+                .conn
+                .store_colors(colormap, &colors)
+                .unwrap()
+                .check()
+                .unwrap();
+            for frame in [
+                shm.capture_raw(u64::from(window))
+                    .expect("DirectColor SHM capture"),
+                xget.capture_raw(u64::from(window))
+                    .expect("DirectColor XGetImage capture"),
+            ] {
+                let png = raw_frame_png(frame);
+                assert_eq!(
+                    cua_driver_core::image_utils::png_dimensions(&png).unwrap(),
+                    (67, 43)
+                );
+                let rgba = decode_png_rgba(&png);
+                for (x, indices) in [
+                    (0, [0x17u16, 0x5b, 0xa8]),
+                    (33, [0xc4, 0x3d, 0x52]),
+                    (66, [0x2d, 0xb8, 0x71]),
+                ] {
+                    assert_eq!(
+                        &rgba[x * 4..x * 4 + 4],
+                        &[
+                            ((indices[0] + 73 + phase * 19) % 256) as u8,
+                            (255 - indices[1]) as u8,
+                            ((indices[2] * 3 + phase * 31) % 256) as u8,
+                            255,
+                        ]
+                    );
+                }
+            }
+        }
+        fixture
+            .conn
+            .destroy_window(window)
+            .unwrap()
+            .check()
+            .unwrap();
+        fixture
+            .conn
+            .free_colormap(colormap)
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
     fn raw_frame_png(frame: RawFrame) -> Vec<u8> {
         packed_zpixmap_to_png(&frame.data, frame.w, frame.h, frame.decoder)
             .expect("encode raw frame")
@@ -1426,6 +1632,72 @@ mod tests {
     fn percentile_micros(samples: &mut [u128], percentile: usize) -> u128 {
         samples.sort_unstable();
         samples[(samples.len() - 1) * percentile / 100]
+    }
+
+    #[test]
+    #[ignore = "requires an isolated X11 display and ImageMagick import"]
+    fn live_destroyed_window_capture_releases_server_and_recovers() {
+        use x11rb::protocol::xproto::{ConnectionExt as _, CreateGCAux, ImageFormat};
+
+        let display = std::env::var("DISPLAY").expect("isolated DISPLAY must be set");
+        let fixture = create_live_fixture(&display, 256, 128);
+        let gc = fixture.conn.generate_id().unwrap();
+        fixture
+            .conn
+            .create_gc(gc, fixture.window, &CreateGCAux::new())
+            .unwrap();
+        let mut seed = 7u32;
+        let pixels: Vec<u8> = (0..256 * 128 * 4)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed as u8
+            })
+            .collect();
+        fixture
+            .conn
+            .put_image(
+                ImageFormat::Z_PIXMAP,
+                fixture.window,
+                gc,
+                256,
+                128,
+                0,
+                0,
+                0,
+                24,
+                &pixels,
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+        let png = capture_via_import(u64::from(fixture.window)).expect("capture large image");
+        assert!(png.len() > 65_536, "exercise concurrent stdout draining");
+        fixture
+            .conn
+            .destroy_window(fixture.window)
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let started = Instant::now();
+        let error = screenshot_window_bytes(u64::from(fixture.window))
+            .expect_err("destroyed window must fail");
+        assert!(started.elapsed() < IMPORT_TIMEOUT + Duration::from_secs(2));
+        assert!(error.to_string().contains("ImageMagick import"));
+        fixture
+            .conn
+            .get_input_focus()
+            .unwrap()
+            .reply()
+            .expect("server grab released");
+        let next = create_live_fixture(&display, 120, 80);
+        let png = screenshot_window_bytes(u64::from(next.window)).expect("capture after failure");
+        assert_eq!(
+            cua_driver_core::image_utils::png_dimensions(&png).unwrap(),
+            (120, 80)
+        );
     }
 
     /// Live correctness and bounded-performance evidence against three Xvfb

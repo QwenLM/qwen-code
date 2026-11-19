@@ -15,6 +15,7 @@ import {
   getAllSettingKeys,
   getDialogSettingKeys,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
+  WORKSPACE_RESTRICTED_ROOT_SETTINGS,
   WORKSPACE_TIGHTEN_ONLY_SETTINGS,
   // Business logic utilities
   TEST_ONLY,
@@ -22,6 +23,8 @@ import {
   setPendingSettingValue,
   getRestartRequiredFromModified,
   getDisplayValue,
+  nextBooleanSettingValue,
+  saveModifiedSettings,
   isDefaultValue,
   setNestedPropertySafe,
   setNestedPropertyForce,
@@ -34,6 +37,7 @@ import {
   type SettingsSchema,
   type SettingsSchemaType,
 } from './settingsSchema.js';
+import { SettingScope, type LoadedSettings } from './settings.js';
 
 vi.mock('./settingsSchema.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('./settingsSchema.js')>();
@@ -254,6 +258,52 @@ describe('SettingsUtils', () => {
           'Value must be <= 10',
         );
       });
+
+      it('refuses out-of-range model.goalCheckpointTimeoutSeconds values', async () => {
+        // This file mocks getSettingsSchema, so read the production
+        // definition straight from the module. The setting is deprecated and
+        // ignored, but its declared bounds stay so the /config write path
+        // keeps refusing a value that was never valid.
+        const { getSettingsSchema: getRealSettingsSchema } =
+          await vi.importActual<typeof import('./settingsSchema.js')>(
+            './settingsSchema.js',
+          );
+        const definition =
+          getRealSettingsSchema().model.properties.goalCheckpointTimeoutSeconds;
+
+        expect(validateSettingValue(definition, 0)).toBe('Value must be >= 1');
+        expect(validateSettingValue(definition, 901)).toBe(
+          'Value must be <= 900',
+        );
+        expect(validateSettingValue(definition, 1)).toBeUndefined();
+        expect(validateSettingValue(definition, 900)).toBeUndefined();
+      });
+
+      it('refuses zero for Goal cadence settings while accepting -1', async () => {
+        const { getSettingsSchema: getRealSettingsSchema } =
+          await vi.importActual<typeof import('./settingsSchema.js')>(
+            './settingsSchema.js',
+          );
+        const model = getRealSettingsSchema().model.properties;
+
+        for (const definition of [
+          model.goalMaxTurns,
+          model.goalMaxActiveMinutes,
+        ]) {
+          expect(validateSettingValue(definition, 0)).toBe(
+            'Value must not be 0',
+          );
+          // `-0` is what `Number()` returns for `-0`, `-0.0`, `-.0` and
+          // `-0e0`, and `JSON.stringify` writes it as `0`. Letting it through
+          // persists the excluded value and aborts every later startup in that
+          // scope, with `/config` unreachable to repair it.
+          expect(validateSettingValue(definition, -0)).toBe(
+            'Value must not be 0',
+          );
+          expect(validateSettingValue(definition, -1)).toBeUndefined();
+          expect(validateSettingValue(definition, 1)).toBeUndefined();
+        }
+      });
     });
 
     describe('requiresRestart', () => {
@@ -428,6 +478,41 @@ describe('SettingsUtils', () => {
           ).toEqual(allKeys);
           expect(allKeys).toContain(restrictedKey);
         });
+
+        it.each(WORKSPACE_RESTRICTED_ROOT_SETTINGS)(
+          'hides the root-level %s only in Workspace scope',
+          (key) => {
+            vi.mocked(getSettingsSchema).mockReturnValue({
+              [key]: {
+                type: 'number',
+                label: key,
+                category: 'General',
+                requiresRestart: false,
+                default: 5,
+                showInDialog: true,
+              },
+              visionModel: {
+                type: 'string',
+                label: 'Vision Model',
+                category: 'General',
+                requiresRestart: false,
+                default: '',
+                showInDialog: true,
+              },
+            } as unknown as ReturnType<typeof getSettingsSchema>);
+
+            expect(getDialogSettingKeys()).toContain(key);
+            expect(
+              getDialogSettingKeys({ excludeWorkspaceRestricted: false }),
+            ).toContain(key);
+            expect(
+              getDialogSettingKeys({ excludeWorkspaceRestricted: true }),
+            ).not.toContain(key);
+            expect(
+              getDialogSettingKeys({ excludeWorkspaceRestricted: true }),
+            ).toContain('visionModel');
+          },
+        );
       });
 
       it('should return only settings marked for dialog display', () => {
@@ -652,6 +737,97 @@ describe('SettingsUtils', () => {
     });
 
     describe('getDisplayValue', () => {
+      it('renders an unset tri-state boolean without exposing undefined', () => {
+        vi.mocked(getSettingsSchema).mockReturnValue({
+          tools: {
+            type: 'object',
+            label: 'Tools',
+            category: 'Tools',
+            requiresRestart: true,
+            default: {},
+            description: 'Tools',
+            showInDialog: false,
+            properties: {
+              webSearch: {
+                type: 'object',
+                label: 'Web Search',
+                category: 'Tools',
+                requiresRestart: true,
+                default: {},
+                description: 'Web Search',
+                showInDialog: false,
+                properties: {
+                  enabled: {
+                    type: 'boolean',
+                    label: 'Enable WebSearch',
+                    category: 'Tools',
+                    requiresRestart: true,
+                    default: undefined,
+                    description: 'Enable WebSearch',
+                    showInDialog: true,
+                  },
+                },
+              },
+            },
+          },
+        } as unknown as SettingsSchemaType);
+
+        expect(
+          getDisplayValue(
+            'tools.webSearch.enabled',
+            makeMockSettings({}),
+            makeMockSettings({}),
+            new Set(),
+          ),
+        ).toBe('(not set)');
+      });
+
+      it('renders a pending reset to an unset tri-state value', () => {
+        vi.mocked(getSettingsSchema).mockReturnValue({
+          tools: {
+            type: 'object',
+            label: 'Tools',
+            category: 'Tools',
+            requiresRestart: true,
+            default: {},
+            description: 'Tools',
+            showInDialog: false,
+            properties: {
+              webSearch: {
+                type: 'object',
+                label: 'Web Search',
+                category: 'Tools',
+                requiresRestart: true,
+                default: {},
+                description: 'Web Search',
+                showInDialog: false,
+                properties: {
+                  enabled: {
+                    type: 'boolean',
+                    label: 'Enable WebSearch',
+                    category: 'Tools',
+                    requiresRestart: true,
+                    default: undefined,
+                    description: 'Enable WebSearch',
+                    showInDialog: true,
+                  },
+                },
+              },
+            },
+          },
+        } as unknown as SettingsSchemaType);
+
+        expect(
+          getDisplayValue(
+            'tools.webSearch.enabled',
+            makeMockSettings({ tools: { webSearch: { enabled: true } } }),
+            makeMockSettings({ tools: { webSearch: { enabled: true } } }),
+            new Set(['tools.webSearch.enabled']),
+            makeMockSettings({ tools: { webSearch: { enabled: undefined } } }),
+          ),
+        ).toBe('(not set)*');
+      });
+
       describe('enum behavior', () => {
         enum StringEnum {
           FOO = 'foo',
@@ -826,6 +1002,25 @@ describe('SettingsUtils', () => {
           );
           expect(result).toBe('Bar');
         });
+
+        it('renders an unset enum default without exposing undefined', () => {
+          vi.mocked(getSettingsSchema).mockReturnValue({
+            ui: {
+              properties: {
+                theme: { ...SETTING, default: undefined },
+              },
+            },
+          } as unknown as SettingsSchemaType);
+
+          expect(
+            getDisplayValue(
+              'ui.theme',
+              makeMockSettings({}),
+              makeMockSettings({}),
+              new Set(),
+            ),
+          ).toBe('(not set)');
+        });
       });
 
       it('should show value without * when setting matches default', () => {
@@ -949,6 +1144,62 @@ describe('SettingsUtils', () => {
       });
     });
 
+    describe('nextBooleanSettingValue', () => {
+      it('moves an unset tri-state boolean directly to false', () => {
+        expect(nextBooleanSettingValue(undefined)).toBe(false);
+        expect(nextBooleanSettingValue(undefined, false)).toBe(true);
+        expect(nextBooleanSettingValue(false)).toBe(true);
+        expect(nextBooleanSettingValue(true)).toBe(false);
+      });
+
+      it('moves an unset boolean to the value its definition asks for', () => {
+        expect(nextBooleanSettingValue(undefined, undefined, true)).toBe(true);
+        expect(nextBooleanSettingValue(false, undefined, true)).toBe(true);
+        expect(nextBooleanSettingValue(true, undefined, true)).toBe(false);
+      });
+
+      it('turns the unified agent loop on from its unset state', async () => {
+        const { getSettingsSchema: getRealSettingsSchema } =
+          await vi.importActual<typeof import('./settingsSchema.js')>(
+            './settingsSchema.js',
+          );
+        const definition =
+          getRealSettingsSchema().experimental.properties.unifiedAgentLoop;
+        expect(
+          nextBooleanSettingValue(
+            undefined,
+            definition.default,
+            definition.unsetToggleValue,
+          ),
+        ).toBe(true);
+      });
+    });
+
+    describe('saveModifiedSettings', () => {
+      it('unsets an existing tri-state boolean when reset to default', () => {
+        const setValue = vi.fn();
+        const loadedSettings = {
+          forScope: () => ({
+            settings: { tools: { webSearch: { enabled: true } } },
+          }),
+          setValue,
+        } as unknown as LoadedSettings;
+
+        saveModifiedSettings(
+          new Set(['tools.webSearch.enabled']),
+          { tools: { webSearch: { enabled: undefined } } },
+          loadedSettings,
+          SettingScope.User,
+        );
+
+        expect(setValue).toHaveBeenCalledWith(
+          SettingScope.User,
+          'tools.webSearch.enabled',
+          undefined,
+        );
+      });
+    });
+
     describe('isDefaultValue', () => {
       it('should return true when setting does not exist in scope', () => {
         const settings = makeMockSettings({}); // setting doesn't exist
@@ -1038,11 +1289,12 @@ describe('setNestedProperty prototype-pollution guards', () => {
 });
 
 describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
-  it('lists the cross-session keys, and the restricted list no longer does', () => {
+  it('lists the name-only lock and the cross-session keys, and the restricted list does not', () => {
     const keys = WORKSPACE_TIGHTEN_ONLY_SETTINGS.map(
       ({ section, key }) => `${section}.${key}`,
     );
     expect(keys).toEqual([
+      'tools.workflowNameOnly',
       'agents.crossSessionMessaging',
       'agents.crossSessionInbound',
     ]);
@@ -1079,13 +1331,26 @@ describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
     expect(messaging.strictness({})).toBe(messaging.strictness(false));
   });
 
-  it('ranks the switch off as stricter than on, and unset as off', () => {
+  // A repository may turn the name-only lock on for itself, never off: only
+  // `true` locks, so anything else ranks with the unlocked default.
+  it('ranks the name-only lock on as stricter than off, unset or garbage', () => {
+    const lock = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'workflowNameOnly',
+    )!;
+    expect(lock.strictness(true)).toBeGreaterThan(lock.strictness(false));
+    expect(lock.strictness(undefined)).toBe(lock.strictness(false));
+    expect(lock.strictness('true')).toBe(lock.strictness(false));
+  });
+
+  it('ranks the switch off as stricter than on, and unset as on', () => {
+    // The switch defaults to on, so a workspace `false` must outrank an
+    // unset user scope or a repository could never turn messaging off.
     const messaging = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
       ({ key }) => key === 'crossSessionMessaging',
     )!;
     expect(messaging.strictness(true)).toBeLessThan(
       messaging.strictness(false),
     );
-    expect(messaging.strictness(undefined)).toBe(messaging.strictness(false));
+    expect(messaging.strictness(undefined)).toBe(messaging.strictness(true));
   });
 });

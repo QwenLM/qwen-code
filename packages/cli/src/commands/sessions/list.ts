@@ -11,6 +11,10 @@ import type {
   ListSessionsResult,
 } from '@qwen-code/qwen-code-core';
 import stringWidth from 'string-width';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../../runtime/agent-session-source.js';
 import { escapeAnsiCtrlCodes } from '../../ui/utils/textUtils.js';
 import { initSessionService } from './common.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -173,6 +177,10 @@ export async function handleList(argv: ListArgs): Promise<void> {
   try {
     result = await svc.listSessions({
       size: argv.limit ?? 20,
+      excludeSourceTypes: [
+        AGENT_HOST_SESSION_SOURCE_TYPE,
+        AGENT_SESSION_SOURCE_TYPE,
+      ],
     });
   } catch (err) {
     writeStderrLine(`Error: failed to list sessions: ${formatError(err)}`);

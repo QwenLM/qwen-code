@@ -15,6 +15,7 @@ import {
 import {
   setMemoryFilename,
   DEFAULT_CONTEXT_FILENAME,
+  AGENT_CONTEXT_FILENAME,
   LOCAL_CONTEXT_FILENAME,
 } from '../utils/memory-constants.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -454,6 +455,65 @@ describe('loadServerHierarchicalMemory', () => {
       projectRoot: expect.any(String),
     });
   });
+
+  it.each(['directory', 'file'] as const)(
+    'stops loading context at the Git root with a .git %s',
+    async (gitMarker) => {
+      setMemoryFilename([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
+      if (gitMarker === 'directory') {
+        await createEmptyDir(path.join(projectRoot, '.git'));
+      } else {
+        await createTestFile(
+          path.join(projectRoot, '.git'),
+          'gitdir: elsewhere',
+        );
+      }
+
+      const expectedPaths: string[] = [];
+      for (const filename of [
+        DEFAULT_CONTEXT_FILENAME,
+        AGENT_CONTEXT_FILENAME,
+      ]) {
+        await createTestFile(
+          path.join(testRootDir, filename),
+          `Parent ${filename} must stay out`,
+        );
+        const rootFile = await createTestFile(
+          path.join(projectRoot, filename),
+          `Root ${filename} is loaded`,
+        );
+        const cwdFile = await createTestFile(
+          path.join(cwd, filename),
+          `CWD ${filename} is loaded`,
+        );
+        expectedPaths.push(
+          path.relative(cwd, rootFile),
+          path.relative(cwd, cwdFile),
+        );
+      }
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(4);
+      expect(result.contextFilePaths).toEqual(expectedPaths);
+      for (const filename of [
+        DEFAULT_CONTEXT_FILENAME,
+        AGENT_CONTEXT_FILENAME,
+      ]) {
+        expect(result.memoryContent).toContain(`Root ${filename} is loaded`);
+        expect(result.memoryContent).toContain(`CWD ${filename} is loaded`);
+        expect(result.memoryContent).not.toContain(
+          `Parent ${filename} must stay out`,
+        );
+      }
+    },
+  );
 
   it('should load extension context file paths', async () => {
     const extensionFilePath = await createTestFile(
@@ -1409,7 +1469,7 @@ describe('loadServerHierarchicalMemory', () => {
 
     it('still loads through a symlink when the target is outside the project-root scan boundary', async () => {
       // A .git marker makes cwd the project root, so the upward scan stops
-      // at its parent and never reaches testRootDir. The outside file can
+      // there and never reaches testRootDir. The outside file can
       // then only be loaded through the workspace symlink.
       await createEmptyDir(path.join(cwd, '.git'));
       await createTestFile(
@@ -1463,6 +1523,115 @@ describe('loadServerHierarchicalMemory', () => {
         result.memoryContent.match(/imported-once marker/g) ?? []
       ).length;
       expect(occurrences).toBe(1);
+    });
+  });
+
+  describe('imports of sibling top-level context files (#15679)', () => {
+    it.each(['tree', 'flat'] as const)(
+      'does not duplicate AGENTS.md imported by CLAUDE.md in %s format',
+      async (importFormat) => {
+        setMemoryFilename([AGENT_CONTEXT_FILENAME, 'CLAUDE.md']);
+        const agentsFile = await createTestFile(
+          path.join(cwd, AGENT_CONTEXT_FILENAME),
+          'sibling-agents-canary',
+        );
+        await createTestFile(path.join(cwd, 'CLAUDE.md'), '@AGENTS.md');
+        const onInstructionsLoaded = vi.fn();
+
+        const result = await loadServerHierarchicalMemory(
+          cwd,
+          [],
+          new FileDiscoveryService(projectRoot),
+          [],
+          DEFAULT_FOLDER_TRUST,
+          importFormat,
+          [],
+          { onInstructionsLoaded },
+        );
+
+        expect(result.fileCount).toBe(2);
+        expect(result.contextFilePaths).toContain(AGENT_CONTEXT_FILENAME);
+        expect(
+          result.memoryContent.match(/sibling-agents-canary/g) ?? [],
+        ).toHaveLength(1);
+        expect(onInstructionsLoaded).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            filePath: agentsFile,
+            loadReason: 'include',
+          }),
+        );
+        expect(onInstructionsLoaded).toHaveBeenCalledWith({
+          filePath: agentsFile,
+          memoryType: 'project',
+          loadReason: 'session_start',
+        });
+        if (importFormat === 'tree') {
+          expect(result.memoryContent).toContain(
+            '<!-- File already processed: AGENTS.md -->',
+          );
+        }
+      },
+    );
+
+    it.each(['tree', 'flat'] as const)(
+      'does not duplicate AGENTS.md imported via a symlink by CLAUDE.md in %s format',
+      async (importFormat) => {
+        setMemoryFilename([AGENT_CONTEXT_FILENAME, 'CLAUDE.md']);
+        await createTestFile(
+          path.join(cwd, AGENT_CONTEXT_FILENAME),
+          'symlink-agents-canary',
+        );
+        await createEmptyDir(path.join(cwd, 'docs'));
+        await fsPromises.symlink(
+          path.join('..', AGENT_CONTEXT_FILENAME),
+          path.join(cwd, 'docs', 'agents-link.md'),
+        );
+        await createTestFile(
+          path.join(cwd, 'CLAUDE.md'),
+          '@docs/agents-link.md',
+        );
+
+        const result = await loadServerHierarchicalMemory(
+          cwd,
+          [],
+          new FileDiscoveryService(projectRoot),
+          [],
+          DEFAULT_FOLDER_TRUST,
+          importFormat,
+        );
+
+        expect(result.fileCount).toBe(2);
+        expect(result.contextFilePaths).toContain(AGENT_CONTEXT_FILENAME);
+        expect(
+          result.memoryContent.match(/symlink-agents-canary/g) ?? [],
+        ).toHaveLength(1);
+      },
+    );
+
+    it('does not duplicate AGENTS.md imported by QWEN.md with default filenames', async () => {
+      setMemoryFilename([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
+      await createTestFile(
+        path.join(cwd, AGENT_CONTEXT_FILENAME),
+        'default-agents-canary',
+      );
+      await createTestFile(
+        path.join(cwd, DEFAULT_CONTEXT_FILENAME),
+        '@AGENTS.md',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(2);
+      expect(result.contextFilePaths).toContain(AGENT_CONTEXT_FILENAME);
+      expect(
+        result.memoryContent.match(/default-agents-canary/g) ?? [],
+      ).toHaveLength(1);
     });
   });
 });

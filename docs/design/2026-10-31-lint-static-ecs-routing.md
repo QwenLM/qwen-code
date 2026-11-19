@@ -1,0 +1,225 @@
+# Lint & Static on the ECS pool for every pull request
+
+[English](2026-10-31-lint-static-ecs-routing.md) | [简体中文](2026-10-31-lint-static-ecs-routing.zh-CN.md)
+
+Decision taken 2026-10-31 by jinjing (maintainer). Scope: `.github/workflows/ci.yml` runner routing.
+Retracts the "collaborator-authored — the same trust class ci.yml's pick_runner
+routes onto this pool" premise formerly stated in
+[`qwen-autofix.md` §38](../../.github/workflows/qwen-autofix.md) (rewritten in
+the same PR); [`autofix-gate-runner-isolation.md`](./autofix-gate-runner-isolation.md)
+remains the reference for the pool's shared-HOME property.
+
+## What changed
+
+`classify_pr`'s `pick_runner` publishes two routings instead of one, both
+assigned from a single resolved fleet ladder:
+
+| Output          | Admits                                                                                            | Read by                                                                                                                                                                        |
+| --------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ubuntu_runner` | same-repo heads, `OWNER` / `MEMBER` / `COLLABORATOR` authors, `merge_group`, `push` — else hosted | `integration_cli`, `web_shell_e2e_smoke` (`test` moved to `pr_test_runner`; superseded by [2026-11-07-ephemeral-container-runners](2026-11-07-ephemeral-container-runners.md)) |
+| `lint_runner`   | every `pull_request`, untrusted forks included; otherwise identical to `ubuntu_runner`            | `lint_and_static`, `integration_no_ak` (2026-11-02)                                                                                                                            |
+
+`classify_pr`'s OWN runner is association-gated ECS (kill-switch excepted):
+same-repo heads, `OWNER` / `MEMBER` / `COLLABORATOR` fork authors, `merge_group`,
+`push` and `workflow_dispatch` reach the pool — except a dispatch whose
+`linux_runner` input is `hosted`, which stays hosted under the 2026-11-14
+amendment below; untrusted fork PRs fall back to
+`ubuntu-latest`. The gate executes only trusted base-SHA code with a read-only
+token — strictly less exposure than the lint lane.
+
+2026-11-14 (PR #17178) reverses the 2026-10-31 extension to unconditional ECS:
+the gate is lightweight, so the hosted queue delay for unreviewed forks is
+acceptable, and keeping them off the persistent pool by default is worth it.
+This is throughput policy, not a fence — a fork can rewrite this `runs-on`
+away (residual-surface note below). The association gate still bounds heavy
+PR-code execution on `ubuntu_runner` (the test lane and the merge-queue-only
+CLI integration lane).
+
+2026-11-02: `integration_no_ak` joined `lint_runner`. Same trust class as
+lint — the lane executes fork code from its checkout and install steps
+(lifecycle scripts plus scripts/prepare.js) — but zero secrets by
+construction: every model key is emptied at the integration gate and the
+job's only token is the read-only checkout grant. Round 2 of review caught
+the gate-scoped HOME being the wrong shape (fork code starts ~14 steps
+earlier), so the lane now mirrors lint exactly: the FIRST step publishes a
+run-unique HOME plus COREPACK_HOME inside it via GITHUB_ENV (corepack does
+not re-verify entries on cache hit — a shared home is a cross-job
+poisoning channel), XDG_CACHE_HOME stays on the shared verified tool
+cache, and an always() cleanup step reclaims the home at the end. The
+routing battery pins the lane set, the first-step isolation, the cleanup,
+and a zero-secrets env contract enforced by VALUE (every non-path key must
+be empty, including `ANTHROPIC_AUTH_TOKEN`, which the Anthropic SDK's auth
+resolver back-fills from env; no secrets.\* anywhere in the gate).
+
+Fallback priority: `MAINTAINER_ECS_RUNNER_DISABLED=true` overrides everything,
+including manual dispatch. `LINUX_RUNNER_FLEET=hosted` forces pull requests,
+merge groups and pushes to hosted, but a `workflow_dispatch` run whose
+`linux_runner` input explicitly selects `self-hosted` / `self-hosted-arm64`
+still reaches the pool — the dispatch branch is evaluated first. During a pool
+outage, use the kill switch, not the fleet variable, to guarantee hosted.
+
+`test_windows` and the macOS lanes are out of scope: they read no classifier
+output.
+
+## Why the untrusted-fork lane is acceptable
+
+The lane's job is "the checks whose verdict depends only on the tree". Routing
+it to the fleet at all is a throughput decision: a hosted round trip per PR
+delays the checks that gate merge. The trust cost is that PR code —
+`pnpm install` lifecycle scripts and lint/static tooling — now runs on the
+shared pool for a fork author nobody has vetted.
+
+## Isolation boundary (and its holes)
+
+`lint_and_static`'s first step publishes `HOME` / `USERPROFILE` via
+`GITHUB_ENV`, pointing at
+`${RUNNER_TEMP}/qwen-lint-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}` —
+run-unique, cleared with `rm -rf` before creation, and reclaimed by an
+`always()` cleanup step before the failure collector. Job-level `env` cannot
+read the `runner` context (GitHub rejects the whole workflow file), and
+`RUNNER_TEMP` survives across jobs on this pool, so a fixed directory name
+would hand a fork's `~/.npmrc` / `~/.gitconfig` to the next job on the
+registration — including the `test` lane, which pins its own constant
+`qwen-ci-home` (a pre-existing property, separately owned).
+
+The pin closes the **HOME-relative (automatic) write class**: config that git,
+npm and pnpm resolve through `~`/`$HOME`. It does not stop a job that writes
+the account's real home by absolute path; that remains in the accepted
+residual surface below. Limits that stay accepted:
+
+- **Package caches are cold.** npm and pnpm stores live under the per-run
+  HOME, so each run installs from the registry; yamllint is re-pipped into
+  `$HOME/.local` and the corepack shim is re-downloaded per run. The measured
+  cold install (~900 s) is what the 90/45 ceiling already prices. Only the
+  linter-archive cache stays shared and warm: `XDG_CACHE_HOME` points at
+  `${RUNNER_TOOL_CACHE}/qwen-ci-cache`, and lint.js SHA-256-verifies every
+  archive on each cache hit before extraction, rejecting and re-fetching
+  tampered entries. `COREPACK_HOME` stays inside the run-unique HOME:
+  corepack does not re-verify extracted entries on cache hit (reproduced on
+  0.34.6 and 0.36.0 — a tampered pnpm entry executes with the recorded hash
+  unchanged), so a shared corepack home is a cross-job poisoning channel.
+- **`$GITHUB_WORKSPACE` is still shared.** The pre-checkout "Restore workspace
+  ownership" step and the checkout itself reduce, but cannot eliminate,
+  residue a co-resident job leaves behind. The lane's only credential is the
+  read-only `GITHUB_TOKEN` (`contents: read`, `pull-requests: read`), bound to
+  the freshness, contract and test-growth steps — harvesting the residue
+  yields no write credential.
+
+Steps that need the real home (none today) would have to be re-gated.
+
+### Why not a container
+
+`qwen-triage`'s `tmux-testing`/`verify` jobs wrap PR code in
+`container: node:22-bookworm`. That path was considered for this lane and
+rejected: the lane's own "Restore workspace ownership" step exists because
+containerised jobs leave root-owned residue on these hosts, a fourth
+containerised lane worsens exactly that problem, and the pnpm-store/bundle-cache
+behavior would need re-proving on the pool. Per-run HOME closes the automatic
+config-inheritance class at a few lines of cost; it is not a sandbox, and the
+residual surface below stays accepted.
+
+## Residual risks (accepted)
+
+- **Co-resident exposure is concretely reachable, not theoretical.** For
+  example, `publish-tmux` runs on this pool holding `CI_BOT_PAT`,
+  uncontainerised and without a trust gate on its `runs-on`; same-UID
+  processes can read `/proc/<pid>/environ`. It is one example, not a census:
+  `serve-ab-publish`, `web-shell-visuals-cleanup` and `qwen-autofix`'s
+  `issue-autofix` also carry bot PATs on ECS pools, and `web_shell_e2e_smoke`
+  reaches the self-hosted ARM64 fleet off `ubuntu_runner` (write-access fork
+  authors included) with no per-job HOME — pre-existing surfaces this PR does
+  not change. A lint step spinning under its 90-minute ceiling can scan for
+  such windows and retry across fork PRs. The structural fix is an isolation
+  fleet — out of scope here.
+- **The association gate is throughput policy, not an enforceable trust
+  boundary.** A `pull_request` run executes the PR's own workflow file, so any
+  fork can put any lane — `test` included — on the pool in the same diff it
+  opens (ci.yml's `test_windows` comment records the same fact). GitHub's
+  first-timer workflow approval is the outer gate. The two-lane scope of this
+  decision (Lint & Static and the no-AK integration lane) describes the
+  default routing, not a fence.
+- **Cloud metadata.** If a pool instance binds a RAM role, any job process can
+  reach the metadata endpoint. Fleet-side hardened mode is recommended,
+  independent of this workflow change.
+- **`/tmp` inode exhaustion.** The pool's tmpfs `/tmp` has a ~1M inode ceiling
+  the disk-floor gate does not cover (it checks the workspace and
+  `RUNNER_TEMP` mounts). A 2026-10-31 lint failure on `ecs-qwen-hz1-9` was this
+  class. Follow-up: extend the floor gate to `os.tmpdir()` and clean host
+  `/tmp` accumulation.
+
+## Kill switch
+
+`MAINTAINER_ECS_RUNNER_DISABLED=true` — all Linux lanes, including this one,
+fall back to `ubuntu-latest`, each with its own hosted ceiling: lint 45
+minutes, test 120, web-shell smoke 60, no-AK integration 30.
+
+## Tests
+
+`.github/scripts/ci-runner-routing.test.mjs` (in `HELPER_TESTS`, so it gates
+every full-profile PR) pins: the gate's association-gated DEFAULT routing
+across the full association matrix (trusted/same-repo → ECS, untrusted forks →
+hosted, the kill-switch reverting everyone, and merge_group/push/dispatch
+reaching ECS), structural pins keeping the association and head-repo clauses
+as drift protection (not a fence — a fork rewrites the whole YAML), the
+producer binding
+(`classify_pr.outputs.lint_runner` ← `pick_runner`), the full association /
+event matrix against the real selector shell, the recorded two-lane scope of
+`lint_runner` (a superset must update this record), the run-unique HOME
+published from the first step with clear-before-create and shared verified
+caches, the cleanup step preceding the collector, and both outputs agreeing
+on one fleet ladder for unmodeled fleet values.
+`scripts/tests/ci-platform-lanes.test.js` pins the `runs-on` literals (lint on
+`lint_runner`, test on `ubuntu_runner`) and evaluates each lane's timeout from
+its own routing output; note that suite runs in the test job's side lane on
+every full-profile PR. The routing battery runs in lint_and_static after
+dependency install (it imports the `yaml` package, so it cannot join the
+dep-free fast lane), and on `github_ci_only` PRs it does not run in the PR's
+own run at all — a stripped isolation is caught by the next full-profile PR
+or main push, one run later. The HOME guard still lives there because the
+battery drives the real `pick_runner` shell and gates every full-profile PR,
+a strictly larger surface than the vitest side lane.
+
+## Decision record and open questions
+
+- Acceptance: jinjing reviewed and accepted the shared-pool code-execution
+  risk on 2026-10-31 for Lint & Static, and later the same day extended the
+  default ECS routing to the classify_pr gate (a strict subset of the lint
+  exposure: trusted base-SHA code, read-only token) so fork PRs no longer
+  queue behind hosted at the prerequisite job — noting that the association
+  gate is not enforceable against a fork that rewrites the workflow YAML, so
+  the acceptance covers the residual surface above, not a one-lane fence. A
+  second maintainer's confirmation is welcome (triage stage-3 deferred on
+  exactly this); it is a human decision, not a code change.
+- 2026-11-14 amendment (PR #17178): the classify_pr gate returns to
+  association-gated default routing (untrusted forks → hosted), reversing the
+  same-day unconditional-ECS extension above. The gate is lightweight enough
+  that the hosted queue delay is acceptable, and default routing should keep
+  unreviewed forks off the persistent pool. The risk acceptance is unchanged —
+  the pool already executes fork code in the lint and no-AK lanes, and the
+  association gate remains throughput policy, not an enforceable boundary (a
+  fork rewrites the workflow YAML). Dispatch routing is no longer unconditional:
+  the gate follows the `linux_runner` input, so `hosted` resolves to
+  `ubuntu-latest` while `self-hosted` and `self-hosted-arm64` resolve to
+  `ecs-qwen`. That is a behaviour change this amendment records — the
+  unconditional gate carried no event terms and sent every dispatch to
+  `ecs-qwen` — so the dispatch edge moves too, not only untrusted-fork classify
+  (ECS → hosted). `self-hosted-arm64` is not a clean follow, and this amendment
+  records the exception rather than implying the input is honoured end to end:
+  the gate has no arm64 labels, so it requests
+  `["self-hosted","linux","x64","ecs-qwen"]` while `pick_runner` sends the
+  downstream lanes to `["self-hosted","linux","arm64"]`. With no x64 runner
+  online, `classify_pr` — the `needs` prerequisite of every Linux lane — queues
+  unbounded, because `timeout-minutes` starts only once a runner picks the job
+  up; the job's 10-minute cap bounds a started-and-stalled classify, not that
+  wait. A maintainer is most likely to dispatch `self-hosted-arm64` when the x64
+  fleet is drained, which is exactly when nothing will pick the gate up.
+- The PR's own CI exercises the routing plumbing on the pool (the author is a
+  collaborator, so both outputs agree on that run); the fork divergence is
+  proven by the routing battery, and its first live end-to-end witness is the
+  next untrusted fork PR.
+- Follow-ups owned separately: warm shared pnpm store (the no-AK lane now
+  pays the same accepted cold-install cost as lint) under the per-run HOME
+  (e.g. via `XDG_DATA_HOME` at a content-verified shared path) to recover the
+  ~900 s cold-install cost; disk-floor gate coverage of `/tmp` inodes; fleet
+  metadata hardening; the `test` lane's constant `qwen-ci-home` persistence;
+  an isolation fleet if the accepted residual surface is ever revisited.

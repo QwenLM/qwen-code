@@ -28,9 +28,38 @@ import {
   type GenAiAttemptHandle,
 } from '../../telemetry/gen-ai-request.js';
 import type { Config } from '../../config/config.js';
+import {
+  getEffectiveReasoning,
+  resolveReasoningForModel,
+} from '../reasoning-overrides.js';
 import { buildSessionIdHeaders } from '../outbound-session-id.js';
+import {
+  expandDynamicHeaders,
+  hasDynamicPlaceholder,
+  warnIfDynamicHeadersDisabled,
+} from '../outbound-dynamic-headers.js';
+import { isResponsesReasoningSignature } from '../../utils/thoughtUtils.js';
+import { retryContext } from '../../utils/retryContext.js';
+import { markRequestDispatched } from '../loggingContentGenerator/request-dispatch.js';
 
 const debugLogger = createDebugLogger('GEMINI');
+
+function installIsolatedTransport(client: GoogleGenAI): boolean {
+  // @google/genai 2.6 has no public fetch hook. Both model request paths use
+  // this instance's final HTTP call after the SDK has built the URL and auth.
+  const { apiClient } = client as unknown as {
+    apiClient?: {
+      apiCall?(url: string, init: RequestInit): Promise<Response>;
+    };
+  };
+  if (typeof apiClient?.apiCall !== 'function') return false;
+  const apiCall = apiClient.apiCall.bind(apiClient);
+  apiClient.apiCall = (url, init) =>
+    retryContext.getStore()?.singleAttempt
+      ? fetch(url, { ...init, redirect: 'error' })
+      : apiCall(url, init);
+  return true;
+}
 
 function observeLlmStream(
   stream: AsyncIterable<GenerateContentResponse>,
@@ -63,6 +92,7 @@ function observeLlmStream(
  */
 export class LlmContentGenerator implements ContentGenerator {
   private readonly googleGenAI: GoogleGenAI;
+  private readonly hasIsolatedTransport: boolean;
   private readonly clientBaseUrl?: string;
   private readonly contentGeneratorConfig?: ContentGeneratorConfig;
   private readonly cliConfig?: Config;
@@ -79,7 +109,19 @@ export class LlmContentGenerator implements ContentGenerator {
     contentGeneratorConfig?: ContentGeneratorConfig,
     cliConfig?: Config,
   ) {
-    const customHeaders = contentGeneratorConfig?.customHeaders;
+    // Only placeholder-free entries may be baked into the client: a
+    // placeholder value put here would be frozen at whatever the session
+    // was when the client was built, and overriding it later would rely
+    // on the SDK letting request-level headers win over client-level
+    // ones. `buildHttpOptions` supplies the placeholder-bearing entries
+    // per request instead, so the literal never reaches the client.
+    const allCustomHeaders = contentGeneratorConfig?.customHeaders;
+    if (cliConfig) warnIfDynamicHeadersDisabled(allCustomHeaders, cliConfig);
+    const staticEntries = Object.entries(allCustomHeaders ?? {}).filter(
+      ([, value]) => typeof value !== 'string' || !hasDynamicPlaceholder(value),
+    );
+    const customHeaders =
+      staticEntries.length > 0 ? Object.fromEntries(staticEntries) : undefined;
     const finalOptions = customHeaders
       ? (() => {
           const baseHttpOptions = options.httpOptions;
@@ -98,22 +140,56 @@ export class LlmContentGenerator implements ContentGenerator {
         })()
       : options;
 
+    const configuredBaseUrl = finalOptions.httpOptions?.baseUrl;
     this.googleGenAI = new GoogleGenAI(finalOptions);
     this.clientBaseUrl = finalOptions.httpOptions?.baseUrl;
+    // The SDK writes any ambient base URL override back into its options.
+    if (
+      contentGeneratorConfig?.isolatedRoute &&
+      !configuredBaseUrl &&
+      this.clientBaseUrl
+    ) {
+      throw new Error('Configure baseUrl explicitly for this Google model.');
+    }
+    this.hasIsolatedTransport = installIsolatedTransport(this.googleGenAI);
     this.contentGeneratorConfig = contentGeneratorConfig;
     this.cliConfig = cliConfig;
   }
 
-  private buildHttpOptions(httpOptions?: HttpOptions): HttpOptions | undefined {
-    const destination = httpOptions?.baseUrl ?? this.clientBaseUrl;
-    if (!this.cliConfig || !destination) return httpOptions;
+  private get models(): GoogleGenAI['models'] {
+    if (retryContext.getStore()?.singleAttempt && !this.hasIsolatedTransport) {
+      throw new Error(
+        'Google GenAI transport does not support isolated requests.',
+      );
+    }
+    return this.googleGenAI.models;
+  }
 
-    const sessionHeaders = buildSessionIdHeaders(this.cliConfig, destination);
-    if (Object.keys(sessionHeaders).length === 0) return httpOptions;
+  private buildHttpOptions(httpOptions?: HttpOptions): HttpOptions | undefined {
+    if (!this.cliConfig) return httpOptions;
+
+    // The placeholder-bearing entries were deliberately kept out of the
+    // client options (see the constructor), so this is the only place
+    // they are supplied — resolved fresh for each request.
+    const dynamicHeaders = expandDynamicHeaders(
+      this.contentGeneratorConfig?.customHeaders,
+      this.cliConfig,
+    );
+    const destination = httpOptions?.baseUrl ?? this.clientBaseUrl;
+    const sessionHeaders = destination
+      ? buildSessionIdHeaders(this.cliConfig, destination)
+      : {};
+    if (
+      Object.keys(sessionHeaders).length === 0 &&
+      Object.keys(dynamicHeaders).length === 0
+    ) {
+      return httpOptions;
+    }
     return {
       ...httpOptions,
       headers: {
         ...httpOptions?.headers,
+        ...dynamicHeaders,
         ...sessionHeaders,
       },
     };
@@ -153,10 +229,14 @@ export class LlmContentGenerator implements ContentGenerator {
         0.95,
       ),
       topK: getParameterValue<number>(configSamplingParams?.top_k, 'topK', 64),
-      maxOutputTokens: getParameterValue<number>(
-        configSamplingParams?.max_tokens,
-        'maxOutputTokens',
-      ),
+      maxOutputTokens:
+        configSamplingParams?.max_tokens !== undefined &&
+        requestConfig.maxOutputTokens !== undefined
+          ? Math.min(
+              configSamplingParams.max_tokens,
+              requestConfig.maxOutputTokens,
+            )
+          : (configSamplingParams?.max_tokens ?? requestConfig.maxOutputTokens),
       presencePenalty: getParameterValue<number>(
         configSamplingParams?.presence_penalty,
         'presencePenalty',
@@ -165,8 +245,14 @@ export class LlmContentGenerator implements ContentGenerator {
         configSamplingParams?.frequency_penalty,
         'frequencyPenalty',
       ),
+      seed: getParameterValue<number>(
+        typeof configSamplingParams?.['seed'] === 'number'
+          ? configSamplingParams['seed']
+          : undefined,
+        'seed',
+      ),
       thinkingConfig: getParameterValue(
-        this.buildThinkingConfig(),
+        this.buildThinkingConfig(request.model, requestConfig.thinkingConfig),
         'thinkingConfig',
         {
           includeThoughts: true,
@@ -176,10 +262,24 @@ export class LlmContentGenerator implements ContentGenerator {
     };
   }
 
-  private buildThinkingConfig():
-    | { includeThoughts: boolean; thinkingLevel?: ThinkingLevel }
-    | undefined {
-    const reasoning = this.contentGeneratorConfig?.reasoning;
+  private buildThinkingConfig(
+    model?: string,
+    requestThinking?: GenerateContentConfig['thinkingConfig'],
+  ): GenerateContentConfig['thinkingConfig'] {
+    const generation = this.contentGeneratorConfig;
+    const resolved =
+      generation && this.cliConfig
+        ? resolveReasoningForModel(this.cliConfig, generation, model)
+        : undefined;
+    if (
+      requestThinking?.includeThoughts === false &&
+      (resolved || retryContext.getStore()?.singleAttempt)
+    ) {
+      return requestThinking;
+    }
+    const reasoning = generation
+      ? getEffectiveReasoning(generation, resolved)
+      : undefined;
 
     if (reasoning === false) {
       return { includeThoughts: false };
@@ -249,8 +349,7 @@ export class LlmContentGenerator implements ContentGenerator {
       config: this.buildGenerateContentConfig(request),
     };
     const telemetryAttempt = reportLlmRequest(finalRequest);
-    const response =
-      await this.googleGenAI.models.generateContent(finalRequest);
+    const response = await this.models.generateContent(finalRequest);
     reportLlmResponse(telemetryAttempt, response);
     return response;
   }
@@ -265,8 +364,8 @@ export class LlmContentGenerator implements ContentGenerator {
       config: this.buildGenerateContentConfig(request),
     };
     const telemetryAttempt = reportLlmRequest(finalRequest);
-    const stream =
-      await this.googleGenAI.models.generateContentStream(finalRequest);
+    markRequestDispatched();
+    const stream = await this.models.generateContentStream(finalRequest);
     return observeLlmStream(stream, telemetryAttempt);
   }
 
@@ -320,6 +419,13 @@ export class LlmContentGenerator implements ContentGenerator {
 
     const result = { ...part };
 
+    // `partMetadata` is client-side bookkeeping only (the reattach boundary
+    // from issue #11627), never part of the wire payload. The Gemini Developer
+    // API route (`partToMldev`) copies it through, but the Vertex AI route
+    // (`partToVertex`) rejects it unconditionally when building the request,
+    // so drop it before the SDK sees it.
+    delete result.partMetadata;
+
     // Strip displayName from inlineData
     if (result.inlineData) {
       const { displayName: _, ...inlineDataWithoutDisplayName } =
@@ -332,6 +438,17 @@ export class LlmContentGenerator implements ContentGenerator {
       const { displayName: _, ...fileDataWithoutDisplayName } =
         result.fileData as { displayName?: string; [key: string]: unknown };
       result.fileData = fileDataWithoutDisplayName as Part['fileData'];
+    }
+
+    // `thoughtSignature` carries no origin marker, so a Responses-API
+    // reasoning replay payload (`{"id":…,"encrypted_content":…}`) reaches the
+    // Gemini wire unchanged after a provider switch. It is not a Gemini-native
+    // signature, so drop it — wire-only, since `result` is a copy and the
+    // caller's history keeps the payload for a later switch back. `thought`
+    // and `text` are untouched, so the visible reasoning summary survives.
+    // https://github.com/QwenLM/qwen-code/issues/9453
+    if (isResponsesReasoningSignature(result.thoughtSignature)) {
+      delete result.thoughtSignature;
     }
 
     // Handle functionResponse parts (which may contain nested media parts)
@@ -393,7 +510,7 @@ export class LlmContentGenerator implements ContentGenerator {
     request: EmbedContentParameters,
   ): Promise<EmbedContentResponse> {
     const httpOptions = this.buildHttpOptions(request.config?.httpOptions);
-    return this.googleGenAI.models.embedContent({
+    return this.models.embedContent({
       ...request,
       ...(httpOptions ? { config: { ...request.config, httpOptions } } : {}),
     });

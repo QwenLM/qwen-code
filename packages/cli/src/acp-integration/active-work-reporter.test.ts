@@ -56,6 +56,65 @@ describe('ActiveWorkReporter', () => {
       .map((call) => call.params as unknown as ActiveWorkSnapshotV1);
   }
 
+  it('repeats the finished execution ID after a heartbeat send fails', async () => {
+    const flakySend = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('dropped'))
+      .mockImplementation(send);
+    const reporter = new ActiveWorkReporter(
+      flakySend,
+      () => [
+        {
+          sessionId: 's1',
+          collectActiveWorkHolds: () => [],
+          getFinishedBackgroundTurnId: () => 'finished-1',
+        },
+      ],
+      INTERVAL_MS,
+      ACTIVE_WORK_HOLD_CATEGORIES,
+    );
+    try {
+      await reporter.flush();
+      await reporter.flush();
+      expect(snapshots().at(-1)?.sessions[0]).toMatchObject({
+        finishedBackgroundTurnId: 'finished-1',
+        holds: [],
+      });
+    } finally {
+      reporter.dispose();
+    }
+  });
+
+  it('publishes running state transitions independently of retained holds', async () => {
+    let running = true;
+    const reporter = new ActiveWorkReporter(
+      send,
+      () => [
+        {
+          sessionId: 's1',
+          collectActiveWorkHolds: () => [
+            { category: 'notification' as const, id: 'a1' },
+          ],
+          hasRunningBackgroundTasks: () => running,
+        },
+      ],
+      INTERVAL_MS,
+      ACTIVE_WORK_HOLD_CATEGORIES,
+    );
+    await reporter.flush();
+    expect(snapshots().at(-1)?.sessions[0]?.hasRunningBackgroundTasks).toBe(
+      true,
+    );
+    running = false;
+    reporter.notifyChanged();
+    await reporter.flush();
+    expect(snapshots().at(-1)?.sessions[0]).toMatchObject({
+      hasRunningBackgroundTasks: false,
+      holds: [{ category: 'notification', id: 'a1' }],
+    });
+    reporter.dispose();
+  });
+
   it('publishes a full snapshot of every source immediately', async () => {
     const reporter = new ActiveWorkReporter(
       send,

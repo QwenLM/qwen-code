@@ -47,6 +47,17 @@
   margin-left: auto;
 }
 
+.pendingButton {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid var(--warning-border);
+  border-radius: 8px;
+  background: var(--warning-bg);
+  color: var(--warning-color);
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .addButton {
   appearance: none;
   padding: 4px 12px;
@@ -97,6 +108,12 @@
   color: var(--foreground);
   font-size: 13px;
   cursor: pointer;
+}
+
+.pickerEmpty {
+  padding: 7px 10px;
+  color: var(--muted-foreground);
+  font-size: 13px;
 }
 
 .pickerItemLabel {

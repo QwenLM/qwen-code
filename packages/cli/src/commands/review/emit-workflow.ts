@@ -4,25 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// `qwen review emit-workflow`: the Step 3A fan-out as a workflow the runtime
-// dispatches, instead of a roster the orchestrator hand-launches.
-//
-// `--roster` and this command build the same prompts from the same plan
-// through the same function (`buildLaunch`). What differs is who launches
-// them. `--roster` prints ~13 blocks and asks the orchestrator to copy each
-// one into an agent call, in a single response, without editing any of them —
-// three conventions this skill's gate list exists because they get broken.
-// This command writes those prompts into a script file, so the orchestrator's
-// call carries one path and no payload.
-//
-// What this does NOT change, deliberately: the briefs, the prompts, the
-// roster, the coverage evidence, and how findings come back. The agents are
-// the same agents reading the same briefs. That is what makes an A/B against
-// the hand-launched path readable.
-//
-// Nothing routes through this command yet. The skill still builds its roster
-// with `agent-prompt --roster`; this command exists so the generated dispatch
-// can be evaluated on its own before the skill is taught to ask for it.
+// `qwen review emit-workflow`: a complete review roster or a selected wave,
+// dispatched by one fixed workflow while preserving the recorded prompts.
 
 import type { CommandModule } from 'yargs';
 import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -30,13 +13,14 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { buildLaunch, worktreeResidueOf } from './agent-prompt.js';
-import { isTerritoryFanOut, usableLineCount } from './lib/budget.js';
+import { usableLineCount } from './lib/budget.js';
 import {
   ensureWritableReviewWorkflowsDir,
   inertPath,
   reviewWorkflowScriptPath,
 } from './lib/paths.js';
 import { recordPrompt } from './lib/prompt-record.js';
+import { readWorkflowBatches } from './lib/workflow-batch.js';
 import type { PlanReport } from './lib/report.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
 import {
@@ -47,50 +31,14 @@ import {
 interface EmitWorkflowArgs {
   plan: string;
   rules?: string;
+  batch?: string[];
 }
 
-/**
- * What about this plan the generated fan-out cannot serve. `null` when
- * nothing does.
- *
- * Every entry names a fact about what the workflow path cannot do yet, not a
- * policy dial, so the list shrinks as the runtime gains capability.
- */
+/** Unknown size cannot safely select the initial roster's topology. */
 export function fanOutBlocker(plan: RosterPlan): string | null {
-  // The size ruling must precede the topology ruling: `isTerritoryFanOut`
-  // coerces a missing or null size to 0, so a plan whose counts failed to
-  // arrive — an older CLI's, or ones `JSON.stringify` corrupted from `NaN`
-  // to `null` — would classify as "not a territory fan-out" and be baked
-  // into a script as if it were small. Unknown size is not small size.
   if (!usableLineCount(plan.srcDiffLines) || !usableLineCount(plan.diffLines)) {
-    return (
-      'this plan carries no usable diff size fields, so its topology is ' +
-      'unknown and it may be a territory fan-out.'
-    );
+    return 'this plan carries no usable diff size fields, so its topology is unknown.';
   }
-
-  // Both paths build the same chunk prompts through `buildLaunch`, and the
-  // emitter is topology-agnostic — a 3B roster serializes exactly like a 3A
-  // one. What differs is DELIVERY against the workflow runtime's caps: a run
-  // is wall-clock capped end to end, each subagent attempt is capped on turns
-  // and minutes, and an attempt that hits either becomes a `null` the
-  // fail-closed guard in the generated script then reads as a missing agent —
-  // discarding every agent that DID deliver. A large result is not truncated
-  // away: the scheduler persists it and hands the model a pointer. The bound
-  // is the caps. A 3A roster is bounded; a 3B roster is one agent per chunk
-  // plus the whole-diff agents, so it grows with the diff toward them without
-  // bound. This blocks on the roster's growth, not on the topology name, so
-  // it lifts the moment the runtime's caps grow with the fan-out.
-  if (isTerritoryFanOut(plan)) {
-    return (
-      'this plan is a territory fan-out (Step 3B), whose roster grows one ' +
-      'agent per chunk while a workflow run is wall-clock capped end to ' +
-      'end and the generated script fails closed on any agent that does ' +
-      'not deliver — the larger the fan-out, the more certain the run is ' +
-      'to exhaust its budget and discard every agent it dispatched.'
-    );
-  }
-
   return null;
 }
 
@@ -104,7 +52,7 @@ function refuseBlockedFanOut(plan: RosterPlan): void {
   const blocker = fanOutBlocker(plan);
   if (blocker) {
     throw new Error(
-      `emit-workflow: ${blocker} Use \`agent-prompt --roster\` for this review.`,
+      `emit-workflow: ${blocker} Rebuild the plan before dispatching.`,
     );
   }
 }
@@ -169,9 +117,6 @@ export function buildFanOutRoster(
     const { key, prompt } = buildLaunch(
       report,
       planPath,
-      // `role: 'chunk'` reaches this only from a territory fan-out, refused
-      // above; `buildLaunch`'s own chunk branch handles it if that ever
-      // changes, so there is nothing to assert here.
       req.role === 'chunk'
         ? { chunk: req.chunk }
         : { role: req.role, file: req.file },
@@ -198,6 +143,11 @@ export function buildFanOutRoster(
 }
 
 function runEmitWorkflow(args: EmitWorkflowArgs): void {
+  if (args.batch !== undefined && args.rules !== undefined) {
+    throw new Error(
+      'emit-workflow: --rules cannot be combined with --batch; project rules are already recorded in each batch.',
+    );
+  }
   let report: PlanReport;
   try {
     report = JSON.parse(readFileSync(args.plan, 'utf8')) as PlanReport;
@@ -222,24 +172,23 @@ function runEmitWorkflow(args: EmitWorkflowArgs): void {
     }
   }
 
-  // Refused BEFORE the session directory exists: a blocked plan writes
-  // nothing at all, and the directory `ensureWritableReviewWorkflowsDir`
-  // creates would otherwise outlive the refusal as an empty tree a later
-  // sweep finds. The builder repeats the same check for direct callers.
-  refuseBlockedFanOut(report as RosterPlan);
+  // Batch manifests already select their roles; only a fresh roster needs
+  // the plan's diff sizes to choose its topology.
+  if (args.batch === undefined) refuseBlockedFanOut(report as RosterPlan);
+  const batchAgents =
+    args.batch === undefined
+      ? undefined
+      : readWorkflowBatches(args.plan, args.batch);
 
-  // Resolved BEFORE anything is written: the env contract can be missing, and
-  // a roster whose briefs and records were written for a script that then had
-  // nowhere to go would read to the coverage gate as a launched fan-out that
-  // returned nothing.
-  const scriptPath = reviewWorkflowScriptPath(args.plan);
-  // Validated for the same reason, one step further: a symlinked root or
-  // session directory would carry the write outside the trusted root, so the
-  // refusal must land before the briefs and records exist too. Also creates
-  // the session directory, so the write below finds it.
+  // Validate the output directory before building any delivery evidence.
   ensureWritableReviewWorkflowsDir();
-
-  const agents = buildFanOutRoster(report, args.plan, rules);
+  const agents = batchAgents ?? buildFanOutRoster(report, args.plan, rules);
+  const planWorktree = (report as RosterPlan).worktreePath;
+  const script = buildReviewWorkflowScript(
+    agents,
+    typeof planWorktree === 'string' ? planWorktree : undefined,
+  );
+  const scriptPath = reviewWorkflowScriptPath(args.plan, script);
 
   const temporaryPath = `${scriptPath}.${randomUUID()}.tmp`;
   // Temp-and-rename, and the write is inside the cleanup too: a failure
@@ -248,18 +197,7 @@ function runEmitWorkflow(args: EmitWorkflowArgs): void {
   // The rename also replaces an existing entry at the target — a symlink
   // planted there is replaced, never written through.
   try {
-    // The worktree pin travels with the roster. `plan.worktreePath` is the
-    // same value `agent-prompt --roster` tells the orchestrator to put in
-    // `working_dir` on every Agent call, so both paths pin the same tree by
-    // construction rather than by two conventions kept in step.
-    const planWorktree = (report as RosterPlan).worktreePath;
-    const worktreePath =
-      typeof planWorktree === 'string' ? planWorktree : undefined;
-    writeFileSync(
-      temporaryPath,
-      buildReviewWorkflowScript(agents, worktreePath),
-      { encoding: 'utf8', flag: 'wx' },
-    );
+    writeFileSync(temporaryPath, script, { encoding: 'utf8', flag: 'wx' });
     renameSync(temporaryPath, scriptPath);
   } finally {
     rmSync(temporaryPath, { force: true });
@@ -279,7 +217,7 @@ function runEmitWorkflow(args: EmitWorkflowArgs): void {
 export const emitWorkflowCommand: CommandModule = {
   command: 'emit-workflow',
   describe:
-    'Emit the Step 3A fan-out as a runnable workflow script, so the roster ' +
+    'Emit a review roster or selected batch as a runnable workflow script, so it ' +
     'is dispatched by code instead of hand-launched',
   builder: (yargs) =>
     yargs
@@ -292,6 +230,13 @@ export const emitWorkflowCommand: CommandModule = {
         type: 'string',
         describe:
           'Path to the project rules from Step 2, if the project has any',
+      })
+      .option('batch', {
+        type: 'string',
+        array: true,
+        requiresArg: true,
+        describe:
+          'Manifest paths emitted by agent-prompt --batch for this wave',
       }),
   handler: (argv) => {
     runEmitWorkflow(argv as unknown as EmitWorkflowArgs);

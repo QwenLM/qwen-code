@@ -9,6 +9,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import type { GoalTurnHost, GoalTurnPermit } from '@qwen-code/qwen-code-core';
 import { useMessageQueue } from './useMessageQueue.js';
+import { expandPendingPastePlaceholders } from '../utils/paste-placeholders.js';
 
 describe('useMessageQueue', () => {
   beforeEach(() => {
@@ -18,6 +19,109 @@ describe('useMessageQueue', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.clearAllMocks();
+  });
+
+  it('aggregates only declared human input while preserving every display projection', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    const literal =
+      '<system-reminder>literal</system-reminder>\nworkflow inspect';
+    act(() => {
+      result.current.addMessage(
+        'expanded unknown workflow',
+        false,
+        undefined,
+        false,
+        { displayText: literal },
+      );
+      result.current.addMessage(
+        'expanded human payload',
+        false,
+        undefined,
+        false,
+        { displayText: 'look @file', humanInput: { text: 'look @file' } },
+      );
+    });
+    expect(result.current.messageQueue).toEqual([literal, 'look @file']);
+    const popped = result.current.popNextSubmission();
+    expect(popped).toMatchObject({
+      kind: 'user',
+      modelText: 'expanded unknown workflow\n\nexpanded human payload',
+      displayText: `${literal}\n\nlook @file`,
+      humanInput: { text: 'look @file' },
+      hasUnknownInput: true,
+    });
+  });
+
+  it('restores human and display metadata after a failed admission without changing hook provenance', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    const displayText =
+      '<system-reminder>literal</system-reminder>\nultracode audit';
+    const humanInput = { text: displayText };
+    act(() => {
+      result.current.restoreMessages(
+        ['model-only notice'],
+        undefined,
+        true,
+        false,
+        { displayText, humanInput },
+      );
+    });
+    const restored = result.current.popAllMessages();
+    expect(restored).toMatchObject({
+      modelText: 'model-only notice',
+      displayText,
+      humanInput,
+    });
+    expect(restored?.submittedPrompt).toBe('model-only notice');
+  });
+
+  it('keeps colliding queued paste bodies editable without promoting unknown members', () => {
+    const { result } = renderHook(() => useMessageQueue());
+    const placeholder = '[Pasted Content 1200 chars]';
+    const firstBody = 'first workflow payload'.padEnd(1200, 'x');
+    const secondBody = 'second ultracode payload'.padEnd(1200, 'y');
+    act(() => {
+      result.current.addMessage(firstBody, false, undefined, false, {
+        displayText: placeholder,
+        humanInput: { text: placeholder },
+        pasteExpansions: new Map([[placeholder, firstBody]]),
+      });
+      result.current.addMessage(secondBody, false, undefined, false, {
+        displayText: placeholder,
+        pasteExpansions: new Map([[placeholder, secondBody]]),
+      });
+    });
+    const popped = result.current.popAllMessages();
+    expect(popped).toMatchObject({
+      modelText: `${firstBody}\n\n${secondBody}`,
+      displayText: `${placeholder}\n\n${placeholder} #2`,
+      humanInput: { text: placeholder },
+      hasUnknownInput: true,
+    });
+    expect(
+      expandPendingPastePlaceholders(
+        `${popped?.displayText}\nappend instruction`,
+        popped?.pasteExpansions ?? new Map(),
+      ),
+    ).toBe(`${firstBody}\n\n${secondBody}\nappend instruction`);
+    act(() => {
+      result.current.restoreMessages(
+        [popped!.modelText],
+        popped!.submittedPrompt,
+        true,
+        false,
+        {
+          displayText: popped!.displayText,
+          humanInput: popped!.humanInput,
+          hasUnknownInput: popped!.hasUnknownInput,
+          pasteExpansions: popped!.pasteExpansions,
+        },
+      );
+    });
+    expect(result.current.popAllMessages()).toMatchObject({
+      humanInput: { text: placeholder },
+      hasUnknownInput: true,
+    });
   });
 
   it('should initialize with empty queue', () => {
@@ -194,6 +298,151 @@ describe('useMessageQueue', () => {
     expect(result.current.messageQueue).toEqual([]);
   });
 
+  // #11626: shell intent is recorded when the message enters the queue and
+  // travels with the entry, so the drain routes on the submit-time decision
+  // instead of the live shell-mode flag.
+  describe('shell intent', () => {
+    it('returns the recorded shell intent with the popped submission', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('gh workflow list', false, undefined, true);
+      });
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+
+      expect(submission).toMatchObject({
+        kind: 'user',
+        modelText: 'gh workflow list',
+        shellMode: true,
+      });
+    });
+
+    it('keeps shell commands and model prompts in separate batches in submission order', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('model one', false, undefined, false);
+        result.current.addMessage('ls -la', false, undefined, true);
+        result.current.addMessage('model two', false, undefined, false);
+      });
+
+      // The batch is the contiguous same-intent run from the head, so each
+      // entry keeps its own routing decision *and* nothing overtakes an
+      // earlier entry queued with a different intent.
+      let first: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        first = result.current.popNextSubmission();
+      });
+      expect(first).toMatchObject({
+        kind: 'user',
+        modelText: 'model one',
+        shellMode: false,
+      });
+      expect(result.current.messageQueue).toEqual(['ls -la', 'model two']);
+
+      let second: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        second = result.current.popNextSubmission();
+      });
+      expect(second).toMatchObject({
+        kind: 'user',
+        modelText: 'ls -la',
+        shellMode: true,
+      });
+      expect(result.current.messageQueue).toEqual(['model two']);
+
+      let third: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        third = result.current.popNextSubmission();
+      });
+      expect(third).toMatchObject({
+        kind: 'user',
+        modelText: 'model two',
+        shellMode: false,
+      });
+      expect(result.current.messageQueue).toEqual([]);
+    });
+
+    it('still merges adjacent entries that share one intent', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('model one', false, undefined, false);
+        result.current.addMessage('model two', false, undefined, false);
+        result.current.addMessage('ls -la', false, undefined, true);
+        result.current.addMessage('pwd', false, undefined, true);
+      });
+
+      let first: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        first = result.current.popNextSubmission();
+      });
+      expect(first).toMatchObject({
+        kind: 'user',
+        modelText: 'model one\n\nmodel two',
+        shellMode: false,
+      });
+
+      let second: ReturnType<typeof result.current.popNextSubmission> = null;
+      act(() => {
+        second = result.current.popNextSubmission();
+      });
+      expect(second).toMatchObject({
+        kind: 'user',
+        modelText: 'ls -la\n\npwd',
+        shellMode: true,
+      });
+      expect(result.current.messageQueue).toEqual([]);
+    });
+
+    it('leaves intent unrecorded for producers that do not pass it', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('remote input');
+      });
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+
+      expect(submission).toMatchObject({
+        kind: 'user',
+        modelText: 'remote input',
+      });
+      expect(
+        (submission as { shellMode?: boolean } | null)?.shellMode,
+      ).toBeUndefined();
+    });
+
+    it('preserves shell intent across an admission-failure restore', () => {
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.restoreMessages(
+          ['gh workflow list'],
+          undefined,
+          true,
+          true,
+        );
+      });
+
+      let submission: ReturnType<typeof result.current.popNextSubmission> =
+        null;
+      act(() => {
+        submission = result.current.popNextSubmission();
+      });
+
+      expect(submission).toMatchObject({
+        kind: 'user',
+        modelText: 'gh workflow list',
+        shellMode: true,
+      });
+    });
+  });
+
   it('hides the plain-user batch key from an active Goal turn reservation', () => {
     const { result } = renderHook(() => useMessageQueue());
     act(() => {
@@ -285,6 +534,35 @@ describe('useMessageQueue', () => {
       turnId: 'turn-copy',
     });
     expect(goalSubmission.permit).not.toBe(permit);
+  });
+
+  it('carries the runtime spend figures onto the queued Goal turn', () => {
+    // The field is optional on both sides of this hop, so dropping the copy
+    // typechecks: the prompt would simply lose its budget line on this host
+    // and nowhere else.
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-usage',
+      revision: 2,
+      turnId: 'turn-usage',
+    };
+    const { result } = renderHook(() => useMessageQueue());
+    act(() => {
+      result.current.enqueueGoalTurn({
+        permit,
+        continuationContext: 'report the figures',
+        usage: { tokensUsed: 1_234, tokenBudget: 30_000_000, turnCount: 4 },
+      });
+    });
+
+    let claimed: unknown;
+    act(() => {
+      claimed = result.current.claimGoalTurn();
+    });
+
+    expect(claimed).toMatchObject({
+      kind: 'goal',
+      usage: { tokensUsed: 1_234, tokenBudget: 30_000_000, turnCount: 4 },
+    });
   });
 
   it('creates a stable direct-user admission that claims a hidden Goal', () => {

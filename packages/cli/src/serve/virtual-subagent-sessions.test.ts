@@ -13,6 +13,7 @@ import {
   Storage,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 import {
   createVirtualSubagentSessionId,
@@ -22,6 +23,25 @@ import {
 } from './virtual-subagent-sessions.js';
 
 const tempDirs: string[] = [];
+
+it.each([
+  new Error('bridge disconnected'),
+  new SessionNotFoundError('parent', undefined, 'session_closing'),
+])(
+  'does not read persisted detail when the live parent fails with %s',
+  async (error) => {
+    const runtime = {
+      bridge: {
+        getSessionTasksStatus: async () => {
+          throw error;
+        },
+      },
+    } as unknown as WorkspaceRuntime;
+    await expect(
+      new VirtualSubagentSessions().resolve(runtime, 'parent', 'agent'),
+    ).rejects.toBe(error);
+  },
+);
 
 it.each(['running', 'paused'])(
   'keeps a terminal task status over non-terminal %s metrics',
@@ -365,6 +385,50 @@ describe('VirtualSubagentSessions', () => {
     });
     const iterator = stream![Symbol.asyncIterator]();
     expect((await iterator.next()).value?.type).toBe('replay_complete');
+    const nestedCall: ChatRecord = {
+      ...record('nested-call', 'two', 'assistant', ''),
+      message: {
+        role: 'model',
+        parts: [{ functionCall: { id: 'nested', name: 'agent', args: {} } }],
+      },
+    };
+    const nestedReadiness = (ready: boolean): ChatRecord => ({
+      ...record(
+        ready ? 'nested-ready' : 'nested-creating',
+        ready ? 'nested-creating' : 'nested-call',
+        'assistant',
+        '',
+      ),
+      type: 'system',
+      message: undefined,
+      subtype: 'agent_session_ready',
+      systemPayload: { callId: 'nested', subagentSessionReady: ready },
+    });
+    await fs.appendFile(
+      outputFile,
+      [nestedCall, nestedReadiness(false)]
+        .map((entry) => JSON.stringify(entry) + '\n')
+        .join(''),
+    );
+    await activeTarget(sessions).refreshLive();
+    expect(JSON.stringify((await iterator.next()).value)).toContain(
+      '"toolCallId":"nested"',
+    );
+    expect(JSON.stringify((await iterator.next()).value)).toContain(
+      '"subagentSessionReady":false',
+    );
+    await fs.appendFile(
+      outputFile,
+      JSON.stringify(nestedReadiness(true)) + '\n',
+    );
+    await activeTarget(sessions).refreshLive();
+    const readyUpdate = JSON.stringify((await iterator.next()).value);
+    expect(readyUpdate).toContain('"toolCallId":"nested"');
+    expect(readyUpdate).toContain('"subagentSessionReady":true');
+    const readyReload = await sessions.load(runtime, resolved!.sessionId);
+    expect(JSON.stringify(readyReload?.compactedReplay)).toContain(
+      '"subagentSessionReady":true',
+    );
     await fs.rm(`${outputFile}.stream`);
     await activeTarget(sessions).refreshLive();
     await fs.writeFile(
@@ -955,3 +1019,160 @@ describe('VirtualSubagentSessions', () => {
     });
   });
 });
+
+it.each([
+  { unloaded: false, dead: false },
+  { unloaded: true, dead: false },
+  { unloaded: false, dead: true },
+  { unloaded: true, dead: true },
+])(
+  'resolves a workflow dispatch with owner state %j',
+  async ({ unloaded, dead }) => {
+    const runtimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-workflow-detail-'),
+    );
+    tempDirs.push(runtimeDir);
+    const workspaceCwd = path.join(runtimeDir, 'workspace');
+    const projectDir = Storage.runWithRuntimeBaseDir(
+      runtimeDir,
+      workspaceCwd,
+      () => new Storage(workspaceCwd).getProjectDir(),
+    );
+    const parentSessionId = 'workflow-parent';
+    const agentId = 'workflow-agent-1234';
+    const sessionDir = getSubagentSessionDir(projectDir, parentSessionId);
+    await fs.mkdir(sessionDir, { recursive: true });
+    const outputFile = path.join(sessionDir, `agent-${agentId}.jsonl`);
+    await fs.writeFile(
+      outputFile,
+      `${JSON.stringify({ ...record('prompt', null, 'user', 'Inspect workflow activity'), sessionId: parentSessionId })}\n`,
+    );
+    const metaPath = outputFile.replace(/\.jsonl$/, '.meta.json');
+    const meta = {
+      agentId,
+      agentType: 'reviewer',
+      description: 'Inspect workflow activity',
+      parentSessionId,
+      parentAgentId: null,
+      createdAt: new Date(1_000).toISOString(),
+      status: 'running',
+      isBackgrounded: false,
+      workflowOwner: {
+        pid: dead ? 2147483647 : process.pid,
+        hostname: os.hostname(),
+      },
+    };
+    await fs.writeFile(metaPath, JSON.stringify(meta));
+    const runtime = {
+      workspaceId: 'workflow-workspace',
+      workspaceCwd,
+      sessionRuntimeBaseDir: runtimeDir,
+      env: {
+        mode: 'runtime-overlay',
+        overlayKeys: ['QWEN_RUNTIME_DIR'],
+        effectiveEnv: { QWEN_RUNTIME_DIR: runtimeDir },
+      },
+      bridge: {
+        getSessionTasksStatus: async () => {
+          if (unloaded) throw new SessionNotFoundError(parentSessionId);
+          return {
+            v: 1,
+            sessionId: parentSessionId,
+            now: Date.now(),
+            tasks: [],
+          };
+        },
+      },
+    } as unknown as WorkspaceRuntime;
+    const sessions = new VirtualSubagentSessions();
+    if (!dead) {
+      await fs.writeFile(
+        metaPath,
+        JSON.stringify({
+          ...meta,
+          workflowOwner: {
+            pid: 2147483647,
+            hostname: `${os.hostname()}-other-host`,
+          },
+        }),
+      );
+      expect(
+        await sessions.resolve(runtime, parentSessionId, agentId),
+      ).toMatchObject({ status: 'running' });
+      await fs.writeFile(
+        metaPath,
+        JSON.stringify({ ...meta, workflowOwner: undefined }),
+      );
+      expect(
+        await sessions.resolve(runtime, parentSessionId, agentId),
+      ).toMatchObject({ status: 'running' });
+      await fs.writeFile(metaPath, JSON.stringify(meta));
+    }
+    const running = await sessions.resolve(runtime, parentSessionId, agentId);
+    expect(running).toMatchObject({
+      taskId: agentId,
+      status: dead ? 'failed' : 'running',
+    });
+    expect(parseVirtualSubagentSessionId(running!.sessionId)).toEqual({
+      parentSessionId,
+      agentId,
+    });
+    expect(
+      await sessions.resolve(runtime, 'another-parent', agentId),
+    ).toBeUndefined();
+    const loaded = await sessions.load(runtime, running!.sessionId);
+    expect(JSON.stringify(loaded)).toContain('Inspect workflow activity');
+    expect(loaded?.hasActivePrompt).toBe(!dead);
+    const intervals = vi.spyOn(globalThis, 'setInterval');
+    const cleared = vi.spyOn(globalThis, 'clearInterval');
+    const abort = new AbortController();
+    const stream = await sessions.subscribe(runtime, running!.sessionId, {
+      signal: abort.signal,
+      lastEventId: 0,
+    });
+    const iterator = stream![Symbol.asyncIterator]();
+    try {
+      await iterator.next();
+      expect(
+        intervals.mock.calls.filter((call) => call[1] === 250),
+      ).toHaveLength(dead ? 0 : 1);
+      if (!dead) {
+        await fs.writeFile(
+          metaPath,
+          JSON.stringify({
+            ...meta,
+            workflowOwner: { ...meta.workflowOwner, pid: 2147483647 },
+          }),
+        );
+        expect(
+          await sessions.resolve(runtime, parentSessionId, agentId),
+        ).toMatchObject({ status: 'failed' });
+        expect(cleared).toHaveBeenCalled();
+        expect(
+          (await sessions.load(runtime, running!.sessionId))?.hasActivePrompt,
+        ).toBe(false);
+      }
+    } finally {
+      abort.abort();
+      await iterator.return?.();
+      intervals.mockRestore();
+      cleared.mockRestore();
+    }
+
+    await fs.writeFile(
+      metaPath,
+      JSON.stringify({
+        ...meta,
+        status: 'completed',
+        lastUpdatedAt: new Date(2_000).toISOString(),
+      }),
+    );
+    expect(
+      await sessions.resolve(runtime, parentSessionId, agentId),
+    ).toMatchObject({
+      taskId: agentId,
+      status: 'completed',
+      durationMs: 1_000,
+    });
+  },
+);

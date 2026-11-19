@@ -5,6 +5,7 @@
  */
 
 import type { IncomingMessage } from 'node:http';
+import { TLSSocket } from 'node:tls';
 import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -18,14 +19,31 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import {
   singleTokenCredentials,
+  type DesktopRelayCredentialClaim,
   type ListenerScopedCredentials,
 } from '../local-control/credentials.js';
-import { listenerIdentityOfSocket } from '../local-control/listener-identity.js';
+import {
+  listenerIdentityOf,
+  listenerIdentityOfSocket,
+} from '../local-control/listener-identity.js';
+import type { SseAdmissionCaps } from '../daemon-status.js';
+import {
+  checkSseAdmission,
+  countSseStream,
+  evaluateSseAdmission,
+} from '../sse-occupancy.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
-import type { ParsedAllowOriginPatterns } from '../auth.js';
-import { formatHostForAuthority, isLoopbackBind } from '../loopback-binds.js';
+import {
+  originIsExplicitlyAllowed,
+  type ParsedAllowOriginPatterns,
+} from '../auth.js';
+import {
+  canonicalHost,
+  formatHostForAuthority,
+  isLoopbackBind,
+} from '../loopback-binds.js';
 import {
   AcpDispatcher,
   type LegacyStandaloneSessionRestorer,
@@ -201,6 +219,8 @@ function pluralWorkspaceRawSelector(
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
 const CHROME_DEVTOOLS_MCP_SERVER_NAME = 'chrome-devtools';
+const DESKTOP_RELAY_CLIENT_NAME = 'qwen-desktop-relay';
+const DESKTOP_RELAY_SERVER_NAME = 'desktop-node-repl';
 const RUNTIME_MCP_RETRY_DELAY_MS = 250;
 const RUNTIME_MCP_RETRY_ATTEMPTS = 20;
 
@@ -420,6 +440,12 @@ export interface MountAcpHttpOptions {
   enabled?: boolean;
   path?: string;
   maxConnections?: number;
+  /**
+   * Daemon-wide stream admission caps (issue #17554), shared with the REST
+   * surfaces. Absent means unlimited (direct embeds / unit fixtures). The
+   * per-mount ACP connection cap remains as the protocol-level bound.
+   */
+  sseAdmissionCaps?: SseAdmissionCaps;
   /** Bearer token for WS auth (WS bypasses Express middleware). */
   token?: string;
   /**
@@ -1001,6 +1027,9 @@ export function mountAcpHttp(
     // `initialize` mints a connection and replies inline (200 + JSON).
     if (isRequest(message) && message.method === 'initialize') {
       const conn = mount.registry.create(isLoopbackReq(req));
+      if (conn)
+        conn.preserveRunningPromptsOnDisconnect =
+          listenerIdentityOf(req).kind === 'remote-access';
       if (!conn) {
         // Connection cap reached — shed load rather than grow unbounded.
         writeStderrLine(
@@ -1160,6 +1189,30 @@ export function mountAcpHttp(
       ? normalizeSessionIdForLookup(rawSessionId)
       : undefined;
 
+    // Authorization BEFORE resource admission (review R1-3): a foreign
+    // session id must keep its terminal 403 even at saturation — a retryable
+    // 503 would send the client into an endless back-off against a request
+    // that can never succeed, and log a refusal for a request that would
+    // have consumed no slot.
+    if (sessionId && !conn.ownsSession(sessionId)) {
+      res.status(403).json({ error: 'Session not owned by this connection' });
+      return;
+    }
+
+    // Shared stream admission (issue #17554): ACP SSE pins a listener slot
+    // exactly like the REST event stream, so it counts against the same
+    // aggregate cap and per-listener clamps.
+    if (
+      !checkSseAdmission({
+        surface: 'acpSse',
+        req,
+        res,
+        caps: opts.sseAdmissionCaps,
+      })
+    ) {
+      return;
+    }
+
     if (!sessionId) {
       // Connection-scoped stream. onClose logs the disconnect so a
       // half-dead connection (conn stream gone, replies silently buffering)
@@ -1211,18 +1264,15 @@ export function mountAcpHttp(
         },
         () => conn.touch(),
       );
+      countSseStream('acpSse', req, res);
       stream.open();
       conn.attachConnStream(stream);
       return;
     }
 
-    // Session-scoped stream — only for a session THIS connection owns
-    // (created via session/new or attached via session/load|resume). Stops
-    // one connection eavesdropping on another's session event stream.
-    if (!conn.ownsSession(sessionId)) {
-      res.status(403).json({ error: 'Session not owned by this connection' });
-      return;
-    }
+    // Session-scoped stream — ownership was verified above the admission
+    // gate (created via session/new or attached via session/load|resume).
+    // Stops one connection eavesdropping on another's session event stream.
 
     // Fresh controller per stream so a reconnect gets a live (non-aborted)
     // signal; `attachSessionStream` installs it and tears down any prior
@@ -1264,6 +1314,7 @@ export function mountAcpHttp(
     }
     // Open (write SSE headers + `retry:`) BEFORE attaching, so the protocol
     // handshake precedes any buffered frames the attach flushes.
+    countSseStream('acpSse', req, res);
     stream.open();
     // Pass the resume cursor INTO attach: when resuming, attach skips flushing
     // id-bearing buffered frames because the ring replay below redelivers every
@@ -1639,13 +1690,18 @@ export function mountAcpHttp(
       const fromLoopback = isLoopbackSocket(socket);
       const upgradeListenerIdentity = listenerIdentityOfSocket(socket);
       const host = (req.headers['host'] ?? '').toLowerCase();
+      const authenticatedRemoteBind =
+        upgradeListenerIdentity.kind === 'primary' &&
+        opts.hostname !== undefined &&
+        !isLoopbackBind(canonicalHost(opts.hostname)) &&
+        !upgradeCredentials.isOpen(upgradeListenerIdentity);
 
       // Host allowlist: mirror REST surface's hostAllowlist middleware
       // (auth.ts:196). Prevents DNS-rebinding attacks where a malicious
       // domain resolves to 127.0.0.1 and the browser sends the
       // attacker's Host header. Match the full host:port string like
       // the REST middleware does; extract port from the socket.
-      if (upgradeListenerIdentity.kind === 'local-control') {
+      if (upgradeListenerIdentity.kind !== 'primary') {
         const authority = upgradeListenerIdentity.authority;
         const browserHost =
           upgradeListenerIdentity.origin === undefined
@@ -1660,7 +1716,7 @@ export function mountAcpHttp(
           socket.destroy();
           return;
         }
-      } else if (fromLoopback) {
+      } else if (fromLoopback && !authenticatedRemoteBind) {
         const allowed = new Set([
           `localhost:${localPort}`,
           `127.0.0.1:${localPort}`,
@@ -1703,17 +1759,30 @@ export function mountAcpHttp(
             localPort,
             opts.hostname,
           );
-          // `--allow-origin` allowlist (same match semantics as the REST
-          // `allowOriginCors`): lets an explicitly permitted non-loopback
-          // origin — e.g. a browser extension's `chrome-extension://<id>`
-          // opening the reverse tool channel — past the CSWSH wall.
+          // `--allow-origin` allowlist, shared with the REST matcher: static
+          // origins and loopback port wildcards let an explicitly permitted
+          // origin — a browser extension's `chrome-extension://<id>`, or the
+          // desktop shell's `http://127.0.0.1:<ephemeral>` — past the CSWSH
+          // wall. The `*` literal stays REST-only by design.
           const isAllowlistedOrigin =
             opts.allowedOrigins !== undefined &&
-            opts.allowedOrigins.origins.has(origin.toLowerCase());
+            originIsExplicitlyAllowed(opts.allowedOrigins, origin);
           const isListenerOrigin =
             upgradeListenerIdentity.kind === 'local-control' &&
             upgradeListenerIdentity.origin === origin.toLowerCase();
-          if (!isLoopbackOrigin && !isAllowlistedOrigin && !isListenerOrigin) {
+          const scheme =
+            socket instanceof TLSSocket && socket.encrypted ? 'https' : 'http';
+          const isPrimaryOrigin =
+            authenticatedRemoteBind &&
+            new URL(`${scheme}://${host}`).origin === origin;
+          const allowed =
+            upgradeListenerIdentity.kind === 'remote-access'
+              ? upgradeListenerIdentity.allowedOrigins?.allows(origin) === true
+              : isLoopbackOrigin ||
+                isAllowlistedOrigin ||
+                isListenerOrigin ||
+                isPrimaryOrigin;
+          if (!allowed) {
             logReject(`origin-not-allowed ${origin}`);
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
             socket.destroy();
@@ -1735,14 +1804,23 @@ export function mountAcpHttp(
       // credential, and the runtime token does not satisfy it. Without this
       // the subprotocol path would be a way around the scoping that
       // `bearerAuth` enforces for plain HTTP.
+      let desktopRelayClaim: DesktopRelayCredentialClaim | undefined;
       if (!upgradeCredentials.isOpen(upgradeListenerIdentity)) {
         // Accept the token from `Authorization` (non-browser clients) or the
         // `qwen-bearer.*` subprotocol (browsers, which can't set Authorization
         // on a WebSocket). Hash-compare in constant time, same posture as REST.
         const presented = extractUpgradeBearer(req);
+        desktopRelayClaim =
+          presented && upgradeListenerIdentity.kind === 'primary'
+            ? upgradeCredentials.consumeDesktopRelayCredential?.(
+                presented,
+                rawPath,
+              )
+            : undefined;
         if (
           !presented ||
-          !upgradeCredentials.verify(presented, upgradeListenerIdentity)
+          (!desktopRelayClaim &&
+            !upgradeCredentials.verify(presented, upgradeListenerIdentity))
         ) {
           logReject('auth-mismatch');
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -1898,6 +1976,27 @@ export function mountAcpHttp(
         return;
       }
 
+      // Shared stream admission (issue #17554): an ACP WS connection pins a
+      // listener slot exactly like an SSE stream. Refuse BEFORE the upgrade
+      // so the client sees an HTTP 503, not a successful 101 followed by a
+      // close. Extra WS routes (voice etc.) keep their own gates.
+      if (!extraRoute) {
+        const refusal = evaluateSseAdmission(
+          listenerIdentityOfSocket(socket).kind,
+          opts.sseAdmissionCaps,
+        );
+        if (refusal) {
+          logReject(
+            `sse-connection-limit scope=${refusal.scope} active=${refusal.active} limit=${refusal.limit}`,
+          );
+          socket.write(
+            'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\n\r\n',
+          );
+          socket.destroy();
+          return;
+        }
+      }
+
       wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
         if (disposed) {
           ws.close(1012, 'Server shutting down');
@@ -1909,6 +2008,12 @@ export function mountAcpHttp(
           extraRoute.onConnection(ws, req);
           return;
         }
+        // The upgrade req is a raw IncomingMessage; occupancy only reads
+        // its socket to resolve the listener tag.
+        const releaseWsOccupancy = countSseStream(
+          'acpWs',
+          req as unknown as Request,
+        );
         activeMount.webSockets.add(ws);
         activeMount.pendingWebSockets.add(ws);
         let initialized = false;
@@ -1951,6 +2056,7 @@ export function mountAcpHttp(
         // the socket goes away. WsStream's onClose handles ACP teardown.
         ws.on('close', () => {
           clearTimeout(initTimer);
+          releaseWsOccupancy();
           activeMount.webSockets.delete(ws);
           activeMount.pendingWebSockets.delete(ws);
           if (clientMcp) {
@@ -2015,6 +2121,32 @@ export function mountAcpHttp(
             parsed !== null && typeof parsed === 'object'
               ? (parsed as { type?: unknown }).type
               : undefined;
+          const isClientMcpFrame =
+            parsed !== null &&
+            typeof parsed === 'object' &&
+            ClientMcpWsConnection.isClientMcpFrameType(frameType);
+          if (desktopRelayClaim && initialized && !isClientMcpFrame) {
+            ws.close(1008, 'Desktop relay credential scope violation');
+            return;
+          }
+          if (desktopRelayClaim && isClientMcpFrame) {
+            const frame = parsed as Record<string, unknown>;
+            if (
+              frame['server'] !== DESKTOP_RELAY_SERVER_NAME ||
+              (frameType === 'mcp_register' &&
+                frame['sessionId'] !== desktopRelayClaim.sessionId)
+            ) {
+              ws.send(
+                JSON.stringify({
+                  type: 'mcp_error',
+                  code: 'credential_scope_violation',
+                  message:
+                    'desktop relay credential is scoped to one server and session',
+                }),
+              );
+              return;
+            }
+          }
           if (
             activeMount.draining &&
             frameType === 'mcp_message' &&
@@ -2073,9 +2205,7 @@ export function mountAcpHttp(
             opts.clientMcpOverWs === true &&
             parsed !== null &&
             typeof parsed === 'object' &&
-            ClientMcpWsConnection.isClientMcpFrameType(
-              (parsed as { type?: unknown }).type,
-            )
+            isClientMcpFrame
           ) {
             // Client-MCP requires an initialized connection (the ACP handshake
             // establishes the connection identity + stream first).
@@ -2276,7 +2406,34 @@ export function mountAcpHttp(
               return;
             }
 
+            const clientName =
+              message.params &&
+              typeof message.params === 'object' &&
+              !Array.isArray(message.params)
+                ? (
+                    (message.params as Record<string, unknown>)[
+                      'clientInfo'
+                    ] as { name?: string } | undefined
+                  )?.name
+                : undefined;
+            if (desktopRelayClaim && clientName !== DESKTOP_RELAY_CLIENT_NAME) {
+              ws.send(
+                JSON.stringify(
+                  rpcError(
+                    message.id,
+                    RPC.INVALID_REQUEST,
+                    'Desktop relay credential requires the desktop relay client',
+                  ),
+                ),
+              );
+              ws.close(1008, 'Desktop relay credential scope violation');
+              return;
+            }
+
             const conn = activeMount.registry.create(fromLoopback);
+            if (conn)
+              conn.preserveRunningPromptsOnDisconnect =
+                upgradeListenerIdentity.kind === 'remote-access';
             if (!conn) {
               ws.send(
                 JSON.stringify(
@@ -2305,7 +2462,27 @@ export function mountAcpHttp(
                 writeStderrLine(
                   `qwen serve: ${activeMount.routeLabel} WS closed (${conn.connectionId.slice(0, 8)})`,
                 );
-                activeMount.registry.delete(conn.connectionId);
+                if (!conn.preserveRunningPromptsOnDisconnect) {
+                  activeMount.registry.delete(conn.connectionId);
+                  return;
+                }
+                conn.onSessionGraceExpired = () => {
+                  if (
+                    !conn.hasLiveSessionStream() &&
+                    !conn.hasRecoverableSession()
+                  ) {
+                    activeMount.registry.delete(conn.connectionId);
+                  }
+                };
+                for (const binding of conn.sessions.values()) {
+                  if (binding.stream)
+                    conn.detachSessionStream(
+                      binding.sessionId,
+                      binding.stream,
+                      SESSION_GRACE_MS,
+                    );
+                }
+                conn.onSessionGraceExpired();
               },
               () => conn.touch(),
             );
@@ -2336,16 +2513,6 @@ export function mountAcpHttp(
             // Gate on `clientInfo.name`: web UI / Zed agents share this `/acp`
             // endpoint, and an un-gated last-writer-wins would let an agent steal
             // the bridge with `cdp_*` frames it can't answer.
-            const clientName =
-              message.params &&
-              typeof message.params === 'object' &&
-              !Array.isArray(message.params)
-                ? (
-                    (message.params as Record<string, unknown>)[
-                      'clientInfo'
-                    ] as { name?: string } | undefined
-                  )?.name
-                : undefined;
             if (
               activeMount.primary &&
               opts.cdpTunnelOverWs === true &&

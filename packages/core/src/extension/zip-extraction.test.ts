@@ -24,6 +24,43 @@ describe('extractZipArchive', () => {
     if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
   });
 
+  it.each([
+    { uncompressedSize: 1024 ** 3 + 1, externalFileAttributes: 0 },
+    { uncompressedSize: 0, externalFileAttributes: 0x1000 << 16 },
+  ])(
+    'rejects Managed resource excess and special entries before opening content %#',
+    async (fields) => {
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zip-extraction-'));
+      const destination = path.join(tempDir, 'destination');
+      const zipFile = new EventEmitter() as ZipFile;
+      const entry = {
+        fileName: 'unsafe',
+        versionMadeBy: 3 << 8,
+        ...fields,
+      } as Entry;
+      zipFile.readEntry = vi.fn(() => zipFile.emit('entry', entry));
+      zipFile.close = vi.fn(() => zipFile.emit('close'));
+      zipFile.openReadStream = vi.fn();
+      mockOpen.mockImplementation(
+        (
+          _file: string,
+          _options: unknown,
+          callback: (error: Error | null, opened?: ZipFile) => void,
+        ) => callback(null, zipFile),
+      );
+      await expect(
+        extractZipArchive(
+          path.join(tempDir, 'archive.zip'),
+          destination,
+          undefined,
+          { enforceResourceLimits: true },
+        ),
+      ).rejects.toThrow();
+      expect(zipFile.openReadStream).not.toHaveBeenCalled();
+      await expect(fs.stat(path.join(destination, 'unsafe'))).rejects.toThrow();
+    },
+  );
+
   it('rejects entries that escape the destination', async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'zip-extraction-'));
     const destination = path.join(tempDir, 'destination');

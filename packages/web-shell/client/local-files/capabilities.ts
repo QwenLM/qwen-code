@@ -20,6 +20,10 @@ export type LocalFilesBlocker =
   | 'cross-origin-frame'
   /** The session's workspace cannot host a bridge (untrusted or live). */
   | 'workspace-ineligible'
+  /** The workspace snapshot has not landed yet; judgement impossible. */
+  | 'workspace-resolving'
+  /** The daemon does not advertise the reverse channel at all. */
+  | 'unsupported-daemon'
   | null;
 
 export interface LocalFilesCapability {
@@ -55,12 +59,15 @@ export function detectLocalFilesCapability(
   const pickerAvailable = typeof win.showDirectoryPicker === 'function';
   const secureContext = win.isSecureContext === true;
   const frame = detectFrame(win);
-  // Ordered by what the user can act on: a missing picker is a browser choice,
-  // an insecure origin is a deployment choice, a cross-origin frame is ours.
-  const blocker: LocalFilesBlocker = !pickerAvailable
-    ? 'unsupported-browser'
-    : !secureContext
-      ? 'insecure-context'
+  // A secure context is a precondition for the picker, not an independent
+  // browser limitation: on a plain-http non-loopback origin the picker is
+  // always absent, so diagnosing the missing picker first would report
+  // "use Chrome" for a deployment problem and hide the SSH-tunnel guidance.
+  // Diagnose the origin first, then the browser, then the frame.
+  const blocker: LocalFilesBlocker = !secureContext
+    ? 'insecure-context'
+    : !pickerAvailable
+      ? 'unsupported-browser'
       : frame === 'cross-origin-iframe'
         ? 'cross-origin-frame'
         : null;

@@ -7,6 +7,7 @@
 import type { Content, Part } from '@google/genai';
 import type { ChatCompressionSettings } from '../config/config.js';
 import type { InputModalities } from '../core/contentGenerator.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 /**
  * Prepares `historyToCompress` for the side-query summary model by
@@ -427,8 +428,8 @@ function transformPart(
   // `write_file`/`edit` carry entire file contents in
   // `functionCall.args.content`, and `estimatePartChars` bills them through
   // the JSON.stringify fallthrough — left untouched they ride into the
-  // side-query at full size (#10380). Only top-level string values are
-  // walked: that is where every built-in tool places its large payloads.
+  // side-query at full size (#10380). Bridge calls carry those same args one
+  // level deeper under `tool_call.arguments`, so walk that envelope too.
   const fc = nextPart.functionCall;
   if (maxTextChars !== undefined && fc?.args) {
     const args = fc.args;
@@ -438,6 +439,27 @@ function transformPart(
       if (typeof value === 'string' && value.length > maxTextChars) {
         newArgs[key] = truncateTextForSlimming(value, maxTextChars);
         stats.textPartsTruncated++;
+        argsTouched = true;
+      }
+    }
+    const bridgedArgs = args['arguments'];
+    if (
+      fc.name === ToolNames.TOOL_CALL &&
+      typeof bridgedArgs === 'object' &&
+      bridgedArgs !== null &&
+      !Array.isArray(bridgedArgs)
+    ) {
+      let bridgedArgsTouched = false;
+      const newBridgedArgs: Record<string, unknown> = { ...bridgedArgs };
+      for (const [key, value] of Object.entries(bridgedArgs)) {
+        if (typeof value === 'string' && value.length > maxTextChars) {
+          newBridgedArgs[key] = truncateTextForSlimming(value, maxTextChars);
+          stats.textPartsTruncated++;
+          bridgedArgsTouched = true;
+        }
+      }
+      if (bridgedArgsTouched) {
+        newArgs['arguments'] = newBridgedArgs;
         argsTouched = true;
       }
     }

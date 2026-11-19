@@ -78,8 +78,10 @@ fn def() -> &'static ToolDef {
                 "session": { "type": "string", "description": "For multi-call work, prefer a short public session label and repeat it on every call that accepts it. Omit it to use the authenticated transport's implicit lifecycle session." },
                 "pid": { "type": "integer", "description": "Target process ID." },
                 "window_id": { "type": "integer", "description": "Target window ID from list_windows." },
+                "app_context": { "type": "boolean", "description": "Capture the app interaction context with native compact AX projection." },
                 "query": { "type": "string", "description": "Case-insensitive filter for tree_markdown and structured elements. Returns matching actionable rows plus their actionable ancestors without renumbering element_index values." },
                 "capture_mode": cua_driver_core::capture_mode::capture_mode_schema(),
+                "include_accessibility": {"type":"boolean","default":true,"description":"Set false for a screenshot without an accessibility walk."},
                 "include_screenshot": {
                     "type": "boolean",
                     "description": "Default true — returns a grounding screenshot alongside the tree. Set false to skip the grab and return the tree only (the cheap path when you're just re-indexing before an element ax action; saves the image tokens + screen-grab latency). screenshot_out_file still forces a capture to disk."
@@ -119,6 +121,17 @@ fn def() -> &'static ToolDef {
         idempotent: false,
         open_world: false,
     })
+}
+
+fn off_space_staleness_note(
+    on_current_space: Option<bool>,
+    chromium: bool,
+) -> Option<&'static str> {
+    (on_current_space == Some(false) && chromium).then_some(
+        "This browser window is on another Space. Chromium may pause painting and \
+         accessibility updates while hidden, so this screenshot and tree can show \
+         an older state. Do not use this read alone to confirm an action's effect.",
+    )
 }
 
 fn chromium_browser_window(pid: i32) -> bool {
@@ -268,24 +281,52 @@ impl Tool for GetWindowStateTool {
             .map(|v| v.max(1) as usize)
             .unwrap_or(crate::ax::tree::DEFAULT_MAX_DEPTH);
 
-        // Always walk the AX tree (perception returns both tree + screenshot).
-        let tree_result = {
+        let app_context = args
+            .get("app_context")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let (tree_result, pending_snapshot) = if args["include_accessibility"] == false {
+            (None, None)
+        } else {
             let q = query.clone();
+            let state = Arc::clone(&self.state);
+            let readiness_deadline = Some(
+                cua_driver_core::tool::current_ax_readiness_deadline().unwrap_or_else(|| {
+                    std::time::Instant::now() + cua_driver_core::tool::AX_READINESS_BUDGET
+                }),
+            );
             // Keep the product deadline below the public client's 25-second
             // deadline so callers receive a structured driver error. The AX
             // walker also applies a native per-element messaging timeout because
             // dropping a spawn_blocking JoinHandle cannot cancel a blocked AX call.
             let walk_future = tokio::task::spawn_blocking(move || {
-                crate::ax::tree::walk_tree_bounded(
-                    pid,
-                    Some(window_id),
-                    q.as_deref(),
-                    max_elements,
-                    max_depth,
-                )
+                if app_context {
+                    if let Err(error) = state.watch_app(pid) {
+                        tracing::debug!(pid, %error, "app focus monitor unavailable");
+                    }
+                }
+                let walk = || {
+                    crate::ax::tree::walk_tree_with_context(
+                        pid,
+                        Some(window_id),
+                        q.as_deref(),
+                        max_elements,
+                        max_depth,
+                        app_context,
+                        readiness_deadline,
+                    )
+                };
+                let tree = if app_context {
+                    crate::apps::with_app_observation(pid, readiness_deadline, walk)
+                } else {
+                    walk()
+                };
+                let snapshot = crate::ax::cache::ElementCache::prepare(&tree.nodes);
+                (tree, snapshot)
             });
             match tokio::time::timeout(std::time::Duration::from_secs(20), walk_future).await {
-                Ok(Ok(r)) => Some(r),
+                Ok(Ok((tree, snapshot))) => (Some(tree), Some(snapshot)),
                 Ok(Err(e)) => return ToolResult::error(format!("AX tree walk failed: {e}")),
                 Err(_elapsed) => {
                     return ToolResult::error(format!(
@@ -312,21 +353,8 @@ impl Tool for GetWindowStateTool {
         // `window_scope` is None only when no window_id was requested, which
         // this tool never does — so treat that as resolved.
         let scope_matched = window_scope.as_ref().is_none_or(|s| s.is_matched());
-
-        // Update element cache — ONLY for a resolved window scope. Caching an
-        // unresolved scope's nodes under (pid, window_id) is what turned a
-        // wrong-surface snapshot into a wrong-surface *action*: a follow-up
-        // click(element_index=N) picked whatever the walk happened to return.
-        // For an unresolved scope, replace any prior entry with an empty
-        // snapshot so a stale index map cannot be clicked through either.
-        if !observation_only {
-            if let Some(ref r) = tree_result {
-                if scope_matched {
-                    self.state.element_cache.update(pid, window_id, &r.nodes);
-                } else {
-                    self.state.element_cache.update(pid, window_id, &[]);
-                }
-            }
+        if !observation_only && tree_result.is_some() && !scope_matched {
+            self.state.element_cache.clear_target(pid, window_id);
         }
 
         let observation_revision =
@@ -337,8 +365,9 @@ impl Tool for GetWindowStateTool {
                         window_id,
                         max_elements,
                         max_depth,
-                        &tree.nodes,
-                        tree.complete && scope_matched,
+                        app_context,
+                        tree,
+                        scope_matched,
                         request,
                     ) {
                         Ok(revision) => Some(revision),
@@ -562,16 +591,15 @@ impl Tool for GetWindowStateTool {
         // Skipped entirely for an unresolved window scope: an element_token is
         // a promise that index N addresses a row of THIS window, and there is
         // no such row to promise (issue #2237).
-        let elem_count_for_snapshot = tree_result
-            .as_ref()
-            .map(|r| r.nodes.iter().filter(|n| n.element_index.is_some()).count())
-            .unwrap_or(0);
         let snapshot_id = if scope_matched && !observation_only {
-            Some(cua_driver_core::element_token::global().register_snapshot(
-                pid,
-                window_id,
-                elem_count_for_snapshot,
-            ))
+            pending_snapshot.map(|snapshot| {
+                self.state.element_cache.publish_for_session(
+                    pid,
+                    window_id,
+                    snapshot,
+                    args.get("_session_id").and_then(Value::as_str),
+                )
+            })
         } else {
             None
         };
@@ -579,16 +607,16 @@ impl Tool for GetWindowStateTool {
             self.state.watch_target(pid, window_id);
         }
 
-        let revision_capture_complete = observation_revision
+        let revision_stable_element_ids = observation_revision
             .as_ref()
             .is_some_and(|revision| revision.stable_element_ids)
             && tree_result
                 .as_ref()
-                .is_some_and(|tree| tree.complete && scope_matched);
+                .is_some_and(|tree| tree.read_complete && scope_matched);
         if let (Some(revision), Some(sid)) = (
             observation_revision
                 .as_ref()
-                .filter(|_| revision_capture_complete),
+                .filter(|_| revision_stable_element_ids),
             snapshot_id,
         ) {
             if let Err(error) = cua_driver_core::observation_revision::revision_tokens()
@@ -611,8 +639,8 @@ impl Tool for GetWindowStateTool {
             snapshot_id,
             tree_result.as_ref(),
         ) {
-            (Some(revision), Some(_), Some(r)) if revision_capture_complete => {
-                build_revision_elements_array(&r.nodes, revision)
+            (Some(revision), Some(sid), Some(r)) => {
+                build_revision_elements_array(&r.nodes, revision, sid)
             }
             (_, Some(sid), Some(r)) => build_elements_array_with_token(&r.nodes, sid),
             (_, None, Some(r)) if scope_matched => build_elements_array(&r.nodes),
@@ -644,6 +672,20 @@ impl Tool for GetWindowStateTool {
                 Issue #22865: use `max_elements` / `max_depth` to bound the \
                 AX walk on apps with very large trees."
         });
+        let capture_complete = tree_result
+            .as_ref()
+            .is_some_and(|tree| tree.complete && scope_matched);
+        let capture_truncated = tree_result.as_ref().is_some_and(|tree| tree.truncated);
+        let capture_read_complete = tree_result
+            .as_ref()
+            .is_some_and(|tree| tree.read_complete && scope_matched);
+        let incomplete_details = tree_result.as_ref().map(|tree| &tree.incomplete_notes);
+        structured["capture_complete"] = serde_json::json!(capture_complete);
+        structured["capture_read_complete"] = serde_json::json!(capture_read_complete);
+        structured["capture_truncated"] = serde_json::json!(capture_truncated);
+        if !capture_complete {
+            structured["capture_incomplete_details"] = serde_json::json!(incomplete_details);
+        }
         if query.is_some() {
             structured["filtered_element_count"] = serde_json::json!(filtered_element_count);
         }
@@ -663,7 +705,7 @@ impl Tool for GetWindowStateTool {
                 "capability": "accessibility.observation_revision.v1",
                 "version": cua_driver_core::observation_revision::OBSERVATION_REVISION_VERSION,
                 "serializer_version": cua_driver_core::observation_revision::ACCESSIBILITY_SERIALIZER_VERSION,
-                "projection_version": cua_driver_core::observation_revision::ACCESSIBILITY_PROJECTION_VERSION,
+                "projection_version": if app_context { cua_driver_core::observation_revision::APP_ACCESSIBILITY_PROJECTION_VERSION } else { cua_driver_core::observation_revision::ACCESSIBILITY_PROJECTION_VERSION },
                 "mode": revision.mode.as_str(),
                 "lineage_id": revision.lineage_id,
                 "revision_id": revision.revision_id,
@@ -671,9 +713,11 @@ impl Tool for GetWindowStateTool {
                 "target": { "pid": pid, "window_id": window_id },
                 "identity": "macos_ax_cf",
                 "elements_scope": "current_full",
-                "stable_element_ids": revision_capture_complete,
-                "capture_complete": revision_capture_complete,
-                "retained": revision_capture_complete,
+                "stable_element_ids": revision_stable_element_ids,
+                "capture_complete": capture_complete,
+                "capture_read_complete": capture_read_complete,
+                "capture_truncated": capture_truncated,
+                "retained": revision_stable_element_ids,
                 "selected_bytes": revision.text.len(),
                 "full_bytes": revision.full_text.len(),
                 "estimated_tokens": revision.text.len().div_ceil(4),
@@ -684,7 +728,7 @@ impl Tool for GetWindowStateTool {
                 structured["observation_revision"]["resync_reason"] =
                     serde_json::json!(reason.as_str());
             }
-            if !revision_capture_complete {
+            if !capture_complete {
                 if let Some(tree) = tree_result.as_ref() {
                     if !tree.incomplete_notes.is_empty() {
                         structured["observation_revision"]["capture_incomplete_details"] =
@@ -785,6 +829,16 @@ impl Tool for GetWindowStateTool {
         }
         if let Some(ref fp) = screenshot_file_path {
             structured["screenshot_file_path"] = serde_json::json!(fp);
+        }
+        let on_current_space = crate::windows::window_on_current_space_by_id(window_id);
+        if on_current_space == Some(false) {
+            structured["on_current_space"] = serde_json::json!(false);
+            if let Some(note) =
+                off_space_staleness_note(on_current_space, chromium_browser_window(pid))
+            {
+                structured["off_space_staleness"] = serde_json::json!(note);
+                content.push(Content::text(note));
+            }
         }
         cua_driver_core::window_inspection::mark_browser_chrome_capture_coverage(
             &mut structured,
@@ -1015,29 +1069,32 @@ pub(crate) fn build_elements_array_with_token(
 pub(crate) fn build_revision_elements_array(
     nodes: &[crate::ax::tree::AXNode],
     revision: &cua_driver_core::observation_revision::ObservationRevisionResult,
+    snapshot_id: u32,
 ) -> Vec<serde_json::Value> {
-    let stable_ids = revision
+    let rendered_ids = revision
         .nodes
         .iter()
         .filter_map(|node| node.actionable_index.map(|index| (index, node.element_id)))
         .collect::<HashMap<_, _>>();
-    let mut elements = build_elements_array(nodes);
+    let mut elements = build_elements_array_with_token(nodes, snapshot_id);
     for element in &mut elements {
         let Some(index) = element.get("element_index").and_then(Value::as_u64) else {
             continue;
         };
         let Some(element_id) = usize::try_from(index)
             .ok()
-            .and_then(|index| stable_ids.get(&index).copied())
+            .and_then(|index| rendered_ids.get(&index).copied())
         else {
             continue;
         };
         element["element_id"] = serde_json::json!(element_id);
-        element["element_token"] =
-            serde_json::json!(cua_driver_core::observation_revision::revision_token_for(
-                &revision.lineage_id,
-                element_id,
-            ));
+        if revision.stable_element_ids {
+            element["element_token"] =
+                serde_json::json!(cua_driver_core::observation_revision::revision_token_for(
+                    &revision.lineage_id,
+                    element_id,
+                ));
+        }
     }
     elements
 }
@@ -1207,6 +1264,11 @@ mod tests {
             value: None,
             description: None,
             identifier: None,
+            rich_text: None,
+            url: None,
+            title_ui_element: None,
+            selectable: false,
+            table_row: false,
             help: None,
             actions: vec![],
             element_ptr: 0,
@@ -1221,6 +1283,8 @@ mod tests {
             enabled: None,
             selected: None,
             in_web_content: false,
+            focused: None,
+            focusable_or_selectable: false,
         }
     }
 
@@ -1584,12 +1648,55 @@ mod tests {
             cache_estimate_bytes: 256,
         };
 
-        let entries = build_revision_elements_array(&nodes, &revision);
+        let entries = build_revision_elements_array(&nodes, &revision, 42);
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["element_index"], 4);
         assert_eq!(entries[0]["element_id"], 37);
         assert_eq!(entries[0]["element_token"], "rv1:lineage-a:25");
+    }
+
+    #[test]
+    fn transient_revision_ids_match_text_but_tokens_use_snapshot_indices() {
+        use cua_driver_core::observation_revision::{
+            CapturedNode, FullResyncReason, ObservationLineage,
+        };
+
+        let nodes = vec![
+            node(None, "AXStaticText", Some("Hint"), 0, None, None),
+            node(Some(0), "AXButton", Some("Save"), 0, None, None),
+            node(Some(1), "AXButton", Some("Cancel"), 0, None, None),
+        ];
+        let captured = nodes
+            .iter()
+            .enumerate()
+            .map(|(identity, node)| CapturedNode {
+                identity,
+                depth: node.depth,
+                body: crate::ax::projection::format_app_body(node),
+                actionable_index: node.element_index,
+            })
+            .collect();
+        let revision = ObservationLineage::new("transient", 8)
+            .unwrap()
+            .for_app()
+            .observe_unretained_full(captured, FullResyncReason::CaptureIncomplete)
+            .unwrap();
+        let entries = build_revision_elements_array(&nodes, &revision, 42);
+
+        assert!(!revision.stable_element_ids);
+        assert!(revision.text.contains("[1] Button \"Save\""));
+        assert!(revision.text.contains("[2] Button \"Cancel\""));
+        for (entry, (id, index, label)) in entries.iter().zip([(1, 0, "Save"), (2, 1, "Cancel")]) {
+            assert_eq!(entry["element_id"], id);
+            assert_eq!(entry["element_index"], index);
+            assert_eq!(entry["label"], label);
+            assert_eq!(
+                entry["element_token"],
+                cua_driver_core::element_token::token_for(42, index),
+            );
+        }
+        assert_eq!(entries.len(), 2);
     }
 
     #[test]

@@ -10,6 +10,7 @@ import {
   parseConfiguredChannels,
   registerBackgroundResponseRelay,
   registerPermissionRelay,
+  resolveChannelLocale,
   registerSessionCleanup,
   sessionsPath,
 } from './runtime.js';
@@ -43,6 +44,26 @@ vi.mock('./channel-registry.js', () => ({
       : undefined,
   supportedTypes: async () => ['telegram'],
 }));
+
+describe('resolveChannelLocale', () => {
+  it.each([
+    ['zh', 'zh'],
+    ['zh-CN', 'zh'],
+    ['zh_CN', 'zh'],
+    ['Chinese', 'zh'],
+    ['中文', 'zh'],
+    [' zh ', 'zh'],
+    ['  zh_CN  ', 'zh'],
+    ['ZH-CN', 'zh'],
+    ['CHINESE', 'zh'],
+    ['en', 'en'],
+    ['auto', 'en'],
+    ['ja', 'en'],
+    [undefined, 'en'],
+  ] as const)('maps %s to %s', (value, expected) => {
+    expect(resolveChannelLocale(value)).toBe(expected);
+  });
+});
 
 it('isolates daemon route stores by workspace hash', () => {
   expect(daemonSessionRoutesPath('/workspace')).toBe(

@@ -76,12 +76,21 @@ vi.mock('../ui/commands/hooksCommand.js', async () => {
   };
 });
 
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type Mock,
+} from 'vitest';
 import { BuiltinCommandLoader } from './BuiltinCommandLoader.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { CommandKind } from '../ui/commands/types.js';
 
 import { restoreCommand } from '../ui/commands/restoreCommand.js';
+import { ideCommand } from '../ui/commands/ideCommand.js';
 
 vi.mock('../ui/commands/authCommand.js', () => ({ authCommand: {} }));
 vi.mock('../ui/commands/bugCommand.js', () => ({ bugCommand: {} }));
@@ -125,6 +134,8 @@ describe('BuiltinCommandLoader', () => {
 
   const restoreCommandMock = restoreCommand as Mock;
 
+  afterEach(() => vi.unstubAllEnvs());
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockConfig = {
@@ -143,6 +154,66 @@ describe('BuiltinCommandLoader', () => {
     });
   });
 
+  it.each([undefined, 'false', 'true'])(
+    'registers subscription account commands when DEV=%s',
+    async (dev) => {
+      vi.stubEnv('DEV', false);
+      if (dev === undefined) delete process.env['DEV'];
+      else process.env['DEV'] = dev;
+      const commands = await new BuiltinCommandLoader(mockConfig).loadCommands(
+        new AbortController().signal,
+      );
+      expect(commands.map((command) => command.name)).toEqual(
+        expect.arrayContaining(['upgrade', 'logout']),
+      );
+    },
+  );
+
+  it('registers /pr for interactive, headless and ACP sessions', async () => {
+    const commands = await new BuiltinCommandLoader(mockConfig).loadCommands(
+      new AbortController().signal,
+    );
+    const pr = commands.find((command) => command.name === 'pr');
+    expect(pr).toBeDefined();
+    expect(pr?.supportedModes).toEqual(
+      expect.arrayContaining(['interactive', 'non_interactive', 'acp']),
+    );
+  });
+
+  it('skips automatic IDE process detection in tool sandbox', async () => {
+    const { ideCommand } = await import('../ui/commands/ideCommand.js');
+    mockConfig.getShellExecutionSandbox = vi
+      .fn()
+      .mockReturnValue({ backend: 'bwrap' });
+    const commands = await new BuiltinCommandLoader(mockConfig).loadCommands(
+      new AbortController().signal,
+    );
+    expect(ideCommand).not.toHaveBeenCalled();
+    expect(commands.some((command) => command.name === 'ide')).toBe(false);
+  });
+
+  it('does not probe local IDE processes for a non-interactive run', async () => {
+    mockConfig.isInteractive = vi.fn().mockReturnValue(false);
+
+    const commands = await new BuiltinCommandLoader(mockConfig).loadCommands(
+      new AbortController().signal,
+    );
+
+    expect(ideCommand).not.toHaveBeenCalled();
+    expect(commands.some((command) => command.name === 'ide')).toBe(false);
+  });
+
+  it('still builds the IDE command for an interactive run', async () => {
+    mockConfig.isInteractive = vi.fn().mockReturnValue(true);
+
+    const commands = await new BuiltinCommandLoader(mockConfig).loadCommands(
+      new AbortController().signal,
+    );
+
+    expect(ideCommand).toHaveBeenCalledOnce();
+    expect(commands.some((command) => command.name === 'ide')).toBe(true);
+  });
+
   it('should correctly pass the config object to restore command factory', async () => {
     const loader = new BuiltinCommandLoader(mockConfig);
     await loader.loadCommands(new AbortController().signal);
@@ -150,6 +221,16 @@ describe('BuiltinCommandLoader', () => {
     // ideCommand is now a constant, no longer needs config
     expect(restoreCommandMock).toHaveBeenCalledTimes(1);
     expect(restoreCommandMock).toHaveBeenCalledWith(mockConfig);
+  });
+
+  it('does not probe local IDE processes for an execution environment', async () => {
+    mockConfig.getExecutionEnvironment = vi.fn().mockReturnValue({});
+    const loader = new BuiltinCommandLoader(mockConfig);
+
+    const commands = await loader.loadCommands(new AbortController().signal);
+
+    expect(ideCommand).not.toHaveBeenCalled();
+    expect(commands.some((command) => command.name === 'ide')).toBe(false);
   });
 
   it('should filter out null command definitions returned by factories', async () => {
@@ -243,6 +324,15 @@ describe('BuiltinCommandLoader', () => {
     const advisorCmd = commands.find((c) => c.name === 'advisor');
     expect(advisorCmd).toBeDefined();
     expect(advisorCmd?.kind).toBe(CommandKind.BUILT_IN);
+  });
+
+  it('should always register the /commit command', async () => {
+    const loader = new BuiltinCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(new AbortController().signal);
+    const commitCmd = commands.find((c) => c.name === 'commit');
+    expect(commitCmd).toBeDefined();
+    expect(commitCmd?.kind).toBe(CommandKind.BUILT_IN);
+    expect(commitCmd?.supportedModes).toEqual(['interactive']);
   });
 
   it('should include lsp command only when LSP is enabled', async () => {

@@ -42,6 +42,7 @@ import {
   RESUME_MAX,
   currentSessionEntry,
 } from './run-ledger.js';
+import { arePermissionBitsEnforced } from '../../../test-utils/permission-bits.js';
 
 let root: string;
 let plan: string;
@@ -692,7 +693,7 @@ describe('the properties the threat model rests on', () => {
     expect(priorSessionIds(plan, envOf('S2'))).toEqual([]);
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'refuses to append over a ledger it could not read',
     () => {
       // A present-but-unreadable REGULAR file holds every recorded entry, and
@@ -700,7 +701,7 @@ describe('the properties the threat model rests on', () => {
       // a transient fault would clobber attempt 1's address exactly when a
       // resume needs it. chmod 0o000 is a POSIX-only fault: on Windows it
       // toggles the read-only attribute and the file stays readable, and root
-      // bypasses the mode entirely — the repo convention for this shape.
+      // with its DAC capabilities bypasses the mode entirely.
       appendRunSession(plan, envOf('S1'));
       const before = readFileSync(runSessionsPath(plan), 'utf8');
       chmodSync(runSessionsPath(plan), 0o000);

@@ -20,6 +20,10 @@
  *                            closes
  */
 
+import {
+  TOOL_LIFECYCLE_DRAIN_MS,
+  type ToolLifecycleEvent,
+} from '../telemetry/tool-lifecycle.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -27,6 +31,7 @@ import {
   AgentEventType,
   type AgentEventEmitter,
   type AgentToolCallEvent,
+  type AgentToolOutputUpdateEvent,
   type AgentToolResponsesFinalizedEvent,
   type AgentRoundTextEvent,
   type AgentStreamTextEvent,
@@ -36,12 +41,14 @@ import type {
   AgentBootstrapRecordPayload,
   ChatRecord,
 } from '../services/chatRecordingService.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { MAX_SUBAGENT_DEPTH_LIMIT } from '../config/config.js';
 import type { Config, SandboxConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getCachedGitBranch } from '../utils/gitUtils.js';
 import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
 import type { Content } from '@google/genai';
+import type { SubagentExecutorSpec } from '../subagents/types.js';
 import type {
   AgentCompletionStats,
   BackgroundActivity,
@@ -131,22 +138,39 @@ export interface AgentMeta {
    * are never exposed as reusable background agents.
    */
   isBackgrounded?: boolean;
-  /** Whether the original launch used temporary worktree isolation. */
-  isolation?: 'worktree';
+  /** Workflow children have no background registry entry to attest liveness. */
+  workflowOwner?: { pid: number; hostname: string };
+  /** Container launches use this legacy field so older readers refuse resume. */
+  isolation?: 'worktree' | 'container';
+  executionBackend?: 'container';
+  workspaceIsolation?: 'worktree';
   /** ISO 8601 timestamp of the latest lifecycle transition. */
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */
   resolvedApprovalMode?: string;
+  /** Set at launch for a run that is never continued: a restart restores
+   * it as a task that cannot be resumed, for this reason. */
+  resumeBlockedReason?: string;
   /**
    * Immutable launch-time execution policy for a restricted fork.
    * Legacy absence allows every tool except the mandatory interaction-tool
    * exclusion; an empty list means deny-all.
    */
   executionAllowedTools?: string[];
+  /**
+   * Launch-time per-agent tool blocklist of a fork, persisted beside
+   * `executionAllowedTools`: the resume path rebuilds the fork's toolConfig
+   * from this sidecar alone, so dropping it would let a backgrounded fork
+   * resume past the blocklist — the only thing bounding a wildcard allowlist
+   * entry such as `mcp__*`. Legacy absence means no blocklist.
+   */
+  disallowedTools?: string[];
   /** Launch-time CLI/runtime flags that should survive process restart. */
   persistedCliFlags?: AgentPersistedCliFlags;
   /** Canonical subagent config name used to recreate this agent. */
   subagentName?: string;
+  /** External launch provenance; transcript replay cannot restore its session. */
+  executor?: SubagentExecutorSpec['kind'];
   /** UI hint preserved for resumed task rows. */
   agentColor?: string;
   /** Number of explicit resume attempts performed so far. */
@@ -777,6 +801,67 @@ export function attachJsonlTranscriptWriter(
     });
   };
 
+  const sessionReadiness = new Map<string, boolean>();
+  const recordSessionReadiness = (callId: string, ready: boolean) => {
+    if (sessionReadiness.get(callId) === ready) return;
+    sessionReadiness.set(callId, ready);
+    recordSystem('agent_session_ready', {
+      callId,
+      subagentSessionReady: ready,
+    });
+  };
+
+  const recordedLifecycle = new Set<string>();
+  const pendingLifecycle = new Set<string>();
+  let cleanedUp = false;
+  let drainTimer: ReturnType<typeof setTimeout> | undefined;
+  const closeLifecycle = () => {
+    if (drainTimer) clearTimeout(drainTimer);
+    drainTimer = undefined;
+    emitter.off(AgentEventType.TOOL_RESULT, onToolResult);
+    emitter.off(AgentEventType.TOOL_OUTPUT_UPDATE, onToolOutputUpdate);
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* best effort */
+      }
+      fd = null;
+    }
+  };
+  const recordLifecycle = (event: ToolLifecycleEvent | undefined) => {
+    if (!event || (cleanedUp && !pendingLifecycle.has(event.executionId)))
+      return;
+    const key = `${event.executionId}:${event.phase}`;
+    if (recordedLifecycle.has(key)) return;
+    recordedLifecycle.add(key);
+    if (event.phase === 'started') pendingLifecycle.add(event.executionId);
+    else pendingLifecycle.delete(event.executionId);
+    if (recordedLifecycle.size > 512)
+      recordedLifecycle.delete(recordedLifecycle.values().next().value!);
+    append({
+      ...baseFields('system'),
+      subtype: 'ui_telemetry',
+      systemPayload: { uiEvent: { ...event, 'event.name': 'tool_lifecycle' } },
+    });
+    if (cleanedUp && pendingLifecycle.size === 0) closeLifecycle();
+  };
+  const onToolResult = (event: { lifecycle?: ToolLifecycleEvent }) =>
+    recordLifecycle(event.lifecycle);
+  const onToolOutputUpdate = (event: AgentToolOutputUpdateEvent) => {
+    recordLifecycle(event.lifecycle);
+    if (cleanedUp) return;
+    const output = event.outputChunk;
+    if (
+      typeof output === 'object' &&
+      output !== null &&
+      'subagentSessionReady' in output &&
+      typeof output.subagentSessionReady === 'boolean'
+    ) {
+      recordSessionReadiness(event.callId, output.subagentSessionReady);
+    }
+  };
+
   const onToolCall = (event: AgentToolCallEvent) => {
     append({
       ...baseFields('assistant'),
@@ -786,13 +871,16 @@ export function attachJsonlTranscriptWriter(
           {
             functionCall: {
               id: event.callId,
-              name: event.name,
-              args: event.args,
+              name: event.modelFacingName ?? event.name,
+              args: event.modelFacingArgs ?? event.args,
             },
           },
         ],
       },
     });
+    if (event.name === ToolNames.AGENT) {
+      recordSessionReadiness(event.callId, false);
+    }
   };
 
   const onToolResponsesFinalized = (
@@ -804,6 +892,12 @@ export function attachJsonlTranscriptWriter(
         message: { role: 'user', parts: response.responseParts },
         toolCallResult: {
           callId: response.callId,
+          ...(sessionReadiness.has(response.callId) &&
+          response.responseParts.some(
+            (part) => part.functionResponse?.response?.['error'],
+          )
+            ? { status: 'error' as const }
+            : {}),
           ...(response.durationMs !== undefined
             ? { durationMs: response.durationMs }
             : {}),
@@ -864,10 +958,14 @@ export function attachJsonlTranscriptWriter(
   emitter.on(AgentEventType.ROUND_TEXT, onRoundText);
   emitter.on(AgentEventType.STREAM_TEXT, appendStreamText);
   emitter.on(AgentEventType.TOOL_CALL, onToolCall);
+  emitter.on(AgentEventType.TOOL_RESULT, onToolResult);
+  emitter.on(AgentEventType.TOOL_OUTPUT_UPDATE, onToolOutputUpdate);
   emitter.on(AgentEventType.TOOL_RESPONSES_FINALIZED, onToolResponsesFinalized);
   emitter.on(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
 
   const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
     emitter.off(AgentEventType.ROUND_TEXT, onRoundText);
     emitter.off(AgentEventType.STREAM_TEXT, appendStreamText);
     emitter.off(AgentEventType.TOOL_CALL, onToolCall);
@@ -881,13 +979,10 @@ export function attachJsonlTranscriptWriter(
       streamFlushTimer = null;
     }
     flushStreamText();
-    if (fd !== null) {
-      try {
-        fs.closeSync(fd);
-      } catch {
-        // best effort
-      }
-      fd = null;
+    if (pendingLifecycle.size === 0) closeLifecycle();
+    else {
+      drainTimer = setTimeout(closeLifecycle, TOOL_LIFECYCLE_DRAIN_MS);
+      drainTimer.unref();
     }
     if (streamFd !== null) {
       try {

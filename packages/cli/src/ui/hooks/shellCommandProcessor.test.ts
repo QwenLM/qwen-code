@@ -18,6 +18,11 @@ import {
 
 const mockIsBinary = vi.hoisted(() => vi.fn());
 const mockShellExecutionService = vi.hoisted(() => vi.fn());
+const runtimeShellMock = vi.hoisted(() => vi.fn());
+vi.mock('@qwen-code/qwen-code-core/sandbox/runtime-shell.js', () => ({
+  executeRuntimeShell: runtimeShellMock,
+}));
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
@@ -64,6 +69,9 @@ describe('useShellCommandProcessor', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    runtimeShellMock.mockImplementation((_runtime, ...args) =>
+      mockShellExecutionService(...args),
+    );
 
     addItemToHistoryMock = vi.fn();
     setPendingHistoryItemMock = vi.fn();
@@ -126,6 +134,35 @@ describe('useShellCommandProcessor', () => {
     ...overrides,
   });
 
+  it('binds sandboxed shell mode to its Config without a host pwd file', async () => {
+    mockConfig.getShellExecutionSandbox = () =>
+      ({ filesystem: 'read-only', network: 'closed' }) as ReturnType<
+        Config['getShellExecutionSandbox']
+      >;
+    const { result } = renderProcessorHook();
+    act(() => {
+      result.current.handleShellCommand(
+        'echo sandbox',
+        new AbortController().signal,
+      );
+    });
+    expect(runtimeShellMock).toHaveBeenCalledWith(
+      mockConfig,
+      'echo sandbox',
+      '/test/dir',
+      expect.any(Function),
+      expect.any(AbortSignal),
+      false,
+      expect.any(Object),
+    );
+    expect(crypto.randomBytes).not.toHaveBeenCalled();
+    expect(fs.writeFileSync).not.toHaveBeenCalled();
+    await act(async () => {
+      resolveExecutionPromise(createMockServiceResult());
+      await onExecMock.mock.calls[0][0];
+    });
+  });
+
   it('should initiate command execution and set pending state', async () => {
     const { result } = renderProcessorHook();
 
@@ -148,7 +185,7 @@ describe('useShellCommandProcessor', () => {
       isUserInitiated: true,
     });
     const tmpFile = path.join(os.tmpdir(), 'shell_pwd_abcdef.tmp');
-    const wrappedCommand = `{ ls -l; }; __code=$?; pwd > "${tmpFile}"; exit $__code`;
+    const wrappedCommand = `{ ls -l;\n}; __code=$?; pwd > "${tmpFile}"; exit $__code`;
     expect(mockShellExecutionService).toHaveBeenCalledWith(
       wrappedCommand,
       '/test/dir',
@@ -158,6 +195,30 @@ describe('useShellCommandProcessor', () => {
       expect.any(Object),
     );
     expect(onExecMock).toHaveBeenCalledWith(expect.any(Promise));
+  });
+
+  it('closes a dangling line continuation before appending the terminator so it is not escaped (R6-8)', async () => {
+    const { result } = renderProcessorHook();
+
+    act(() => {
+      result.current.handleShellCommand(
+        'echo hi \\',
+        new AbortController().signal,
+      );
+    });
+
+    const tmpFile = path.join(os.tmpdir(), 'shell_pwd_abcdef.tmp');
+    // The appended `;` must start its own line: a bare `;` right after the
+    // backslash is escaped into a literal `;` argument (bash runs `ls ';'`).
+    const wrappedCommand = `{ echo hi \\\n;\n}; __code=$?; pwd > "${tmpFile}"; exit $__code`;
+    expect(mockShellExecutionService).toHaveBeenCalledWith(
+      wrappedCommand,
+      '/test/dir',
+      expect.any(Function),
+      expect.any(Object),
+      false,
+      expect.any(Object),
+    );
   });
 
   it('should handle successful execution and update history correctly', async () => {
@@ -324,7 +385,7 @@ describe('useShellCommandProcessor', () => {
       });
 
       // Verify it's using the non-pty shell
-      const wrappedCommand = `{ stream; }; __code=$?; pwd > "${path.join(
+      const wrappedCommand = `{ stream;\n}; __code=$?; pwd > "${path.join(
         os.tmpdir(),
         'shell_pwd_abcdef.tmp',
       )}"; exit $__code`;

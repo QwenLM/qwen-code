@@ -90,6 +90,8 @@ describe('auto-memory extraction with agent planner', () => {
     expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledWith(
       mockConfig,
       projectRoot,
+      undefined,
+      undefined,
     );
 
     const docs = await scanAutoMemoryTopicDocuments(projectRoot);

@@ -1,0 +1,242 @@
+diff --git a/node_modules/@pierre/trees/NOTICE.md b/node_modules/@pierre/trees/NOTICE.md
+--- a/node_modules/@pierre/trees/NOTICE.md
++++ b/node_modules/@pierre/trees/NOTICE.md
+@@ -33,3 +33,7 @@
+ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+ ```
++
++Qwen Code modifications to @pierre/trees 1.0.0-beta.6: adds formatItemName for display-only labels and formatter-aware search; original path identity is preserved.
++
++Modified files: dist/model/publicTypes.d.ts, dist/model/internalTypes.d.ts, dist/model/FileTreeController.js, dist/render/FileTree.js, dist/render/FileTreeView.js, dist/render/FileTreeView.d.ts.
+diff --git a/node_modules/@pierre/trees/dist/model/publicTypes.d.ts b/node_modules/@pierre/trees/dist/model/publicTypes.d.ts
+--- a/node_modules/@pierre/trees/dist/model/publicTypes.d.ts
++++ b/node_modules/@pierre/trees/dist/model/publicTypes.d.ts
+@@ -1,3 +1,4 @@
++/*! Modified by Qwen Code: display-only formatItemName and search; see package NOTICE. */
+ import { FileTreeIcons, RemappedIcon } from "../iconConfig.js";
+ import { ContextMenuAnchorRect, GitStatusEntry } from "../publicTypes.js";
+ import { FileTreeDensity } from "./density.js";
+@@ -58,6 +59,7 @@
+   dragAndDrop?: boolean | FileTreeDragAndDropConfig;
+   fileTreeSearchMode?: FileTreeSearchMode;
+   initialSearchQuery?: string | null;
++  formatItemName?: (name: string) => string;
+   initialSelectedPaths?: readonly FileTreePublicId[];
+   onSearchChange?: FileTreeSearchChangeListener;
+   renaming?: boolean | FileTreeRenamingConfig;
+diff --git a/node_modules/@pierre/trees/dist/model/internalTypes.d.ts b/node_modules/@pierre/trees/dist/model/internalTypes.d.ts
+--- a/node_modules/@pierre/trees/dist/model/internalTypes.d.ts
++++ b/node_modules/@pierre/trees/dist/model/internalTypes.d.ts
+@@ -1,3 +1,4 @@
++/*! Modified by Qwen Code: display-only formatItemName and search; see package NOTICE. */
+ import { FileTreeIcons } from "../iconConfig.js";
+ import { GitStatus } from "../publicTypes.js";
+ import { FileTreeCompositionOptions, FileTreePublicId, FileTreeRenderOptions, FileTreeRowDecorationRenderer, FileTreeScrollOffset, FileTreeSearchBlurBehavior, FileTreeVisibleRow } from "./publicTypes.js";
+@@ -45,6 +46,7 @@
+   initialViewportHeight?: number;
+   instanceId?: string;
+   renamingEnabled?: boolean;
++  formatItemName?: (name: string) => string;
+   renderRowDecoration?: FileTreeRowDecorationRenderer;
+   searchBlurBehavior?: FileTreeSearchBlurBehavior;
+   searchEnabled?: boolean;
+diff --git a/node_modules/@pierre/trees/dist/model/FileTreeController.js b/node_modules/@pierre/trees/dist/model/FileTreeController.js
+--- a/node_modules/@pierre/trees/dist/model/FileTreeController.js
++++ b/node_modules/@pierre/trees/dist/model/FileTreeController.js
+@@ -1,3 +1,4 @@
++/*! Modified by Qwen Code: display-only formatItemName and search; see package NOTICE. */
+ import { PathStore } from "../path-store/src/store.js";
+ import "../path-store/src/index.js";
+ import { renameFileTreePaths } from "../utils/renameFileTreePaths.js";
+@@ -100,6 +101,7 @@
+ 	#onRename;
+ 	#onRenameError;
+ 	#onSearchChange;
++	#formatItemName;
+ 	#projectionPaths = [];
+ 	#projectionPosInSetByIndex = /* @__PURE__ */ new Int32Array(0);
+ 	#projectionSetSizeByIndex = /* @__PURE__ */ new Int32Array(0);
+@@ -128,7 +130,7 @@
+ 	#visibleCount = 0;
+ 	#unsubscribe;
+ 	constructor(options) {
+-		const { dragAndDrop, fileTreeSearchMode, initialSearchQuery, initialSelectedPaths, renaming, onSearchChange, paths, preparedInput, ...baseOptions } = options;
++		const { dragAndDrop, fileTreeSearchMode, initialSearchQuery, initialSelectedPaths, renaming, onSearchChange, formatItemName, paths, preparedInput, ...baseOptions } = options;
+ 		const resolvedInput = resolveFileTreeInput({
+ 			paths,
+ 			preparedInput
+@@ -142,6 +144,7 @@
+ 			this.#onRename = renaming.onRename;
+ 		}
+ 		this.#onSearchChange = onSearchChange;
++		this.#formatItemName = formatItemName;
+ 		this.#searchMode = fileTreeSearchMode ?? "hide-non-matches";
+ 		this.#store = this.#createStore(resolvedInput.paths, resolvedInput.preparedInput);
+ 		const resolvedInitialSelectedPaths = initialSelectedPaths?.map((path) => this.#resolveSelectionPath(path)).filter((resolved) => resolved != null) ?? [];
+@@ -889,9 +892,12 @@
+ 		this.#knownPaths = [...knownPaths].sort();
+ 		return this.#knownPaths;
+ 	}
++	#formatSearchPath(path) {
++		return toLowerCaseSearchPath(this.#formatItemName == null ? path : path.split("/").map(segment => segment === "" ? "" : this.#formatItemName(segment)).join("/"));
++	}
+ 	#getListedPathsLowerCase() {
+ 		if (this.#listedPathsLowerCase != null) return this.#listedPathsLowerCase;
+-		this.#listedPathsLowerCase = this.#getListedPaths().map(toLowerCaseSearchPath);
++		this.#listedPathsLowerCase = this.#getListedPaths().map(path => this.#formatSearchPath(path));
+ 		return this.#listedPathsLowerCase;
+ 	}
+ 	#getAllKnownDirectoryPaths() {
+@@ -901,7 +907,7 @@
+ 	}
+ 	#getAllKnownDirectoryPathsLowerCase() {
+ 		if (this.#knownDirectoryPathsLowerCase != null) return this.#knownDirectoryPathsLowerCase;
+-		this.#knownDirectoryPathsLowerCase = this.#getAllKnownDirectoryPaths().map(toLowerCaseSearchPath);
++		this.#knownDirectoryPathsLowerCase = this.#getAllKnownDirectoryPaths().map(path => this.#formatSearchPath(path));
+ 		return this.#knownDirectoryPathsLowerCase;
+ 	}
+ 	#invalidateKnownPathCaches() {
+@@ -1025,7 +1031,7 @@
+ 		const matchingPathSet = /* @__PURE__ */ new Set();
+ 		let focusCandidate = null;
+ 		for (let index = 0; index < listedPaths.length; index += 1) {
+-			if (!listedPathsLowerCase[index].includes(searchValue)) continue;
++			if (!listedPathsLowerCase[index].includes(searchValue) && !toLowerCaseSearchPath(listedPaths[index]).includes(searchValue)) continue;
+ 			const path = listedPaths[index];
+ 			matchingPaths.push(path);
+ 			matchingPathSet.add(path);
+@@ -1034,7 +1040,7 @@
+ 		const knownDirectoryPaths = this.#getAllKnownDirectoryPaths();
+ 		const knownDirectoryPathsLowerCase = this.#getAllKnownDirectoryPathsLowerCase();
+ 		for (let index = 0; index < knownDirectoryPaths.length; index += 1) {
+-			if (!knownDirectoryPathsLowerCase[index].includes(searchValue)) continue;
++			if (!knownDirectoryPathsLowerCase[index].includes(searchValue) && !toLowerCaseSearchPath(knownDirectoryPaths[index]).includes(searchValue)) continue;
+ 			const path = knownDirectoryPaths[index];
+ 			if (matchingPathSet.has(path)) continue;
+ 			matchingPaths.push(path);
+diff --git a/node_modules/@pierre/trees/dist/render/FileTree.js b/node_modules/@pierre/trees/dist/render/FileTree.js
+--- a/node_modules/@pierre/trees/dist/render/FileTree.js
++++ b/node_modules/@pierre/trees/dist/render/FileTree.js
+@@ -1,3 +1,4 @@
++/*! Modified by Qwen Code: display-only formatItemName and search; see package NOTICE. */
+ import { getBuiltInSpriteSheet, isColoredBuiltInIconSet } from "../builtInIcons.js";
+ import { FILE_TREE_STYLE_ATTRIBUTE, FILE_TREE_UNSAFE_CSS_ATTRIBUTE, HEADER_SLOT_NAME } from "../constants.js";
+ import { normalizeFileTreeIcons } from "../iconConfig.js";
+@@ -64,6 +65,7 @@
+ 	#id;
+ 	#onSelectionChange;
+ 	#renderRowDecoration;
++	#formatItemName;
+ 	#renamingEnabled;
+ 	#searchBlurBehavior;
+ 	#searchEnabled;
+@@ -83,7 +85,7 @@
+ 	#wroteHostItemHeight = false;
+ 	#wroteHostDensityFactor = false;
+ 	constructor(options) {
+-		const { composition, density, fileTreeSearchMode, gitStatus, id, initialSearchQuery, icons, itemHeight, onSearchChange, onSelectionChange, overscan, renderRowDecoration, renaming, search, searchBlurBehavior, searchFakeFocus, stickyFolders, unsafeCSS, initialVisibleRowCount, ...controllerOptions } = options;
++		const { composition, density, fileTreeSearchMode, gitStatus, id, initialSearchQuery, icons, itemHeight, onSearchChange, onSelectionChange, overscan, formatItemName, renderRowDecoration, renaming, search, searchBlurBehavior, searchFakeFocus, stickyFolders, unsafeCSS, initialVisibleRowCount, ...controllerOptions } = options;
+ 		this.#composition = composition;
+ 		this.#id = createClientId(id);
+ 		this.#gitStatusState = resolveFileTreeGitStatusState(gitStatus);
+@@ -91,6 +93,7 @@
+ 		this.#unsafeCSS = unsafeCSS;
+ 		this.#onSelectionChange = onSelectionChange;
+ 		this.#renderRowDecoration = renderRowDecoration;
++		this.#formatItemName = formatItemName;
+ 		this.#renamingEnabled = renaming != null && renaming !== false;
+ 		this.#searchBlurBehavior = searchBlurBehavior;
+ 		this.#searchEnabled = search === true;
+@@ -104,6 +107,7 @@
+ 		};
+ 		this.#controller = new FileTreeController({
+ 			...controllerOptions,
++			formatItemName,
+ 			fileTreeSearchMode,
+ 			initialSearchQuery,
+ 			onSearchChange,
+@@ -310,6 +314,7 @@
+ 			icons: this.#icons,
+ 			instanceId: this.#id,
+ 			renamingEnabled: this.#renamingEnabled,
++			formatItemName: this.#formatItemName,
+ 			renderRowDecoration: this.#renderRowDecoration,
+ 			searchBlurBehavior: this.#searchBlurBehavior,
+ 			searchEnabled: this.#searchEnabled,
+@@ -447,12 +452,13 @@
+ 	}
+ };
+ function preloadFileTree(options) {
+-	const { composition, density, fileTreeSearchMode, gitStatus, id, initialSearchQuery, icons, itemHeight, onSearchChange: _onSearchChange, onSelectionChange: _onSelectionChange, overscan, renderRowDecoration, renaming, search, searchBlurBehavior, searchFakeFocus, stickyFolders, unsafeCSS, initialVisibleRowCount, ...controllerOptions } = options;
++	const { composition, density, fileTreeSearchMode, gitStatus, id, initialSearchQuery, icons, itemHeight, onSearchChange: _onSearchChange, onSelectionChange: _onSelectionChange, overscan, formatItemName, renderRowDecoration, renaming, search, searchBlurBehavior, searchFakeFocus, stickyFolders, unsafeCSS, initialVisibleRowCount, ...controllerOptions } = options;
+ 	const resolvedDensity = resolveFileTreeDensity(density, itemHeight);
+ 	const resolvedItemHeight = resolvedDensity.itemHeight;
+ 	const resolvedId = createServerId(id);
+ 	const controller = new FileTreeController({
+ 		...controllerOptions,
++		formatItemName,
+ 		fileTreeSearchMode,
+ 		initialSearchQuery,
+ 		renaming
+@@ -478,6 +484,7 @@
+ 		itemHeight: resolvedItemHeight,
+ 		overscan,
+ 		renamingEnabled: renaming != null && renaming !== false,
++		formatItemName,
+ 		renderRowDecoration,
+ 		searchBlurBehavior,
+ 		searchEnabled: search === true,
+diff --git a/node_modules/@pierre/trees/dist/render/FileTreeView.js b/node_modules/@pierre/trees/dist/render/FileTreeView.js
+--- a/node_modules/@pierre/trees/dist/render/FileTreeView.js
++++ b/node_modules/@pierre/trees/dist/render/FileTreeView.js
+@@ -1,3 +1,4 @@
++/*! Modified by Qwen Code: display-only formatItemName and search; see package NOTICE. */
+ import { CONTEXT_MENU_SLOT_NAME, CONTEXT_MENU_TRIGGER_TYPE, HEADER_SLOT_NAME } from "../constants.js";
+ import { createFileTreeIconResolver } from "./iconResolver.js";
+ import { FILE_TREE_DEFAULT_ITEM_HEIGHT } from "../model/virtualization.js";
+@@ -401,6 +402,11 @@
+ 	] });
+ }
+ function renderStyledRow(frame, row, key, options = {}) {
++	if (frame.formatItemName) row = {
++		...row,
++		name: frame.formatItemName(row.name),
++		flattenedSegments: row.flattenedSegments?.map(segment => ({ ...segment, name: frame.formatItemName(segment.name) }))
++	};
+ 	const { controller, renameView, visualFocusPath, contextHoverPath, draggedPathSet, dragTarget, dragAndDropEnabled, shouldSuppressContextMenu, handleRowDragStart, handleRowDragEnd, handleRowTouchStart, instanceId, itemHeight, gitStatusByPath, ignoredGitDirectories, ignoredInheritanceCache, directoriesWithGitChanges, gitLaneActive, contextMenuEnabled, contextMenuTriggerMode, contextMenuButtonTriggerEnabled, contextMenuButtonVisibility, contextMenuRightClickEnabled, registerRenameInput, registerButton, resolveIcon, renderDecorationForRow, openContextMenuForRow, onRowClick, onKeyDown } = frame;
+ 	const targetPath = getFileTreeRowPath(row);
+ 	const { isParked = false, mode = "flow", style } = options;
+@@ -517,7 +523,7 @@
+ 	if (range.end < range.start) return [];
+ 	return frame.controller.getVisibleRows(range.start, range.end).filter((row) => !hiddenRowPaths.has(getFileTreeRowPath(row))).map((row, slotIndex) => renderStyledRow(frame, row, range.start + slotIndex));
+ }
+-function FileTreeView({ composition, controller, gitStatusByPath, ignoredGitDirectories, directoriesWithGitChanges, icons, instanceId, itemHeight = FILE_TREE_DEFAULT_ITEM_HEIGHT, overscan = 10, renamingEnabled = false, renderRowDecoration, searchBlurBehavior = "close", searchEnabled = false, searchFakeFocus = false, slotHost, stickyFolders = false, initialViewportHeight = 420 }) {
++function FileTreeView({ composition, controller, gitStatusByPath, ignoredGitDirectories, directoriesWithGitChanges, icons, instanceId, itemHeight = FILE_TREE_DEFAULT_ITEM_HEIGHT, overscan = 10, renamingEnabled = false, formatItemName, renderRowDecoration, searchBlurBehavior = "close", searchEnabled = false, searchFakeFocus = false, slotHost, stickyFolders = false, initialViewportHeight = 420 }) {
+ 	"use no memo";
+ 	const contextMenuAnchorRef = useRef(null);
+ 	const contextMenuTriggerRef = useRef(null);
+@@ -1759,6 +1765,7 @@
+ 		registerRenameInput,
+ 		renameView,
+ 		renderDecorationForRow,
++		formatItemName,
+ 		resolveIcon,
+ 		shouldSuppressContextMenu,
+ 		visualFocusPath
+diff --git a/node_modules/@pierre/trees/dist/render/FileTreeView.d.ts b/node_modules/@pierre/trees/dist/render/FileTreeView.d.ts
+--- a/node_modules/@pierre/trees/dist/render/FileTreeView.d.ts
++++ b/node_modules/@pierre/trees/dist/render/FileTreeView.d.ts
+@@ -1,3 +1,4 @@
++/*! Modified by Qwen Code: display-only formatItemName and search; see package NOTICE. */
+ import { FileTreeViewProps } from "../model/internalTypes.js";
+ import { JSX } from "preact";
+ 
+@@ -13,6 +14,7 @@
+   itemHeight,
+   overscan,
+   renamingEnabled,
++  formatItemName,
+   renderRowDecoration,
+   searchBlurBehavior,
+   searchEnabled,

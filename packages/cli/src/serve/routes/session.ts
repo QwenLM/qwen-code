@@ -4,15 +4,32 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  isSessionStartupConfigError,
+  parseSessionStartupConfig,
+} from '@qwen-code/acp-bridge/sessionStartupConfig';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { inspect } from 'node:util';
+import { z } from 'zod';
+import {
+  hashDaemonWorkspace,
+  withDaemonSpan,
+} from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
+import { GENERATED_UI_CARD_ID_PATTERN } from '@qwen-code/qwen-code-core/services/generated-ui-state.js';
+import { writeSessionBranchSidecar } from '@qwen-code/qwen-code-core/services/session-branch-sidecar.js';
 import {
   APPROVAL_MODES,
+  AGENT_WORKTREE_SLUG_PATTERN,
   BTW_MAX_INPUT_LENGTH,
+  CARRIED_PATHS_MAX_BYTES,
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
+  WorktreeDirtyCarryConflictError,
+  clearWorktreeSessionDurable,
+  createWorktreeSession,
+  createWorktreeSessionMarker,
+  worktreeBranchForSlug,
   SessionOrganizationError,
   SessionIdCaseConflictError,
   SessionStorageEntryError,
@@ -30,29 +47,44 @@ import {
   createWorktreeSessionMarkerExclusive,
   readWorktreeSessionMarkerStrict,
   readWorktreeSessionStrict,
+  transferWorktreeSessionMarkerOwner,
+  WorktreeMarkerCommittedError,
+  clearWorktreeSession,
   writeWorktreeSession,
   readSessionPrs,
   toSessionPrInfo,
   upsertSessionPr,
+  isSessionPrRole,
   SESSION_PR_URL_MAX_LENGTH,
+  type SessionPrRole,
+  type SessionSourceInput,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionGroupPresetColor,
   type SessionArchiveState,
+  type WorktreeSession,
   parseGoalControlRequest,
+  readArtifactSnapshot,
+  isValidCronTaskRoutingId,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
 } from '@qwen-code/qwen-code-core';
+import {
+  MAX_SUB_SESSION_PROMPT_CHARS,
+  MAX_SUB_SESSION_WORKSPACE_CHARS,
+} from '@qwen-code/acp-bridge/bridgeOptions';
+import type { SubSessionLauncher } from '../create-sub-session.js';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
-  CHANNEL_PROMPT_META_KEY,
-  DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  SESSION_ATTACHMENT_CHUNK_BYTES,
+  SessionAttachmentUploadError,
+} from '@qwen-code/acp-bridge/sessionAttachments';
+import {
   type BridgeBranchedSession,
+  type BridgePersistedBranchedSession,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
-import {
-  extractErrorCode,
-  extractErrorMessage,
-  parseSessionSource,
-} from '@qwen-code/acp-bridge';
+import { parseSessionSource, summarizeReplay } from '@qwen-code/acp-bridge';
+import { readServeWorkflowActionInput } from '@qwen-code/acp-bridge/status';
 import {
   isReservedLiveSessionSource,
   isReservedStandaloneSessionSource,
@@ -82,13 +114,19 @@ import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
 import { parseChannelDelivery } from '../../runtime/channel-delivery.js';
 import {
   canonicalizeWorkspace,
+  BranchWhilePromptActiveError,
+  BridgeChannelQuarantinedError,
+  CdWhilePromptActiveError,
   InvalidClientIdError,
   InvalidSessionMetadataError,
-  PromptQueueFullError,
   SessionArtifactValidationError,
   SessionArchivedError,
   SessionConflictError,
+  SessionBusyError,
+  SessionLimitExceededError,
   SessionNotFoundError,
+  SessionResetPendingError,
+  BridgeTimeoutError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   type AcpSessionBridge,
@@ -96,8 +134,17 @@ import {
   type BridgeSessionCatalogVersion,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import {
+  BtwStreamError,
+  BtwStreamRequests,
+  streamBtwSnapshots,
+} from '../btw-stream.js';
 import type { SendBridgeError } from '../server/error-response.js';
-import { resolvePromptDeadlineMs } from '../server/prompt-deadline.js';
+import {
+  WorktreeResetActiveError,
+  WorktreeResetInvalidStateError,
+  WorktreeResetUnsupportedError,
+} from '../server/worktree-reset-errors.js';
 import {
   parseClientIdHeader,
   parseOptionalWorkspaceCwd,
@@ -109,16 +156,17 @@ import {
   InvalidCursorError,
   getWorkspaceSessionInfoForResponse,
   invalidateWorkspaceSessionListCache,
+  isPersistedSessionCursor,
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
   searchWorkspaceSessionsForResponse,
+  type ListWorkspaceSessionsOptions,
 } from '../server/session-list.js';
 import {
   archiveDaemonSessions,
   assertSessionArchived,
   assertSessionLoadable,
-  assertSessionRestorable,
   deleteDaemonSessionIfOrphan,
   deleteDaemonSessions,
   logSessionArchiveWarning,
@@ -127,22 +175,46 @@ import {
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
 import {
+  ArtifactLibraryRequestError,
+  artifactLibraryMemberError,
+  removeWorkspaceLibraryArtifact,
+  removeWorkspaceLibraryArtifacts,
+  type ArtifactLibraryRemovalResult,
+  type WorkspaceSessionArtifactsEnvelope,
+} from '../server/session-artifact-library.js';
+import { WorkspaceArtifactCache } from '../server/workspace-artifact-cache.js';
+import { ArtifactLibraryStream } from '../server/artifact-library-stream.js';
+import type { SseAdmissionCaps } from '../daemon-status.js';
+import { checkSseAdmission, countSseStream } from '../sse-occupancy.js';
+import {
+  PROMPT_IDEMPOTENCY_KEY_MAX_LENGTH,
+  admitSessionPrompt,
+  classifyPromptRequest,
+  type SessionPromptAdmission,
+} from './session-prompt-admission.js';
+import { acquireWorktreeOwnershipOp } from '../server/worktree-ownership-op.js';
+import { restoreSessionCore } from '../server/session-restore.js';
+import {
   exportSessionTranscript,
   parseSessionExportFormat,
   sessionExportFormatValues,
 } from '../server/session-export.js';
 import { setDaemonTelemetryWorkspace } from '../server/telemetry.js';
-import {
-  readRecentPromptTerminals,
-  reconcileDanglingPromptTerminals,
-  withPromptTerminals,
-} from '../prompt-terminal-ledger.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../../runtime/agent-session-source.js';
 import {
   omitSkillDetailsForSdkSurface,
   omitSkillDetailsFromReplayArrays,
 } from '../skill-details-redaction.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
+import {
+  readSessionToolCalls,
+  SessionToolCallsLimitError,
+  SessionToolCallsReplayError,
+} from '../session-tool-calls.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
 import {
   PERSIST_REASONING_SELECTION_META_KEY,
@@ -161,6 +233,8 @@ import {
   branchExists,
   isDirtyTree,
   getHeadCommit,
+  isCommitAncestor,
+  probeCommitAncestry,
   createBranch,
   checkoutRef,
   deleteBranch,
@@ -171,16 +245,26 @@ import {
   type VirtualSubagentSessions,
 } from '../virtual-subagent-sessions.js';
 import {
+  captureWorkspaceEntryCurrency,
+  failedBatchMember,
+  isGenerationClosedError,
+  MAX_BATCH_WORKSPACES,
+  MAX_MEMBER_BYTES,
+  MAX_SELECTOR_CHARS,
+  resolveWorkspaceEntryBySelector,
   resolveWorkspaceEntryFromParam,
   resolveWorkspaceRuntimeFromParam,
   sendUntrustedWorkspaceResponse,
   sendWorkspaceRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
 import {
+  redactWorkflowModeFromConfigOptions,
+  redactWorkflowModeFromSessionState,
   redactWorkflowsFromAvailableCommandsEvent,
   redactWorkflowsFromReplayArrays,
   redactWorkflowsFromSupportedCommands,
 } from '../workflow-session-gate.js';
+import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 import type {
   WorkspaceEntry,
   WorkspaceRegistry,
@@ -192,11 +276,16 @@ import {
   createWorkspaceRuntimeSessionService,
   runWithWorkspaceRuntimeStorage,
 } from '../workspace-runtime-storage.js';
-import type { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 import {
-  CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY,
-  isChannelWorkerPromptAuthorized,
-} from '../channel-worker-prompt-authorization.js';
+  clearBranchWorktreeJournalDurable,
+  createBranchWorktreeJournal,
+  getBranchWorktreeJournalPath,
+  isBranchWorktreeCreationSupported,
+  resolveBranchWorktreeBaseCheckout,
+  updateBranchWorktreeJournal,
+  type BranchWorktreePreparationJournal,
+} from '../branch-worktree-preparation.js';
+import type { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 import {
   createRequestedSessionIdAdmission,
   RequestedSessionIdAdmissionError,
@@ -241,18 +330,53 @@ function redactSdkSurfaceReplay<
 const MAX_BRANCH_NAME_BYTES = 1000;
 const MAX_BRANCH_COMPONENT_BYTES = 200;
 
+// Mirrors validateBranchName in GitModePopover.tsx; keep the two in sync.
+function isValidGitBranchName(name: string): boolean {
+  return !(
+    /[^\p{L}\p{N}._/-]/u.test(name) ||
+    name.includes('..') ||
+    name.includes('//') ||
+    name.startsWith('.') ||
+    name.startsWith('-') ||
+    name.startsWith('/') ||
+    name.endsWith('/') ||
+    name.endsWith('.') ||
+    name.endsWith('.git') ||
+    name.includes('@{') ||
+    name.split('/').some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
+    name.toUpperCase() === GIT_RESERVED_BRANCH ||
+    Buffer.byteLength(name, 'utf8') > MAX_BRANCH_NAME_BYTES ||
+    name
+      .split('/')
+      .some((c) => Buffer.byteLength(c, 'utf8') > MAX_BRANCH_COMPONENT_BYTES)
+  );
+}
+
 interface RegisterSessionRoutesDeps {
   boundWorkspace: string;
   bridge: AcpSessionBridge;
   workspaceRegistry: WorkspaceRegistry;
   archiveCoordinator: SessionArchiveCoordinator;
   requestedSessionIdAdmission?: RequestedSessionIdAdmission;
+  /**
+   * Fired after a load/resume makes a session live, so the PR watch can deliver
+   * its pending transitions now instead of at the next tick (design §2). Never
+   * awaited: the watch's per-PR lock is not re-entrant, and a restore the drain
+   * itself dispatched must not wait on a drain.
+   */
+  onSessionRestored?: (input: {
+    runtime: WorkspaceRuntime;
+    workspaceCwd: string;
+    sessionId: string;
+  }) => void;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
   daemonLog?: DaemonLogger;
+  sseAdmissionCaps?: SseAdmissionCaps;
   channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
+  sessionArtifactsPersistenceAvailable?: boolean;
   languageCodes: string[];
   virtualSubagentSessions?: VirtualSubagentSessions;
   materializeLiveConversationDirectory?: (sessionId: string) => Promise<string>;
@@ -278,13 +402,20 @@ const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES =
 const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
-// Must exceed CHANNEL_DELIVERY_IPC_TIMEOUT_MS (30 s, channel-delivery-ipc.ts) plus scheduling slack.
-const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
+const ARTIFACT_LIBRARY_CONCURRENCY = 4;
 // Media blocks are resolved into inline bytes at dispatch, so an unbounded
 // content array lets one small request fan out into gigabytes of heap (a
 // repeated reference resolves to the same 8 MiB image once per occurrence).
 // Keep a single request from expanding an unbounded number of content blocks.
 const MEDIA_CONTENT_MAX_BLOCKS = 256;
+
+// The two restoreFailed refusal notes for a handoff-to-local snapshot conflict,
+// chosen from rollback()'s actual result. Named so each arm is greppable by its
+// text (the route tests assert on these substrings).
+const HANDOFF_RESTORE_NOTE_RESTORED =
+  ' — the local checkout was force-restored by rollback; inspect it if conflict markers remain';
+const HANDOFF_RESTORE_NOTE_FAILED =
+  ' — the local checkout could not be restored and may still hold conflict markers; inspect it before retrying';
 
 // SVG is allowed as an ordinary file resource but never as an inline image.
 // Compare the normalized media type so spelling variants cannot bypass the
@@ -364,27 +495,15 @@ function mediaBlockParseError(
   }
   return `each ${entryLabel} must be an inline content block or carry \`attachmentId\`, \`size\`, and \`mimeType\``;
 }
-const PRIMARY_ONLY_LIVE_SESSION_ROUTES = ['POST /session/:id/cd'] as const;
 const PRIMARY_OR_INTERNAL_LIVE_SESSION_ROUTES = [
   'POST /session/:id/branch',
-  'POST /session/:id/side-task',
   'POST /session/:id/fork',
 ] as const;
-type PrimaryOnlyLiveSessionRoute =
-  (typeof PRIMARY_ONLY_LIVE_SESSION_ROUTES)[number];
 type PrimaryOrInternalLiveSessionRoute =
   (typeof PRIMARY_OR_INTERNAL_LIVE_SESSION_ROUTES)[number];
 type RestrictedLiveSessionRoute =
-  | PrimaryOnlyLiveSessionRoute
+  | 'POST /session/:id/cd'
   | PrimaryOrInternalLiveSessionRoute;
-
-function isPrimaryOnlyLiveSessionRoute(
-  route: string,
-): route is PrimaryOnlyLiveSessionRoute {
-  return (PRIMARY_ONLY_LIVE_SESSION_ROUTES as readonly string[]).includes(
-    route,
-  );
-}
 
 function isPrimaryOrInternalLiveSessionRoute(
   route: string,
@@ -454,31 +573,6 @@ function sendSessionOrganizationError(res: Response, err: unknown): boolean {
     ...(err.field !== undefined ? { field: err.field } : {}),
   });
   return true;
-}
-
-/**
- * Renders a prompt-turn rejection for the daemon log. Non-Error rejections
- * (bare JSON-RPC error objects forwarded by the bridge) must not degrade to
- * `[object Object]` — that hid the failure cause in production incidents
- * (#10710), so extract the structured message/code instead.
- */
-export function describePromptTurnFailure(err: unknown): string {
-  const detail = extractErrorMessage(err);
-  if (err instanceof Error) {
-    return `[${err.name}] ${detail}`;
-  }
-  const code = extractErrorCode(err);
-  // `extractErrorMessage` terminates in `String(err)`, which renders a plain
-  // object as `[object Object]`. Fall back to `inspect` for those: unlike
-  // `JSON.stringify` it never throws, so circular and non-serializable
-  // rejections stay readable instead of degrading again.
-  const rendered =
-    typeof err === 'object' &&
-    err !== null &&
-    (detail === '' || detail === String(err))
-      ? inspect(err, { depth: 2, breakLength: Infinity })
-      : detail;
-  return code === undefined ? rendered : `[code ${code}] ${rendered}`;
 }
 
 function parseTranscriptLimitQuery(
@@ -643,16 +737,22 @@ function parseHistoryPageSize(
   return value as number;
 }
 
-function parseLiveReplayMode(
+function parseReplayMode(
   body: Record<string, unknown>,
   res: Response,
+  key: 'liveReplayMode' | 'compactedReplayMode' | 'eventDetailMode',
 ): 'full' | 'summary' | undefined | null {
-  const value = body['liveReplayMode'];
+  const value = body[key];
   if (value === undefined) return undefined;
   if (value !== 'full' && value !== 'summary') {
     res.status(400).json({
-      error: '`liveReplayMode` must be `full` or `summary`',
-      code: 'invalid_live_replay_mode',
+      error: `\`${key}\` must be \`full\` or \`summary\``,
+      code:
+        key === 'liveReplayMode'
+          ? 'invalid_live_replay_mode'
+          : key === 'compactedReplayMode'
+            ? 'invalid_compacted_replay_mode'
+            : 'invalid_event_detail_mode',
     });
     return null;
   }
@@ -734,6 +834,20 @@ function parseRequestedSessionSource(
   body: Record<string, unknown>,
   res: Response,
 ): { sourceType?: string; sourceId?: string } | null {
+  // Agent sessions are created by the session-agents orchestrator
+  // in-process, never through this route. Accepting the source here would let
+  // a client relabel a session it restores so a real run is sent into it.
+  if (
+    body['sourceType'] === AGENT_HOST_SESSION_SOURCE_TYPE ||
+    body['sourceType'] === AGENT_SESSION_SOURCE_TYPE
+  ) {
+    res.status(400).json({
+      error:
+        'The requested session source is reserved for daemon-owned agent sessions.',
+      code: 'reserved_session_source',
+    });
+    return null;
+  }
   if (
     isReservedStandaloneSessionSource({
       sourceType:
@@ -766,10 +880,17 @@ function parseRequestedSessionSource(
   return source;
 }
 
+export type ResolveSubagentSessionRuntime = (
+  res: Response,
+  route: string,
+  parentSessionId: string,
+) => Promise<WorkspaceRuntime | undefined>;
+
 export function registerSessionRoutes(
   app: Application,
   deps: RegisterSessionRoutesDeps,
-): void {
+): { resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime } {
+  const btwStreams = new BtwStreamRequests();
   const {
     boundWorkspace,
     workspaceRegistry,
@@ -845,49 +966,23 @@ export function registerSessionRoutes(
     return guard ? () => guard.assertOpen() : undefined;
   };
   const LANGUAGE_CODES = deps.languageCodes;
+  const workspaceArtifactCaches = new WeakMap<
+    WorkspaceRuntime,
+    WorkspaceArtifactCache
+  >();
+  const artifactCache = (runtime: WorkspaceRuntime): WorkspaceArtifactCache => {
+    let cache = workspaceArtifactCaches.get(runtime);
+    if (!cache) {
+      cache = new WorkspaceArtifactCache(runtime);
+      workspaceArtifactCaches.set(runtime, cache);
+    }
+    return cache;
+  };
   const transcriptCursorMasterKey = crypto.randomBytes(32);
   const transcriptCursorCodecs = new Map<
     string,
     SessionTranscriptCursorCodec
   >();
-  // A Channel restore keeps its recovered question deferred until this route
-  // validates and relocates the worktree. Serialize that integrity window so
-  // a second restore cannot enter the bridge and queue cwd behind the prompt.
-  const worktreeRestoreTails = new WeakMap<
-    AcpSessionBridge,
-    Map<string, Promise<void>>
-  >();
-  const acquireWorktreeRestore = async (
-    bridge: AcpSessionBridge,
-    sessionId: string,
-  ): Promise<() => void> => {
-    let tails = worktreeRestoreTails.get(bridge);
-    if (!tails) {
-      tails = new Map();
-      worktreeRestoreTails.set(bridge, tails);
-    }
-    const key = normalizeSessionIdForLookup(sessionId);
-    const previous = tails.get(key);
-    let releaseGate!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      releaseGate = resolve;
-    });
-    const tail = (previous ?? Promise.resolve()).then(() => gate);
-    tails.set(key, tail);
-    if (previous) {
-      await previous;
-    }
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      releaseGate();
-      if (tails.get(key) === tail) {
-        tails.delete(key);
-      }
-    };
-  };
-
   // Tracks workspaces with an active branch session (workspaceCwd → sessionId).
   // Prevents concurrent branch sessions that would conflict on HEAD. The
   // POST /session branch block additionally rejects branch creation while any
@@ -1045,6 +1140,24 @@ export function registerSessionRoutes(
     res.status(400).json({
       error: `Workspace mismatch: daemon is bound to "${boundWorkspace}"`,
       code: 'workspace_mismatch',
+      boundWorkspace,
+      requestedWorkspace,
+    });
+  };
+
+  // A workspace with no registry entry at all (removed, or never registered)
+  // is a PERMANENT absence, unlike the reversible draining/transitioning
+  // states that still have an entry and answer workspace_mismatch /
+  // workspace_runtime_unavailable. Callers (e.g. the channel worker's
+  // bound-session wake) may classify this 404 as gone without risking the
+  // reversible states.
+  const sendWorkspaceNotFound = (
+    res: Response,
+    requestedWorkspace: string,
+  ): void => {
+    res.status(404).json({
+      error: `Workspace not found: "${requestedWorkspace}" is not registered with this daemon.`,
+      code: 'workspace_not_found',
       boundWorkspace,
       requestedWorkspace,
     });
@@ -1483,6 +1596,10 @@ export function registerSessionRoutes(
         archiveState: 'active',
         size: 1,
         signal,
+        excludeSourceTypes: [
+          AGENT_HOST_SESSION_SOURCE_TYPE,
+          AGENT_SESSION_SOURCE_TYPE,
+        ],
       });
       signal.throwIfAborted();
       return page.items.length > 0;
@@ -1490,17 +1607,6 @@ export function registerSessionRoutes(
       signal.throwIfAborted();
       return false;
     }
-  };
-
-  const isNumericSessionCursor = (cursor: string): boolean => {
-    const trimmed = cursor.trim();
-    if (trimmed === '') return false;
-    const parsed = Number(trimmed);
-    return (
-      Number.isFinite(parsed) &&
-      parsed >= 0 &&
-      parsed <= Number.MAX_SAFE_INTEGER
-    );
   };
 
   const requireTrustedRuntimeForWorkspaceRoute = (
@@ -1774,6 +1880,20 @@ export function registerSessionRoutes(
       ? managedEntry.current?.runtime
       : workspaceRegistry.resolveWorkspaceCwd('cwd' in body ? key : undefined);
     if (!runtime) {
+      // Distinguish permanent absence (no registry entry at all) from the
+      // reversible non-active states (entry exists but is draining /
+      // transitioning / blocked): only the former is a gone workspace.
+      const entry =
+        'cwd' in body
+          ? workspaceRegistry.getEntryByWorkspaceCwd(key)
+          : undefined;
+      if ('cwd' in body && !entry) {
+        logSessionRoutingFailure(route, 'workspace_not_found', {
+          requestedWorkspace: key,
+        });
+        sendWorkspaceNotFound(res, key);
+        return undefined;
+      }
       logSessionRoutingFailure(route, 'workspace_mismatch', {
         requestedWorkspace: key,
       });
@@ -1854,6 +1974,19 @@ export function registerSessionRoutes(
     });
   };
 
+  const sendStandaloneActionUnsupported = (
+    res: Response,
+    route: string,
+    sessionId: string,
+  ): void => {
+    res.status(400).json({
+      error: 'This action is not supported in a standalone session.',
+      code: 'unsupported_action',
+      sessionId,
+      route,
+    });
+  };
+
   const isStandaloneOwner = (
     runtime: WorkspaceRuntime,
     sessionId: string,
@@ -1908,6 +2041,7 @@ export function registerSessionRoutes(
       options: {
         cwdBound?: 'always' | 'rewind-files' | 'sync-output-language';
         promptAdmission?: boolean;
+        rejectStandalone?: boolean;
       } = {},
     ): RequestHandler =>
     async (req, res) => {
@@ -1917,12 +2051,27 @@ export function registerSessionRoutes(
         const owner = await resolveOwnerSessionRuntime(sessionId, res, route);
         if (!owner) return;
         const { runtime, standalone } = owner;
+        if (options.rejectStandalone && standalone) {
+          sendStandaloneActionUnsupported(res, route, sessionId);
+          return;
+        }
         const cwdBound =
           options.cwdBound === 'always' ||
           (options.cwdBound === 'rewind-files' &&
             safeBody(req)['rewindFiles'] !== false) ||
           (options.cwdBound === 'sync-output-language' &&
             safeBody(req)['syncOutputLanguage'] === true);
+        if (
+          runtime.routeFileSystemFactory.sshWorkspace &&
+          cwdBound &&
+          route !== 'POST /session/:id/continue'
+        ) {
+          res.status(501).json({
+            code: 'ssh_workspace_operation_unsupported',
+            error: 'This operation is not supported for SSH workspaces.',
+          });
+          return;
+        }
         if (standalone && (options.promptAdmission || cwdBound)) {
           const service = deps.standaloneSessionService;
           if (!service) {
@@ -2028,9 +2177,18 @@ export function registerSessionRoutes(
       if (location !== 'active') return false;
       if (!isInternalWorkspaceRuntime(runtime)) return true;
       const service = createWorkspaceRuntimeSessionService(runtime);
+      const session = await readLoadableConversationSession(sessionId, service);
+      if (session === undefined) return false;
+      // Beyond what the Live-only compatibility adapter admitted, only a
+      // top-level explicit standalone session is in scope here: the dedicated
+      // standalone surface refuses child sessions, so they stay unreachable
+      // from the generic transcript routes.
+      if (session.metadata.parentSessionId === undefined) return true;
       return (
-        (await readLoadableLiveConversationMetadata(sessionId, service)) !==
-        undefined
+        session.kind === 'live' ||
+        (session.kind === 'standalone' &&
+          session.persistence === 'legacy' &&
+          session.parentSource?.persistence === 'legacy')
       );
     };
     const throwMissingActiveTranscript = (): never => {
@@ -2262,6 +2420,44 @@ export function registerSessionRoutes(
       );
     }
     return throwMissingActiveTranscript();
+  };
+
+  const resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime = async (
+    res,
+    route,
+    parentSessionId,
+  ) => {
+    const owner = workspaceRegistry.resolveLiveSessionOwner(parentSessionId);
+    if (owner.kind !== 'not_found') {
+      return requireSessionRuntime({
+        sessionId: parentSessionId,
+        route,
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+    }
+    try {
+      return await resolveTranscriptSessionRuntime(
+        res,
+        route,
+        parentSessionId,
+        false,
+      );
+    } catch (error) {
+      if (
+        error instanceof SessionNotFoundError &&
+        error.code === 'session_not_found' &&
+        (workspaceRegistry.primaryEntry.state !== 'active' ||
+          !workspaceRegistry.primaryEntry.current)
+      ) {
+        logSessionRoutingFailure(route, 'workspace_runtime_unavailable', {
+          sessionId: parentSessionId,
+        });
+        return requirePrimarySessionRuntime(workspaceRegistry, res);
+      }
+      throw error;
+    }
   };
 
   const resolveSessionAnyStateRuntime = async (
@@ -2550,6 +2746,20 @@ export function registerSessionRoutes(
     return undefined;
   };
 
+  const parseRequireIdle = (
+    req: Request,
+    res: Response,
+  ): boolean | undefined => {
+    const value: unknown = safeBody(req)['requireIdle'];
+    if (value === undefined) return false;
+    if (typeof value === 'boolean') return value;
+    res.status(400).json({
+      error: '`requireIdle` must be a boolean',
+      code: 'invalid_request',
+    });
+    return undefined;
+  };
+
   // Mirrors the bridge's displayName control-character rule (ESLint forbids
   // control-char regexes).
   const hasControlCharacter = (value: string): boolean =>
@@ -2564,7 +2774,12 @@ export function registerSessionRoutes(
     req: Request,
     res: Response,
   ):
-    | { number: number; url: string; state?: 'open' | 'merged' | 'closed' }
+    | {
+        number: number;
+        url: string;
+        state?: 'open' | 'merged' | 'closed';
+        role?: SessionPrRole | null;
+      }
     | null
     | undefined => {
     const raw: unknown = safeBody(req)['pr'];
@@ -2573,6 +2788,7 @@ export function registerSessionRoutes(
     const number = candidate?.['number'];
     const url = candidate?.['url'];
     const state = candidate?.['state'];
+    const role = candidate?.['role'];
     if (
       candidate === null ||
       typeof candidate !== 'object' ||
@@ -2588,16 +2804,23 @@ export function registerSessionRoutes(
       (state !== undefined &&
         state !== 'open' &&
         state !== 'merged' &&
-        state !== 'closed')
+        state !== 'closed') ||
+      // null is the explicit clear; an omitted role preserves the known one.
+      (role !== undefined && role !== null && !isSessionPrRole(role))
     ) {
       res.status(400).json({
-        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, and an optional \`state\` that is one of \`open\`, \`merged\`, or \`closed\``,
+        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters, an optional \`state\` that is one of \`open\`, \`merged\`, or \`closed\`, and an optional \`role\` that is one of \`review\`, \`verify\`, \`fix\`, or null to clear`,
         code: 'invalid_metadata',
         field: 'pr',
       });
       return null;
     }
-    return { number, url, ...(state ? { state } : {}) };
+    return {
+      number,
+      url,
+      ...(state ? { state } : {}),
+      ...(role !== undefined ? { role: role as SessionPrRole | null } : {}),
+    };
   };
 
   const serializeSessionErrors = (
@@ -2679,6 +2902,7 @@ export function registerSessionRoutes(
               coordinator: archiveCoordinator,
               coordinatorLockHeld,
               assertCanMutate,
+              runtimeWorkspaceCwd: runtime.workspaceCwd,
               onError: ({ phase, sessionId, error }) => {
                 writeStderrLine(
                   `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
@@ -2699,6 +2923,7 @@ export function registerSessionRoutes(
     route: string,
     sessionIds: string[],
     resolveConflicts = false,
+    requireIdle = false,
   ) => {
     const run = async (
       runtime: WorkspaceRuntime,
@@ -2721,6 +2946,7 @@ export function registerSessionRoutes(
               coordinator: archiveCoordinator,
               coordinatorLockHeld,
               resolveConflicts,
+              requireIdle,
               assertCanMutate,
             }),
           ),
@@ -2778,8 +3004,7 @@ export function registerSessionRoutes(
     ) => Promise<void> | void,
     options: { cwdBound?: boolean; rejectStandalone?: boolean } = {},
   ): RequestHandler => {
-    const primaryOnly = isPrimaryOnlyLiveSessionRoute(route);
-    if (!primaryOnly && !isPrimaryOrInternalLiveSessionRoute(route)) {
+    if (!isPrimaryOrInternalLiveSessionRoute(route)) {
       throw new Error(`Unregistered restricted session route: ${route}`);
     }
     return async (req, res) => {
@@ -2790,18 +3015,10 @@ export function registerSessionRoutes(
         if (!owner) return;
         const { runtime, standalone } = owner;
         if (options.rejectStandalone && standalone) {
-          res.status(400).json({
-            error: 'This action is not supported in a standalone session.',
-            code: 'unsupported_action',
-            sessionId,
-            route,
-          });
+          sendStandaloneActionUnsupported(res, route, sessionId);
           return;
         }
-        if (
-          !runtime.primary &&
-          (primaryOnly || !isInternalWorkspaceRuntime(runtime))
-        ) {
+        if (!runtime.primary && !isInternalWorkspaceRuntime(runtime)) {
           logSessionRoutingFailure(
             route,
             'non_primary_session_route_not_supported',
@@ -2847,6 +3064,17 @@ export function registerSessionRoutes(
     const resolvedRuntime = resolveRuntimeForSessionCreation(body, res);
     if (resolvedRuntime === undefined) return;
     const { runtime, workspaceCwd } = resolvedRuntime;
+    if (
+      runtime.routeFileSystemFactory.sshWorkspace &&
+      (body['branch'] != null || body['worktree'] != null)
+    ) {
+      res.status(501).json({
+        code: 'ssh_workspace_operation_unsupported',
+        error:
+          'Create branches and worktrees through the remote agent or SSH terminal.',
+      });
+      return;
+    }
     if (runtime.provenance === 'live-conversation') {
       res.status(400).json({
         error:
@@ -2857,6 +3085,13 @@ export function registerSessionRoutes(
     }
     const assertRuntimeGenerationOpen =
       captureRuntimeGenerationAssertion(runtime);
+    let startupConfig;
+    try {
+      startupConfig = parseSessionStartupConfig(body['startupConfig'], body);
+    } catch (error) {
+      sendBridgeError(res, error, { route: 'POST /session' });
+      return;
+    }
     const modelServiceId =
       typeof body['modelServiceId'] === 'string'
         ? (body['modelServiceId'] as string)
@@ -2913,11 +3148,21 @@ export function registerSessionRoutes(
       }
     }
 
-    let branchMeta: { name: string; baseBranch: string } | undefined;
+    let branchMeta:
+      | { name: string; baseBranch: string; baseCommit?: string }
+      | undefined;
     let branchBaseCommit: string | undefined;
     let worktreeMeta:
-      | { slug: string; path: string; branch: string }
+      | {
+          slug: string;
+          path: string;
+          branch: string;
+          baseCommit?: string;
+          baseBranch?: string;
+        }
       | undefined;
+    let worktreeBaseBranch: string | undefined;
+    let worktreeBaseCommit: string | undefined;
     let worktreeDurablyAttached = false;
     let spawnCompleted = false;
 
@@ -2957,29 +3202,7 @@ export function registerSessionRoutes(
           return;
         }
         // Validate git branch name characters and reserved names.
-        // Mirrors validateBranchName in GitModePopover.tsx; keep in sync.
-        if (
-          /[^\p{L}\p{N}._/-]/u.test(branchName) ||
-          branchName.includes('..') ||
-          branchName.includes('//') ||
-          branchName.startsWith('.') ||
-          branchName.startsWith('-') ||
-          branchName.startsWith('/') ||
-          branchName.endsWith('/') ||
-          branchName.endsWith('.') ||
-          branchName.endsWith('.git') ||
-          branchName.includes('@{') ||
-          branchName
-            .split('/')
-            .some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
-          branchName.toUpperCase() === GIT_RESERVED_BRANCH ||
-          Buffer.byteLength(branchName, 'utf8') > MAX_BRANCH_NAME_BYTES ||
-          branchName
-            .split('/')
-            .some(
-              (c) => Buffer.byteLength(c, 'utf8') > MAX_BRANCH_COMPONENT_BYTES,
-            )
-        ) {
+        if (!isValidGitBranchName(branchName)) {
           res.status(400).json({
             error: `Invalid branch name: ${branchName}`,
             code: 'branch_invalid_name',
@@ -3013,7 +3236,16 @@ export function registerSessionRoutes(
         // by a "new chat" does not block a fresh branch session.
         const sharedCheckoutSession = runtime.bridge
           .listWorkspaceSessions(workspaceCwd)
-          .find((session) => !session.worktree && session.clientCount > 0);
+          .find(
+            (session) =>
+              session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE &&
+              // Mesh agent bodies hold no user edits and are driven by the
+              // daemon, not by a person at a checkout — they must not block
+              // branch creation in the workspace they happen to share.
+              session.sourceType !== AGENT_SESSION_SOURCE_TYPE &&
+              !session.worktree &&
+              session.clientCount > 0,
+          );
         if (sharedCheckoutSession) {
           res.status(409).json({
             error:
@@ -3125,7 +3357,7 @@ export function registerSessionRoutes(
           });
           return;
         }
-        branchMeta = { name: branchName, baseBranch };
+        branchMeta = { name: branchName, baseBranch, baseCommit };
         branchBaseCommit = baseCommit;
         sessionScope = 'thread';
       }
@@ -3176,7 +3408,9 @@ export function registerSessionRoutes(
         } else {
           slug = rawSlug;
         }
-        const slugError = GitWorktreeService.validateUserWorktreeSlug(slug);
+        const slugError = AGENT_WORKTREE_SLUG_PATTERN.test(slug)
+          ? 'Worktree name is reserved for ephemeral agent worktrees.'
+          : GitWorktreeService.validateUserWorktreeSlug(slug);
         if (slugError) {
           res
             .status(400)
@@ -3186,9 +3420,34 @@ export function registerSessionRoutes(
         const baseBranch = await wtService
           .getCurrentBranch()
           .catch(() => undefined);
+        // Record the base the worktree starts from: the handoff back to
+        // local promotes a branch only when HEAD moved past this commit.
+        worktreeBaseBranch = baseBranch;
+        worktreeBaseCommit = await getHeadCommit(workspaceCwd);
+        if (!worktreeBaseCommit) {
+          // An unborn HEAD (no commits yet) has no base to detach from;
+          // git worktree add would fail with a generic error.
+          res.status(409).json({
+            error: 'The workspace has no commits to base a worktree on',
+            code: 'worktree_base_unavailable',
+          });
+          return;
+        }
         assertRuntimeGenerationOpen?.();
-        const wtResult = await wtService.createUserWorktree(slug, baseBranch);
+        const wtResult = await wtService.createUserWorktree(slug, baseBranch, {
+          carryDirtyState: true,
+          detached: true,
+        });
         if (!wtResult.success || !wtResult.worktree) {
+          // An in-progress merge/rebase is a state the user can clear, not a
+          // daemon fault: answer a readable 409 rather than a 500 (R12-1).
+          if (wtResult.code === 'worktree_merge_in_progress') {
+            res.status(409).json({
+              error: wtResult.error ?? 'The workspace has an in-progress merge',
+              code: 'worktree_merge_in_progress',
+            });
+            return;
+          }
           res.status(500).json({
             error: wtResult.error ?? 'Failed to create worktree',
             code: 'worktree_create_failed',
@@ -3199,6 +3458,8 @@ export function registerSessionRoutes(
           slug,
           path: wtResult.worktree.path,
           branch: wtResult.worktree.branch,
+          baseCommit: worktreeBaseCommit,
+          baseBranch: worktreeBaseBranch,
         };
         // Worktree sessions must be independent — never coalesce onto an
         // existing single-scope session that lives in the main checkout.
@@ -3210,10 +3471,20 @@ export function registerSessionRoutes(
         sessionScope = 'thread';
       }
 
+      // A plain session (no branch/worktree) still has a start commit: the
+      // HEAD it was created from. Capture it so the change overview's commit
+      // fallback can scope to <baseCommit>..HEAD instead of suppressing for
+      // lack of a boundary. A failed read stays undefined (no boundary).
+      const plainBaseCommit =
+        !branchMeta && !worktreeMeta
+          ? await getHeadCommit(workspaceCwd).catch(() => undefined)
+          : undefined;
+
       assertRuntimeGenerationOpen?.();
       const session = await runtime.bridge.spawnOrAttach({
         workspaceCwd,
         modelServiceId,
+        ...(startupConfig ? { startupConfig } : {}),
         ...(clientId !== undefined ? { clientId } : {}),
         ...(sessionScope !== undefined ? { sessionScope } : {}),
         ...(approvalMode !== undefined ? { approvalMode } : {}),
@@ -3223,6 +3494,7 @@ export function registerSessionRoutes(
         ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
         ...(worktreeMeta ? { worktree: worktreeMeta } : {}),
         ...(branchMeta ? { branch: branchMeta } : {}),
+        ...(plainBaseCommit ? { baseCommit: plainBaseCommit } : {}),
         ...(requestedSessionId !== undefined
           ? { sessionId: requestedSessionId }
           : {}),
@@ -3261,7 +3533,10 @@ export function registerSessionRoutes(
         // and inFlightBranchWorkspaces permanently blocks the workspace.
         if (worktreeMeta) {
           await new GitWorktreeService(workspaceCwd)
-            .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+            .removeUserWorktree(worktreeMeta.slug, {
+              deleteBranch: true,
+              baseCommit: worktreeBaseCommit,
+            })
             .catch(() => {});
         }
         if (branchMeta) {
@@ -3283,7 +3558,7 @@ export function registerSessionRoutes(
       } catch (error) {
         if (!session.attached) {
           try {
-            const removed = await runWithWorkspaceRuntimeStorage(runtime, () =>
+            await runWithWorkspaceRuntimeStorage(runtime, () =>
               deleteDaemonSessionIfOrphan({
                 sessionId: session.sessionId,
                 service: createWorkspaceRuntimeSessionService(runtime),
@@ -3291,13 +3566,6 @@ export function registerSessionRoutes(
                 coordinator: archiveCoordinator,
               }),
             );
-            if (removed) {
-              if (worktreeMeta) {
-                await new GitWorktreeService(workspaceCwd)
-                  .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
-                  .catch(() => {});
-              }
-            }
           } catch {
             // Runtime disposal remains responsible for final containment.
           }
@@ -3305,6 +3573,38 @@ export function registerSessionRoutes(
           await runtime.bridge
             .detachClient(session.sessionId, session.clientId)
             .catch(() => {});
+        }
+        // Relocation is only attempted after this check, so no session has
+        // entered the worktree and nothing can own the checkout regardless of
+        // how session cleanup turned out. This deliberately differs from the
+        // relocation and persistence failure handlers below, which may still
+        // have a live session inside the checkout and so remove it only after
+        // a definitive session delete; leaving the checkout here would orphan
+        // the directory, its git registration, and its branch permanently.
+        if (worktreeMeta) {
+          const rollbackSlug = worktreeMeta.slug;
+          await new GitWorktreeService(workspaceCwd)
+            .removeUserWorktree(rollbackSlug, {
+              deleteBranch: true,
+              baseCommit: worktreeBaseCommit,
+            })
+            .catch((removalError) => {
+              // A failed removal here recreates the exact orphan this block
+              // exists to prevent, and the caller only sees the generation
+              // 503 — name the worktree in the daemon log so the leak is
+              // diagnosable.
+              daemonLog?.warn(
+                'worktree removal failed during generation-closed rollback',
+                {
+                  sessionId: session.sessionId,
+                  slug: rollbackSlug,
+                  error:
+                    removalError instanceof Error
+                      ? removalError.message
+                      : String(removalError),
+                },
+              );
+            });
         }
         throw error;
       }
@@ -3366,7 +3666,10 @@ export function registerSessionRoutes(
               // Clean up the worktree if one was created for this session.
               if (worktreeMeta) {
                 await new GitWorktreeService(workspaceCwd)
-                  .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+                  .removeUserWorktree(worktreeMeta.slug, {
+                    deleteBranch: true,
+                    baseCommit: worktreeBaseCommit,
+                  })
                   .catch(() => {});
               }
               // Roll back the branch if one was created for this session.
@@ -3481,7 +3784,10 @@ export function registerSessionRoutes(
           // session was definitively removed.
           if (removedSession) {
             await new GitWorktreeService(workspaceCwd)
-              .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+              .removeUserWorktree(worktreeMeta.slug, {
+                deleteBranch: true,
+                baseCommit: worktreeBaseCommit,
+              })
               .catch(() => {});
           }
           res.status(500).json({
@@ -3506,8 +3812,9 @@ export function registerSessionRoutes(
               worktreeBranch: worktreeMeta.branch,
               originalCwd: workspaceCwd,
               workspaceCwd,
-              originalBranch: '',
-              originalHeadCommit: '',
+              originalBranch: worktreeBaseBranch ?? '',
+              originalHeadCommit: worktreeBaseCommit ?? '',
+              worktreeBase: worktreeBaseCommit,
             },
           );
           assertRuntimeGenerationOpen?.();
@@ -3536,7 +3843,10 @@ export function registerSessionRoutes(
           }
           if (removed) {
             await new GitWorktreeService(workspaceCwd)
-              .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+              .removeUserWorktree(worktreeMeta.slug, {
+                deleteBranch: true,
+                baseCommit: worktreeBaseCommit,
+              })
               .catch(() => {});
           } else {
             daemonLog?.warn(
@@ -3569,7 +3879,10 @@ export function registerSessionRoutes(
       // user-named worktrees).
       if (worktreeMeta && !worktreeDurablyAttached && !spawnCompleted) {
         await new GitWorktreeService(workspaceCwd)
-          .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+          .removeUserWorktree(worktreeMeta.slug, {
+            deleteBranch: true,
+            baseCommit: worktreeBaseCommit,
+          })
           .catch(() => {});
       }
       // Roll back the branch if spawn failed — switch back to the base
@@ -3581,6 +3894,54 @@ export function registerSessionRoutes(
           branchBaseCommit,
           daemonLog,
         );
+      }
+      // A definite startup-config rejection already closed the live
+      // session in the bridge, but the recording the spawn persisted
+      // survives — and reserveCreate would answer every retry of the
+      // caller-supplied id with 409 session_id_conflict, while a
+      // daemon-generated id leaves a listed, resumable phantom. Roll the
+      // recording back the way the other spawn-failure paths do, naming
+      // the session the rejection was actually applied to. Uncertain
+      // outcomes keep it: the close result is unknown.
+      const rejectedSessionId =
+        (isSessionStartupConfigError(err) ? err.sessionId : undefined) ??
+        requestedSessionId;
+      if (
+        rejectedSessionId !== undefined &&
+        isSessionStartupConfigError(err) &&
+        err.code === 'startup_config_rejected'
+      ) {
+        let rollbackError: unknown;
+        const removed = await runWithWorkspaceRuntimeStorage(runtime, () =>
+          deleteDaemonSessionIfOrphan({
+            sessionId: rejectedSessionId,
+            service: createWorkspaceRuntimeSessionService(runtime),
+            bridge: runtime.bridge,
+            coordinator: archiveCoordinator,
+          }),
+        ).catch((cleanupError: unknown) => {
+          rollbackError = cleanupError;
+          return false;
+        });
+        if (!removed) {
+          // The definite rejection still owes the caller its 422, so an
+          // inconclusive rollback — refused because the session stayed
+          // live, or failed outright — is a daemon-log line, not a throw.
+          daemonLog?.warn(
+            'startup rejection recording rollback was inconclusive; the session id may stay occupied',
+            {
+              sessionId: rejectedSessionId,
+              ...(rollbackError === undefined
+                ? {}
+                : {
+                    error:
+                      rollbackError instanceof Error
+                        ? rollbackError.message
+                        : String(rollbackError),
+                  }),
+            },
+          );
+        }
       }
       // Only the plain creation path can promise that the initialize
       // handshake preceded every durable mutation: `branch`/`worktree`
@@ -3619,17 +3980,15 @@ export function registerSessionRoutes(
           });
           return;
         }
-        const runtime = requireSessionRuntime({
-          sessionId: virtualKey.parentSessionId,
-          route,
-          res,
-          workspaceRegistry,
-          daemonLog,
-        });
-        if (!runtime) return;
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         try {
+          const runtime = await resolveSubagentSessionRuntime(
+            res,
+            route,
+            virtualKey.parentSessionId,
+          );
+          if (!runtime) return;
           const session = await runOwnerRuntimeActivity(runtime, () =>
             virtualSubagentSessions.load(runtime, sessionId, clientId),
           );
@@ -3677,8 +4036,19 @@ export function registerSessionRoutes(
       const historyPageSize =
         action === 'load' ? parseHistoryPageSize(body ?? {}, res) : undefined;
       if (historyPageSize === null) return;
-      const liveReplayMode = parseLiveReplayMode(body ?? {}, res);
+      // Load replays history; resume restores the full journal, so the
+      // load-only replay fields are parsed only for load — resume neither
+      // uses nor rejects them (see restore-request-fields.ts).
+      const liveReplayMode =
+        action === 'load'
+          ? parseReplayMode(body ?? {}, res, 'liveReplayMode')
+          : undefined;
       if (liveReplayMode === null) return;
+      const compactedReplayMode =
+        action === 'load'
+          ? parseReplayMode(body ?? {}, res, 'compactedReplayMode')
+          : undefined;
+      if (compactedReplayMode === null) return;
       const restoreSource = parseRequestedSessionSource(body, res);
       if (restoreSource === null) return;
       const clientId = parseClientIdHeader(req, res);
@@ -3725,6 +4095,9 @@ export function registerSessionRoutes(
                   ...(clientId !== undefined ? { clientId } : {}),
                   ...(historyPageSize !== undefined ? { historyPageSize } : {}),
                   ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
+                  ...(compactedReplayMode !== undefined
+                    ? { compactedReplayMode }
+                    : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
                 },
               );
@@ -3780,594 +4153,42 @@ export function registerSessionRoutes(
           }
         }
       }
-      let sessionIdReservation: RequestedSessionIdReservation | undefined;
-      if (!isInternalWorkspaceRuntime(runtime)) {
-        try {
-          sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
-            sessionId,
-            {
-              bridge: runtime.bridge,
-              workspaceCwd,
-              workspaceId: runtime.workspaceId,
-            },
-          );
-        } catch (error) {
-          if (error instanceof RequestedSessionIdAdmissionError) {
-            sendRequestedSessionIdAdmissionError(res, error, route);
-            return;
-          }
-          throw error;
-        }
-      }
-      let restoredStorageSessionId = sessionId;
-      let suppressWorktreeContextRestore = false;
-      let deferRestoreAskUserQuestionPrompt = false;
-      let releaseWorktreeRestore: (() => void) | undefined;
       try {
-        // The coordinator canonicalizes lock keys (every case variant of a
-        // caller id contends on one key), so the request spelling alone
-        // covers the raw-spelled batch delete/archive/unarchive locks.
-        const session = await archiveCoordinator.runSharedMany(
-          [sessionId],
-          async () => {
-            const sessionService =
-              createWorkspaceRuntimeSessionService(runtime);
-            const persistedSessionId = await resolveSessionIdForRestore(
-              sessionService,
-              sessionId,
-            );
-            if (persistedSessionId) {
-              restoredStorageSessionId = persistedSessionId;
-            } else if (isInternalWorkspaceRuntime(runtime)) {
-              throw new SessionNotFoundError(sessionId);
-            }
-            const location = await assertSessionRestorable(
-              workspaceCwd,
-              restoredStorageSessionId,
-              sessionId,
-              runtime.sessionRuntimeBaseDir,
-            );
-            if (location === undefined && isInternalWorkspaceRuntime(runtime)) {
-              throw new SessionNotFoundError(sessionId);
-            }
-            // Recover the persisted parent lineage so the restored live entry
-            // reports it (the bridge otherwise creates the entry without it, and
-            // status calls would show a restored sub-session as top-level).
-            const metadata =
-              runtime.provenance === 'live-conversation'
-                ? await readLoadableLiveConversationMetadata(
-                    restoredStorageSessionId,
-                    sessionService,
-                  )
-                : await sessionService.readCreationMetadata(
-                    restoredStorageSessionId,
-                  );
-            // The reserved standalone source is hidden only on the internal
-            // Conversations runtime. Ordinary workspace restores keep
-            // loading legacy transcripts that happen to carry the reserved
-            // source string — create-side admission already blocks new ones,
-            // so every such transcript on an ordinary store predates the
-            // gate and must not become unreachable.
-            if (
-              metadata === undefined ||
-              (isInternalWorkspaceRuntime(runtime) &&
-                isReservedStandaloneSessionSource(metadata))
-            ) {
-              throw new SessionNotFoundError(sessionId);
-            }
-            const {
-              sourceType: _reservedSourceType,
-              sourceId: _reservedSourceId,
-              ...metadataWithoutSource
-            } = metadata;
-            const restoreMetadata =
-              !isInternalWorkspaceRuntime(runtime) &&
-              isReservedStandaloneSessionSource(metadata)
-                ? metadataWithoutSource
-                : metadata;
-            const hasPersistedSource =
-              'sourceType' in restoreMetadata &&
-              restoreMetadata.sourceType !== undefined;
-            const restoreRequestMetadata = {
-              ...restoreMetadata,
-              ...(hasPersistedSource || isInternalWorkspaceRuntime(runtime)
-                ? {}
-                : restoreSource),
-            };
-            const isChannelRestore =
-              restoreRequestMetadata.sourceType === 'channel';
-            let isPart4AWorktreeRestore = false;
-            if (
-              isChannelRestore &&
-              runtime.provenance !== 'live-conversation'
-            ) {
-              const sidecarBeforeRestore = await readWorktreeSessionStrict(
-                sessionService.getWorktreeSessionPath(restoredStorageSessionId),
-              );
-              isPart4AWorktreeRestore =
-                sidecarBeforeRestore.state === 'valid' &&
-                sidecarBeforeRestore.session.workspaceCwd !== undefined;
-              suppressWorktreeContextRestore = !(
-                sidecarBeforeRestore.state === 'valid' &&
-                sidecarBeforeRestore.session.workspaceCwd === undefined
-              );
-            } else {
-              suppressWorktreeContextRestore = isChannelRestore;
-            }
-            deferRestoreAskUserQuestionPrompt =
-              suppressWorktreeContextRestore &&
-              runtime.bridge.fireDeferredRestoreAskUserQuestionPrompt !==
-                undefined &&
-              runtime.bridge.discardDeferredRestoreAskUserQuestionPrompt !==
-                undefined;
-            if (deferRestoreAskUserQuestionPrompt && isPart4AWorktreeRestore) {
-              releaseWorktreeRestore = await acquireWorktreeRestore(
-                runtime.bridge,
-                sessionId,
-              );
-            }
-            assertRuntimeGenerationOpen?.();
-            if (isInternalWorkspaceRuntime(runtime)) {
-              sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
-                sessionId,
-                {
-                  bridge: runtime.bridge,
-                  workspaceCwd,
-                  workspaceId: runtime.workspaceId,
-                },
-              );
-              setDaemonTelemetryWorkspace(res, runtime.workspaceCwd);
-            }
-            let liveConversationCwd: string | undefined;
-            if (runtime.provenance === 'live-conversation') {
-              const materialize = deps.materializeLiveConversationDirectory;
-              if (!materialize) {
-                throw new Error('Live conversation workspace is unavailable.');
-              }
-              // Keyed on the canonical id, not the persisted spelling: the
-              // bridge registers the live entry under the canonical id, and
-              // every later materialize/discard call derives the directory
-              // from that same id.
-              liveConversationCwd = await materialize(sessionId);
-            }
-            assertRuntimeGenerationOpen?.();
-            const restored =
-              action === 'load'
-                ? await runtime.bridge.loadSession({
-                    sessionId,
-                    workspaceCwd,
-                    ...(suppressWorktreeContextRestore
-                      ? {
-                          suppressWorktreeContextRestore: true,
-                          ...(deferRestoreAskUserQuestionPrompt
-                            ? { deferRestoreAskUserQuestionPrompt: true }
-                            : {}),
-                        }
-                      : {}),
-                    historyReplay: 'response',
-                    ...(historyPageSize !== undefined
-                      ? { historyPageSize }
-                      : {}),
-                    ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
-                    ...(clientId !== undefined ? { clientId } : {}),
-                    ...(approvalMode !== undefined ? { approvalMode } : {}),
-                    ...restoreRequestMetadata,
-                  })
-                : await runtime.bridge.resumeSession({
-                    sessionId,
-                    workspaceCwd,
-                    ...(suppressWorktreeContextRestore
-                      ? {
-                          suppressWorktreeContextRestore: true,
-                          ...(deferRestoreAskUserQuestionPrompt
-                            ? { deferRestoreAskUserQuestionPrompt: true }
-                            : {}),
-                        }
-                      : {}),
-                    ...(clientId !== undefined ? { clientId } : {}),
-                    ...(approvalMode !== undefined ? { approvalMode } : {}),
-                    ...restoreRequestMetadata,
-                  });
-            // Every path that can register a Live entry relocates it before a
-            // prompt can start. Re-queuing cd for an active entry would block
-            // this load behind the prompt it is meant to observe.
-            if (liveConversationCwd !== undefined) {
-              if (restored.hasActivePrompt) {
-                if (restored.currentCwd === liveConversationCwd) {
-                  return restored;
-                }
-                try {
-                  if (restored.clientId) {
-                    await runtime.bridge.detachClient(
-                      restored.sessionId,
-                      restored.clientId,
-                    );
-                  }
-                } catch {
-                  // Preserve the isolation error. Never kill an active owner.
-                }
-                throw new Error(
-                  'Active Live session is outside its isolated conversation directory.',
-                );
-              }
-              try {
-                const changed = await runtime.bridge.changeSessionCwd(
-                  sessionId,
-                  {
-                    path: liveConversationCwd,
-                    allowedRoots: [runtime.workspaceCwd],
-                    managedRelocation: 'live-conversation',
-                  },
-                );
-                if (changed.newCwd !== liveConversationCwd) {
-                  throw new Error(
-                    'Live conversation directory relocation was rejected.',
-                  );
-                }
-                restored.currentCwd = changed.newCwd;
-              } catch (error) {
-                try {
-                  if (restored.attached) {
-                    if (restored.clientId) {
-                      await runtime.bridge.detachClient(
-                        restored.sessionId,
-                        restored.clientId,
-                      );
-                    }
-                  } else {
-                    await runtime.bridge.killSession(restored.sessionId, {
-                      requireZeroAttaches: true,
-                    });
-                  }
-                } catch {
-                  // Preserve the relocation error.
-                }
-                throw error;
-              }
-            }
-            // Prompt terminal ledger: reconcile prompts left in_flight by
-            // a dead previous daemon before responding. Only the cold path
-            // (no live entry attached and no active prompt on a live entry)
-            // is eligible — an attached load has a live owner that will
-            // publish the real terminal itself, and live-conversation
-            // workspaces store transcripts outside the runtime layout this
-            // reconciliation reads. Gated on `action === 'load'` to match
-            // the load-mediation contract (resume keeps its exact
-            // pre-existing response shape).
-            if (
-              action === 'load' &&
-              !restored.attached &&
-              !restored.hasActivePrompt &&
-              !deferRestoreAskUserQuestionPrompt &&
-              runtime.provenance !== 'live-conversation'
-            ) {
-              try {
-                await reconcileDanglingPromptTerminals(
-                  sessionService,
-                  sessionId,
-                );
-              } catch {
-                // Best-effort: a failure leaves dangling prompts unknown
-                // (fail-closed) and must never fail the load itself.
-              }
-            }
-            return restored;
-          },
-        );
-        const cleanupRestoredSession = async (): Promise<void> => {
-          if (deferRestoreAskUserQuestionPrompt) {
-            runtime.bridge.discardDeferredRestoreAskUserQuestionPrompt?.(
-              session.sessionId,
-              session.clientId,
-            );
-          }
-          if (session.attached) {
-            await runtime.bridge
-              .detachClient(session.sessionId, session.clientId)
-              .catch(() => {});
-          } else {
-            await runtime.bridge
-              .killSession(session.sessionId, { requireZeroAttaches: true })
-              .catch(() => {});
-          }
-        };
-        try {
-          assertRuntimeGenerationOpen?.();
-        } catch (error) {
-          await cleanupRestoredSession();
-          throw error;
-        }
-        // Mirror the `POST /session` disconnect-cleanup path (see the
-        // long comment above the matching `if (!res.writable)` there
-        // for the rationale around `res.writable` vs `req.aborted` /
-        // `req.destroyed`, plus the `requireZeroAttaches` race
-        // and the attach-rollback case). Restore needs the
-        // same cleanup because a client that disconnects during a
-        // multi-second `session/load` would otherwise leave a freshly
-        // restored session in `byId` with no client holding its id.
-        if (!res.writable) {
-          void cleanupRestoredSession();
-          return;
-        }
-        if (runtime.provenance !== 'live-conversation') {
-          const sidecarPath = createWorkspaceRuntimeSessionService(
-            runtime,
-          ).getWorktreeSessionPath(restoredStorageSessionId);
-          const sidecarResult = await readWorktreeSessionStrict(sidecarPath);
-          if (
-            sidecarResult.state === 'valid' &&
-            sidecarResult.session.workspaceCwd === undefined
-          ) {
-            const sidecar = sidecarResult.session;
-            let realTarget: string | undefined;
-            let candidateRoots: string[] = [];
-            let validationError: unknown;
-            try {
-              const workspaceRoots = [fs.realpathSync(workspaceCwd)];
-              let repoTop: string | null = null;
-              try {
-                repoTop = await new GitWorktreeService(
-                  workspaceCwd,
-                ).getRepoTopLevel();
-              } catch {
-                // Not a git repo or getRepoTopLevel unavailable.
-              }
-              if (repoTop) {
-                const realRepoTop = fs.realpathSync(repoTop);
-                if (!workspaceRoots.includes(realRepoTop)) {
-                  workspaceRoots.push(realRepoTop);
-                }
-              }
-              const realOriginalCwd = fs.realpathSync(sidecar.originalCwd);
-              if (!workspaceRoots.includes(realOriginalCwd)) {
-                throw new Error('legacy sidecar belongs to another workspace');
-              }
-              candidateRoots = workspaceRoots.map((root) =>
-                path.join(root, '.qwen', 'worktrees'),
-              );
-              realTarget = fs.realpathSync(sidecar.worktreePath);
-              const contained = candidateRoots.some((root) => {
-                try {
-                  const realRoot = fs.realpathSync(root);
-                  const relative = path.relative(realRoot, realTarget!);
-                  return (
-                    relative.length > 0 &&
-                    !relative.startsWith('..') &&
-                    !path.isAbsolute(relative)
-                  );
-                } catch {
-                  return false;
-                }
-              });
-              if (!contained) {
-                throw new Error('worktree sidecar path failed containment');
-              }
-            } catch (error) {
-              validationError = error;
-              realTarget = undefined;
-            }
-            if (!realTarget) {
-              daemonLog?.warn('worktree sidecar path failed containment', {
-                sessionId,
-                path: sidecar.worktreePath,
-                error:
-                  validationError instanceof Error
-                    ? validationError.message
-                    : String(validationError),
-              });
-            } else {
-              const worktree = {
-                slug: sidecar.slug,
-                path: realTarget,
-                branch: sidecar.worktreeBranch,
-              };
-              try {
-                if (!session.hasActivePrompt) {
-                  await runtime.bridge.changeSessionCwd(sessionId, {
-                    path: worktree.path,
-                    allowedRoots: candidateRoots,
-                  });
-                }
-                runtime.bridge.setSessionWorktree(sessionId, worktree);
-                session.worktree = worktree;
-              } catch (restoreErr) {
-                daemonLog?.warn('worktree restore failed on load/resume', {
-                  sessionId,
-                  worktreePath: worktree.path,
-                  error:
-                    restoreErr instanceof Error
-                      ? restoreErr.message
-                      : String(restoreErr),
-                });
-              }
-            }
-          } else if (sidecarResult.state !== 'missing') {
-            try {
-              if (sidecarResult.state !== 'valid') {
-                throw new Error('Worktree sidecar is missing or invalid');
-              }
-              const sidecar = sidecarResult.session;
-              const realWorkspace = fs.realpathSync(workspaceCwd);
-              if (sidecar.workspaceCwd !== undefined) {
-                let realSidecarWorkspace: string;
-                try {
-                  realSidecarWorkspace = fs.realpathSync(sidecar.workspaceCwd);
-                } catch {
-                  throw new Error(
-                    'Worktree sidecar workspace is missing or inaccessible',
-                  );
-                }
-                if (realSidecarWorkspace !== realWorkspace) {
-                  throw new Error(
-                    'Worktree sidecar belongs to another workspace',
-                  );
-                }
-              }
-              const workspaceRoots = [realWorkspace];
-              let repoTop: string | null = null;
-              try {
-                repoTop = await new GitWorktreeService(
-                  realWorkspace,
-                ).getRepoTopLevel();
-              } catch {
-                // A missing repository makes containment validation fail below.
-              }
-              if (repoTop && repoTop !== realWorkspace) {
-                workspaceRoots.push(fs.realpathSync(repoTop));
-              }
-              let realOriginalCwd: string;
-              try {
-                realOriginalCwd = fs.realpathSync(sidecar.originalCwd);
-              } catch {
-                throw new Error(
-                  'Worktree sidecar workspace is missing or inaccessible',
-                );
-              }
-              if (!workspaceRoots.includes(realOriginalCwd)) {
-                throw new Error(
-                  'Worktree sidecar belongs to another workspace',
-                );
-              }
-              const candidateRoots = workspaceRoots.map((root) =>
-                path.join(root, '.qwen', 'worktrees'),
-              );
-              let realTarget: string;
-              try {
-                realTarget = fs.realpathSync(sidecar.worktreePath);
-              } catch {
-                throw new Error('Worktree checkout is missing or inaccessible');
-              }
-              const contained = candidateRoots.some((root) => {
-                try {
-                  const realRoot = fs.realpathSync(root);
-                  const relative = path.relative(realRoot, realTarget);
-                  return (
-                    relative.length > 0 &&
-                    !relative.startsWith('..') &&
-                    !path.isAbsolute(relative)
-                  );
-                } catch {
-                  return false;
-                }
-              });
-              if (!contained) {
-                throw new Error('Worktree sidecar path failed containment');
-              }
-              const marker = await readWorktreeSessionMarkerStrict(realTarget);
-              if (
-                marker.state !== 'valid' ||
-                marker.sessionId !== restoredStorageSessionId
-              ) {
-                throw new Error('Worktree marker ownership is invalid');
-              }
-              const worktree = {
-                slug: sidecar.slug,
-                path: realTarget,
-                branch: sidecar.worktreeBranch,
-              };
-              const hasUnlocatedRestoredPrompt =
-                session.hasActivePrompt &&
-                !session.attached &&
-                session.currentCwd === undefined;
-              if (hasUnlocatedRestoredPrompt) {
-                runtime.bridge.setSessionWorktree(sessionId, worktree);
-                session.worktree = worktree;
-              } else if (session.hasActivePrompt) {
-                if (session.currentCwd !== realTarget) {
-                  throw new Error('Active session is outside its worktree');
-                }
-              } else {
-                const changed = await runtime.bridge.changeSessionCwd(
-                  sessionId,
-                  {
-                    path: realTarget,
-                    allowedRoots: candidateRoots,
-                  },
-                );
-                if (changed.newCwd !== realTarget) {
-                  throw new Error('Worktree relocation was rejected');
-                }
-                session.currentCwd = changed.newCwd;
-              }
-              if (!hasUnlocatedRestoredPrompt) {
-                runtime.bridge.setSessionWorktree(sessionId, worktree);
-                assertRuntimeGenerationOpen?.();
-                session.worktree = worktree;
-                session.worktreeState = 'persisted-v1';
-              }
-            } catch (restoreErr) {
-              daemonLog?.warn('worktree integrity validation failed', {
-                sessionId: session.sessionId,
-                error:
-                  restoreErr instanceof Error
-                    ? restoreErr.message
-                    : String(restoreErr),
-              });
-              await cleanupRestoredSession();
-              throw restoreErr;
-            }
-          }
-        }
-        if (!res.writable) {
-          await cleanupRestoredSession();
-          return;
-        }
-        try {
-          assertRuntimeGenerationOpen?.();
-        } catch (error) {
-          await cleanupRestoredSession();
-          throw error;
-        }
-        const deferredRestorePromptAdmitted =
-          deferRestoreAskUserQuestionPrompt &&
-          (runtime.bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
-            session.sessionId,
-            session.clientId,
-          ) ??
-            false);
-        if (deferredRestorePromptAdmitted) {
-          session.hasActivePrompt = true;
-        } else if (
-          deferRestoreAskUserQuestionPrompt &&
-          action === 'load' &&
-          !session.attached &&
-          !session.hasActivePrompt &&
-          runtime.provenance !== 'live-conversation'
-        ) {
-          try {
-            await reconcileDanglingPromptTerminals(
-              createWorkspaceRuntimeSessionService(runtime),
-              sessionId,
-            );
-          } catch {
-            // Best-effort: a failure leaves dangling prompts unknown
-            // (fail-closed) and must never fail the load itself.
-          }
-        }
-        try {
-          assertRuntimeGenerationOpen?.();
-        } catch (error) {
-          await cleanupRestoredSession();
-          throw error;
-        }
-        daemonLog?.info(
-          `session ${action}${session.attached ? ' (attached)' : ''}`,
-          { sessionId: session.sessionId, clientId: session.clientId },
-        );
-        // The load response embeds the replay snapshot inline; redact the
-        // skill bodies there just like the SSE egress does (#9234).
-        const responseSession = withPromptTerminals(
-          session,
-          action === 'load'
-            ? readRecentPromptTerminals(
-                createWorkspaceRuntimeSessionService(runtime),
-                sessionId,
-              )
-            : undefined,
-        );
+        const outcome = await restoreSessionCore({
+          action,
+          runtime,
+          workspaceCwd,
+          sessionId,
+          archiveCoordinator,
+          requestedSessionIdAdmission,
+          assertRuntimeGenerationOpen,
+          daemonLog,
+          materializeLiveConversationDirectory:
+            deps.materializeLiveConversationDirectory,
+          historyPageSize,
+          liveReplayMode,
+          compactedReplayMode,
+          clientId,
+          approvalMode,
+          restoreSource,
+          isCancelled: () => !res.writable,
+          onWorkspaceResolved: (cwd) => setDaemonTelemetryWorkspace(res, cwd),
+        });
+        if (outcome.kind === 'cancelled') return;
         res
           .status(200)
-          .json(redactSdkSurfaceReplay(responseSession, runtime.trusted));
+          .json(redactSdkSurfaceReplay(outcome.session, runtime.trusted));
+        // The core's finally has already released the reservation and the
+        // worktree lock by the time it returns. Never awaited: the watch's
+        // per-PR lock is not re-entrant, and a restore the drain dispatched
+        // must not wait on a drain.
+        try {
+          deps.onSessionRestored?.({ runtime, workspaceCwd, sessionId });
+        } catch (err) {
+          daemonLog?.warn(
+            `session restored hook failed for ${sessionId}: ${String(err)}`,
+          );
+        }
       } catch (err) {
         if (err instanceof RequestedSessionIdAdmissionError) {
           sendRequestedSessionIdAdmissionError(res, err, route);
@@ -4377,14 +4198,1853 @@ export function registerSessionRoutes(
           route,
           sessionId,
         });
-      } finally {
-        sessionIdReservation?.release();
-        releaseWorktreeRestore?.();
       }
     };
 
   app.post('/session/:id/load', mutate(), restoreSessionHandler('load'));
   app.post('/session/:id/resume', mutate(), restoreSessionHandler('resume'));
+
+  // ── Worktree reset (ownership transfer) ──────────────────────────
+  // POST /session/:id/worktree-reset moves a worktree session's checkout
+  // ownership to a fresh replacement session: spawn in the root workspace,
+  // relocate into the checkout, link the sidecar pair (supersedes /
+  // supersededBy), flip the marker, then attest persisted-v1. The transfer
+  // holds the worktree-keyed ownership lock for its whole duration, so a
+  // restore can never pass its ownership validation mid-transfer, and two
+  // resets for one checkout serialize. See
+  // docs/design/channel-named-sessions-part4b.md for the full protocol.
+  const resolveWorktreeOwnershipTarget = async (
+    runtime: WorkspaceRuntime,
+    workspaceCwd: string,
+    sidecar: WorktreeSession,
+    sessionId: string,
+  ): Promise<{ realTarget: string; candidateRoots: string[] }> => {
+    // Every refusal here is the typed invalid-state 409: the specific
+    // reason goes to the daemon log, never to the wire. Returns the error
+    // so call sites `throw invalidState(...)` explicitly (definite-
+    // assignment analysis does not follow never-returning calls in catch).
+    const invalidState = (reason: string): WorktreeResetInvalidStateError => {
+      daemonLog?.warn('worktree reset rejected sidecar state', {
+        sessionId,
+        reason,
+      });
+      return new WorktreeResetInvalidStateError(sessionId);
+    };
+    const realWorkspace = fs.realpathSync(workspaceCwd);
+    if (sidecar.workspaceCwd !== undefined) {
+      let realSidecarWorkspace: string;
+      try {
+        realSidecarWorkspace = fs.realpathSync(sidecar.workspaceCwd);
+      } catch {
+        throw invalidState('sidecar workspace is missing or inaccessible');
+      }
+      if (realSidecarWorkspace !== realWorkspace) {
+        throw invalidState('sidecar belongs to another workspace');
+      }
+    }
+    const workspaceRoots = [realWorkspace];
+    let repoTop: string | null = null;
+    try {
+      repoTop = await new GitWorktreeService(realWorkspace).getRepoTopLevel();
+    } catch {
+      // A missing repository makes containment validation fail below.
+    }
+    if (repoTop && repoTop !== realWorkspace) {
+      workspaceRoots.push(fs.realpathSync(repoTop));
+    }
+    let realOriginalCwd: string;
+    try {
+      realOriginalCwd = fs.realpathSync(sidecar.originalCwd);
+    } catch {
+      throw invalidState('sidecar original cwd is missing or inaccessible');
+    }
+    if (!workspaceRoots.includes(realOriginalCwd)) {
+      throw invalidState('sidecar original cwd is outside the accepted roots');
+    }
+    const candidateRoots = workspaceRoots.map((root) =>
+      path.join(root, '.qwen', 'worktrees'),
+    );
+    // Also the ownership lock key, so it must keep the rule stated in
+    // `server/worktree-ownership-op.ts`.
+    let realTarget: string;
+    try {
+      realTarget = fs.realpathSync(sidecar.worktreePath);
+    } catch {
+      throw invalidState('worktree checkout is missing or inaccessible');
+    }
+    const contained = candidateRoots.some((root) => {
+      try {
+        const realRoot = fs.realpathSync(root);
+        const relative = path.relative(realRoot, realTarget);
+        return (
+          relative.length > 0 &&
+          !relative.startsWith('..') &&
+          !path.isAbsolute(relative)
+        );
+      } catch {
+        return false;
+      }
+    });
+    if (!contained) {
+      throw invalidState('worktree path failed containment');
+    }
+    return { realTarget, candidateRoots };
+  };
+
+  const worktreeResetHandler = async (
+    req: Request,
+    res: Response,
+  ): Promise<void> => {
+    const route = 'POST /session/:id/worktree-reset';
+    const sessionId = requireSessionId(req, res);
+    if (!sessionId) return;
+    if (parseVirtualSubagentSessionId(sessionId)) {
+      res.status(400).json({
+        error: 'Virtual subagent sessions do not support worktree reset',
+        code: 'unsupported_action',
+        sessionId,
+      });
+      return;
+    }
+    const body = safeBody(req);
+    let resolvedRuntime:
+      | { runtime: WorkspaceRuntime; workspaceCwd: string }
+      | undefined;
+    try {
+      resolvedRuntime = await resolveRuntimeForSessionRestore(
+        body,
+        res,
+        route,
+        sessionId,
+      );
+    } catch (err) {
+      if (sendConversationRuntimeError(res, err)) return;
+      sendBridgeError(res, err, { route, sessionId });
+      return;
+    }
+    if (resolvedRuntime === undefined) return;
+    const { runtime, workspaceCwd } = resolvedRuntime;
+    const approvalMode = parseOptionalApprovalMode(body, res);
+    if (approvalMode === null) return;
+    const source = parseRequestedSessionSource(body, res);
+    if (source === null) return;
+    const modelServiceId =
+      typeof body['modelServiceId'] === 'string'
+        ? (body['modelServiceId'] as string)
+        : undefined;
+    const assertRuntimeGenerationOpen =
+      captureRuntimeGenerationAssertion(runtime);
+    try {
+      await runOwnerRuntimeActivity(runtime, () =>
+        archiveCoordinator.runSharedMany([sessionId], async () => {
+          const sessionService = createWorkspaceRuntimeSessionService(runtime);
+          // The session record must exist (this resolver also normalizes
+          // legacy case-variant spellings to the stored id).
+          const storageSessionId = await resolveSessionIdForRestore(
+            sessionService,
+            sessionId,
+          );
+          if (storageSessionId === undefined) {
+            throw new SessionNotFoundError(sessionId);
+          }
+          const oldSidecarPath =
+            sessionService.getWorktreeSessionPath(storageSessionId);
+          if (
+            runtime.bridge.setSessionResetPending === undefined ||
+            runtime.bridge.clearSessionResetPending === undefined ||
+            runtime.bridge.clearSessionWorktree === undefined ||
+            runtime.bridge.severSessionClients === undefined
+          ) {
+            throw new Error('Bridge does not support worktree reset');
+          }
+          // Pre-read (unlocked) only to locate the worktree and classify the
+          // entry; every value that drives a decision is re-read under the
+          // ownership lock.
+          const preRead = await readWorktreeSessionStrict(oldSidecarPath);
+          if (
+            preRead.state === 'missing' ||
+            (preRead.state === 'valid' &&
+              preRead.session.workspaceCwd === undefined)
+          ) {
+            throw new WorktreeResetUnsupportedError(sessionId);
+          }
+          if (preRead.state !== 'valid') {
+            daemonLog?.warn('worktree reset rejected invalid sidecar', {
+              sessionId,
+              reason: preRead.reason,
+            });
+            throw new WorktreeResetInvalidStateError(sessionId);
+          }
+          const preTarget = await resolveWorktreeOwnershipTarget(
+            runtime,
+            workspaceCwd,
+            preRead.session,
+            sessionId,
+          );
+          const releaseOwnership = await acquireWorktreeOwnershipOp(
+            preTarget.realTarget,
+          );
+          try {
+            // Re-read and re-validate under the lock; a concurrent edit
+            // between the pre-read and here must not drive the transfer.
+            const lockedRead = await readWorktreeSessionStrict(oldSidecarPath);
+            if (
+              lockedRead.state === 'missing' ||
+              (lockedRead.state === 'valid' &&
+                lockedRead.session.workspaceCwd === undefined)
+            ) {
+              throw new WorktreeResetUnsupportedError(sessionId);
+            }
+            if (lockedRead.state !== 'valid') {
+              daemonLog?.warn('worktree reset rejected invalid sidecar', {
+                sessionId,
+                reason: lockedRead.reason,
+              });
+              throw new WorktreeResetInvalidStateError(sessionId);
+            }
+            const oldSidecar = lockedRead.session;
+            const { realTarget, candidateRoots } =
+              await resolveWorktreeOwnershipTarget(
+                runtime,
+                workspaceCwd,
+                oldSidecar,
+                sessionId,
+              );
+            if (realTarget !== preTarget.realTarget) {
+              daemonLog?.warn('worktree reset rejected: sidecar moved', {
+                sessionId,
+              });
+              throw new WorktreeResetInvalidStateError(sessionId);
+            }
+            const readSummary = (
+              id: string,
+            ):
+              | ReturnType<AcpSessionBridge['getSessionSummary']>
+              | undefined => {
+              try {
+                return runtime.bridge.getSessionSummary(id);
+              } catch (error) {
+                // A session unknown to the live bridge is dormant, and a
+                // dormant session is quiescent.
+                if (error instanceof SessionNotFoundError) return undefined;
+                throw error;
+              }
+            };
+            runtime.bridge.setSessionResetPending(sessionId);
+            let barrierArmed = true;
+            try {
+              let effectiveOldSidecar = oldSidecar;
+              if (oldSidecar.supersededBy !== undefined) {
+                // ── Resume path ──────────────────────────────────────
+                // A previous transfer for this session crashed mid-flight.
+                // Classify by the marker: naming the old session means the
+                // flip never committed — roll the interrupted transfer back
+                // and proceed with a fresh replacement in the same request;
+                // naming the replacement means the flip committed — finish
+                // the severance and return it. An absent marker only reads
+                // as pre-commit while the replacement is dormant (below).
+                const replacementId = oldSidecar.supersededBy;
+                const newSidecarPath =
+                  sessionService.getWorktreeSessionPath(replacementId);
+                const newRead = await readWorktreeSessionStrict(newSidecarPath);
+                // Sidecar-link agreement only. The marker is the authority on
+                // what committed, so neither branch may consult the
+                // replacement's transcript record: a crash can leave the
+                // linked pair with no record yet, and a retry that refuses on
+                // it never converges.
+                const linksAgree =
+                  newRead.state === 'valid' &&
+                  newRead.session.supersedes === storageSessionId;
+                const marker =
+                  await readWorktreeSessionMarkerStrict(realTarget);
+                if (marker.state === 'invalid') {
+                  daemonLog?.warn('worktree reset resume rejected marker', {
+                    sessionId,
+                    reason: marker.reason,
+                  });
+                  throw new WorktreeResetInvalidStateError(sessionId);
+                }
+                if (
+                  marker.state === 'missing' ||
+                  (marker.state === 'valid' &&
+                    marker.sessionId === storageSessionId)
+                ) {
+                  // Pre-commit: a marker naming the old session proves S_new
+                  // non-authoritative, so the destructive rollback is correct
+                  // and the fresh transfer below recreates the marker through
+                  // the hatch.
+                  if (!linksAgree) {
+                    daemonLog?.warn(
+                      'worktree reset resume found inconsistent links',
+                      { sessionId, replacementSessionId: replacementId },
+                    );
+                    throw new WorktreeResetInvalidStateError(sessionId);
+                  }
+                  // An absent marker proves nothing on its own: a committed
+                  // transfer whose git-excluded marker was later cleaned (a
+                  // task-local `git clean -xdf`) reads exactly like the
+                  // supervisor-cleaned pre-commit shape. A replacement still
+                  // live on this daemon is that committed owner, so refuse
+                  // before any destructive write instead of dismantling it
+                  // and spawning a second writer. A dormant replacement is
+                  // the genuine post-crash shape and still rolls back.
+                  if (
+                    marker.state === 'missing' &&
+                    readSummary(replacementId) !== undefined
+                  ) {
+                    daemonLog?.warn(
+                      'worktree reset resume found a live replacement with no marker',
+                      { sessionId, replacementSessionId: replacementId },
+                    );
+                    throw new WorktreeResetInvalidStateError(sessionId);
+                  }
+                  const { supersededBy: _drop, ...restoredOld } = oldSidecar;
+                  // Confirm the removal before the sidecar writes destroy the
+                  // links a retry classifies by. `false` is a documented
+                  // outcome, not an error — a client attached, so
+                  // `requireZeroAttaches` bailed — and it leaves the
+                  // interrupted replacement live inside the checkout, where
+                  // the fresh transfer below would spawn a second writer
+                  // beside it with nothing on disk naming the survivor.
+                  const removed = await runWithWorkspaceRuntimeStorage(
+                    runtime,
+                    () =>
+                      deleteDaemonSessionIfOrphan({
+                        sessionId: replacementId,
+                        service: sessionService,
+                        bridge: runtime.bridge,
+                        coordinator: archiveCoordinator,
+                      }),
+                  ).catch(() => false);
+                  if (!removed) {
+                    daemonLog?.warn(
+                      'worktree reset could not remove the interrupted replacement',
+                      { sessionId, replacementSessionId: replacementId },
+                    );
+                    throw new WorktreeResetInvalidStateError(sessionId);
+                  }
+                  // Undo in the reverse of the transfer's write order so a
+                  // crash mid-rollback leaves the backward link alone — the
+                  // shape a retry refuses for repair — instead of a forward
+                  // link nothing scans for.
+                  await clearWorktreeSession(newSidecarPath);
+                  await writeWorktreeSession(oldSidecarPath, restoredOld);
+                  daemonLog?.warn(
+                    'worktree reset rolled back an interrupted transfer',
+                    { sessionId, replacementSessionId: replacementId },
+                  );
+                  effectiveOldSidecar = restoredOld;
+                } else if (
+                  marker.state === 'valid' &&
+                  marker.sessionId === replacementId
+                ) {
+                  // Committed: the replacement is the authoritative owner and
+                  // is never rolled back. Finish the transfer idempotently.
+                  // The marker already moved ownership, so releasing the
+                  // barrier stops being this request's to do: every refusal
+                  // below leaves the superseded entry fenced for the retry
+                  // that finishes the severance, exactly as the survivor
+                  // branch does, instead of re-admitting a writer to a
+                  // checkout the marker has handed to the replacement.
+                  barrierArmed = false;
+                  if (!linksAgree) {
+                    daemonLog?.warn(
+                      'worktree reset resume found inconsistent links',
+                      { sessionId, replacementSessionId: replacementId },
+                    );
+                    throw new WorktreeResetInvalidStateError(sessionId);
+                  }
+                  const newSummary = readSummary(replacementId);
+                  if (
+                    newSummary &&
+                    (newSummary.hasActivePrompt ||
+                      (newSummary.pendingInteractionCount ?? 0) > 0)
+                  ) {
+                    throw new WorktreeResetActiveError(replacementId);
+                  }
+                  // Carry the superseded session's recorded start onto the
+                  // resumed replacement too (R9-13): its worktree.baseCommit is
+                  // the creation tip T, and T..HEAD would hide the session's own
+                  // pre-handoff S..T commits.
+                  const supersededSummary = readSummary(sessionId);
+                  const priorStart =
+                    supersededSummary?.baseCommit ??
+                    supersededSummary?.branch?.baseCommit ??
+                    supersededSummary?.worktree?.baseCommit;
+                  if (priorStart) {
+                    runtime.bridge.setSessionBaseCommit?.(
+                      replacementId,
+                      priorStart,
+                    );
+                  }
+                  runtime.bridge.clearSessionWorktree(sessionId);
+                  const severCompleted =
+                    await runtime.bridge.severSessionClients(sessionId);
+                  if (severCompleted) {
+                    runtime.bridge.clearSessionResetPending(sessionId);
+                  } else {
+                    // The same hold the fresh transfer's sever step reports:
+                    // keep the barrier armed on the surviving superseded
+                    // entry instead of certifying a severance that did not
+                    // happen.
+                    daemonLog?.warn(
+                      'worktree reset left the superseded session live',
+                      { sessionId, replacementSessionId: replacementId },
+                    );
+                  }
+                  assertRuntimeGenerationOpen?.();
+                  daemonLog?.info(
+                    'worktree session reset resumed after interruption',
+                    { sessionId, replacementSessionId: replacementId },
+                  );
+                  res.status(200).json({
+                    sessionId: replacementId,
+                    workspaceCwd,
+                    currentCwd: realTarget,
+                    worktree: {
+                      slug: oldSidecar.slug,
+                      path: realTarget,
+                      branch: oldSidecar.worktreeBranch,
+                      baseCommit:
+                        oldSidecar.worktreeBase ||
+                        oldSidecar.originalHeadCommit ||
+                        undefined,
+                      baseBranch: oldSidecar.originalBranch || undefined,
+                    },
+                    worktreeState: 'persisted-v1',
+                    attached: false,
+                    ...(severCompleted ? {} : { supersededSessionLive: true }),
+                  });
+                  return;
+                } else {
+                  daemonLog?.warn(
+                    'worktree reset resume found a marker naming another session',
+                    { sessionId },
+                  );
+                  throw new WorktreeResetInvalidStateError(sessionId);
+                }
+              }
+
+              // ── Fresh transfer (also the fall-through after a pre-commit
+              // rollback) ─────────────────────────────────────────────
+              const oldSummary = readSummary(sessionId);
+              if (
+                oldSummary &&
+                (oldSummary.hasActivePrompt ||
+                  (oldSummary.pendingInteractionCount ?? 0) > 0)
+              ) {
+                throw new WorktreeResetActiveError(sessionId);
+              }
+              let spawnedNew: { sessionId: string } | undefined;
+              let newSidecarWritten = false;
+              let oldSupersededWritten = false;
+              let markerTransferred = false;
+              try {
+                assertRuntimeGenerationOpen?.();
+                // 1. The replacement spawns in the root workspace with the
+                // same thread-scope, source and worktree metadata conventions
+                // as a fresh worktree creation, minus worktree creation. The
+                // worktree metadata also keeps it on the Legacy engine.
+                // Carry the superseded session's recorded start so the
+                // replacement keeps its pre-handoff commits: worktree.baseCommit
+                // below is the worktree's creation tip T, and T..HEAD would hide
+                // the session's own S..T work (R9-13). T stays on the worktree
+                // meta for the handoff rewind classification.
+                const priorStart =
+                  oldSummary?.baseCommit ??
+                  oldSummary?.branch?.baseCommit ??
+                  oldSummary?.worktree?.baseCommit;
+                const spawned = await runtime.bridge.spawnOrAttach({
+                  workspaceCwd,
+                  modelServiceId,
+                  sessionScope: 'thread',
+                  ...(priorStart ? { baseCommit: priorStart } : {}),
+                  ...(approvalMode !== undefined ? { approvalMode } : {}),
+                  ...(source.sourceType !== undefined
+                    ? { sourceType: source.sourceType }
+                    : {}),
+                  ...(source.sourceId !== undefined
+                    ? { sourceId: source.sourceId }
+                    : {}),
+                  worktree: {
+                    slug: effectiveOldSidecar.slug,
+                    path: realTarget,
+                    branch: effectiveOldSidecar.worktreeBranch,
+                    baseCommit:
+                      effectiveOldSidecar.worktreeBase ||
+                      effectiveOldSidecar.originalHeadCommit ||
+                      undefined,
+                    baseBranch: effectiveOldSidecar.originalBranch || undefined,
+                  },
+                });
+                spawnedNew = { sessionId: spawned.sessionId };
+                // 2. Relocate into the checkout.
+                const changed = await runtime.bridge.changeSessionCwd(
+                  spawned.sessionId,
+                  { path: realTarget, allowedRoots: candidateRoots },
+                );
+                if (changed.newCwd !== realTarget) {
+                  throw new Error('Worktree relocation was rejected');
+                }
+                // 3. The old sidecar names its replacement first: that
+                // backward link is the only door into the resume
+                // classification above, so a crash between the two writes
+                // stays observable to a retry — it refuses the disagreeing
+                // pair for operator repair instead of spawning a second
+                // replacement and stranding the first under a dangling
+                // forward link nothing ever scans for.
+                await writeWorktreeSession(oldSidecarPath, {
+                  ...effectiveOldSidecar,
+                  supersededBy: spawned.sessionId,
+                });
+                oldSupersededWritten = true;
+                // 4. The replacement's sidecar carries the forward link.
+                const newSidecarPath = sessionService.getWorktreeSessionPath(
+                  spawned.sessionId,
+                );
+                const {
+                  supersededBy: _dropOld,
+                  supersedes: _dropOldLink,
+                  ...oldSidecarCore
+                } = effectiveOldSidecar;
+                await writeWorktreeSession(newSidecarPath, {
+                  ...oldSidecarCore,
+                  supersedes: storageSessionId,
+                });
+                newSidecarWritten = true;
+                // The caller is gone — an expired `fetchWithTimeout` budget
+                // aborts the socket mid-transfer. Only the fresh-transfer 200
+                // carries the bridge-minted owner registration, so a handover
+                // nobody receives leaves one no client can detach, and past
+                // the flip below it could not be undone anyway: refuse here
+                // and let the pre-commit rollback reap the replacement. Do
+                // not test `res.writable` — it is an own data property that
+                // stays `true` after a disconnect, unlike these two.
+                if (res.destroyed || res.socket?.writable === false) {
+                  throw new Error(
+                    'Client disconnected before the worktree ownership flip',
+                  );
+                }
+                // 5. A prompt admitted in the check-to-arm window and still
+                // winding down aborts the transfer; after the flip it would
+                // write into a checkout whose ownership just moved.
+                const windingDown = readSummary(sessionId);
+                if (
+                  windingDown &&
+                  (windingDown.hasActivePrompt ||
+                    (windingDown.pendingInteractionCount ?? 0) > 0)
+                ) {
+                  throw new WorktreeResetActiveError(sessionId);
+                }
+                const markerBeforeFlip =
+                  await readWorktreeSessionMarkerStrict(realTarget);
+                try {
+                  await transferWorktreeSessionMarkerOwner(
+                    realTarget,
+                    markerBeforeFlip.state === 'missing'
+                      ? null
+                      : storageSessionId,
+                    spawned.sessionId,
+                  );
+                } catch (markerError) {
+                  // Bounded typed failure: the core primitive's message can
+                  // carry I/O detail; the daemon log gets it, the wire does
+                  // not. The rollback below runs before this propagates.
+                  daemonLog?.warn('worktree marker transfer failed', {
+                    sessionId,
+                    replacementSessionId: spawned.sessionId,
+                    error:
+                      markerError instanceof Error
+                        ? markerError.message
+                        : String(markerError),
+                  });
+                  if (markerError instanceof WorktreeMarkerCommittedError) {
+                    // The primitive's own post-commit tail failed with the
+                    // marker already naming the replacement, so the flip did
+                    // happen: never compensate backwards, and never report
+                    // the invalid-state 409 whose contract is that this
+                    // request changed nothing. A retry resumes the committed
+                    // transfer idempotently.
+                    markerTransferred = true;
+                    barrierArmed = false;
+                    throw new Error(
+                      'Worktree ownership moved to the replacement, but the marker commit did not finish cleanly; retry the reset to complete the transfer',
+                    );
+                  }
+                  throw new WorktreeResetInvalidStateError(sessionId);
+                }
+                markerTransferred = true;
+                // Ownership moved, so this request stops owning the barrier
+                // release: a completed severance clears it explicitly below,
+                // while a survivor's fence — or a failure anywhere in this
+                // post-flip tail — has to outlive the request that left it
+                // armed rather than re-admit a writer to a checkout the
+                // marker already handed to the replacement.
+                barrierArmed = false;
+                // 6. Attest the replacement, then bring the superseded
+                // session's runtime view in line with the disk: no worktree
+                // association, no attaches.
+                const newWorktree = {
+                  slug: effectiveOldSidecar.slug,
+                  path: realTarget,
+                  branch: effectiveOldSidecar.worktreeBranch,
+                  baseCommit:
+                    effectiveOldSidecar.worktreeBase ||
+                    effectiveOldSidecar.originalHeadCommit ||
+                    undefined,
+                  baseBranch: effectiveOldSidecar.originalBranch || undefined,
+                };
+                runtime.bridge.setSessionWorktree(
+                  spawned.sessionId,
+                  newWorktree,
+                );
+                assertRuntimeGenerationOpen?.();
+                runtime.bridge.clearSessionWorktree(sessionId);
+                const severCompleted =
+                  await runtime.bridge.severSessionClients(sessionId);
+                if (severCompleted) {
+                  runtime.bridge.clearSessionResetPending(sessionId);
+                } else {
+                  // The child holds background work, so the last detach's
+                  // idle close was refused and the superseded session is
+                  // still live inside the checkout whose ownership just
+                  // moved. Keep the prompt barrier armed — it is the only
+                  // fence left on that entry — and report the hold instead of
+                  // certifying a severance that did not happen. Escalating to
+                  // killSession is not an option: it turns a close error into
+                  // a channel kill, and the replacement was spawned onto that
+                  // same workspace-bound bridge.
+                  daemonLog?.warn(
+                    'worktree reset left the superseded session live',
+                    {
+                      sessionId,
+                      replacementSessionId: spawned.sessionId,
+                    },
+                  );
+                }
+                daemonLog?.info('worktree session reset', {
+                  sessionId,
+                  replacementSessionId: spawned.sessionId,
+                });
+                res.status(200).json({
+                  ...spawned,
+                  currentCwd: realTarget,
+                  worktree: newWorktree,
+                  worktreeState: 'persisted-v1',
+                  ...(severCompleted ? {} : { supersededSessionLive: true }),
+                });
+              } catch (transferError) {
+                if (markerTransferred) {
+                  // Past the point of no return: the checkout belongs to the
+                  // replacement. The superseded redirect heals the caller's
+                  // registry on its next selection; never compensate
+                  // backwards here.
+                  daemonLog?.warn(
+                    'worktree reset failed after the ownership flip',
+                    {
+                      sessionId,
+                      replacementSessionId: spawnedNew?.sessionId,
+                      error:
+                        transferError instanceof Error
+                          ? transferError.message
+                          : String(transferError),
+                    },
+                  );
+                  throw transferError;
+                }
+                // Roll back to the pre-commit shape: the old session keeps
+                // ownership and a retry starts a fresh transfer. The removal
+                // goes first and has to be confirmed — `false` means a client
+                // attached, so the replacement is still live inside the
+                // checkout. Unwriting the links anyway would leave that
+                // survivor with nothing on disk naming it and a retry would
+                // spawn a second writer beside it; keeping the pair makes the
+                // retry take the resume path above and refuse for repair.
+                if (spawnedNew) {
+                  const orphanSessionId = spawnedNew.sessionId;
+                  const removed = await runWithWorkspaceRuntimeStorage(
+                    runtime,
+                    () =>
+                      deleteDaemonSessionIfOrphan({
+                        sessionId: orphanSessionId,
+                        service: sessionService,
+                        bridge: runtime.bridge,
+                        coordinator: archiveCoordinator,
+                      }),
+                  ).catch(() => false);
+                  if (!removed) {
+                    daemonLog?.warn(
+                      'worktree reset could not remove the spawned replacement',
+                      { sessionId, replacementSessionId: orphanSessionId },
+                    );
+                    throw transferError;
+                  }
+                }
+                // Undo in the reverse of the write order above so a crash
+                // mid-rollback leaves the backward link alone — the shape a
+                // retry refuses for repair — instead of a forward link
+                // nothing scans for.
+                if (newSidecarWritten && spawnedNew) {
+                  await clearWorktreeSession(
+                    sessionService.getWorktreeSessionPath(spawnedNew.sessionId),
+                  );
+                }
+                if (oldSupersededWritten) {
+                  await writeWorktreeSession(
+                    oldSidecarPath,
+                    effectiveOldSidecar,
+                  );
+                }
+                throw transferError;
+              }
+            } finally {
+              if (barrierArmed) {
+                runtime.bridge.clearSessionResetPending(sessionId);
+              }
+            }
+          } finally {
+            releaseOwnership();
+          }
+        }),
+      );
+    } catch (err) {
+      if (!res.headersSent) {
+        sendBridgeError(res, err, { route, sessionId });
+      }
+    }
+  };
+  app.post('/session/:id/worktree-reset', mutate(), worktreeResetHandler);
+
+  // "Create branch here" (Codex parity): turn a detached managed worktree
+  // into a named branch at its current HEAD, in place. No session transfer —
+  // the checkout, marker owner, and session id all stay; only the branch
+  // metadata changes. Serialized against reset/restore by the same
+  // worktree-keyed ownership lock.
+  const worktreeBranchHandler = async (
+    req: Request,
+    res: Response,
+  ): Promise<void> => {
+    const route = 'POST /session/:id/worktree-branch';
+    const sessionId = requireSessionId(req, res);
+    if (!sessionId) return;
+    if (parseVirtualSubagentSessionId(sessionId)) {
+      res.status(400).json({
+        error:
+          'Virtual subagent sessions do not support worktree branch creation',
+        code: 'unsupported_action',
+        sessionId,
+      });
+      return;
+    }
+    const body = safeBody(req);
+    const name = body['name'];
+    if (
+      typeof name !== 'string' ||
+      name.length === 0 ||
+      !isValidGitBranchName(name)
+    ) {
+      res.status(400).json({
+        error: '`name` must be a valid git branch name',
+        code: 'branch_invalid_name',
+      });
+      return;
+    }
+    let resolvedRuntime:
+      | { runtime: WorkspaceRuntime; workspaceCwd: string }
+      | undefined;
+    try {
+      resolvedRuntime = await resolveRuntimeForSessionRestore(
+        body,
+        res,
+        route,
+        sessionId,
+      );
+    } catch (err) {
+      if (sendConversationRuntimeError(res, err)) return;
+      sendBridgeError(res, err, { route, sessionId });
+      return;
+    }
+    if (resolvedRuntime === undefined) return;
+    const { runtime, workspaceCwd } = resolvedRuntime;
+    const assertRuntimeGenerationOpen =
+      captureRuntimeGenerationAssertion(runtime);
+    try {
+      await runOwnerRuntimeActivity(runtime, () =>
+        archiveCoordinator.runSharedMany([sessionId], async () => {
+          const sessionService = createWorkspaceRuntimeSessionService(runtime);
+          let storageSessionId = await resolveSessionIdForRestore(
+            sessionService,
+            sessionId,
+          );
+          if (storageSessionId === undefined) {
+            // A freshly created session may have no transcript yet (the
+            // user branches before the first prompt); the live bridge
+            // summary is authoritative for it. Throws when unknown.
+            runtime.bridge.getSessionSummary(sessionId);
+            storageSessionId = sessionId;
+          }
+          // Same busy gate as worktree-reset: branching reads HEAD and
+          // writes a ref, which must not race an in-flight turn.
+          const branchBusySummary =
+            runtime.bridge.getSessionSummary(storageSessionId);
+          if (
+            branchBusySummary.hasActivePrompt ||
+            (branchBusySummary.pendingPromptCount ?? 0) > 0
+          ) {
+            throw new BranchWhilePromptActiveError(storageSessionId);
+          }
+          if (runtime.bridge.setSessionWorktree === undefined) {
+            throw new Error('Bridge does not support worktree branch creation');
+          }
+          const sidecarPath =
+            sessionService.getWorktreeSessionPath(storageSessionId);
+          const preRead = await readWorktreeSessionStrict(sidecarPath);
+          if (
+            preRead.state === 'missing' ||
+            (preRead.state === 'valid' &&
+              preRead.session.workspaceCwd === undefined)
+          ) {
+            res.status(409).json({
+              error: 'Session has no managed worktree',
+              code: 'worktree_branch_unsupported',
+              sessionId: storageSessionId,
+            });
+            return;
+          }
+          if (preRead.state !== 'valid') {
+            throw new WorktreeResetInvalidStateError(storageSessionId);
+          }
+          const { realTarget } = await resolveWorktreeOwnershipTarget(
+            runtime,
+            workspaceCwd,
+            preRead.session,
+            storageSessionId,
+          );
+          const releaseOwnership = await acquireWorktreeOwnershipOp(realTarget);
+          try {
+            // Re-read under the lock: a concurrent reset may have moved
+            // ownership or branched the checkout since the pre-read.
+            const lockedRead = await readWorktreeSessionStrict(sidecarPath);
+            if (lockedRead.state !== 'valid') {
+              throw new WorktreeResetInvalidStateError(storageSessionId);
+            }
+            const sidecar = lockedRead.session;
+            if (sidecar.worktreeBranch !== '') {
+              res.status(409).json({
+                error: 'Worktree already has a branch',
+                code: 'worktree_already_branched',
+                sessionId: storageSessionId,
+              });
+              return;
+            }
+            // A superseded sidecar means a reset moved the checkout to a
+            // replacement session; the marker must still name this session.
+            if (sidecar.supersededBy !== undefined) {
+              throw new WorktreeResetInvalidStateError(storageSessionId);
+            }
+            const branchMarker =
+              await readWorktreeSessionMarkerStrict(realTarget);
+            if (
+              branchMarker.state !== 'valid' ||
+              branchMarker.sessionId !== storageSessionId
+            ) {
+              throw new WorktreeResetInvalidStateError(storageSessionId);
+            }
+            const wtService = new GitWorktreeService(workspaceCwd);
+            if (await wtService.localBranchExists(name)) {
+              res.status(409).json({
+                error: `Branch ${name} already exists`,
+                code: 'branch_already_exists',
+                sessionId: storageSessionId,
+              });
+              return;
+            }
+            assertRuntimeGenerationOpen?.();
+            await wtService.createWorktreeBranch(realTarget, name);
+            await writeWorktreeSession(sidecarPath, {
+              ...sidecar,
+              worktreeBranch: name,
+            });
+            // Branching the checkout must not drop the session's start
+            // commit/base branch: the change overview still scopes its window
+            // to them, so carry them onto the live meta and the response.
+            const branchedWorktree = {
+              slug: sidecar.slug,
+              path: realTarget,
+              branch: name,
+              baseCommit:
+                sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
+              baseBranch: sidecar.originalBranch || undefined,
+            };
+            runtime.bridge.setSessionWorktree(
+              storageSessionId,
+              branchedWorktree,
+            );
+            res.status(200).json({
+              sessionId: storageSessionId,
+              worktree: branchedWorktree,
+            });
+          } finally {
+            releaseOwnership();
+          }
+        }),
+      );
+    } catch (err) {
+      if (!res.headersSent) {
+        sendBridgeError(res, err, { route, sessionId });
+      }
+    }
+  };
+  app.post('/session/:id/worktree-branch', mutate(), worktreeBranchHandler);
+
+  // "Hand off" (Codex parity): move the SAME session between its managed
+  // worktree and the local checkout, carrying the work. Design D6 documents
+  // the protocol and the v1 limitations (local-clean stands in for occupancy;
+  // no crash-window atomic rollback).
+  const worktreeHandoffHandler = async (
+    req: Request,
+    res: Response,
+  ): Promise<void> => {
+    const route = 'POST /session/:id/worktree-handoff';
+    const sessionId = requireSessionId(req, res);
+    if (!sessionId) return;
+    if (parseVirtualSubagentSessionId(sessionId)) {
+      res.status(400).json({
+        error: 'Virtual subagent sessions do not support worktree handoff',
+        code: 'unsupported_action',
+        sessionId,
+      });
+      return;
+    }
+    const body = safeBody(req);
+    const to = body['to'];
+    if (to !== 'local' && to !== 'worktree') {
+      res.status(400).json({
+        error: "`to` must be 'local' or 'worktree'",
+        code: 'invalid_handoff_target',
+      });
+      return;
+    }
+    const name = body['name'];
+    if (
+      name !== undefined &&
+      (typeof name !== 'string' ||
+        name.length === 0 ||
+        !isValidGitBranchName(name))
+    ) {
+      res.status(400).json({
+        error: '`name` must be a valid git branch name',
+        code: 'branch_invalid_name',
+      });
+      return;
+    }
+    let resolvedRuntime:
+      | { runtime: WorkspaceRuntime; workspaceCwd: string }
+      | undefined;
+    try {
+      resolvedRuntime = await resolveRuntimeForSessionRestore(
+        body,
+        res,
+        route,
+        sessionId,
+      );
+    } catch (err) {
+      if (sendConversationRuntimeError(res, err)) return;
+      sendBridgeError(res, err, { route, sessionId });
+      return;
+    }
+    if (resolvedRuntime === undefined) return;
+    const { runtime, workspaceCwd } = resolvedRuntime;
+    const assertRuntimeGenerationOpen =
+      captureRuntimeGenerationAssertion(runtime);
+    try {
+      await runOwnerRuntimeActivity(runtime, () =>
+        archiveCoordinator.runSharedMany([sessionId], async () => {
+          const sessionService = createWorkspaceRuntimeSessionService(runtime);
+          let storageSessionId = await resolveSessionIdForRestore(
+            sessionService,
+            sessionId,
+          );
+          if (storageSessionId === undefined) {
+            runtime.bridge.getSessionSummary(sessionId);
+            storageSessionId = sessionId;
+          }
+          const sidecarPath =
+            sessionService.getWorktreeSessionPath(storageSessionId);
+          const realWorkspace = fs.realpathSync(workspaceCwd);
+
+          if (to === 'local') {
+            const preRead = await readWorktreeSessionStrict(sidecarPath);
+            if (
+              preRead.state === 'missing' ||
+              (preRead.state === 'valid' &&
+                preRead.session.workspaceCwd === undefined)
+            ) {
+              res.status(409).json({
+                error: 'Session has no managed worktree',
+                code: 'worktree_handoff_unsupported',
+                sessionId: storageSessionId,
+              });
+              return;
+            }
+            if (preRead.state !== 'valid') {
+              throw new WorktreeResetInvalidStateError(storageSessionId);
+            }
+            const { realTarget } = await resolveWorktreeOwnershipTarget(
+              runtime,
+              workspaceCwd,
+              preRead.session,
+              storageSessionId,
+            );
+            const releaseOwnership =
+              await acquireWorktreeOwnershipOp(realTarget);
+            // The reset-pending fence is a non-refcounted set: only clear it
+            // in the finally if THIS request armed it. A refusal that exits
+            // before arming (superseded sidecar, marker mismatch, ...) must
+            // not release a fence another operation (e.g. a refused reset)
+            // is still holding.
+            let barrierArmed = false;
+            // R11-1: the realTarget lock serializes the worktree being LEFT,
+            // not the local checkout being mutated. Two handoffs from
+            // different worktrees into one checkout hold different realTarget
+            // keys, so also lock the local checkout (nested) once its path is
+            // known; released in the same finally.
+            let releaseLocalOwnership: (() => void) | null = null;
+            try {
+              const lockedRead = await readWorktreeSessionStrict(sidecarPath);
+              if (lockedRead.state !== 'valid') {
+                throw new WorktreeResetInvalidStateError(storageSessionId);
+              }
+              const sidecar = lockedRead.session;
+              // A superseded sidecar means a reset moved the checkout to a
+              // replacement session; the marker must still name this session.
+              if (sidecar.supersededBy !== undefined) {
+                throw new WorktreeResetInvalidStateError(storageSessionId);
+              }
+              const handoffMarker =
+                await readWorktreeSessionMarkerStrict(realTarget);
+              if (
+                handoffMarker.state !== 'valid' ||
+                handoffMarker.sessionId !== storageSessionId
+              ) {
+                throw new WorktreeResetInvalidStateError(storageSessionId);
+              }
+              // Fence prompt admission for the whole transfer. The busy
+              // gate below only sees prompts already active; a prompt
+              // admitted mid-handoff would write files after the snapshot
+              // and lose its last edits (the queue-tail check runs after
+              // the queue drains, so it cannot catch that interleaving).
+              // The reset-pending barrier is the bridge's existing
+              // admission fence: sendPrompt, cd, workflow actions and goal
+              // control all fail closed on it while it is armed.
+              if (
+                runtime.bridge.setSessionResetPending === undefined ||
+                runtime.bridge.clearSessionResetPending === undefined
+              ) {
+                throw new Error(
+                  'Bridge does not support handoff serialization',
+                );
+              }
+              runtime.bridge.setSessionResetPending(storageSessionId);
+              barrierArmed = true;
+              let localCwd: string;
+              try {
+                localCwd = fs.realpathSync(sidecar.originalCwd);
+              } catch {
+                throw new WorktreeResetInvalidStateError(storageSessionId);
+              }
+              // Serialize on the checkout actually being mutated (R11-1), so
+              // the cleanliness/occupancy gates below and the carry/checkout
+              // cannot interleave with another handoff into the same tree.
+              releaseLocalOwnership =
+                await acquireWorktreeOwnershipOp(localCwd);
+              const localService = new GitWorktreeService(localCwd);
+              // An upgraded checkout may still hold the old daemon-written
+              // .qwen/.gitignore; migrate it before the clean gate so the
+              // daemon's own residue does not refuse the handoff.
+              await localService.migrateLegacyWorktreeGitignore();
+              if (await localService.hasWorktreeChanges(localCwd)) {
+                res.status(409).json({
+                  error: 'Local checkout has uncommitted changes',
+                  code: 'local_checkout_dirty',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
+              // Refuse a busy session before any git mutation: the
+              // snapshot/branch/checkout below do not run on the bridge's
+              // prompt queue, so an in-flight turn could write files after
+              // the copy and leave its last edits behind. Same gate as the
+              // worktree-reset route; changeSessionCwd re-checks at the
+              // queue tail for the race window after this read.
+              const localBusySummary =
+                runtime.bridge.getSessionSummary(storageSessionId);
+              if (
+                localBusySummary.hasActivePrompt ||
+                (localBusySummary.pendingPromptCount ?? 0) > 0
+              ) {
+                throw new CdWhilePromptActiveError(storageSessionId);
+              }
+              // Refuse when another live client-attached non-worktree session
+              // occupies the local checkout: the branch checkout below moves
+              // its shared HEAD (and the snapshot writes its files), which
+              // would silently relocate that session onto the handed-off
+              // branch. The branch route applies the same predicate; ownership
+              // is keyed on the worktree path, so two sessions from different
+              // worktrees sharing one originalCwd hold different locks over
+              // this same checkout. Worktree sessions are exempt — they run in
+              // their own cwd, including the handing-off session itself.
+              // listWorkspaceSessions only answers for the BOUND workspace;
+              // asking about localCwd when it differs (a branch-route sidecar
+              // whose originalCwd is the repo top while the daemon is bound to
+              // a subdirectory) silently returns [], hiding exactly the
+              // occupants of the shared checkout (R9-1). Query the bound
+              // workspace, and fail closed when the checkout being moved is
+              // not that workspace — its occupants cannot be enumerated.
+              let boundWorkspaceReal: string;
+              try {
+                boundWorkspaceReal = fs.realpathSync(runtime.workspaceCwd);
+              } catch {
+                boundWorkspaceReal = runtime.workspaceCwd;
+              }
+              if (localCwd !== boundWorkspaceReal) {
+                res.status(409).json({
+                  error:
+                    'Cannot verify the occupants of the local checkout; handing off would move a shared checkout',
+                  code: 'handoff_workspace_occupied',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
+              // Policy (6902429921): the occupancy guard protects a live
+              // HUMAN attachment — a user actively viewing/editing the shared
+              // checkout whose HEAD a handoff would move. Agent sessions
+              // (AGENT_HOST / AGENT source types) are daemon-spawned subagent
+              // subprocesses, not independent user attachments: they have no
+              // user watching the checkout, and their work is owned by the
+              // parent session's worktree lifecycle, so they are deliberately
+              // excluded. Worktree sessions are excluded too (they live in
+              // their own checkout, not this shared one). clientCount > 0
+              // keeps only sessions with a live attachment.
+              const occupyingSession = runtime.bridge
+                .listWorkspaceSessions(runtime.workspaceCwd)
+                .find(
+                  (session) =>
+                    session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE &&
+                    session.sourceType !== AGENT_SESSION_SOURCE_TYPE &&
+                    !session.worktree &&
+                    session.clientCount > 0,
+                );
+              if (occupyingSession) {
+                res.status(409).json({
+                  error:
+                    'Another session is already active in this workspace; handing off would move its shared checkout',
+                  code: 'handoff_workspace_occupied',
+                  existingSessionId: occupyingSession.sessionId,
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
+              const wtService = new GitWorktreeService(workspaceCwd);
+              const wtCheckoutService = new GitWorktreeService(realTarget);
+              // gateBase describes originalCwd's checkout (the local HEAD
+              // the gate compares against); base is the commit the worktree
+              // was created at (the promotion test). They differ when a
+              // branch worktree was created from a sibling managed worktree.
+              const gateBase = sidecar.originalHeadCommit;
+              const base = sidecar.worktreeBase ?? sidecar.originalHeadCommit;
+              // The local checkout may have moved ahead of the recorded
+              // base — committing locally while the agent works in the
+              // worktree is the normal reason to use one. A descendant is
+              // reconcilable for the snapshot-only path (the snapshot
+              // applies on top; a conflicting apply is refused below). A
+              // divergent or unreadable HEAD is terminal. The descendant
+              // case is re-checked below once we know whether a branch will
+              // be checked out — checking out a branch would drop the user's
+              // own ahead-of-base commit from the working tree.
+              let localHead: string | undefined;
+              if (gateBase) {
+                localHead = await getHeadCommit(localCwd);
+                if (
+                  !localHead ||
+                  (localHead !== gateBase &&
+                    !(await isCommitAncestor(gateBase, localHead, localCwd)))
+                ) {
+                  res.status(409).json({
+                    error:
+                      'Local checkout HEAD moved past the recorded handoff base',
+                    code: 'local_head_moved',
+                    sessionId: storageSessionId,
+                  });
+                  return;
+                }
+              }
+              // Carry the work before moving the session: branch checkout
+              // first, then the tracked dirty snapshot, then the untracked
+              // overlay (stash create excludes untracked files).
+              const info =
+                await wtService.getRegisteredWorktreeBranch(realTarget);
+              const head = info?.headCommit ?? '';
+              // Trust the checkout's actual branch, not the sidecar's
+              // record: the agent runs git freely in its worktree and may
+              // have switched branches since the sidecar was written.
+              // Checking out the recorded branch would leave the real
+              // work behind behind a 200.
+              if (!info || info.branch !== sidecar.worktreeBranch) {
+                res.status(409).json({
+                  error:
+                    'The worktree branch no longer matches the session record',
+                  code: 'worktree_branch_mismatch',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
+              let branch = info.branch;
+              // Fail closed when the worktree HEAD or its recorded base
+              // cannot be verified: skipping the promotion would report
+              // success while the agent's commits stay in the worktree.
+              if (!branch && (!head || !base)) {
+                res.status(409).json({
+                  error:
+                    'Cannot verify the worktree HEAD against its recorded base',
+                  code: 'worktree_handoff_base_unavailable',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
+              // Promotion carries the agent's work to the local checkout only
+              // when the worktree HEAD moved PAST its creation base. A HEAD
+              // behind the base (an ancestor of it) would rewind the user's
+              // clean checkout. This applies to the recorded-branch shape too
+              // (no `!branch` short-circuit, R10-1), and the ancestry probe is
+              // three-valued so an unreadable/pruned base fails closed instead
+              // of being misread as "not behind" and promoted (R11-14).
+              let headBehindBase = false;
+              if (head && base && head !== base) {
+                const ancestry = await probeCommitAncestry(
+                  head,
+                  base,
+                  realTarget,
+                );
+                if (ancestry === 'unanswerable') {
+                  res.status(409).json({
+                    error:
+                      'Cannot verify the worktree HEAD against its recorded base',
+                    code: 'worktree_handoff_base_unavailable',
+                    sessionId: storageSessionId,
+                  });
+                  return;
+                }
+                headBehindBase = ancestry === 'ancestor';
+              }
+              // A recorded branch whose tip is behind the base must be checked
+              // out by the handoff, which would rewind the local checkout —
+              // refuse (R10-1). The detached shape instead stays snapshot-only
+              // below (R9-4), since its promotion is optional.
+              if (headBehindBase && branch !== '') {
+                res.status(409).json({
+                  error:
+                    'The worktree branch tip is behind the recorded handoff base',
+                  code: 'worktree_head_behind_base',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
+              // A descendant local HEAD is reconcilable only when no branch
+              // is checked out (the snapshot applies on top of the local
+              // HEAD). Checking out a branch — recorded, or promoted at the
+              // worktree HEAD — would remove the user's own ahead-of-base
+              // commit from the working tree, so refuse that combination.
+              const willCheckoutBranch =
+                branch !== '' || (head !== base && !headBehindBase);
+              // A legacy sidecar may carry an empty originalHeadCommit, which
+              // skips the local-HEAD gate above. The snapshot-only path is
+              // still safe (it applies on top of the local HEAD), but a
+              // branch checkout would move the local checkout without ever
+              // verifying its HEAD — fail closed like the detached sibling
+              // rather than silently dropping the user's ahead-of-base work.
+              if (willCheckoutBranch && !gateBase) {
+                res.status(409).json({
+                  error:
+                    'Cannot verify the local HEAD against its recorded handoff base',
+                  code: 'worktree_handoff_base_unavailable',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
+              // The checkout target must CONTAIN the local HEAD, else the
+              // checkout rewinds the user's work — including a divergent base
+              // where localHead === gateBase (so no moved-ahead flag fires)
+              // but the worktree tip sits on another line (R11-6). Subsumes
+              // the moved-ahead refusal; scoped to an actual branch checkout.
+              if (
+                willCheckoutBranch &&
+                (!localHead ||
+                  !(await isCommitAncestor(localHead, head, realTarget)))
+              ) {
+                res.status(409).json({
+                  error:
+                    'Local checkout HEAD moved past the recorded handoff base',
+                  code: 'local_head_moved',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
+              // Captured before any mutation, so a capture failure needs no
+              // rollback. A silent `stash create` failure must refuse the
+              // handoff rather than relocate the session without the
+              // worktree's tracked edits (R13-1).
+              let snapshot: string;
+              try {
+                snapshot = await wtService.createStashSnapshot(realTarget);
+              } catch (error) {
+                res.status(409).json({
+                  error:
+                    'The worktree snapshot could not be captured from the worktree',
+                  code: 'handoff_carry_failed',
+                  detail:
+                    error instanceof Error ? error.message : String(error),
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
+              // Everything below mutates the local checkout, the worktree,
+              // or the sidecar; a late failure (checkout hook, stash
+              // conflict, busy-turn refusal at the queue tail) must restore
+              // the pre-handoff shape so a retry is not stranded.
+              let autoBranch: string | null = null;
+              let localOriginalBranch: string | null = null;
+              let detachedFrom: string | null = null;
+              let copiedUntracked: string[] = [];
+              const rollback = async (): Promise<boolean> => {
+                // Whether the local checkout was force-restored to its
+                // pre-handoff committed state. A failed force-checkout (e.g.
+                // the same held index lock that failed the apply's own reset)
+                // leaves conflict markers behind, so the refusal must not
+                // claim a restore that did not happen (round-9 S18).
+                let localRestored = false;
+                if (copiedUntracked.length > 0) {
+                  const localTop =
+                    (await localService.getRepoTopLevel().catch(() => null)) ??
+                    localCwd;
+                  for (const rel of copiedUntracked) {
+                    try {
+                      fs.rmSync(path.join(localTop, rel), { force: true });
+                    } catch {
+                      // Best-effort: the file may already be gone.
+                    }
+                  }
+                }
+                if (localOriginalBranch !== null) {
+                  localRestored = await localService
+                    .forceCheckoutBranch(localCwd, localOriginalBranch)
+                    .then(() => true)
+                    .catch(() => false);
+                }
+                if (autoBranch !== null) {
+                  const deleted = await wtService
+                    .deleteLocalBranch(autoBranch)
+                    .then(() => true)
+                    .catch(() => false);
+                  if (deleted) {
+                    await writeWorktreeSession(sidecarPath, {
+                      ...sidecar,
+                      worktreeBranch: '',
+                    }).catch(() => undefined);
+                  } else {
+                    // The delete was refused — typically because
+                    // detachCheckout failed and the worktree still sits on
+                    // the branch. Keep the sidecar naming it (a retry then
+                    // matches); if the worktree is detached, re-attach it so
+                    // the record describes the checkout again. Rewriting the
+                    // sidecar to '' here would wedge every later handoff in
+                    // worktree_branch_mismatch.
+                    await wtService
+                      .checkoutBranchInCheckout(realTarget, autoBranch)
+                      .catch(() => undefined);
+                  }
+                } else if (detachedFrom !== null) {
+                  // The worktree sat on a named branch the handoff did not
+                  // create ("Create branch here"). Re-attach it after the
+                  // local restore releases the ref, or the sidecar records
+                  // a branch the detached checkout no longer matches and
+                  // every retry 409s worktree_branch_mismatch.
+                  await wtService
+                    .checkoutBranchInCheckout(realTarget, detachedFrom)
+                    .catch(() => undefined);
+                }
+                return localRestored;
+              };
+              // Capture the local ref before ANY mutation (the stash apply
+              // and untracked carry run even when no branch is promoted),
+              // so a late failure can restore the pre-handoff shape. A
+              // detached local checkout rolls back to its commit, not to
+              // 'HEAD' (which would stay at the promoted tip).
+              const origBranch = await localService
+                .getCurrentBranch()
+                .catch(() => null);
+              localOriginalBranch =
+                origBranch === 'HEAD'
+                  ? ((await getHeadCommit(localCwd)) ?? null)
+                  : origBranch;
+              if (!branch && head !== base && !headBehindBase) {
+                branch = name || worktreeBranchForSlug(sidecar.slug);
+                // Same typed refusal as the explicit-name path: an occupied
+                // auto name must not degrade into a generic bridge error.
+                if (await wtService.localBranchExists(branch)) {
+                  res.status(409).json({
+                    error: `Branch ${branch} already exists`,
+                    code: 'branch_already_exists',
+                    sessionId: storageSessionId,
+                  });
+                  return;
+                }
+                await wtService.createWorktreeBranch(realTarget, branch);
+                autoBranch = branch;
+                // Persist immediately: a later failure must not leave the
+                // branch unrecorded, or every retry re-derives the same
+                // name and hits branch_already_exists forever.
+                await writeWorktreeSession(sidecarPath, {
+                  ...sidecar,
+                  worktreeBranch: branch,
+                });
+              }
+              if (branch) {
+                try {
+                  // Release the branch from the worktree first: git forbids
+                  // the same branch checked out in two worktrees at once.
+                  // The session is leaving, so the worktree stays detached
+                  // at the same commit (its dirty state survives).
+                  await wtService.detachCheckout(realTarget);
+                  detachedFrom = branch;
+                  // Refuse (atomically) to overwrite a local ignored file the
+                  // branch tracks: the clean gate cannot see ignored files, so
+                  // a plain checkout could destroy unrecoverable local content.
+                  await localService.checkoutBranchInCheckout(
+                    localCwd,
+                    branch,
+                    {
+                      noOverwriteIgnore: true,
+                    },
+                  );
+                } catch (error) {
+                  await rollback();
+                  res.status(409).json({
+                    error: `Cannot check out ${branch} in the local checkout`,
+                    code: 'handoff_checkout_failed',
+                    detail:
+                      error instanceof Error ? error.message : String(error),
+                    sessionId: storageSessionId,
+                  });
+                  return;
+                }
+              }
+              let relocatedCwd: string;
+              try {
+                if (snapshot) {
+                  try {
+                    await localService.applyStashSnapshot(localCwd, snapshot);
+                  } catch (error) {
+                    // A conflicting 3-way apply writes markers and unmerged
+                    // index entries into the user's checkout. An environment
+                    // failure (unwritable index, unreadable index state) did
+                    // not land the work at all; a conflict whose own restore
+                    // failed (restoreFailed) leaves markers behind for
+                    // rollback's force-checkout to clear. Refuse with a typed
+                    // code that distinguishes content to resolve from a carry
+                    // that could not apply, and surface restoreFailed so the
+                    // refusal never claims a clean restore the service could
+                    // not make (6903276958). The note must track what rollback
+                    // actually did: when the same fault (e.g. a held index
+                    // lock) also fails rollback's force-checkout, the checkout
+                    // still holds markers and the refusal must say so rather
+                    // than claim a restore that never happened (round-9 S18).
+                    const localRestored = await rollback();
+                    const isConflict =
+                      error instanceof WorktreeDirtyCarryConflictError &&
+                      error.conflict;
+                    const restoreFailed =
+                      error instanceof WorktreeDirtyCarryConflictError &&
+                      error.restoreFailed;
+                    res.status(409).json({
+                      error: isConflict
+                        ? 'The worktree snapshot conflicts with the local checkout'
+                        : 'The worktree snapshot could not be applied to the local checkout',
+                      code: isConflict
+                        ? 'handoff_snapshot_conflict'
+                        : 'handoff_carry_failed',
+                      detail:
+                        (error instanceof Error
+                          ? error.message
+                          : String(error)) +
+                        (restoreFailed
+                          ? localRestored
+                            ? HANDOFF_RESTORE_NOTE_RESTORED
+                            : HANDOFF_RESTORE_NOTE_FAILED
+                          : ''),
+                      sessionId: storageSessionId,
+                    });
+                    return;
+                  }
+                }
+                // The stash omits a tracked deletion whose path became a
+                // directory; remove the local file so the untracked carry can
+                // mkdir the directory there (R11-10, the create-direction
+                // carry already does this). The removed tracked file is
+                // restored by rollback's forceCheckoutBranch, so it is not
+                // added to copiedUntracked. A local modification to that file
+                // conflicts just like a snapshot conflict — refuse, not clobber.
+                try {
+                  await wtCheckoutService.removeDeletedToDirectoryFiles(
+                    localCwd,
+                  );
+                } catch (error) {
+                  if (
+                    error instanceof WorktreeDirtyCarryConflictError &&
+                    error.conflict
+                  ) {
+                    await rollback();
+                    res.status(409).json({
+                      error:
+                        'The worktree snapshot conflicts with the local checkout',
+                      code: 'handoff_snapshot_conflict',
+                      detail:
+                        error instanceof Error ? error.message : String(error),
+                      sessionId: storageSessionId,
+                    });
+                    return;
+                  }
+                  throw error;
+                }
+                copiedUntracked =
+                  await wtCheckoutService.carryUntrackedFilesTo(localCwd);
+                assertRuntimeGenerationOpen?.();
+                const repoTop =
+                  (await wtService.getRepoTopLevel().catch(() => null)) ??
+                  realWorkspace;
+                const changed = await runtime.bridge.changeSessionCwd(
+                  storageSessionId,
+                  {
+                    path: localCwd,
+                    allowedRoots: [realWorkspace, fs.realpathSync(repoTop)],
+                    // This route owns the reset-pending barrier armed above.
+                    allowWhileResetPending: true,
+                  },
+                );
+                if (changed.newCwd !== localCwd) {
+                  throw new Error('Handoff relocation was rejected');
+                }
+                relocatedCwd = changed.newCwd;
+              } catch (error) {
+                // A caller-facing timeout does NOT abort the queued cd
+                // (mirrors the to=worktree arm): it can still land the
+                // session in localCwd after this rejection. Decide by
+                // observed state rather than rolling back the carried work.
+                if (error instanceof BridgeTimeoutError) {
+                  const observedCwd =
+                    runtime.bridge.getSessionExecutionSnapshot(
+                      storageSessionId,
+                    ).effectiveCwd;
+                  if (observedCwd === localCwd) {
+                    // The cd landed: finish the transfer instead of
+                    // discarding the branch/snapshot just applied locally.
+                    await clearWorktreeSessionDurable(sidecarPath);
+                    // Promote the worktree base into the plain start commit so
+                    // the commit fallback keeps a boundary after the worktree
+                    // meta is removed (R5-1).
+                    if (base) {
+                      runtime.bridge.setSessionBaseCommit?.(
+                        storageSessionId,
+                        base,
+                      );
+                    }
+                    runtime.bridge.clearSessionWorktree?.(storageSessionId);
+                    res.status(200).json({
+                      sessionId: storageSessionId,
+                      worktree: null,
+                      currentCwd: localCwd,
+                    });
+                    return;
+                  }
+                  // Undetermined: keep the checkout + sidecar (the cd may
+                  // still land); rolling back would discard the carried
+                  // local work and contradict the session's real cwd.
+                  throw error;
+                }
+                await rollback();
+                throw error;
+              }
+              await clearWorktreeSessionDurable(sidecarPath);
+              // Promote the worktree base into the plain start commit so the
+              // commit fallback keeps a boundary after the worktree meta is
+              // removed (R5-1).
+              if (base) {
+                runtime.bridge.setSessionBaseCommit?.(storageSessionId, base);
+              }
+              runtime.bridge.clearSessionWorktree?.(storageSessionId);
+              res.status(200).json({
+                sessionId: storageSessionId,
+                worktree: null,
+                currentCwd: relocatedCwd,
+              });
+            } finally {
+              if (barrierArmed) {
+                runtime.bridge.clearSessionResetPending?.(storageSessionId);
+              }
+              // Release in reverse acquisition order (local nested in realTarget).
+              if (releaseLocalOwnership) {
+                releaseLocalOwnership();
+              }
+              releaseOwnership();
+            }
+            return;
+          }
+
+          // to === 'worktree'
+          const execution =
+            runtime.bridge.getSessionExecutionSnapshot(storageSessionId);
+          let sourceCwd: string;
+          try {
+            sourceCwd = fs.realpathSync(execution.effectiveCwd);
+          } catch {
+            throw new WorktreeResetInvalidStateError(storageSessionId);
+          }
+          const releaseOwnership = await acquireWorktreeOwnershipOp(sourceCwd);
+          // Only clear the reset-pending fence in the finally if THIS
+          // request armed it (the set is non-refcounted); the "already has a
+          // managed worktree" 409 exits before arming and must not release a
+          // fence a concurrent transfer is holding.
+          let barrierArmed = false;
+          try {
+            // Decide inside the ownership lock, mirroring the to=local and
+            // worktree-branch siblings: a pre-read outside it let two
+            // concurrent requests both create a worktree, and treating an
+            // invalid sidecar as "no worktree" overwrote the record and
+            // orphaned the previous checkout.
+            const preRead = await readWorktreeSessionStrict(sidecarPath);
+            if (preRead.state === 'valid') {
+              res.status(409).json({
+                error: 'Session already has a managed worktree',
+                code: 'worktree_handoff_unsupported',
+                sessionId: storageSessionId,
+              });
+              return;
+            }
+            if (preRead.state !== 'missing') {
+              throw new WorktreeResetInvalidStateError(storageSessionId);
+            }
+            // Arm the admission fence FIRST, then read the busy gate: a
+            // prompt admitted between the gate read and the arm would
+            // slip past both. With the barrier armed, sendPrompt fails
+            // closed synchronously, so the gate only has to catch prompts
+            // admitted before the arm (pendingPromptCount covers the
+            // attachment-resolution window where promptActive is false).
+            if (
+              runtime.bridge.setSessionResetPending === undefined ||
+              runtime.bridge.clearSessionResetPending === undefined
+            ) {
+              throw new Error('Bridge does not support handoff serialization');
+            }
+            runtime.bridge.setSessionResetPending(storageSessionId);
+            barrierArmed = true;
+            const wtBusySummary =
+              runtime.bridge.getSessionSummary(storageSessionId);
+            if (
+              wtBusySummary.hasActivePrompt ||
+              (wtBusySummary.pendingPromptCount ?? 0) > 0
+            ) {
+              throw new CdWhilePromptActiveError(storageSessionId);
+            }
+            const sourceService = new GitWorktreeService(sourceCwd);
+            await sourceService.migrateLegacyWorktreeGitignore();
+            const currentBranch = await sourceService
+              .getCurrentBranch()
+              .catch(() => undefined);
+            // Read the base from the checkout the sidecar records as
+            // originalCwd (the workspace root), NOT from the session's
+            // effective cwd: the return leg compares originalCwd's HEAD
+            // against this base, so the pair must describe one checkout.
+            // A session cd'd into a sibling checkout with a divergent HEAD
+            // therefore starts its worktree at the workspace HEAD (the
+            // sibling's own commits stay in the sibling); its dirty files
+            // are still carried from sourceCwd below, and a carry conflict
+            // fails the handoff closed rather than relocating without them.
+            const baseCommit = await getHeadCommit(workspaceCwd);
+            if (!baseCommit) {
+              res.status(409).json({
+                error: 'Cannot read the local HEAD to record the handoff base',
+                code: 'worktree_handoff_base_unavailable',
+                sessionId: storageSessionId,
+              });
+              return;
+            }
+            const slug = GitWorktreeService.generateAutoSlug();
+            // Place the worktree under the workspace's managed root (the
+            // same root POST /session uses), not the session's effective
+            // cwd — a /cd into a subdirectory must not move the managed
+            // directory. Capture the dirty state from the session's own
+            // checkout, which may differ from the placement root. Base the
+            // worktree on the recorded SHA, not a branch name: the service
+            // resolves names in the placement repository, so a branch name
+            // could start the worktree at a different commit than recorded.
+            const placementService = new GitWorktreeService(workspaceCwd);
+            const created = await placementService.createUserWorktree(
+              slug,
+              baseCommit,
+              {
+                detached: true,
+                carryDirtyState: true,
+                dirtyStateSource: sourceCwd,
+              },
+            );
+            if (!created.success || !created.worktree) {
+              // An in-progress merge/rebase is a user-clearable state, not a
+              // daemon fault: surface the typed 409 here too (R13-2).
+              if (created.code === 'worktree_merge_in_progress') {
+                res.status(409).json({
+                  error:
+                    created.error ?? 'The workspace has an in-progress merge',
+                  code: 'worktree_merge_in_progress',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
+              res.status(500).json({
+                error: created.error ?? 'Failed to create worktree',
+                code: 'worktree_create_failed',
+                sessionId: storageSessionId,
+              });
+              return;
+            }
+            const worktree = created.worktree;
+            // The bridge reports the canonical (realpath'd) cwd while the
+            // service returns the raw join; a symlinked workspace root
+            // (macOS /var → /private/var) must not roll back the checkout
+            // the session now lives in.
+            let canonicalWorktreePath = worktree.path;
+            try {
+              canonicalWorktreePath = fs.realpathSync(worktree.path);
+              await createWorktreeSessionMarkerExclusive(
+                worktree.path,
+                storageSessionId,
+              );
+              await writeWorktreeSession(sidecarPath, {
+                slug,
+                worktreePath: worktree.path,
+                worktreeBranch: '',
+                // The ownership-checked routes accept originalCwd only at
+                // the workspace root or repo top; recording the session's
+                // effective cwd (a /cd may point into a subdirectory)
+                // would strand the session with 409s on every later route.
+                originalCwd: workspaceCwd,
+                workspaceCwd,
+                originalBranch: currentBranch ?? '',
+                originalHeadCommit: baseCommit,
+                worktreeBase: baseCommit,
+              });
+              assertRuntimeGenerationOpen?.();
+              const changed = await runtime.bridge.changeSessionCwd(
+                storageSessionId,
+                {
+                  path: worktree.path,
+                  allowedRoots: [placementService.getUserWorktreesDir()],
+                  // This route owns the reset-pending barrier armed above.
+                  allowWhileResetPending: true,
+                },
+              );
+              if (changed.newCwd !== canonicalWorktreePath) {
+                throw new Error('Handoff relocation was rejected');
+              }
+              runtime.bridge.setSessionWorktree?.(storageSessionId, {
+                slug,
+                path: worktree.path,
+                branch: '',
+                baseCommit,
+                baseBranch: currentBranch ?? undefined,
+              });
+              res.status(200).json({
+                sessionId: storageSessionId,
+                worktree: {
+                  slug,
+                  path: worktree.path,
+                  branch: '',
+                  baseCommit,
+                  baseBranch: currentBranch ?? undefined,
+                },
+                currentCwd: changed.newCwd,
+              });
+            } catch (error) {
+              // A bridge timeout is caller-facing: the queued cd can still
+              // land the session in the worktree after this await rejects.
+              // Decide by observed state — deleting a checkout the session
+              // now lives in would strand it in a vanished directory with
+              // the sidecar gone and every route failing on realpath.
+              const observedCwd =
+                runtime.bridge.getSessionExecutionSnapshot(
+                  storageSessionId,
+                ).effectiveCwd;
+              if (observedCwd === canonicalWorktreePath) {
+                runtime.bridge.setSessionWorktree?.(storageSessionId, {
+                  slug,
+                  path: worktree.path,
+                  branch: '',
+                  baseCommit,
+                  baseBranch: currentBranch ?? undefined,
+                });
+                res.status(200).json({
+                  sessionId: storageSessionId,
+                  worktree: {
+                    slug,
+                    path: worktree.path,
+                    branch: '',
+                    baseCommit,
+                    baseBranch: currentBranch ?? undefined,
+                  },
+                  currentCwd: worktree.path,
+                });
+                return;
+              }
+              // A caller-facing timeout does NOT abort the underlying cd
+              // (withTimeout only ends the caller's wait): the queued cd can
+              // still land the session in this worktree after this rejection
+              // and update effectiveCwd to it, so the observed-cwd read above
+              // may be stale. Rolling back on an undetermined timeout would
+              // delete the checkout the session is about to inhabit and
+              // strand it in a vanished directory. Keep the checkout +
+              // sidecar so a late-landing cd has a valid home; only a
+              // definitive failure (the cd rejected, or settled elsewhere)
+              // is safe to roll back.
+              if (error instanceof BridgeTimeoutError) {
+                throw error;
+              }
+              // Roll back the fresh worktree, sidecar, and marker; the
+              // session stays in the local checkout.
+              await clearWorktreeSessionDurable(sidecarPath).catch(
+                () => undefined,
+              );
+              await placementService
+                .removeUserWorktree(slug, {
+                  deleteBranch: true,
+                  baseCommit,
+                })
+                .catch(() => undefined);
+              throw error;
+            }
+          } finally {
+            if (barrierArmed) {
+              runtime.bridge.clearSessionResetPending?.(storageSessionId);
+            }
+            releaseOwnership();
+          }
+        }),
+      );
+    } catch (err) {
+      if (!res.headersSent) {
+        sendBridgeError(res, err, { route, sessionId });
+      }
+    }
+  };
+  app.post('/session/:id/worktree-handoff', mutate(), worktreeHandoffHandler);
 
   app.get('/session/:id/subagents/:subagentRef', async (req, res) => {
     const route = 'GET /session/:id/subagents/:subagentRef';
@@ -4409,15 +6069,13 @@ export function registerSessionRoutes(
       });
       return;
     }
-    const runtime = requireSessionRuntime({
-      sessionId,
-      route,
-      res,
-      workspaceRegistry,
-      daemonLog,
-    });
-    if (!runtime) return;
     try {
+      const runtime = await resolveSubagentSessionRuntime(
+        res,
+        route,
+        sessionId,
+      );
+      if (!runtime) return;
       await runOwnerRuntimeActivity(runtime, async () => {
         const resolved = await virtualSubagentSessions.resolve(
           runtime,
@@ -4532,6 +6190,509 @@ export function registerSessionRoutes(
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        const rawWorktree = body?.['worktree'];
+        if (rawWorktree !== undefined) {
+          if (!runtime.trusted) {
+            res.status(403).json({
+              error: 'Worktree creation requires a trusted workspace',
+              code: 'untrusted_workspace',
+            });
+            return;
+          }
+          if (
+            rawWorktree === null ||
+            typeof rawWorktree !== 'object' ||
+            Array.isArray(rawWorktree)
+          ) {
+            res.status(400).json({
+              error: '`worktree` must be an object',
+              code: 'invalid_worktree',
+            });
+            return;
+          }
+          const worktreeRequest = rawWorktree as Record<string, unknown>;
+          const rawSlug = worktreeRequest['slug'];
+          const slug =
+            rawSlug === undefined
+              ? GitWorktreeService.generateAutoSlug()
+              : rawSlug;
+          if (typeof slug !== 'string' || slug.length === 0) {
+            res.status(400).json({
+              error: '`worktree.slug` must be a non-empty string',
+              code: 'worktree_invalid_slug',
+            });
+            return;
+          }
+          const slugError = AGENT_WORKTREE_SLUG_PATTERN.test(slug)
+            ? 'Worktree name is reserved for ephemeral agent worktrees.'
+            : GitWorktreeService.validateUserWorktreeSlug(slug);
+          if (slugError) {
+            res.status(400).json({
+              error: slugError,
+              code: 'worktree_invalid_slug',
+            });
+            return;
+          }
+
+          const sessionService = createWorkspaceRuntimeSessionService(runtime);
+          if (runtime.bridge.getSessionSummary(sessionId).hasActivePrompt) {
+            throw new BranchWhilePromptActiveError(sessionId);
+          }
+          const snapshot =
+            runtime.bridge.getSessionExecutionSnapshot(sessionId);
+          const base = await resolveBranchWorktreeBaseCheckout({
+            workspaceCwd: runtime.workspaceCwd,
+            sessionId,
+            snapshot,
+            sidecarPath: sessionService.getWorktreeSessionPath(sessionId),
+          });
+          if (!base) {
+            res.status(409).json({
+              error:
+                'The current session cwd cannot be used as a worktree base',
+              code: 'worktree_base_checkout_unsupported',
+            });
+            return;
+          }
+          if (!(await isBranchWorktreeCreationSupported(base))) {
+            res.status(500).json({
+              error: 'Worktree creation is not available for this checkout',
+              code: 'worktree_create_failed',
+            });
+            return;
+          }
+
+          const targetSessionId = crypto.randomUUID();
+          await archiveCoordinator.runSharedMany(
+            [targetSessionId],
+            async () => {
+              let reservation: RequestedSessionIdReservation | undefined;
+              let worktreeCreated = false;
+              let markerCreated = false;
+              let mutationDispatched = false;
+              let published: BridgePersistedBranchedSession | undefined;
+              let restored: BridgeBranchedSession | undefined;
+              const worktreeService = new GitWorktreeService(base.repoTop);
+              const sidecarPath =
+                sessionService.getWorktreeSessionPath(targetSessionId);
+              const journalPath = getBranchWorktreeJournalPath(
+                sidecarPath,
+                targetSessionId,
+              );
+              let journal: BranchWorktreePreparationJournal | undefined;
+              const cleanupPrepared = async (): Promise<void> => {
+                if (!journal) return;
+                if (
+                  await sessionService.sessionExistsInAnyState(targetSessionId)
+                ) {
+                  await clearBranchWorktreeJournalDurable(journalPath);
+                  return;
+                }
+                if (!worktreeCreated) {
+                  const pathExists = await fs.promises
+                    .lstat(journal.worktreePath)
+                    .then(() => true)
+                    .catch((error: NodeJS.ErrnoException) => {
+                      if (error.code === 'ENOENT') return false;
+                      throw error;
+                    });
+                  if (!pathExists) {
+                    await clearBranchWorktreeJournalDurable(journalPath);
+                  } else {
+                    daemonLog?.warn(
+                      'planned branch worktree residue preserved',
+                      { targetSessionId },
+                    );
+                  }
+                  return;
+                }
+                if (!journal.sidecarCreated) {
+                  const sidecarExists = await fs.promises
+                    .lstat(sidecarPath)
+                    .then(() => true)
+                    .catch((error: NodeJS.ErrnoException) => {
+                      if (error.code === 'ENOENT') return false;
+                      throw error;
+                    });
+                  if (sidecarExists) {
+                    daemonLog?.warn(
+                      'branch worktree sidecar ownership is unknown',
+                      { targetSessionId },
+                    );
+                    return;
+                  }
+                }
+                journal = await updateBranchWorktreeJournal(
+                  journalPath,
+                  journal,
+                  'cleanup-intent',
+                );
+                const removed =
+                  await worktreeService.removePreparedUserWorktree(
+                    slug,
+                    markerCreated ? targetSessionId : null,
+                    base.headCommit,
+                    async () => {
+                      journal = await updateBranchWorktreeJournal(
+                        journalPath,
+                        journal!,
+                        'worktree-removed',
+                      );
+                      runtime.generationGuard?.assertOpen();
+                    },
+                    journal!.worktreeBranch !== '',
+                    journal!.carriedPaths,
+                  );
+                if (!removed.success) {
+                  daemonLog?.warn('branch worktree cleanup refused', {
+                    targetSessionId,
+                    error: removed.error,
+                  });
+                  return;
+                }
+                journal = await updateBranchWorktreeJournal(
+                  journalPath,
+                  journal,
+                  removed.branchPreserved
+                    ? 'branch-preserved'
+                    : 'branch-deleted',
+                );
+                if (removed.branchPreserved) {
+                  daemonLog?.warn('branch worktree cleanup preserved branch', {
+                    targetSessionId,
+                    branch: journal.worktreeBranch,
+                  });
+                }
+                if (journal.sidecarCreated) {
+                  await clearWorktreeSessionDurable(sidecarPath);
+                } else {
+                  const lateSidecarExists = await fs.promises
+                    .lstat(sidecarPath)
+                    .then(() => true)
+                    .catch((error: NodeJS.ErrnoException) => {
+                      if (error.code === 'ENOENT') return false;
+                      throw error;
+                    });
+                  if (lateSidecarExists) {
+                    daemonLog?.warn(
+                      'branch worktree sidecar ownership is unknown',
+                      { targetSessionId },
+                    );
+                    return;
+                  }
+                }
+                await clearBranchWorktreeJournalDurable(journalPath);
+              };
+              const releaseRestored = async (): Promise<void> => {
+                if (!restored) return;
+                if (restored.attached) {
+                  await runtime.bridge
+                    .detachClient(restored.sessionId, restored.clientId)
+                    .catch(() => {});
+                } else {
+                  await runtime.bridge
+                    .killSession(restored.sessionId, {
+                      requireZeroAttaches: true,
+                    })
+                    .catch(() => false);
+                }
+              };
+
+              try {
+                reservation = await requestedSessionIdAdmission.reserveCreate(
+                  targetSessionId,
+                  {
+                    bridge: runtime.bridge,
+                    workspaceCwd: runtime.workspaceCwd,
+                    workspaceId: runtime.workspaceId,
+                  },
+                );
+                runtime.generationGuard?.assertOpen();
+                const worktreePath = worktreeService.getUserWorktreePath(slug);
+                const pathExists = await fs.promises
+                  .lstat(worktreePath)
+                  .then(() => true)
+                  .catch((error: NodeJS.ErrnoException) => {
+                    if (error.code === 'ENOENT') return false;
+                    throw error;
+                  });
+                if (pathExists) {
+                  res.status(500).json({
+                    error: 'Failed to create worktree',
+                    code: 'worktree_create_failed',
+                  });
+                  return;
+                }
+                journal = await createBranchWorktreeJournal({
+                  journalPath,
+                  targetSessionId,
+                  slug,
+                  worktreePath,
+                  // Detached managed worktree: no branch ref exists.
+                  worktreeBranch: '',
+                  repoTop: base.repoTop,
+                  baseCommit: base.headCommit,
+                  sidecarPath,
+                });
+                runtime.generationGuard?.assertOpen();
+                const worktreeResult = await worktreeService.createUserWorktree(
+                  slug,
+                  base.headCommit,
+                  {
+                    carryDirtyState: true,
+                    detached: true,
+                    // The worktree sits at the source checkout's HEAD,
+                    // which may differ from the main checkout's: capture
+                    // the session's own dirty state, not the main's.
+                    dirtyStateSource: base.checkoutCwd,
+                    // This route persists carriedPaths in the preparation
+                    // journal, whose reader refuses oversized records;
+                    // bound the carry so the journal stays readable. The
+                    // handoff and POST /session write no journal and carry
+                    // any size.
+                    maxCarriedPathsBytes: CARRIED_PATHS_MAX_BYTES,
+                  },
+                );
+                if (!worktreeResult.success || !worktreeResult.worktree) {
+                  await cleanupPrepared();
+                  // An in-progress merge/rebase is a user-clearable state, not
+                  // a daemon fault: surface the typed 409 here too, and keep
+                  // the service's refusal text rather than a generic one
+                  // (R13-2).
+                  if (worktreeResult.code === 'worktree_merge_in_progress') {
+                    res.status(409).json({
+                      error:
+                        worktreeResult.error ??
+                        'The workspace has an in-progress merge',
+                      code: 'worktree_merge_in_progress',
+                    });
+                    return;
+                  }
+                  res.status(500).json({
+                    error: worktreeResult.error ?? 'Failed to create worktree',
+                    code: 'worktree_create_failed',
+                  });
+                  return;
+                }
+                worktreeCreated = true;
+                // Record the carried overlay in the in-memory journal BEFORE
+                // the persist that can throw: if the journal write fails,
+                // cleanupPrepared still reads carriedPaths from this variable
+                // and can reap the worktree the carry just dirtied. Assigning
+                // only from the await's result would leave it undefined on a
+                // write failure, handing cleanup an empty exemption set that
+                // refuses the dirty checkout forever.
+                journal = {
+                  ...journal,
+                  carriedPaths: worktreeResult.carriedPaths,
+                };
+                journal = await updateBranchWorktreeJournal(
+                  journalPath,
+                  journal,
+                  'worktree-created',
+                );
+                runtime.generationGuard?.assertOpen();
+                const worktree = {
+                  slug,
+                  path: worktreeResult.worktree.path,
+                  branch: worktreeResult.worktree.branch,
+                  baseCommit: base.headCommit,
+                  // Carry the base branch so the live summary has the same
+                  // base-branch exclusion the sidecar restores after restart
+                  // (R9-1); without it, integrating upstream re-lists foreign
+                  // commits as this session's loose work.
+                  baseBranch: base.branch || undefined,
+                };
+                await createWorktreeSessionMarker(
+                  worktree.path,
+                  targetSessionId,
+                );
+                markerCreated = true;
+                journal = await updateBranchWorktreeJournal(
+                  journalPath,
+                  journal,
+                  'marker-created',
+                );
+                runtime.generationGuard?.assertOpen();
+                // originalHeadCommit must describe originalCwd's checkout
+                // (the repo top) for the handoff's local_head_moved gate;
+                // an unreadable HEAD fails closed rather than disabling the
+                // gate with an empty base.
+                const repoTopHead = await getHeadCommit(base.repoTop);
+                if (!repoTopHead) {
+                  await cleanupPrepared();
+                  res.status(500).json({
+                    error:
+                      'Cannot read the workspace HEAD to record the handoff base',
+                    code: 'worktree_create_failed',
+                  });
+                  return;
+                }
+                await createWorktreeSession(sidecarPath, {
+                  slug,
+                  worktreePath: worktree.path,
+                  worktreeBranch: worktree.branch,
+                  originalCwd: base.repoTop,
+                  workspaceCwd: runtime.workspaceCwd,
+                  originalBranch: base.branch,
+                  originalHeadCommit: repoTopHead,
+                  // The worktree was created at the source checkout's HEAD,
+                  // which may differ from the repo top's HEAD (a session
+                  // living in a sibling managed worktree). The promotion
+                  // test, exit_worktree and the orphan reaper read this.
+                  worktreeBase: base.headCommit,
+                });
+                journal = await updateBranchWorktreeJournal(
+                  journalPath,
+                  journal,
+                  'sidecar-ready',
+                );
+
+                runtime.generationGuard?.assertOpen();
+                journal = await updateBranchWorktreeJournal(
+                  journalPath,
+                  journal,
+                  'mutation-dispatched',
+                );
+                runtime.generationGuard?.assertOpen();
+                mutationDispatched = true;
+                published = (await runtime.bridge.branchSession(
+                  sessionId,
+                  {
+                    name,
+                    ...(atRecordId !== undefined ? { atRecordId } : {}),
+                    targetSessionId,
+                    persistOnly: true,
+                  },
+                  { clientId },
+                )) as BridgePersistedBranchedSession;
+                await clearBranchWorktreeJournalDurable(journalPath);
+
+                runtime.generationGuard?.assertOpen();
+                const loaded = await runtime.bridge.loadSession({
+                  sessionId: targetSessionId,
+                  workspaceCwd: runtime.workspaceCwd,
+                  historyReplay: 'response',
+                  ...(clientId !== undefined ? { clientId } : {}),
+                });
+                restored = {
+                  ...loaded,
+                  displayName: published.displayName,
+                  forkedFrom: published.forkedFrom,
+                  ...(published.sourceWarnings?.length
+                    ? { sourceWarnings: published.sourceWarnings }
+                    : {}),
+                };
+                runtime.generationGuard?.assertOpen();
+                const changed = await runtime.bridge.changeSessionCwd(
+                  targetSessionId,
+                  {
+                    path: worktree.path,
+                    allowedRoots: [
+                      path.join(base.repoTop, '.qwen', 'worktrees'),
+                    ],
+                  },
+                );
+                runtime.generationGuard?.assertOpen();
+                runtime.bridge.setSessionWorktree(targetSessionId, worktree);
+                restored.currentCwd = changed.newCwd;
+                restored.worktree = worktree;
+                if (!res.writable) {
+                  await releaseRestored();
+                  return;
+                }
+                res
+                  .status(201)
+                  .json(omitSkillDetailsFromReplayArrays(restored));
+                return;
+              } catch (error) {
+                if (published) {
+                  await releaseRestored();
+                  if (res.writable) {
+                    res.status(500).json({
+                      error: 'Branch created but failed to open its worktree',
+                      code: 'branch_worktree_activation_failed',
+                      sessionId: targetSessionId,
+                    });
+                  }
+                  return;
+                }
+                const errorKind = (error as { data?: { errorKind?: unknown } })
+                  .data?.errorKind;
+                const settledPrecommitFailure =
+                  error instanceof BranchWhilePromptActiveError ||
+                  error instanceof BridgeChannelQuarantinedError ||
+                  error instanceof InvalidClientIdError ||
+                  error instanceof SessionBusyError ||
+                  error instanceof SessionLimitExceededError ||
+                  error instanceof SessionNotFoundError ||
+                  error instanceof SessionResetPendingError ||
+                  errorKind === 'branch_point_invalid' ||
+                  errorKind === 'session_not_found' ||
+                  errorKind === 'session_busy';
+                if (!mutationDispatched || settledPrecommitFailure) {
+                  try {
+                    await cleanupPrepared();
+                  } catch (cleanupError) {
+                    daemonLog?.warn('branch worktree cleanup failed', {
+                      targetSessionId,
+                      error:
+                        cleanupError instanceof Error
+                          ? cleanupError.message
+                          : String(cleanupError),
+                    });
+                    if (res.writable) {
+                      res.status(500).json({
+                        error: 'Failed to prepare worktree branch',
+                        code: 'worktree_create_failed',
+                      });
+                    }
+                    return;
+                  }
+                  if (error instanceof RequestedSessionIdAdmissionError) {
+                    sendRequestedSessionIdAdmissionError(
+                      res,
+                      error,
+                      'POST /session/:id/branch',
+                    );
+                    return;
+                  }
+                  const fileSystemError = error as NodeJS.ErrnoException;
+                  if (
+                    typeof fileSystemError.path === 'string' ||
+                    typeof fileSystemError.syscall === 'string'
+                  ) {
+                    if (res.writable) {
+                      res.status(500).json({
+                        error: 'Failed to prepare worktree branch',
+                        code: 'worktree_create_failed',
+                      });
+                    }
+                    return;
+                  }
+                  throw error;
+                }
+                if (res.writable) {
+                  res.status(500).json({
+                    error:
+                      'Branch outcome is unknown; prepared resources were preserved',
+                    code: 'branch_worktree_outcome_unknown',
+                    sessionId: targetSessionId,
+                  });
+                }
+                return;
+              } finally {
+                reservation?.release();
+              }
+            },
+          );
+          return;
+        }
+        // Record the branch point so the change overview's commit fallback can
+        // scope this session's window to <baseCommit>..HEAD. A current-checkout
+        // branch session has no worktree sidecar to restore it from, so without
+        // this capture the fallback would be suppressed permanently (R5-1).
+        const branchBaseCommit = await getHeadCommit(runtime.workspaceCwd);
         const result = await runtime.bridge.branchSession(
           sessionId,
           {
@@ -4540,8 +6701,36 @@ export function registerSessionRoutes(
           },
           { clientId },
         );
+        // Persist the branch point next to the new transcript. A checkpoint
+        // branch (atRecordId) is persist-only — no live entry exists at branch
+        // time, so the in-memory setter below cannot reach it; the restore flow
+        // re-applies this sidecar as the start commit (R8-2). Writing it for the
+        // live arm too heals that arm's start commit across a daemon restart.
+        // Best-effort: a durably committed fork must not fail on a sidecar write.
+        if (branchBaseCommit) {
+          // Best-effort: writeSessionBranchSidecar never throws (returns false
+          // on failure), so a failed persist degrades to the pre-sidecar
+          // behavior and the fork stays committed; surface it in the log.
+          const persisted = writeSessionBranchSidecar(
+            createWorkspaceRuntimeSessionService(
+              runtime,
+            ).getBranchSessionPathForArchiveState(result.sessionId, 'active'),
+            branchBaseCommit,
+          );
+          if (!persisted) {
+            daemonLog?.warn('branch point sidecar write failed', {
+              sessionId: result.sessionId,
+            });
+          }
+        }
         if (atRecordId === undefined) {
           const restored = result as BridgeBranchedSession;
+          if (branchBaseCommit) {
+            runtime.bridge.setSessionBaseCommit?.(
+              restored.sessionId,
+              branchBaseCommit,
+            );
+          }
           const releaseLiveBranch = async () => {
             if (restored.attached) {
               await runtime.bridge
@@ -4580,7 +6769,7 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/side-task',
     mutate(),
-    withRestrictedMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/side-task',
       async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
@@ -4684,12 +6873,126 @@ export function registerSessionRoutes(
     ),
   );
 
+  // A person's "send to another session" from Web Shell: the open session
+  // is the caller, and the launcher of its workspace runs the launch.
+  app.post(
+    '/session/:id/sub-sessions',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/sub-sessions',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const prompt = body['prompt'];
+        if (
+          typeof prompt !== 'string' ||
+          prompt.trim().length === 0 ||
+          prompt.length > MAX_SUB_SESSION_PROMPT_CHARS
+        ) {
+          res.status(400).json({
+            code: 'invalid_sub_session_prompt',
+            error: `\`prompt\` must be a non-empty string of at most ${MAX_SUB_SESSION_PROMPT_CHARS} characters`,
+          });
+          return;
+        }
+        const workspace = body['workspace'];
+        if (
+          workspace !== undefined &&
+          (typeof workspace !== 'string' ||
+            workspace.trim().length === 0 ||
+            workspace.length > MAX_SUB_SESSION_WORKSPACE_CHARS ||
+            // eslint-disable-next-line no-control-regex -- rejecting C0 control chars
+            /[\x00-\x1f\x7f]/.test(workspace))
+        ) {
+          res.status(400).json({
+            code: 'invalid_sub_session_workspace',
+            error: `\`workspace\` must be a non-empty string of at most ${MAX_SUB_SESSION_WORKSPACE_CHARS} characters without control characters`,
+          });
+          return;
+        }
+        const targetSessionId = body['targetSessionId'];
+        if (
+          targetSessionId !== undefined &&
+          !isValidCronTaskRoutingId(targetSessionId)
+        ) {
+          res.status(400).json({
+            code: 'invalid_sub_session_target',
+            error: `\`targetSessionId\` must be a non-empty string of at most ${MAX_CRON_TASK_ROUTING_ID_LENGTH} characters without control characters`,
+          });
+          return;
+        }
+        const launcher = (
+          req.app.locals as {
+            subSessionLauncherFor?: (
+              runtime: WorkspaceRuntime,
+            ) => SubSessionLauncher | undefined;
+          }
+        ).subSessionLauncherFor?.(runtime);
+        if (!launcher) {
+          res.status(501).json({
+            code: 'sub_session_send_unavailable',
+            error: 'This session cannot start sub-sessions.',
+          });
+          return;
+        }
+        let result: Awaited<ReturnType<SubSessionLauncher['launchForPerson']>>;
+        try {
+          result = await launcher.launchForPerson({
+            callerSessionId: sessionId,
+            prompt: prompt.trim(),
+            ...(typeof workspace === 'string' ? { workspace } : {}),
+            ...(typeof targetSessionId === 'string'
+              ? { sessionId: targetSessionId }
+              : {}),
+          });
+        } catch (error) {
+          // The launcher refuses with plain errors (untrusted or unknown
+          // workspace, an unknown target, caps), written for the person.
+          // Typed errors keep their usual status.
+          if (!(error instanceof Error) || error.constructor !== Error) {
+            throw error;
+          }
+          res.status(409).json({
+            code: 'sub_session_send_refused',
+            error: error.message,
+          });
+          return;
+        }
+        res.status(202).json({
+          sessionId: result.sessionId,
+          ...(result.workspaceCwd !== undefined
+            ? { workspaceCwd: result.workspaceCwd }
+            : {}),
+          ...(result.taskId !== undefined ? { taskId: result.taskId } : {}),
+        });
+      },
+      { rejectStandalone: true },
+    ),
+  );
+
   app.post(
     '/session/:id/cd',
     mutate(),
-    withRestrictedMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/cd',
       async (req, res, sessionId, runtime) => {
+        if (isInternalWorkspaceRuntime(runtime)) {
+          logSessionRoutingFailure(
+            'POST /session/:id/cd',
+            'non_primary_session_route_not_supported',
+            {
+              sessionId,
+              workspaceId: runtime.workspaceId,
+              workspaceCwd: runtime.workspaceCwd,
+            },
+          );
+          sendNonPrimarySessionRouteUnsupported(
+            res,
+            'POST /session/:id/cd',
+            sessionId,
+            runtime,
+          );
+          return;
+        }
         const body = safeBody(req);
         const targetPath = body['path'];
         if (
@@ -4708,13 +7011,18 @@ export function registerSessionRoutes(
         runtime.generationGuard?.assertOpen();
         const result = await runtime.bridge.changeSessionCwd(
           sessionId,
-          { path: targetPath },
+          {
+            path: targetPath,
+            ...(!runtime.primary
+              ? { allowedRoots: [runtime.workspaceCwd] }
+              : {}),
+          },
           clientId !== undefined ? { clientId } : undefined,
         );
         runtime.generationGuard?.assertOpen();
         res.status(200).json(result);
       },
-      { rejectStandalone: true },
+      { cwdBound: 'always', rejectStandalone: true },
     ),
   );
 
@@ -4722,8 +7030,32 @@ export function registerSessionRoutes(
     '/session/:id/status',
     withOwnerReadSession(
       'GET /session/:id/status',
-      (_req, res, sessionId, runtime) => {
-        res.status(200).json(runtime.bridge.getSessionSummary(sessionId));
+      async (_req, res, sessionId, runtime) => {
+        const service = createWorkspaceRuntimeSessionService(runtime);
+        // Bridge entries are re-created without prs on daemon restart/reload,
+        // so hydrate the persisted binding history before reading the summary;
+        // seedSessionPrs no-ops when bindings already exist, so live state is
+        // never clobbered. Best-effort: an unreadable sidecar omits bindings.
+        try {
+          const hydratedPrs = await readSessionPrs(
+            service.getPrSessionPathForArchiveState(sessionId, 'active'),
+          );
+          if (hydratedPrs && hydratedPrs.length > 0) {
+            runtime.bridge.seedSessionPrs?.(sessionId, hydratedPrs);
+          }
+        } catch {
+          // An unreadable sidecar omits the bindings, not the summary.
+        }
+        const summary = { ...runtime.bridge.getSessionSummary(sessionId) };
+        try {
+          summary.lastUserPromptAt =
+            await service.getLastUserPromptAt(sessionId);
+        } catch {
+          // An unreadable transcript omits the optional field, not the summary.
+          summary.lastUserPromptAt = undefined;
+        }
+        runtime.generationGuard?.assertOpen();
+        res.status(200).json(summary);
       },
     ),
   );
@@ -4776,6 +7108,12 @@ export function registerSessionRoutes(
     const route = 'GET /session/:id/transcript';
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;
+    const compactedReplayMode = parseReplayMode(
+      req.query,
+      res,
+      'compactedReplayMode',
+    );
+    if (compactedReplayMode === null) return;
     const limit = parseTranscriptLimitQuery(req.query['limit'], res);
     if (limit === null) return;
     const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
@@ -4864,9 +7202,10 @@ export function registerSessionRoutes(
       const serialized = serializeWorkspaceTranscriptResponse(
         {
           ...result,
-          events: (result.events ?? []).map((event) =>
-            redactSdkSurfaceEvent(event, workspaceTrusted),
-          ),
+          events: (compactedReplayMode === 'summary'
+            ? summarizeReplay(result.events ?? [])
+            : (result.events ?? [])
+          ).map((event) => redactSdkSurfaceEvent(event, workspaceTrusted)),
         },
         sessionId,
       );
@@ -4893,6 +7232,12 @@ export function registerSessionRoutes(
     if (!qualifiedTarget) return;
     const preResolvedRuntime =
       qualifiedTarget.kind === 'ordinary' ? qualifiedTarget.runtime : undefined;
+    const compactedReplayMode = parseReplayMode(
+      req.query,
+      res,
+      'compactedReplayMode',
+    );
+    if (compactedReplayMode === null) return;
     const limit = parseTranscriptLimitQuery(req.query['limit'], res);
     if (limit === null) return;
     const cursor = parseTranscriptCursorQuery(req.query['cursor'], res);
@@ -5098,7 +7443,9 @@ export function registerSessionRoutes(
       );
       if (result === undefined) return;
       const serialized = serializeWorkspaceTranscriptResponse(
-        result,
+        compactedReplayMode === 'summary'
+          ? { ...result, events: summarizeReplay(result.events) }
+          : result,
         sessionId,
       );
       res
@@ -5110,6 +7457,271 @@ export function registerSessionRoutes(
       sendBridgeError(res, err, { route, sessionId });
     }
   });
+
+  app.get('/workspaces/:workspace/session/:id/tool-calls', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/session/:id/tool-calls';
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const qualifiedTarget = resolveQualifiedSessionTarget(req, res, {
+      allowUntrustedSecondary: true,
+    });
+    if (!qualifiedTarget) return;
+    const turnId = req.query['turnId'];
+    if (typeof turnId !== 'string' || !turnId.trim() || turnId.length > 200) {
+      res.status(400).json({
+        error: '`turnId` must be a non-empty persisted turn record id',
+        code: 'invalid_turn_anchor',
+      });
+      return;
+    }
+    try {
+      const result = await runWithoutDebugLogSession(() =>
+        archiveCoordinator.runSharedMany([sessionId], async () => {
+          const runtime =
+            qualifiedTarget.kind === 'ordinary'
+              ? qualifiedTarget.runtime
+              : await resolveQualifiedSessionRuntime(
+                  req,
+                  res,
+                  route,
+                  [sessionId],
+                  'active',
+                );
+          if (!runtime) return undefined;
+          const assertRuntimeGenerationOpen =
+            captureRuntimeGenerationAssertion(runtime);
+          assertRuntimeGenerationOpen?.();
+          return runWithWorkspaceRuntimeStorage(runtime, async () => {
+            await assertSessionLoadable(
+              runtime.workspaceCwd,
+              sessionId,
+              runtime.sessionRuntimeBaseDir,
+              {
+                allowActiveConflict: true,
+              },
+            );
+            try {
+              runtime.bridge.getSessionSummary(sessionId);
+              if (runtime.bridge.flushSessionTranscript) {
+                await runtime.bridge.flushSessionTranscript(sessionId);
+              } else {
+                await runtime.bridge.getSessionTranscriptPage({
+                  sessionId,
+                  direction: 'backward',
+                  limit: 1,
+                });
+              }
+            } catch (error) {
+              if (!(error instanceof SessionNotFoundError)) throw error;
+            }
+            const codec = getTranscriptCursorCodec(runtime);
+            const reader = new SessionTranscriptReader(
+              runtime.workspaceCwd,
+              codec,
+            );
+            const hasActivePrompt = () => {
+              try {
+                return runtime.bridge.getSessionSummary(sessionId)
+                  .hasActivePrompt;
+              } catch (error) {
+                if (error instanceof SessionNotFoundError) return false;
+                throw error;
+              }
+            };
+            let events;
+            try {
+              events = await readSessionToolCalls({
+                sessionId,
+                turnId,
+                reader,
+                codec,
+                hasActivePrompt,
+              });
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+                throw error;
+              const location =
+                await createWorkspaceRuntimeSessionService(
+                  runtime,
+                ).getSessionLocation(sessionId);
+              if (location === 'archived')
+                throw new SessionArchivedError(sessionId);
+              if (location === 'conflict')
+                throw new SessionConflictError(sessionId);
+              throw new SessionNotFoundError(sessionId);
+            }
+            assertRuntimeGenerationOpen?.();
+            return {
+              v: 1 as const,
+              sessionId,
+              turnId,
+              events: events.map((event) =>
+                redactSdkSurfaceEvent(event, runtime.trusted),
+              ),
+            };
+          });
+        }),
+      );
+      if (result === undefined) return;
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .type('application/json')
+        .send(serializeWorkspaceTranscriptResponse(result, sessionId));
+    } catch (error) {
+      if (error instanceof SessionToolCallsLimitError) {
+        res.status(413).json({
+          error: error.message,
+          code: 'tool_calls_limit_exceeded',
+          sessionId,
+        });
+        return;
+      }
+      if (error instanceof SessionToolCallsReplayError) {
+        res.status(500).json({
+          error: error.message,
+          code: 'tool_calls_replay_incomplete',
+          sessionId,
+        });
+        return;
+      }
+      sendBridgeError(res, error, { route, sessionId });
+    }
+  });
+
+  for (const route of [
+    '/session/:id/turns/:promptId/hooks',
+    '/workspaces/:workspace/session/:id/turns/:promptId/hooks',
+  ]) {
+    app.get(route, async (req, res) => {
+      const routeName = `GET ${route}`;
+      const sessionId = requireSessionId(req, res);
+      if (sessionId === null) return;
+      const promptId = req.params['promptId'];
+      if (typeof promptId !== 'string' || !promptId.trim()) {
+        res.status(400).json({
+          code: 'invalid_prompt_id',
+          error: 'A history prompt ID is required',
+        });
+        return;
+      }
+      const qualified = route.startsWith('/workspaces/');
+      const target = qualified
+        ? resolveQualifiedSessionTarget(req, res, {
+            allowUntrustedSecondary: true,
+          })
+        : undefined;
+      if (qualified && !target) return;
+      const limit = parseTranscriptLimitQuery(req.query['limit'], res);
+      if (limit === null) return;
+      const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
+      if (snapshot === null) return;
+      const start = parseTranscriptStartQuery(req.query['start'], res);
+      if (start === null) return;
+      if (
+        (start !== undefined && snapshot === undefined) ||
+        (snapshot !== undefined &&
+          workspaceTranscriptCursorExceedsLimit(snapshot))
+      ) {
+        res.status(400).json({
+          code: 'invalid_transcript_cursor',
+          error: 'Invalid hook page snapshot or start',
+        });
+        return;
+      }
+      try {
+        const result = await runWithoutDebugLogSession(() =>
+          archiveCoordinator.runSharedMany([sessionId], async () => {
+            const runtime = qualified
+              ? target?.kind === 'ordinary'
+                ? target.runtime
+                : await resolveQualifiedSessionRuntime(
+                    req,
+                    res,
+                    routeName,
+                    [sessionId],
+                    'active',
+                  )
+              : await resolveTranscriptSessionRuntime(
+                  res,
+                  routeName,
+                  sessionId,
+                  snapshot !== undefined,
+                );
+            if (!runtime) return undefined;
+            const assertOpen = captureRuntimeGenerationAssertion(runtime);
+            assertOpen?.();
+            return runWithWorkspaceRuntimeStorage(runtime, async () => {
+              if (snapshot === undefined) {
+                await assertSessionLoadable(
+                  runtime.workspaceCwd,
+                  sessionId,
+                  runtime.sessionRuntimeBaseDir,
+                  { allowActiveConflict: true },
+                );
+                try {
+                  runtime.bridge.getSessionSummary(sessionId);
+                  if (runtime.bridge.flushSessionTranscript)
+                    await runtime.bridge.flushSessionTranscript(sessionId);
+                  else
+                    await runtime.bridge.getSessionTranscriptPage({
+                      sessionId,
+                      direction: 'backward',
+                      limit: 1,
+                    });
+                } catch (error) {
+                  if (!(error instanceof SessionNotFoundError)) throw error;
+                }
+                assertOpen?.();
+              }
+              try {
+                const page = await new SessionTranscriptReader(
+                  runtime.workspaceCwd,
+                  getTranscriptCursorCodec(runtime),
+                ).readTurnHooksPage(sessionId, promptId, {
+                  ...(snapshot !== undefined ? { snapshot } : {}),
+                  ...(start !== undefined ? { start } : {}),
+                  ...(limit !== undefined ? { limit } : {}),
+                });
+                assertOpen?.();
+                if (!page)
+                  res.status(404).json({
+                    code: 'turn_not_found',
+                    error: 'History turn not found',
+                    sessionId,
+                  });
+                return page;
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+                  throw error;
+                if (snapshot !== undefined)
+                  throw new SessionTranscriptSnapshotUnavailableError(
+                    sessionId,
+                  );
+                const location =
+                  await createWorkspaceRuntimeSessionService(
+                    runtime,
+                  ).getSessionLocation(sessionId);
+                if (location === 'archived')
+                  throw new SessionArchivedError(sessionId);
+                if (location === 'conflict')
+                  throw new SessionConflictError(sessionId);
+                throw new SessionNotFoundError(sessionId);
+              }
+            });
+          }),
+        );
+        if (result === undefined) return;
+        res
+          .status(200)
+          .set('Cache-Control', 'no-store')
+          .type('application/json')
+          .send(serializeWorkspaceTranscriptResponse(result, sessionId));
+      } catch (error) {
+        sendBridgeError(res, error, { route: routeName, sessionId });
+      }
+    });
+  }
 
   app.get('/session/:id/turn-index', async (req, res) => {
     const route = 'GET /session/:id/turn-index';
@@ -5294,15 +7906,13 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'GET /session/:id/context',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'GET /session/:id/context',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(200).json({
             v: 1,
@@ -5321,9 +7931,14 @@ export function registerSessionRoutes(
     withOwnerReadSession(
       'GET /session/:id/context',
       async (_req, res, sessionId, runtime) => {
+        const status = await runtime.bridge.getSessionContextStatus(sessionId);
         res
           .status(200)
-          .json(await runtime.bridge.getSessionContextStatus(sessionId));
+          .json(
+            runtime.trusted
+              ? status
+              : redactWorkflowModeFromSessionState(status),
+          );
       },
     ),
   );
@@ -5366,15 +7981,13 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'GET /session/:id/supported-commands',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'GET /session/:id/supported-commands',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(200).json({
             v: 1,
@@ -5411,15 +8024,58 @@ export function registerSessionRoutes(
     withOwnerReadSession(
       'GET /session/:id/tasks',
       async (req, res, sessionId, runtime) => {
-        res.status(200).json(
-          await runtime.bridge.getSessionTasksStatus(sessionId, {
-            // Same fail-closed shape as the workflow control surfaces:
-            // opting in here leaks strictly more than the redacted
-            // supported-commands surface on an untrusted workspace.
-            includeWorkflows:
-              runtime.trusted && req.query['includeWorkflows'] === 'true',
-          }),
-        );
+        const status = await runtime.bridge.getSessionTasksStatus(sessionId, {
+          // Same fail-closed shape as the workflow control surfaces:
+          // opting in here leaks strictly more than the redacted
+          // supported-commands surface on an untrusted workspace.
+          includeWorkflows:
+            runtime.trusted && req.query['includeWorkflows'] === 'true',
+        });
+        if (req.query['includeSubSessions'] !== 'true') {
+          res.status(200).json(status);
+          return;
+        }
+        // The daemon, not the child, reports these launches back, so it
+        // lists them here beside the child's own tasks.
+        const launcher = (
+          req.app.locals as {
+            subSessionLauncherFor?: (
+              runtime: WorkspaceRuntime,
+            ) => SubSessionLauncher | undefined;
+          }
+        ).subSessionLauncherFor?.(runtime);
+        res.status(200).json({
+          ...status,
+          subSessions: (launcher?.listOutgoing(sessionId) ?? []).map(
+            (task) => ({
+              kind: 'session',
+              ...task,
+              runtimeMs: Math.max(
+                0,
+                (task.endTime ?? status.now) - task.startTime,
+              ),
+            }),
+          ),
+        });
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/tasks/:taskId/runtime',
+    withOwnerReadSession(
+      'GET /session/:id/tasks/:taskId/runtime',
+      async (req, res, sessionId, runtime) => {
+        const taskId = req.params['taskId'];
+        if (!taskId) {
+          res.status(400).json({
+            error: '`taskId` route parameter is required',
+          });
+          return;
+        }
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionTaskRuntime(sessionId, taskId));
       },
     ),
   );
@@ -5501,6 +8157,162 @@ export function registerSessionRoutes(
     ),
   );
 
+  app.post(
+    '/session/:id/mcp-app/tools/call',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/mcp-app/tools/call',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (!clientId) {
+          res
+            .status(403)
+            .json({ error: 'MCP App calls require a session-bound client id' });
+          return;
+        }
+        const body = safeBody(req);
+        const { serverName, resourceUri, name, arguments: args } = body;
+        if (
+          typeof serverName !== 'string' ||
+          !serverName ||
+          typeof resourceUri !== 'string' ||
+          !resourceUri.startsWith('ui://') ||
+          typeof name !== 'string' ||
+          !name ||
+          !args ||
+          typeof args !== 'object' ||
+          Array.isArray(args)
+        ) {
+          res.status(400).json({ error: 'Invalid MCP App tool call' });
+          return;
+        }
+        const abort = new AbortController();
+        const onClose = () => {
+          if (!res.writableEnded) abort.abort();
+        };
+        res.once('close', onClose);
+        try {
+          res.json(
+            await runtime.bridge.callMcpAppTool(
+              sessionId,
+              {
+                serverName,
+                resourceUri,
+                name,
+                arguments: args as Record<string, unknown>,
+              },
+              abort.signal,
+              { clientId },
+            ),
+          );
+        } finally {
+          res.off('close', onClose);
+        }
+      },
+      { cwdBound: 'always' },
+    ),
+  );
+
+  // Generated UI view state. Reads and writes go to the session's live owner
+  // and never fall back to another runtime; a card id outside the minted
+  // grammar is rejected before it reaches the agent.
+  const generatedUiStateRequest = (
+    req: Request,
+    res: Response,
+  ): { clientId: string; cardId: string } | undefined => {
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return undefined;
+    if (!clientId) {
+      res
+        .status(403)
+        .json({ error: 'View state requires a session-bound client id' });
+      return undefined;
+    }
+    const cardId = req.params['cardId'];
+    if (!cardId || !GENERATED_UI_CARD_ID_PATTERN.test(cardId)) {
+      res
+        .status(400)
+        .json({ error: 'Invalid card id', code: 'invalid_card_id' });
+      return undefined;
+    }
+    return { clientId, cardId };
+  };
+
+  app.get(
+    '/session/:id/generated-ui/state/:cardId',
+    withOwnerReadSession(
+      'GET /session/:id/generated-ui/state/:cardId',
+      async (req, res, sessionId, runtime) => {
+        const request = generatedUiStateRequest(req, res);
+        if (!request) return;
+        try {
+          res
+            .status(200)
+            .json(
+              await runtime.bridge.getGeneratedUiState(
+                sessionId,
+                request.cardId,
+                { clientId: request.clientId },
+              ),
+            );
+        } catch (err) {
+          sendBridgeError(res, err, {
+            route: 'GET /session/:id/generated-ui/state/:cardId',
+            sessionId,
+          });
+        }
+      },
+      { cwdBound: true },
+    ),
+  );
+
+  app.put(
+    '/session/:id/generated-ui/state/:cardId',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'PUT /session/:id/generated-ui/state/:cardId',
+      async (req, res, sessionId, runtime) => {
+        const request = generatedUiStateRequest(req, res);
+        if (!request) return;
+        const body = safeBody(req);
+        const baseRevision = body['baseRevision'];
+        if (
+          !Number.isSafeInteger(baseRevision) ||
+          (baseRevision as number) < 0 ||
+          !Object.hasOwn(body, 'value')
+        ) {
+          res.status(400).json({
+            error: 'Expected a non-negative baseRevision and a value',
+            code: 'invalid_state',
+          });
+          return;
+        }
+        try {
+          const result = await runtime.bridge.setGeneratedUiState(
+            sessionId,
+            request.cardId,
+            { baseRevision: baseRevision as number, value: body['value'] },
+            { clientId: request.clientId },
+          );
+          const status =
+            result.outcome === 'saved'
+              ? 200
+              : result.outcome === 'stale'
+                ? 409
+                : 413;
+          res.status(status).json(result);
+        } catch (err) {
+          sendBridgeError(res, err, {
+            route: 'PUT /session/:id/generated-ui/state/:cardId',
+            sessionId,
+          });
+        }
+      },
+      { cwdBound: 'always' },
+    ),
+  );
+
   app.get(
     '/session/:id/resources',
     withOwnerReadSession(
@@ -5527,6 +8339,486 @@ export function registerSessionRoutes(
   );
 
   app.get(
+    '/session/:id/sources',
+    withOwnerReadSession(
+      'GET /session/:id/sources',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.getSessionSources(
+              sessionId,
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/sources',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/sources',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (clientId === undefined) {
+          res.status(403).json({
+            error: 'Source mutations require a session-bound client id',
+            code: 'client_id_required',
+          });
+          return;
+        }
+        const result = await runtime.bridge.upsertSessionSource(
+          sessionId,
+          req.body as SessionSourceInput,
+          { clientId },
+        );
+        res.status(200).json(result);
+      },
+    ),
+  );
+
+  app.delete(
+    '/session/:id/sources/:sourceId',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'DELETE /session/:id/sources/:sourceId',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (clientId === undefined) {
+          res.status(403).json({
+            error: 'Source mutations require a session-bound client id',
+            code: 'client_id_required',
+          });
+          return;
+        }
+        const result = await runtime.bridge.removeSessionSource(
+          sessionId,
+          req.params['sourceId']!,
+          { clientId },
+        );
+        res.status(200).json(result);
+      },
+    ),
+  );
+
+  const artifactSessionId = z
+    .string()
+    .min(1)
+    .max(256)
+    .refine((id) => id.trim().length > 0)
+    .transform(normalizeSessionIdForLookup);
+  const artifactQuery = z
+    .object({
+      sessionIds: z.array(artifactSessionId).min(1).max(100),
+    })
+    .strict();
+  const artifactDeletion = z
+    .object({
+      artifacts: z
+        .array(
+          z
+            .object({
+              sessionId: artifactSessionId,
+              artifactId: z
+                .string()
+                .min(1)
+                .max(200)
+                .refine((id) => id.trim().length > 0),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(100),
+    })
+    .strict();
+
+  for (const operation of ['all', 'query', 'delete'] as const) {
+    const route =
+      '/workspaces/:workspace/artifact-library' +
+      (operation === 'all' ? '' : `/${operation}`);
+    const handler: RequestHandler = async (req, res) => {
+      const selected = new Map<string, Set<string>>();
+      if (operation === 'query') {
+        const parsed = artifactQuery.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            code: 'invalid_artifact_library_request',
+            error: 'Expected 1–100 sessionIds.',
+          });
+          return;
+        }
+        for (const id of parsed.data.sessionIds) selected.set(id, new Set());
+      } else if (operation === 'delete') {
+        const parsed = artifactDeletion.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            code: 'invalid_artifact_library_request',
+            error: 'Expected 1–100 artifacts with sessionId and artifactId.',
+          });
+          return;
+        }
+        for (const { sessionId, artifactId } of parsed.data.artifacts) {
+          const ids = selected.get(sessionId) ?? new Set<string>();
+          ids.add(artifactId);
+          selected.set(sessionId, ids);
+        }
+      }
+      if (deps.sessionArtifactsPersistenceAvailable === false) {
+        res.status(409).json({
+          code: 'artifact_library_unavailable',
+          error: 'Artifact persistence is unavailable',
+        });
+        return;
+      }
+      let stream: ArtifactLibraryStream | undefined;
+      try {
+        const runtime = await resolveQualifiedSessionRuntime(
+          req,
+          res,
+          route,
+          [],
+          'any',
+        );
+        if (!runtime) return;
+        const assertOpen = captureRuntimeGenerationAssertion(runtime);
+        const cache = artifactCache(runtime);
+        const response = await runOwnerRuntimeActivity(runtime, () =>
+          runWithWorkspaceRuntimeStorage(runtime, async () => {
+            assertOpen?.();
+            if (operation === 'all') {
+              for (const id of await cache.sessionIds())
+                selected.set(id, new Set());
+            }
+            const readResults: WorkspaceSessionArtifactsEnvelope[] = [];
+            const errors: Array<
+              ReturnType<typeof artifactLibraryMemberError> & {
+                sessionId: string;
+              }
+            > = [];
+            const removed: ArtifactLibraryRemovalResult[] = [];
+            const groups = [...selected];
+            const processGroup = async ([sessionId, artifactIds]: [
+              string,
+              Set<string>,
+            ]) => {
+              const run = async () => {
+                assertOpen?.();
+                const owner =
+                  workspaceRegistry.resolveLiveSessionOwner(sessionId);
+                if (owner.kind === 'unavailable')
+                  throw new ArtifactLibraryRequestError(
+                    503,
+                    'workspace_runtime_unavailable',
+                    'Session owner is unavailable.',
+                  );
+                if (owner.kind === 'ambiguous')
+                  throw new ArtifactLibraryRequestError(
+                    500,
+                    'ambiguous_session_owner',
+                    'Session has multiple live owners.',
+                  );
+                if (owner.kind === 'found' && owner.runtime !== runtime)
+                  throw new ArtifactLibraryRequestError(
+                    409,
+                    'session_workspace_conflict',
+                    'Session belongs to another workspace.',
+                  );
+                if (isInternalWorkspaceRuntime(runtime)) {
+                  const service = createWorkspaceRuntimeSessionService(runtime);
+                  const location = await service.getSessionLocation(sessionId);
+                  if (location === 'conflict')
+                    throw new SessionConflictError(sessionId);
+                  if (
+                    !location ||
+                    !(await readLoadableLiveConversationMetadata(
+                      sessionId,
+                      service,
+                    ))
+                  )
+                    throw new SessionNotFoundError(sessionId);
+                }
+                assertOpen?.();
+                if (operation !== 'delete')
+                  return { session: await cache.read(sessionId) };
+                cache.invalidate(sessionId);
+                try {
+                  return {
+                    removed: await removeWorkspaceLibraryArtifacts(
+                      runtime,
+                      sessionId,
+                      [...artifactIds],
+                      () => assertOpen?.(),
+                    ),
+                  };
+                } finally {
+                  cache.invalidate(sessionId);
+                }
+              };
+              try {
+                const result =
+                  operation === 'delete'
+                    ? await archiveCoordinator.runExclusiveMany(
+                        [sessionId],
+                        run,
+                      )
+                    : await archiveCoordinator.runSharedMany([sessionId], run);
+                return { sessionId, artifactIds, result };
+              } catch (error) {
+                return {
+                  sessionId,
+                  artifactIds,
+                  error: artifactLibraryMemberError(error),
+                };
+              }
+            };
+            let succeeded = 0;
+            let failed = 0;
+            let skipped = 0;
+            const consume = async (
+              item: Awaited<ReturnType<typeof processGroup>>,
+            ) => {
+              if (item.error) {
+                if (operation === 'delete') {
+                  for (const artifactId of item.artifactIds)
+                    removed.push({
+                      sessionId: item.sessionId,
+                      artifactId,
+                      error: item.error,
+                    });
+                } else if (
+                  operation !== 'all' ||
+                  item.error.code !== 'session_not_found'
+                ) {
+                  failed++;
+                  const error = { sessionId: item.sessionId, ...item.error };
+                  if (stream) await stream.send('session_error', error);
+                  else errors.push(error);
+                } else skipped++;
+              } else if (item.result?.session) {
+                succeeded++;
+                if (stream)
+                  await stream.send('session', { ...item.result.session });
+                else readResults.push(item.result.session);
+              } else if (item.result?.removed) {
+                removed.push(...item.result.removed);
+              }
+            };
+            if (operation === 'delete') {
+              for (
+                let offset = 0;
+                offset < groups.length;
+                offset += ARTIFACT_LIBRARY_CONCURRENCY
+              ) {
+                const batch = await Promise.all(
+                  groups
+                    .slice(offset, offset + ARTIFACT_LIBRARY_CONCURRENCY)
+                    .map(processGroup),
+                );
+                assertOpen?.();
+                for (const item of batch) await consume(item);
+              }
+            } else {
+              if (res.destroyed) return;
+              res.vary('Accept');
+              if (
+                req.accepts(['application/json', 'text/event-stream']) ===
+                'text/event-stream'
+              ) {
+                if (
+                  !checkSseAdmission({
+                    surface: 'artifactLibrary',
+                    req,
+                    res,
+                    caps: deps.sseAdmissionCaps,
+                    daemonLog: deps.daemonLog,
+                  })
+                ) {
+                  return;
+                }
+                countSseStream('artifactLibrary', req, res);
+                stream = new ArtifactLibraryStream(res);
+                await stream.send('start', { total: groups.length });
+              }
+              const results: Array<Awaited<ReturnType<typeof processGroup>>> =
+                [];
+              let next = 0;
+              let stopped = false;
+              const worker = async () => {
+                try {
+                  while (
+                    !stopped &&
+                    !res.destroyed &&
+                    !stream?.closed &&
+                    next < groups.length
+                  ) {
+                    assertOpen?.();
+                    const index = next++;
+                    const item = await processGroup(groups[index]!);
+                    assertOpen?.();
+                    if (res.destroyed || stream?.closed) return;
+                    if (stream) await consume(item);
+                    else results[index] = item;
+                  }
+                } catch (error) {
+                  stopped = true;
+                  throw error;
+                }
+              };
+              const workers = await Promise.allSettled(
+                Array.from(
+                  {
+                    length: Math.min(
+                      ARTIFACT_LIBRARY_CONCURRENCY,
+                      groups.length,
+                    ),
+                  },
+                  worker,
+                ),
+              );
+              const rejected = workers.find(
+                (result) => result.status === 'rejected',
+              );
+              if (rejected?.status === 'rejected') throw rejected.reason;
+              if (res.destroyed || stream?.closed) return;
+              assertOpen?.();
+              if (stream) {
+                await stream.send('complete', {
+                  total: groups.length,
+                  succeeded,
+                  failed,
+                  skipped,
+                });
+                return;
+              }
+              for (const item of results) await consume(item);
+            }
+            assertOpen?.();
+            return operation === 'delete'
+              ? { v: 1, results: removed }
+              : { v: 1, sessions: readResults, errors };
+          }),
+        );
+        // headersSent: an SSE admission refusal inside the closure already
+        // answered 503; the JSON fallback must not double-send.
+        if (!stream && !res.destroyed && !res.headersSent)
+          res.status(200).set('Cache-Control', 'no-store').json(response);
+      } catch (error) {
+        if (stream) {
+          if (!stream.closed)
+            await stream
+              .send(
+                'error',
+                error instanceof WorkspaceGenerationClosedError
+                  ? {
+                      status: 503,
+                      code: 'workspace_runtime_unavailable',
+                      message: 'Workspace runtime is not active.',
+                    }
+                  : { ...artifactLibraryMemberError(error) },
+              )
+              .catch(() => undefined);
+        } else if (!res.destroyed) sendBridgeError(res, error, { route });
+      } finally {
+        stream?.end();
+      }
+    };
+    if (operation === 'all') app.get(route, handler);
+    else if (operation === 'delete')
+      app.post(route, mutate({ strict: true }), handler);
+    else app.post(route, handler);
+  }
+
+  // Persisted workspace management neither borrows a session client identity
+  // nor loads cold sessions.
+  for (const operation of ['read', 'remove'] as const) {
+    const route =
+      '/workspaces/:workspace/session/:id/artifact-library' +
+      (operation === 'remove' ? '/:artifactId' : '');
+    const handler: RequestHandler = async (req, res) => {
+      const sessionId = requireSessionId(req, res);
+      if (sessionId === null) return;
+      if (deps.sessionArtifactsPersistenceAvailable === false) {
+        res.status(409).json({
+          code: 'artifact_library_unavailable',
+          error: 'Artifact persistence is unavailable',
+        });
+        return;
+      }
+      try {
+        const runtime = await resolveQualifiedSessionRuntime(
+          req,
+          res,
+          route,
+          [sessionId],
+          'any',
+        );
+        if (!runtime) return;
+        const assertOpen = captureRuntimeGenerationAssertion(runtime);
+        const run = async () => {
+          assertOpen?.();
+          const liveOwner =
+            workspaceRegistry.resolveLiveSessionOwner(sessionId);
+          if (liveOwner.kind === 'unavailable') {
+            sendWorkspaceRuntimeUnavailable(res);
+            return undefined;
+          }
+          if (liveOwner.kind === 'ambiguous') {
+            sendAmbiguousSessionOwner(
+              res,
+              route,
+              sessionId,
+              liveOwner.runtimes,
+            );
+            return undefined;
+          }
+          if (liveOwner.kind === 'found' && liveOwner.runtime !== runtime) {
+            sendSessionWorkspaceConflict(
+              res,
+              route,
+              sessionId,
+              runtime,
+              liveOwner.runtime,
+            );
+            return undefined;
+          }
+          if (operation === 'remove')
+            workspaceArtifactCaches.get(runtime)?.invalidate(sessionId);
+          const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
+            operation === 'read'
+              ? artifactCache(runtime).read(sessionId)
+              : removeWorkspaceLibraryArtifact(
+                  runtime,
+                  sessionId,
+                  req.params['artifactId']!,
+                  () => assertOpen?.(),
+                ),
+          );
+          assertOpen?.();
+          return result;
+        };
+        const result = await runOwnerRuntimeActivity(runtime, () =>
+          operation === 'read'
+            ? archiveCoordinator.runSharedMany([sessionId], run)
+            : archiveCoordinator.runExclusiveMany([sessionId], run),
+        );
+        if (result)
+          res.status(200).set('Cache-Control', 'no-store').json(result);
+      } catch (error) {
+        if (sendArtifactValidationError(res, error)) return;
+        sendBridgeError(res, error, { route, sessionId });
+      }
+    };
+    if (operation === 'read') app.get(route, handler);
+    else app.delete(route, mutate({ strict: true }), handler);
+  }
+
+  app.get(
     '/session/:id/artifacts',
     withOwnerReadSession(
       'GET /session/:id/artifacts',
@@ -5541,6 +8833,48 @@ export function registerSessionRoutes(
               clientId !== undefined ? { clientId } : undefined,
             ),
           );
+      },
+      { cwdBound: true },
+    ),
+  );
+
+  app.get(
+    '/session/:id/artifacts/:artifactId/content',
+    withOwnerReadSession(
+      'GET /session/:id/artifacts/:artifactId/content',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const { artifacts } = await runtime.bridge.getSessionArtifacts(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        const artifact = artifacts.find(
+          (item) => item.id === req.params['artifactId'],
+        );
+        let content: string;
+        try {
+          if (!artifact) throw new Error('Snapshot not registered');
+          content = await readArtifactSnapshot(
+            artifact,
+            runtime.sessionRuntimeBaseDir,
+          );
+        } catch {
+          res.status(404).json({
+            error: 'artifact_snapshot_unavailable',
+            message: 'Saved webpage version is missing or has changed.',
+          });
+          return;
+        }
+        res
+          .status(200)
+          .set({
+            'Content-Type': 'text/html; charset=utf-8',
+            'Content-Disposition': 'attachment; filename="saved-webpage.html"',
+            'X-Content-Type-Options': 'nosniff',
+            'Cache-Control': 'private, no-store',
+          })
+          .send(content);
       },
       { cwdBound: true },
     ),
@@ -5693,18 +9027,20 @@ export function registerSessionRoutes(
           });
           return;
         }
-        const action = safeBody(req)['action'];
+        const body = safeBody(req);
+        const action = body['action'];
         if (
           action !== 'pause' &&
           action !== 'resume' &&
           action !== 'retry' &&
           action !== 'rerun' &&
           action !== 'delete-history' &&
-          action !== 'run-saved'
+          action !== 'run-saved' &&
+          action !== 'run-script'
         ) {
           res.status(400).json({
             error:
-              '`action` must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
+              '`action` must be "pause", "resume", "retry", "rerun", "delete-history", "run-saved", or "run-script"',
           });
           return;
         }
@@ -5722,6 +9058,7 @@ export function registerSessionRoutes(
               taskId,
               action,
               clientId !== undefined ? { clientId } : undefined,
+              readServeWorkflowActionInput(body),
             ),
           );
       },
@@ -5794,6 +9131,9 @@ export function registerSessionRoutes(
         const promptId = crypto.randomUUID();
         const result = await runtime.bridge.continueSession(sessionId, {
           ...(clientId !== undefined ? { clientId } : {}),
+          ...(typeof req.body?.confirmCancellation === 'string'
+            ? { confirmCancellation: req.body.confirmCancellation }
+            : {}),
           promptId,
         });
         if (daemonLog && result.accepted) {
@@ -5806,6 +9146,172 @@ export function registerSessionRoutes(
         res.status(200).json(result);
       },
       { cwdBound: 'always' },
+    ),
+  );
+
+  const attachmentUploadBodyError: ErrorRequestHandler = (
+    error,
+    _req,
+    res,
+    next,
+  ) => {
+    const status =
+      error && typeof error === 'object' && 'status' in error
+        ? error.status
+        : undefined;
+    if (status === 400 || status === 413 || status === 415) {
+      res.status(status).json({
+        error:
+          status === 413
+            ? 'Attachment upload request body exceeds its limit'
+            : 'Invalid attachment upload request body',
+        code:
+          status === 413
+            ? 'attachment_upload_too_large'
+            : status === 415
+              ? error.type === 'encoding.unsupported'
+                ? 'invalid_attachment_upload_encoding'
+                : 'invalid_attachment_upload_content_type'
+              : 'invalid_attachment_upload_body',
+      });
+      return;
+    }
+    next(error);
+  };
+
+  app.post(
+    '/session/:id/attachment-uploads',
+    mutate(),
+    express.json({ limit: '4kb', inflate: false }),
+    attachmentUploadBodyError,
+    withOwnerMutableSession(
+      'POST /session/:id/attachment-uploads',
+      (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        if (
+          typeof body['name'] !== 'string' ||
+          typeof body['mimeType'] !== 'string' ||
+          !body['mimeType'].trim() ||
+          typeof body['size'] !== 'number'
+        ) {
+          throw new SessionAttachmentUploadError(
+            400,
+            'invalid_attachment_upload_metadata',
+            'name, mimeType, and size are required',
+          );
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        try {
+          const upload = runtime.bridge.createSessionAttachmentUpload(
+            sessionId,
+            {
+              name: body['name'],
+              mimeType: body['mimeType'].trim().toLowerCase(),
+              size: body['size'],
+            },
+            clientId === undefined ? undefined : { clientId },
+          );
+          res.set('Cache-Control', 'no-store').status(201).json(upload);
+        } catch (error) {
+          if (error instanceof TypeError || error instanceof RangeError) {
+            throw new SessionAttachmentUploadError(
+              error instanceof RangeError ? 413 : 400,
+              'invalid_attachment_upload_metadata',
+              error.message,
+            );
+          }
+          throw error;
+        }
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/attachment-uploads/:uploadId/chunks',
+    mutate(),
+    express.raw({
+      type: '*/*',
+      limit: SESSION_ATTACHMENT_CHUNK_BYTES,
+      inflate: false,
+    }),
+    attachmentUploadBodyError,
+    withOwnerMutableSession(
+      'POST /session/:id/attachment-uploads/:uploadId/chunks',
+      (req, res, sessionId, runtime) => {
+        if (
+          req.headers['content-type']
+            ?.split(';', 1)[0]
+            ?.trim()
+            .toLowerCase() !== 'application/octet-stream'
+        ) {
+          throw new SessionAttachmentUploadError(
+            415,
+            'invalid_attachment_upload_content_type',
+            'Chunks require application/octet-stream',
+          );
+        }
+        const offset = req.query['offset'];
+        if (
+          typeof offset !== 'string' ||
+          !/^\d+$/.test(offset) ||
+          !Number.isSafeInteger(Number(offset)) ||
+          !Buffer.isBuffer(req.body)
+        ) {
+          throw new SessionAttachmentUploadError(
+            400,
+            'invalid_attachment_upload_chunk',
+            'A raw chunk and a non-negative integer offset are required',
+          );
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = runtime.bridge.appendSessionAttachmentUpload(
+          sessionId,
+          req.params['uploadId']!,
+          Number(offset),
+          req.body,
+          clientId === undefined ? undefined : { clientId },
+        );
+        res.set('Cache-Control', 'no-store').status(200).json(result);
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/attachment-uploads/:uploadId/complete',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/attachment-uploads/:uploadId/complete',
+      async (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const reference = await runtime.bridge.completeSessionAttachmentUpload(
+          sessionId,
+          req.params['uploadId']!,
+          clientId === undefined ? undefined : { clientId },
+          captureRuntimeGenerationAssertion(runtime),
+        );
+        res.set('Cache-Control', 'no-store').status(200).json(reference);
+      },
+    ),
+  );
+
+  app.delete(
+    '/session/:id/attachment-uploads/:uploadId',
+    mutate(),
+    withOwnerMutableSession(
+      'DELETE /session/:id/attachment-uploads/:uploadId',
+      (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        runtime.bridge.cancelSessionAttachmentUpload(
+          sessionId,
+          req.params['uploadId']!,
+          clientId === undefined ? undefined : { clientId },
+        );
+        res.status(204).end();
+      },
     ),
   );
 
@@ -5959,8 +9465,9 @@ export function registerSessionRoutes(
     withOwnerMutableSession(
       'POST /session/:id/prompt',
       async (req, res, sessionId, runtime, onPromptAdmitted) => {
-        const ownerBridge = runtime.bridge;
         const body = safeBody(req);
+        const eventDetailMode = parseReplayMode(body, res, 'eventDetailMode');
+        if (eventDetailMode === null) return;
         const prompt = body['prompt'];
         if (!Array.isArray(prompt) || prompt.length === 0) {
           res.status(400).json({
@@ -6022,6 +9529,22 @@ export function registerSessionRoutes(
           }
           requestDeadlineMs = rawRequestDeadline;
         }
+        const rawIdempotencyKey = body['idempotencyKey'];
+        let idempotencyKey: string | undefined;
+        if (rawIdempotencyKey !== undefined && rawIdempotencyKey !== null) {
+          if (
+            typeof rawIdempotencyKey !== 'string' ||
+            rawIdempotencyKey.length === 0 ||
+            rawIdempotencyKey.length > PROMPT_IDEMPOTENCY_KEY_MAX_LENGTH
+          ) {
+            res.status(400).json({
+              error: `\`idempotencyKey\` must be a non-empty string of at most ${PROMPT_IDEMPOTENCY_KEY_MAX_LENGTH} characters`,
+              code: 'invalid_idempotency_key',
+            });
+            return;
+          }
+          idempotencyKey = rawIdempotencyKey;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
 
@@ -6036,62 +9559,10 @@ export function registerSessionRoutes(
           }
         }
 
-        const promptId = crypto.randomUUID();
-        if (delivery && deps.channelDeliveryAuthorizations) {
-          deps.channelDeliveryAuthorizations.authorizePrompt(
-            runtime.workspaceCwd,
-            {
-              sessionId,
-              deliveryId: promptId,
-              target: delivery.target,
-            },
-          );
-        }
-        const forwardedBody = { ...body };
-        delete forwardedBody['deadlineMs'];
-        delete forwardedBody['delivery'];
-        const forwardedMeta =
-          typeof forwardedBody['_meta'] === 'object' &&
-          forwardedBody['_meta'] !== null &&
-          !Array.isArray(forwardedBody['_meta'])
-            ? { ...(forwardedBody['_meta'] as Record<string, unknown>) }
-            : undefined;
-        const promptAuthorization =
-          forwardedMeta?.[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
-        const promptDisplayText =
-          forwardedMeta?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
-        const channelPrompt = forwardedMeta?.[CHANNEL_PROMPT_META_KEY];
-        if (forwardedMeta) {
-          delete forwardedMeta[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
-          delete forwardedMeta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
-          delete forwardedMeta[CHANNEL_PROMPT_META_KEY];
-          if (Object.keys(forwardedMeta).length > 0) {
-            forwardedBody['_meta'] = forwardedMeta;
-          } else {
-            delete forwardedBody['_meta'];
-          }
-        }
-        const channelWorkerAuthorized = isChannelWorkerPromptAuthorized(
-          promptAuthorization,
-          runtime.workspaceCwd,
+        const { forwardedBody, classification } = classifyPromptRequest(
+          body,
+          runtime,
         );
-        const trustedPromptDisplayText =
-          typeof promptDisplayText === 'string' && channelWorkerAuthorized
-            ? promptDisplayText
-            : undefined;
-        // Channel classification opts the turn out of loop-detected
-        // rejection, so it rides the same worker authorization as the
-        // display projection; a forged key from any other caller is dropped
-        // here and again at the bridge admission strip.
-        const trustedChannelPrompt =
-          channelWorkerAuthorized && channelPrompt === true;
-
-        const lastEventId = ownerBridge.getSessionLastEventId(sessionId);
-        // Epoch token paired with the cursor above: a client that seeds its
-        // SSE resume position from this 202 must also learn the bus epoch so
-        // a daemon restart in between is detected (DAEMON-001).
-        const eventEpoch = ownerBridge.getSessionEventEpoch(sessionId);
-        addDaemonRequestAttribute('qwen-code.prompt_id', promptId);
 
         const abort = new AbortController();
         let responseFinished = false;
@@ -6104,72 +9575,35 @@ export function registerSessionRoutes(
         };
         res.once('close', onResClose);
         res.once('finish', onResFinish);
-        // The effective deadline (server cap ∩ request override) is passed
-        // to the bridge, which owns the deadline race: it publishes the
-        // formal `turn_error{code:'prompt_deadline_exceeded'}` terminal,
-        // releases the per-session FIFO, and best-effort cancels the agent.
-        // A route-side timer can't do any of that — it could only abort
-        // this request's signal.
-        const effectiveDeadlineMs = resolvePromptDeadlineMs(
-          promptDeadlineMs,
-          requestDeadlineMs,
-        );
 
-        let promptPromise: ReturnType<AcpSessionBridge['sendPrompt']>;
+        let admission: SessionPromptAdmission;
         try {
-          promptPromise = ownerBridge.sendPrompt(
-            sessionId,
+          admission = admitSessionPrompt(
             {
-              ...forwardedBody,
+              archiveCoordinator: deps.archiveCoordinator,
+              channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
+              daemonLog,
+              promptDeadlineMs,
+            },
+            {
+              runtime,
               sessionId,
               prompt,
-            } as Parameters<AcpSessionBridge['sendPrompt']>[1],
-            abort.signal,
-            {
-              ...(clientId !== undefined ? { clientId } : {}),
-              promptId,
-              ...(effectiveDeadlineMs !== undefined
-                ? { deadlineMs: effectiveDeadlineMs }
-                : {}),
-              ...(trustedPromptDisplayText !== undefined
-                ? { promptDisplayText: trustedPromptDisplayText }
-                : {}),
-              ...(trustedChannelPrompt ? { channelPrompt: true } : {}),
-              ...(delivery !== undefined
-                ? {
-                    channelDelivery: {
-                      deliveryId: promptId,
-                      target: delivery.target,
-                    },
-                  }
-                : {}),
-              ...(onPromptAdmitted !== undefined ? { onPromptAdmitted } : {}),
+              request: forwardedBody,
+              classification,
+              idempotencyKey,
+              requestDeadlineMs,
+              clientId,
+              delivery,
+              signal: abort.signal,
+              onPromptId: (promptId) =>
+                addDaemonRequestAttribute('qwen-code.prompt_id', promptId),
+              onPromptAdmitted,
             },
           );
         } catch (err) {
-          deps.channelDeliveryAuthorizations?.revokePrompt(
-            runtime.workspaceCwd,
-            sessionId,
-            promptId,
-          );
           res.off('close', onResClose);
           res.off('finish', onResFinish);
-          if (daemonLog && err instanceof PromptQueueFullError) {
-            daemonLog.warn('prompt admission rejected: queue full', {
-              sessionId,
-              promptId,
-              ...(clientId !== undefined ? { clientId } : {}),
-              limit: err.limit,
-              pendingCount: err.pendingCount,
-            });
-          }
-          if (daemonLog && err instanceof InvalidClientIdError) {
-            daemonLog.warn('prompt admission rejected: invalid client id', {
-              sessionId,
-              promptId,
-              ...(clientId !== undefined ? { clientId } : {}),
-            });
-          }
           sendBridgeError(res, err, {
             route: 'POST /session/:id/prompt',
             sessionId,
@@ -6177,45 +9611,21 @@ export function registerSessionRoutes(
           return;
         }
         res.off('close', onResClose);
-
-        promptPromise
-          .then(
-            () => {
-              if (daemonLog) {
-                daemonLog.info('prompt turn completed', {
-                  sessionId,
-                  promptId,
-                  clientId,
-                });
-              }
-            },
-            (err) => {
-              if (daemonLog) {
-                daemonLog.warn(
-                  `prompt turn failed: ${describePromptTurnFailure(err)}`,
-                  { sessionId, promptId, clientId },
-                );
-              }
-            },
-          )
-          .finally(() => {
-            if (delivery && deps.channelDeliveryAuthorizations) {
-              const revokeTimer = setTimeout(() => {
-                deps.channelDeliveryAuthorizations?.revokePrompt(
-                  runtime.workspaceCwd,
-                  sessionId,
-                  promptId,
-                );
-              }, CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS);
-              revokeTimer.unref();
-            }
-          })
-          .catch(() => {});
-
-        if (daemonLog) {
-          daemonLog.info('prompt enqueued', { sessionId, promptId, clientId });
+        if (admission.deduplicated) {
+          res.off('finish', onResFinish);
+          res.status(202).json({
+            promptId: admission.promptId,
+            lastEventId: admission.lastEventId,
+            eventEpoch: admission.eventEpoch,
+            deduplicated: true,
+          });
+          return;
         }
-        res.status(202).json({ promptId, lastEventId, eventEpoch });
+        res.status(202).json({
+          promptId: admission.promptId,
+          lastEventId: admission.lastEventId,
+          eventEpoch: admission.eventEpoch,
+        });
       },
       { promptAdmission: true },
     ),
@@ -6249,6 +9659,18 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (
+          !checkSseAdmission({
+            surface: 'generation',
+            req,
+            res,
+            caps: deps.sseAdmissionCaps,
+            daemonLog: deps.daemonLog,
+            logContext: { sessionId },
+          })
+        ) {
+          return;
+        }
 
         const abort = new AbortController();
         let completed = false;
@@ -6264,6 +9686,7 @@ export function registerSessionRoutes(
           clientId !== undefined ? { clientId } : undefined,
         );
 
+        countSseStream('generation', req, res);
         res.status(200);
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -6325,17 +9748,15 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'POST /session/:id/heartbeat',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'POST /session/:id/heartbeat',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(200).json({
             sessionId,
@@ -6376,17 +9797,15 @@ export function registerSessionRoutes(
         next();
         return;
       }
-      const runtime = requireSessionRuntime({
-        sessionId: key.parentSessionId,
-        route: 'POST /session/:id/detach',
-        res,
-        workspaceRegistry,
-        daemonLog,
-      });
-      if (!runtime) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       try {
+        const runtime = await resolveSubagentSessionRuntime(
+          res,
+          'POST /session/:id/detach',
+          key.parentSessionId,
+        );
+        if (!runtime) return;
         await runOwnerRuntimeActivity(runtime, async () => {
           res.status(204).end();
         });
@@ -6454,6 +9873,7 @@ export function registerSessionRoutes(
             runtime.bridge.closeSession(
               sessionId,
               clientId !== undefined ? { clientId } : undefined,
+              { cancelReason: 'user' },
             ),
           ),
         ),
@@ -6502,6 +9922,8 @@ export function registerSessionRoutes(
     if (uniqueIds === undefined) return;
     const resolveConflicts = parseResolveConflicts(req, res);
     if (resolveConflicts === undefined) return;
+    const requireIdle = parseRequireIdle(req, res);
+    if (requireIdle === undefined) return;
     if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
 
     try {
@@ -6511,6 +9933,7 @@ export function registerSessionRoutes(
         'POST /sessions/archive',
         uniqueIds,
         resolveConflicts,
+        requireIdle,
       );
       if (!operation) return;
       const { result } = operation;
@@ -6592,6 +10015,8 @@ export function registerSessionRoutes(
       if (uniqueIds === undefined) return;
       const resolveConflicts = parseResolveConflicts(req, res);
       if (resolveConflicts === undefined) return;
+      const requireIdle = parseRequireIdle(req, res);
+      if (requireIdle === undefined) return;
       if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
       try {
         const operation = await archiveSessions(
@@ -6600,6 +10025,7 @@ export function registerSessionRoutes(
           route,
           uniqueIds,
           resolveConflicts,
+          requireIdle,
         );
         if (!operation) return;
         const { result } = operation;
@@ -6687,6 +10113,18 @@ export function registerSessionRoutes(
         }
         const pr = parseSessionPrBody(req, res);
         if (pr === null) return;
+        // The null role clear is sidecar semantics (upsertSessionPr); the
+        // bridge only knows set-or-preserve, and the persisted list
+        // reconciles the live entry right after the upsert anyway.
+        const bridgePr =
+          pr === undefined
+            ? undefined
+            : {
+                number: pr.number,
+                url: pr.url,
+                ...(pr.state ? { state: pr.state } : {}),
+                ...(pr.role != null ? { role: pr.role } : {}),
+              };
         const displayName =
           typeof rawDisplayName === 'string'
             ? rawDisplayName.slice(0, 256)
@@ -6718,7 +10156,7 @@ export function registerSessionRoutes(
           // keeps a rejected request from leaving a durable binding behind.
           effective = runtime.bridge.updateSessionMetadata(
             sessionId,
-            { displayName, ...(pr ? { pr } : {}) },
+            { displayName, ...(bridgePr ? { pr: bridgePr } : {}) },
             clientId !== undefined ? { clientId } : undefined,
           );
           if (pr) {
@@ -6776,6 +10214,16 @@ export function registerSessionRoutes(
       }
       const pr = parseSessionPrBody(req, res);
       if (pr === null) return;
+      // See the primary metadata route: null clears in the sidecar only.
+      const bridgePr =
+        pr === undefined
+          ? undefined
+          : {
+              number: pr.number,
+              url: pr.url,
+              ...(pr.state ? { state: pr.state } : {}),
+              ...(pr.role != null ? { role: pr.role } : {}),
+            };
       if (rawDisplayName === undefined && pr === undefined) {
         res.status(400).json({
           error: 'at least one of `displayName` or `pr` is required',
@@ -6849,6 +10297,7 @@ export function registerSessionRoutes(
                 number: number;
                 url: string;
                 state?: 'open' | 'merged' | 'closed';
+                role?: SessionPrRole;
               }>;
             };
             const service = createWorkspaceRuntimeSessionService(runtime);
@@ -6883,7 +10332,7 @@ export function registerSessionRoutes(
               // located archive state.
               effective = runtime.bridge.updateSessionMetadata(
                 sessionId,
-                { displayName, ...(pr ? { pr } : {}) },
+                { displayName, ...(bridgePr ? { pr: bridgePr } : {}) },
                 clientId !== undefined ? { clientId } : undefined,
               );
               assertRuntimeGenerationOpen?.();
@@ -7332,6 +10781,18 @@ export function registerSessionRoutes(
             ? req.query['cursor']
             : undefined;
         const size = parseSessionPageSizeQuery(req.query['size']);
+        const sortBy = req.query['sortBy'];
+        if (
+          sortBy !== undefined &&
+          sortBy !== 'updatedAt' &&
+          sortBy !== 'lastUserPromptAt'
+        ) {
+          res.status(400).json({
+            error: '`sortBy` must be "updatedAt" or "lastUserPromptAt"',
+            code: 'invalid_session_sort',
+          });
+          return;
+        }
         const rawView = req.query['view'];
         let view: 'organized' | undefined;
         if (rawView !== undefined) {
@@ -7403,7 +10864,34 @@ export function registerSessionRoutes(
           });
           return;
         }
-        const options = {
+        const rawLiveOnly = req.query['liveOnly'];
+        let liveOnly = false;
+        if (rawLiveOnly !== undefined) {
+          if (rawLiveOnly !== '1') {
+            res.status(400).json({
+              error: '`liveOnly` must be "1"',
+              code: 'invalid_session_live_only',
+            });
+            return;
+          }
+          if (
+            view !== undefined ||
+            archiveState === 'archived' ||
+            parentSessionId !== undefined ||
+            parsedSource.sourceType !== undefined ||
+            sortBy === 'lastUserPromptAt'
+          ) {
+            res.status(400).json({
+              error:
+                '`liveOnly` cannot be combined with organized view, archived state, parent, source filters, or question sorting',
+              code: 'invalid_session_live_only_filter',
+            });
+            return;
+          }
+          liveOnly = true;
+        }
+        const options: ListWorkspaceSessionsOptions = {
+          ...(sortBy !== undefined ? { sortBy } : {}),
           ...(cursor !== undefined ? { cursor } : {}),
           ...(size !== undefined ? { size } : {}),
           ...(archiveState !== undefined ? { archiveState } : {}),
@@ -7425,22 +10913,36 @@ export function registerSessionRoutes(
         res.once('close', onResponseClosed);
         if (req.aborted || res.destroyed) onRequestAborted();
         try {
+          if (liveOnly && !runtime.trusted) {
+            res.status(403).json({
+              error: '`liveOnly` requires a trusted workspace',
+              code: 'untrusted_workspace',
+            });
+            return;
+          }
           // Organized/archived views always need the persisted store: organized
           // cursors are opaque (non-numeric) and archived-only workspaces have no
           // active persisted sessions, so the live-only fallback would drop them.
           // Metadata filters gather the whole workspace
           // (persisted + live) to filter completely and paginates with an opaque
           // activity cursor, so the numeric-cursor live fallback can't serve it.
+          // `liveOnly` bypasses the persisted store on purpose: its callers need
+          // the sessions holding slots, not a page of closed history.
           const usePersisted =
             readOnlySecondary ||
-            runtime.primary ||
-            view === 'organized' ||
-            archiveState === 'archived' ||
-            parentSessionId !== undefined ||
-            parsedSource.sourceType !== undefined ||
-            (cursor !== undefined && cursor !== ''
-              ? isNumericSessionCursor(cursor)
-              : await hasActivePersistedSessions(runtime, controller.signal));
+            (!liveOnly &&
+              (runtime.primary ||
+                view === 'organized' ||
+                sortBy === 'lastUserPromptAt' ||
+                archiveState === 'archived' ||
+                parentSessionId !== undefined ||
+                parsedSource.sourceType !== undefined ||
+                (cursor !== undefined && cursor !== ''
+                  ? isPersistedSessionCursor(cursor)
+                  : await hasActivePersistedSessions(
+                      runtime,
+                      controller.signal,
+                    ))));
           // The live path only reads cursor/size; persisted-only options
           // (organized view or archived state) would be silently dropped there.
           // usePersisted already routes those to the persisted path — assert it so
@@ -7690,46 +11192,209 @@ export function registerSessionRoutes(
     BridgeSessionCatalogVersion
   >();
 
+  const readWorkspaceLiveState = (runtime: WorkspaceRuntime) => {
+    const assertRuntimeOpen = captureRuntimeGenerationAssertion(runtime);
+    const bridge = runtime.bridge;
+    assertRuntimeOpen?.();
+    const catalogVersion = bridge.getSessionCatalogVersion();
+    const lastExposed = lastExposedCatalogVersions.get(bridge);
+    if (
+      lastExposed === undefined ||
+      lastExposed.generation !== catalogVersion.generation ||
+      lastExposed.revision !== catalogVersion.revision
+    ) {
+      invalidateSessionLists(runtime, ['active', 'archived']);
+    }
+    const sessions = bridge
+      .listWorkspaceSessions(runtime.workspaceCwd)
+      .filter(
+        (session) => session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE,
+      )
+      .map((session) => ({
+        sessionId: session.sessionId,
+        clientCount: session.clientCount,
+        hasActivePrompt: session.hasActivePrompt,
+        ...(session.activeWorkState !== undefined
+          ? { activeWorkState: session.activeWorkState }
+          : {}),
+        hasRunningBackgroundTasks: session.hasRunningBackgroundTasks,
+        ...(session.backgroundTurn
+          ? { backgroundTurn: session.backgroundTurn }
+          : {}),
+        isWaitingForPermission: session.isWaitingForPermission ?? false,
+        isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
+        hasTurnError: session.hasTurnError ?? false,
+        // Bridge-local activity watermark, absent until a running prompt in
+        // this bridge publishes its first terminal. Reading it costs nothing
+        // extra: the summary is already in memory.
+        ...(session.updatedAt !== undefined
+          ? { updatedAt: session.updatedAt }
+          : {}),
+      }));
+    assertRuntimeOpen?.();
+    lastExposedCatalogVersions.set(bridge, catalogVersion);
+    return { v: 1 as const, catalogVersion, sessions };
+  };
+
   app.get('/workspaces/:workspace/sessions/live-state', async (req, res) => {
     const route = 'GET /workspaces/:workspace/sessions/live-state';
     // Strict trust gate: live state is never read from an untrusted
     // runtime, and an unknown selector never falls back to primary.
     const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
     if (runtime === null) return;
-    const assertRuntimeOpen = captureRuntimeGenerationAssertion(runtime);
-    const bridge = runtime.bridge;
     try {
-      assertRuntimeOpen?.();
-      const catalogVersion = bridge.getSessionCatalogVersion();
-      const lastExposed = lastExposedCatalogVersions.get(bridge);
-      if (
-        lastExposed === undefined ||
-        lastExposed.generation !== catalogVersion.generation ||
-        lastExposed.revision !== catalogVersion.revision
-      ) {
-        invalidateSessionLists(runtime, ['active', 'archived']);
-      }
-      const sessions = bridge
-        .listWorkspaceSessions(runtime.workspaceCwd)
-        .map((session) => ({
-          sessionId: session.sessionId,
-          clientCount: session.clientCount,
-          hasActivePrompt: session.hasActivePrompt,
-          isWaitingForPermission: session.isWaitingForPermission ?? false,
-          isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
-          // Bridge-local activity watermark, absent until a running prompt in
-          // this bridge publishes its first terminal. Reading it costs nothing
-          // extra: the summary is already in memory.
-          ...(session.updatedAt !== undefined
-            ? { updatedAt: session.updatedAt }
-            : {}),
-        }));
-      assertRuntimeOpen?.();
-      lastExposedCatalogVersions.set(bridge, catalogVersion);
       res.setHeader('Cache-Control', 'no-store');
-      res.status(200).json({ v: 1, catalogVersion, sessions });
+      res.status(200).json(readWorkspaceLiveState(runtime));
     } catch (err) {
       sendBridgeError(res, err, { route });
+    }
+  });
+
+  const liveStateBatchRequest = z
+    .object({
+      workspaces: z
+        .array(z.string().min(1).max(MAX_SELECTOR_CHARS))
+        .min(1)
+        .max(MAX_BATCH_WORKSPACES),
+    })
+    .strict();
+
+  app.post('/sessions/live-state', async (req, res) => {
+    const parsed = liveStateBatchRequest.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        code: 'invalid_session_live_state_batch_request',
+        error: 'Invalid session live-state batch request.',
+      });
+      return;
+    }
+
+    const readMember = async (workspace: string) => {
+      const entry = resolveWorkspaceEntryBySelector(
+        workspaceRegistry,
+        workspace,
+      );
+      if (!entry) {
+        return failedBatchMember(
+          workspace,
+          undefined,
+          404,
+          'workspace_not_found',
+          'Workspace is not registered with this daemon.',
+        );
+      }
+      const unavailable = () =>
+        failedBatchMember(
+          workspace,
+          entry,
+          503,
+          'workspace_runtime_unavailable',
+          'Workspace runtime is not active.',
+        );
+      const { generation, isCurrent } = captureWorkspaceEntryCurrency(
+        workspaceRegistry,
+        entry,
+      );
+      if (!generation || !isCurrent()) return unavailable();
+      const runtime = generation.runtime;
+      if (!runtime.trusted) {
+        logSessionRoutingFailure(
+          'POST /sessions/live-state',
+          'untrusted_workspace',
+          {
+            workspaceId: runtime.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+          },
+        );
+        return failedBatchMember(
+          workspace,
+          entry,
+          403,
+          'untrusted_workspace',
+          'Workspace is not trusted.',
+        );
+      }
+      try {
+        const snapshot = await withDaemonSpan(
+          'qwen-code.daemon.session_live_state_batch.member',
+          {
+            'qwen-code.workspace.hash': hashDaemonWorkspace(
+              runtime.workspaceCwd,
+            ),
+          },
+          async () => readWorkspaceLiveState(runtime),
+        );
+        if (!isCurrent()) return unavailable();
+        const member = {
+          workspace,
+          workspaceId: runtime.workspaceId,
+          cwd: runtime.workspaceCwd,
+          ...snapshot,
+        };
+        if (Buffer.byteLength(JSON.stringify(member)) > MAX_MEMBER_BYTES) {
+          return failedBatchMember(
+            workspace,
+            entry,
+            413,
+            'live_state_response_too_large',
+            `Live-state snapshot exceeds ${MAX_MEMBER_BYTES / 1024} KiB.`,
+          );
+        }
+        return member;
+      } catch (error) {
+        if (isGenerationClosedError(error) || !isCurrent()) {
+          return unavailable();
+        }
+        // The member body stays generic by contract; the raw error exists
+        // only here, so losing it would leave a polling client with no
+        // server-side trace of which workspace is failing.
+        daemonLog?.error(
+          error instanceof Error ? error.message : String(error),
+          error instanceof Error ? error : undefined,
+          {
+            route: 'POST /sessions/live-state',
+            workspaceId: entry.workspaceId,
+          },
+        );
+        return failedBatchMember(
+          workspace,
+          entry,
+          500,
+          'session_live_state_failed',
+          'Failed to read workspace session live state.',
+        );
+      }
+    };
+
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const onClose = () => {
+      if (!res.writableEnded) abort();
+    };
+    req.once('aborted', abort);
+    res.once('close', onClose);
+    if (req.aborted || res.destroyed) abort();
+
+    const workspaces = [];
+    try {
+      for (const workspace of parsed.data.workspaces) {
+        if (controller.signal.aborted) return;
+        workspaces.push(await readMember(workspace));
+        // Member reads are synchronous bridge-memory reads chained through
+        // microtasks, so without this yield the loop cannot observe a
+        // disconnect until every member has been read.
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      if (controller.signal.aborted) return;
+      addDaemonRequestAttribute(
+        'qwen-code.daemon.session_live_state_batch.members',
+        workspaces.length,
+      );
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(200).json({ workspaces });
+    } finally {
+      req.off('aborted', abort);
+      res.off('close', onClose);
     }
   });
 
@@ -7810,9 +11475,9 @@ export function registerSessionRoutes(
         const configId = body['configId'];
         const value = body['value'];
         const persist = body['persist'];
-        if (configId !== 'reasoning_effort') {
+        if (configId !== 'reasoning_effort' && configId !== 'workflow_mode') {
           res.status(400).json({
-            error: '`configId` must be reasoning_effort',
+            error: '`configId` must be reasoning_effort or workflow_mode',
           });
           return;
         }
@@ -7822,12 +11487,40 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (configId === 'workflow_mode') {
+          if ((value !== 'on' && value !== 'off') || persist !== undefined) {
+            res.status(400).json({
+              error:
+                'Workflow mode requires on/off and does not accept persist',
+            });
+            return;
+          }
+          if (!runtime.trusted) {
+            sendUntrustedSessionOwner(
+              res,
+              'POST /session/:id/config-option',
+              sessionId,
+              runtime,
+            );
+            return;
+          }
+          if (runtime.routeFileSystemFactory.sshWorkspace) {
+            res.status(501).json({
+              code: 'ssh_workspace_operation_unsupported',
+              error: 'Workflow mode is unsupported for SSH workspaces',
+            });
+            return;
+          }
+        }
         if (persist !== undefined && typeof persist !== 'boolean') {
           res.status(400).json({
             error: '`persist` must be a boolean when provided',
           });
           return;
         }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const assertOpen = captureRuntimeGenerationAssertion(runtime);
         const response = await runtime.bridge.setSessionConfigOption(
           sessionId,
           {
@@ -7842,10 +11535,16 @@ export function registerSessionRoutes(
                 }
               : {}),
           },
+          clientId !== undefined ? { clientId } : undefined,
+          assertOpen,
         );
+        assertOpen?.();
         res.status(200).json({
-          configOptions: response.configOptions,
+          configOptions: runtime.trusted
+            ? response.configOptions
+            : redactWorkflowModeFromConfigOptions(response).configOptions,
           persisted:
+            configId === 'workflow_mode' ||
             response._meta?.[REASONING_SELECTION_PERSISTED_META_KEY] === true,
         });
       },
@@ -7880,6 +11579,110 @@ export function registerSessionRoutes(
         res.status(200).json(response);
       },
     ),
+  );
+
+  const btwRequestId = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
+  const btwStreamInput = z.object({
+    question: z.string().max(BTW_MAX_INPUT_LENGTH).trim().min(1),
+    requestId: btwRequestId,
+    resume: z.boolean().optional(),
+  });
+  const btwStreamHandler = (method: 'post' | 'delete') =>
+    withOwnerMutableSession(
+      method === 'post'
+        ? 'POST /session/:id/btw/stream'
+        : 'DELETE /session/:id/btw/stream/:requestId',
+      (req, res, sessionId, runtime) => {
+        const parsed =
+          method === 'post'
+            ? btwStreamInput.safeParse(safeBody(req))
+            : btwRequestId.safeParse(req.params['requestId']);
+        if (!parsed.success) {
+          res.status(400).json({
+            code: 'invalid_btw_request',
+            error:
+              method === 'post'
+                ? 'A valid requestId and non-empty question are required'
+                : 'A valid requestId is required',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const bridge = runtime.bridge;
+        // Session detach can win the race with cancelling its own cached request.
+        if (
+          typeof parsed.data !== 'string' ||
+          !btwStreams.has(bridge, sessionId, clientId, parsed.data)
+        ) {
+          // Authorize this live-session client without starting model work.
+          bridge.getPendingPrompts(
+            sessionId,
+            clientId !== undefined ? { clientId } : undefined,
+          );
+        }
+        try {
+          if (typeof parsed.data === 'string') {
+            btwStreams.cancel(bridge, sessionId, clientId, parsed.data);
+            res.status(204).end();
+            return;
+          }
+          if (!bridge.generateSessionBtwStream) {
+            res.status(501).json({
+              code: 'btw_stream_not_supported',
+              error: 'Streaming side questions are not supported',
+            });
+            return;
+          }
+          const { requestId, question, resume } = parsed.data;
+          // Terminal outcomes (409 conflict / 410 expired) must survive
+          // saturation: decide them BEFORE the admission gate, which stays
+          // immediately before open() so a refusal never starts the bridge
+          // side request (issue #17554 review R1-5).
+          btwStreams.precheck(
+            bridge,
+            sessionId,
+            clientId,
+            requestId,
+            question,
+            resume === true,
+          );
+          if (
+            !checkSseAdmission({
+              surface: 'artifactLibrary',
+              req,
+              res,
+              caps: deps.sseAdmissionCaps,
+              daemonLog: deps.daemonLog,
+              logContext: { sessionId },
+            })
+          ) {
+            return;
+          }
+          const request = btwStreams.open(
+            bridge,
+            sessionId,
+            clientId,
+            requestId,
+            question,
+            resume === true,
+          );
+          countSseStream('artifactLibrary', req, res);
+          // The bridge's side request holds generation alive independently of HTTP.
+          void streamBtwSnapshots(res, request);
+        } catch (error) {
+          if (!(error instanceof BtwStreamError)) throw error;
+          res
+            .status(error.status)
+            .json({ code: error.code, error: error.message });
+        }
+      },
+    );
+  app.post('/session/:id/btw/stream', mutate(), btwStreamHandler('post'));
+  app.delete(
+    '/session/:id/btw/stream/:requestId',
+    mutate(),
+    btwStreamHandler('delete'),
   );
 
   app.post(
@@ -7940,9 +11743,26 @@ export function registerSessionRoutes(
   // Queue a user message typed while the session's turn is still running. The
   // ACP child drains it between tool batches (`craft/drainMidTurnQueue`) so the
   // model sees it before the turn ends, instead of waiting for the next turn.
-  // Returns `{ accepted, messageId? }`. Accepted requests are owned by the
-  // daemon; rejected requests were not admitted. Synchronous — the bridge only
-  // mutates its in-memory session queues.
+  // Returns `{ accepted, messageId?, reason? }`; `reason` is `'session_idle'`
+  // when an open session has no prompt admitted to its prompt FIFO and no
+  // active Goal turn, which lets a client resubmit as an ordinary prompt
+  // instead of reporting a failure. The verdict describes only what can drain
+  // a mid-turn message, not everything the session may hold (a session
+  // snapshot can still report `hasActivePrompt: true`). Every other rejection
+  // cause — closing, attachment budget, mismatched `messageId`, full queue —
+  // omits it, and a kept mismatched payload is not a delivery promise: a
+  // removed promoted message disappears from snapshots at once — one that had
+  // not started is dropped where it stands, one already running is hidden
+  // until its aborted turn settles — so the removal response is the only
+  // `removed = true` a client ever observes.
+  // For a new admission, a `content` reference the session no longer holds
+  // (or an invalid one) is declined before the idle/queue verdicts: the
+  // bridge throws and the error mapping answers 410/400 with an
+  // `{ error, code }` body — no `accepted`, no `reason`. A same-`messageId`
+  // retry whose payload matches acks idempotently first, and a closing
+  // session is refused reasonless first. Accepted requests are owned by the
+  // daemon; rejected requests were not admitted. Synchronous — the bridge
+  // only mutates its in-memory session queues.
   //
   // Per-message abuse guard. The sibling `/btw` caps its field; without this
   // only the global 10 MB body limit applies. It bounds how much a single
@@ -7956,6 +11776,8 @@ export function registerSessionRoutes(
       'POST /session/:id/mid-turn-message',
       (req, res, sessionId, runtime) => {
         const body = safeBody(req);
+        const eventDetailMode = parseReplayMode(body, res, 'eventDetailMode');
+        if (eventDetailMode === null) return;
         const message = body['message'];
         const messageId = body['messageId'];
         // Validate (and length-check, and enqueue) the TRIMMED value — the bridge
@@ -8032,8 +11854,29 @@ export function registerSessionRoutes(
           typeof messageId === 'string' ? messageId : undefined,
           {
             rejectIfIdle: true,
+            ...(eventDetailMode !== undefined ? { eventDetailMode } : {}),
             ...(mediaBlocks ? { content: mediaBlocks } : {}),
           },
+        );
+        res.status(200).json(result);
+      },
+    ),
+  );
+
+  // Deliver the queued mid-turn messages now: the agent cuts a streaming
+  // model response short instead of waiting for its next tool boundary,
+  // unless that response has started a tool call.
+  app.post(
+    '/session/:id/mid-turn-messages/send-now',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/mid-turn-messages/send-now',
+      (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = runtime.bridge.sendMidTurnMessagesNow(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
         );
         res.status(200).json(result);
       },
@@ -8252,6 +12095,54 @@ export function registerSessionRoutes(
   );
 
   app.get(
+    '/session/:id/message-groups',
+    withOwnerReadSession(
+      'GET /session/:id/message-groups',
+      async (_req, res, sessionId, runtime) => {
+        res.status(200).json(await runtime.bridge.getMessageGroups(sessionId));
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/messages/delete',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/messages/delete',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const snapshot = body['snapshot'];
+        const groupIds = body['groupIds'];
+        if (
+          typeof snapshot !== 'string' ||
+          snapshot.length === 0 ||
+          !Array.isArray(groupIds) ||
+          groupIds.length === 0 ||
+          !groupIds.every((id) => typeof id === 'string' && id.length > 0) ||
+          new Set(groupIds).size !== groupIds.length
+        ) {
+          res.status(400).json({
+            error: 'A snapshot and distinct non-empty groupIds are required',
+            code: 'invalid_message_groups',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.deleteMessageGroups(
+              sessionId,
+              { snapshot, groupIds },
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
+      },
+    ),
+  );
+
+  app.get(
     '/session/:id/rewind/snapshots',
     withOwnerReadSession(
       'GET /session/:id/rewind/snapshots',
@@ -8329,6 +12220,7 @@ export function registerSessionRoutes(
         const body = safeBody(req);
         const mode = body['mode'];
         const persist = body['persist'];
+        const planMode = body['planMode'];
         if (
           typeof mode !== 'string' ||
           !APPROVAL_MODES.includes(mode as ApprovalMode)
@@ -8347,12 +12239,26 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (
+          planMode !== undefined &&
+          (typeof planMode !== 'boolean' || mode === 'plan')
+        ) {
+          res.status(400).json({
+            error:
+              '`planMode` must be a boolean with a non-plan execution mode',
+            code: 'invalid_plan_mode',
+          });
+          return;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const response = await runtime.bridge.setSessionApprovalMode(
           sessionId,
           mode as ApprovalMode,
-          { persist: persist === true },
+          {
+            persist: persist === true,
+            ...(typeof planMode === 'boolean' ? { planMode } : {}),
+          },
           clientId !== undefined ? { clientId } : undefined,
         );
         res.status(200).json(response);
@@ -8411,4 +12317,5 @@ export function registerSessionRoutes(
       { cwdBound: 'sync-output-language' },
     ),
   );
+  return { resolveSubagentSessionRuntime };
 }

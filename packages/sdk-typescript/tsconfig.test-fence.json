@@ -1,5 +1,9 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["test/unit/daemon-public-surface.test.ts"],
+  "include": [
+    "test/unit/daemon-public-surface.test.ts",
+    "test/unit/mcp-tool-schema.test.ts",
+    "test/unit/peer-surface.test.ts"
+  ],
   "exclude": ["node_modules", "dist"]
 }

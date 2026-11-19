@@ -7,12 +7,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDaemonWorkspaceActions } from './actions.js';
 
-// The scheduled-task methods use raw global fetch (like glob/stat/list), so we
-// stub fetch and assert the HTTP method, path (with id encoding), JSON body,
-// auth header, and error handling.
+// Assert the native REST request sent by the SDK, including auth and bodies.
 function makeActions(token?: string) {
   return createDaemonWorkspaceActions({
-    // These methods never touch the client, only requireClient's non-null check.
     getClient: () => ({}) as never,
     getWorkspaceCwd: () => '/ws',
     baseUrl: '',
@@ -43,8 +40,7 @@ describe('scheduled-tasks workspace actions', () => {
   });
 
   const initOf = (call: unknown[]) => call[1] as RequestInit;
-  const headersOf = (init: RequestInit) =>
-    (init.headers ?? {}) as Record<string, string>;
+  const headersOf = (init: RequestInit) => new Headers(init.headers);
 
   it('lists tasks with a GET and returns the tasks array', async () => {
     fetchMock.mockResolvedValue(
@@ -55,7 +51,7 @@ describe('scheduled-tasks workspace actions', () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('/scheduled-tasks');
     expect(initOf(fetchMock.mock.calls[0]).method ?? 'GET').toBe('GET');
-    expect(headersOf(init)['Authorization']).toBe('Bearer tok');
+    expect(headersOf(init).get('Authorization')).toBe('Bearer tok');
   });
 
   it('returns [] when the response omits tasks', async () => {
@@ -73,7 +69,7 @@ describe('scheduled-tasks workspace actions', () => {
     const init = initOf(fetchMock.mock.calls[0]);
     expect(fetchMock.mock.calls[0][0]).toBe('/scheduled-tasks');
     expect(init.method).toBe('POST');
-    expect(headersOf(init)['Content-Type']).toBe('application/json');
+    expect(headersOf(init).get('Content-Type')).toBe('application/json');
     expect(JSON.parse(init.body as string)).toMatchObject({
       cron: '0 9 * * *',
       prompt: 'p',
@@ -162,5 +158,112 @@ describe('scheduled-tasks workspace actions', () => {
       expect(fetchMock.mock.calls[0][0]).toBe('/scheduled-tasks');
       expect(fetchMock.mock.calls[1][0]).toBe('/scheduled-tasks');
     });
+  });
+});
+
+describe('scheduled-task routing workspace actions', () => {
+  it('uses an explicit workspace even when no current workspace is bound', async () => {
+    const qualified = {
+      listSessionGroups: vi.fn().mockResolvedValue({
+        groups: [],
+        colorOptions: ['blue'],
+      }),
+      createSessionGroup: vi.fn().mockResolvedValue({ id: 'group-1' }),
+      workspaceProviders: vi.fn().mockResolvedValue({ providers: [] }),
+    };
+    const client = {
+      workspaceByCwd: vi.fn().mockReturnValue(qualified),
+      listSessionGroups: vi.fn(),
+      createSessionGroup: vi.fn(),
+      workspaceProviders: vi.fn(),
+    };
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => client as never,
+      getWorkspaceCwd: () => undefined,
+      baseUrl: '',
+    });
+
+    await actions.listSessionGroups('/repo/secondary');
+    await actions.createSessionGroup(
+      { name: 'Automations', color: 'blue' },
+      '/repo/secondary',
+    );
+    await actions.loadProviders('/repo/secondary');
+
+    expect(client.workspaceByCwd).toHaveBeenCalledTimes(3);
+    expect(client.workspaceByCwd).toHaveBeenCalledWith('/repo/secondary');
+    expect(qualified.listSessionGroups).toHaveBeenCalledOnce();
+    expect(qualified.createSessionGroup).toHaveBeenCalledWith({
+      name: 'Automations',
+      color: 'blue',
+    });
+    expect(qualified.workspaceProviders).toHaveBeenCalledOnce();
+    expect(client.listSessionGroups).not.toHaveBeenCalled();
+    expect(client.createSessionGroup).not.toHaveBeenCalled();
+    expect(client.workspaceProviders).not.toHaveBeenCalled();
+  });
+
+  it('uses an explicit workspace when a different workspace is bound', async () => {
+    const qualified = {
+      listSessionGroups: vi.fn().mockResolvedValue({
+        groups: [],
+        colorOptions: ['blue'],
+      }),
+      createSessionGroup: vi.fn().mockResolvedValue({ id: 'group-1' }),
+      workspaceProviders: vi.fn().mockResolvedValue({ providers: [] }),
+    };
+    const client = {
+      workspaceByCwd: vi.fn().mockReturnValue(qualified),
+      listSessionGroups: vi.fn(),
+      createSessionGroup: vi.fn(),
+      workspaceProviders: vi.fn(),
+    };
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => client as never,
+      getWorkspaceCwd: () => '/repo/main',
+      baseUrl: '',
+    });
+
+    await actions.listSessionGroups('/repo/secondary');
+    await actions.createSessionGroup(
+      { name: 'Automations', color: 'blue' },
+      '/repo/secondary',
+    );
+    await actions.loadProviders('/repo/secondary');
+
+    expect(client.workspaceByCwd).toHaveBeenCalledTimes(3);
+    expect(client.workspaceByCwd).toHaveBeenCalledWith('/repo/secondary');
+    expect(client.listSessionGroups).not.toHaveBeenCalled();
+    expect(client.createSessionGroup).not.toHaveBeenCalled();
+    expect(client.workspaceProviders).not.toHaveBeenCalled();
+  });
+
+  it('uses unqualified actions when the explicit workspace is already bound', async () => {
+    const client = {
+      workspaceByCwd: vi.fn(),
+      listSessionGroups: vi.fn().mockResolvedValue({
+        groups: [],
+        colorOptions: ['blue'],
+      }),
+      createSessionGroup: vi.fn().mockResolvedValue({ id: 'group-1' }),
+      workspaceProviders: vi.fn().mockResolvedValue({ providers: [] }),
+    };
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => client as never,
+      getWorkspaceCwd: () => '/repo/main',
+      baseUrl: '',
+    });
+
+    await actions.listSessionGroups('/repo/main');
+    await actions.createSessionGroup(
+      { name: 'Automations', color: 'blue' },
+      '/repo/main',
+    );
+    await actions.loadProviders('/repo/main');
+
+    expect(client.workspaceByCwd).not.toHaveBeenCalled();
+    expect(client.listSessionGroups).toHaveBeenCalledOnce();
+    expect(client.createSessionGroup).toHaveBeenCalledOnce();
+    expect(client.workspaceProviders).toHaveBeenCalledOnce();
   });
 });

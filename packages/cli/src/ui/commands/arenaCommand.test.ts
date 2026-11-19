@@ -86,6 +86,35 @@ describe('arenaCommand localization', () => {
   });
 });
 
+describe('arenaCommand tool sandbox', () => {
+  it.each(['start', 'stop', 'status', 'select'] as const)(
+    'rejects %s before accessing an Arena runtime',
+    async (name) => {
+      const getArenaManager = vi.fn();
+      const cleanupArenaRuntime = vi.fn();
+      const context = createMockCommandContext({
+        executionMode: 'interactive',
+        services: {
+          config: {
+            getShellExecutionSandbox: () => ({ backend: 'bwrap' }),
+            getArenaManager,
+            cleanupArenaRuntime,
+          } as never,
+        },
+      });
+      expect(
+        await getArenaSubCommand(name).action!(context, '--discard'),
+      ).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'Arena is unavailable in tool sandbox.',
+      });
+      expect(getArenaManager).not.toHaveBeenCalled();
+      expect(cleanupArenaRuntime).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe('arenaCommand start subcommand', () => {
   it('rejects image-only models passed explicitly', async () => {
     const context = createMockCommandContext({

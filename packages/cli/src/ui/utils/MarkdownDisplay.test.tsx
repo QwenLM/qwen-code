@@ -6,13 +6,17 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import stripAnsi from 'strip-ansi';
-import { MarkdownDisplay } from './MarkdownDisplay.js';
+import {
+  MarkdownDisplay,
+  countMarkdownSourceBlocks,
+} from './MarkdownDisplay.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { renderMermaidVisual } from './mermaidVisualRenderer.js';
 import { RenderModeProvider } from '../contexts/RenderModeContext.js';
 import { getScreenBuffer } from '../selection/screen-buffer.js';
 import { getSelectedText } from '../selection/selection-text.js';
+import { splitFencedMarkdown } from './markdown-utilities.js';
 
 function copiedFrame(stdout: NodeJS.WriteStream): string {
   const frame = getScreenBuffer(stdout)!.frame!;
@@ -107,6 +111,66 @@ describe('<MarkdownDisplay />', () => {
       expect(frame).not.toContain('qwen-code');
     });
 
+    it('keeps the LaTeX source hint on the visible block after a false fence', () => {
+      const text = [
+        '```text',
+        '```not-a-close',
+        '$$',
+        'hidden',
+        '$$',
+        '$hidden_inline$',
+        '```',
+        '$$',
+        'visible',
+        '$$',
+        '$visible_inline$',
+      ].join(eol);
+      expect(countMarkdownSourceBlocks(text).mathBlockCount).toBe(1);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = stripAnsi(lastFrame() ?? '');
+      expect(output).toMatch(
+        /LaTeX block · source: \/copy latex 1\n[^\n]*visible/,
+      );
+      expect(output).not.toContain('/copy latex 2');
+    });
+
+    it('keeps the Mermaid source hint on the visible block after a false fence', () => {
+      const text = [
+        '````text',
+        '````not-a-close',
+        '```mermaid',
+        'flowchart LR',
+        '  H[Hidden] --> X[Target]',
+        '```',
+        '````',
+        '```mermaid',
+        'flowchart LR',
+        '  V[Visible] --> Y[Target]',
+        '```',
+      ].join(eol);
+      expect(
+        countMarkdownSourceBlocks(text).codeBlockLanguageCounts.get('mermaid'),
+      ).toBe(1);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = stripAnsi(lastFrame() ?? '');
+      expect(output).toContain('source: /copy mermaid 1');
+      const diagram = output.slice(output.indexOf('Mermaid flowchart'));
+      expect(diagram).toContain('Visible');
+      expect(diagram).not.toContain('Hidden');
+    });
+
+    it('keeps pending pipe content inside code after a false fence', () => {
+      const text = ['```md', '```not-a-close', '| A | B |'].join(eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      expect(stripAnsi(lastFrame() ?? '')).toContain('| A | B |');
+    });
+
     it('handles unclosed (pending) code blocks', () => {
       const text = '```typescript\nlet y = 2;'.replace(/\n/g, eol);
       const { lastFrame } = renderWithProviders(
@@ -114,6 +178,40 @@ describe('<MarkdownDisplay />', () => {
       );
       expect(lastFrame()).toMatchSnapshot();
     });
+
+    it.each([
+      ['~~~', '```'],
+      ['```', '~~~'],
+      ['```', '```not-a-close'],
+      ['~~~', '~~~~ still-code'],
+      ['```', '```\u00a0'],
+    ])(
+      'renders %s code across an inner %s line after a streaming split',
+      (outer, inner) => {
+        const text =
+          `${outer}md\nHere:\n${inner}\nstill inside\n${outer}\nAfter.`.replace(
+            /\n/g,
+            eol,
+          );
+        const { after } = splitFencedMarkdown(text, text.indexOf('still'));
+        for (const renderedText of [text, after]) {
+          for (const isPending of [false, true]) {
+            const { lastFrame, unmount } = renderWithProviders(
+              <MarkdownDisplay
+                {...baseProps}
+                text={renderedText}
+                isPending={isPending}
+              />,
+            );
+            const frame = stripAnsi(lastFrame() ?? '');
+            expect(frame).toMatch(/3\s+still inside/);
+            expect(frame).toContain('After.');
+            expect(frame).not.toContain('qwen-code');
+            unmount();
+          }
+        }
+      },
+    );
 
     it('clips a long pending message to availableTerminalHeight', () => {
       // A long streaming message must NOT render all its lines: the live

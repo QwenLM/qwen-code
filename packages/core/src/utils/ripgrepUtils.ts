@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
+import fsPromises from 'node:fs/promises';
 import { resolveBundleDir } from './bundlePaths.js';
 import { fileExists } from './fileUtils.js';
 import { execCommand, isCommandAvailable } from './shell-utils.js';
@@ -172,6 +173,41 @@ export function getBuiltinRipgrep(): string | null {
 }
 
 /**
+ * Restores the exec bit on the bundled ripgrep binary when it is missing.
+ *
+ * Packing preserves the exec bit only for `bin` entries, so every published
+ * `vendor/ripgrep/*\/rg` ships as 0644 (#12679). The managed-update activation
+ * path heals its own install (#12673), but a fresh `npm i -g` never runs it,
+ * and an activation performed by a launcher that predates that fix heals
+ * nothing either — the bundled binary then fails to spawn with EACCES and
+ * search silently degrades to system rg or the JS grep tool.
+ *
+ * Best-effort and metadata-only: an install that cannot be chmod'ed (read-only
+ * or permission-restricted) keeps the existing fallback behaviour. Callers go
+ * through `resolveRipgrep`, which caches its selection, so this stats the
+ * binary once per process and never on the search hot path.
+ */
+async function ensureBundledRipgrepExecutable(
+  binaryPath: string,
+): Promise<void> {
+  // Windows synthesizes mode bits and always reports the binary as executable.
+  if (process.platform === 'win32') return;
+
+  try {
+    const stats = await fsPromises.stat(binaryPath);
+    if ((stats.mode & 0o111) !== 0) return;
+    await fsPromises.chmod(binaryPath, 0o755);
+    debugLogger.info(
+      `Restored the missing exec bit on bundled ripgrep at ${binaryPath}.`,
+    );
+  } catch (error) {
+    debugLogger.warn(
+      `Could not restore the exec bit on bundled ripgrep at ${binaryPath}: ${error}`,
+    );
+  }
+}
+
+/**
  * Checks if ripgrep binary exists and returns its path
  * @param useBuiltin If true, tries bundled ripgrep first, then falls back to system ripgrep.
  *                   If false, only checks for system ripgrep.
@@ -188,6 +224,7 @@ export async function resolveRipgrep(
     // Try bundled ripgrep first
     const rgPath = getBuiltinRipgrep();
     if (rgPath && (await fileExists(rgPath))) {
+      await ensureBundledRipgrepExecutable(rgPath);
       const selection = { mode: 'builtin' as const, command: rgPath };
       cachedSelections.set(useBuiltin, selection);
       return selection;
@@ -209,6 +246,39 @@ export async function resolveRipgrep(
   return null;
 }
 
+// execFile's abort callback can run before the child has exited.
+function probeRipgrepUntilClosed(
+  command: string,
+  signal: AbortSignal,
+): Promise<{ stdout: string; code: number }> {
+  return new Promise((resolve, reject) => {
+    let output = '';
+    let failure: Error | null = null;
+    const child = execFile(
+      command,
+      ['--version'],
+      {
+        encoding: 'utf8',
+        timeout: RIPGREP_TEST_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
+      },
+      (error, stdout) => {
+        failure = error;
+        output = stdout;
+      },
+    );
+    const abort = () => child.kill('SIGKILL');
+    child.once('close', (code) => {
+      signal.removeEventListener('abort', abort);
+      if (signal.aborted) reject(signal.reason);
+      else if (failure) reject(failure);
+      else resolve({ stdout: output, code: code ?? 1 });
+    });
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) abort();
+  });
+}
+
 /**
  * Ensures that ripgrep is healthy by checking its version.
  * @param selection The ripgrep selection to check.
@@ -216,7 +286,9 @@ export async function resolveRipgrep(
  */
 export async function ensureRipgrepHealthy(
   selection: RipgrepSelection,
+  signal?: AbortSignal,
 ): Promise<void> {
+  signal?.throwIfAborted();
   if (
     cachedHealth &&
     cachedHealth.selection.command === selection.command &&
@@ -228,13 +300,11 @@ export async function ensureRipgrepHealthy(
   let probeOutput = '';
   let probeCode = -1;
   try {
-    const { stdout, code } = await execCommand(
-      selection.command,
-      ['--version'],
-      {
-        timeout: RIPGREP_TEST_TIMEOUT_MS,
-      },
-    );
+    const { stdout, code } = signal
+      ? await probeRipgrepUntilClosed(selection.command, signal)
+      : await execCommand(selection.command, ['--version'], {
+          timeout: RIPGREP_TEST_TIMEOUT_MS,
+        });
     probeOutput = stdout;
     probeCode = code;
     working = code === 0 && stdout.startsWith('ripgrep');
@@ -292,16 +362,19 @@ export async function ensureMacBinarySigned(
  */
 async function resolveHealthyRipgrep(
   useBuiltin: boolean,
+  signal?: AbortSignal,
 ): Promise<RipgrepSelection | null> {
+  signal?.throwIfAborted();
   const selection = await resolveRipgrep(useBuiltin);
   if (!selection) {
     return null;
   }
 
   try {
-    await ensureRipgrepHealthy(selection);
+    await ensureRipgrepHealthy(selection, signal);
     return selection;
   } catch (error) {
+    signal?.throwIfAborted();
     if (selection.mode !== 'builtin') {
       throw error;
     }
@@ -313,9 +386,10 @@ async function resolveHealthyRipgrep(
     try {
       fallback = await resolveRipgrep(false);
       if (fallback) {
-        await ensureRipgrepHealthy(fallback);
+        await ensureRipgrepHealthy(fallback, signal);
       }
     } catch (fallbackError) {
+      signal?.throwIfAborted();
       // System rg is unusable too. The bundled failure is the root cause, but
       // keep the system reason visible or it is lost entirely.
       debugLogger.warn(`System rg is unusable as well: ${fallbackError}`);
@@ -339,8 +413,9 @@ async function resolveHealthyRipgrep(
  */
 export async function canUseRipgrep(
   useBuiltin: boolean = true,
+  signal?: AbortSignal,
 ): Promise<boolean> {
-  const selection = await resolveHealthyRipgrep(useBuiltin);
+  const selection = await resolveHealthyRipgrep(useBuiltin, signal);
   return selection !== null;
 }
 

@@ -14,7 +14,7 @@ use crate::windows::WindowOwner;
 /// What the requested `window_id` turned out to be.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowScope {
-    /// A top-level AXWindow reported the requested CGWindowID.
+    /// An AXWindow or attached AXSheet reported the requested CGWindowID.
     Matched,
     /// WindowServer has no record of the requested CGWindowID — closed,
     /// stale, or fabricated.
@@ -54,7 +54,7 @@ pub struct TopLevelCandidate {
     /// themselves as `open-panel` / `save-panel`.
     pub identifier: Option<String>,
     /// `_AXUIElementGetWindow` result, when the SPI resolved one. Only read
-    /// for `AXWindow` roles.
+    /// for `AXWindow` and `AXSheet` roles.
     pub ax_window_id: Option<u32>,
 }
 
@@ -133,11 +133,13 @@ where
     let matched: Vec<usize> = candidates
         .iter()
         .enumerate()
-        .filter(|(_, c)| c.role == "AXWindow" && c.ax_window_id == Some(requested))
+        .filter(|(_, c)| {
+            matches!(c.role.as_str(), "AXWindow" | "AXSheet") && c.ax_window_id == Some(requested)
+        })
         .map(|(i, _)| i)
         .collect();
 
-    if matched.is_empty() {
+    if matched.len() != 1 {
         // Nothing claims the id. Ask WindowServer *why*: a fabricated/stale id
         // and a live id owned by another process are different refusals, and a
         // live same-pid id whose AX surface never materialised is not a refusal
@@ -148,6 +150,18 @@ where
         return ScopeDecision {
             scope,
             walk: Vec::new(),
+        };
+    }
+
+    if candidates[matched[0]].role == "AXSheet" {
+        let scope = scope_from_owner(&resolve_owner()).unwrap_or(WindowScope::Matched);
+        return ScopeDecision {
+            walk: if scope.is_matched() {
+                matched
+            } else {
+                Vec::new()
+            },
+            scope,
         };
     }
 
@@ -204,6 +218,37 @@ mod tests {
         let d = decide_window_scope(&candidates, 22, never_called);
         assert_eq!(d.scope, WindowScope::Matched);
         assert_eq!(d.walk, vec![0, 2], "menu bar + requested window only");
+    }
+
+    #[test]
+    fn exact_sheet_walks_only_its_own_surface() {
+        let candidates = [
+            TopLevelCandidate::new("AXMenuBar", None),
+            TopLevelCandidate::new("AXWindow", Some(11)),
+            TopLevelCandidate::new("AXSheet", Some(22)),
+            TopLevelCandidate::new("AXSheet", Some(33)),
+        ];
+        for (requested, index) in [(22, 2), (33, 3)] {
+            let decision = decide_window_scope(&candidates, requested, || WindowOwner::SamePid);
+            assert_eq!(decision.scope, WindowScope::Matched);
+            assert_eq!(decision.walk, vec![index]);
+        }
+        for owner in [WindowOwner::Unknown, panel_service_owner()] {
+            let decision = decide_window_scope(&candidates, 22, || owner);
+            assert!(!decision.scope.is_matched());
+            assert!(decision.walk.is_empty());
+        }
+    }
+
+    #[test]
+    fn distinct_surfaces_claiming_one_id_do_not_establish_a_unique_target() {
+        let candidates = [
+            TopLevelCandidate::new("AXWindow", Some(11)),
+            TopLevelCandidate::new("AXSheet", Some(11)),
+        ];
+        let decision = decide_window_scope(&candidates, 11, || WindowOwner::SamePid);
+        assert!(!decision.scope.is_matched());
+        assert!(decision.walk.is_empty());
     }
 
     #[test]

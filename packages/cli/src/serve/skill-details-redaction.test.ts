@@ -152,6 +152,18 @@ describe('omitSkillDetailsFromReplayArrays', () => {
     });
   });
 
+  it('redacts the lifecycle supplement without changing its source', () => {
+    const event = wrappedCommandsEvent();
+    const session = { sessionId: 'sess-1', lifecycleReplay: [event] };
+    const shaped = omitSkillDetailsFromReplayArrays(session);
+    expect(shaped.lifecycleReplay[0].data.update._meta).toEqual({
+      availableSkills: ['bugfix'],
+      other: 'kept',
+    });
+    expect(event.data.update._meta).toHaveProperty('availableSkillDetails');
+    expect(session.lifecycleReplay[0]).toBe(event);
+  });
+
   it('returns its input unchanged when no replay arrays are present', () => {
     const session = {
       sessionId: 'sess-1',

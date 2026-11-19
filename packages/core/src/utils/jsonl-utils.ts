@@ -33,6 +33,7 @@ const debugLogger = createDebugLogger('JSONL');
 
 type JsonlReadOptions = {
   throwOnNonEnoentError?: boolean;
+  onIncompleteRead?: () => void;
 };
 
 type JsonlReadLinesOptions = {
@@ -48,6 +49,10 @@ interface ParsedJsonlLine<T> {
  * A map of file paths to mutexes for preventing concurrent writes.
  */
 const fileLocks = new Map<string, Mutex>();
+
+export function _getFileLockCountForTest(): number {
+  return fileLocks.size;
+}
 
 /**
  * Gets or creates a mutex for a specific file path.
@@ -146,7 +151,7 @@ export function _recoverObjectsFromLine<T = unknown>(line: string): T[] {
  * forwarding scalars or arrays would trip property accesses in callers
  * (`record.type`, `record.uuid`).
  */
-function parseLineTolerantWithIntegrity<T>(
+export function parseLineTolerantWithIntegrity<T>(
   line: string,
   filePath: string,
 ): ParsedJsonlLine<T> {
@@ -231,6 +236,12 @@ async function readLinesWithIntegrityInternal<T = unknown>(
         if (budget === 'records' && results.length >= count) break;
         results.push(obj);
       }
+      if (
+        (budget === 'records' && results.length >= count) ||
+        (budget === 'lines' && scannedLines >= count)
+      ) {
+        break;
+      }
     }
 
     options.signal?.throwIfAborted();
@@ -297,14 +308,15 @@ export async function read<T = unknown>(
     for await (const line of rl) {
       const trimmed = line.trim();
       if (trimmed.length === 0) continue;
-      for (const obj of parseLineTolerant<T>(trimmed, filePath)) {
-        results.push(obj);
-      }
+      const parsed = parseLineTolerantWithIntegrity<T>(trimmed, filePath);
+      if (!parsed.complete) options.onIncompleteRead?.();
+      for (const obj of parsed.records) results.push(obj);
     }
 
     return results;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      options.onIncompleteRead?.();
       debugLogger.error(`Error reading ${filePath}:`, error);
       if (options.throwOnNonEnoentError) {
         throw error;
@@ -341,23 +353,29 @@ export async function writeLine(
   data: unknown,
 ): Promise<void> {
   const lock = getFileLock(filePath);
-  await lock.runExclusive(async () => {
-    const line = `${JSON.stringify(data)}\n`;
-    const dir = path.dirname(filePath);
-    if (!ensuredDirs.has(dir)) {
-      await fs.promises.mkdir(dir, { recursive: true });
-      ensuredDirs.add(dir);
-    }
-    // flush:true fsyncs after each line so a process killed mid-write
-    // doesn't leave a glued `}{` record on disk (closes #3681). On
-    // Node v22/v24 strace shows string + utf8 + flush:true does fsync
-    // correctly; passing a Buffer is forward-compat insurance against
-    // any future C++ fast path that might bypass JS-side flush logic
-    // for the string case, with no behavior delta on tested versions.
-    await fs.promises.appendFile(filePath, Buffer.from(line, 'utf8'), {
-      flush: true,
+  try {
+    await lock.runExclusive(async () => {
+      const line = `${JSON.stringify(data)}\n`;
+      const dir = path.dirname(filePath);
+      if (!ensuredDirs.has(dir)) {
+        await fs.promises.mkdir(dir, { recursive: true });
+        ensuredDirs.add(dir);
+      }
+      // flush:true fsyncs after each line so a process killed mid-write
+      // doesn't leave a glued `}{` record on disk (closes #3681). On
+      // Node v22/v24 strace shows string + utf8 + flush:true does fsync
+      // correctly; passing a Buffer is forward-compat insurance against
+      // any future C++ fast path that might bypass JS-side flush logic
+      // for the string case, with no behavior delta on tested versions.
+      await fs.promises.appendFile(filePath, Buffer.from(line, 'utf8'), {
+        flush: true,
+      });
     });
-  });
+  } finally {
+    if (fileLocks.get(filePath) === lock && !lock.isLocked()) {
+      fileLocks.delete(filePath);
+    }
+  }
 }
 
 /**

@@ -529,16 +529,31 @@ public final class DaemonClient implements AutoCloseable {
     private HttpSupport.Response send(String path, String method,
             Map<String, Object> body, String clientId, Duration timeout)
             throws IOException, InterruptedException {
+        return sendEncoded(path, method,
+                body == null ? null : JsonSupport.encode(body), clientId,
+                timeout);
+    }
+
+    /** A POST whose body the caller already encoded, so a body that cannot
+     * encode fails before this call — provably before any byte is sent. */
+    HttpSupport.Response sendEncodedMutation(String path, String encodedBody,
+            String clientId) throws IOException, InterruptedException {
+        return sendEncoded(path, "POST", encodedBody, clientId, requestTimeout);
+    }
+
+    private HttpSupport.Response sendEncoded(String path, String method,
+            String encodedBody, String clientId, Duration timeout)
+            throws IOException, InterruptedException {
         HttpRequest.Builder builder = requestBuilder(path, clientId)
                 .header("Accept", "application/json")
                 .header("Accept-Encoding", "identity")
                 .timeout(timeout);
-        if (body == null) {
+        if (encodedBody == null) {
             builder.method(method, HttpRequest.BodyPublishers.noBody());
         } else {
             builder.header("Content-Type", "application/json; charset=utf-8")
                     .method(method, HttpRequest.BodyPublishers.ofString(
-                            JsonSupport.encode(body), StandardCharsets.UTF_8));
+                            encodedBody, StandardCharsets.UTF_8));
         }
         java.util.concurrent.CompletableFuture<HttpResponse<HttpSupport.Body>> future;
         try {

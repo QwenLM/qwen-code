@@ -9,11 +9,19 @@ import {
   CreateSubSessionTool,
   MAX_SUB_SESSION_PROMPT_CHARS,
 } from './create-sub-session.js';
+import { ToolConfirmationOutcome } from './tools.js';
+import { ApprovalMode } from '../config/approval-mode.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 import type { Config, SubSessionSpawner } from '../config/config.js';
 
 function makeConfig(spawner?: SubSessionSpawner): Config {
   return {
     getSubSessionSpawner: () => spawner,
+    getSubSessionWorkspaceResolver: () => async () => ({
+      workspaceId: 'repo-b',
+      workspaceCwd: '/canonical/other repo',
+      workspaceGeneration: 'generation-b',
+    }),
   } as unknown as Config;
 }
 
@@ -21,6 +29,163 @@ describe('CreateSubSessionTool', () => {
   it('has the correct name', () => {
     expect(new CreateSubSessionTool(makeConfig()).name).toBe(
       'create_sub_session',
+    );
+  });
+
+  it('rejects an unsafe model id at validation, matching the daemon boundary', () => {
+    const tool = new CreateSubSessionTool(makeConfig());
+    expect(() =>
+      tool.build({ prompt: 'do X', model: 'm'.repeat(257) }),
+    ).toThrow(/at most 256 characters/);
+    expect(() => tool.build({ prompt: 'do X', model: 'bad\nmodel' })).toThrow(
+      /control characters/,
+    );
+  });
+
+  it('passes a target workspace to the spawner and names it for the approver', async () => {
+    const spawner = vi.fn(async () => ({
+      sessionId: 'sub-1',
+      result: 'ok',
+      workspaceCwd: '/canonical/other repo',
+    }));
+    const tool = new CreateSubSessionTool(makeConfig(spawner));
+    const invocation = tool.build({ prompt: 'do X', workspace: '/repos/b' });
+    const signal = new AbortController().signal;
+    const confirmation = await invocation.getConfirmationDetails(signal);
+    expect(invocation.getDescription()).toBe(
+      '[first-turn] in "/canonical/other repo": do X',
+    );
+    expect((await invocation.execute(signal)).error?.message).toContain(
+      'requires one-time approval',
+    );
+    expect(spawner).not.toHaveBeenCalled();
+    await confirmation!.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    expect(
+      tool.toAutoClassifierInput({ prompt: 'do X', workspace: '/repos/b' }),
+    ).toMatchObject({ workspace: '/repos/b' });
+    const res = await invocation.execute(new AbortController().signal);
+    expect(spawner).toHaveBeenCalledWith({
+      prompt: 'do X',
+      completion: 'first-turn',
+      workspace: '/repos/b',
+      workspaceGeneration: 'generation-b',
+    });
+    expect((await invocation.execute(signal)).error?.message).toContain(
+      'requires one-time approval',
+    );
+    expect(spawner).toHaveBeenCalledOnce();
+    expect(res.returnDisplay).toContain(
+      'qwen-session://sub-1?workspace=%2Fcanonical%2Fother+repo)',
+    );
+  });
+
+  it('requires one-shot approval only for an explicit workspace', async () => {
+    const tool = new CreateSubSessionTool(makeConfig());
+    const signal = new AbortController().signal;
+    const remote = tool.build({ prompt: 'do X', workspace: '/repos/b' });
+    const local = tool.build({ prompt: 'do X' });
+
+    expect(remote.requiresUserInteraction?.()).toBe(true);
+    expect(await remote.getConfirmationDetails(signal)).toMatchObject({
+      type: 'exec',
+      title: '[first-turn] in "/canonical/other repo": do X',
+      command: 'do X',
+      hideAlwaysAllow: true,
+      permissionRules: [],
+    });
+    expect(await remote.getDefaultPermission()).toBe('ask');
+    expect(local.requiresUserInteraction?.()).toBe(false);
+    expect(await local.getConfirmationDetails(signal)).toMatchObject({
+      type: 'info',
+    });
+  });
+
+  it('honors a destination deny rule added while approval is pending', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1' }));
+    const config = makeConfig(spawner);
+    const permissionManager = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+    });
+    permissionManager.initialize();
+    config.getPermissionManager = () => permissionManager;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'summarize',
+      workspace: 'repo-b',
+    });
+    const signal = new AbortController().signal;
+    const confirmation = await invocation.getConfirmationDetails(signal);
+    permissionManager.addSessionDenyRule(
+      'CreateSubSession(workspace:/canonical/other repo)',
+    );
+    await confirmation!.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+
+    expect((await invocation.execute(signal)).error?.message).toContain(
+      'denied by permission rules',
+    );
+    expect(spawner).not.toHaveBeenCalled();
+  });
+
+  it('sends a follow-up to an earlier sub-session and words the result as one', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'kid', result: 'done' }));
+    const tool = new CreateSubSessionTool(makeConfig(spawner));
+    const invocation = tool.build({
+      prompt: 'and now?',
+      sessionId: 'kid',
+      workspace: '/repos/b',
+    });
+    const signal = new AbortController().signal;
+    const confirmation = await invocation.getConfirmationDetails(signal);
+    expect(invocation.getDescription()).toBe(
+      '[first-turn] to "kid" in "/canonical/other repo": and now?',
+    );
+    // The approver sees which session the prompt goes to.
+    expect(confirmation).toMatchObject({
+      approvalText: expect.stringContaining('Session: "kid"'),
+    });
+    await confirmation!.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    const res = await invocation.execute(signal);
+    expect(spawner).toHaveBeenCalledWith({
+      prompt: 'and now?',
+      completion: 'first-turn',
+      workspace: '/repos/b',
+      workspaceGeneration: 'generation-b',
+      sessionId: 'kid',
+    });
+    expect(res.llmContent).toContain('result');
+    expect(res.llmContent).not.toContain('first-turn result');
+    const sent = await tool
+      .build({ prompt: 'p', sessionId: 'kid', completion: 'sent' })
+      .execute(new AbortController().signal);
+    expect(sent.llmContent).toContain('accepted the prompt into its queue');
+    expect(sent.returnDisplay).toMatch(/ queued$/);
+    expect(() => tool.build({ prompt: 'p', sessionId: 'a\nb' })).toThrow(
+      /sessionId/,
+    );
+    expect(() =>
+      tool.build({ prompt: 'p', sessionId: 'kid', model: 'm1' }),
+    ).toThrow(/cannot be combined/);
+    expect(() =>
+      tool.build({ prompt: 'p', sessionId: 'kid', name: 'n' }),
+    ).toThrow(/cannot be combined/);
+    spawner.mockRejectedValueOnce(new Error('not yours'));
+    const refused = await tool
+      .build({ prompt: 'p', sessionId: 'kid' })
+      .execute(new AbortController().signal);
+    expect(refused.llmContent).toBe(
+      'Error sending to sub-session kid: not yours',
+    );
+  });
+
+  it('rejects an empty or unsafe workspace at validation', () => {
+    const tool = new CreateSubSessionTool(makeConfig());
+    expect(() => tool.build({ prompt: 'do X', workspace: ' ' })).toThrow(
+      /workspace/,
+    );
+    expect(() => tool.build({ prompt: 'do X', workspace: 'a\nb' })).toThrow(
+      /control characters/,
     );
   });
 
@@ -72,6 +237,7 @@ describe('CreateSubSessionTool', () => {
     expect(res.error).toBeUndefined();
     expect(res.llmContent).toContain('sub-2');
     expect(res.llmContent).toMatch(/did not wait/i);
+    expect(res.returnDisplay).toContain('qwen-session://sub-2)');
   });
 
   it('reports a completed-but-empty first turn without an error', async () => {
@@ -176,6 +342,8 @@ describe('CreateSubSessionTool', () => {
 
     expect(res.returnDisplay).toBe('Cancelled');
     expect(res.llmContent).toMatch(/cancelled/i);
+    // Returned, not thrown: the scheduler must be told the call did not finish.
+    expect(res.interruptedBeforeCompletion).toBe(true);
     // The sub-session is NOT cancelled — it has no abort seam — so the tool
     // must say so rather than implying the work was undone.
     expect(res.llmContent).toMatch(/runs independently|not cancelled/i);
@@ -202,6 +370,22 @@ describe('CreateSubSessionTool', () => {
     // Nothing was created, so the message must not hedge.
     expect(res.llmContent).toMatch(/no sub-session was created/i);
     expect(res.llmContent).not.toMatch(/may already have been created/i);
+  });
+
+  it('reports that a cancelled follow-up may already be queued', async () => {
+    const spawner: SubSessionSpawner = () => new Promise(() => {});
+    const ac = new AbortController();
+    const result = new CreateSubSessionTool(makeConfig(spawner))
+      .build({ prompt: 'x', sessionId: 'kid' })
+      .execute(ac.signal);
+    ac.abort();
+
+    await expect(result).resolves.toMatchObject({
+      llmContent: expect.stringContaining(
+        'follow-up prompt may already be queued',
+      ),
+      interruptedBeforeCompletion: true,
+    });
   });
 
   it('does not report cancellation when the spawn wins the race', async () => {

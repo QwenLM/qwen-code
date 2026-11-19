@@ -16,6 +16,7 @@
 
 import * as net from 'node:net';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { PeerDropReason } from './peer-admission.js';
 import {
   buildAuthLine,
   buildDeliveryStatusFrame,
@@ -59,6 +60,14 @@ export const MAX_CONCURRENT_SENDS = 64;
 export const PROBE_TIMEOUT_MS = 250;
 
 let inFlightSends = 0;
+let sendCapacity: { ready: Promise<void>; release: () => void } | undefined;
+
+function releaseSendSlot(): void {
+  inFlightSends -= 1;
+  const capacity = sendCapacity;
+  sendCapacity = undefined;
+  capacity?.release();
+}
 
 export class PeerSendError extends Error {
   constructor(
@@ -72,6 +81,8 @@ export class PeerSendError extends Error {
 
 export interface SendPeerFrameOptions {
   timeoutMs?: number;
+  /** Wait for a local send slot instead of rejecting with EBUSY. */
+  waitForCapacity?: boolean;
   /**
    * The receiver's inbox token, sent as an auth line ahead of the frame.
    * Omitted when the receiver's record advertises none — an inbox that
@@ -97,11 +108,21 @@ export interface SendPeerFrameOptions {
  * address is worth retrying; ETIMEDOUT means it accepted the connection
  * and then stopped servicing it.
  */
-export function sendPeerFrame(
+export async function sendPeerFrame(
   socketPath: string,
   frame: PeerFrame,
   options: SendPeerFrameOptions = {},
 ): Promise<void> {
+  while (options.waitForCapacity && inFlightSends >= MAX_CONCURRENT_SENDS) {
+    if (!sendCapacity) {
+      let release!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      sendCapacity = { ready, release };
+    }
+    await sendCapacity.ready;
+  }
   const timeoutMs = options.timeoutMs ?? SEND_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     if (!isLocalIpcPath(socketPath)) {
@@ -146,7 +167,7 @@ export function sendPeerFrame(
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
-      inFlightSends -= 1;
+      releaseSendSlot();
       socket.destroy();
       reject(new PeerSendError(error.message, error.code));
     };
@@ -176,7 +197,7 @@ export function sendPeerFrame(
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
-      inFlightSends -= 1;
+      releaseSendSlot();
       debugLogger.debug(`sent ${frame.type} frame to ${socketPath}`);
       resolve();
     });
@@ -192,11 +213,19 @@ export function sendPeerFrame(
  */
 export async function sendDeliveryStatus(
   socketPath: string,
-  fields: { status: PeerDeliveryStatus; origMsgId: string; from?: string },
+  fields: {
+    status: PeerDeliveryStatus;
+    origMsgId: string;
+    from?: string;
+    dropReason?: PeerDropReason;
+    droppedMsgIds?: string[];
+  },
   authToken?: string,
+  options?: Pick<SendPeerFrameOptions, 'waitForCapacity'>,
 ): Promise<void> {
   try {
     await sendPeerFrame(socketPath, buildDeliveryStatusFrame(fields), {
+      ...options,
       ...(authToken !== undefined ? { authToken } : {}),
     });
   } catch (error) {

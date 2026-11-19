@@ -140,10 +140,12 @@ export interface LocalCacheCandidate {
    * Step 8 used to add it from `{{model}}`, which interpolates the BARE model
    * id: two provider configurations exposing one model name recorded the same
    * token and passed each other's same-model gate, which is the contract's
-   * whole point. Empty when the runtime published no identity, and the gate
-   * reads empty as a mismatch — an unverifiable contract is a failed one.
+   * whole point. ABSENT when the runtime published no identity: the gate
+   * reads absence as a mismatch — an unverifiable contract is a failed one —
+   * and `cache-commit` promotes such a candidate as the findings ledger
+   * alone, with none of the anchor state above.
    */
-  lastModelId: string;
+  lastModelId?: string;
   /**
    * Did the capture that wrote this include untracked files?
    *
@@ -156,15 +158,13 @@ export interface LocalCacheCandidate {
 /**
  * The cache Step 8 writes from a candidate — the candidate's fields plus the
  * model-written ledger (`round`, `findings`, …). Only the fields the scoping
- * decision reads are typed; the rest ride as data. `lastModelId` is inherited
- * from the candidate and optional here only because a cache written before it
- * moved into the capture may not carry one — which the gate treats as a
- * mismatch, so such a cache costs a full round and never a wrong scope.
+ * decision reads are typed; the rest ride as data. `lastModelId` may be
+ * absent — a cache written before it moved into the capture — which the gate
+ * treats as a mismatch, so such a cache costs a full round and never a wrong
+ * scope. (A ledger-only promotion carries none of the anchor fields at all,
+ * so `readLocalCache` returns null for it: no anchor, the ledger still read.)
  */
-export interface LocalReviewCache
-  extends Omit<LocalCacheCandidate, 'lastModelId'> {
-  lastModelId?: string;
-}
+export type LocalReviewCache = LocalCacheCandidate;
 
 /**
  * The per-file identity of `paths`' current worktree state, batched.
@@ -349,7 +349,7 @@ export function hashWorktreeFiles(
  * never equals a real answer — an unavailable probe must not certify the
  * state it could not read.
  */
-function renderingAttributes(
+export function renderingAttributes(
   repoRoot: string,
   paths: readonly string[],
 ): Record<string, string> {

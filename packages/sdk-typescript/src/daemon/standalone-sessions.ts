@@ -8,6 +8,7 @@ import { DaemonHttpError } from './DaemonHttpError.js';
 import { DAEMON_APPROVAL_MODES, DAEMON_ERROR_KINDS } from './types.js';
 import type {
   DaemonApprovalMode,
+  SessionStartupConfig,
   DaemonRestoredSession,
   DaemonSession,
   DaemonSessionArchiveState,
@@ -25,6 +26,7 @@ export type DaemonStandaloneSessionOptions = Omit<
 >;
 
 export interface CreateStandaloneSessionOptions {
+  startupConfig?: SessionStartupConfig;
   sessionId?: string;
   modelServiceId?: string;
   approvalMode?: DaemonApprovalMode;
@@ -34,6 +36,7 @@ export interface RestoreStandaloneSessionRequest {
   approvalMode?: DaemonApprovalMode;
   historyPageSize?: number;
   liveReplayMode?: 'full' | 'summary';
+  compactedReplayMode?: 'full' | 'summary';
   hideInheritedHistory?: boolean;
   timeoutMs?: number;
 }
@@ -70,6 +73,8 @@ export type DaemonStandaloneSessionLookup =
   | DaemonStandaloneSessionCreating;
 
 export interface DaemonStandaloneSessionListOptions {
+  /** Descending order; question sort requires session_last_user_prompt_sort. Unknown times sort last. */
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   pageSize?: number;
   cursor?: string;
   archiveState?: DaemonSessionArchiveState;

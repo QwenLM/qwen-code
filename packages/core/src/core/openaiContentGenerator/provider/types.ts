@@ -11,7 +11,7 @@ export type OpenAIRequestContextOverrides = {
 // Extended types to support cache_control for DashScope
 export interface ChatCompletionContentPartTextWithCache
   extends OpenAI.Chat.ChatCompletionContentPartText {
-  cache_control?: { type: 'ephemeral' };
+  cache_control?: { type: 'ephemeral'; ttl?: '5m' | '1h' };
 }
 
 export type ChatCompletionContentPartWithCache =
@@ -19,16 +19,13 @@ export type ChatCompletionContentPartWithCache =
   | OpenAI.Chat.ChatCompletionContentPartImage
   | OpenAI.Chat.ChatCompletionContentPartRefusal;
 
-export type ChatCompletionToolWithCache = OpenAI.Chat.ChatCompletionTool & {
-  cache_control?: { type: 'ephemeral' };
-};
-
 export interface OpenAICompatibleProvider {
   buildHeaders(): Record<string, string | undefined>;
   buildClient(): OpenAI;
   buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,
+    reattachBlockCount?: number,
   ): OpenAI.Chat.ChatCompletionCreateParams;
   getDefaultGenerationConfig(): GenerateContentConfig;
   getResponseParsingOptions?(model?: string): OpenAIResponseParsingOptions;

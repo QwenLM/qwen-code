@@ -21,6 +21,11 @@
  */
 
 import {
+  findDaemonAvailability,
+  type DaemonAvailability,
+} from '../daemon/availability.js';
+
+import {
   LOCAL_FILES_SERVER_NAME,
   type JsonRpcRequest,
   type JsonRpcResponse,
@@ -84,6 +89,7 @@ export interface LocalFilesBridgeOptions {
   server: LocalFilesRpcServer;
   openSocket: OpenSocket;
   token?: string;
+  availability?: DaemonAvailability;
   serverName?: string;
   clientInfo?: { name: string; version: string };
   /** Re-warm the ACP child before retrying a failed registration. */
@@ -103,14 +109,56 @@ export interface LocalFilesBridgeOptions {
   workspaceSelector?: AcpWorkspaceSelector;
 }
 
+/**
+ * Owner-lock acquisition shape, shared with the hook's disconnect
+ * arbitration: one ifAvailable attempt cannot tell a peer's lock from this
+ * context's own release still settling.
+ */
+export const DEFAULT_LOCK_ATTEMPTS = 3;
+export const DEFAULT_LOCK_RETRY_DELAY_MS = 100;
+
+/**
+ * Bounded ifAvailable acquisition of the owner lock, shared by the bridge's
+ * start() and the hook's disconnect arbitration so the decline/retry
+ * semantics (a conformant manager declines by invoking the callback with
+ * null, Web Locks 4.1) live in one place. Resolves true when the callback
+ * ran (or the wait was cancelled after a grant), false when every attempt
+ * was declined; a rejecting manager rejects, for the caller to policy.
+ */
+export async function withOwnerLock(opts: {
+  locks: LockManagerLike;
+  delay: (ms: number) => Promise<void>;
+  cancelled: () => boolean;
+  run: () => Promise<void>;
+}): Promise<boolean> {
+  for (let attempt = 0; attempt < DEFAULT_LOCK_ATTEMPTS; attempt++) {
+    if (attempt > 0) await opts.delay(DEFAULT_LOCK_RETRY_DELAY_MS);
+    if (opts.cancelled()) return false;
+    let settled = false;
+    await opts.locks.request(
+      LOCAL_FILES_LOCK_NAME,
+      { ifAvailable: true },
+      async (lock) => {
+        if (lock === null || lock === undefined) return;
+        if (opts.cancelled()) {
+          settled = true;
+          return;
+        }
+        settled = true;
+        await opts.run();
+      },
+    );
+    if (settled) return true;
+  }
+  return false;
+}
+
 const DEFAULTS = {
   maxRegisterAttempts: 6,
   maxReconnectAttempts: 8,
   reconnectBaseDelayMs: 500,
   initializeTimeoutMs: 15_000,
   registerTimeoutMs: 30_000,
-  lockAttempts: 3,
-  lockRetryDelayMs: 100,
 };
 
 /** Mirrors the bearer-subprotocol scheme the daemon's WS upgrade accepts. */
@@ -215,6 +263,9 @@ export class LocalFilesBridge {
   private readonly serverName: string;
   private readonly delay: (ms: number) => Promise<void>;
   private socket: WebSocketLike | undefined;
+  private availability: DaemonAvailability | undefined;
+  private resumeController = new AbortController();
+  private unsubscribeAvailability: (() => void) | undefined;
   private state: LocalFilesBridgeState = { phase: 'idle' };
   private stopped = false;
   private running = false;
@@ -255,41 +306,42 @@ export class LocalFilesBridge {
     if (this.running) return;
     this.running = true;
     this.stopped = false;
+    this.resumeController = new AbortController();
+    this.availability =
+      this.options.availability ??
+      findDaemonAvailability(this.options.baseUrl, this.options.token);
+    this.unsubscribeAvailability = this.availability?.subscribe(() => {
+      if (this.availability?.getSnapshot() !== 'available')
+        this.socket?.close();
+    });
     try {
       const locks = this.options.locks;
       if (!locks) {
         await this.run();
         return;
       }
-      let owned = false;
       // A same-tab replacement stops the old bridge and starts this one in
       // the same task, while the old lock release is still settling; a single
       // ifAvailable attempt would misread that as another tab and park here
-      // forever, so retry a few times before concluding held-elsewhere.
-      const attempts = DEFAULTS.lockAttempts;
-      for (
-        let attempt = 0;
-        attempt < attempts && !owned && !this.stopped;
-        attempt++
-      ) {
-        if (attempt > 0) await this.delay(DEFAULTS.lockRetryDelayMs);
-        if (this.stopped) break;
-        await locks.request(
-          LOCAL_FILES_LOCK_NAME,
-          { ifAvailable: true },
-          async (lock) => {
-            // `ifAvailable` means the callback is skipped entirely when
-            // another tab holds the lock; a null lock is the other way it can
-            // decline. A stop() landing before the grant must release it
-            // again instead of starting a run nobody can stop.
-            if (lock === null || lock === undefined || this.stopped) return;
-            owned = true;
-            await this.run();
-          },
-        );
-      }
+      // forever, so withOwnerLock retries a few times before concluding
+      // held-elsewhere.
+      const owned = await withOwnerLock({
+        locks,
+        delay: (ms) => this.delay(ms),
+        cancelled: () => this.stopped,
+        run: () => this.run(),
+      });
       if (!owned && !this.stopped) this.setState({ phase: 'held-elsewhere' });
+    } catch (err) {
+      // A sandboxed iframe can reject navigator.locks.request outright
+      // (SecurityError); without a catch that is an unhandled rejection and
+      // the UI parks in connecting forever. fail() also tears down, so a
+      // throw escaping after connect() opened a socket cannot leave it open
+      // behind the failed status.
+      this.fail('start_failed', err);
     } finally {
+      this.unsubscribeAvailability?.();
+      this.unsubscribeAvailability = undefined;
       this.running = false;
     }
   }
@@ -307,6 +359,9 @@ export class LocalFilesBridge {
    */
   private teardown(): void {
     this.stopped = true;
+    this.resumeController.abort();
+    this.unsubscribeAvailability?.();
+    this.unsubscribeAvailability = undefined;
     this.clearTimers();
     const socket = this.socket;
     this.socket = undefined;
@@ -346,7 +401,25 @@ export class LocalFilesBridge {
   private async connect(): Promise<void> {
     if (this.stopped) return;
     const attempt = this.reconnectAttempts + 1;
-    this.setState({ phase: 'connecting', attempt });
+    if (this.state.phase === 'idle' || this.state.phase === 'stopped') {
+      this.setState({ phase: 'connecting', attempt });
+    }
+    try {
+      if (this.availability) {
+        do {
+          await this.availability.waitUntilAvailable(
+            this.resumeController.signal,
+          );
+          if (this.stopped) return;
+        } while (this.availability.getSnapshot() !== 'available');
+      }
+    } catch {
+      return;
+    }
+    if (this.stopped) return;
+    if (this.state.phase !== 'connecting') {
+      this.setState({ phase: 'connecting', attempt });
+    }
     this.registerAttempts = 0;
     let socket: WebSocketLike;
     try {
@@ -644,6 +717,16 @@ export class LocalFilesBridge {
   }
 
   private async scheduleReconnect(code: number, reason: string): Promise<void> {
+    if (this.availability) {
+      await this.availability.check();
+      if (this.stopped) return;
+      if (this.availability.getSnapshot() !== 'available') {
+        this.reconnectAttempts = 0;
+        this.setState({ phase: 'reconnecting', attempt: 0, reason });
+        await this.connect();
+        return;
+      }
+    }
     this.reconnectAttempts += 1;
     const max =
       this.options.maxReconnectAttempts ?? DEFAULTS.maxReconnectAttempts;

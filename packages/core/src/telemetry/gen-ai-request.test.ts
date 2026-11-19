@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { ROOT_CONTEXT, type Attributes, type Span } from '@opentelemetry/api';
 import {
+  createGenAiExchange,
   createGenAiRequestObserverContext,
   extractAnthropicRequestAttributes,
   extractLlmRequestAttributes,
@@ -26,6 +27,11 @@ function createSpan(options: { recording?: boolean; throws?: boolean } = {}): {
       Object.assign(attributes, values);
       return span;
     },
+    setAttribute: (key: string, value: unknown) => {
+      if (options.throws) throw new Error('setAttribute failed');
+      attributes[key] = value as Attributes[string];
+      return span;
+    },
   } as unknown as Span;
   return { span, attributes };
 }
@@ -41,6 +47,7 @@ describe('GenAI request attribute extraction', () => {
         frequency_penalty: -0.25,
         presence_penalty: 0.5,
         stop: 'done',
+        reasoning_effort: 'high',
       }),
     ).toEqual({
       'gen_ai.request.choice.count': 3,
@@ -50,6 +57,7 @@ describe('GenAI request attribute extraction', () => {
       'gen_ai.request.frequency_penalty': -0.25,
       'gen_ai.request.presence_penalty': 0.5,
       'gen_ai.request.stop_sequences': ['done'],
+      'gen_ai.request.reasoning.level': 'high',
     });
   });
 
@@ -104,11 +112,42 @@ describe('GenAI request attribute extraction', () => {
       max_tokens: 50,
       temperature: 0.2,
       stop: ['inherited'],
+      reasoning_effort: 'high',
     }) as Record<string, unknown>;
     request['top_p'] = 0.8;
     expect(extractOpenAiRequestAttributes(request)).toEqual({
       'gen_ai.request.top_p': 0.8,
     });
+  });
+
+  it.each([
+    'low',
+    'medium',
+    'high',
+    'minimal',
+    'xhigh',
+    'max',
+    'none',
+    'custom',
+  ])('preserves the exact reasoning effort %s', (reasoningEffort) => {
+    expect(
+      extractOpenAiRequestAttributes({ reasoning_effort: reasoningEffort }),
+    ).toEqual({ 'gen_ai.request.reasoning.level': reasoningEffort });
+  });
+
+  it.each([undefined, null, '', 1, false, [], {}])(
+    'omits invalid reasoning effort %j',
+    (reasoningEffort) => {
+      expect(
+        extractOpenAiRequestAttributes({ reasoning_effort: reasoningEffort }),
+      ).toEqual({});
+    },
+  );
+
+  it('does not infer reasoning effort from nested provider fields', () => {
+    expect(
+      extractOpenAiRequestAttributes({ reasoning: { effort: 'high' } }),
+    ).toEqual({});
   });
 
   it('preserves and copies valid stop sequences', () => {
@@ -182,9 +221,26 @@ describe('GenAI request observer', () => {
     );
 
     reportOpenAiRequest({}, requestContext);
-    reportOpenAiRequest({ temperature: 0.5 }, requestContext);
+    reportOpenAiRequest(
+      { temperature: 0.5, reasoning_effort: 'high' },
+      requestContext,
+    );
 
     expect(attributes).toEqual({});
+  });
+
+  it('retains the first reasoning effort across request attempts', () => {
+    const { span, attributes } = createSpan();
+    const requestContext = createGenAiRequestObserverContext(
+      ROOT_CONTEXT,
+      span,
+    );
+
+    reportOpenAiRequest({ reasoning_effort: 'high' }, requestContext);
+    reportOpenAiRequest({ reasoning_effort: 'low' }, requestContext);
+    reportOpenAiRequest({}, requestContext);
+
+    expect(attributes).toEqual({ 'gen_ai.request.reasoning.level': 'high' });
   });
 
   it('consumes the first snapshot when extraction fails', () => {
@@ -220,11 +276,15 @@ describe('GenAI request observer', () => {
       second.span,
     );
 
-    reportOpenAiRequest({ temperature: 0.1 }, firstContext);
+    reportOpenAiRequest(
+      { temperature: 0.1, reasoning_effort: 'high' },
+      firstContext,
+    );
     reportOpenAiRequest({ temperature: 0.9 }, secondContext);
 
     expect(first.attributes).toEqual({
       'gen_ai.request.temperature': 0.1,
+      'gen_ai.request.reasoning.level': 'high',
     });
     expect(second.attributes).toEqual({
       'gen_ai.request.temperature': 0.9,
@@ -276,6 +336,126 @@ describe('GenAI request observer', () => {
   it('does nothing without an observer', () => {
     expect(() =>
       reportOpenAiRequest({ temperature: 0.5 }, ROOT_CONTEXT),
+    ).not.toThrow();
+  });
+});
+
+describe('GenAI response attributes', () => {
+  /** A live observer whose span collects attributes, plus its handle. */
+  function observed() {
+    const { span, attributes } = createSpan();
+    const exchange = createGenAiExchange(ROOT_CONTEXT, span, {
+      captureContent: false,
+      sensitiveAttributeMaxLength: 1024,
+    });
+    const handle = reportOpenAiRequest({}, exchange.context);
+    return { span, attributes, controller: exchange.controller, handle };
+  }
+
+  it('writes a response attribute onto the span', () => {
+    const { attributes, controller, handle } = observed();
+    controller.recordResponseAttribute(
+      handle,
+      'openrouter.provider',
+      'Parasail',
+    );
+    expect(attributes).toEqual({ 'openrouter.provider': 'Parasail' });
+  });
+
+  it('overwrites an earlier value so a retry reports the answering attempt', () => {
+    const { attributes, controller, handle } = observed();
+    controller.recordResponseAttribute(handle, 'openrouter.provider', 'Stale');
+    controller.recordResponseAttribute(handle, 'openrouter.provider', 'Fresh');
+    expect(attributes['openrouter.provider']).toBe('Fresh');
+  });
+
+  it('ignores an undefined value', () => {
+    const { attributes, controller, handle } = observed();
+    controller.recordResponseAttribute(
+      handle,
+      'openrouter.provider',
+      undefined,
+    );
+    expect(attributes).toStrictEqual({});
+  });
+
+  it('ignores a missing handle', () => {
+    const { attributes, controller } = observed();
+    expect(() =>
+      controller.recordResponseAttribute(undefined, 'openrouter.provider', 'x'),
+    ).not.toThrow();
+    expect(attributes).toEqual({});
+  });
+
+  it('refuses a handle from an earlier generation', () => {
+    // The retry path reuses one span, so a stale handle and a live one have
+    // the same controller: only the generation tells them apart, and the
+    // foreign-controller case below cannot exercise that check.
+    const { span, attributes } = createSpan();
+    const exchange = createGenAiExchange(ROOT_CONTEXT, span, {
+      captureContent: false,
+      sensitiveAttributeMaxLength: 1024,
+    });
+    const stale = reportOpenAiRequest({}, exchange.context);
+    reportOpenAiRequest({}, exchange.context);
+    exchange.controller.recordResponseAttribute(
+      stale,
+      'openrouter.provider',
+      'stale',
+    );
+    expect(attributes['openrouter.provider']).toBeUndefined();
+  });
+
+  it('refuses a handle from a different controller', () => {
+    const { attributes, controller, handle } = observed();
+    const exchange = createGenAiExchange(ROOT_CONTEXT, createSpan().span, {
+      captureContent: false,
+      sensitiveAttributeMaxLength: 1024,
+    });
+    controller.recordResponseAttribute(handle, 'openrouter.provider', 'ok');
+    // A foreign controller's handle must not reach this controller's span.
+    exchange.controller.recordResponseAttribute(
+      handle,
+      'openrouter.provider',
+      'foreign',
+    );
+    expect(attributes).toEqual({ 'openrouter.provider': 'ok' });
+  });
+
+  it('refuses a same-generation handle owned by another controller', () => {
+    // Both exchanges open one attempt, so both handles carry generation 1 and
+    // only the controller identity separates them. Without that check the
+    // write would land on this exchange's span.
+    const first = observed();
+    const second = observed();
+    first.controller.recordResponseAttribute(
+      second.handle,
+      'openrouter.provider',
+      'foreign',
+    );
+    expect(first.attributes).toEqual({});
+  });
+
+  it('refuses to write after the exchange is finalized', () => {
+    const { attributes, controller, handle } = observed();
+    controller.finalize(true);
+    controller.recordResponseAttribute(handle, 'openrouter.provider', 'late');
+    expect(attributes['openrouter.provider']).toBeUndefined();
+  });
+
+  it('does not let span failures escape', () => {
+    const { span } = createSpan({ throws: true });
+    const exchange = createGenAiExchange(ROOT_CONTEXT, span, {
+      captureContent: false,
+      sensitiveAttributeMaxLength: 1024,
+    });
+    const handle = reportOpenAiRequest({}, exchange.context);
+    expect(() =>
+      exchange.controller.recordResponseAttribute(
+        handle,
+        'openrouter.provider',
+        'x',
+      ),
     ).not.toThrow();
   });
 });

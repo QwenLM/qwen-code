@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { BundledSkillLoader } from './BundledSkillLoader.js';
-import { skillArgsPath } from './skill-args-file.js';
+import { skillArgsPath, writeSkillArgs } from './skill-args-file.js';
 import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -49,6 +49,7 @@ describe('BundledSkillLoader', () => {
     mockAddSessionAllowRule = vi.fn();
     mockConfig = {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
+      enableReviewWorkflow: vi.fn().mockResolvedValue(undefined),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getModel: vi.fn().mockReturnValue(undefined),
       getCliVersion: vi.fn().mockReturnValue('0.21.2'),
@@ -73,6 +74,45 @@ describe('BundledSkillLoader', () => {
   });
 
   const signal = new AbortController().signal;
+
+  it('rejects sandbox skill invocation before side effects or argument writes and removal', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sandbox-bundled-skill-'));
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+      mockConfig.getShellExecutionSandbox = vi.fn().mockReturnValue({
+        filesystem: 'read-only',
+      });
+      mockSkillManager.listSkills.mockResolvedValue([
+        makeSkill({ allowedTools: ['Edit'] }),
+      ]);
+      const [command] = await new BundledSkillLoader(mockConfig).loadCommands(
+        signal,
+      );
+      const invoke = (args: string) =>
+        command.action!(
+          { invocation: { raw: `/review ${args}`, args } } as never,
+          args,
+        );
+      expect(await invoke('123')).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('not yet supported'),
+      });
+      expect(existsSync(join(dir, '.qwen'))).toBe(false);
+      writeSkillArgs('review', 'prior authority');
+      await invoke('');
+      expect(readFileSync(skillArgsPath('review'), 'utf8')).toBe(
+        'prior authority',
+      );
+      expect(mockAddSessionAllowRule).not.toHaveBeenCalled();
+      expect(mockAddSessionHook).not.toHaveBeenCalled();
+      expect(mockConfig.enableReviewWorkflow).not.toHaveBeenCalled();
+    } finally {
+      process.chdir(cwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it('should return empty array when config is null', async () => {
     const loader = new BundledSkillLoader(null);
@@ -179,6 +219,34 @@ describe('BundledSkillLoader', () => {
       type: 'submit_prompt',
       content: [{ text: makeSkillPrompt('You are an expert code reviewer.') }],
     });
+  });
+
+  it('waits for review workflow registration before submitting the slash prompt', async () => {
+    let release!: () => void;
+    const registration = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(mockConfig.enableReviewWorkflow).mockReturnValue(registration);
+    mockSkillManager.listSkills.mockResolvedValue([makeSkill()]);
+    const commands = await new BundledSkillLoader(mockConfig).loadCommands(
+      signal,
+    );
+    let submitted = false;
+    const pending = Promise.resolve(
+      commands[0].action!(
+        { invocation: { raw: '/review', args: '' } } as never,
+        '',
+      ),
+    ).then((result) => {
+      submitted = true;
+      return result;
+    });
+    await vi.waitFor(() =>
+      expect(mockConfig.enableReviewWorkflow).toHaveBeenCalledOnce(),
+    );
+    expect(submitted).toBe(false);
+    release();
+    expect(await pending).toMatchObject({ type: 'submit_prompt' });
   });
 
   describe('invocation arguments', () => {

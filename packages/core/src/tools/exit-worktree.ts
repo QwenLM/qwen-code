@@ -17,7 +17,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import {
   GitWorktreeService,
-  readWorktreeSessionMarker,
+  readWorktreeSessionMarkerOutcome,
   worktreeBranchForSlug,
 } from '../services/gitWorktreeService.js';
 import {
@@ -236,12 +236,31 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     //    those as "owner unknown" and allow removal (matches prior
     //    behaviour) but log so operators can see when the guard is
     //    bypassed.
-    const owner = await readWorktreeSessionMarker(worktreePath);
+    const markerOutcome = await readWorktreeSessionMarkerOutcome(worktreePath);
     const currentSessionId = this.config.getSessionId();
+    if (markerOutcome.state === 'inconclusive') {
+      // The marker changed identity (or vanished) mid-read — a concurrent
+      // ownership transfer is in flight. Refuse rather than read that as
+      // "no marker": removal is destructive and the owner is unknown.
+      return errorResult(
+        `Refusing to remove worktree "${this.params.name}" — its session ` +
+          `ownership marker could not be read conclusively (it changed ` +
+          `while being read). Retry, or remove it manually with ` +
+          `\`git worktree remove ${worktreePath}\`.`,
+      );
+    }
+    const owner =
+      markerOutcome.state === 'owned' ? markerOutcome.sessionId : null;
     if (owner !== null && owner !== currentSessionId) {
       currentWorktreeSession ??= await this.readCurrentWorktreeSession();
+      // A sidecar carrying `supersededBy` is proof the marker is *not* stale:
+      // the worktree-reset transfer deliberately retains the superseded
+      // sidecar with the same slug and path, so without this term the hatch
+      // below collapses to `ownerActive` and a resumed superseded session
+      // drops the checkout (and branch) the replacement now owns.
       const currentSessionOwnsPath =
         currentWorktreeSession?.slug === this.params.name &&
+        currentWorktreeSession.supersededBy === undefined &&
         samePath(currentWorktreeSession.worktreePath, worktreePath);
       const ownerActive = await isSessionRuntimeActive(
         owner,
@@ -312,9 +331,29 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
       }
     }
 
+    // A named creation (enter_worktree) provably owns its slug ref; a
+    // detached session worktree or one branched in place does not. The
+    // sidecar's recorded branch tells the two apart, and its base lets
+    // the unmerged check distinguish agent commits from an unreachable
+    // creation base. Read the sidecar even when the directory exists at
+    // the expected path (the common case), and only trust it when it
+    // names THIS worktree — the session may track a different one.
+    const slugBranch = worktreeBranchForSlug(this.params.name);
+    const sessionSidecar = await this.readCurrentWorktreeSession();
+    const sidecarForThis =
+      sessionSidecar?.slug === this.params.name ? sessionSidecar : null;
+    const branchOwned =
+      sidecarForThis?.worktreeBranch === slugBranch &&
+      sidecarForThis?.worktreeBranch !== '';
+    const creationBase =
+      sidecarForThis?.worktreeBase ?? sidecarForThis?.originalHeadCommit;
+
     let hasUnmerged = true;
     try {
-      hasUnmerged = await service.hasUnmergedWorktreeCommits(this.params.name);
+      hasUnmerged = await service.hasUnmergedWorktreeCommits(
+        this.params.name,
+        creationBase,
+      );
     } catch (error) {
       // Service-level helper logs its own failures, but the caller
       // context is what an operator would grep for ("why did
@@ -335,44 +374,58 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
 
     const result = await service.removeUserWorktree(this.params.name, {
       deleteBranch: true,
+      branchOwned,
+      baseCommit: creationBase,
     });
     if (!result.success) {
       return errorResult(result.error ?? 'Failed to remove worktree.');
     }
+
+    // Report what actually happened, never a deletion inferred from the
+    // slug name: a detached or in-place-branched worktree may delete no
+    // branch at all, and the branch that survives is the only handle to
+    // the work once the directory is gone.
+    await this.maybeClearWorktreeSession();
+    const reportedBranch = result.deletedBranch ?? result.keptBranch ?? branch;
+    let message: string;
+    let returnDisplay: string;
     if (result.branchPreserved) {
       // Status check passed and unmerged check passed, but the safe
       // delete still refused — most likely a race where new commits
       // landed between the checks. Be loud rather than force-deleting.
-      await this.maybeClearWorktreeSession();
-      const output: ExitWorktreeOutput = {
-        action: 'remove',
-        worktreePath,
-        worktreeBranch: branch,
-        message:
-          `Removed worktree directory "${this.params.name}" but kept branch ${branch} ` +
-          `(git refused a safe delete at the last moment — possibly a race with another ` +
-          `process). Recover with \`git branch -D ${branch}\` if you really want to discard it.`,
-      };
-      return {
-        llmContent: JSON.stringify(output),
-        returnDisplay: `Removed worktree directory **${this.params.name}**, branch \`${branch}\` preserved`,
-      };
+      message =
+        `Removed worktree directory "${this.params.name}" but kept branch ${reportedBranch} ` +
+        `(git refused a safe delete at the last moment — possibly a race with another ` +
+        `process). Recover with \`git branch -D ${reportedBranch}\` if you really want to discard it.`;
+      returnDisplay = `Removed worktree directory **${this.params.name}**, branch \`${reportedBranch}\` preserved`;
+    } else if (result.deletedBranch) {
+      message = `Removed worktree "${this.params.name}" and deleted branch ${result.deletedBranch}.`;
+      if (result.keptBranch) {
+        message += ` Kept branch ${result.keptBranch} (the checkout's own branch).`;
+      }
+      returnDisplay = `Removed worktree **${this.params.name}** (branch \`${result.deletedBranch}\`)`;
+    } else if (result.keptBranch) {
+      message =
+        `Removed worktree "${this.params.name}" but kept branch ${result.keptBranch} ` +
+        `(it was not this worktree's slug branch to delete). Remove it with ` +
+        `\`git branch -d ${result.keptBranch}\` if you want it gone.`;
+      returnDisplay = `Removed worktree **${this.params.name}**, branch \`${result.keptBranch}\` kept`;
+    } else {
+      message = `Removed worktree "${this.params.name}". No branch was deleted.`;
+      returnDisplay = `Removed worktree **${this.params.name}**`;
     }
-
     debugLogger.debug(
-      `Removed user worktree: ${worktreePath} (branch=${branch})`,
+      `Removed user worktree: ${worktreePath} (branch=${reportedBranch})`,
     );
-
-    await this.maybeClearWorktreeSession();
     const output: ExitWorktreeOutput = {
       action: 'remove',
       worktreePath,
-      worktreeBranch: branch,
-      message: `Removed worktree "${this.params.name}" and deleted branch ${branch}.`,
+      worktreeBranch: reportedBranch,
+      message,
     };
     return {
       llmContent: JSON.stringify(output),
-      returnDisplay: `Removed worktree **${this.params.name}** (branch \`${branch}\`)`,
+      returnDisplay,
     };
   }
 

@@ -7,6 +7,20 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const mockGenerateJson = vi.hoisted(() => vi.fn());
+const mockRecoveryDebug = vi.hoisted(() => vi.fn());
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (tag?: string) => {
+      const logger = actual.createDebugLogger(tag);
+      return tag === 'EDIT_PRIOR_READ'
+        ? { ...logger, debug: mockRecoveryDebug }
+        : logger;
+    },
+  };
+});
 
 vi.mock('../utils/editor.js', () => ({
   openDiff: vi.fn(),
@@ -20,7 +34,7 @@ import type { Mock } from 'vitest';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { EditToolParams } from './edit.js';
 import { applyReplacement, EditTool } from './edit.js';
-import type { FileDiff, ToolInvocation, ToolResult } from './tools.js';
+import type { FileDiff } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -29,8 +43,49 @@ import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { FileReadCache } from '../services/fileReadCache.js';
+import { getAutoMemoryRoot } from '../memory/paths.js';
+import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
+import type { TextFileIo } from '../services/fileSystemService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import {
+  canonicalWorktreePath,
+  grantUnattendedFixes,
+  openBackgroundFix,
+  recordConfirmedWatch,
+  recordWatchTask,
+  resetUnattendedFixGrantsForTests,
+} from './autofix-pr-grants.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+// eslint-disable-next-line import/no-internal-modules -- Static regression data, not a module implementation.
+import replayCases from './fixtures/edit-stale-recovery.json' with { type: 'json' };
+
+const readText = (filePath: string) => fs.readFileSync(filePath, 'utf8');
+
+const edit = (
+  file_path: string,
+  old_string = 'old',
+  new_string = 'new',
+  extra: Partial<EditToolParams> = {},
+): EditToolParams => ({ file_path, old_string, new_string, ...extra });
+
+/** A model-only diffStat: [added lines, removed lines, added chars, removed chars]. */
+const modelDiffStat = (
+  addedLines: number,
+  removedLines: number,
+  addedChars: number,
+  removedChars: number,
+) => ({
+  model_added_lines: addedLines,
+  model_removed_lines: removedLines,
+  model_added_chars: addedChars,
+  model_removed_chars: removedChars,
+  user_added_lines: 0,
+  user_removed_lines: 0,
+  user_added_chars: 0,
+  user_removed_chars: 0,
+});
 
 describe('EditTool', () => {
   let tool: EditTool;
@@ -45,22 +100,34 @@ describe('EditTool', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    mockRecoveryDebug.mockClear();
+    vi.unstubAllEnvs();
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'edit-tool-test-'));
     rootDir = path.join(tempDir, 'root');
     fs.mkdirSync(rootDir);
     fileReadCache = new FileReadCache();
     mockFileHistoryService = { trackEdit: vi.fn() };
     fsService = new StandardFileSystemService();
+    llmClient = { generateJson: mockGenerateJson };
+    baseLlmClient = { generateJson: vi.fn() };
 
-    llmClient = {
-      generateJson: mockGenerateJson, // mockGenerateJson is already defined and hoisted
-    };
-
-    baseLlmClient = {
-      generateJson: vi.fn(),
-    };
-
+    const permissionManager = new PermissionManager({
+      getPermissionsAllow: () => undefined,
+      getPermissionsAsk: () => undefined,
+      getPermissionsDeny: () => undefined,
+      getProjectRoot: () => rootDir,
+      getCwd: () => rootDir,
+    });
+    permissionManager.initialize();
     mockConfig = {
+      storage: {
+        getProjectTempDir: () => path.join(tempDir, 'project-temp'),
+        getProjectDir: () => path.join(tempDir, 'project'),
+        getUserSkillsDirs: () => [path.join(tempDir, 'skills')],
+        getWorkflowRunsDir: () => path.join(tempDir, 'workflow-runs'),
+      },
+      getPlansDir: () => path.join(tempDir, 'plans'),
+      getPermissionManager: () => permissionManager,
       getLlmClient: vi.fn().mockReturnValue(llmClient),
       getBaseLlmClient: vi.fn().mockReturnValue(baseLlmClient),
       getTargetDir: () => rootDir,
@@ -90,36 +157,614 @@ describe('EditTool', () => {
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: vi.fn().mockReturnValue(false),
       getFileHistoryService: () => mockFileHistoryService,
+      isRecordArtifactEnabled: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
-    // Reset mocks before each test
-    (mockConfig.getApprovalMode as Mock).mockClear();
     // Default to not skipping confirmation
+    (mockConfig.getApprovalMode as Mock).mockClear();
     (mockConfig.getApprovalMode as Mock).mockReturnValue(ApprovalMode.DEFAULT);
 
     tool = new EditTool(mockConfig);
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
   /**
-   * Simulate the model having read `filePath` earlier in the session,
-   * so the EditTool's prior-read enforcement does not reject the
-   * subsequent edit. Tests that exercise pure Edit-business behaviour
-   * (diffing, encoding, replace_all, etc.) should call this after
-   * writing the fixture file and before invoking `tool.execute`.
+   * Simulate the model having read `filePath` earlier in the session so
+   * prior-read enforcement does not reject the edit. Tests of pure Edit
+   * behaviour (diffing, encoding, replace_all, etc.) call this after writing
+   * the fixture file and before invoking `tool.execute`.
    */
-  function seedPriorRead(filePath: string) {
+  function seedPriorRead(filePath: string, full = true, cacheable = true) {
     const stats = fs.statSync(filePath);
-    fileReadCache.recordRead(filePath, stats, {
-      full: true,
-      cacheable: true,
-    });
+    fileReadCache.recordRead(filePath, stats, { full, cacheable });
+    return stats;
   }
 
+  /** Writes the fixture file and seeds a prior full read of it. */
+  function seedFile(filePath: string, content: string) {
+    fs.writeFileSync(filePath, content, 'utf8');
+    seedPriorRead(filePath);
+  }
+
+  const run = (params: EditToolParams) =>
+    tool.build(params).execute(new AbortController().signal);
+  const confirm = (params: EditToolParams) =>
+    tool.build(params).getConfirmationDetails(new AbortController().signal);
+  const autoEditOnce = () =>
+    (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+      ApprovalMode.AUTO_EDIT,
+    );
+
+  describe('Unicode escape recovery', () => {
+    it.each([
+      ['你好', String.raw`\u4f60\u597d`, String.raw`\u518d\u89c1`, '再见'],
+      [String.raw`\u4f60\u597d`, '你好', '再见', String.raw`\u518d\u89c1`],
+      [String.raw`\u4F60\u597D`, '你好', '你们', String.raw`\u4F60\u4EEC`],
+    ])(
+      'edits %j and preserves its Unicode representation',
+      async (disk, old, next, expected) => {
+        const filePath = path.join(rootDir, 'unicode.txt');
+        seedFile(filePath, `label = "${disk}";\n`);
+        const params = edit(
+          filePath,
+          `label = "${old}";`,
+          `label = "${next}";`,
+        );
+
+        expect(
+          await tool
+            .getModifyContext(new AbortController().signal)
+            .getProposedContent(params),
+        ).toBe(`label = "${expected}";\n`);
+        expect(readText(filePath)).toBe(`label = "${disk}";\n`);
+        const result = await run(params);
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe(`label = "${expected}";\n`);
+        expect(mockFileHistoryService.trackEdit).toHaveBeenCalledOnce();
+      },
+    );
+
+    it.each([false, true])(
+      'rejects different equivalent representations with replace_all=%s',
+      async (replaceAll) => {
+        const filePath = path.join(rootDir, 'ambiguous.txt');
+        const content = '你好\n' + String.raw`\u4F60\u597D` + '\n';
+        seedFile(filePath, content);
+
+        const result = await run(
+          edit(filePath, String.raw`\u4f60\u597d`, '再见', {
+            replace_all: replaceAll,
+          }),
+        );
+
+        expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
+        expect(readText(filePath)).toBe(content);
+        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([false, true])(
+      'retains identical-candidate uniqueness with replace_all=%s',
+      async (replaceAll) => {
+        const filePath = path.join(rootDir, 'repeated-unicode.txt');
+        const content = '你好\n你好\n';
+        seedFile(filePath, content);
+
+        const result = await run(
+          edit(filePath, String.raw`\u4f60\u597d`, String.raw`\u518d\u89c1`, {
+            replace_all: replaceAll,
+          }),
+        );
+
+        if (replaceAll) {
+          expect(result.error).toBeUndefined();
+          expect(readText(filePath)).toBe('再见\n再见\n');
+        } else {
+          expect(result.error?.type).toBe(
+            ToolErrorType.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
+          );
+          expect(readText(filePath)).toBe(content);
+          expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+        }
+      },
+    );
+
+    it.each([false, true])(
+      'rejects protected canonical substrings with replace_all=%s',
+      async (replaceAll) => {
+        const filePath = path.join(rootDir, 'protected-unicode.txt');
+        const content =
+          String.raw`\u4f60\u597d` + '\n' + String.raw`\\u4f60\u597d` + '\n';
+        seedFile(filePath, content);
+
+        const result = await run(
+          edit(filePath, '你好', '再见', { replace_all: replaceAll }),
+        );
+
+        expect(readText(filePath)).toBe(content);
+        expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
+        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+      },
+    );
+
+    it('gives an exact match priority without decoding the replacement', async () => {
+      const filePath = path.join(rootDir, 'exact-unicode.txt');
+      const escaped = String.raw`\u4f60\u597d`;
+      const next = String.raw`\u518d\u89c1`;
+      seedFile(filePath, `${escaped}\n你好\n`);
+
+      const result = await run(edit(filePath, '你好', next));
+
+      expect(result.error).toBeUndefined();
+      expect(readText(filePath)).toBe(`${escaped}\n${next}\n`);
+    });
+
+    it('rejects overlapping protected canonical substrings', async () => {
+      const filePath = path.join(rootDir, 'overlapping-unicode.txt');
+      const content = String.raw`\\u4f60\u4f60\u4f60`;
+      seedFile(filePath, content);
+
+      const result = await run(
+        edit(filePath, '你你', '再见', { replace_all: true }),
+      );
+
+      expect(readText(filePath)).toBe(content);
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
+      expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+    });
+
+    it('preserves doubled backslashes and literal dollar replacements', async () => {
+      const filePath = path.join(rootDir, 'escaped-replacement.txt');
+      seedFile(filePath, '你好\n');
+      const next = String.raw`\u518d\u89c1 \\u4f60 \n \u0022 $& $$`;
+
+      const result = await run(edit(filePath, String.raw`\u4f60\u597d`, next));
+
+      expect(result.error).toBeUndefined();
+      expect(readText(filePath)).toBe(
+        String.raw`再见 \\u4f60 \n \u0022 $& $$` + '\n',
+      );
+    });
+
+    it('recovers text immediately after a completed backslash pair', async () => {
+      const filePath = path.join(rootDir, 'paired-backslash.txt');
+      const content = String.raw`{"p": "C:\\share\u4f60\u597d"}`;
+      const expected = String.raw`{"p": "C:\\client\u4f60\u597d"}`;
+      seedFile(filePath, content);
+      const params = edit(filePath, 'share你好', 'client你好');
+
+      expect(
+        await tool
+          .getModifyContext(new AbortController().signal)
+          .getProposedContent(params),
+      ).toBe(expected);
+      expect(readText(filePath)).toBe(content);
+
+      const result = await run(params);
+
+      expect(result.error).toBeUndefined();
+      expect(readText(filePath)).toBe(expected);
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledOnce();
+    });
+
+    it('keeps whole-line matching boundaries in editor proposals', async () => {
+      const filePath = path.join(rootDir, 'fuzzy-proposal.txt');
+      const content = ' const x = 1 \nfoo\nconst x = 1 \nbar\n';
+      seedFile(filePath, content);
+
+      const proposed = await tool
+        .getModifyContext(new AbortController().signal)
+        .getProposedContent(edit(filePath, 'const x = 1\n', 'replacement\n'));
+
+      expect(proposed).toBe(' const x = 1 \nfoo\nreplacement\nbar\n');
+      expect(readText(filePath)).toBe(content);
+    });
+
+    it.each([
+      [String.raw`{"a": "\u4f60\u597d\u518d"}`, '你好\\'],
+      [String.raw`\u4f60\u4f60`, '60你'],
+      ['你好\\\\', String.raw`\u4f60\u597d` + '\\'],
+      [String.raw`a\n\u4f60\u597d`, 'n你好'],
+      [String.raw`\u4f60\u597d\t`, '你好\\'],
+      [String.raw`/\s\u4f60\u597d/`, 's你好'],
+      [String.raw`a\x41\u4f60\u597d`, '41你好'],
+      [String.raw`x = "\u4f60\x41";`, '你\\'],
+      [String.raw`a\u{4f60}\u4f60\u597d`, 'f60}你好'],
+      [String.raw`x\u{1F600}\u4f60`, '1F600}你'],
+      [String.raw`a\u{4f60}\u4f60\u597d`, '}你好'],
+    ])('refuses recovery that splits an escape in %j', async (content, old) => {
+      const filePath = path.join(rootDir, 'partial-escape.txt');
+      seedFile(filePath, content);
+      const params = edit(filePath, old, 'X');
+
+      const proposed = await tool
+        .getModifyContext(new AbortController().signal)
+        .getProposedContent(params);
+      const result = await run(params);
+
+      expect(proposed).toBe(content);
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
+      expect(readText(filePath)).toBe(content);
+      expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [String.raw`p = "\u4f60\u597d";`, '你好', 'C:\\路径'],
+      [String.raw`{"a": "\u4f60\u597d\n"}`, '你好', 'X\\'],
+      [String.raw`\u4f60\u597d`, '你', 'C:\\'],
+      [String.raw`\u4f60;\u4f60\n`, '你', 'X\\'],
+      [String.raw`{"a": "\u4f60"}`, '你', 'C:\\'],
+      [String.raw`x = \u4f60north;`, '你', 'X\\'],
+      [String.raw`\u4f60test`, '你', 'X\\'],
+    ])(
+      'refuses replacement escape fusion in %j',
+      async (content, old, next) => {
+        const filePath = path.join(rootDir, 'replacement-escape.txt');
+        seedFile(filePath, content);
+        const params = edit(filePath, old, next, { replace_all: true });
+
+        const proposed = await tool
+          .getModifyContext(new AbortController().signal)
+          .getProposedContent(params);
+        const result = await run(params);
+
+        expect(proposed).toBe(content);
+        expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
+        expect(readText(filePath)).toBe(content);
+        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+      },
+    );
+
+    it('refuses a large Unicode recovery without an engine error', async () => {
+      const filePath = path.join(rootDir, 'large-unicode.txt');
+      const old = '你'.repeat(4_000);
+      const content = String.raw`\u4f60`.repeat(4_000);
+      seedFile(filePath, content);
+      const params = edit(filePath, old, 'X');
+
+      const proposed = await tool
+        .getModifyContext(new AbortController().signal)
+        .getProposedContent(params);
+      const result = await run(params);
+
+      expect(proposed).toBe(content);
+      expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
+      expect(readText(filePath)).toBe(content);
+      expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+    });
+
+    it('preserves mixed line endings when a proposal cannot match', async () => {
+      const filePath = path.join(rootDir, 'mixed-proposal.txt');
+      const content = 'first\r\nsecond\n';
+      seedFile(filePath, content);
+
+      const proposed = await tool
+        .getModifyContext(new AbortController().signal)
+        .getProposedContent(edit(filePath, 'missing', 'replacement'));
+
+      expect(proposed).toBe(content);
+      expect(readText(filePath)).toBe(content);
+    });
+
+    it.each([
+      ['\n', false],
+      ['\r\n', false],
+      ['\n', true],
+      ['\r\n', true],
+    ])(
+      'matches deletion proposal/write for %j with scoped I/O=%s',
+      async (eol, scoped) => {
+        const filePath = path.join(rootDir, 'unicode-deletion.txt');
+        seedFile(filePath, String.raw`\u4f60\u597d` + `${eol}next${eol}`);
+        if (scoped) {
+          const io: TextFileIo = {
+            inspect: vi.fn(async () => ({
+              kind: 'file' as const,
+              response: await fsService.readTextFile({ path: filePath }),
+              stats: fs.statSync(filePath),
+            })),
+            withMutation: async (_path, signal, operation) =>
+              operation({
+                original: await io.inspect(filePath, signal),
+                write: async (params) => {
+                  await fsService.writeTextFile(params);
+                  return fs.statSync(filePath);
+                },
+              }),
+          };
+          Object.assign(fsService, { textFileIo: io });
+        }
+        const params = edit(filePath, '你好', '');
+
+        const proposed = await tool
+          .getModifyContext(new AbortController().signal)
+          .getProposedContent(params);
+        const result = await run(params);
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe(`next${eol}`);
+        expect(proposed).toBe(readText(filePath));
+      },
+    );
+  });
+
+  describe('fuzzy trailing-newline boundaries', () => {
+    it.each(
+      [
+        {
+          name: 'primary fuzzy match beside an indented line',
+          content: ' const x = 1 \nfoo\n\nconst x = 1 \n\nafter\n',
+          oldString: 'const x = 1\n',
+          newString: 'replacement\n',
+          expected: ' const x = 1 \nfoo\n\nreplacement\n\nafter\n',
+        },
+        {
+          name: 'fallback fuzzy match beside an indented line',
+          content: ' const x = 1 \nfoo\nconst x = 1 \nbar\n',
+          oldString: 'const x = 1\n',
+          newString: 'replacement\n',
+          expected: ' const x = 1 \nfoo\nreplacement\nbar\n',
+        },
+        {
+          name: 'fuzzy EOF match beside an indented line',
+          content: ' const x = 1 \nfoo\nconst x = 1 ',
+          oldString: 'const x = 1\n',
+          newString: 'replacement\n',
+          expected: ' const x = 1 \nfoo\nreplacement',
+        },
+        {
+          name: 'fuzzy EOF deletion beside an indented newline suffix',
+          content: ' a \nx\na ',
+          oldString: 'a\n',
+          newString: '',
+          expected: ' a \nx\n',
+        },
+        {
+          name: 'fuzzy match beside a longer line prefix',
+          content: 'const x = 1 extra\nconst x = 1 \n',
+          oldString: 'const x = 1  ',
+          newString: 'replacement',
+          expected: 'const x = 1 extra\nreplacement\n',
+        },
+        {
+          name: 'multiline fuzzy match beside an indented block',
+          content:
+            ' const x = 1 \nnext \nother\nconst x = 1 \nnext \n\nafter\n',
+          oldString: 'const x = 1\nnext\n',
+          newString: 'replacement\n',
+          expected: ' const x = 1 \nnext \nother\nreplacement\n\nafter\n',
+        },
+        {
+          name: 'multiline fuzzy match beside a longer final line',
+          content: 'first \nsecond extra\nx\nfirst \nsecond \ny\n',
+          oldString: 'first\nsecond\n',
+          newString: 'replacement\n',
+          expected: 'first \nsecond extra\nx\nreplacement\ny\n',
+        },
+        {
+          name: 'overlapping blank-line fuzzy match',
+          content: 'x\n\n\n',
+          oldString: '\n \n',
+          newString: 'replacement\n',
+          expected: 'x\nreplacement\n',
+        },
+        {
+          name: 'fuzzy replacement with literal dollar sequences',
+          content: ' const x = 1 \nfoo\n\nconst x = 1 \n\nafter\n',
+          oldString: 'const x = 1\n',
+          newString: "$& $` $' $$\n",
+          expected: " const x = 1 \nfoo\n\n$& $` $' $$\n\nafter\n",
+        },
+      ].flatMap((testCase) =>
+        [false, true].map((replaceAll) => ({ ...testCase, replaceAll })),
+      ),
+    )(
+      'preserves unmatched lines during $name (all: $replaceAll)',
+      async (testCase) => {
+        const filePath = path.join(rootDir, 'scoped-fuzzy-match.txt');
+        seedFile(filePath, testCase.content);
+
+        const result = await run(
+          edit(filePath, testCase.oldString, testCase.newString, {
+            replace_all: testCase.replaceAll,
+          }),
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe(testCase.expected);
+        expect(mockFileHistoryService.trackEdit).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each([false, true])(
+      'counts only repeated whole fuzzy lines (all: %s)',
+      async (replaceAll) => {
+        const content = ' a \nfoo\na \n\na \nb\n';
+        const filePath = path.join(rootDir, 'scoped-repeated-lines.txt');
+        seedFile(filePath, content);
+        const write = vi.spyOn(fsService, 'writeTextFile');
+
+        const result = await run(
+          edit(filePath, 'a\n', 'replacement\n', { replace_all: replaceAll }),
+        );
+
+        if (replaceAll) {
+          expect(result.error).toBeUndefined();
+          expect(readText(filePath)).toBe(
+            ' a \nfoo\nreplacement\n\nreplacement\nb\n',
+          );
+          expect(write).toHaveBeenCalledTimes(1);
+        } else {
+          expect(result.error?.type).toBe(
+            ToolErrorType.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
+          );
+          expect(result.llmContent).toContain('Found 2 occurrences');
+          expect(readText(filePath)).toBe(content);
+          expect(write).not.toHaveBeenCalled();
+          expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+        }
+      },
+    );
+
+    it.each([
+      ['literal', 'prefix old\nold\n', 'old'],
+      ['character-normalized', 'prefix “old”\n“old”\n', '"old"'],
+    ])(
+      'retains %s mid-line replacements',
+      async (_mode, content, oldString) => {
+        const filePath = path.join(rootDir, 'mid-line.txt');
+        seedFile(filePath, content);
+
+        const result = await run(
+          edit(filePath, oldString, 'new', { replace_all: true }),
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe('prefix new\nnew\n');
+      },
+    );
+
+    it.each([
+      ['fuzzy', 'a \n\na \nb\n'],
+      ['literal', 'a\n\na\nb\n'],
+    ])('rejects repeated %s lines without writing', async (_mode, content) => {
+      const filePath = path.join(rootDir, 'repeated-lines.txt');
+      seedFile(filePath, content);
+      const write = vi.spyOn(fsService, 'writeTextFile');
+
+      const result = await run(edit(filePath, 'a\n', 'replacement\n'));
+
+      expect(result.error?.type).toBe(
+        ToolErrorType.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
+      );
+      expect(result.llmContent).toContain('Found 2 occurrences');
+      expect(readText(filePath)).toBe(content);
+      expect(write).not.toHaveBeenCalled();
+      expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['fuzzy', 'a \n\na \nb\n'],
+      ['literal', 'a\n\na\nb\n'],
+    ])(
+      'replaces both repeated %s lines when explicitly enabled',
+      async (_mode, content) => {
+        const filePath = path.join(rootDir, 'repeated-lines.txt');
+        seedFile(filePath, content);
+
+        const result = await run(
+          edit(filePath, 'a\n', 'replacement\n', { replace_all: true }),
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe('replacement\n\nreplacement\nb\n');
+      },
+    );
+
+    it.each([
+      {
+        name: 'deletion before a blank line',
+        content: 'before\nremove-me \n\nafter\n',
+        oldString: 'remove-me\n',
+        newString: '',
+        expected: 'before\n\nafter\n',
+      },
+      {
+        name: 'replacement before a blank line',
+        content: 'before\nremove-me \n\nafter\n',
+        oldString: 'remove-me\n',
+        newString: 'replacement\n',
+        expected: 'before\nreplacement\n\nafter\n',
+      },
+      {
+        name: 'multiline string replacement',
+        content: 'before\nconst value = `first \nsecond`;\n\nafter\n',
+        oldString: 'const value = `first\nsecond`;\n',
+        newString: 'const value = `replacement`;\n',
+        expected: 'before\nconst value = `replacement`;\n\nafter\n',
+      },
+      {
+        name: 'deletion with multiple requested newlines',
+        content: 'before\nremove-me \n\n\nafter\n',
+        oldString: 'remove-me\n\n',
+        newString: '',
+        expected: 'before\n\nafter\n',
+      },
+      {
+        name: 'deletion before a whitespace-only line',
+        content: 'before\nremove-me \n \nafter\n',
+        oldString: 'remove-me\n',
+        newString: '',
+        expected: 'before\n \nafter\n',
+      },
+      {
+        name: 'deletion at EOF with a newline',
+        content: 'before\nremove-me \n',
+        oldString: 'remove-me\n',
+        newString: '',
+        expected: 'before\n',
+      },
+      {
+        name: 'replacement at EOF without a newline',
+        content: 'before\nremove-me ',
+        oldString: 'remove-me\n',
+        newString: 'replacement\n',
+        expected: 'before\nreplacement',
+      },
+      {
+        name: 'literal deletion before a blank line',
+        content: 'before\nremove-me\n\nafter\n',
+        oldString: 'remove-me\n',
+        newString: '',
+        expected: 'before\n\nafter\n',
+      },
+      {
+        name: 'implicit whole-line deletion without a requested newline',
+        content: 'before\nremove-me \n\nafter\n',
+        oldString: 'remove-me  ',
+        newString: '',
+        expected: 'before\n\nafter\n',
+      },
+    ])('preserves surrounding content during $name', async (testCase) => {
+      const filePath = path.join(rootDir, 'newline-boundary.txt');
+      seedFile(filePath, testCase.content);
+
+      const result = await run(
+        edit(filePath, testCase.oldString, testCase.newString),
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(readText(filePath)).toBe(testCase.expected);
+    });
+  });
+
+  /** An invocation whose calculateEdit aborts `controller`, then throws `error`. */
+  const abortingInvocation = (
+    fileName: string,
+    controller: AbortController,
+    error: Error,
+  ) => {
+    const invocation = tool.build(edit(path.join(rootDir, fileName)));
+    const calculateSpy = vi
+      .spyOn(invocation as any, 'calculateEdit')
+      .mockImplementation(async () => {
+        if (!controller.signal.aborted) {
+          controller.abort();
+        }
+        throw error;
+      });
+    return { invocation, calculateSpy };
+  };
+
   describe('applyReplacement', () => {
+    const replace = (current: string, oldStr: string, newStr: string) =>
+      applyReplacement(current, oldStr, newStr, false);
+
     it('should return newString if isNewFile is true', () => {
       expect(applyReplacement(null, 'old', 'new', true)).toBe('new');
       expect(applyReplacement('existing', 'old', 'new', true)).toBe('new');
@@ -134,120 +779,151 @@ describe('EditTool', () => {
     });
 
     it('should replace oldString with newString in currentContent', () => {
-      expect(applyReplacement('hello old world old', 'old', 'new', false)).toBe(
+      expect(replace('hello old world old', 'old', 'new')).toBe(
         'hello new world new',
       );
     });
 
     it('should return currentContent if oldString is empty and not a new file', () => {
-      expect(applyReplacement('hello world', '', 'new', false)).toBe(
-        'hello world',
-      );
+      expect(replace('hello world', '', 'new')).toBe('hello world');
     });
 
     it('should treat $ literally and not as replacement pattern', () => {
-      const current = "price is $100 and pattern end is ' '";
-      const oldStr = 'price is $100';
-      const newStr = 'price is $200';
-      const result = applyReplacement(current, oldStr, newStr, false);
-      expect(result).toBe("price is $200 and pattern end is ' '");
+      expect(
+        replace(
+          "price is $100 and pattern end is ' '",
+          'price is $100',
+          'price is $200',
+        ),
+      ).toBe("price is $200 and pattern end is ' '");
     });
 
     it("should treat $' literally and not as a replacement pattern", () => {
-      const current = 'foo';
-      const oldStr = 'foo';
-      const newStr = "bar$'baz";
-      const result = applyReplacement(current, oldStr, newStr, false);
-      expect(result).toBe("bar$'baz");
+      expect(replace('foo', 'foo', "bar$'baz")).toBe("bar$'baz");
     });
 
     it('should treat $& literally and not as a replacement pattern', () => {
-      const current = 'hello world';
-      const oldStr = 'hello';
-      const newStr = '$&-replacement';
-      const result = applyReplacement(current, oldStr, newStr, false);
-      expect(result).toBe('$&-replacement world');
+      expect(replace('hello world', 'hello', '$&-replacement')).toBe(
+        '$&-replacement world',
+      );
     });
 
     it('should treat $` literally and not as a replacement pattern', () => {
-      const current = 'prefix-middle-suffix';
-      const oldStr = 'middle';
-      const newStr = 'new$`content';
-      const result = applyReplacement(current, oldStr, newStr, false);
-      expect(result).toBe('prefix-new$`content-suffix');
+      expect(replace('prefix-middle-suffix', 'middle', 'new$`content')).toBe(
+        'prefix-new$`content-suffix',
+      );
     });
 
     it('should treat $1, $2 capture groups literally', () => {
-      const current = 'test string';
-      const oldStr = 'test';
-      const newStr = '$1$2replacement';
-      const result = applyReplacement(current, oldStr, newStr, false);
-      expect(result).toBe('$1$2replacement string');
+      expect(replace('test string', 'test', '$1$2replacement')).toBe(
+        '$1$2replacement string',
+      );
     });
 
     it('should use replaceAll for normal strings without problematic $ sequences', () => {
-      const current = 'normal text replacement';
-      const oldStr = 'text';
-      const newStr = 'string';
-      const result = applyReplacement(current, oldStr, newStr, false);
-      expect(result).toBe('normal string replacement');
+      expect(replace('normal text replacement', 'text', 'string')).toBe(
+        'normal string replacement',
+      );
     });
 
     it('should handle multiple occurrences with problematic $ sequences', () => {
-      const current = 'foo bar foo baz';
-      const oldStr = 'foo';
-      const newStr = "test$'end";
-      const result = applyReplacement(current, oldStr, newStr, false);
-      expect(result).toBe("test$'end bar test$'end baz");
+      expect(replace('foo bar foo baz', 'foo', "test$'end")).toBe(
+        "test$'end bar test$'end baz",
+      );
     });
 
     it('should handle complex regex patterns with $ at end', () => {
-      const current = "| select('match', '^[sv]d[a-z]$')";
-      const oldStr = "'^[sv]d[a-z]$'";
-      const newStr = "'^[sv]d[a-z]$' # updated";
-      const result = applyReplacement(current, oldStr, newStr, false);
-      expect(result).toBe("| select('match', '^[sv]d[a-z]$' # updated)");
+      expect(
+        replace(
+          "| select('match', '^[sv]d[a-z]$')",
+          "'^[sv]d[a-z]$'",
+          "'^[sv]d[a-z]$' # updated",
+        ),
+      ).toBe("| select('match', '^[sv]d[a-z]$' # updated)");
     });
 
     it('should handle empty replacement with problematic $ in newString', () => {
-      const current = 'test content';
-      const oldStr = 'nothing';
-      const newStr = "replacement$'text";
-      const result = applyReplacement(current, oldStr, newStr, false);
-      expect(result).toBe('test content'); // No replacement because oldStr not found
+      // No replacement because oldStr is not found
+      expect(replace('test content', 'nothing', "replacement$'text")).toBe(
+        'test content',
+      );
     });
 
     it('should handle $$ (escaped dollar) correctly', () => {
-      const current = 'price value';
-      const oldStr = 'value';
-      const newStr = '$$100';
-      const result = applyReplacement(current, oldStr, newStr, false);
-      expect(result).toBe('price $$100');
+      expect(replace('price value', 'value', '$$100')).toBe('price $$100');
     });
   });
 
   describe('team memory', () => {
     const teamFile = () =>
       path.join(rootDir, '.qwen', 'team-memory', 'feedback', 'x.md');
+    // Prior-read enforcement off so the test can edit an existing file directly.
+    const writeTeamFile = (content: string) => {
+      (mockConfig.getFileReadCacheDisabled as Mock).mockReturnValue(true);
+      const file = teamFile();
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, content, 'utf8');
+      return file;
+    };
 
     it('blocks a secret written to a team-memory path via new_string', () => {
-      const params: EditToolParams = {
-        file_path: teamFile(),
-        old_string: '',
-        new_string: `token = ghp_${'a'.repeat(36)}`,
-      };
-      expect(tool.validateToolParams(params)).toMatch(
-        /shared with all repository collaborators/i,
-      );
+      expect(
+        tool.validateToolParams(
+          edit(teamFile(), '', `token = ghp_${'a'.repeat(36)}`),
+        ),
+      ).toMatch(/shared with all repository collaborators/i);
     });
 
     it('allows clean content on a team-memory path', () => {
-      const params: EditToolParams = {
-        file_path: teamFile(),
-        old_string: '',
-        new_string: 'Use real DBs in integration tests.',
-      };
-      expect(tool.validateToolParams(params)).toBeNull();
+      expect(
+        tool.validateToolParams(
+          edit(teamFile(), '', 'Use real DBs in integration tests.'),
+        ),
+      ).toBeNull();
+    });
+
+    it("asks the user for a write into a background fix's worktree, but for its own agent", async () => {
+      const worktree = fs.mkdtempSync(path.join(os.tmpdir(), 'autofix-pr-wt-'));
+      try {
+        await openFixAt(worktree, 'fix-agent');
+        const file = path.join(worktree, 'src', 'a.ts');
+        expect(
+          tool
+            .build({ file_path: file, old_string: '', new_string: 'x' })
+            .requiresUserInteraction?.(),
+        ).toBe(true);
+        expect(
+          await runWithAgentContext('fix-agent', async () =>
+            tool
+              .build({ file_path: file, old_string: '', new_string: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(false);
+        // An agent the fix agent started is its own; another agent is not.
+        expect(
+          await runWithAgentContext('fix-agent-child', async () =>
+            tool
+              .build({ file_path: file, old_string: '', new_string: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(false);
+        expect(
+          await runWithAgentContext('session-agent', async () =>
+            tool
+              .build({ file_path: file, old_string: '', new_string: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(true);
+        const outside = path.join(path.dirname(worktree), 'elsewhere.ts');
+        expect(
+          tool
+            .build({ file_path: outside, old_string: '', new_string: 'x' })
+            .requiresUserInteraction?.(),
+        ).toBe(false);
+      } finally {
+        resetUnattendedFixGrantsForTests();
+        fs.rmSync(worktree, { recursive: true, force: true });
+      }
     });
 
     it('proposes (asks) team writes — never auto-allowed like private memory', async () => {
@@ -258,87 +934,55 @@ describe('EditTool', () => {
     });
 
     it('blocks a secret assembled across edits (scans full result, not just new_string)', async () => {
-      // Prior-read enforcement off so we can edit an existing file directly.
-      (mockConfig.getFileReadCacheDisabled as Mock).mockReturnValue(true);
-      const file = teamFile();
-      fs.mkdirSync(path.dirname(file), { recursive: true });
       // Existing content holds only the prefix (body < 36 → no match alone).
-      fs.writeFileSync(file, `ghp_${'a'.repeat(10)}`, 'utf8');
+      const file = writeTeamFile(`ghp_${'a'.repeat(10)}`);
       // new_string has no `ghp_` prefix, so the validate-time scan passes;
       // only the merged result `ghp_` + 36 chars is a real token.
-      const result = await tool
-        .build({
-          file_path: file,
-          old_string: 'a'.repeat(10),
-          new_string: 'a'.repeat(36),
-        })
-        .execute(new AbortController().signal);
+      const result = await run(edit(file, 'a'.repeat(10), 'a'.repeat(36)));
       expect(JSON.stringify(result)).toMatch(
         /shared with all repository collaborators/i,
       );
     });
 
     it('reports the pre-existing-secret message and leaves the file untouched', async () => {
-      // Prior-read enforcement off so we can edit an existing file directly.
-      (mockConfig.getFileReadCacheDisabled as Mock).mockReturnValue(true);
-      const file = teamFile();
-      fs.mkdirSync(path.dirname(file), { recursive: true });
       // Seed the on-disk file with a FULL detectable token so currentContent
       // itself trips the scanner — exercises the preExisting branch.
       const original = `secret = ghp_${'a'.repeat(36)}\nkeep`;
-      fs.writeFileSync(file, original, 'utf8');
+      const file = writeTeamFile(original);
       // Edit a clean line; the committed secret survives in the merged result.
-      const result = await tool
-        .build({ file_path: file, old_string: 'keep', new_string: 'kept' })
-        .execute(new AbortController().signal);
+      const result = await run(edit(file, 'keep', 'kept'));
       expect(JSON.stringify(result)).toMatch(
         /secret already exists in the current file content/i,
       );
       // The blocked edit must not have written anything.
-      expect(fs.readFileSync(file, 'utf8')).toBe(original);
+      expect(readText(file)).toBe(original);
     });
   });
 
   describe('validateToolParams', () => {
     it('should return null for valid params', () => {
-      const params: EditToolParams = {
-        file_path: path.join(rootDir, 'test.txt'),
-        old_string: 'old',
-        new_string: 'new',
-      };
-      expect(tool.validateToolParams(params)).toBeNull();
+      expect(
+        tool.validateToolParams(edit(path.join(rootDir, 'test.txt'))),
+      ).toBeNull();
     });
 
     it('should return error for relative path', () => {
-      const params: EditToolParams = {
-        file_path: 'test.txt',
-        old_string: 'old',
-        new_string: 'new',
-      };
-      expect(tool.validateToolParams(params)).toMatch(
+      expect(tool.validateToolParams(edit('test.txt'))).toMatch(
         /File path must be absolute/,
       );
     });
 
     it('should allow path outside root (external path support)', () => {
-      const params: EditToolParams = {
-        file_path: path.join(tempDir, 'outside-root.txt'),
-        old_string: 'old',
-        new_string: 'new',
-      };
-      const error = tool.validateToolParams(params);
+      const error = tool.validateToolParams(
+        edit(path.join(tempDir, 'outside-root.txt')),
+      );
       expect(error).toBeNull();
     });
 
     it.skipIf(process.platform === 'win32')(
       'should unescape shell-escaped spaces in file_path',
       () => {
-        const escapedPath = path.join(rootDir, 'my\\ file.txt');
-        const params: EditToolParams = {
-          file_path: escapedPath,
-          old_string: 'old',
-          new_string: 'new',
-        };
+        const params = edit(path.join(rootDir, 'my\\ file.txt'));
         expect(tool.validateToolParams(params)).toBeNull();
         expect(params.file_path).toBe(path.join(rootDir, 'my file.txt'));
       },
@@ -347,15 +991,9 @@ describe('EditTool', () => {
     it.skipIf(process.platform === 'win32')(
       'should unescape multiple shell-escaped characters in file_path',
       () => {
-        const escapedPath = path.join(
-          rootDir,
-          'project\\ \\(v2\\)\\ \\&\\ more.txt',
+        const params = edit(
+          path.join(rootDir, 'project\\ \\(v2\\)\\ \\&\\ more.txt'),
         );
-        const params: EditToolParams = {
-          file_path: escapedPath,
-          old_string: 'old',
-          new_string: 'new',
-        };
         expect(tool.validateToolParams(params)).toBeNull();
         expect(params.file_path).toBe(
           path.join(rootDir, 'project (v2) & more.txt'),
@@ -366,18 +1004,14 @@ describe('EditTool', () => {
     it.skipIf(process.platform === 'win32')(
       'should preserve literal backslashes in file_path',
       () => {
-        // On Windows, backslashes are path separators, and unescapePath is a
-        // no-op. This test only validates literal-backslash preservation on
-        // platforms where backslashes are not path separators.
+        // On Windows, backslashes are path separators and unescapePath is a
+        // no-op, so this only validates literal-backslash preservation where
+        // backslashes are not path separators.
         const pathWithBackslash = path.join(
           rootDir,
           'path\\\\with\\\\slashes.txt',
         );
-        const params: EditToolParams = {
-          file_path: pathWithBackslash,
-          old_string: 'old',
-          new_string: 'new',
-        };
+        const params = edit(pathWithBackslash);
         expect(tool.validateToolParams(params)).toBeNull();
         // Double backslashes (literal) should be preserved
         expect(params.file_path).toBe(pathWithBackslash);
@@ -388,85 +1022,45 @@ describe('EditTool', () => {
   describe('getConfirmationDetails', () => {
     const testFile = 'edit_me.txt';
     let filePath: string;
+    const confirmationFor = (fileName: string) =>
+      expect.objectContaining({
+        title: `Confirm Edit: ${fileName}`,
+        fileName,
+        fileDiff: expect.any(String),
+      });
 
     beforeEach(() => {
       filePath = path.join(rootDir, testFile);
     });
 
     it('should throw an error if params are invalid', async () => {
-      const params: EditToolParams = {
-        file_path: 'relative.txt',
-        old_string: 'old',
-        new_string: 'new',
-      };
-      expect(() => tool.build(params)).toThrow();
+      expect(() => tool.build(edit('relative.txt'))).toThrow();
     });
 
     it('should request confirmation for valid edit', async () => {
-      fs.writeFileSync(filePath, 'some old content here');
-      seedPriorRead(filePath);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-      };
-      const invocation = tool.build(params);
-      const confirmation = await invocation.getConfirmationDetails(
-        new AbortController().signal,
-      );
-      expect(confirmation).toEqual(
-        expect.objectContaining({
-          title: `Confirm Edit: ${testFile}`,
-          fileName: testFile,
-          fileDiff: expect.any(String),
-        }),
-      );
+      seedFile(filePath, 'some old content here');
+      expect(await confirm(edit(filePath))).toEqual(confirmationFor(testFile));
     });
 
     it('should throw if old_string is not found', async () => {
-      fs.writeFileSync(filePath, 'some content here');
-      seedPriorRead(filePath);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'not_found',
-        new_string: 'new',
-      };
-      const invocation = tool.build(params);
-      await expect(
-        invocation.getConfirmationDetails(new AbortController().signal),
-      ).rejects.toThrow();
+      seedFile(filePath, 'some content here');
+      await expect(confirm(edit(filePath, 'not_found'))).rejects.toThrow();
     });
 
     it('should throw if multiple occurrences of old_string are found', async () => {
-      fs.writeFileSync(filePath, 'old old content here');
-      seedPriorRead(filePath);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-      };
-      const invocation = tool.build(params);
-      await expect(
-        invocation.getConfirmationDetails(new AbortController().signal),
-      ).rejects.toThrow();
+      seedFile(filePath, 'old old content here');
+      await expect(confirm(edit(filePath))).rejects.toThrow();
     });
 
     it('should surface plain object read errors without object stringification', async () => {
-      fs.writeFileSync(filePath, 'some old content here');
-      seedPriorRead(filePath);
+      seedFile(filePath, 'some old content here');
       vi.spyOn(fsService, 'readTextFile').mockRejectedValueOnce({
         message: 'Plain object read error',
       });
 
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-      };
-      const invocation = tool.build(params);
-      const err = await invocation
-        .getConfirmationDetails(new AbortController().signal)
-        .catch((error: unknown) => error);
+      const err = await confirm(edit(filePath)).catch(
+        (error: unknown) => error,
+      );
 
       expect(err).toBeInstanceOf(Error);
       expect((err as Error).message).toContain(
@@ -477,45 +1071,22 @@ describe('EditTool', () => {
 
     it('should request confirmation for creating a new file (empty old_string)', async () => {
       const newFileName = 'new_file.txt';
-      const newFilePath = path.join(rootDir, newFileName);
-      const params: EditToolParams = {
-        file_path: newFilePath,
-        old_string: '',
-        new_string: 'new file content',
-      };
-      const invocation = tool.build(params);
-      const confirmation = await invocation.getConfirmationDetails(
-        new AbortController().signal,
+      const params = edit(
+        path.join(rootDir, newFileName),
+        '',
+        'new file content',
       );
-      expect(confirmation).toEqual(
-        expect.objectContaining({
-          title: `Confirm Edit: ${newFileName}`,
-          fileName: newFileName,
-          fileDiff: expect.any(String),
-        }),
-      );
+      expect(await confirm(params)).toEqual(confirmationFor(newFileName));
     });
 
     it('should rethrow calculateEdit errors when the abort signal is triggered', async () => {
-      const filePath = path.join(rootDir, 'abort-confirmation.txt');
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-      };
-
-      const invocation = tool.build(params);
       const abortController = new AbortController();
       const abortError = new Error('Abort requested');
-
-      const calculateSpy = vi
-        .spyOn(invocation as any, 'calculateEdit')
-        .mockImplementation(async () => {
-          if (!abortController.signal.aborted) {
-            abortController.abort();
-          }
-          throw abortError;
-        });
+      const { invocation, calculateSpy } = abortingInvocation(
+        'abort-confirmation.txt',
+        abortController,
+        abortError,
+      );
 
       await expect(
         invocation.getConfirmationDetails(abortController.signal),
@@ -534,44 +1105,25 @@ describe('EditTool', () => {
     });
 
     it('should throw error if file path is not absolute', async () => {
-      const params: EditToolParams = {
-        file_path: 'relative.txt',
-        old_string: 'old',
-        new_string: 'new',
-      };
-      expect(() => tool.build(params)).toThrow(/File path must be absolute/);
+      expect(() => tool.build(edit('relative.txt'))).toThrow(
+        /File path must be absolute/,
+      );
     });
 
     it('should throw error if file path is empty', async () => {
-      const params: EditToolParams = {
-        file_path: '',
-        old_string: 'old',
-        new_string: 'new',
-      };
-      expect(() => tool.build(params)).toThrow(
+      expect(() => tool.build(edit(''))).toThrow(
         /The 'file_path' parameter must be non-empty./,
       );
     });
 
     it('should reject when calculateEdit fails after an abort signal', async () => {
-      const params: EditToolParams = {
-        file_path: path.join(rootDir, 'abort-execute.txt'),
-        old_string: 'old',
-        new_string: 'new',
-      };
-
-      const invocation = tool.build(params);
       const abortController = new AbortController();
       const abortError = new Error('Abort requested during execute');
-
-      const calculateSpy = vi
-        .spyOn(invocation as any, 'calculateEdit')
-        .mockImplementation(async () => {
-          if (!abortController.signal.aborted) {
-            abortController.abort();
-          }
-          throw abortError;
-        });
+      const { invocation, calculateSpy } = abortingInvocation(
+        'abort-execute.txt',
+        abortController,
+        abortError,
+      );
 
       await expect(invocation.execute(abortController.signal)).rejects.toBe(
         abortError,
@@ -583,22 +1135,14 @@ describe('EditTool', () => {
     it('should edit an existing file and return diff with fileName', async () => {
       const initialContent = 'This is some old text.';
       const newContent = 'This is some new text.'; // old -> new
-      fs.writeFileSync(filePath, initialContent, 'utf8');
-      seedPriorRead(filePath);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-      };
+      seedFile(filePath, initialContent);
       const writeSpy = vi.spyOn(fsService, 'writeTextFile');
 
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run(edit(filePath));
 
-      expect(result.llmContent).toMatch(
-        /Showing lines \d+-\d+ of \d+ from the edited file:/,
-      );
-      expect(fs.readFileSync(filePath, 'utf8')).toBe(newContent);
+      expect(result.llmContent).toBe(`The file: ${filePath} has been updated.`);
+      expect(result.llmContent).not.toMatch(/Showing lines/);
+      expect(readText(filePath)).toBe(newContent);
       expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
       const display = result.returnDisplay as FileDiff;
       expect(display.fileDiff).toMatch(initialContent);
@@ -613,138 +1157,200 @@ describe('EditTool', () => {
       );
     });
 
+    describe('session artifacts', () => {
+      beforeEach(() => {
+        (mockConfig.isRecordArtifactEnabled as Mock).mockReturnValue(true);
+      });
+
+      it('records an edited artifact-like file', async () => {
+        const csvPath = path.join(rootDir, 'orders.csv');
+        seedFile(csvPath, 'id,old\n1,a\n');
+
+        const result = await run(edit(csvPath, 'old', 'newer-col'));
+
+        expect(result.llmContent).toContain(
+          'automatically recorded as a workspace artifact with workspacePath "orders.csv"',
+        );
+        expect(result.llmContent).not.toMatch(/Showing lines/);
+        expect(result.artifacts).toEqual([
+          {
+            title: 'orders.csv',
+            kind: 'file',
+            storage: 'workspace',
+            workspacePath: 'orders.csv',
+            mimeType: 'text/csv',
+            sizeBytes: fs.statSync(csvPath).size,
+          },
+        ]);
+      });
+
+      it('records an artifact-like file created by edit', async () => {
+        const notePath = path.join(rootDir, 'notes', 'summary.md');
+        autoEditOnce();
+
+        const result = await run(edit(notePath, '', '# Summary\n'));
+
+        expect(result.llmContent).toMatch(/Created new file/);
+        expect(result.artifacts).toEqual([
+          expect.objectContaining({
+            title: 'summary.md',
+            kind: 'file',
+            workspacePath: 'notes/summary.md',
+          }),
+        ]);
+        expect(result.artifacts?.[0]).not.toHaveProperty('updateOnly');
+      });
+
+      it('only refreshes an existing artifact when record_as_artifact is false', async () => {
+        const csvPath = path.join(rootDir, 'orders.csv');
+        seedFile(csvPath, 'id,old\n1,a\n');
+
+        const result = await run(
+          edit(csvPath, 'old', 'new', { record_as_artifact: false }),
+        );
+
+        expect(result.llmContent).not.toContain('automatically recorded');
+        expect(result.artifacts).toEqual([
+          expect.objectContaining({
+            workspacePath: 'orders.csv',
+            updateOnly: true,
+          }),
+        ]);
+      });
+
+      it('only refreshes an existing artifact for other files', async () => {
+        const sourcePath = path.join(rootDir, 'src', 'index.ts');
+        fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+        seedFile(sourcePath, 'export const old = 1;\n');
+
+        const result = await run(edit(sourcePath));
+
+        expect(result.llmContent).not.toContain('automatically recorded');
+        expect(result.artifacts).toEqual([
+          expect.objectContaining({
+            workspacePath: 'src/index.ts',
+            updateOnly: true,
+          }),
+        ]);
+      });
+
+      it('does not record files outside the workspace', async () => {
+        const outsidePath = path.join(tempDir, 'outside.csv');
+        seedFile(outsidePath, 'old\n');
+
+        const result = await run(edit(outsidePath));
+
+        expect(readText(outsidePath)).toBe('new\n');
+        expect(result.artifacts).toBeUndefined();
+      });
+
+      it('does not record anything when the edit fails', async () => {
+        const csvPath = path.join(rootDir, 'orders.csv');
+        seedFile(csvPath, 'id,value\n');
+
+        const result = await run(edit(csvPath, 'missing', 'replacement'));
+
+        expect(result.error).toBeDefined();
+        expect(result.artifacts).toBeUndefined();
+      });
+
+      it('does not record anything when artifact recording is disabled', async () => {
+        (mockConfig.isRecordArtifactEnabled as Mock).mockReturnValue(false);
+        const csvPath = path.join(rootDir, 'orders.csv');
+        seedFile(csvPath, 'id,old\n');
+
+        const result = await run(edit(csvPath));
+
+        expect(result.llmContent).not.toContain('automatically recorded');
+        expect(result.artifacts).toBeUndefined();
+      });
+    });
+
     // trackEdit is best-effort: a FileHistoryService failure (disk full,
     // permissions, corrupted state) must never break the edit tool.
     it('completes the edit even when trackEdit throws', async () => {
-      const initialContent = 'This is some old text.';
-      const newContent = 'This is some new text.';
-      fs.writeFileSync(filePath, initialContent, 'utf8');
-      seedPriorRead(filePath);
+      seedFile(filePath, 'This is some old text.');
       mockFileHistoryService.trackEdit.mockRejectedValueOnce(
         new Error('disk full'),
       );
 
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-      };
-
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run(edit(filePath));
 
       expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
-      expect(fs.readFileSync(filePath, 'utf8')).toBe(newContent);
-      expect(result.llmContent).toMatch(
-        /Showing lines \d+-\d+ of \d+ from the edited file:/,
-      );
+      expect(readText(filePath)).toBe('This is some new text.');
+      expect(result.llmContent).toBe(`The file: ${filePath} has been updated.`);
+      expect(result.llmContent).not.toMatch(/Showing lines/);
     });
 
-    // Pin the upstream-aligned ordering: trackEdit MUST run before the
-    // pre-write checkPriorRead. The upstream `claude-code/src/tools/
-    // FileEditTool` comment on the equivalent block says:
+    // Pins the upstream-aligned ordering: trackEdit MUST run before the
+    // pre-write checkPriorRead. Upstream `claude-code/src/tools/FileEditTool`
+    // says of the equivalent block: "These awaits must stay OUTSIDE the
+    // critical section below — a yield between the staleness check and
+    // writeTextContent lets concurrent edits interleave." Otherwise the
+    // multi-hundred-ms `trackEdit` sits between checkPriorRead and
+    // writeTextFile, widening the stat-then-write race from microseconds to
+    // seconds.
     //
-    //   "These awaits must stay OUTSIDE the critical section below — a
-    //    yield between the staleness check and writeTextContent lets
-    //    concurrent edits interleave."
-    //
-    // Without this ordering the multi-hundred-ms `trackEdit` sat
-    // between checkPriorRead and writeTextFile, widening the
-    // already-acknowledged stat-then-write race window from microseconds
-    // to seconds.
-    //
-    // Test strategy: install a `trackEdit` mock that mutates the file
-    // on disk (bumps mtime) before returning. The mutation has to be
-    // detected by the pre-write `checkPriorRead`. That only happens if
-    // `trackEdit` runs BEFORE the pre-write check — the broken
-    // ordering would run the pre-write check first (passing on the
-    // pre-mutation stats), then trackEdit (which mutates), then write
-    // (which clobbers the external mutation silently).
-    //
-    // Asserting on `result.error` directly tests the behavioral
-    // invariant rather than the call-ordering proxy, so it survives
-    // future refactors that preserve the invariant even if they shift
-    // the number of `cache.check` calls.
+    // Strategy: a `trackEdit` mock bumps the file's mtime. Only if trackEdit
+    // runs BEFORE the pre-write check does that check see the mutation; the
+    // broken order would check first (passing on pre-mutation stats), then
+    // mutate, then silently clobber the external change on write. Asserting
+    // on `result.error` tests the invariant rather than a call-order proxy,
+    // so it survives refactors that change the number of `cache.check` calls.
     it('backs up before the pre-write freshness check (TOCTOU ordering)', async () => {
       const initialContent = 'This is some old text.';
-      fs.writeFileSync(filePath, initialContent, 'utf8');
-      seedPriorRead(filePath);
+      seedFile(filePath, initialContent);
 
       mockFileHistoryService.trackEdit.mockImplementation(async () => {
-        // Simulate an external write that lands while trackEdit is
-        // copying the file to the backup directory. Bumping mtime by
-        // 5 s makes the change reliably "newer" under the cache's
-        // ~1 s comparison granularity on macOS.
+        // An external write landing while trackEdit copies the file to the
+        // backup directory. +5 s is reliably "newer" under the cache's ~1 s
+        // comparison granularity on macOS.
         const newTime = new Date(Date.now() + 5000);
         fs.utimesSync(filePath, newTime, newTime);
       });
 
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-      };
-
-      const result = await tool
-        .build(params)
-        .execute(new AbortController().signal);
+      const result = await run(edit(filePath));
 
       // trackEdit must have actually fired.
       expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
-      // The pre-write check must have caught the in-trackEdit mutation
-      // and rejected, proving trackEdit ran BEFORE the pre-write check.
+      // The pre-write check caught the in-trackEdit mutation, proving
+      // trackEdit ran BEFORE it.
       expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
       // The file on disk is unchanged (rejected, not overwritten).
-      expect(fs.readFileSync(filePath, 'utf8')).toBe(initialContent);
+      expect(readText(filePath)).toBe(initialContent);
     });
 
     // The Edit tool feeds the commit-attribution singleton on success so
-    // commit notes can later report per-file AI/human ratios. Service-
-    // level tests for `recordEdit` already exist; these guard against
-    // the wiring at the tool boundary regressing (e.g. someone moves
-    // the call out of the success path).
+    // commit notes can later report per-file AI/human ratios. Service-level
+    // tests for `recordEdit` exist; these guard the wiring at the tool
+    // boundary (e.g. someone moving the call out of the success path).
     describe('commit-attribution wiring', () => {
       beforeEach(() => {
         CommitAttributionService.resetInstance();
       });
 
       it('records AI-originated edits in the attribution service', async () => {
-        const initial = 'old line';
         const updated = 'new line';
-        fs.writeFileSync(filePath, initial, 'utf8');
         // Prior-read enforcement (origin/main #3774) requires the file
         // to have been Read before Edit can mutate it.
-        seedPriorRead(filePath);
-        const invocation = tool.build({
-          file_path: filePath,
-          old_string: 'old',
-          new_string: 'new',
-        });
+        seedFile(filePath, 'old line');
 
-        await invocation.execute(new AbortController().signal);
+        await run(edit(filePath));
 
         const attribution =
           CommitAttributionService.getInstance().getFileAttribution(filePath);
         expect(attribution).toBeDefined();
-        // The actual char count is implementation detail of
-        // computeCharContribution; we only assert the entry exists
-        // with a positive contribution.
+        // The exact char count is a computeCharContribution detail; only
+        // assert the entry exists with a positive contribution.
         expect(attribution!.aiContribution).toBeGreaterThan(0);
         // Length sanity: contribution is bounded by the new content.
         expect(attribution!.aiContribution).toBeLessThanOrEqual(updated.length);
       });
 
       it('skips attribution when the edit is modified_by_user', async () => {
-        fs.writeFileSync(filePath, 'old line', 'utf8');
-        seedPriorRead(filePath);
-        const invocation = tool.build({
-          file_path: filePath,
-          old_string: 'old',
-          new_string: 'new',
-          modified_by_user: true,
-        });
+        seedFile(filePath, 'old line');
 
-        await invocation.execute(new AbortController().signal);
+        await run(edit(filePath, 'old', 'new', { modified_by_user: true }));
 
         expect(
           CommitAttributionService.getInstance().getFileAttribution(filePath),
@@ -756,25 +1362,17 @@ describe('EditTool', () => {
       const newFileName = 'brand_new_file.txt';
       const newFilePath = path.join(rootDir, newFileName);
       const fileContent = 'Content for the new file.';
-      const params: EditToolParams = {
-        file_path: newFilePath,
-        old_string: '',
-        new_string: fileContent,
-      };
-
-      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
-        ApprovalMode.AUTO_EDIT,
-      );
+      autoEditOnce();
       const writeSpy = vi.spyOn(fsService, 'writeTextFile');
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
 
-      expect(result.llmContent).toMatch(/Created new file/);
-      expect(result.llmContent).toMatch(
-        /Showing lines \d+-\d+ of \d+ from the edited file:/,
+      const result = await run(edit(newFilePath, '', fileContent));
+
+      expect(result.llmContent).toBe(
+        `Created new file: ${newFilePath} with provided content.`,
       );
+      expect(result.llmContent).not.toMatch(/Showing lines/);
       expect(fs.existsSync(newFilePath)).toBe(true);
-      expect(fs.readFileSync(newFilePath, 'utf8')).toBe(fileContent);
+      expect(readText(newFilePath)).toBe(fileContent);
       expect(writeSpy).toHaveBeenCalledWith(
         expect.objectContaining({ toolWriteOrigin: 'edit' }),
       );
@@ -782,38 +1380,17 @@ describe('EditTool', () => {
       const display = result.returnDisplay as FileDiff;
       expect(display.fileDiff).toMatch(/\+Content for the new file\./);
       expect(display.fileName).toBe(newFileName);
-      expect((result.returnDisplay as FileDiff).diffStat).toStrictEqual({
-        model_added_lines: 1,
-        model_removed_lines: 0,
-        model_added_chars: 25,
-        model_removed_chars: 0,
-        user_added_lines: 0,
-        user_removed_lines: 0,
-        user_added_chars: 0,
-        user_removed_chars: 0,
-      });
+      expect(display.diffStat).toStrictEqual(modelDiffStat(1, 0, 25, 0));
     });
 
     it('should create new file with BOM when defaultFileEncoding is utf-8-bom', async () => {
-      // Change config to use utf-8-bom
       (mockConfig.getDefaultFileEncoding as Mock).mockReturnValue('utf-8-bom');
-
-      const newFileName = 'bom_new_file.txt';
-      const newFilePath = path.join(rootDir, newFileName);
+      const newFilePath = path.join(rootDir, 'bom_new_file.txt');
       const fileContent = 'Content for BOM file.';
-      const params: EditToolParams = {
-        file_path: newFilePath,
-        old_string: '',
-        new_string: fileContent,
-      };
+      autoEditOnce();
 
-      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
-        ApprovalMode.AUTO_EDIT,
-      );
-      const invocation = tool.build(params);
-      await invocation.execute(new AbortController().signal);
+      await run(edit(newFilePath, '', fileContent));
 
-      // Verify file has BOM
       const fileBuffer = fs.readFileSync(newFilePath);
       expect(fileBuffer[0]).toBe(0xef);
       expect(fileBuffer[1]).toBe(0xbb);
@@ -823,22 +1400,12 @@ describe('EditTool', () => {
 
     it('should create new file without BOM when defaultFileEncoding is utf-8', async () => {
       // Config defaults to utf-8
-      const newFileName = 'no_bom_new_file.txt';
-      const newFilePath = path.join(rootDir, newFileName);
+      const newFilePath = path.join(rootDir, 'no_bom_new_file.txt');
       const fileContent = 'Content without BOM.';
-      const params: EditToolParams = {
-        file_path: newFilePath,
-        old_string: '',
-        new_string: fileContent,
-      };
+      autoEditOnce();
 
-      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
-        ApprovalMode.AUTO_EDIT,
-      );
-      const invocation = tool.build(params);
-      await invocation.execute(new AbortController().signal);
+      await run(edit(newFilePath, '', fileContent));
 
-      // Verify file does not have BOM
       const fileBuffer = fs.readFileSync(newFilePath);
       expect(fileBuffer[0]).not.toBe(0xef);
       expect(fileBuffer.toString('utf8')).toBe(fileContent);
@@ -846,39 +1413,20 @@ describe('EditTool', () => {
 
     it('should preserve BOM character in content when editing existing file', async () => {
       const bomFilePath = path.join(rootDir, 'existing_bom.txt');
-      // Create file with BOM (BOM is \ufeff character in string)
-      const originalContent = '\ufeff// Original line\nconst x = 1;';
-      fs.writeFileSync(bomFilePath, originalContent, 'utf8');
-      seedPriorRead(bomFilePath);
+      // BOM is the \ufeff character in a string
+      seedFile(bomFilePath, '\ufeff// Original line\nconst x = 1;');
+      autoEditOnce();
 
-      const params: EditToolParams = {
-        file_path: bomFilePath,
-        old_string: 'const x = 1;',
-        new_string: 'const x = 2;',
-      };
+      await run(edit(bomFilePath, 'const x = 1;', 'const x = 2;'));
 
-      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
-        ApprovalMode.AUTO_EDIT,
-      );
-      const invocation = tool.build(params);
-      await invocation.execute(new AbortController().signal);
-
-      // Verify file still has BOM and new content
-      const resultContent = fs.readFileSync(bomFilePath, 'utf8');
+      const resultContent = readText(bomFilePath);
       expect(resultContent.charCodeAt(0)).toBe(0xfeff); // BOM preserved
       expect(resultContent).toContain('const x = 2;');
     });
 
     it('should return error if old_string is not found in file', async () => {
-      fs.writeFileSync(filePath, 'Some content.', 'utf8');
-      seedPriorRead(filePath);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'nonexistent',
-        new_string: 'replacement',
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      seedFile(filePath, 'Some content.');
+      const result = await run(edit(filePath, 'nonexistent', 'replacement'));
       expect(result.llmContent).toMatch(
         /0 occurrences found for old_string in/,
       );
@@ -888,15 +1436,8 @@ describe('EditTool', () => {
     });
 
     it('should return error if multiple occurrences of old_string are found and replace_all is false', async () => {
-      fs.writeFileSync(filePath, 'multiple old old strings', 'utf8');
-      seedPriorRead(filePath);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      seedFile(filePath, 'multiple old old strings');
+      const result = await run(edit(filePath));
       expect(result.llmContent).toMatch(/replace_all was not enabled/);
       expect(result.returnDisplay).toMatch(
         /Failed to edit because the text matches multiple locations/,
@@ -904,72 +1445,103 @@ describe('EditTool', () => {
     });
 
     it('should successfully replace multiple occurrences when replace_all is true', async () => {
-      fs.writeFileSync(filePath, 'old text\nold text\nold text', 'utf8');
-      seedPriorRead(filePath);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-        replace_all: true,
-      };
+      seedFile(filePath, 'old text\nold text\nold text');
 
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run(
+        edit(filePath, 'old', 'new', { replace_all: true }),
+      );
 
-      expect(result.llmContent).toMatch(
-        /Showing lines \d+-\d+ of \d+ from the edited file/,
-      );
-      expect(fs.readFileSync(filePath, 'utf8')).toBe(
-        'new text\nnew text\nnew text',
-      );
+      expect(result.llmContent).toBe(`The file: ${filePath} has been updated.`);
+      expect(result.llmContent).not.toMatch(/Showing lines/);
+      expect(readText(filePath)).toBe('new text\nnew text\nnew text');
       const display = result.returnDisplay as FileDiff;
 
       expect(display.fileDiff).toMatch(/-old text\n-old text\n-old text/);
       expect(display.fileDiff).toMatch(/\+new text\n\+new text\n\+new text/);
       expect(display.fileName).toBe(testFile);
-      expect((result.returnDisplay as FileDiff).diffStat).toStrictEqual({
-        model_added_lines: 3,
-        model_removed_lines: 3,
-        model_added_chars: 24,
-        model_removed_chars: 24,
-        user_added_lines: 0,
-        user_removed_lines: 0,
-        user_added_chars: 0,
-        user_removed_chars: 0,
-      });
+      expect(display.diffStat).toStrictEqual(modelDiffStat(3, 3, 24, 24));
     });
 
     it('should return error if trying to create a file that already exists (empty old_string)', async () => {
-      fs.writeFileSync(filePath, 'Existing content', 'utf8');
-      seedPriorRead(filePath);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: '',
-        new_string: 'new content',
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      seedFile(filePath, 'Existing content');
+      const result = await run(edit(filePath, '', 'new content'));
       expect(result.llmContent).toMatch(/File already exists, cannot create/);
       expect(result.returnDisplay).toMatch(
         /Attempted to create a file that already exists/,
       );
     });
 
-    it('should not include modification message when proposed content is not modified', async () => {
-      const initialContent = 'This is some old text.';
-      fs.writeFileSync(filePath, initialContent, 'utf8');
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-        modified_by_user: false,
-      };
+    it('includes modification message and updated snippet when modified_by_user is true', async () => {
+      seedFile(filePath, 'This is some old text.');
 
-      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
-        ApprovalMode.AUTO_EDIT,
+      const result = await run(
+        edit(filePath, 'old', 'user-new', { modified_by_user: true }),
       );
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      expect(readText(filePath)).toBe('This is some user-new text.');
+      expect(result.llmContent).toContain(
+        'User modified the `new_string` content before approving.',
+      );
+      expect(result.llmContent).toMatch(
+        /Showing lines \d+-\d+ of \d+ from the edited file:/,
+      );
+    });
+
+    it('bounds output for whole-file params produced by user modification', async () => {
+      const original = Array.from({ length: 80 }, (_, i) => `line ${i}`).join(
+        '\n',
+      );
+      const modified = original.replace('line 40', 'user replacement');
+      seedFile(filePath, original);
+      const params = tool
+        .getModifyContext(new AbortController().signal)
+        .createUpdatedParams(
+          original,
+          modified,
+          edit(filePath, 'line 40', 'model replacement'),
+        );
+      const result = await run(params);
+      expect(result.error).toBeUndefined();
+      expect(readText(filePath)).toBe(modified);
+      expect(result.llmContent).toContain(
+        'User modified the `new_string` content before approving.',
+      );
+      expect(result.llmContent).toContain('user replacement');
+      expect(result.llmContent).toMatch(/Showing lines/);
+      expect(result.llmContent).not.toContain('line 10');
+      expect(result.llmContent).not.toContain(modified);
+    });
+
+    it.each([false, true])(
+      'asks for Read when user-modified output is too large (new file=%s)',
+      async (newFile) => {
+        const original = newFile ? '' : 'old';
+        if (!newFile) seedFile(filePath, original);
+        const modified = 'user replacement'.repeat(2000);
+        const params = tool
+          .getModifyContext(new AbortController().signal)
+          .createUpdatedParams(
+            original,
+            modified,
+            edit(filePath, original, 'model replacement'),
+          );
+        const result = await run(params);
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe(modified);
+        expect(result.llmContent).toContain('User modified');
+        expect(result.llmContent).toContain('Read');
+        expect(result.llmContent).not.toContain(modified);
+      },
+    );
+
+    it('should not include modification message when proposed content is not modified', async () => {
+      fs.writeFileSync(filePath, 'This is some old text.', 'utf8');
+      autoEditOnce();
+
+      const result = await run(
+        edit(filePath, 'old', 'new', { modified_by_user: false }),
+      );
 
       expect(result.llmContent).not.toMatch(
         /User modified the `new_string` content/,
@@ -977,19 +1549,10 @@ describe('EditTool', () => {
     });
 
     it('should not include modification message when modified_by_user is not provided', async () => {
-      const initialContent = 'This is some old text.';
-      fs.writeFileSync(filePath, initialContent, 'utf8');
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-      };
+      fs.writeFileSync(filePath, 'This is some old text.', 'utf8');
+      autoEditOnce();
 
-      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
-        ApprovalMode.AUTO_EDIT,
-      );
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run(edit(filePath));
 
       expect(result.llmContent).not.toMatch(
         /User modified the `new_string` content/,
@@ -997,16 +1560,8 @@ describe('EditTool', () => {
     });
 
     it('should return error if old_string and new_string are identical', async () => {
-      const initialContent = 'This is some identical text.';
-      fs.writeFileSync(filePath, initialContent, 'utf8');
-      seedPriorRead(filePath);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'identical',
-        new_string: 'identical',
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      seedFile(filePath, 'This is some identical text.');
+      const result = await run(edit(filePath, 'identical', 'identical'));
       expect(result.llmContent).toMatch(/No changes to apply/);
       expect(result.returnDisplay).toMatch(/No changes to apply/);
     });
@@ -1014,24 +1569,23 @@ describe('EditTool', () => {
     it('should return EDIT_NO_CHANGE error if replacement results in identical content', async () => {
       // This can happen if the literal string replacement with `replaceAll` results in no change.
       const initialContent = 'line 1\nline  2\nline 3'; // Note the double space
-      fs.writeFileSync(filePath, initialContent, 'utf8');
-      seedPriorRead(filePath);
-      const params: EditToolParams = {
-        file_path: filePath,
-        // old_string has a single space, so it won't be found by replaceAll
-        old_string: 'line 1\nline 2\nline 3',
-        new_string: 'line 1\nnew line 2\nline 3',
-      };
+      seedFile(filePath, initialContent);
 
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run(
+        edit(
+          filePath,
+          // old_string has a single space, so it won't be found by replaceAll
+          'line 1\nline 2\nline 3',
+          'line 1\nnew line 2\nline 3',
+        ),
+      );
 
       expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
       expect(result.returnDisplay).toMatch(
         /Failed to edit, could not find the string to replace./,
       );
       // Ensure the file was not actually changed
-      expect(fs.readFileSync(filePath, 'utf8')).toBe(initialContent);
+      expect(readText(filePath)).toBe(initialContent);
     });
   });
 
@@ -1044,86 +1598,45 @@ describe('EditTool', () => {
     });
 
     it('should return FILE_NOT_FOUND error', async () => {
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'any',
-        new_string: 'new',
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run(edit(filePath, 'any'));
       expect(result.error?.type).toBe(ToolErrorType.FILE_NOT_FOUND);
     });
 
     it('should return ATTEMPT_TO_CREATE_EXISTING_FILE error', async () => {
-      fs.writeFileSync(filePath, 'existing content', 'utf8');
-      seedPriorRead(filePath);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: '',
-        new_string: 'new content',
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      seedFile(filePath, 'existing content');
+      const result = await run(edit(filePath, '', 'new content'));
       expect(result.error?.type).toBe(
         ToolErrorType.ATTEMPT_TO_CREATE_EXISTING_FILE,
       );
     });
 
     it('should return NO_OCCURRENCE_FOUND error', async () => {
-      fs.writeFileSync(filePath, 'content', 'utf8');
-      seedPriorRead(filePath);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'not-found',
-        new_string: 'new',
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      seedFile(filePath, 'content');
+      const result = await run(edit(filePath, 'not-found'));
       expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
     });
 
     it('should return EXPECTED_OCCURRENCE_MISMATCH error when replace_all is false and text is not unique', async () => {
-      fs.writeFileSync(filePath, 'one one two', 'utf8');
-      seedPriorRead(filePath);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'one',
-        new_string: 'new',
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      seedFile(filePath, 'one one two');
+      const result = await run(edit(filePath, 'one'));
       expect(result.error?.type).toBe(
         ToolErrorType.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
       );
     });
 
     it('should return NO_CHANGE error', async () => {
-      fs.writeFileSync(filePath, 'content', 'utf8');
-      seedPriorRead(filePath);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'content',
-        new_string: 'content',
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      seedFile(filePath, 'content');
+      const result = await run(edit(filePath, 'content', 'content'));
       expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_CHANGE);
     });
 
     it('should return EDIT_PREPARATION_FAILURE with plain object read error messages', async () => {
-      fs.writeFileSync(filePath, 'content', 'utf8');
-      seedPriorRead(filePath);
+      seedFile(filePath, 'content');
       vi.spyOn(fsService, 'readTextFile').mockRejectedValueOnce({
         message: 'Plain object read error',
       });
 
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'content',
-        new_string: 'new content',
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run(edit(filePath, 'content', 'new content'));
 
       expect(result.error?.type).toBe(ToolErrorType.EDIT_PREPARATION_FAILURE);
       expect(result.llmContent).toContain(
@@ -1133,47 +1646,26 @@ describe('EditTool', () => {
     });
 
     it('should throw INVALID_PARAMETERS error for relative path', async () => {
-      const params: EditToolParams = {
-        file_path: 'relative/path.txt',
-        old_string: 'a',
-        new_string: 'b',
-      };
-      expect(() => tool.build(params)).toThrow();
+      expect(() => tool.build(edit('relative/path.txt', 'a', 'b'))).toThrow();
     });
 
     it('should return FILE_WRITE_FAILURE on write error', async () => {
-      fs.writeFileSync(filePath, 'content', 'utf8');
-      seedPriorRead(filePath);
-
+      seedFile(filePath, 'content');
       vi.spyOn(fsService, 'writeTextFile').mockRejectedValueOnce(
         new Error('Simulated write error'),
       );
 
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'content',
-        new_string: 'new content',
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run(edit(filePath, 'content', 'new content'));
       expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
     });
 
     it('should surface plain object write error messages without object stringification', async () => {
-      fs.writeFileSync(filePath, 'content', 'utf8');
-      seedPriorRead(filePath);
-
+      seedFile(filePath, 'content');
       vi.spyOn(fsService, 'writeTextFile').mockRejectedValueOnce({
         message: 'Plain object edit error',
       });
 
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'content',
-        new_string: 'new content',
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      const result = await run(edit(filePath, 'content', 'new content'));
 
       expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
       expect(result.llmContent).toContain(
@@ -1184,87 +1676,60 @@ describe('EditTool', () => {
   });
 
   describe('getDescription', () => {
+    const descriptionOf = (fileName: string, oldStr: string, newStr: string) =>
+      tool
+        .build(edit(path.join(rootDir, fileName), oldStr, newStr))
+        .getDescription();
+
     it('should return "No file changes to..." if old_string and new_string are the same', () => {
-      const testFileName = 'test.txt';
-      const params: EditToolParams = {
-        file_path: path.join(rootDir, testFileName),
-        old_string: 'identical_string',
-        new_string: 'identical_string',
-      };
-      const invocation = tool.build(params);
       // shortenPath will be called internally, resulting in just the file name
-      expect(invocation.getDescription()).toBe(
-        `No file changes to ${testFileName}`,
-      );
+      expect(
+        descriptionOf('test.txt', 'identical_string', 'identical_string'),
+      ).toBe('No file changes to test.txt');
     });
 
     it('should return the file path when old and new strings differ', () => {
-      const testFileName = 'test.txt';
-      const params: EditToolParams = {
-        file_path: path.join(rootDir, testFileName),
-        old_string: 'this is the old string value',
-        new_string: 'this is the new string value',
-      };
-      const invocation = tool.build(params);
-      expect(invocation.getDescription()).toBe(testFileName);
+      expect(
+        descriptionOf(
+          'test.txt',
+          'this is the old string value',
+          'this is the new string value',
+        ),
+      ).toBe('test.txt');
     });
 
     it('should return the file path for short strings', () => {
-      const testFileName = 'short.txt';
-      const params: EditToolParams = {
-        file_path: path.join(rootDir, testFileName),
-        old_string: 'old',
-        new_string: 'new',
-      };
-      const invocation = tool.build(params);
-      expect(invocation.getDescription()).toBe(testFileName);
+      expect(descriptionOf('short.txt', 'old', 'new')).toBe('short.txt');
     });
   });
 
   describe('FileReadCache integration', () => {
     it('records a write into the cache so a follow-up Read sees lastWriteAt', async () => {
       // Without this hook, ReadFile's `(lastWriteAt === undefined ||
-      // lastReadAt > lastWriteAt)` guard would let a post-edit Read
-      // return the pre-edit placeholder when the filesystem's mtime
-      // resolution is too coarse to detect the edit.
+      // lastReadAt > lastWriteAt)` guard would let a post-edit Read return
+      // the pre-edit placeholder when the filesystem's mtime resolution is
+      // too coarse to detect the edit.
       const filePath = path.join(rootDir, 'cached.txt');
       fs.writeFileSync(filePath, 'old content');
 
       // Simulate the model having Read the file before Edit fires.
-      const preEditStats = fs.statSync(filePath);
-      fileReadCache.recordRead(filePath, preEditStats, {
-        full: true,
-        cacheable: true,
-      });
-      const beforeRead = fileReadCache.check(preEditStats);
+      const beforeRead = fileReadCache.check(seedPriorRead(filePath));
       expect(beforeRead.state).toBe('fresh');
       if (beforeRead.state === 'fresh') {
         expect(beforeRead.entry.lastWriteAt).toBeUndefined();
       }
 
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old content',
-        new_string: 'new content',
-      };
-      const invocation = tool.build(params) as ToolInvocation<
-        EditToolParams,
-        ToolResult
-      >;
-      const abortSignal = new AbortController().signal;
-      const result = await invocation.execute(abortSignal);
+      const result = await run(edit(filePath, 'old content', 'new content'));
       expect(result.error).toBeUndefined();
 
-      const postEditStats = fs.statSync(filePath);
-      const after = fileReadCache.check(postEditStats);
+      const after = fileReadCache.check(fs.statSync(filePath));
       // After the edit, the cache entry's mtime+size match the new
       // file state and lastWriteAt has been stamped.
       expect(after.state).toBe('fresh');
       if (after.state === 'fresh') {
         expect(after.entry.lastWriteAt).toBeDefined();
-        // lastReadAt was set by the simulated pre-edit Read; the
-        // post-write timestamp must dominate it so subsequent Reads
-        // do not return the placeholder.
+        // lastReadAt was set by the simulated pre-edit Read; the post-write
+        // timestamp must dominate it so later Reads skip the placeholder.
         expect(after.entry.lastWriteAt!).toBeGreaterThanOrEqual(
           after.entry.lastReadAt!,
         );
@@ -1273,7 +1738,6 @@ describe('EditTool', () => {
   });
 
   describe('prior-read enforcement', () => {
-    const abortSignal = new AbortController().signal;
     let filePath: string;
 
     beforeEach(() => {
@@ -1282,22 +1746,16 @@ describe('EditTool', () => {
 
     it('rejects an edit when the file has not been read in this session', async () => {
       fs.writeFileSync(filePath, 'untouched content', 'utf8');
-      // No seedPriorRead call — simulate the model trying to Edit a
-      // file it has never received via ReadFile.
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'untouched',
-        new_string: 'modified',
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(abortSignal);
+      // No seedPriorRead: the model tries to Edit a file it never received
+      // via ReadFile.
+      const result = await run(edit(filePath, 'untouched', 'modified'));
 
       expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
       expect(result.error?.message).toMatch(
         /has not been read in this session/,
       );
       // File must remain untouched.
-      expect(fs.readFileSync(filePath, 'utf8')).toBe('untouched content');
+      expect(readText(filePath)).toBe('untouched content');
     });
 
     it('rejects an edit terminally when the filesystem reports ino 0', async () => {
@@ -1305,8 +1763,7 @@ describe('EditTool', () => {
       // the cache cannot prove the model read *this* file. Re-reading
       // would not help, so the model must be told to stop rather than be
       // sent round the "re-read it first" loop forever.
-      fs.writeFileSync(filePath, 'untouched content', 'utf8');
-      seedPriorRead(filePath);
+      seedFile(filePath, 'untouched content');
       const nativeStat = fs.promises.stat;
       const stat = vi
         .spyOn(fs.promises, 'stat')
@@ -1319,13 +1776,7 @@ describe('EditTool', () => {
         });
 
       try {
-        const result = await tool
-          .build({
-            file_path: filePath,
-            old_string: 'untouched',
-            new_string: 'modified',
-          })
-          .execute(abortSignal);
+        const result = await run(edit(filePath, 'untouched', 'modified'));
 
         expect(result.error?.type).toBe(
           ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
@@ -1335,35 +1786,26 @@ describe('EditTool', () => {
         // Not the message that tells the model to re-read — that would
         // loop, because the re-read cannot change the inode.
         expect(result.error?.message).not.toMatch(/Re-read it with/);
-        expect(fs.readFileSync(filePath, 'utf8')).toBe('untouched content');
+        expect(readText(filePath)).toBe('untouched content');
       } finally {
         stat.mockRestore();
       }
     });
 
     it('allows an edit after a ranged (offset/limit) read', async () => {
-      // A partial read still counts as a prior read: requiring the
-      // model to re-read multi-thousand-line files just to change one
-      // line is wasteful, and the existing `0 occurrences` failure
-      // mode catches the case the full-read requirement was meant to
-      // defend against (a fabricated old_string that misses the
-      // actual bytes). This matches Claude Code's `readFileState`
-      // contract, which also accepts partial reads.
+      // A partial read counts as a prior read: forcing a re-read of a
+      // multi-thousand-line file to change one line is wasteful, and the
+      // `0 occurrences` failure already catches what the full-read rule
+      // defended against (a fabricated old_string that misses the actual
+      // bytes). Matches Claude Code's `readFileState`, which also accepts
+      // partial reads.
       fs.writeFileSync(filePath, 'line a\nline b\nline c\n', 'utf8');
-      const stats = fs.statSync(filePath);
-      fileReadCache.recordRead(filePath, stats, {
-        full: false,
-        cacheable: true,
-      });
-      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
-        ApprovalMode.AUTO_EDIT,
-      );
+      seedPriorRead(filePath, false);
+      autoEditOnce();
 
-      const result = await tool
-        .build({ file_path: filePath, old_string: 'line a', new_string: 'X' })
-        .execute(abortSignal);
+      const result = await run(edit(filePath, 'line a', 'X'));
       expect(result.error).toBeUndefined();
-      expect(fs.readFileSync(filePath, 'utf8')).toBe('X\nline b\nline c\n');
+      expect(readText(filePath)).toBe('X\nline b\nline c\n');
     });
 
     it('allows editing a large text file after a ranged read', async () => {
@@ -1376,60 +1818,34 @@ describe('EditTool', () => {
         'x'.repeat(11 * 1024 * 1024),
       ].join('\n');
       fs.writeFileSync(filePath, initialContent, 'utf8');
-      const stats = fs.statSync(filePath);
-      fileReadCache.recordRead(filePath, stats, {
-        full: false,
-        cacheable: true,
-      });
-      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
-        ApprovalMode.AUTO_EDIT,
-      );
+      seedPriorRead(filePath, false);
+      autoEditOnce();
 
-      const result = await tool
-        .build({
-          file_path: filePath,
-          old_string: 'target',
-          new_string: 'updated',
-        })
-        .execute(abortSignal);
+      const result = await run(edit(filePath, 'target', 'updated'));
 
       expect(result.error).toBeUndefined();
-      expect(fs.readFileSync(filePath, 'utf8').startsWith('updated\n')).toBe(
-        true,
-      );
+      expect(readText(filePath).startsWith('updated\n')).toBe(true);
     });
 
     it('rejects an edit when the previous read was non-cacheable (binary / pdf / image)', async () => {
-      // ReadFile records every successful read into the cache,
-      // including binary / PDF / image reads that produce a
-      // structured payload rather than text. lastReadCacheable=false
-      // marks those — Edit must not accept them.
+      // ReadFile records every successful read, including binary / PDF /
+      // image reads that produce a structured payload rather than text;
+      // lastReadCacheable=false marks those and Edit must not accept them.
       fs.writeFileSync(filePath, 'pretend this is binary', 'utf8');
-      const stats = fs.statSync(filePath);
-      fileReadCache.recordRead(filePath, stats, {
-        full: true,
-        cacheable: false,
-      });
+      seedPriorRead(filePath, true, false);
 
-      const result = await tool
-        .build({
-          file_path: filePath,
-          old_string: 'pretend',
-          new_string: 'X',
-        })
-        .execute(abortSignal);
+      const result = await run(edit(filePath, 'pretend', 'X'));
       expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
-      // Telling the model to re-read with read_file would loop the
-      // agent forever: a binary/image/PDF read also leaves
-      // lastReadCacheable=false. The message must explain the dead
-      // end instead of asking for another read.
+      // Asking for another read_file would loop the agent forever (such a
+      // read also leaves lastReadCacheable=false), so the message must
+      // explain the dead end instead.
       expect(result.error?.message).toMatch(
         /binary \/ image \/ audio \/ video \/ PDF \/ notebook payload/,
       );
       expect(result.error?.message).toContain('notebook_edit');
       expect(result.error?.message).not.toMatch(/Use the read_file tool first/);
-      // EditTool's verb is "edit", not "overwrite" — using the
-      // wrong one here would be confusing for in-place edits.
+      // EditTool's verb is "edit", not "overwrite" — the wrong one would
+      // confuse in-place edits.
       expect(result.error?.message).toMatch(/if you need to edit it\./);
       expect(result.error?.message).not.toMatch(
         /if you need to overwrite it\./,
@@ -1437,31 +1853,23 @@ describe('EditTool', () => {
     });
 
     it('rejects an edit on a directory with TARGET_IS_DIRECTORY', async () => {
-      // Pre-fix, the directory exemption returned ok:true and
-      // readTextFile would either throw EISDIR (caught by execute as
+      // Pre-fix, the directory exemption returned ok:true and readTextFile
+      // would either throw EISDIR (caught by execute as
       // EDIT_PREPARATION_FAILURE) or — in WriteFile.getConfirmationDetails —
-      // collapse into UNHANDLED_EXCEPTION. The structured rejection
-      // here gives a stable error code regardless of where the call
-      // hits in the pipeline.
+      // collapse into UNHANDLED_EXCEPTION. The structured rejection gives a
+      // stable error code wherever the call hits the pipeline.
       const dirPath = path.join(rootDir, 'enforce-dir');
       fs.mkdirSync(dirPath);
-      const result = await tool
-        .build({
-          file_path: dirPath,
-          old_string: 'foo',
-          new_string: 'bar',
-        })
-        .execute(abortSignal);
+      const result = await run(edit(dirPath, 'foo', 'bar'));
       expect(result.error?.type).toBe(ToolErrorType.TARGET_IS_DIRECTORY);
       expect(result.error?.message).toMatch(/is a directory/);
     });
 
     it('rejects an edit with a stat failure other than ENOENT (fail-closed)', async () => {
-      // Symmetric with WriteFile's EACCES test. checkPriorRead is
-      // shared today, but if a future change adds an Edit-side
-      // fallback that downgrades a real verify failure to
-      // EDIT_REQUIRES_PRIOR_READ, only the write path would catch
-      // it without this test.
+      // Symmetric with WriteFile's EACCES test. checkPriorRead is shared
+      // today, but if a future Edit-side fallback downgraded a real verify
+      // failure to EDIT_REQUIRES_PRIOR_READ, only the write path would
+      // catch it without this test.
       fs.writeFileSync(filePath, 'untouched', 'utf8');
       const statSpy = vi
         .spyOn(fs.promises, 'stat')
@@ -1469,40 +1877,26 @@ describe('EditTool', () => {
           Object.assign(new Error('EACCES'), { code: 'EACCES' }),
         );
 
-      const result = await tool
-        .build({
-          file_path: filePath,
-          old_string: 'untouched',
-          new_string: 'modified',
-        })
-        .execute(abortSignal);
+      const result = await run(edit(filePath, 'untouched', 'modified'));
 
       expect(result.error?.type).toBe(
         ToolErrorType.PRIOR_READ_VERIFICATION_FAILED,
       );
       expect(result.error?.message).toMatch(/Could not stat .*\(EACCES\)/);
-      expect(fs.readFileSync(filePath, 'utf8')).toBe('untouched');
+      expect(readText(filePath)).toBe('untouched');
 
       statSpy.mockRestore();
     });
 
     it('does not let an unread file be probed via NO_OCCURRENCE_FOUND', async () => {
-      // Regression for the read-less content oracle: pre-fix, a model
-      // could call Edit with candidate old_strings on an unread file
-      // and observe NO_OCCURRENCE_FOUND vs OCCURRENCE_MATCH to
-      // reverse-engineer the contents. With enforcement before
-      // calculateEdit, the call must be rejected with the prior-read
-      // error code regardless of whether the candidate string would
-      // have matched.
+      // Regression for the read-less content oracle: pre-fix, a model could
+      // call Edit with candidate old_strings on an unread file and tell
+      // NO_OCCURRENCE_FOUND from OCCURRENCE_MATCH to reverse-engineer the
+      // contents. With enforcement before calculateEdit, the call must get
+      // the prior-read error whether or not the candidate would have matched.
       fs.writeFileSync(filePath, 'sensitive token: hunter2', 'utf8');
 
-      const result = await tool
-        .build({
-          file_path: filePath,
-          old_string: 'hunter2',
-          new_string: 'redacted',
-        })
-        .execute(abortSignal);
+      const result = await run(edit(filePath, 'hunter2', 'redacted'));
       expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
       expect(result.error?.type).not.toBe(
         ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
@@ -1510,197 +1904,615 @@ describe('EditTool', () => {
     });
 
     it('rejects confirmation requests on an unread file before showing a diff', async () => {
-      // The user must not see a diff computed from current bytes the
-      // model never received — they would approve under a false
-      // assumption that the model worked from those bytes.
+      // The user must not see a diff computed from current bytes the model
+      // never received — they would approve assuming the model worked from
+      // those bytes.
       fs.writeFileSync(filePath, 'unread content', 'utf8');
-      const invocation = tool.build({
-        file_path: filePath,
-        old_string: 'unread',
-        new_string: 'modified',
-      });
       await expect(
-        invocation.getConfirmationDetails(abortSignal),
+        confirm(edit(filePath, 'unread', 'modified')),
       ).rejects.toThrow(/has not been read in this session/);
     });
 
-    it('rejects an edit when the file has been modified since the last read', async () => {
-      fs.writeFileSync(filePath, 'one', 'utf8');
-      seedPriorRead(filePath);
-      // Simulate an out-of-band modification: change content + bump
-      // mtime far enough into the future that even coarse-resolution
-      // filesystems detect the change.
+    it('returns FILE_CHANGED_SINCE_READ when a stale file no longer contains old_string', async () => {
+      seedFile(filePath, 'one');
+      // Out-of-band modification: change content and bump mtime far enough
+      // ahead that even coarse-resolution filesystems detect it.
       fs.writeFileSync(filePath, 'two with more bytes', 'utf8');
       const future = new Date(Date.now() + 60_000);
       fs.utimesSync(filePath, future, future);
 
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'two',
-        new_string: 'three',
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(abortSignal);
+      const result = await run(edit(filePath, 'one', 'three'));
 
       expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
       expect(result.error?.message).toMatch(/has been modified since/);
       // File must remain at the externally-modified content.
-      expect(fs.readFileSync(filePath, 'utf8')).toBe('two with more bytes');
+      expect(readText(filePath)).toBe('two with more bytes');
     });
 
     it('exempts new-file creation from prior-read enforcement', async () => {
-      // old_string === '' on a non-existent path is the new-file
-      // creation idiom in EditTool. The model has nothing to read
-      // first, so enforcement must not trigger.
+      // old_string === '' on a non-existent path is EditTool's new-file
+      // idiom; there is nothing to read first, so enforcement must not fire.
       const newPath = path.join(rootDir, 'brand-new-edit.txt');
-      const params: EditToolParams = {
-        file_path: newPath,
-        old_string: '',
-        new_string: 'fresh creation',
-      };
-      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
-        ApprovalMode.AUTO_EDIT,
-      );
-      const invocation = tool.build(params);
-      const result = await invocation.execute(abortSignal);
+      autoEditOnce();
+
+      const result = await run(edit(newPath, '', 'fresh creation'));
 
       expect(result.error).toBeUndefined();
-      expect(fs.readFileSync(newPath, 'utf8')).toBe('fresh creation');
+      expect(readText(newPath)).toBe('fresh creation');
     });
 
     it('allows a create-then-edit-then-edit chain without an intervening read', async () => {
-      // The author of a brand-new file has, by definition, "seen"
-      // the bytes it just wrote. Without recordWrite seeding read
-      // metadata, the second edit would be rejected because
-      // lastReadWasFull / lastReadCacheable would still be unset on
-      // the entry recordWrite created during the create step.
+      // The author of a brand-new file has, by definition, "seen" the bytes
+      // it just wrote. Without recordWrite seeding read metadata, the second
+      // edit would be rejected because lastReadWasFull / lastReadCacheable
+      // would still be unset on the entry recordWrite created.
       const newPath = path.join(rootDir, 'create-then-edit.txt');
       (mockConfig.getApprovalMode as Mock).mockReturnValue(
         ApprovalMode.AUTO_EDIT,
       );
 
-      const created = await tool
-        .build({
-          file_path: newPath,
-          old_string: '',
-          new_string: 'first content\n',
-        })
-        .execute(abortSignal);
+      const created = await run(edit(newPath, '', 'first content\n'));
       expect(created.error).toBeUndefined();
 
-      const edited = await tool
-        .build({
-          file_path: newPath,
-          old_string: 'first',
-          new_string: 'second',
-        })
-        .execute(abortSignal);
+      const edited = await run(edit(newPath, 'first', 'second'));
       expect(edited.error).toBeUndefined();
-      expect(fs.readFileSync(newPath, 'utf8')).toBe('second content\n');
+      expect(readText(newPath)).toBe('second content\n');
     });
 
     it('allows Edit after Write→partial-Read', async () => {
-      // The Write authors the bytes (recordWrite seeds the cache), and
-      // a follow-up partial Read at the same fingerprint must not
-      // disqualify the next Edit. After dropping the `lastReadWasFull`
-      // requirement from prior-read enforcement, this is just the
-      // generic "partial read counts" path; pre-fix it failed for a
-      // different reason (the partial read overwrote the full-read
-      // flag recordWrite had stamped, and enforcement still required
-      // that flag).
+      // The Write authors the bytes (recordWrite seeds the cache), and a
+      // follow-up partial Read at the same fingerprint must not disqualify
+      // the next Edit. With `lastReadWasFull` no longer required this is the
+      // generic "partial read counts" path; pre-fix it failed because the
+      // partial read overwrote the full-read flag recordWrite had stamped,
+      // and enforcement still required that flag.
       const newPath = path.join(rootDir, 'write-then-partial-read.txt');
       (mockConfig.getApprovalMode as Mock).mockReturnValue(
         ApprovalMode.AUTO_EDIT,
       );
 
-      const created = await tool
-        .build({
-          file_path: newPath,
-          old_string: '',
-          new_string: 'line one\nline two\nline three\n',
-        })
-        .execute(abortSignal);
+      const created = await run(
+        edit(newPath, '', 'line one\nline two\nline three\n'),
+      );
       expect(created.error).toBeUndefined();
 
-      // Simulate a partial follow-up Read (offset/limit). Pre-fix
-      // this overwrote lastReadWasFull/lastReadCacheable to false.
-      fileReadCache.recordRead(newPath, fs.statSync(newPath), {
-        full: false,
-        cacheable: true,
-      });
+      // Partial follow-up Read (offset/limit); pre-fix this overwrote
+      // lastReadWasFull/lastReadCacheable to false.
+      seedPriorRead(newPath, false);
 
-      const edited = await tool
-        .build({
-          file_path: newPath,
-          old_string: 'line two',
-          new_string: 'second line',
-        })
-        .execute(abortSignal);
+      const edited = await run(edit(newPath, 'line two', 'second line'));
       expect(edited.error).toBeUndefined();
-      expect(fs.readFileSync(newPath, 'utf8')).toBe(
-        'line one\nsecond line\nline three\n',
-      );
+      expect(readText(newPath)).toBe('line one\nsecond line\nline three\n');
     });
 
     it('allows a chain of edits without re-reading between them', async () => {
-      // After the first Edit, recordWrite stamps `lastWriteAt`. The
-      // second Edit's stat will still match the cache entry (because
-      // recordWrite refreshed the fingerprint), so it is `fresh` and
-      // proceeds without requiring an intervening Read.
-      fs.writeFileSync(filePath, 'alpha', 'utf8');
-      seedPriorRead(filePath);
+      // The first Edit's recordWrite stamps `lastWriteAt` and refreshes the
+      // fingerprint, so the second Edit's stat is `fresh` and proceeds
+      // without an intervening Read.
+      seedFile(filePath, 'alpha');
 
-      const first = await tool
-        .build({ file_path: filePath, old_string: 'alpha', new_string: 'beta' })
-        .execute(abortSignal);
+      const first = await run(edit(filePath, 'alpha', 'beta'));
       expect(first.error).toBeUndefined();
 
-      const second = await tool
-        .build({ file_path: filePath, old_string: 'beta', new_string: 'gamma' })
-        .execute(abortSignal);
+      const second = await run(edit(filePath, 'beta', 'gamma'));
       expect(second.error).toBeUndefined();
-      expect(fs.readFileSync(filePath, 'utf8')).toBe('gamma');
+      expect(readText(filePath)).toBe('gamma');
     });
 
     it('bypasses enforcement entirely when fileReadCacheDisabled is true', async () => {
       fs.writeFileSync(filePath, 'untouched', 'utf8');
-      // No seed: with the cache disabled, the model is on the
-      // pre-cache contract — Edit must succeed without a prior Read.
-      // Use mockReturnValue (not mockReturnValueOnce): calculateEdit
-      // now calls getFileReadCacheDisabled twice — once before
-      // readTextFile and once after, for the post-read TOCTOU
-      // re-check — and both must see disabled=true to actually bypass.
+      // No seed: with the cache disabled the model is on the pre-cache
+      // contract, so Edit must succeed without a prior Read. mockReturnValue,
+      // not ...Once: calculateEdit calls getFileReadCacheDisabled twice
+      // (before readTextFile and in the post-read TOCTOU re-check) and both
+      // must see disabled=true to actually bypass.
       (mockConfig.getFileReadCacheDisabled as Mock).mockReturnValue(true);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'untouched',
-        new_string: 'modified',
-      };
-      const result = await tool.build(params).execute(abortSignal);
+      const result = await run(edit(filePath, 'untouched', 'modified'));
       expect(result.error).toBeUndefined();
-      expect(fs.readFileSync(filePath, 'utf8')).toBe('modified');
+      expect(readText(filePath)).toBe('modified');
     });
 
     it('attaches a structured ToolErrorType when getConfirmationDetails rejects', async () => {
-      // Without an `errorType` field on the thrown Error, the tool
-      // scheduler reports every confirmation-time rejection as
-      // UNHANDLED_EXCEPTION — losing the EDIT_REQUIRES_PRIOR_READ /
-      // FILE_CHANGED_SINCE_READ contract this PR introduces.
+      // Without an `errorType` on the thrown Error, the tool scheduler
+      // reports every confirmation-time rejection as UNHANDLED_EXCEPTION —
+      // losing the EDIT_REQUIRES_PRIOR_READ / FILE_CHANGED_SINCE_READ
+      // contract this PR introduces.
       fs.writeFileSync(filePath, 'unread content', 'utf8');
-      const invocation = tool.build({
-        file_path: filePath,
-        old_string: 'unread',
-        new_string: 'modified',
-      });
-      let caught: unknown;
-      try {
-        await invocation.getConfirmationDetails(abortSignal);
-      } catch (err) {
-        caught = err;
-      }
+      const caught = await confirm(edit(filePath, 'unread', 'modified')).catch(
+        (err: unknown) => err,
+      );
       expect((caught as { errorType?: string })?.errorType).toBe(
         ToolErrorType.EDIT_REQUIRES_PRIOR_READ,
       );
+    });
+
+    describe('authorized exact stale recovery', () => {
+      const modifyExternally = (
+        target: string,
+        content: string,
+        deltaMs = 60_000,
+      ) => {
+        fs.writeFileSync(target, content, 'utf8');
+        const future = new Date(Date.now() + deltaMs);
+        fs.utimesSync(target, future, future);
+      };
+
+      it('replays public anonymous stale case-048 and preserves its external newline change', async () => {
+        const fixture = replayCases.stale;
+        seedFile(filePath, fixture.previousContent);
+        modifyExternally(filePath, fixture.currentContent);
+
+        const result = await run(
+          edit(filePath, fixture.oldString, fixture.newString),
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toContain('recovery checks');
+        expect(readText(filePath)).toBe(
+          fixture.currentContent.replace(fixture.oldString, fixture.newString),
+        );
+        expect(readText(filePath).endsWith('\n')).toBe(false);
+      });
+
+      it('replays public anonymous no-match case-021 without mutating its excerpt', async () => {
+        const fixture = replayCases.noMatch;
+        seedFile(filePath, fixture.content);
+
+        const result = await run(
+          edit(filePath, fixture.oldString, fixture.newString),
+        );
+
+        expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
+        expect(readText(filePath)).toBe(fixture.content);
+      });
+
+      it('recovers when a previously read text file changed elsewhere and old_string matches uniquely', async () => {
+        seedFile(filePath, 'header-v1\ntarget line\nfooter\n');
+        modifyExternally(filePath, 'header-v2\ntarget line\nfooter\n');
+
+        const result = await run(edit(filePath, 'target line', 'updated line'));
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe('header-v2\nupdated line\nfooter\n');
+        expect(
+          mockRecoveryDebug.mock.calls.filter(
+            ([message]) => message === 'stale edit recovery',
+          ),
+        ).toEqual([['stale edit recovery', { path: filePath }]]);
+        expect(result.llmContent).toContain(
+          `The file: ${filePath} has been updated.`,
+        );
+        expect(result.llmContent).toContain(
+          'The file had been modified since it was last read in this session',
+        );
+        expect(result.llmContent).toMatch(
+          /Showing lines \d+-\d+ of \d+ from the edited file:/,
+        );
+        const postCheck = fileReadCache.check(fs.statSync(filePath));
+        expect(postCheck.state).toBe('fresh');
+        if (postCheck.state === 'fresh') {
+          expect(postCheck.entry.readBaselineNeedsRefresh).toBe(true);
+          expect(postCheck.entry.readResidentInHistory).toBe(false);
+        }
+        await confirm(edit(filePath, 'updated line', 'again'));
+        if (postCheck.state === 'fresh') {
+          expect(postCheck.entry.readBaselineNeedsRefresh).toBe(true);
+        }
+        const followup = await run(edit(filePath, 'updated line', 'again'));
+        expect(followup.error).toBeUndefined();
+        expect(followup.llmContent).toContain('recovery checks');
+        expect(readText(filePath)).toBe('header-v2\nagain\nfooter\n');
+      });
+
+      it('replaces the current unique target without claiming its original semantic location', async () => {
+        seedFile(filePath, 'a\nawait save();\nb\n');
+        modifyExternally(filePath, 'a\nb\nif (x) { await save(); }\n');
+        const result = await run(
+          edit(filePath, 'await save();', 'await flushNow();'),
+        );
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe('a\nb\nif (x) { await flushNow(); }\n');
+        expect(result.llmContent).toContain('if (x) { await flushNow(); }');
+      });
+
+      it('preserves the terminal non-text rejection after recovery', async () => {
+        seedFile(filePath, 'header-v1\ntarget\n');
+        modifyExternally(filePath, 'header-v2\ntarget\n');
+        expect(
+          (await run(edit(filePath, 'target', 'updated'))).error,
+        ).toBeUndefined();
+        seedPriorRead(filePath, true, false);
+        const result = await run(edit(filePath, 'updated', 'again'));
+        expect(result.error?.type).toBe(ToolErrorType.EDIT_REQUIRES_PRIOR_READ);
+        expect(result.llmContent).toContain('binary');
+        expect(readText(filePath)).toBe('header-v2\nupdated\n');
+      });
+
+      it('carries recovery state across atomic inode replacement on consecutive edits', async () => {
+        seedFile(filePath, 'header-v1\ntarget\n');
+        modifyExternally(filePath, 'header-v2\ntarget\n');
+        vi.spyOn(fsService, 'writeTextFile').mockImplementation(
+          async (params) => {
+            const replacement = `${params.path}.replacement`;
+            fs.writeFileSync(replacement, params.content);
+            fs.renameSync(replacement, params.path);
+            return {};
+          },
+        );
+        for (const [oldText, newText] of [
+          ['target', 'updated'],
+          ['updated', 'again'],
+        ]) {
+          const beforeInode = fs.statSync(filePath).ino;
+          const result = await run(edit(filePath, oldText, newText));
+          expect(result.error).toBeUndefined();
+          expect(result.llmContent).toContain('recovery checks');
+          expect(fs.statSync(filePath).ino).not.toBe(beforeInode);
+          const current = fileReadCache.check(fs.statSync(filePath));
+          expect(current.state).toBe('fresh');
+          if (current.state === 'fresh')
+            expect(current.entry.readBaselineNeedsRefresh).toBe(true);
+        }
+        expect(readText(filePath)).toBe('header-v2\nagain\n');
+      });
+
+      it.each([
+        'replace_all',
+        'no-op',
+        'fuzzy',
+        'multiple',
+        'permission',
+      ] as const)(
+        'does not bypass recovery checks on a fresh fingerprint (%s)',
+        async (reason) => {
+          seedFile(filePath, 'header-v1\ntarget\n');
+          modifyExternally(filePath, 'header-v2\ntarget\n');
+          expect(
+            (await run(edit(filePath, 'target', 'updated updated'))).error,
+          ).toBeUndefined();
+          const params = edit(filePath, 'updated updated', 'again');
+          if (reason === 'replace_all') params.replace_all = true;
+          if (reason === 'no-op') params.new_string = params.old_string;
+          if (reason === 'fuzzy') params.old_string = 'updated  updated';
+          if (reason === 'multiple') params.old_string = 'updated';
+          if (reason === 'permission') {
+            const pm = new PermissionManager({
+              getPermissionsAllow: () => undefined,
+              getPermissionsAsk: () => ['ReadFile'],
+              getPermissionsDeny: () => undefined,
+              getProjectRoot: () => rootDir,
+              getCwd: () => rootDir,
+            });
+            pm.initialize();
+            mockConfig.getPermissionManager = () => pm;
+          }
+          const result = await run(params);
+          expect(result.error?.type).toBe(
+            ToolErrorType.FILE_CHANGED_SINCE_READ,
+          );
+          expect(readText(filePath)).toBe('header-v2\nupdated updated\n');
+        },
+      );
+
+      it('rejects with FILE_CHANGED_SINCE_READ when stale file has multiple matches', async () => {
+        seedFile(filePath, 'target\nfooter\n');
+        modifyExternally(filePath, 'target\nmiddle\ntarget\nfooter\n');
+
+        const result = await run(edit(filePath, 'target', 'updated'));
+
+        expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+        expect(result.error?.type).not.toBe(
+          ToolErrorType.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
+        );
+        expect(readText(filePath)).toBe('target\nmiddle\ntarget\nfooter\n');
+        expect(mockRecoveryDebug).not.toHaveBeenCalled();
+      });
+
+      it('does not log a successful recovery while only preparing confirmation', async () => {
+        seedFile(filePath, 'header-v1\ntarget\n');
+        modifyExternally(filePath, 'header-v2\ntarget\n');
+
+        const details = await confirm(edit(filePath, 'target', 'updated'));
+
+        expect(details.type).toBe('edit');
+        expect(readText(filePath)).toBe('header-v2\ntarget\n');
+        expect(mockRecoveryDebug).not.toHaveBeenCalled();
+      });
+
+      it('rejects with FILE_CHANGED_SINCE_READ when replace_all is true on a stale file', async () => {
+        seedFile(filePath, 'header-v1\ntarget\n');
+        modifyExternally(filePath, 'header-v2\ntarget\n');
+
+        const result = await run(
+          edit(filePath, 'target', 'updated', { replace_all: true }),
+        );
+
+        expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+        expect(readText(filePath)).toBe('header-v2\ntarget\n');
+      });
+
+      it('rejects fuzzy-only matches on a stale file (exact literal only)', async () => {
+        seedFile(filePath, 'v1\nconst s = \u201Chello\u201D;\n');
+        modifyExternally(filePath, 'v2\nconst s = \u201Chello\u201D;\n');
+
+        const result = await run(
+          edit(filePath, 'const s = "hello";', 'const s = "bye";'),
+        );
+
+        expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+        expect(readText(filePath)).toBe('v2\nconst s = \u201Chello\u201D;\n');
+      });
+
+      it('rejects when prior read was non-cacheable (cacheable: false)', async () => {
+        fs.writeFileSync(filePath, 'v1\ntarget\n', 'utf8');
+        seedPriorRead(filePath, true, false);
+        modifyExternally(filePath, 'v2\ntarget\n');
+
+        const result = await run(edit(filePath, 'target', 'updated'));
+
+        expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+      });
+
+      it('rejects when Read permission is not auto-allowed (outside workspace, qwenignore, or PM rule)', async () => {
+        const outsidePath = path.join(tempDir, 'outside.txt');
+        seedFile(outsidePath, 'v1\ntarget\n');
+        modifyExternally(outsidePath, 'v2\ntarget\n');
+        const outsideResult = await run(edit(outsidePath, 'target', 'updated'));
+        expect(outsideResult.error?.type).toBe(
+          ToolErrorType.FILE_CHANGED_SINCE_READ,
+        );
+        expect(readText(outsidePath)).toBe('v2\ntarget\n');
+
+        const allowReadManager = new PermissionManager({
+          getPermissionsAllow: () => ['ReadFile'],
+          getPermissionsAsk: () => undefined,
+          getPermissionsDeny: () => undefined,
+          getProjectRoot: () => rootDir,
+          getCwd: () => rootDir,
+        });
+        allowReadManager.initialize();
+        const allowReadConfig = {
+          ...mockConfig,
+          getPermissionManager: () => allowReadManager,
+        } as unknown as Config;
+        const allowedRuleResult = await new EditTool(allowReadConfig)
+          .build(edit(outsidePath, 'target', 'updated'))
+          .execute(new AbortController().signal);
+        expect(allowedRuleResult.error?.type).toBe(
+          ToolErrorType.FILE_CHANGED_SINCE_READ,
+        );
+        expect(readText(outsidePath)).toBe('v2\ntarget\n');
+
+        fs.writeFileSync(path.join(rootDir, '.qwenignore'), 'ignored.txt\n');
+        const ignoredPath = path.join(rootDir, 'ignored.txt');
+        seedFile(ignoredPath, 'v1\ntarget\n');
+        modifyExternally(ignoredPath, 'v2\ntarget\n');
+        const fileService = new FileDiscoveryService(rootDir);
+        const ignoredConfig = {
+          ...mockConfig,
+          getFileService: () => fileService,
+        } as unknown as Config;
+        const ignoredResult = await new EditTool(ignoredConfig)
+          .build(edit(ignoredPath, 'target', 'updated'))
+          .execute(new AbortController().signal);
+        expect(ignoredResult.error?.type).toBe(
+          ToolErrorType.FILE_CHANGED_SINCE_READ,
+        );
+
+        for (const rule of ['ask', 'deny'] as const) {
+          const pm = new PermissionManager({
+            getPermissionsAllow: () => undefined,
+            getPermissionsAsk: () =>
+              rule === 'ask' ? ['ReadFile'] : undefined,
+            getPermissionsDeny: () =>
+              rule === 'deny' ? ['ReadFile'] : undefined,
+            getProjectRoot: () => rootDir,
+            getCwd: () => rootDir,
+          });
+          pm.initialize();
+          const pmConfig = {
+            ...mockConfig,
+            getPermissionManager: () => pm,
+          } as unknown as Config;
+          seedFile(filePath, 'v1\ntarget\n');
+          modifyExternally(filePath, 'v2\ntarget\n');
+          const pmResult = await new EditTool(pmConfig)
+            .build(edit(filePath, 'target', 'updated'))
+            .execute(new AbortController().signal);
+          expect(pmResult.error?.type).toBe(
+            ToolErrorType.FILE_CHANGED_SINCE_READ,
+          );
+        }
+      });
+
+      it.each([false, true])(
+        'checks the frozen snapshot after a concurrent Read (changed=%s)',
+        async (changed) => {
+          seedFile(filePath, 'header-v1\ntarget\n');
+          modifyExternally(filePath, 'header-v2\ntarget\n');
+          const inv = tool.build(edit(filePath, 'target', 'updated'));
+          const details = await inv.getConfirmationDetails(
+            new AbortController().signal,
+          );
+          expect(details.type).toBe('edit');
+          if (details.type === 'edit') {
+            expect(details.warnings).toEqual([
+              expect.stringContaining('changed since'),
+            ]);
+          }
+          if (changed)
+            modifyExternally(filePath, 'header-v3\ntarget\n', 120_000);
+          seedPriorRead(filePath);
+          expect(fileReadCache.check(fs.statSync(filePath)).state).toBe(
+            'fresh',
+          );
+          const result = await inv.execute(new AbortController().signal);
+          if (changed) {
+            expect(result.error?.type).toBe(
+              ToolErrorType.FILE_CHANGED_SINCE_READ,
+            );
+            expect(result.llmContent).toContain('snapshot captured');
+            expect(result.llmContent).not.toContain('mtime or size changed');
+            expect(readText(filePath)).toBe('header-v3\ntarget\n');
+          } else {
+            expect(result.error).toBeUndefined();
+            expect(readText(filePath)).toBe('header-v2\nupdated\n');
+          }
+        },
+      );
+
+      it('reports a frozen snapshot mismatch after another recovered edit refreshes the fingerprint', async () => {
+        seedFile(filePath, 'header-v1\ntarget\n');
+        modifyExternally(filePath, 'header-v2\ntarget\n');
+        expect(
+          (await run(edit(filePath, 'target', 'updated'))).error,
+        ).toBeUndefined();
+        const pending = tool.build(edit(filePath, 'updated', 'final'));
+        await pending.getConfirmationDetails(new AbortController().signal);
+
+        expect(
+          (await run(edit(filePath, 'updated', 'concurrent update'))).error,
+        ).toBeUndefined();
+        const current = fileReadCache.check(fs.statSync(filePath));
+        expect(current.state).toBe('fresh');
+        if (current.state === 'fresh') {
+          expect(current.entry.readBaselineNeedsRefresh).toBe(true);
+        }
+
+        const result = await pending.execute(new AbortController().signal);
+        expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+        expect(result.llmContent).toContain('snapshot captured');
+        expect(result.llmContent).not.toContain('mtime or size changed');
+        expect(readText(filePath)).toBe('header-v2\nconcurrent update\n');
+      });
+
+      it('does not attach a stale warning to a fresh confirmation', async () => {
+        seedFile(filePath, 'target\n');
+        const details = await confirm(edit(filePath, 'target', 'updated'));
+        if (details.type === 'edit') expect(details.warnings).toBeUndefined();
+      });
+
+      it('uses production default-read roots outside the workspace', async () => {
+        const target = path.join(
+          mockConfig.storage.getProjectTempDir(),
+          'target.txt',
+        );
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        seedFile(target, 'v1\ntarget\n');
+        modifyExternally(target, 'v2\ntarget\n');
+        const result = await run(edit(target, 'target', 'updated'));
+        expect(result.error).toBeUndefined();
+        expect(readText(target)).toBe('v2\nupdated\n');
+      });
+
+      it('allows only managed memory paths, not adjacent private runtime files', async () => {
+        vi.stubEnv(
+          'QWEN_CODE_MEMORY_BASE_DIR',
+          path.join(fs.realpathSync(tempDir), 'memory-base'),
+        );
+        vi.stubEnv('QWEN_CODE_MEMORY_LOCAL', '0');
+        const memoryFile = path.join(getAutoMemoryRoot(rootDir), 'notes.md');
+        fs.mkdirSync(path.dirname(memoryFile), { recursive: true });
+        seedFile(memoryFile, 'v1\ntarget\n');
+        modifyExternally(memoryFile, 'v2\ntarget\n');
+        const allowed = await run(edit(memoryFile, 'target', 'updated'));
+        expect(allowed.error).toBeUndefined();
+        const privateFile = path.join(tempDir, 'memory-base', 'settings.json');
+        seedFile(privateFile, 'v1\ntarget\n');
+        modifyExternally(privateFile, 'v2\ntarget\n');
+        const rejected = await run(edit(privateFile, 'target', 'updated'));
+        expect(rejected.error?.type).toBe(
+          ToolErrorType.FILE_CHANGED_SINCE_READ,
+        );
+        expect(readText(privateFile)).toBe('v2\ntarget\n');
+      });
+
+      it('does not recover through scoped text I/O', async () => {
+        seedFile(filePath, 'v1\ntarget\n');
+        modifyExternally(filePath, 'v2\ntarget\n');
+        const io: TextFileIo = {
+          inspect: async () => ({
+            kind: 'file',
+            response: await fsService.readTextFile({ path: filePath }),
+            stats: fs.statSync(filePath),
+          }),
+          withMutation: async (_path, signal, operation) =>
+            operation({
+              original: await io.inspect(filePath, signal),
+              write: async (params) => {
+                await fsService.writeTextFile(params);
+                return fs.statSync(filePath);
+              },
+            }),
+        };
+        Object.assign(fsService, { textFileIo: io });
+        const result = await run(edit(filePath, 'target', 'updated'));
+        expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+        expect(readText(filePath)).toBe('v2\ntarget\n');
+      });
+
+      it('pins confirmed stale snapshot and rejects if file changes again before execute', async () => {
+        seedFile(filePath, 'header-v1\ntarget\n');
+        modifyExternally(filePath, 'header-v2\ntarget\n');
+
+        const inv = tool.build(edit(filePath, 'target', 'updated'));
+        const details = await inv.getConfirmationDetails(
+          new AbortController().signal,
+        );
+        expect(details.type).toBe('edit');
+
+        // Another external write lands while waiting for confirmation.
+        modifyExternally(filePath, 'header-v3\ntarget\n', 120_000);
+        const result = await inv.execute(new AbortController().signal);
+
+        expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+        expect(result.llmContent).toContain('snapshot captured');
+        expect(result.llmContent).not.toContain('mtime or size changed');
+        expect(readText(filePath)).toBe('header-v3\ntarget\n');
+      });
+
+      it('applies confirmed stale edit when file matches the confirmed snapshot', async () => {
+        seedFile(filePath, 'header-v1\ntarget\n');
+        modifyExternally(filePath, 'header-v2\ntarget\n');
+
+        const inv = tool.build(edit(filePath, 'target', 'updated'));
+        await inv.getConfirmationDetails(new AbortController().signal);
+        const result = await inv.execute(new AbortController().signal);
+
+        expect(result.error).toBeUndefined();
+        expect(readText(filePath)).toBe('header-v2\nupdated\n');
+      });
+
+      it('rejects fresh-confirmed edit that becomes stale before execute', async () => {
+        seedFile(filePath, 'header-v1\ntarget\n');
+
+        const inv = tool.build(edit(filePath, 'target', 'updated'));
+        await inv.getConfirmationDetails(new AbortController().signal);
+
+        modifyExternally(filePath, 'header-v2\ntarget\n');
+        const result = await inv.execute(new AbortController().signal);
+
+        expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+        expect(readText(filePath)).toBe('header-v2\ntarget\n');
+      });
+
+      it('rejects no-op edits (old_string === new_string) and vanished files after confirmation with FILE_CHANGED_SINCE_READ', async () => {
+        seedFile(filePath, 'v1\ntarget\n');
+        modifyExternally(filePath, 'v2\ntarget\n');
+
+        const noopResult = await run(edit(filePath, 'target', 'target'));
+        expect(noopResult.error?.type).toBe(
+          ToolErrorType.FILE_CHANGED_SINCE_READ,
+        );
+
+        const inv = tool.build(edit(filePath, 'target', 'updated'));
+        await inv.getConfirmationDetails(new AbortController().signal);
+        fs.unlinkSync(filePath);
+        const deletedResult = await inv.execute(new AbortController().signal);
+        expect(deletedResult.error?.type).toBe(
+          ToolErrorType.FILE_CHANGED_SINCE_READ,
+        );
+      });
     });
   });
 
@@ -1708,46 +2520,31 @@ describe('EditTool', () => {
     'escaped paths with spaces (end-to-end)',
     () => {
       it('should read and edit a file whose name contains spaces when given an escaped path', async () => {
-        // Create a file with spaces in its name on disk
-        const realFileName = 'my spaced file.txt';
-        const realPath = path.join(rootDir, realFileName);
-        fs.writeFileSync(realPath, 'Hello old world!', 'utf8');
-        // The Edit's prior-read enforcement is keyed off the
-        // *unescaped* path that EditTool resolves internally; seed
-        // the cache against that real path so this test exercises
-        // the escape-handling, not the enforcement layer.
-        seedPriorRead(realPath);
+        const realPath = path.join(rootDir, 'my spaced file.txt');
+        // Prior-read enforcement is keyed off the *unescaped* path EditTool
+        // resolves internally; seed that real path so this test exercises
+        // the escape handling, not the enforcement layer.
+        seedFile(realPath, 'Hello old world!');
+        autoEditOnce();
 
         // Pass an ESCAPED path (as the LLM might from at-completion)
-        const escapedPath = path.join(rootDir, 'my\\ spaced\\ file.txt');
-        const params: EditToolParams = {
-          file_path: escapedPath,
-          old_string: 'old',
-          new_string: 'new',
-        };
-
-        (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
-          ApprovalMode.AUTO_EDIT,
+        const result = await run(
+          edit(path.join(rootDir, 'my\\ spaced\\ file.txt')),
         );
 
-        const invocation = tool.build(params);
-        const result = await invocation.execute(new AbortController().signal);
-
         // Should succeed — not fail with file-not-found
-        expect(result.llmContent).toMatch(/Showing lines \d+-\d+ of \d+/);
-        expect(fs.readFileSync(realPath, 'utf8')).toBe('Hello new world!');
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toBe(
+          `The file: ${realPath} has been updated.`,
+        );
+        expect(result.llmContent).not.toMatch(/Showing lines/);
+        expect(readText(realPath)).toBe('Hello new world!');
       });
 
       it('should fail gracefully when escaped path points to nonexistent file', async () => {
-        const escapedPath = path.join(rootDir, 'nonexistent\\ file.txt');
-        const params: EditToolParams = {
-          file_path: escapedPath,
-          old_string: 'old',
-          new_string: 'new',
-        };
-
-        const invocation = tool.build(params);
-        const result = await invocation.execute(new AbortController().signal);
+        const result = await run(
+          edit(path.join(rootDir, 'nonexistent\\ file.txt')),
+        );
 
         // Should report file-not-found (unescaped path used, file truly doesn't exist)
         expect(result.error?.type).toBe(ToolErrorType.FILE_NOT_FOUND);
@@ -1757,22 +2554,48 @@ describe('EditTool', () => {
 
   describe('workspace boundary validation', () => {
     it('should validate paths are within workspace root', () => {
-      const validPath = {
-        file_path: path.join(rootDir, 'file.txt'),
-        old_string: 'old',
-        new_string: 'new',
-      };
-      expect(tool.validateToolParams(validPath)).toBeNull();
+      expect(
+        tool.validateToolParams(edit(path.join(rootDir, 'file.txt'))),
+      ).toBeNull();
     });
 
     it('should allow paths outside workspace root (external path support)', () => {
-      const externalPath = {
-        file_path: '/etc/passwd',
-        old_string: 'root',
-        new_string: 'hacked',
-      };
-      const error = tool.validateToolParams(externalPath);
+      const error = tool.validateToolParams(
+        edit('/etc/passwd', 'root', 'hacked'),
+      );
       expect(error).toBeNull();
     });
   });
 });
+
+async function openFixAt(worktree: string, agentId: string) {
+  grantUnattendedFixes('s-write', {
+    pr: 3,
+    worktree: canonicalWorktreePath(worktree),
+    check: async () => true,
+    open: async () => ({ task: 't' }),
+    close: async () => {},
+  });
+  recordConfirmedWatch('s-write', {
+    pr: 3,
+    repo: 'o/r',
+    host: null,
+    targetDir: path.dirname(worktree),
+    preparedAt: null,
+    worktree: canonicalWorktreePath(worktree),
+    authorCanPush: true,
+  });
+  recordWatchTask('s-write', 3, { task: 't', reply: true, instructions: '' });
+  const fix = await openBackgroundFix(
+    's-write',
+    worktree,
+    new AbortController().signal,
+  );
+  // The fix agent started `${agentId}-child`.
+  fix.attach(
+    agentId,
+    () => {},
+    (id) => id === `${agentId}-child`,
+  );
+  return fix;
+}

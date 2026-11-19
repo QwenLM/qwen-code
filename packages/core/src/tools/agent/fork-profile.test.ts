@@ -31,6 +31,13 @@ describe('fork profiles', () => {
     await fs.writeFile(path.join(profileDir, `${name}.md`), content, 'utf8');
   }
 
+  // Writes `content` as the `name` profile of a fresh project; returns its loader.
+  async function writeAndLoad(content: string, name = 'ro-research') {
+    const projectRoot = await createProject();
+    await writeProfile(projectRoot, name, content);
+    return () => loadForkProfile(projectRoot, name);
+  }
+
   afterEach(async () => {
     await Promise.all(
       tempDirs.splice(0).map((dir) =>
@@ -43,10 +50,7 @@ describe('fork profiles', () => {
   });
 
   it('loads a valid project profile with an optional prompt hint', async () => {
-    const projectRoot = await createProject();
-    await writeProfile(
-      projectRoot,
-      'ro-research',
+    const load = await writeAndLoad(
       '\uFEFF---\r\n' +
         'name: ro-research\r\n' +
         'tools:\r\n' +
@@ -58,7 +62,7 @@ describe('fork profiles', () => {
         '---\r\n',
     );
 
-    expect(loadForkProfile(projectRoot, 'ro-research')).toEqual({
+    expect(load()).toEqual({
       name: 'ro-research',
       tools: ['read_file', 'mcp__github__read_*'],
       promptHint: 'Work read-only.\nReport file and line evidence.',
@@ -66,28 +70,20 @@ describe('fork profiles', () => {
   });
 
   it('preserves an empty tools array as deny-all', async () => {
-    const projectRoot = await createProject();
-    await writeProfile(
-      projectRoot,
-      'no-tools',
+    const load = await writeAndLoad(
       '---\nname: no-tools\ntools: []\n---\n',
+      'no-tools',
     );
 
-    expect(loadForkProfile(projectRoot, 'no-tools')).toEqual({
-      name: 'no-tools',
-      tools: [],
-    });
+    expect(load()).toEqual({ name: 'no-tools', tools: [] });
   });
 
   it('loads flow-style YAML with the strict parser', async () => {
-    const projectRoot = await createProject();
-    await writeProfile(
-      projectRoot,
-      'ro-research',
+    const load = await writeAndLoad(
       '---\nname: ro-research\ntools: [read_file, grep_search]\n---\n',
     );
 
-    expect(loadForkProfile(projectRoot, 'ro-research')).toEqual({
+    expect(load()).toEqual({
       name: 'ro-research',
       tools: ['read_file', 'grep_search'],
     });
@@ -162,102 +158,50 @@ describe('fork profiles', () => {
     );
   });
 
-  it('rejects a profile larger than the byte cap', async () => {
-    const projectRoot = await createProject();
-    await writeProfile(projectRoot, 'ro-research', 'x'.repeat(64 * 1024 + 1));
-
-    expect(() => loadForkProfile(projectRoot, 'ro-research')).toThrow(
-      /file is larger than 65536 bytes/i,
-    );
-  });
-
   it('accepts a valid profile exactly at the byte cap', async () => {
-    const projectRoot = await createProject();
     const prefix = '---\nname: ro-research\ntools: []\n';
     const suffix = '---\n';
     const commentLength = 64 * 1024 - prefix.length - suffix.length - 2;
     const content = `${prefix}#${'x'.repeat(commentLength)}\n${suffix}`;
     expect(Buffer.byteLength(content)).toBe(64 * 1024);
-    await writeProfile(projectRoot, 'ro-research', content);
+    const load = await writeAndLoad(content);
 
-    expect(loadForkProfile(projectRoot, 'ro-research')).toEqual({
-      name: 'ro-research',
-      tools: [],
-    });
+    expect(load()).toEqual({ name: 'ro-research', tools: [] });
   });
 
-  it('requires frontmatter name to match the requested filename', async () => {
-    const projectRoot = await createProject();
-    await writeProfile(
-      projectRoot,
-      'ro-research',
+  it.each([
+    [
+      'rejects a profile larger than the byte cap',
+      'x'.repeat(64 * 1024 + 1),
+      /file is larger than 65536 bytes/i,
+    ],
+    [
+      'requires frontmatter name to match the requested filename',
       '---\nname: another-profile\ntools: []\n---\n',
-    );
-
-    expect(() => loadForkProfile(projectRoot, 'ro-research')).toThrow(
       /frontmatter name must exactly match the filename/i,
-    );
-  });
-
-  it('rejects unresolved YAML aliases instead of falling back', async () => {
-    const projectRoot = await createProject();
-    await writeProfile(
-      projectRoot,
-      'ro-research',
-      '---\n' +
-        'name: ro-research\n' +
-        'tools:\n' +
-        '  - read_file\n' +
-        'note: *missing\n' +
-        '---\n',
-    );
-
-    expect(() => loadForkProfile(projectRoot, 'ro-research')).toThrow(
+    ],
+    [
+      'rejects unresolved YAML aliases instead of falling back',
+      '---\nname: ro-research\ntools:\n  - read_file\nnote: *missing\n---\n',
       /malformed YAML frontmatter/i,
-    );
-  });
-
-  it('rejects YAML warnings instead of accepting unresolved tags', async () => {
-    const projectRoot = await createProject();
-    await writeProfile(
-      projectRoot,
-      'ro-research',
+    ],
+    [
+      'rejects YAML warnings instead of accepting unresolved tags',
       '---\nname: ro-research\ntools: !unknown [read_file]\n---\n',
-    );
-
-    expect(() => loadForkProfile(projectRoot, 'ro-research')).toThrow(
       /malformed YAML frontmatter/i,
-    );
-  });
-
-  it('rejects non-empty Markdown bodies with promptHint guidance', async () => {
-    const projectRoot = await createProject();
-    await writeProfile(
-      projectRoot,
-      'ro-research',
+    ],
+    [
+      'rejects non-empty Markdown bodies with promptHint guidance',
       '---\nname: ro-research\ntools: []\n---\nWork read-only.\n',
-    );
-
-    expect(() => loadForkProfile(projectRoot, 'ro-research')).toThrow(
       /Markdown body content.*promptHint/i,
-    );
-  });
-
-  it('rejects prompt hints longer than 200 characters', async () => {
-    const projectRoot = await createProject();
-    await writeProfile(
-      projectRoot,
-      'ro-research',
-      '---\n' +
-        'name: ro-research\n' +
-        'tools: []\n' +
-        `promptHint: ${'x'.repeat(201)}\n` +
-        '---\n',
-    );
-
-    expect(() => loadForkProfile(projectRoot, 'ro-research')).toThrow(
+    ],
+    [
+      'rejects prompt hints longer than 200 characters',
+      `---\nname: ro-research\ntools: []\npromptHint: ${'x'.repeat(201)}\n---\n`,
       /promptHint must not exceed 200 characters/i,
-    );
+    ],
+  ])('%s', async (_title, content, error) => {
+    expect(await writeAndLoad(content)).toThrow(error);
   });
 
   it.each([
@@ -304,9 +248,6 @@ describe('fork profiles', () => {
       error: /promptHint must be a string/i,
     },
   ])('rejects $label', async ({ content, error }) => {
-    const projectRoot = await createProject();
-    await writeProfile(projectRoot, 'ro-research', content);
-
-    expect(() => loadForkProfile(projectRoot, 'ro-research')).toThrow(error);
+    expect(await writeAndLoad(content)).toThrow(error);
   });
 });
