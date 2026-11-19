@@ -348,31 +348,34 @@ describe('NotebookEditTool', () => {
     expectFreshCode(updated.cells[0], ['x = 2\n', 'print(x)']);
   });
 
-  it('replaces by cell-N fallback and converts code to markdown cleanly', async () => {
-    const filePath = writeSeeded(
-      'convert.ipynb',
-      nb45([
-        cell('code', undefined, 'print("old")', {
-          execution_count: 1,
-          outputs: [{ output_type: 'stream', text: 'old\n' }],
-        }),
-      ]),
-    );
+  it.each([undefined, ''])(
+    'replaces by cell-N fallback for id %j and converts code to markdown',
+    async (id) => {
+      const filePath = writeSeeded(
+        'convert.ipynb',
+        nb45([
+          cell('code', id, 'print("old")', {
+            execution_count: 1,
+            outputs: [{ output_type: 'stream', text: 'old\n' }],
+          }),
+        ]),
+      );
 
-    const result = await edit({
-      notebook_path: filePath,
-      cell_id: 'cell-0',
-      cell_type: 'markdown',
-      new_source: '# Notes',
-    });
+      const result = await edit({
+        notebook_path: filePath,
+        cell_id: 'cell-0',
+        cell_type: 'markdown',
+        new_source: '# Notes',
+      });
 
-    expect(result.error).toBeUndefined();
-    const updated = readNotebook(filePath);
-    expect(updated.cells[0].cell_type).toBe('markdown');
-    expect(updated.cells[0].source).toBe('# Notes');
-    expect(updated.cells[0]).not.toHaveProperty('outputs');
-    expect(updated.cells[0]).not.toHaveProperty('execution_count');
-  });
+      expect(result.error).toBeUndefined();
+      const updated = readNotebook(filePath);
+      expect(updated.cells[0].cell_type).toBe('markdown');
+      expect(updated.cells[0].source).toBe('# Notes');
+      expect(updated.cells[0]).not.toHaveProperty('outputs');
+      expect(updated.cells[0]).not.toHaveProperty('execution_count');
+    },
+  );
 
   it('converts markdown to code with code-only fields', async () => {
     const filePath = writeSeeded(
@@ -445,6 +448,24 @@ describe('NotebookEditTool', () => {
 
     expect(result.updatedContent).toContain('\n  "cells"');
     expect(result.updatedContent.endsWith('\n')).toBe(false);
+  });
+
+  it('rejects a positional alias for a cell with its own ID', async () => {
+    const filePath = writeSeeded(
+      'stable-ids.ipynb',
+      nb45([
+        cell('markdown', 'note-1', 'note'),
+        cell('code', 'code-1', 'original'),
+      ]),
+    );
+    const original = fs.readFileSync(filePath);
+    const result = await edit({
+      notebook_path: filePath,
+      cell_id: 'cell-1',
+      new_source: 'replacement',
+    });
+    expect(result.error?.type).toBe(ToolErrorType.NOTEBOOK_CELL_NOT_FOUND);
+    expect(fs.readFileSync(filePath)).toEqual(original);
   });
 
   it('rejects ambiguous fallback-like cell IDs', async () => {
