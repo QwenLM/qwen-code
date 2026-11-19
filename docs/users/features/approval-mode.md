@@ -122,7 +122,9 @@ You can switch into Ask Permissions Mode during a session usingÂ **Shift+Tab**â€
 
 **Start a new session in Ask Permissions Mode**
 
-New sessions start in Auto Mode (in an untrusted folder, Ask Permissions Mode). To start every session in Ask Permissions Mode, set `tools.approvalMode` to `"default"` (see [Configure Ask Permissions Mode as default](#configure-ask-permissions-mode-as-default)) or pass `--approval-mode default`. To switch the current session, use:
+Standard sessions in trusted folders default to Auto Mode. The built-in default is Ask Permissions Mode in untrusted folders and when using `--bare` or `--safe-mode`.
+
+To [set Ask Permissions Mode as the default](#configure-ask-permissions-mode-as-default), set `tools.approvalMode` to `"default"` in `~/.qwen/settings.json` for your user account or in `.qwen/settings.json` for the current project. To select it for a single launch, pass `--approval-mode default`. To switch the current session, use:
 
 ```
 /approval-mode default
@@ -130,7 +132,13 @@ New sessions start in Auto Mode (in an untrusted folder, Ask Permissions Mode). 
 
 **Run "headless" queries in Ask Permissions Mode**
 
-Headless runs start in Auto Mode too. Because a `--prompt` run cannot show a confirmation, both Auto and Ask Permissions deny shell commands and file edits there unless a `permissions.allow` rule covers them. To run in Ask Permissions Mode explicitly:
+Headless runs use the same startup defaults. In standard headless runs with text input, Auto and Ask Permissions exclude shell, monitor, `edit`, and `write_file` tools by default.
+
+An explicit allow rule in `permissions.allow` or `--allowed-tools` can keep a tool available. The selected approval mode and permission rules then determine which calls can run. For example, a path-scoped allow rule can keep `edit` available, and Auto Mode can still approve ordinary workspace edits outside that rule.
+
+With `--input-format stream-json`, the host can respond to approval requests through the protocol.
+
+To run in Ask Permissions Mode explicitly:
 
 ```
 qwen --approval-mode default --prompt "Analyze this code for potential bugs"
@@ -156,8 +164,9 @@ You can review each proposed change and approve or reject it individually.
 
 ### Configure Ask Permissions Mode as default
 
-```bash
-// .qwen/settings.json
+Add this to `~/.qwen/settings.json` for your user default or to `.qwen/settings.json` for the current project.
+
+```json
 {
   "tools": {
     "approvalMode": "default"
