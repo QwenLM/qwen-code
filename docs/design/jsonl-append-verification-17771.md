@@ -27,6 +27,13 @@ packages/core/src/utils/debugLogger.test.ts
   0 pending** from that snapshot. Later automation is outside this snapshot;
   these are not recomputed current rollup totals. Skipped checks are not
   evidence of additional platform or feature coverage.
+- Post-squash main CI run [44540717712](https://github.com/QwenLM/qwen-code/actions/runs/44540717712)
+  separately failed an i18n test for missing `settings.label.experimental.mods`
+  and `settings.description.experimental.mods` ru entries. This is not a JSONL
+  append regression and is outside the earlier PR-head snapshot. Existing
+  [#17847](https://github.com/QwenLM/qwen-code/pull/17847) tracked that locale-only
+  issue and is closed with `mergeCommit: null`. This ledger does not present its
+  proposed locale fix, or the main branch's CI, as verified here.
 
 ## Delivered behavior
 

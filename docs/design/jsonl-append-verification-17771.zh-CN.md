@@ -27,6 +27,13 @@ packages/core/src/utils/debugLogger.test.ts
   **28 passed、34 skipped、0 failed、0 cancelled、0 pending**。后续附着的自动化
   不在这个快照内；这些不是按当前聚合重新计算的数字。skipped 不能作为更多平台或
   功能覆盖的证据。
+- 合入后的 main CI [run 44540717712](https://github.com/QwenLM/qwen-code/actions/runs/44540717712)
+  还发生过另一项独立的 i18n 测试失败，缺少的是
+  `settings.label.experimental.mods` 和 `settings.description.experimental.mods`
+  的 ru 条目。它不是 JSONL append 回归，也不在前述 PR-head 快照的统计范围内。
+  既有的 [#17847](https://github.com/QwenLM/qwen-code/pull/17847) 单独跟踪这项
+  locale 问题，目前已闭合且 `mergeCommit: null`。本文不把该提议的 locale 修复
+  或主线 CI 记为已经验证。
 
 ## 已交付行为
 
