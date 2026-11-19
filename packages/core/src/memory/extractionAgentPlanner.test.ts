@@ -157,8 +157,9 @@ describe('runAutoMemoryExtractionByAgent', () => {
     expect(systemPrompt).toContain(
       'Leave unsupported conditions and fallbacks out of every saved field',
     );
+    expect(systemPrompt).toContain('copy the rule and its qualifiers verbatim');
     expect(systemPrompt).toContain(
-      'Add a success requirement only when the user explicitly requires it',
+      'Ordering by itself leaves outcomes unspecified',
     );
     expect(systemPrompt).toContain(
       'Keep a rule and all the conditions and exceptions that govern it in the same file',
