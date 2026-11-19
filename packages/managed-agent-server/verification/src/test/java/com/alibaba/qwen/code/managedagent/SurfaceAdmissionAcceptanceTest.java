@@ -622,6 +622,17 @@ public class SurfaceAdmissionAcceptanceTest {
             case SESSION_OPTIONS ->
                 expect(entry, null, 401, "actor_required");
             case INTERNAL_OPERATOR -> expect(entry, null, 403, "operator_credential_required");
+            case INTERNAL_CHANNEL_ADAPTER -> {
+                // The tenant header admits the trusted adapter; the channel
+                // is the first domain gate. Registration is the one route
+                // that creates its own subject, so it answers admitted.
+                if (entry.capabilities().contains(
+                        Capability.CHANNEL_ADAPTER_REGISTER)) {
+                    expectAdmitted(entry, null);
+                } else {
+                    expect(entry, null, 404, "channel_not_found");
+                }
+            }
             case INTERNAL_WRITER ->
                 expectInternal(entry);
             default -> throw new AssertionError(
@@ -676,6 +687,149 @@ public class SurfaceAdmissionAcceptanceTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted());
+    }
+
+    // The walk's pr-watch probes name a missing channel, so a swapped
+    // (tenantId, channelId) argument pair still 404s there. These arms
+    // register their own channel and Session and pin the service's own
+    // domain answers, so each handler is reached with the arguments in
+    // order.
+    @Test
+    public void prWatchRoutesAnswerTheirOwnDomainOverARegisteredChannel()
+            throws Exception {
+        String channel = "channel-prwatch-admitted";
+        String session = createSession(tenant, OWNER, true);
+        registerPrWatchChannel(channel);
+        MvcResult created = mvc.perform(post(
+                        "/internal/managed-channels/v1/channels/" + channel
+                                + "/pr-watch:create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + session + "\","
+                                + "\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":42,"
+                                + "\"events\":[\"ci_failure\"]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sessionId").value(session))
+                .andExpect(jsonPath("$.prNumber").value(42))
+                .andReturn();
+        String bindingId = JSON.readTree(created.getResponse()
+                .getContentAsString()).path("bindingId").asText();
+        assertThat(bindingId).isNotBlank();
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:list")
+                        .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.bindings[0].bindingId")
+                        .value(bindingId));
+        // A transition the binding does not enable is the service's own
+        // domain refusal — reached only when the channel resolved under the
+        // caller's tenant, never a missing-channel 404.
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:inject")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":42,"
+                                + "\"transition\":\"merge_conflict\","
+                                + "\"headSha\":\"" + digest() + "\","
+                                + "\"episode\":1,\"evidence\":\"\","
+                                + "\"text\":\"probe\"}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code")
+                        .value("pr_watch_transition_not_enabled"));
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:retire")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":42}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.bindingId").value(bindingId));
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:list")
+                        .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.bindings").isEmpty());
+    }
+
+    @Test
+    public void prWatchRoutesRefuseFractionalIntegerTokens() throws Exception {
+        // The TS contract refuses a fractional prNumber/episode; the MVC
+        // converter must refuse it too (ACCEPT_FLOAT_AS_INT disabled) with
+        // a 400, never truncate 1.5 into 1. The channel and binding exist,
+        // so a silently truncated token would answer admitted instead.
+        String channel = "channel-prwatch-fractional";
+        String session = createSession(tenant, OWNER, true);
+        registerPrWatchChannel(channel);
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + session + "\","
+                                + "\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":42,"
+                                + "\"events\":[\"ci_failure\"]}"))
+                .andExpect(status().isOk());
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + session + "\","
+                                + "\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":1.5,"
+                                + "\"events\":[\"ci_failure\"]}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:inject")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":42,"
+                                + "\"transition\":\"ci_failure\","
+                                + "\"headSha\":\"" + digest() + "\","
+                                + "\"episode\":1.5,\"evidence\":\"\","
+                                + "\"text\":\"probe\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:inject")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":1.5,"
+                                + "\"transition\":\"ci_failure\","
+                                + "\"headSha\":\"" + digest() + "\","
+                                + "\"episode\":1,\"evidence\":\"\","
+                                + "\"text\":\"probe\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:retire")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":1.5}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+    }
+
+    private void registerPrWatchChannel(String channel) throws Exception {
+        mvc.perform(put("/internal/managed-channels/v1/channels/" + channel)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"platform\":\"github\","
+                                + "\"accountId\":\"bot-account\","
+                                + "\"accountGeneration\":1,"
+                                + "\"actorId\":\"" + OWNER + "\","
+                                + "\"workspaceId\":\"ws\","
+                                + "\"cwdRelative\":\".\","
+                                + "\"policy\":{\"adapter\":\"github\","
+                                + "\"senderPolicy\":\"allowlist\","
+                                + "\"allowedSenders\":[\"maintainer\"],"
+                                + "\"dispatchMode\":\"followup\"}}"))
+                .andExpect(status().isOk());
     }
 
     // The admitted list probes only prove "not refused": pin that a
@@ -1620,7 +1774,11 @@ public class SurfaceAdmissionAcceptanceTest {
         variables.put("packageDigest", digest());
         variables.put("agentId", "agent-missing");
         variables.put("automationId", automation);
-        variables.put("channelId", "channel-missing");
+        // The register probe creates its subject: give it a channel id no
+        // other probe names, so the channel_not_found arms keep their gate.
+        variables.put("channelId",
+                entry.capabilities().contains(Capability.CHANNEL_ADAPTER_REGISTER)
+                        ? "channel-register-probe" : "channel-missing");
         variables.put("deliveryId", "delivery-missing");
         variables.put("itemId", artifactItemId);
         variables.put("artifactId", artifactId);
@@ -1977,6 +2135,27 @@ public class SurfaceAdmissionAcceptanceTest {
                     + digest() + "\"}";
             case PUB_RANGE -> "{\"manifestRef\":{},\"expectedIdentity\":{},"
                     + "\"streamId\":\"stdout\",\"offset\":0,\"length\":1}";
+            case CHANNEL_ADAPTER_REGISTER -> "{\"platform\":\"email\","
+                    + "\"accountId\":\"probe@example.com\",\"accountGeneration\":1,"
+                    + "\"actorId\":\"owner\",\"workspaceId\":\"ws\","
+                    + "\"cwdRelative\":\".\",\"policy\":{\"adapter\":\"email\","
+                    + "\"senderPolicy\":\"allowlist\",\"allowedSenders\":"
+                    + "[\"alice@example.com\"],\"dispatchMode\":\"followup\"}}";
+            case CHANNEL_ADAPTER_INBOUND -> "{\"accountGeneration\":1,"
+                    + "\"platformEventId\":\"probe\",\"semanticRevision\":1,"
+                    + "\"scope\":{\"kind\":\"single\"},\"senderId\":\"alice\","
+                    + "\"text\":\"probe\"}";
+            case CHANNEL_ADAPTER_DELIVERY_RECEIPT -> "{\"outcome\":\"accepted\","
+                    + "\"ordinal\":0,\"providerMessageId\":\"probe\"}";
+            case PR_WATCH_BINDING_CREATE -> "{\"sessionId\":\"" + session
+                    + "\",\"owner\":\"octocat\",\"repo\":\"hello-world\","
+                    + "\"prNumber\":42,\"events\":[\"ci_failure\"]}";
+            case PR_WATCH_BINDING_RETIRE -> "{\"owner\":\"octocat\","
+                    + "\"repo\":\"hello-world\",\"prNumber\":42}";
+            case PR_WATCH_INJECT -> "{\"owner\":\"octocat\","
+                    + "\"repo\":\"hello-world\",\"prNumber\":42,"
+                    + "\"transition\":\"ci_failure\",\"headSha\":\"" + digest()
+                    + "\",\"episode\":1,\"evidence\":\"\",\"text\":\"probe\"}";
             default -> "{}";
         };
     }
@@ -2171,6 +2350,20 @@ public class SurfaceAdmissionAcceptanceTest {
                     new ToolPublicationAdmissionStore(jdbc, manager, sessions,
                             acceptancePublicationData),
                     properties);
+        }
+
+        // The channel adapter controller is conditional on
+        // qwen.managed-agent.channels.enabled, whose isolated-listener guard
+        // this boot does not provision; mount it over the real services so
+        // the admission probes reach the tenant-header admission and the
+        // channel's own domain gates.
+        @Bean
+        public com.alibaba.qwen.code.managedagent.api.ManagedChannelAdapterController
+                acceptanceChannelAdapter(
+                com.alibaba.qwen.code.managedagent.channel.ManagedChannelService channels,
+                com.alibaba.qwen.code.managedagent.channel.ManagedPrWatchService prWatch) {
+            return new com.alibaba.qwen.code.managedagent.api.ManagedChannelAdapterController(
+                    channels, prWatch);
         }
 
         // The terminal ticket route is broker-gated; mount it here so the

@@ -112,6 +112,8 @@ describe('Generated UI view state through the daemon', () => {
         const { promptId } = (await json(response, 202)) as {
           promptId: string;
         };
+        expect(promptId).toEqual(expect.any(String));
+        expect(promptId.length).toBeGreaterThan(0);
         // Admission is asynchronous; closing the session can cancel the turn.
         await expect
           .poll(
@@ -119,7 +121,7 @@ describe('Generated UI view state through the daemon', () => {
               json(
                 await call(
                   'GET',
-                  `/session/${session.sessionId}/turns/${promptId}`,
+                  `/session/${session.sessionId}/turns/${encodeURIComponent(promptId)}`,
                   undefined,
                   session.clientId,
                 ),
@@ -127,7 +129,11 @@ describe('Generated UI view state through the daemon', () => {
               ),
             { timeout: 60_000 },
           )
-          .toMatchObject({ state: 'completed' });
+          .toMatchObject({
+            promptId,
+            state: 'completed',
+            resultText: 'done',
+          });
       };
       const put = (
         target: { sessionId: string; clientId: string },

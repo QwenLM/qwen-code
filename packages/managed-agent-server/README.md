@@ -1323,6 +1323,7 @@ a stale `300000` keeps meaning five minutes instead of widening the
 signature-replay window to ~83 hours), the sub-second `events.batch-interval`
 and `events.materialize-interval`,
 `runtime-broker.child-workspace-git-timeout`, `runtime-broker.retention.scan-delay`,
+`runtime-broker.mcp-parking.idle-duration`, `runtime-broker.mcp-parking.scan-delay`,
 `automation.scan-delay`,
 `automation.lease`, `automation.late-tolerance` and `automation.lookback`
 — bind a suffix-less number as milliseconds. Always write the suffix (`90s`,

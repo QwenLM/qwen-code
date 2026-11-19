@@ -39,6 +39,16 @@ public interface RuntimeBrokerOperations {
 
     public CompletionStage<List<Map<String, Object>>> mcpDefinitions(String harnessSessionId, String runtimeSessionId);
 
+    /**
+     * Closes a parked owner's MCP connections and hands back its mount, without
+     * a terminal release. Answers false when {@code parked} stops holding or
+     * this process does not hold the live binding.
+     */
+    public default CompletionStage<Boolean> reclaimParkedMcp(String bindingId, long generation,
+            String runtimeSessionId, java.util.function.BooleanSupplier parked) {
+        return java.util.concurrent.CompletableFuture.completedFuture(false);
+    }
+
     public CompletionStage<Map<String, Object>> extensionControl(String harnessSessionId, String expectedBindingId,
             Long expectedGeneration, Map<String, Object> operation);
 

@@ -4,6 +4,10 @@
 
 Status: implemented (scopes A and B). Scope B shipped in
 [session-list artifact summary](2026-11-17-session-list-artifact-summary.md).
+The header entry's _destination_ is superseded: it now opens the right panel's
+artifacts list tab instead of the environment panel's artifacts section — see
+[artifacts entry opens the right panel](2026-11-18-artifacts-entry-opens-right-panel.md).
+The load-embedded artifact list and the session-list summary remain as designed.
 
 ## Problem statement
 
@@ -222,8 +226,10 @@ Relevant baseline behavior (before this change):
 
 - On a cold session with artifacts, the header artifact entry is visible before
   the conversation body first paint, with the correct count.
-- Clicking the entry opens the environment panel's artifacts section populated
-  with the session's artifacts.
+- Clicking the entry opens the artifacts surface populated with the session's
+  artifacts. Originally the environment panel's artifacts section; superseded by
+  the right panel's artifacts list tab (see
+  [artifacts entry opens the right panel](2026-11-18-artifacts-entry-opens-right-panel.md)).
 - `/load` server-side duration does not regress.
 - Older daemons (no field) behave exactly as today.
 - Build, typecheck, and focused unit tests pass.

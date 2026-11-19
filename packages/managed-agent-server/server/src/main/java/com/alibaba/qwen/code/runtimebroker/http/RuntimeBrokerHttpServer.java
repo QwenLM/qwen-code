@@ -316,6 +316,9 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             response.put("runtime", Map.of("bindingId", record.getBindingId(),
                     "generation", Long.toString(record.getRuntimeGeneration()),
                     "provisionerKind", service.runtimeProvisionerKind(record)));
+            if (service.mcpParkable(record)) {
+                response.put("mcpParkable", true);
+            }
             return response;
         });
     }
