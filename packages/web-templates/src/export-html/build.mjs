@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_147_200;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_300;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -156,7 +156,15 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_147_200;
 // 2,146,529 lane measurement #17746 re-tracked. The forbidden-input guard
 // passes and the third-party input mix is unchanged, so the constants stay at
 // main's #17746 tracking instead of raising them for this PR.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_148_200;
+// The selective-commit checklist copy (#16681: ten keys across two locales,
+// plus the catalog test that pins them) is reachable from the document entry
+// only through web-shell's whole i18n table, so it lands here like the rest of
+// that table: merged head fd004e0a4 measures 2,148,626 JS bytes in CI, 426 over
+// the 2,148,200 ceiling. Re-track the lane measurement per the convention:
+// warning 2,147,200 -> 2,149,300 and ceiling 2,148,200 -> 2,149,700, leaving
+// 674 bytes to the warning and 1,074 to the ceiling. The forbidden-input guard
+// passes and the third-party input mix is unchanged.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_149_700;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
