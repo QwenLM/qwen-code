@@ -1454,10 +1454,14 @@ class QwenHostedHarnessConnectorTest {
         // D5′: a depth-1 child keeps the admitted surface — the relaxation
         // must not tighten an existing SSH child — while its launch gate stays
         // closed through the lineage conjunct of publicChildLaunchAvailable.
+        // Assert the launch predicate itself so the comment's second half is
+        // load-bearing: a root may launch, a child with lineage may not.
+        assertThat(ReflectionTestUtils.<Boolean>invokeMethod(sshChild, "publicChildLaunchAvailable", childSession)).isTrue();
         when(sessions.findChildLineage("tenant-a", SESSION_ID)).thenReturn(
                 new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(
                         SESSION_ID, SESSION_ID, "run-1", 1));
         assertThat(sshChild.supportsClientFiles(childSession)).isTrue();
+        assertThat(ReflectionTestUtils.<Boolean>invokeMethod(sshChild, "publicChildLaunchAvailable", childSession)).isFalse();
 
         // A profile-less Session is refused even when not foregroundOnly.
         var profileless = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null, null, "ACTIVE",

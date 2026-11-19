@@ -56,8 +56,10 @@ class WorkspaceProfileLifecycleTest {
     }
 
     @ParameterizedTest
+    // D3: FILES joins the v2 settlement witnesses — its verifyResources branch
+    // settles like MCP (no Shell capture/publication/monitor).
     @ValueSource(strings = {WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.SHELL_V3,
-            WorkspaceToolProfiles.SHELL_V4, WorkspaceToolProfiles.MCP})
+            WorkspaceToolProfiles.SHELL_V4, WorkspaceToolProfiles.MCP, WorkspaceToolProfiles.FILES})
     void closesWithoutResourcesAndDeletesAtomicallyWithPrivateRetirement(String profile) {
         var f = fixture();
         var op = admit(f, profile, OperationKind.DELETE);
