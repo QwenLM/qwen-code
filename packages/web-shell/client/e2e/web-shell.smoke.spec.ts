@@ -1247,6 +1247,34 @@ test('pastes long plain text as editable composer content @smoke', async ({
   );
 });
 
+test('allows drafting while session history loads and sends after replay @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  await daemon.sse.waitForConnection(scenario.sessionId);
+
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  const send = page.locator('[data-web-shell-composer-submit]');
+  const draft = 'Draft written while history is loading';
+  await expect(editor).toBeEditable();
+  await fillComposer(page, draft);
+  await expect(send).toBeDisabled();
+  await page.keyboard.press('Enter');
+  await expect(editor).toHaveText(draft);
+  expect(daemon.promptRequests()).toHaveLength(0);
+
+  await completeReplay(page, daemon, scenario.sessionId);
+  await expect(editor).toHaveText(draft);
+  await expect(send).toBeEnabled();
+  await send.click();
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  const request = firstRequest(daemon.promptRequests());
+  expect(request.path).toBe(`/session/${scenario.sessionId}/prompt`);
+  expectPromptBodyToContainText(requestBodyRecord(request), draft);
+});
+
 test('keeps later SSE connections alive when an earlier one is cancelled @smoke', async ({
   page,
 }, testInfo) => {
