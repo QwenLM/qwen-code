@@ -184,7 +184,7 @@ export const DefaultAppLayout: React.FC = () => {
                 />
               </Box>
             )}
-            {uiState.dialogsVisible && inactiveComposer}
+            {floatingDialog && inactiveComposer}
             <ExitWarning />
           </Box>
         </>

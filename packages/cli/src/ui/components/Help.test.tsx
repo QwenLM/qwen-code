@@ -137,12 +137,12 @@ const InteractiveHelpHarness = ({
 describe('Help Component', () => {
   it('PR17541 R1-10 bounds the general page by the supplied dialog height', () => {
     const view = render(
-      <DialogSizeProvider value={{ columns: 60, rows: 24 }}>
+      <DialogSizeProvider value={{ columns: 60, rows: 16 }}>
         <Help commands={mockCommands} width={60} />
       </DialogSizeProvider>,
     );
-    expect(view.lastFrame()).toContain('Shortcuts');
-    expect((view.lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(24);
+    expect(view.lastFrame()).toContain('understands your codebase');
+    expect((view.lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(16);
   });
 
   it('PR17541 R1-10 windows commands within the supplied dialog height', () => {
@@ -154,14 +154,13 @@ describe('Help Component', () => {
       sourceLabel: 'Built-in',
     }));
     const view = render(
-      <DialogSizeProvider value={{ columns: 80, rows: 24 }}>
+      <DialogSizeProvider value={{ columns: 80, rows: 20 }}>
         <Help commands={commands} width={80} activeTab="commands" />
       </DialogSizeProvider>,
     );
     const visible = (view.lastFrame() ?? '').match(/sizing-cmd-\d+/g) ?? [];
-    expect(visible.length).toBeGreaterThan(3);
-    expect(visible.length).toBeLessThanOrEqual(8);
-    expect((view.lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(24);
+    expect(visible.length).toBe(2);
+    expect((view.lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(20);
   });
 
   it('renders Claude Code style tabs and the general page by default', () => {

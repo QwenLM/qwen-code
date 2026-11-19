@@ -43,12 +43,27 @@ export const MAX_MODEL_ITEMS_TO_SHOW = 10;
  * Height-cap parity of the ink ModelDialog: non-list chrome to reserve when
  * capping the visible model rows — outer border (2) + title/gap (2) + the
  * highlighted-entry detail panel (divider + up to 4 rows + margin, ~7) +
- * footer hint (2) + error-box rows when present. Mirrors
- * `MODEL_DIALOG_FIXED_ROWS` in ui/components/ModelDialog.tsx.
+ * footer hint (2) + error-box rows when present. Compact mode removes the
+ * detail panel and vertical padding, reclaiming 8 rows, as in ModelDialog.
  */
 export const MODEL_DIALOG_FIXED_ROWS = 14;
 export const MODEL_OPTION_ROW_HEIGHT = 1;
 export const MODEL_OPTION_ROW_HEIGHT_WITH_DESCRIPTION = 2;
+
+function isCompactModelDialog(
+  availableTerminalHeight: number | undefined,
+  hasDescriptions: boolean,
+  errorMessageRows: number,
+): boolean {
+  const rowHeight = hasDescriptions
+    ? MODEL_OPTION_ROW_HEIGHT_WITH_DESCRIPTION
+    : MODEL_OPTION_ROW_HEIGHT;
+  return (
+    availableTerminalHeight !== undefined &&
+    availableTerminalHeight <
+      MODEL_DIALOG_FIXED_ROWS + rowHeight + errorMessageRows
+  );
+}
 
 /** Parity of the ink dialog's `maxModelItemsToShow` computation. */
 export function computeModelDialogMaxItems(
@@ -62,13 +77,21 @@ export function computeModelDialogMaxItems(
   const rowHeight = hasDescriptions
     ? MODEL_OPTION_ROW_HEIGHT_WITH_DESCRIPTION
     : MODEL_OPTION_ROW_HEIGHT;
+  const fixedRows =
+    MODEL_DIALOG_FIXED_ROWS -
+    (isCompactModelDialog(
+      availableTerminalHeight,
+      hasDescriptions,
+      errorMessageRows,
+    )
+      ? 8
+      : 0);
   return Math.max(
     1,
     Math.min(
       MAX_MODEL_ITEMS_TO_SHOW,
       Math.floor(
-        (availableTerminalHeight - MODEL_DIALOG_FIXED_ROWS - errorMessageRows) /
-          rowHeight,
+        (availableTerminalHeight - fixedRows - errorMessageRows) / rowHeight,
       ),
     ),
   );
@@ -267,18 +290,23 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
       )
     : 0;
 
-  // Height-capped list window (ink parity): on short terminals the detail
-  // panel and footer stay visible instead of being pushed off-screen.
+  // Short views omit details and padding so the list and footer still fit.
   const errorMessageRows = errorMessage
     ? 2 + errorMessage.split('\n').length
     : 0;
+  const hasDescriptions = entries.some(
+    (entry) =>
+      typeof entry.description === 'string' &&
+      entry.description.trim().length > 0,
+  );
+  const compact = isCompactModelDialog(
+    availableTerminalHeight,
+    hasDescriptions,
+    errorMessageRows,
+  );
   const maxItemsToShow = computeModelDialogMaxItems(
     availableTerminalHeight,
-    entries.some(
-      (entry) =>
-        typeof entry.description === 'string' &&
-        entry.description.trim().length > 0,
-    ),
+    hasDescriptions,
     errorMessageRows,
   );
 
@@ -304,7 +332,7 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
   const hasModels = entries.length > 0;
 
   return (
-    <DialogFrame>
+    <DialogFrame bodyLayout={{ compact, border: true }}>
       <text fg={C.text} attributes={1}>
         {modelDialogTitle(mode, persistScope)}
       </text>
@@ -351,38 +379,40 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
         </box>
       )}
 
-      {highlightedEntry && highlightedEntry.key !== ADVISOR_OFF_OPTION && (
-        <box flexDirection="column" marginTop={1}>
-          <text fg={C.dim}>{'─'.repeat(ruleWidth)}</text>
-          {highlightedEntry.isQwenOAuth && !highlightedEntry.isRuntime && (
-            <box marginTop={1}>
-              <text fg={C.yellow}>
-                ⚠ {t('Discontinued — switch to Coding Plan or API Key')}
-              </text>
-            </box>
-          )}
-          <DetailRow
-            label={t('Modality')}
-            value={formatModalities(highlightedEntry.modalities)}
-          />
-          <DetailRow
-            label={t('Context Window')}
-            value={formatContextWindow(highlightedEntry.contextWindowSize)}
-          />
-          {!highlightedEntry.isQwenOAuth && (
-            <box flexDirection="column">
-              <DetailRow
-                label="Base URL"
-                value={highlightedEntry.baseUrl ?? t('(default)')}
-              />
-              <DetailRow
-                label="API Key"
-                value={highlightedEntry.envKey ?? t('(not set)')}
-              />
-            </box>
-          )}
-        </box>
-      )}
+      {highlightedEntry &&
+        highlightedEntry.key !== ADVISOR_OFF_OPTION &&
+        !compact && (
+          <box flexDirection="column" marginTop={1}>
+            <text fg={C.dim}>{'─'.repeat(ruleWidth)}</text>
+            {highlightedEntry.isQwenOAuth && !highlightedEntry.isRuntime && (
+              <box marginTop={1}>
+                <text fg={C.yellow}>
+                  ⚠ {t('Discontinued — switch to Coding Plan or API Key')}
+                </text>
+              </box>
+            )}
+            <DetailRow
+              label={t('Modality')}
+              value={formatModalities(highlightedEntry.modalities)}
+            />
+            <DetailRow
+              label={t('Context Window')}
+              value={formatContextWindow(highlightedEntry.contextWindowSize)}
+            />
+            {!highlightedEntry.isQwenOAuth && (
+              <box flexDirection="column">
+                <DetailRow
+                  label="Base URL"
+                  value={highlightedEntry.baseUrl ?? t('(default)')}
+                />
+                <DetailRow
+                  label="API Key"
+                  value={highlightedEntry.envKey ?? t('(not set)')}
+                />
+              </box>
+            )}
+          </box>
+        )}
 
       {errorMessage && (
         <box marginTop={1} paddingX={1}>

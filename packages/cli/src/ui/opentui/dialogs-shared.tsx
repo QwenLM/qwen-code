@@ -101,7 +101,10 @@ export function DialogFrame(props: {
    * region, with the unused rows blank below it.
    */
   fill?: boolean;
-  bodyLayout?: ReturnType<typeof scrollDialogLayout>;
+  bodyLayout?: Pick<
+    ReturnType<typeof scrollDialogLayout>,
+    'compact' | 'border'
+  >;
 }) {
   return (
     <box

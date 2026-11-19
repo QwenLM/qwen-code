@@ -65,7 +65,11 @@ describe('InstalledTab', () => {
       const manager = createManager();
       manager.getLoadedExtensions.mockReturnValue([
         extension,
-        { ...extension, id: 'second-id', name: 'second-extension' },
+        ...Array.from({ length: 23 }, (_, index) => ({
+          ...extension,
+          id: `sizing-${index}`,
+          name: `sizing-${String(index + 1).padStart(2, '0')}`,
+        })),
       ]);
       const config = {
         getExtensionManager: () => manager,
@@ -86,6 +90,7 @@ describe('InstalledTab', () => {
       );
       await waitFor(() => expect(manager.refreshCache).toHaveBeenCalledOnce());
       await waitFor(() => expect(lastFrame()).toContain('demo'));
+      expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(rows);
       const navigate = async (name: string) => {
         const handler = mockUseKeypress.mock.calls
           .filter((call) => call[1]?.isActive === true)
@@ -93,7 +98,8 @@ describe('InstalledTab', () => {
         await act(async () => handler({ name, sequence: '' }));
       };
       await navigate('down');
-      await waitFor(() => expect(lastFrame()).toMatch(/●.*second-extension/));
+      await waitFor(() => expect(lastFrame()).toMatch(/●.*sizing-01/));
+      expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(rows);
       await navigate('up');
       await waitFor(() => expect(lastFrame()).toMatch(/●.*demo/));
     },

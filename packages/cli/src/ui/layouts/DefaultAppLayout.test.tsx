@@ -6,7 +6,8 @@
 
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { render } from 'ink-testing-library';
-import { Text } from 'ink';
+import { Text, measureElement, type DOMElement } from 'ink';
+import { createRef } from 'react';
 import { DefaultAppLayout } from './DefaultAppLayout.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import {
@@ -18,6 +19,9 @@ import { StreamingState } from '../types.js';
 
 const dialogManagerMockState = vi.hoisted(() => ({ lineCount: 1 }));
 const btwMessagePropsSpy = vi.hoisted(() => vi.fn());
+const dialogSizeSpy = vi.hoisted(() => vi.fn());
+const agentComposerSpy = vi.hoisted(() => vi.fn());
+const composerMockState = vi.hoisted(() => ({ lineCount: 1 }));
 
 vi.mock('../components/MainContent.js', () => ({
   MainContent: () => <Text>MainContent</Text>,
@@ -29,19 +33,32 @@ vi.mock('../components/UpdateNotification.js', () => ({
   ),
 }));
 
-vi.mock('../components/DialogManager.js', () => ({
-  DialogManager: () => (
+vi.mock('../components/DialogManager.js', async () => {
+  const { useDialogSize } = await import('../contexts/DialogSizeContext.js');
+  return {
+    DialogManager: () => {
+      dialogSizeSpy(useDialogSize());
+      return (
+        <Text>
+          {Array.from(
+            { length: dialogManagerMockState.lineCount },
+            (_, i) => `DialogManager ${i + 1}`,
+          ).join('\n')}
+        </Text>
+      );
+    },
+  };
+});
+
+vi.mock('../components/Composer.js', () => ({
+  Composer: () => (
     <Text>
       {Array.from(
-        { length: dialogManagerMockState.lineCount },
-        (_, i) => `DialogManager ${i + 1}`,
+        { length: composerMockState.lineCount },
+        () => 'Composer',
       ).join('\n')}
     </Text>
   ),
-}));
-
-vi.mock('../components/Composer.js', () => ({
-  Composer: () => <Text>Composer</Text>,
 }));
 
 vi.mock('../components/ExitWarning.js', () => ({
@@ -68,8 +85,10 @@ vi.mock('../components/agent-view/AgentChatView.js', () => ({
 }));
 
 vi.mock('../components/agent-view/AgentComposer.js', () => ({
-  AgentComposer: ({ active }: { active: boolean }) =>
-    active ? <Text>AgentComposer</Text> : null,
+  AgentComposer: (props: { active: boolean; agentId: string }) => {
+    agentComposerSpy(props);
+    return props.active ? <Text>AgentComposer</Text> : null;
+  },
 }));
 
 vi.mock('../hooks/useTerminalSize.js', () => ({
@@ -133,9 +152,12 @@ function frameHeight(frame: string): number {
 describe('DefaultAppLayout', () => {
   beforeEach(() => {
     dialogManagerMockState.lineCount = 1;
+    composerMockState.lineCount = 1;
+    dialogSizeSpy.mockClear();
+    agentComposerSpy.mockClear();
   });
 
-  it('PR17541 R1-4 keeps a composer or placeholder on an agent tab outside VP mode', () => {
+  it('PR17541 R1-4 replaces an inactive composer with a bounded inline dialog outside VP mode', () => {
     mockedUseAgentViewState.mockReturnValue({
       activeView: 'agent-1',
       agents: new Map([['agent-1', {}]]),
@@ -145,8 +167,81 @@ describe('DefaultAppLayout', () => {
       useTerminalBuffer: false,
       dialogsVisible: true,
     });
-    expect(lastFrame()).toMatch(/AgentComposer|❯/);
     expect(lastFrame()).toContain('DialogManager');
+    expect(lastFrame()).not.toContain('❯');
+    expect(agentComposerSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ active: false, agentId: 'agent-1' }),
+    );
+    expect(frameHeight(lastFrame() ?? '')).toBeLessThanOrEqual(24);
+  });
+
+  it.each([40, 100])(
+    'publishes the actual overlay width for main area %i',
+    (mainAreaWidth) => {
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map(),
+      });
+      renderLayout({
+        ...baseUIState,
+        dialogsVisible: true,
+        useTerminalBuffer: true,
+        staticExtraHeight: 3,
+        mainAreaWidth,
+      });
+      expect(dialogSizeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          columns: Math.min(mainAreaWidth, 76),
+          rows: 19,
+          isDialog: true,
+        }),
+      );
+    },
+  );
+
+  it('keeps an uncapped long permissions dialog larger than thirty-two rows', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+    dialogManagerMockState.lineCount = 50;
+    const view = renderLayout({
+      ...baseUIState,
+      dialogsVisible: true,
+      useTerminalBuffer: true,
+      terminalHeight: 70,
+      isPermissionsDialogOpen: true,
+    });
+    expect(view.lastFrame()).toContain('DialogManager 50');
+  });
+
+  it('remeasures controls before a dialog opens and preserves their larger space', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+    composerMockState.lineCount = 9;
+    const controls = createRef<DOMElement>();
+    const uiState = {
+      ...baseUIState,
+      mainControlsRef: controls,
+      useTerminalBuffer: true,
+    };
+    const view = renderLayout(uiState);
+    const closedHeight = measureElement(controls.current!).height;
+    expect(closedHeight).toBeGreaterThan(5);
+    view.rerender(
+      <UIActionsContext.Provider value={mockUIActions}>
+        <UIStateContext.Provider
+          value={{ ...uiState, dialogsVisible: true } as UIState}
+        >
+          <DefaultAppLayout />
+        </UIStateContext.Provider>
+      </UIActionsContext.Provider>,
+    );
+    expect(measureElement(controls.current!).height).toBeGreaterThanOrEqual(
+      closedHeight,
+    );
   });
 
   it('renders sticky todo list before the composer in the main view', () => {

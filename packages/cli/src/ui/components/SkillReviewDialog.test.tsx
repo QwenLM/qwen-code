@@ -299,7 +299,7 @@ describe('SkillReviewDialog', () => {
   it('PR17541 R1-16 wraps previews at the dialog inner width with two slack columns', async () => {
     const stagedManifestPath = await writeSkill(
       'sizing-skill',
-      `${'X'.repeat(54)}\nTAIL\n`,
+      `${'X'.repeat(60)}\nTAIL\n`,
     );
     const { lastFrame } = render(
       <DialogSizeProvider value={{ columns: 60, rows: 30 }}>
@@ -317,7 +317,9 @@ describe('SkillReviewDialog', () => {
       </DialogSizeProvider>,
     );
     await vi.waitFor(() => expect(lastFrame()).toContain('TAIL'));
-    expect(stripAnsi(lastFrame() ?? '')).toContain('X'.repeat(54));
+    const frame = stripAnsi(lastFrame() ?? '');
+    expect(frame).toContain('X'.repeat(56));
+    expect(frame).not.toContain('X'.repeat(60));
   });
 
   it('shows a fallback when the staged file cannot be read', async () => {

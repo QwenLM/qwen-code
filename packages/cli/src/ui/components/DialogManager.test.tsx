@@ -7,6 +7,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Config, OutputStyleDefinition } from '@qwen-code/qwen-code-core';
 import { BUILT_IN_OUTPUT_STYLES } from '@qwen-code/qwen-code-core';
+import { parseRule } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
+import { SettingScope } from '../../config/settings.js';
 import { renderWithProviders, withProviders } from '../../test-utils/render.js';
 import { DialogManager } from './DialogManager.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
@@ -51,6 +53,37 @@ const renderDialogManager = (
   renderWithProviders(dialogTree(uiState), { config: config as Config });
 
 describe('DialogManager', () => {
+  it('hands the constrained height and width to a real permissions list', async () => {
+    const view = renderDialogManager(
+      createUIState({
+        isPermissionsDialogOpen: true,
+        terminalHeight: 22,
+        staticExtraHeight: 3,
+        mainAreaWidth: 60,
+      }),
+      {
+        getPermissionManager: () =>
+          ({
+            listRules: () =>
+              Array.from({ length: 15 }, (_, index) => ({
+                rule: parseRule(`Read(rule-${String(index).padStart(2, '0')})`),
+                type: 'allow',
+                scope: SettingScope.User,
+              })),
+          }) as never,
+        getWorkspaceContext: () =>
+          ({
+            getDirectories: () => [],
+            getInitialDirectories: () => [],
+          }) as never,
+      },
+    );
+    await vi.waitFor(() => expect(view.lastFrame()).toContain('Read(rule-00)'));
+    const frame = view.lastFrame() ?? '';
+    expect(frame.match(/Read\(rule-\d+\)/g)).toHaveLength(4);
+    expect(frame.match(/╭─+╮/)?.[0].length).toBe(56);
+    view.unmount();
+  });
   it.each([14, 24, 40])(
     'keeps the full provider menu at %i rows',
     (terminalHeight) => {

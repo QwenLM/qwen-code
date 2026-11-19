@@ -88,7 +88,9 @@ export const DiscoverTab = ({
   const [installing, setInstalling] = useState(false);
 
   const { columns, rows, isDialog } = useDialogSize();
-  const availableWidth = Math.max(24, columns - 8);
+  const availableWidth = isDialog
+    ? Math.max(1, columns)
+    : Math.max(24, columns - 8);
   // Each item renders as 3 lines (title, description, gap). Reserve rows for
   // the header, search box, gap and scroll hints. The dialog provider already
   // reserves the parent tab bar, border and footer.

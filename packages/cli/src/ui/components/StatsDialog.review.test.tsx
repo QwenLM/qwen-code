@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Component, act, type ReactNode } from 'react';
+import { Component, act, type ReactNode, type ComponentProps } from 'react';
 import { Text } from 'ink';
 import { render } from 'ink-testing-library';
 import { describe, expect, it, vi } from 'vitest';
@@ -13,7 +13,10 @@ import type { Key } from '../hooks/useKeypress.js';
 import { StatsDialog } from './StatsDialog.js';
 import type { StatsData } from '../utils/statsDataService.js';
 
-const { keys } = vi.hoisted(() => ({ keys: vi.fn() }));
+const { keys, activity } = vi.hoisted(() => ({
+  keys: vi.fn(),
+  activity: vi.fn(),
+}));
 vi.mock('../hooks/useKeypress.js', () => ({ useKeypress: keys }));
 vi.mock('../contexts/ConfigContext.js', () => ({
   useConfig: () => ({ getProjectRoot: () => '/tmp' }),
@@ -28,6 +31,16 @@ vi.mock('../contexts/SessionContext.js', () => ({
   }),
 }));
 vi.mock('./StatsSessionTab.js', () => ({ SessionTab: () => null }));
+vi.mock('./StatsActivityTab.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./StatsActivityTab.js')>();
+  return {
+    ...actual,
+    ActivityTab: (props: ComponentProps<typeof actual.ActivityTab>) => {
+      activity(props);
+      return <actual.ActivityTab {...props} />;
+    },
+  };
+});
 vi.mock('../utils/statsDataService.js', () => ({
   loadStatsData: async (): Promise<StatsData> => ({
     report: {
@@ -93,6 +106,14 @@ describe('Stats dialog review regression', () => {
         handler({ name: 'tab', shift: false } as Key);
       });
       expect(view.lastFrame()).not.toContain('RENDER_ERROR');
+      expect(activity).toHaveBeenCalledWith(
+        expect.objectContaining({
+          bodyWidth: 6,
+          data: expect.objectContaining({
+            tokensPerDay: [{ date: '2026-11-01', model: 'test', tokens: 10 }],
+          }),
+        }),
+      );
       view.unmount();
     } finally {
       consoleError.mockRestore();

@@ -101,9 +101,9 @@ describe('RewindSelector', () => {
     expect(lastFrame()).toContain('› #2 second prompt');
   });
 
-  it('PR17541 R1-3 fills a twenty-row dialog with seven short turns', () => {
+  it('PR17541 R1-3 uses a sixteen-row dialog for exactly five short turns', () => {
     const { lastFrame } = render(
-      <DialogSizeProvider value={{ columns: 60, rows: 20 }}>
+      <DialogSizeProvider value={{ columns: 60, rows: 16 }}>
         <RewindSelector
           history={Array.from({ length: 10 }, (_, i) =>
             userTurn(i + 1, `sizing-prompt-${i + 1}`, `prompt-${i + 1}`),
@@ -115,7 +115,8 @@ describe('RewindSelector', () => {
         />
       </DialogSizeProvider>,
     );
-    expect((lastFrame()?.match(/sizing-prompt-/g) ?? []).length).toBe(7);
+    expect((lastFrame()?.match(/sizing-prompt-/g) ?? []).length).toBe(5);
+    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(16);
   });
 
   it('navigates the pick list with arrow keys and cancels with Escape', () => {

@@ -251,11 +251,13 @@ export function applyOpenTuiTheme(definition: OpenTuiThemeDefinition): void {
   THEME_REVISION++;
   const light = definition.type === 'light';
   const surface = light ? LIGHT : DARK;
-  // Empty-string palette values mean "no color" in ink themes (the NoColor
-  // theme is all empty strings) and must stay unset like unresolvable ones.
+  // Missing and empty palette values stay unset like unresolvable colors.
   const palette = Object.fromEntries(
     Object.entries(definition.palette)
-      .map(([key, value]) => [key, value === '' ? undefined : toHex(value)])
+      .map(([key, value]) => [
+        key,
+        typeof value === 'string' && value !== '' ? toHex(value) : undefined,
+      ])
       .filter(([, hex]) => hex !== undefined),
   ) as Partial<Palette>;
   Object.assign(C, surface, palette);

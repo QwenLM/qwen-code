@@ -36,5 +36,18 @@ it('PR17541 R1-13 uses one row per permission option in a standard dialog', () =
   const props = select.mock.calls.at(-1)?.[0] as
     | { maxItemsToShow: number }
     | undefined;
-  expect(props?.maxItemsToShow).toBeGreaterThanOrEqual(10);
+  expect(props?.maxItemsToShow).toBe(10);
 });
+
+it.each([60, 80])(
+  'uses the narrow permission tabs only below eighty columns (%i)',
+  (columns) => {
+    const { lastFrame } = render(
+      <DialogSizeProvider value={{ columns, rows: 22 }}>
+        <PermissionsDialog onExit={vi.fn()} availableTerminalHeight={22} />
+      </DialogSizeProvider>,
+    );
+    expect(lastFrame()?.includes('Permissions:')).toBe(columns >= 80);
+    expect(lastFrame()).toContain('Allow');
+  },
+);

@@ -142,6 +142,9 @@ export const QwenLight: Theme = new Theme(
     text: {
       ...lightSemanticColors.text,
       secondary: qwenLightColors.Gray,
+      link: qwenLightColors.AccentBlue,
+      accent: qwenLightColors.AccentPurple,
+      code: qwenLightColors.LightBlue,
     },
     background: {
       ...lightSemanticColors.background,

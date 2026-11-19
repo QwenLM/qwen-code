@@ -281,16 +281,34 @@ describe('AgentComposer', () => {
     expect(setAgentInputBufferText).toHaveBeenCalledWith('draft typed by user');
     capturedKeypressOptions.length = 0;
     setAgentInputBufferText.mockClear();
+    baseTextInputProps.onSubmit = undefined;
     rerender(<AgentComposer agentId="agent-1" active={false} />);
     expect(capturedKeypressOptions.every((options) => !options.isActive)).toBe(
       true,
     );
     expect(setAgentInputBufferText).not.toHaveBeenCalled();
+    expect(baseTextInputProps.onSubmit).toBeUndefined();
     rerender(<AgentComposer agentId="agent-1" />);
     expect(vi.mocked(useTextBuffer).mock.results.at(-1)?.value.text).toBe(
       'draft typed by user',
     );
     expect(initializeCount).toBe(1);
+  });
+
+  it('suspends cancellation of a responding agent while its composer is inactive', () => {
+    vi.mocked(useAgentStreamingState).mockReturnValue({
+      status: AgentStatus.IDLE,
+      streamingState: StreamingState.Responding,
+      isInputActive: false,
+      elapsedTime: 0,
+      lastPromptTokenCount: 0,
+    } as never);
+    const view = render(<AgentComposer agentId="agent-1" />);
+    expect(capturedKeypressOptions[ESCAPE_CANCEL].isActive).toBe(true);
+    capturedKeypressOptions.length = 0;
+    view.rerender(<AgentComposer agentId="agent-1" active={false} />);
+    expect(capturedKeypressOptions[ESCAPE_CANCEL].isActive).toBe(false);
+    view.unmount();
   });
 
   it.each([true, false])(

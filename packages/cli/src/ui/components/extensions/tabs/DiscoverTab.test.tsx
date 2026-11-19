@@ -62,6 +62,7 @@ describe('DiscoverTab', () => {
       marketplaceName: 'market',
       installSource: `owner/plugin-${i}`,
       installed: false,
+      description: `Sizing description ${i}`,
     })) as DiscoveredPlugin[];
     const manager = { discoverPlugins: vi.fn().mockResolvedValue(plugins) };
     const { lastFrame } = render(
@@ -78,6 +79,17 @@ describe('DiscoverTab', () => {
     );
     await waitFor(() => expect(lastFrame()).toContain('sizing-plugin-0'));
     expect(lastFrame()).toContain('sizing-plugin-1');
+    expect(lastFrame()?.match(/╭─+╮/)?.[0].length).toBe(60);
+    expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(15);
+    expect(lastFrame()?.match(/sizing-plugin-\d/g)).toHaveLength(2);
+    for (let index = 0; index < 3; index++) {
+      await act(async () =>
+        activeKeypress()({ name: 'down', sequence: '\x1b[B' } as Key),
+      );
+    }
+    await waitFor(() => expect(lastFrame()).toContain('sizing-plugin-3'));
+    expect(lastFrame()).toContain('↑ more above');
+    expect(lastFrame()).toContain('↓ more below');
     expect(lastFrame()?.split('\n').length).toBeLessThanOrEqual(15);
   });
 

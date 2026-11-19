@@ -712,7 +712,7 @@ describe('<ModelDialog />', () => {
       getByText('Enter to select, ↑↓ to navigate, Esc to close'),
     ).toBeDefined();
     expect(queryByText(/Base URL/)).toBeNull();
-    expect(mockedSelect.mock.calls[0][0].maxItemsToShow).toBeGreaterThan(0);
+    expect(mockedSelect.mock.calls[0][0].maxItemsToShow).toBe(5);
   });
 
   it('accounts for the taller two-row option height when descriptions are present', () => {

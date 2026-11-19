@@ -6,7 +6,7 @@
 // @vitest-environment jsdom
 
 import { render } from 'ink-testing-library';
-import { render as inkRender } from 'ink';
+import { Box, render as inkRender } from 'ink';
 import { EventEmitter } from 'node:events';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { waitFor } from '@testing-library/react';
@@ -16,6 +16,7 @@ import { UIStateContext } from '../../contexts/UIStateContext.js';
 import { KeypressProvider } from '../../contexts/KeypressContext.js';
 import { SettingsContext } from '../../contexts/SettingsContext.js';
 import { ShellFocusContext } from '../../contexts/ShellFocusContext.js';
+import { DialogSizeProvider } from '../../contexts/DialogSizeContext.js';
 import { LoadedSettings } from '../../../config/settings.js';
 import type { UIState } from '../../contexts/UIStateContext.js';
 import type {
@@ -139,6 +140,7 @@ const renderDialog = (
     onClose?: () => void;
     initialTab?: (typeof EXTENSIONS_TABS)[keyof typeof EXTENSIONS_TABS];
     uiState?: UIState;
+    bounds?: { columns: number; rows: number };
   } = {},
 ) =>
   render(
@@ -146,11 +148,20 @@ const renderDialog = (
       <ShellFocusContext.Provider value={true}>
         <UIStateContext.Provider value={opts.uiState ?? createUIState()}>
           <KeypressProvider kittyProtocolEnabled={false}>
-            <ExtensionsManagerDialog
-              onClose={opts.onClose ?? vi.fn()}
-              config={config}
-              initialTab={opts.initialTab}
-            />
+            <DialogSizeProvider value={opts.bounds ?? null}>
+              <Box
+                flexDirection="column"
+                width={opts.bounds?.columns}
+                maxHeight={opts.bounds?.rows}
+                overflow={opts.bounds ? 'hidden' : undefined}
+              >
+                <ExtensionsManagerDialog
+                  onClose={opts.onClose ?? vi.fn()}
+                  config={config}
+                  initialTab={opts.initialTab}
+                />
+              </Box>
+            </DialogSizeProvider>
           </KeypressProvider>
         </UIStateContext.Provider>
       </ShellFocusContext.Provider>
@@ -226,6 +237,46 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
     expect(frame).toContain('Installed');
     expect(frame).toContain('Sources');
   });
+
+  it.each([16, 20])(
+    'R2-1 keeps selection and a wrapped status inside %i clipped rows',
+    async (rows) => {
+      const status = '错误：插件权限配置无效，请检查工作区设置。'.repeat(4);
+      const manager = createManager({
+        extensions: Array.from({ length: 24 }, (_, index) =>
+          mockExtension(`entry-${String(index).padStart(2, '0')}`),
+        ),
+      });
+      manager.disableExtension.mockRejectedValueOnce(new Error(status));
+      const { stdin, lastFrame, unmount } = renderDialog(
+        createConfig(manager),
+        {
+          bounds: { columns: 70, rows },
+        },
+      );
+      await waitFor(() => expect(lastFrame()).toContain('entry-00'));
+      for (let index = 0; index < 16; index++) {
+        stdin.write('\x1b[B');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      await waitFor(() => expect(lastFrame()).toMatch(/●.*entry-16/));
+      const frame = stripAnsi(lastFrame() ?? '');
+      expect(frame.split('\n').length).toBeLessThanOrEqual(rows);
+      expect(frame).toMatch(/●.*entry-16/);
+      expect(frame).toContain('↑↓ navigate');
+      stdin.write(' ');
+      await waitFor(() => expect(manager.disableExtension).toHaveBeenCalled());
+      await waitFor(() => expect(lastFrame()).toContain('错误：插件权限'));
+      const errorFrame = stripAnsi(lastFrame() ?? '');
+      expect(errorFrame.split('\n').length).toBeLessThanOrEqual(rows);
+      expect(errorFrame).toMatch(/●.*entry-16/);
+      expect(errorFrame.replace(/[│\s]/g, '')).toContain(
+        status.replace(/\s/g, ''),
+      );
+      expect(errorFrame).toContain('↑↓ navigate');
+      unmount();
+    },
+  );
 
   it('caps its width on a wide terminal so the status column is not clipped', async () => {
     // Regression: the dialog computed boxWidth = columns - 4 with no cap, while
