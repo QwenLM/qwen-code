@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_735;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_395;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -171,7 +171,12 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_735;
 // the third-party input mix is unchanged. The merged branch's ceiling follows
 // the recovery-inbox measurements above, rather than lowering that branch's
 // budget or reserving space for interactive-only copy.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_150_735;
+//
+// Main 73bdaa349c's declared workflow phases add 660 bytes. This tree
+// measures 2,149,682 bytes of renderer JS and 2,425,151 bytes of separate
+// CSS; the third-party input mix is unchanged and the forbidden-input guard
+// passes. The warning and ceiling retain 713- and 1,713-byte margins.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_151_395;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
