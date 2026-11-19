@@ -1728,6 +1728,18 @@ export default {
     '當前語音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 設置語音模型。',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     '當前視覺模型：{{visionModel}}\n使用 "/model --vision <model-id>" 設置視覺橋接模型。',
+  'Set the vision bridge timeout in seconds (use with --vision)':
+    '設置視覺橋接逾時（秒，搭配 --vision 使用）',
+  '--timeout can only be used with --vision.':
+    '--timeout 只能與 --vision 一起使用。',
+  'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.':
+    '無效的 --timeout 值 "{{value}}"。請使用正整數秒數，例如 60、60s 或 90000ms。',
+  'Vision bridge timeout: {{timeout}}': '視覺橋接逾時：{{timeout}}',
+  'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.':
+    '已儲存視覺橋接逾時 {{timeout}}{{scope}}。較高優先順序的設定使實際逾時為 {{effectiveTimeout}}。',
+  'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.':
+    '視覺橋接逾時：{{timeout}}\n使用 "/model --vision --timeout <seconds>" 修改。',
+  '{{timeout}} (default)': '{{timeout}}（預設）',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     '當前圖像模型：{{imageModel}}\n使用 "/model --image <model-id>" 設置圖像生成模型。',
   'Compaction model override cleared': '壓縮模型覆蓋已清除',
