@@ -19,8 +19,12 @@ import type { ManagedInboundEvent } from '@qwen-code/channel-base';
 import {
   DISPATCHED_COMMENTS_LIMIT,
   MANAGED_GITHUB_PENDING_LIMIT,
+  MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT,
+  MANAGED_GITHUB_PR_WATCH_FIRED_LIMIT,
+  MANAGED_GITHUB_PR_WATCH_PENDING_LIMIT,
   ManagedGithubStateStore,
   validManagedGithubState,
+  type ManagedGithubPrWatchPending,
   type ManagedGithubState,
 } from './managed-state.js';
 
@@ -228,6 +232,226 @@ describe('validManagedGithubState', () => {
       false,
     );
     expect(validManagedGithubState(null)).toBe(false);
+  });
+});
+
+describe('validManagedGithubState watch segment', () => {
+  function watchPending(
+    overrides: Partial<ManagedGithubPrWatchPending> = {},
+  ): ManagedGithubPrWatchPending {
+    return {
+      key: 'prw:ci_failure:Owner/Repo#9:sha-a:1',
+      episode: 1,
+      owner: 'Owner',
+      repo: 'Repo',
+      prNumber: 9,
+      transition: 'ci_failure',
+      headSha: 'sha-a',
+      evidence: 'CI failed on head sha-a.',
+      detectedAt: '2026-11-17T10:00:00Z',
+      ...overrides,
+    };
+  }
+
+  function watchState(): ManagedGithubState {
+    return {
+      ...freshState(),
+      watch: {
+        prs: {
+          'owner/repo#9': {
+            headSha: 'sha-a',
+            mergeableState: 'clean',
+            ci: 'passing',
+            ciFiredSha: 'sha-a',
+            seq: 2,
+            fired: ['prw:ci_failure:Owner/Repo#9:sha-a:1'],
+            pending: [watchPending()],
+          },
+        },
+      },
+    };
+  }
+
+  it('accepts an absent watch (existing state) and a populated one', () => {
+    expect(validManagedGithubState(freshState())).toBe(true);
+    expect(validManagedGithubState(watchState())).toBe(true);
+    expect(
+      validManagedGithubState({ ...freshState(), watch: { prs: {} } }),
+    ).toBe(true);
+    // A baseline-only entry (first observation) is legal.
+    expect(
+      validManagedGithubState({
+        ...freshState(),
+        watch: { prs: { 'owner/repo#9': { headSha: 'sha-a' } } },
+      }),
+    ).toBe(true);
+  });
+
+  it('accepts a durable sweep offset and episode watermark, rejects malformed ones', () => {
+    const base = watchState();
+    const withWatch = (extra: Record<string, unknown>) => ({
+      ...freshState(),
+      watch: { ...base.watch!, ...extra },
+    });
+    // A restart must accept the persisted rotation offset and watermark.
+    expect(
+      validManagedGithubState(
+        withWatch({ sweepStart: 0, episodes: { 'owner/repo#9': 3 } }),
+      ),
+    ).toBe(true);
+    expect(validManagedGithubState(withWatch({ sweepStart: 30 }))).toBe(true);
+    expect(validManagedGithubState(withWatch({ sweepStart: -1 }))).toBe(false);
+    expect(validManagedGithubState(withWatch({ sweepStart: 1.5 }))).toBe(false);
+    expect(validManagedGithubState(withWatch({ sweepStart: '0' }))).toBe(false);
+    expect(
+      validManagedGithubState(withWatch({ episodes: { 'owner/repo#9': 0 } })),
+    ).toBe(false);
+    expect(
+      validManagedGithubState(withWatch({ episodes: { 'owner/repo#9': 1.5 } })),
+    ).toBe(false);
+    expect(validManagedGithubState(withWatch({ episodes: [] }))).toBe(false);
+    expect(validManagedGithubState(withWatch({ episodes: null }))).toBe(false);
+    const overCap: Record<string, number> = {};
+    for (let i = 0; i <= MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT; i++) {
+      overCap[`owner/repo#${i}`] = 1;
+    }
+    expect(validManagedGithubState(withWatch({ episodes: overCap }))).toBe(
+      false,
+    );
+  });
+
+  it('accepts the fired ring and pending queue at their exact caps', () => {
+    const state = watchState();
+    const entry = state.watch!.prs['owner/repo#9']!;
+    entry.fired = Array.from(
+      { length: MANAGED_GITHUB_PR_WATCH_FIRED_LIMIT },
+      (_, i) => `prw:head_change:Owner/Repo#9:${i}:1`,
+    );
+    entry.pending = Array.from(
+      { length: MANAGED_GITHUB_PR_WATCH_PENDING_LIMIT },
+      (_, i) => watchPending({ key: `prw:head_change:Owner/Repo#9:${i}:1` }),
+    );
+    expect(validManagedGithubState(state)).toBe(true);
+  });
+
+  it('rejects a malformed watch container', () => {
+    expect(validManagedGithubState({ ...freshState(), watch: null })).toBe(
+      false,
+    );
+    expect(validManagedGithubState({ ...freshState(), watch: [] })).toBe(false);
+    expect(
+      validManagedGithubState({ ...freshState(), watch: { prs: [] } }),
+    ).toBe(false);
+    expect(
+      validManagedGithubState({ ...freshState(), watch: { prs: null } }),
+    ).toBe(false);
+    expect(
+      validManagedGithubState({
+        ...freshState(),
+        watch: { prs: { 'owner/repo#9': null } },
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects a malformed baseline', () => {
+    const withEntry = (entry: unknown) => ({
+      ...freshState(),
+      watch: { prs: { 'owner/repo#9': entry } },
+    });
+    expect(validManagedGithubState(withEntry({ headSha: '' }))).toBe(false);
+    expect(validManagedGithubState(withEntry({ headSha: 42 }))).toBe(false);
+    expect(validManagedGithubState(withEntry({ ci: 'failure' }))).toBe(false);
+    expect(validManagedGithubState(withEntry({ ci: 'red' }))).toBe(false);
+    expect(validManagedGithubState(withEntry({ seq: -1 }))).toBe(false);
+    expect(validManagedGithubState(withEntry({ seq: 1.5 }))).toBe(false);
+    expect(validManagedGithubState(withEntry({ ciFiredSha: '' }))).toBe(false);
+  });
+
+  it('rejects a malformed fired ring', () => {
+    const withEntry = (entry: unknown) => ({
+      ...freshState(),
+      watch: { prs: { 'owner/repo#9': entry } },
+    });
+    expect(validManagedGithubState(withEntry({ fired: 'key' }))).toBe(false);
+    expect(validManagedGithubState(withEntry({ fired: [''] }))).toBe(false);
+    expect(validManagedGithubState(withEntry({ fired: [7] }))).toBe(false);
+    expect(
+      validManagedGithubState(
+        withEntry({
+          fired: Array.from(
+            { length: MANAGED_GITHUB_PR_WATCH_FIRED_LIMIT + 1 },
+            (_, i) => `key-${i}`,
+          ),
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects a malformed pending entry', () => {
+    const withPending = (pending: unknown) => ({
+      ...freshState(),
+      watch: { prs: { 'owner/repo#9': { pending } } },
+    });
+    expect(validManagedGithubState(withPending('nope'))).toBe(false);
+    expect(validManagedGithubState(withPending([null]))).toBe(false);
+    expect(
+      validManagedGithubState(withPending([watchPending({ key: '' })])),
+    ).toBe(false);
+    expect(
+      validManagedGithubState(withPending([watchPending({ episode: 0 })])),
+    ).toBe(false);
+    expect(
+      validManagedGithubState(
+        withPending([watchPending({ episode: undefined as never })]),
+      ),
+    ).toBe(false);
+    expect(
+      validManagedGithubState(withPending([watchPending({ prNumber: 0 })])),
+    ).toBe(false);
+    expect(
+      validManagedGithubState(
+        withPending([watchPending({ transition: 'state_change' as never })]),
+      ),
+    ).toBe(false);
+    expect(
+      validManagedGithubState(withPending([watchPending({ headSha: '' })])),
+    ).toBe(false);
+    expect(
+      validManagedGithubState(
+        withPending([watchPending({ detectedAt: 'not-a-date' })]),
+      ),
+    ).toBe(false);
+    expect(
+      validManagedGithubState(withPending([watchPending({ owner: '' })])),
+    ).toBe(false);
+    expect(
+      validManagedGithubState(
+        withPending(
+          Array.from(
+            { length: MANAGED_GITHUB_PR_WATCH_PENDING_LIMIT + 1 },
+            (_, i) => watchPending({ key: `key-${i}` }),
+          ),
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it('round-trips the watch segment through the store', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'managed-github-watch-'));
+    vi.stubEnv('QWEN_HOME', dir);
+    try {
+      const store = new ManagedGithubStateStore(
+        'gh-1',
+        dir,
+        'https://api.github.com',
+      );
+      const state = watchState();
+      store.save(state);
+      expect(store.load()).toEqual(state);
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

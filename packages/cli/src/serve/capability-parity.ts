@@ -149,11 +149,12 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'surface:ARTIFACT_GET',
   },
-  workspace_artifact_library: NO_MANAGED_EQUIVALENT(
-    'no Managed workspace-wide artifact query or explicit-pair batch removal',
-  ),
+  workspace_artifact_library: {
+    standing: 'managed',
+    evidence: 'surface:WORKSPACE_ARTIFACT_LIST',
+  },
   workspace_artifact_library_stream: NO_MANAGED_EQUIVALENT(
-    'no Managed progressive workspace artifact query with session summaries',
+    'Managed workspace artifact reads are JSON cursor pages without progressive streaming or session-summary updates',
   ),
   session_sources: NO_MANAGED_EQUIVALENT('no Managed session source list'),
   generated_ui_state: NO_MANAGED_EQUIVALENT(
@@ -692,6 +693,20 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'STORE_WRITER_ACQUIRE',
   'STORE_WRITER_RENEW',
   'STORE_WRITER_SEAL',
+  // Internal channel-adapter surface: between the control plane and its trusted
+  // adapter deployment (tenant header + isolated internal listener), never a
+  // client capability. The PR-watch binding/injection routes are the same
+  // trusted-adapter surface for bound-session proactive delivery.
+  'CHANNEL_ADAPTER_REGISTER',
+  'CHANNEL_ADAPTER_DISCONNECT',
+  'CHANNEL_ADAPTER_INBOUND',
+  'CHANNEL_ADAPTER_DELIVERY_CLAIM',
+  'CHANNEL_ADAPTER_DELIVERY_RECEIPT',
+  'CHANNEL_ADAPTER_DELIVERY_RESEND',
+  'PR_WATCH_BINDING_CREATE',
+  'PR_WATCH_BINDING_LIST',
+  'PR_WATCH_BINDING_RETIRE',
+  'PR_WATCH_INJECT',
 ]);
 
 /**

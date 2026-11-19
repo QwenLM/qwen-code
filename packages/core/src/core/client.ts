@@ -317,11 +317,19 @@ function hostContinuationOptions(
       getInterruptedGoalPauseReason: options.getInterruptedGoalPauseReason,
       getQueuedGoalTurnKey: options.getQueuedGoalTurnKey,
     }),
+    // A client-initiated Stop-hook/stop-policy continuation keeps the turn's
+    // ledger key: its prompt id carries a continuation suffix, so without the
+    // base key beginTurn would read it as a new turn and reset the consumed
+    // marks mid-turn (R16).
+    ...(options?.ledgerTurnKey && { ledgerTurnKey: options.ledgerTurnKey }),
   };
 }
 
 /** Upper bound on prompt ids tracked for an in-flight Stop-hook chain. */
 export const MAX_STOP_HOOK_CHAIN_PROMPT_IDS = 32;
+
+/** Upper bound on background-interaction prompt ids retained for ledger exclusion. */
+export const MAX_BACKGROUND_INTERACTION_PROMPT_IDS = 32;
 
 export type UserTurnRecord =
   | {
@@ -518,6 +526,14 @@ export interface SendMessageOptions {
    * (#13319).
    */
   retractDeliveredOutputOnRetry?: boolean;
+  /**
+   * Stable model-availability ledger turn key for this send, when it differs
+   * from the send's `prompt_id`. A headless runtime Goal run keeps the
+   * foreground turn's `prompt_id` for identity but opens its own ledger turn
+   * so a fallback the foreground turn exhausted is re-probed for the Goal run.
+   * Forwarded to `LlmChat`; defaults to `prompt_id` when unset.
+   */
+  ledgerTurnKey?: string;
 }
 
 /** UserPromptSubmit's verdict on a prompt, taken before the prompt expands. */
@@ -759,6 +775,20 @@ export class LlmClient {
   // is bound to its owning interaction: every budget entrypoint below is a
   // no-op for an invocation that does not own it.
   private toolExplorationBudgetPromptId: string | undefined;
+  // Prompt ids claimed by background interactions: concurrent `/btw` side
+  // queries, Notification and Teammate sends. The CLI advances the prompt
+  // counter for each, so their ids are unique (R6-1/R7-1 root fix). Their
+  // ToolResult/Hook/Steer continuations are resubmitted without the background
+  // flag, so model-availability ledger membership must exclude the whole
+  // interaction by prompt id, not just the first send's messageType. Within a
+  // session the id is never reused by a foreground turn (the mint counter
+  // advances); a rewind/resume can re-mint a transcript id, but startNewSession
+  // clears this set at the session boundary, so a reused id never hits a stale
+  // registration. The set is bounded FIFO like stopHookChains, evicting by
+  // insertion order (R8-F11); this is safe because a background interaction's
+  // continuations drain within its turn, long before 32 newer interactions
+  // would evict its id — the bound is not a drain check.
+  private readonly backgroundInteractionPromptIds = new Set<string>();
   // Prompt ids introduced by a flagged concurrent side query. Their tool-result
   // continuations arrive unflagged, so the recorded id — not the flag — is what
   // keeps them from draining the owning turn's pending async hook block. Kept
@@ -872,6 +902,16 @@ export class LlmClient {
     this.compressionObserver = observer;
     this.compressionObserverOptions = options;
     this.chat?.setCompressionObserver(observer, options);
+  }
+
+  /**
+   * Drop the background prompt-id registry on a session swap. The registered
+   * Notification/Teammate/side-query ids belong to the outgoing conversation;
+   * a resumed transcript can reuse an id, so a stale registration must not
+   * exclude a new foreground turn from the ledger (P2).
+   */
+  clearBackgroundInteractionPromptIds(): void {
+    this.backgroundInteractionPromptIds.clear();
   }
 
   async initialize(
@@ -4413,6 +4453,29 @@ export class LlmClient {
       // nor take over (or clear) the running turn's exploration phase, which
       // the ownership check below every budget entrypoint enforces for the
       // side turn's tool results too.
+      // Register background interactions so their unflagged ToolResult/Hook/
+      // Steer continuations stay excluded from the ledger by prompt id (see
+      // backgroundInteractionPromptIds), not just the first send's messageType.
+      // Notification/Teammate/side-query ids are unique: the CLI advances the
+      // prompt counter for each (R6-1/R7-1 root fix), so a registered id is
+      // never reused by a foreground turn and cannot drop it from the ledger.
+      if (
+        options?.isConcurrentSideQuery ||
+        messageType === SendMessageType.Notification ||
+        messageType === SendMessageType.Teammate
+      ) {
+        this.backgroundInteractionPromptIds.add(prompt_id);
+        while (
+          this.backgroundInteractionPromptIds.size >
+          MAX_BACKGROUND_INTERACTION_PROMPT_IDS
+        ) {
+          const oldest = this.backgroundInteractionPromptIds
+            .keys()
+            .next().value;
+          if (oldest === undefined) break;
+          this.backgroundInteractionPromptIds.delete(oldest);
+        }
+      }
       if (!options?.isConcurrentSideQuery) {
         this.toolExplorationBudget.reset();
         this.toolExplorationBudgetPromptId = prompt_id;
@@ -4776,6 +4839,7 @@ export class LlmClient {
             undefined,
             goalPermit,
             /* deliveredTurn */ true,
+            /* teammateTurn */ messageType === SendMessageType.Teammate,
           );
       }
     }
@@ -5226,6 +5290,19 @@ export class LlmClient {
         options?.toolCallPreparations,
         suppressedHookContext,
         workflowModeEligible ? () => onModelRequestDispatched?.() : undefined,
+        messageType === SendMessageType.Retry,
+        // Ledger membership is decided here, where the sender is known: the
+        // live turn's own sends participate. Notification/Teammate first sends
+        // are background, not this turn, and are excluded by messageType.
+        // Notification, Teammate and concurrent side queries are additionally
+        // registered by prompt id so their unflagged ToolResult/Hook/Steer
+        // continuations stay excluded (the flag/messageType is only on the first
+        // send). Their ids are unique (the CLI advances the prompt counter), so
+        // a registered id never drops a foreground turn (R6-1/R7-1).
+        messageType !== SendMessageType.Notification &&
+          messageType !== SendMessageType.Teammate &&
+          !this.backgroundInteractionPromptIds.has(prompt_id),
+        options?.ledgerTurnKey,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
