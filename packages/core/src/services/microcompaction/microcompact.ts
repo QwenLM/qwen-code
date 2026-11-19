@@ -11,6 +11,7 @@ import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from '../../config/clearCo
 import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames, canonicalToolName } from '../../tools/tool-names.js';
 import { isPersistedOutputStub } from '../../tools/truncation.js';
+import { getToolOutputRecovery } from '../../tools/tool-output-recovery.js';
 
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
 export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
@@ -509,9 +510,14 @@ function getClearableToolOutput(
   // the stub would trade a preview for nothing (it is already preview-sized)
   // and destroy the only reference to the saved bytes, so it is never
   // clearable. Truncations without a saved file keep no such reference and
-  // stay clearable. Both producers count: the `<persisted-output>` tag and the
-  // `Tool output was too large...` envelope `run_shell_command` emits.
-  if (isPersistedOutputStub(output)) {
+  // stay clearable. Prefer the Part-aware recovery handle because it covers
+  // every producer without recognizing their model-visible text. The string
+  // fallback remains necessary after JSON serialization or resume drops the
+  // non-enumerable handle.
+  if (
+    (getToolOutputRecovery(part)?.persistedOutputFiles?.length ?? 0) > 0 ||
+    isPersistedOutputStub(output)
+  ) {
     // It is not free, though: the preview its producer budgeted stays resident
     // in the prompt. Counting it as zero would take the largest results out of
     // the size trigger's total and let the valve go blind to them, so the

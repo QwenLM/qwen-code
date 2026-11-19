@@ -7,6 +7,11 @@
 import { describe, expect, it, afterEach } from 'vitest';
 import type { Content } from '@google/genai';
 import type { ClearContextOnIdleSettings } from '../../config/config.js';
+import { enforceFunctionResponseBudget } from '../../tools/tool-response-finalizer.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+} from '../../tools/tool-output-recovery.js';
 
 import {
   collectResidentMemoryBodies,
@@ -1069,6 +1074,154 @@ the last characters`;
     expect(
       result.history[3]!.parts![0]!.functionResponse!.response!['output'],
     ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+  });
+
+  it.each([
+    {
+      name: 'finalizer saved artifact',
+      toolName: 'run_shell_command',
+      rawOutput: `retained output tail${'x'.repeat(2_000)}`,
+      expectedPreview: 'retained output tail',
+    },
+    {
+      name: 'web_fetch saved extracted text',
+      toolName: 'web_fetch',
+      rawOutput: `URL: https://example.com\nContent-Type: text/plain\nFull extracted text saved to: /tmp/tool-results/web-fetch.txt. Page in with read_file using file_path, offset and limit.\n\n${'web content '.repeat(200)}`,
+      expectedPreview: 'Full extracted text saved to:',
+    },
+  ])(
+    'preserves a real finalized $name part with recovery metadata',
+    ({ toolName, rawOutput, expectedPreview }) => {
+      const outputFile = '/tmp/tool-results/finalizer.output';
+      const [finalized] = enforceFunctionResponseBudget(
+        [
+          {
+            callId: 'finalizer-call',
+            toolName,
+            responseParts: makeToolResult(toolName, rawOutput).parts!,
+            persistedOutputFiles: [outputFile],
+          },
+        ],
+        900,
+      );
+      const part = finalized!.responseParts[0]!;
+      const output = part.functionResponse!.response!['output'];
+      expect(output).toContain(
+        `Tool output truncated. Persisted tool-output artifact: ${outputFile}`,
+      );
+      expect(output).toContain(expectedPreview);
+      expect(getToolOutputRecovery(part)).toEqual({
+        persistedOutputFiles: [outputFile],
+      });
+
+      const result = microcompactHistory(
+        [
+          makeToolCall(toolName),
+          { role: 'user', parts: [part] },
+          makeToolCall('run_shell_command'),
+          makeToolResult('run_shell_command', 'newest ordinary output'),
+        ],
+        twoHoursAgo,
+        { ...DEFAULT_SETTINGS, toolResultsNumToKeep: 0 },
+        { force: true },
+      );
+
+      expect(
+        result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+      ).toBe(output);
+    },
+  );
+
+  it('retains the recognized string fallback after recovery metadata is lost on resume', () => {
+    const stub = makePersistedOutputStub();
+    const part = makeToolResult('run_shell_command', stub).parts![0]!;
+    setToolOutputRecovery(part, {
+      persistedOutputFiles: ['/tmp/tool-results/resumed.output'],
+    });
+    const resumed = JSON.parse(
+      JSON.stringify({ role: 'user', parts: [part] }),
+    ) as Content;
+    expect(getToolOutputRecovery(resumed.parts![0]!)).toBeUndefined();
+
+    const result = microcompactHistory(
+      [
+        makeToolCall('run_shell_command'),
+        resumed,
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'newest ordinary output'),
+      ],
+      twoHoursAgo,
+      { ...DEFAULT_SETTINGS, toolResultsNumToKeep: 0 },
+      { force: true },
+    );
+
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(stub);
+  });
+
+  it('protects only non-empty recovery file lists during forced clearing', () => {
+    const outputFile = '/tmp/tool-results/protected.output';
+    const emptyRecovery = enforceFunctionResponseBudget(
+      [
+        {
+          callId: 'empty-recovery-call',
+          toolName: 'run_shell_command',
+          responseParts: makeToolResult('run_shell_command', 'x'.repeat(2_000))
+            .parts!,
+          persistedOutputFiles: [],
+        },
+      ],
+      300,
+    )[0]!.responseParts[0]!;
+    const protectedRecovery = enforceFunctionResponseBudget(
+      [
+        {
+          callId: 'protected-recovery-call',
+          toolName: 'run_shell_command',
+          responseParts: makeToolResult('run_shell_command', 'y'.repeat(2_000))
+            .parts!,
+          persistedOutputFiles: [outputFile],
+        },
+      ],
+      300,
+    )[0]!.responseParts[0]!;
+    expect(getToolOutputRecovery(emptyRecovery)?.persistedOutputFiles).toEqual(
+      [],
+    );
+    expect(
+      getToolOutputRecovery(protectedRecovery)?.persistedOutputFiles,
+    ).toEqual([outputFile]);
+
+    const result = microcompactHistory(
+      [
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'ordinary control output'),
+        makeToolCall('run_shell_command'),
+        { role: 'user', parts: [emptyRecovery] },
+        makeToolCall('run_shell_command'),
+        { role: 'user', parts: [protectedRecovery] },
+        makeToolCall('run_shell_command'),
+        makeToolResult('run_shell_command', 'newest ordinary output'),
+      ],
+      twoHoursAgo,
+      { ...DEFAULT_SETTINGS, toolResultsNumToKeep: 0 },
+      { force: true },
+    );
+
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(result.meta!.toolsCleared).toBe(2);
+    expect(
+      result.history[3]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(
+      result.history[5]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(protectedRecovery.functionResponse!.response!['output']);
+    expect(
+      result.history[7]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('newest ordinary output');
   });
 
   it('still clears a bounded envelope that could not save a file', () => {
