@@ -52115,8 +52115,8 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       );
     } finally {
       await pair.restore();
-      // The daemon's block-buffered logger keeps writing until close; rm
-      // racing a live flush dies with ENOTEMPTY on loaded hosts.
+      // The logger appends by path, so removing its log dir while the daemon
+      // still drains recreates daemon.log and the parent rmdir hits ENOTEMPTY.
       await handle?.close();
       handle = undefined;
       await fsp.rm(logDir, {
