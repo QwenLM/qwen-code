@@ -148,6 +148,14 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_147_200;
 // to the warning and 1,671 to the ceiling. (A local build against the worktree's
 // own node_modules measures lower — 2,138,797 — but the lane's absolute number
 // is what these constants track.)
+// The workspace artifact library copy (nine keys across three locales) is
+// interactive-only: managed-artifact-library-messages.transcript-stub.ts
+// replaces it in transcript mode, so it contributes no bytes here. The merged
+// tree first measured 2,148,522 JS bytes with the copy inlined; registering
+// the stub brings it to 2,146,575 (CSS 2,423,645, separate), 46 above the
+// 2,146,529 lane measurement #17746 re-tracked. The forbidden-input guard
+// passes and the third-party input mix is unchanged, so the constants stay at
+// main's #17746 tracking instead of raising them for this PR.
 const MAX_DOCUMENT_RUNTIME_BYTES = 2_148_200;
 
 // Modules that must not be reachable from the document entry, checked against
