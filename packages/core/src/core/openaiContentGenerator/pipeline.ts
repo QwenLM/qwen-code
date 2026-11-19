@@ -76,6 +76,7 @@ import { getCurrentAgentId } from '../../agents/runtime/agent-context.js';
 import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
 import { trailingReattachPartCount } from '../../services/image-payload-references.js';
 import type { ResolvedReasoning } from '../reasoning-overrides.js';
+import { markRequestDispatched } from '../loggingContentGenerator/request-dispatch.js';
 import {
   ensureReasoningContentOnAssistantMessage,
   filterIsolatedModelOverrides,
@@ -1990,6 +1991,7 @@ export class ContentGenerationPipeline {
       runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest);
       const telemetryAttempt = reportOpenAiRequest(openaiRequest);
 
+      markRequestDispatched();
       return executor(openaiRequest, attemptContext, telemetryAttempt);
     };
 
