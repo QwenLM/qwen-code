@@ -290,7 +290,9 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
           </div>
         )}
         {result?.error && (
-          <pre className={styles.shellFailure}>{result.error}</pre>
+          <pre className={styles.shellFailure} dir="ltr">
+            {result.error}
+          </pre>
         )}
         {!!result?.signal && (
           <div className={styles.shellFailure}>

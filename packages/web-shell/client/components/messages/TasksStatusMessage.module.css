@@ -399,6 +399,7 @@
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--foreground);
+  direction: ltr;
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;

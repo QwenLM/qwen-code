@@ -577,7 +577,7 @@ export function StandaloneAuth({
         <CardHeader className="items-center text-center">
           <CardTitle className="text-2xl">{copy.heading}</CardTitle>
           {normalizedAddress && (
-            <CardDescription className="font-mono text-xs break-all">
+            <CardDescription className="font-mono text-xs break-all" dir="ltr">
               {normalizedAddress}
             </CardDescription>
           )}
@@ -639,6 +639,7 @@ export function StandaloneAuth({
               <Label htmlFor="daemon-address">{copy.addressLabel}</Label>
               <Input
                 id="daemon-address"
+                dir="ltr"
                 type="url"
                 inputMode="url"
                 autoComplete="url"
@@ -662,6 +663,7 @@ export function StandaloneAuth({
               <Label htmlFor="daemon-bearer-token">{copy.tokenLabel}</Label>
               <Input
                 id="daemon-bearer-token"
+                dir="ltr"
                 type="password"
                 autoComplete="off"
                 autoFocus={needsToken}

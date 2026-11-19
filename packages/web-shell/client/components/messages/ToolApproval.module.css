@@ -209,6 +209,7 @@
 
 .codeBlock {
   margin: 0;
+  direction: ltr;
   font-family: var(--font-mono);
   font-size: 13px;
   color: var(--foreground);

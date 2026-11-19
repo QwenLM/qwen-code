@@ -478,7 +478,10 @@ export function DesktopRelayPanel({
           <p className="text-xs text-muted-foreground">
             {t('desktopRelay.unknownHint')}
           </p>
-          <code className="block break-all rounded bg-muted px-2 py-1 font-mono text-xs">
+          <code
+            dir="ltr"
+            className="block break-all rounded bg-muted px-2 py-1 font-mono text-xs"
+          >
             ~/.qwen/desktop-relay/node_modules/.bin/node-repl-mcp desktop-relay
             disconnect
           </code>
@@ -500,7 +503,10 @@ export function DesktopRelayPanel({
           <p className="text-xs text-muted-foreground">
             {t('desktopRelay.setupHint')}
           </p>
-          <code className="block break-all rounded bg-muted px-2 py-1 font-mono text-xs">
+          <code
+            dir="ltr"
+            className="block break-all rounded bg-muted px-2 py-1 font-mono text-xs"
+          >
             {installCommand}
           </code>
           <div className="flex gap-2">

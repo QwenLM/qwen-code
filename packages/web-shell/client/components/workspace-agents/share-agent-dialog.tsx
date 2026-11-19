@@ -80,7 +80,7 @@ function Copyable({ label, text }: { label: string; text: string }) {
     <div className="flex flex-col gap-1.5 text-sm">
       <span className="font-medium">{label}</span>
       <div className="flex items-center gap-2 rounded-md border border-border bg-muted/40 py-1.5 pe-1.5 ps-3">
-        <code className="min-w-0 flex-1 truncate font-mono text-xs">
+        <code className="min-w-0 flex-1 truncate font-mono text-xs" dir="ltr">
           {text}
         </code>
         <Button

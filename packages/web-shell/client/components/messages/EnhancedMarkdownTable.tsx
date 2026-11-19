@@ -2935,6 +2935,7 @@ export function EnhancedTable({
     <div
       ref={setShell}
       data-selection-copy-table
+      dir={isRtl ? 'rtl' : 'ltr'}
       className={`${styles.tableShell} ${densityClassName(density)} ${
         freezeFirstColumn ? styles.hasFrozenColumn : ''
       } ${isDragging ? styles.dragging : ''} ${fullscreen ? styles.fullscreenTable : ''}`}

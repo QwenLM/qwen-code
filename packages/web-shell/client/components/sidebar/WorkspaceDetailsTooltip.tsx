@@ -223,7 +223,9 @@ export function WorkspaceDetailsTooltip({
     <>
       <GitBranchIcon aria-hidden="true" />
       <span className={sidebarStyles.sessionDetailsBranch}>
-        <span title={branch ?? undefined}>{branch}</span>
+        <span title={branch ?? undefined} dir="ltr">
+          {branch}
+        </span>
         {gitDotTone && (
           <span
             className={sidebarStyles.sessionDetailsGitDot}
@@ -410,6 +412,7 @@ export function WorkspaceDetailsTooltip({
               className={sidebarStyles.sessionDetailsPath}
               title={cwd}
               data-web-shell-workspace-path
+              dir="ltr"
             >
               {cwd}
             </span>

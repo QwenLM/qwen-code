@@ -20,6 +20,8 @@ const LTR_CODE_SURFACES: Array<[string, string]> = [
   ['./messages/tools/ToolChrome.module.css', '.shellOutput'],
   ['./messages/tools/ToolChrome.module.css', '.payloadText'],
   ['./messages/TasksStatusMessage.module.css', '.shellOutput'],
+  ['./messages/TasksStatusMessage.module.css', '.monitorCommand'],
+  ['./messages/ToolApproval.module.css', '.codeBlock'],
   ['./dialogs/GitDiffDialog.module.css', '.diffLine'],
   [
     './artifacts/ArtifactPanel.module.css',
@@ -29,6 +31,25 @@ const LTR_CODE_SURFACES: Array<[string, string]> = [
     './artifacts/ArtifactPanel.module.css',
     '.codeMirrorFile :global(.cm-editor)',
   ],
+];
+
+// A machine value rendered through a class that ALSO renders localized copy
+// carries the pin as a `dir="ltr"` attribute on that one render instead of in
+// the stylesheet: a class-level pin would force LTR onto the Arabic
+// placeholders sharing it. Each entry names the file, the element, a marker
+// identifying the render, and how many such renders must carry the pin — so
+// pinning a localized sibling fails here too.
+const LTR_MACHINE_RENDERS: Array<[string, string, string, number]> = [
+  ['./messages/TasksStatusMessage.tsx', 'div', 'shellFieldValue', 2],
+  ['./messages/tools/ShellToolOutput.tsx', 'pre', 'shellFailure', 1],
+  ['./DesktopRelayControl.tsx', 'code', 'font-mono', 2],
+  ['./workspace-agents/add-runtime-dialog.tsx', 'code', 'font-mono', 1],
+  ['./workspace-agents/share-agent-dialog.tsx', 'code', 'font-mono', 1],
+  ['./sidebar/WorkspaceDetailsTooltip.tsx', 'span', 'sessionDetailsPath', 1],
+  ['./sidebar/WorkspaceDetailsTooltip.tsx', 'span', 'title={branch', 1],
+  ['./StandaloneAuth.tsx', 'CardDescription', 'font-mono', 1],
+  ['./StandaloneAuth.tsx', 'Input', 'id="daemon-address"', 1],
+  ['./StandaloneAuth.tsx', 'Input', 'id="daemon-bearer-token"', 1],
 ];
 
 function directions(file: string, selector: string): string[] {
@@ -42,6 +63,20 @@ function directions(file: string, selector: string): string[] {
     rule.walkDecls('direction', (decl) => found.push(decl.value));
   });
   return found;
+}
+
+// Opening tags are matched up to their first `>`; an attribute expression
+// containing `=>` truncates the match, which is harmless because the marker
+// and the pin both precede any handler in the renders listed above.
+function pinnedRenders(file: string, tag: string, marker: string): number {
+  const src = readFileSync(
+    fileURLToPath(new URL(file, import.meta.url)),
+    'utf8',
+  );
+  const openings = src.match(new RegExp(`<${tag}\\b[^>]*>`, 'g')) ?? [];
+  return openings.filter(
+    (opening) => opening.includes(marker) && opening.includes('dir="ltr"'),
+  ).length;
 }
 
 describe('RTL shell keeps code surfaces LTR', () => {
@@ -58,6 +93,27 @@ describe('RTL shell keeps code surfaces LTR', () => {
   it('leaves the shared output class to the shell direction', () => {
     expect(
       directions('./messages/tools/ToolChrome.module.css', '.expandedOutput'),
+    ).toEqual([]);
+  });
+
+  it.each(LTR_MACHINE_RENDERS)(
+    '%s pins %s renders marked %s to dir="ltr"',
+    (file, tag, marker, count) => {
+      expect(pinnedRenders(file, tag, marker)).toBe(count);
+    },
+  );
+
+  // The sibling localized renders of the same shared classes must stay
+  // unpinned, or an Arabic placeholder would be forced LTR.
+  it('leaves the localized siblings of the shared machine classes unpinned', () => {
+    expect(
+      directions(
+        './messages/TasksStatusMessage.module.css',
+        '.shellFieldValue',
+      ),
+    ).toEqual([]);
+    expect(
+      directions('./messages/tools/ToolChrome.module.css', '.shellFailure'),
     ).toEqual([]);
   });
 });

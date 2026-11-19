@@ -2506,6 +2506,24 @@ describe('EnhancedMarkdownTable', () => {
     ).toBe('280px');
   });
 
+  // Markdown.tsx renders this table inside a `dir="auto"` box, so an unpinned
+  // shell takes its layout direction from the first strong character of the
+  // content while the resize/freeze branches take theirs from the UI locale.
+  // Pinning the shell is what keeps those two from disagreeing.
+  it.each([
+    ['en', 'ltr'],
+    ['ar', 'rtl'],
+  ] as const)(
+    'pins the table shell to the %s UI direction',
+    (language, dir) => {
+      const container = renderTable(language);
+      const shell = container.querySelector<HTMLElement>(
+        '[class*="tableShell"]',
+      )!;
+      expect(shell.getAttribute('dir')).toBe(dir);
+    },
+  );
+
   it('positions the RTL frozen shadow outside the left edge of the frozen column', () => {
     const container = renderWideTable('ar');
     const shell = container.querySelector<HTMLElement>(

@@ -1565,7 +1565,9 @@ export function ShellTaskDetail({
               label={t('tasks.detail.workingDir')}
             />
           </div>
-          <div className={styles.shellFieldValue}>{currentTask.cwd}</div>
+          <div className={styles.shellFieldValue} dir="ltr">
+            {currentTask.cwd}
+          </div>
         </div>
         {currentTask.outputFile && (
           <div className={styles.monitorCommandSection}>
@@ -1578,7 +1580,7 @@ export function ShellTaskDetail({
                 label={t('tasks.detail.outputFile')}
               />
             </div>
-            <div className={styles.shellFieldValue}>
+            <div className={styles.shellFieldValue} dir="ltr">
               {currentTask.outputFile}
             </div>
           </div>
