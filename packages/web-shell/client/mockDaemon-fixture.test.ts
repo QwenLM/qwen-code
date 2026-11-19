@@ -71,13 +71,23 @@ describe('createWebShellDaemonScenario fixture ownership', () => {
   it('does not hand back the caller standaloneSessions array', () => {
     // The standalone create and patch routes unshift and replace whole
     // elements, so array identity is the property that decides whether a
-    // case's writes reach the caller's fixture.
-    const fixture: DaemonStandaloneSessionSummary[] = [];
+    // case's writes reach the caller's fixture. A populated fixture is what
+    // lets the value assertion also pin that the caller's rows survive the
+    // clone — an empty one would pass for any fresh empty array.
+    const fixture: DaemonStandaloneSessionSummary[] = [
+      {
+        ...makeSidebarSession('standalone-fixture'),
+        sourceType: 'standalone',
+        context: { kind: 'standalone' },
+      },
+    ];
     const scenario = createWebShellDaemonScenario({
       standaloneSessions: fixture,
     });
 
     expect(scenario.standaloneSessions).not.toBe(fixture);
+    expect(scenario.standaloneSessions[0]).not.toBe(fixture[0]);
+    expect(scenario.standaloneSessions).toEqual(fixture);
   });
 
   it('does not hand back the caller gitRemotes array', () => {
