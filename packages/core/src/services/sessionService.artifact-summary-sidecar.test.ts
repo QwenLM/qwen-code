@@ -649,7 +649,7 @@ describe('SessionService - artifact summary sidecar', () => {
       cwd: root,
       version: '1.0.0',
       systemPayload: {
-        title: 'Pre-prompt session',
+        customTitle: 'Pre-prompt session',
       } as unknown as ChatRecord['systemPayload'],
     };
     writeTranscript([title, { ...artifactEventRecord([a]), parentUuid: null }]);
@@ -862,7 +862,9 @@ describe('SessionService - artifact summary sidecar', () => {
     subtype: 'custom_title',
     cwd: root,
     version: '1.0.0',
-    systemPayload: { title } as unknown as ChatRecord['systemPayload'],
+    systemPayload: {
+      customTitle: title,
+    } as unknown as ChatRecord['systemPayload'],
   });
 
   const writeTranscriptOfSize = (targetBytes: number, rest: ChatRecord[]) => {
@@ -905,7 +907,7 @@ describe('SessionService - artifact summary sidecar', () => {
       cwd: root,
       version: '1.0.0',
       systemPayload: {
-        title: 'Non-tail',
+        customTitle: 'Non-tail',
       } as unknown as ChatRecord['systemPayload'],
     };
     writeTranscript([
@@ -925,6 +927,15 @@ describe('SessionService - artifact summary sidecar', () => {
     });
     expect(projection?.runtime.apiHistory.length).toBe(0);
     expect(projection?.runtime.artifactSnapshot?.artifacts.length).toBe(2);
+    // One delivered-set definition: pin membership, not just size — an
+    // equal-size different-membership delivery would otherwise stay green.
+    const loadIds = loaded?.artifactSnapshot?.artifacts
+      .map((artifact) => artifact.id)
+      .sort();
+    const projectionIds = projection?.runtime.artifactSnapshot?.artifacts
+      .map((artifact) => artifact.id)
+      .sort();
+    expect(projectionIds).toEqual(loadIds);
     expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
       afterLoad,
     );
@@ -1144,7 +1155,7 @@ describe('SessionService - artifact summary sidecar', () => {
       cwd: root,
       version: '1.0.0',
       systemPayload: {
-        title: 'Non-tail removal',
+        customTitle: 'Non-tail removal',
       } as unknown as ChatRecord['systemPayload'],
     };
     writeTranscript([
@@ -1254,7 +1265,7 @@ describe('SessionService - artifact summary sidecar', () => {
       cwd: root,
       version: '1.0.0',
       systemPayload: {
-        title: 'Stat fail',
+        customTitle: 'Stat fail',
       } as unknown as ChatRecord['systemPayload'],
     };
     writeTranscript([title, { ...artifactEventRecord([a]), parentUuid: null }]);
@@ -1444,7 +1455,7 @@ describe('SessionService - artifact summary sidecar', () => {
       cwd: root,
       version: '1.0.0',
       systemPayload: {
-        title: 'Pre-prompt',
+        customTitle: 'Pre-prompt',
       } as unknown as ChatRecord['systemPayload'],
     };
     const unknownType = {
@@ -1535,7 +1546,7 @@ describe('SessionService - artifact summary sidecar', () => {
       cwd: root,
       version: '1.0.0',
       systemPayload: {
-        title: 'Partial',
+        customTitle: 'Partial',
       } as unknown as ChatRecord['systemPayload'],
     };
     writeFileSync(
@@ -1574,7 +1585,7 @@ describe('SessionService - artifact summary sidecar', () => {
       cwd: root,
       version: '1.0.0',
       systemPayload: {
-        title: 'Partial load',
+        customTitle: 'Partial load',
       } as unknown as ChatRecord['systemPayload'],
     };
     writeFileSync(
@@ -1593,13 +1604,116 @@ describe('SessionService - artifact summary sidecar', () => {
     );
   });
 
+  it('seeds the projection from a complete read despite a damaged sources snapshot', async () => {
+    // A damaged session_sources_snapshot sets sourcesUnavailable even on a
+    // complete read, but it does not narrow artifact delivery. The load
+    // seed keys on read completeness (sourceReadComplete) and proceeds; the
+    // projection seed must key on the same signal, not the broader
+    // sourcesUnavailable, or the two funnels disagree on the same journal
+    // (review round-8 deferred finding).
+    const a = persistedArtifact('https://example.com/damaged-sources-a');
+    const b = persistedArtifact('https://example.com/damaged-sources-b');
+    const sourceRecord: ChatRecord = {
+      uuid: 'source-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'session_source',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        sourceType: 'web_shell',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    const damagedSnapshot: ChatRecord = {
+      uuid: 'sources-snap-1',
+      parentUuid: 'source-1',
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.250Z',
+      type: 'system',
+      subtype: 'session_sources_snapshot',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        version: 1,
+        revision: -1,
+        sources: [],
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([
+      sourceRecord,
+      damagedSnapshot,
+      { ...artifactEventRecord([a, b]), parentUuid: 'source-1' },
+    ]);
+
+    const loaded = await service.loadSession(SESSION_ID);
+    expect(loaded?.artifactSnapshot?.artifacts.length).toBe(2);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      2,
+    );
+
+    writeSessionArtifactSummarySidecar(sidecarPath, 5);
+    const projection = await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+    expect(projection?.runtime.sourcesUnavailable).toBe(true);
+    expect(projection?.runtime.artifactSnapshot?.artifacts.length).toBe(2);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      2,
+    );
+  });
+
+  it('refuses the projection seed when the history chain has a gap', async () => {
+    // The historyGaps authority gate: a broken active chain can orphan
+    // artifact events off the branch and undercount, so the seed keeps the
+    // correct sidecar. This is the projection gate that lacked a dedicated
+    // pin until review round 8.
+    const a = persistedArtifact('https://example.com/gap-a');
+    const b = persistedArtifact('https://example.com/gap-b');
+    const title: ChatRecord = {
+      uuid: 'title-1',
+      parentUuid: 'missing-parent',
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'custom_title',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        customTitle: 'Gap',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([
+      title,
+      { ...artifactEventRecord([a, b]), parentUuid: 'title-1' },
+    ]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 5);
+
+    const projection = await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+
+    expect(projection).toBeDefined();
+    expect(projection?.runtime.apiHistory.length).toBe(0);
+    expect(projection?.runtime.historyGaps?.length).toBeGreaterThan(0);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      5,
+    );
+  });
+
   it('never pays an auxiliary read in the projection funnel', async () => {
     // The projection funnel counts the artifactSnapshot its own selective
     // read already delivers — no full parse on either branch (review
     // round-6 R6-1: count and delivery share one source). A conversation
     // projection is skipped entirely; a side-records projection is counted
     // from its delivery (the metadata-only selector includes the
-    // null-parented event, so it is delivered and seeded).
+    // null-parented event, so it is delivered and seeded). The pin targets
+    // the load-funnel entry points a full-parse fallback would call —
+    // loadSession is reachable from the projection path (readAllRecords
+    // alone is not, since the selective read lives in the transcript
+    // reader), so a regression that re-routes the seed through the load
+    // funnel turns this red (review round-8 deferred finding).
     const readSpy = vi.spyOn(
       service as unknown as {
         readAllRecords: (
@@ -1609,6 +1723,7 @@ describe('SessionService - artifact summary sidecar', () => {
       },
       'readAllRecords',
     );
+    const loadSpy = vi.spyOn(service, 'loadSession');
     const a = persistedArtifact('https://example.com/spy-a');
 
     writeTranscript([userRecord(), artifactEventRecord([a])]);
@@ -1617,6 +1732,7 @@ describe('SessionService - artifact summary sidecar', () => {
       replay: { kind: 'none' },
     });
     expect(readSpy).not.toHaveBeenCalled();
+    expect(loadSpy).not.toHaveBeenCalled();
     expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
 
     const title: ChatRecord = {
@@ -1629,7 +1745,7 @@ describe('SessionService - artifact summary sidecar', () => {
       cwd: root,
       version: '1.0.0',
       systemPayload: {
-        title: 'Pre-prompt session',
+        customTitle: 'Pre-prompt session',
       } as unknown as ChatRecord['systemPayload'],
     };
     writeTranscript([title, { ...artifactEventRecord([a]), parentUuid: null }]);
@@ -1640,6 +1756,7 @@ describe('SessionService - artifact summary sidecar', () => {
     expect(projection).toBeDefined();
     expect(projection?.runtime.apiHistory.length).toBe(0);
     expect(readSpy).not.toHaveBeenCalled();
+    expect(loadSpy).not.toHaveBeenCalled();
     // The metadata-only selector includes the null-parented event, so the
     // projection delivers it and the sidecar matches — still no read.
     expect(projection?.runtime.artifactSnapshot?.artifacts.length).toBe(1);
@@ -1647,6 +1764,7 @@ describe('SessionService - artifact summary sidecar', () => {
       1,
     );
     readSpy.mockRestore();
+    loadSpy.mockRestore();
   });
 
   it('does not seed through the projection for a session with a conversation', async () => {

@@ -3830,18 +3830,22 @@ export class SessionService {
     // for a metadata-only active chain, so this delivery matches the
     // whole-transcript rebuild the load funnel counts and the recorder
     // stamps — one delivered-set definition across all three writers.
-    // The authority gates mirror the load seed: a partial read
-    // (sourcesUnavailable), a broken history chain, or a damaged artifact
-    // journal must not overwrite a correct count — the library mutation
-    // guard refuses the same journal, and the load seed keeps the last
-    // known good count on refusal. Counting the delivery needs no
-    // auxiliary read: the reader already paid the indexing cost. Sessions
-    // with a conversation keep the selective read's zero-extra-I/O
-    // contract; their count arrives via the recorder and the load funnel.
+    // The authority gates mirror the load seed: an incomplete read
+    // (sourceReadComplete — the same signal the load seed gates on;
+    // sourcesUnavailable is broader and also flags a damaged sources
+    // snapshot, which does not narrow artifact delivery), a broken history
+    // chain, or a damaged artifact journal must not overwrite a correct
+    // count — the library mutation guard refuses the same journal, and the
+    // load seed keeps the last known good count on refusal. Counting the
+    // delivery needs no auxiliary read: the reader already paid the
+    // indexing cost. Sessions with a conversation are not seeded here;
+    // their count arrives via the recorder stamp and the CLI load funnel
+    // (a daemon-only first open of a legacy conversation session without a
+    // sidecar is a pre-existing #17518 limitation, tracked as a follow-up).
     if (
       projection &&
       projection.runtime.apiHistory.length === 0 &&
-      !projection.runtime.sourcesUnavailable &&
+      projection.runtime.sourceReadComplete === true &&
       !projection.runtime.historyGaps?.length &&
       !hasDisqualifyingArtifactJournalWarning(
         projection.runtime.artifactJournalWarnings ?? [],
@@ -6036,8 +6040,10 @@ function isForkSideRecord(record: ChatRecord): boolean {
 
 /**
  * Transcript size cap shared by the library mutation read and the
- * best-effort seed's auxiliary read: neither parses an unbounded
- * transcript on a live path.
+ * best-effort first-open seed's size gate. It bounds the library mutation
+ * read; for the seed it declines to seed an oversized conversation-less
+ * transcript. The load funnel's own parse is the load and is not bounded
+ * by this cap — the seed's size gate runs after that read.
  */
 const MAX_TRANSCRIPT_READ_BYTES = 64 * 1024 * 1024;
 
