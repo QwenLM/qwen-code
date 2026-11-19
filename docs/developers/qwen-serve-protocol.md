@@ -4183,7 +4183,7 @@ independent per-thread conversations, create sessions with
 
 ### `POST /session/:id/sub-sessions`
 
-A person sends a prompt from the page of session `:id` to a new session or any existing one, in its own workspace or another registered one (capability `session_sub_session_send`). The daemon runs it as a `sent` launch of `create_sub_session` with `:id` as the caller: the same trust and cap checks, and the same completion notification, which `:id` takes as a turn of its own. Unlike the tool, picking the workspace is the approval, so nothing is asked separately; the target keeps its own approval mode; any session but `:id` itself can be the target, keeping its own parent and source; and the delegation depth limit does not apply.
+A person sends a prompt from the page of session `:id` to a new session or any existing one, in its own workspace or another registered one (capability `session_sub_session_send`). The daemon runs it as a `sent` launch of `create_sub_session` with `:id` as the caller: the same trust and cap checks, and the same completion notification, which `:id` takes as a turn of its own. Unlike the tool, picking the workspace is the approval, so nothing is asked separately; the target keeps its own approval mode; and the delegation depth limit does not apply. As with the tool, any session but `:id` itself can be the target, keeping its own parent and source.
 
 ```bash
 curl -X POST http://127.0.0.1:4170/session/$SID/sub-sessions \

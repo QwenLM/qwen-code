@@ -4406,6 +4406,7 @@ export class Session implements SessionContext {
             ? {
                 workspace: req.workspace,
                 workspaceGeneration: req.workspaceGeneration,
+                ...(req.requiresYolo ? { requiresYolo: true } : {}),
               }
             : {}),
           ...(req.sessionId ? { sessionId: req.sessionId } : {}),

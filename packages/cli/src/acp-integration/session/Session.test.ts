@@ -23370,7 +23370,7 @@ describe('Session', () => {
       );
     });
 
-    it('forwards a target workspace and surfaces the daemon refusal text', async () => {
+    it('forwards a target workspace and its YOLO requirement, surfacing the daemon refusal text', async () => {
       const spawn = vi.mocked(mockConfig.setSubSessionSpawner).mock
         .calls[0]?.[0];
       expect(spawn).toBeTypeOf('function');
@@ -23385,6 +23385,7 @@ describe('Session', () => {
           completion: 'first-turn',
           workspace: '/x',
           workspaceGeneration: 'generation-x',
+          requiresYolo: true,
         }),
       ).rejects.toThrow('No registered workspace matches "/x".');
       expect(mockClient.extMethod).toHaveBeenLastCalledWith(
@@ -23394,6 +23395,7 @@ describe('Session', () => {
           completion: 'first-turn',
           workspace: '/x',
           workspaceGeneration: 'generation-x',
+          requiresYolo: true,
           callerSessionId: 'test-session-id',
         },
       );
@@ -23449,7 +23451,7 @@ describe('Session', () => {
         launches: true,
       },
       { label: 'Auto', mode: ApprovalMode.AUTO, asks: true, launches: true },
-      { label: 'YOLO', mode: ApprovalMode.YOLO, asks: true, launches: true },
+      { label: 'YOLO', mode: ApprovalMode.YOLO, asks: false, launches: true },
       { label: 'Plan', mode: ApprovalMode.PLAN, asks: false, launches: false },
       {
         label: 'deny rule on requested selector',
@@ -23585,6 +23587,9 @@ describe('Session', () => {
           expect(spawn).toHaveBeenCalledExactlyOnceWith({
             ...args,
             ...(local ? {} : { workspaceGeneration: 'generation-b' }),
+            ...(!local && mode === ApprovalMode.YOLO
+              ? { requiresYolo: true }
+              : {}),
             completion: 'first-turn',
           });
           if (asks) {
