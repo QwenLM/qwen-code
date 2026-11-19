@@ -9,15 +9,18 @@ import { consumeFrames } from '../../src/daemon/sse.js';
 
 describe('SSE frame scanning', () => {
   it.each(['\n\n', '\r\n\r\n'])(
-    'preserves every frame in a large batch (%j)',
+    'preserves every frame within the large-batch scan budget (%j)',
     (separator) => {
       const frames = Array.from({ length: 16_000 }, (_, id) => `data: ${id}`);
-      expect(
-        consumeFrames(frames.join(separator) + separator + 'partial'),
-      ).toEqual({
+      const input = frames.join(separator) + separator + 'partial';
+      const started = performance.now();
+      const consumed = consumeFrames(input);
+      const elapsed = performance.now() - started;
+      expect(consumed).toEqual({
         frames,
         tail: 'partial',
       });
+      expect(elapsed).toBeLessThan(500);
     },
   );
 
