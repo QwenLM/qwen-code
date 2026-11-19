@@ -134,6 +134,7 @@ import {
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
+import { ManagedRuntimeOutcomeUnknownError } from '../services/execution-environment.js';
 import { fnResponse } from '../test-utils/model-fixtures.js';
 
 /** MockTool that self-identifies as an omni media-policy tool, so a
@@ -2926,6 +2927,153 @@ describe('CoreToolScheduler', () => {
   const modelResult = (llmContent: string, returnDisplay: string) => ({
     llmContent,
     returnDisplay,
+  });
+
+  it('waits for Managed Runtime settlement after a timeout and drains running siblings', async () => {
+    await withToolTimeoutEnv('50', async () => {
+      const onTimeout = vi.fn();
+      const loseOutcome = deferred();
+      const settleSibling = deferred();
+      const unknown = new ManagedRuntimeOutcomeUnknownError('outcome unknown');
+      const tools = new AbortController();
+      const read = new MockTool({
+        name: 'read_file',
+        kind: Kind.Read,
+        canUpdateOutput: true,
+        execute: async (params, signal) => {
+          if (params['file_path'] === 'first.ts') {
+            signal?.addEventListener('abort', onTimeout, {
+              once: true,
+            });
+            await loseOutcome.promise;
+            throw unknown;
+          }
+          await settleSibling.promise;
+          return textResult('known outcome');
+        },
+      });
+      const config = makeSchedulerConfig(makeToolRegistry(read), {
+        getApprovalMode: () => ApprovalMode.YOLO,
+        getManagedRuntimeEnvironment: () => ({
+          toolNames: new Set([read.name]),
+        }),
+      });
+      const onManagedRuntimeBatchFailed = vi.fn();
+      const onManagedRuntimeOutcomeUnknown = vi.fn((error) =>
+        tools.abort(error),
+      );
+      const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+        schedulerWithCallbacks(config, {
+          onManagedRuntimeBatchFailed,
+          onManagedRuntimeOutcomeUnknown,
+        });
+      const running = scheduler.schedule(
+        [
+          readFileRequest('first', 'first.ts', 'p'),
+          readFileRequest('sibling', 'sibling.ts', 'p'),
+        ],
+        tools.signal,
+      );
+      void running.catch(() => undefined);
+      await vi.waitFor(() => expect(onTimeout).toHaveBeenCalled());
+      loseOutcome.resolve();
+      await vi.waitFor(() =>
+        expect(onManagedRuntimeOutcomeUnknown).toHaveBeenCalledWith(
+          unknown,
+          'first',
+        ),
+      );
+      expect(onManagedRuntimeBatchFailed).not.toHaveBeenCalled();
+      settleSibling.resolve();
+      await expect(running).rejects.toBe(unknown);
+      expect(onManagedRuntimeBatchFailed).toHaveBeenCalledExactlyOnceWith(
+        unknown,
+      );
+      expect(onAllToolCallsComplete).not.toHaveBeenCalled();
+      expect(reportedCalls(onToolCallsUpdate)).not.toContainEqual(
+        expect.objectContaining({
+          request: expect.objectContaining({ callId: 'first' }),
+          response: expect.anything(),
+        }),
+      );
+    });
+  });
+
+  it('reports an unknown outcome that settles just after a successful parallel tool', async () => {
+    const previous = process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+    process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '2';
+    try {
+      const unknown = new ManagedRuntimeOutcomeUnknownError('outcome unknown');
+      const loseOutcome = deferred();
+      const checkingThird = deferred();
+      const admitThird = deferred<boolean>();
+      const executeThird = vi.fn(() => textResult('too late'));
+      const read = new MockTool({
+        name: 'read_file',
+        kind: Kind.Read,
+        execute: async (params) => {
+          if (params['file_path'] === 'second.ts') {
+            await loseOutcome.promise;
+            throw unknown;
+          }
+          if (params['file_path'] === 'third.ts') return executeThird();
+          return textResult('known outcome');
+        },
+      });
+      const config = makeSchedulerConfig(makeToolRegistry(read), {
+        getApprovalMode: () => ApprovalMode.YOLO,
+      });
+      const onManagedRuntimeBatchFailed = vi.fn();
+      const tools = new AbortController();
+      const onAllToolCallsComplete = vi.fn();
+      const onManagedRuntimeOutcomeUnknown = vi.fn((error: Error) =>
+        tools.abort(error),
+      );
+      const scheduler = makeTestScheduler(config, {
+        onManagedRuntimeOutcomeUnknown,
+        onManagedRuntimeBatchFailed,
+        onAllToolCallsComplete,
+        beforeToolLaunch: ({ request }) => {
+          if (request.callId !== 'third') return true;
+          checkingThird.resolve();
+          return admitThird.promise;
+        },
+      });
+      const settled = scheduler
+        .schedule(
+          [
+            readFileRequest('first', 'first.ts', 'p'),
+            readFileRequest('second', 'second.ts', 'p'),
+            readFileRequest('third', 'third.ts', 'p'),
+          ],
+          tools.signal,
+        )
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      await checkingThird.promise;
+      loseOutcome.resolve();
+      await vi.waitFor(() =>
+        expect(onManagedRuntimeOutcomeUnknown).toHaveBeenCalledWith(
+          unknown,
+          'second',
+        ),
+      );
+      admitThird.resolve(true);
+      await vi.waitFor(() =>
+        expect(onManagedRuntimeBatchFailed).toHaveBeenCalledExactlyOnceWith(
+          unknown,
+        ),
+      );
+      expect(await settled).toBe(unknown);
+      expect(onAllToolCallsComplete).not.toHaveBeenCalled();
+      expect(executeThird).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined)
+        delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+      else process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = previous;
+    }
   });
 
   /** Runs lone `tool` as call `callId` with empty args; returns the handles. */

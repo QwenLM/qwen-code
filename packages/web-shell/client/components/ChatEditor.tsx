@@ -2009,6 +2009,7 @@ export const ChatEditor = memo(
       fileUploadDirectory,
       fileDropAction,
       composerVariant = 'default',
+      composerGlowEnabled = true,
       modelPicker,
     } = useWebShellCustomization();
     const [advancedMode, setAdvancedMode] = useState(false);
@@ -2784,16 +2785,13 @@ export const ChatEditor = memo(
       };
     }, [hasAtMenu, hasSlashMenu, closeAtMenu, closeSlashMenu]);
 
-    // editorViewRef is stable for the component's lifetime, so this effect
-    // runs once and the glow stays attached to the initial contentDOM; it
-    // re-attaches only if the view ref itself is replaced (CodeMirror
-    // recreates contentDOM on view swap, which is uncommon).
     useEffect(() => {
+      if (!composerGlowEnabled) return undefined;
       const glowRoot = containerRef.current;
       const inputEl = editorViewRef.current?.contentDOM;
       if (!glowRoot || !inputEl) return undefined;
       return attachComposerGlow(glowRoot, inputEl);
-    }, [editorViewRef]);
+    }, [composerGlowEnabled, editorViewRef]);
 
     const visibleActionSet = useMemo(() => {
       if (!visibleToolbarActions) return null;
@@ -4406,10 +4404,8 @@ export const ChatEditor = memo(
           onDragOver={handleUploadDragOver}
           onDragLeave={handleUploadDragLeave}
           onDropCapture={handleUploadDrop}
-          // Legacy marker from the pre-#8098 glow implementation; no CSS or
-          // script consumes it today, kept as-is to stay faithful to the
-          // restored original.
-          data-dac-glow
+          // Preserve the legacy marker for composers with the glow enabled.
+          data-dac-glow={composerGlowEnabled || undefined}
           onClick={(event) => {
             setModeDropdownOpen(false);
             setModelDropdownOpen(false);
@@ -4421,8 +4417,12 @@ export const ChatEditor = memo(
             core.focus();
           }}
         >
-          <div className={styles.dacAura} aria-hidden="true" />
-          <div className={styles.dacHalo} aria-hidden="true" />
+          {composerGlowEnabled && (
+            <>
+              <div className={styles.dacAura} aria-hidden="true" />
+              <div className={styles.dacHalo} aria-hidden="true" />
+            </>
+          )}
           {uploadEnabled && (
             <input
               ref={fileInputRef}

@@ -2230,6 +2230,37 @@ describe('Session', () => {
     expect(provider?.()).toBe(true);
   });
 
+  it('answers a Mod row unhooked once the session started without Mods', async () => {
+    const merged: Record<string, unknown> = { experimental: { mods: true } };
+    const modSettings = {
+      get merged() {
+        return merged;
+      },
+      isTrusted: false,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    const row = { text: 'Hello', isFirstOfReply: true };
+    const modSession = new Session(
+      'mod-row-session-id',
+      mockConfig,
+      mockClient,
+      modSettings,
+    );
+
+    // Before the history is replayed, the Mods have yet to start.
+    expect(await modSession.askModRow('AssistantMessage', row)).toEqual({
+      status: 'unanswered',
+    });
+    merged['experimental'] = { mods: false };
+    modSession.installRewriter();
+    merged['experimental'] = { mods: true };
+    expect(await modSession.askModRow('AssistantMessage', row)).toEqual({
+      status: 'unhooked',
+    });
+  });
+
   it('does not create approval transcript state during construction', () => {
     expect(
       mockChatRecordingService.recordSessionApprovalMode,
@@ -23371,7 +23402,7 @@ describe('Session', () => {
       );
     });
 
-    it('forwards a target workspace and surfaces the daemon refusal text', async () => {
+    it('forwards a target workspace and its YOLO requirement, surfacing the daemon refusal text', async () => {
       const spawn = vi.mocked(mockConfig.setSubSessionSpawner).mock
         .calls[0]?.[0];
       expect(spawn).toBeTypeOf('function');
@@ -23386,6 +23417,7 @@ describe('Session', () => {
           completion: 'first-turn',
           workspace: '/x',
           workspaceGeneration: 'generation-x',
+          requiresYolo: true,
         }),
       ).rejects.toThrow('No registered workspace matches "/x".');
       expect(mockClient.extMethod).toHaveBeenLastCalledWith(
@@ -23395,6 +23427,7 @@ describe('Session', () => {
           completion: 'first-turn',
           workspace: '/x',
           workspaceGeneration: 'generation-x',
+          requiresYolo: true,
           callerSessionId: 'test-session-id',
         },
       );
@@ -23450,7 +23483,7 @@ describe('Session', () => {
         launches: true,
       },
       { label: 'Auto', mode: ApprovalMode.AUTO, asks: true, launches: true },
-      { label: 'YOLO', mode: ApprovalMode.YOLO, asks: true, launches: true },
+      { label: 'YOLO', mode: ApprovalMode.YOLO, asks: false, launches: true },
       { label: 'Plan', mode: ApprovalMode.PLAN, asks: false, launches: false },
       {
         label: 'deny rule on requested selector',
@@ -23586,6 +23619,9 @@ describe('Session', () => {
           expect(spawn).toHaveBeenCalledExactlyOnceWith({
             ...args,
             ...(local ? {} : { workspaceGeneration: 'generation-b' }),
+            ...(!local && mode === ApprovalMode.YOLO
+              ? { requiresYolo: true }
+              : {}),
             completion: 'first-turn',
           });
           if (asks) {

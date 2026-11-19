@@ -2434,6 +2434,7 @@ export class BridgeClient implements Client {
     const callerSessionId = this.requireSubSessionCaller(params);
     const workspace = params['workspace'];
     const workspaceGeneration = params['workspaceGeneration'];
+    const requiresYolo = params['requiresYolo'];
     if (
       workspace !== undefined &&
       (!isSubSessionWorkspaceSelector(workspace) ||
@@ -2453,6 +2454,15 @@ export class BridgeClient implements Client {
       throw RequestError.invalidParams(
         undefined,
         'Named sub-sessions require a workspace generation from approval',
+      );
+    }
+    if (
+      requiresYolo !== undefined &&
+      (requiresYolo !== true || workspace === undefined)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`requiresYolo` is only supported for named workspaces and must be true',
       );
     }
     const sessionId = params['sessionId'];
@@ -2493,7 +2503,11 @@ export class BridgeClient implements Client {
       ...(typeof name === 'string' && name.length > 0 ? { name } : {}),
       ...(typeof workspace === 'string' &&
       typeof workspaceGeneration === 'string'
-        ? { workspace, workspaceGeneration }
+        ? {
+            workspace,
+            workspaceGeneration,
+            ...(requiresYolo === true ? { requiresYolo } : {}),
+          }
         : {}),
       ...(typeof sessionId === 'string' ? { sessionId } : {}),
       ...source,
