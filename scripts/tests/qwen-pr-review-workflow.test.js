@@ -3454,7 +3454,7 @@ describe('review_requested burst coalescing (#8945)', () => {
   );
 
   it('resolves the bot login from review-config, not a paraphrase', () => {
-    expect(botLogin).toBe('qwen-code-ci-bot');
+    expect(botLogin).toBe('qwen-code-review-bot');
   });
 
   it('filters non-bot review_requested events before authorize spends compute', () => {
@@ -4191,7 +4191,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           'for a in "$@"; do if [ "$prev" = "--jq" ]; then filter="$a"; fi; prev="$a"; done',
           'if [ "$cmd" = "api" ] && [ "$sub" = "user" ]; then',
           '  [ "${SCENARIO:-}" = "lookup_fail" ] && exit 1',
-          '  echo "qwen-code-ci-bot"; exit 0',
+          '  echo "qwen-code-review-bot"; exit 0',
           'fi',
           // The never-started guard asks this run's job list whether review-pr
           // ever got a runner. It runs the step's REAL --jq filter over the
@@ -4677,7 +4677,12 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
             prHead: 'HEADSHA1',
             runCreated: RUN_CREATED,
             runStartedAttempt: RUN_RESTARTED,
-            reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER, body),
+            reviews: reviewFixture(
+              'qwen-code-review-bot',
+              'HEADSHA1',
+              AFTER,
+              body,
+            ),
           });
           expect(r.status, body).toBe(0);
           expect(r.posted, body).toBe('');
@@ -4698,7 +4703,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
         // — see the attribute-by-TIME test below.
         const cases = {
           stale: reviewFixture(
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             'HEADSHA1',
             BEFORE,
             COMPOSED_REVIEW_BODIES[0],
@@ -4710,7 +4715,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
             COMPOSED_REVIEW_BODIES[0],
           ),
           pending: reviewFixture(
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             'HEADSHA1',
             null,
             COMPOSED_REVIEW_BODIES[0],
@@ -4746,7 +4751,12 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
             prHead: 'HEADSHA1',
             runCreated: RUN_CREATED,
             runStartedAttempt: RUN_RESTARTED,
-            reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER, body),
+            reviews: reviewFixture(
+              'qwen-code-review-bot',
+              'HEADSHA1',
+              AFTER,
+              body,
+            ),
           });
           expect(r.posted, body).not.toBe('');
         }
@@ -4770,7 +4780,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           runCreated: RUN_CREATED,
           runStartedAttempt: RUN_RESTARTED,
           reviews: reviewFixture(
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             'HEADSHA1',
             MID_RERUN,
             COMPOSED_REVIEW_BODIES[0],
@@ -4794,7 +4804,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
             prHead: 'HEADSHA1',
             runCreated: RUN_CREATED,
             runStartedAttempt: RUN_RESTARTED,
-            reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+            reviews: reviewFixture('qwen-code-review-bot', 'HEADSHA1', AFTER),
           });
           expect(r.posted, scenario).not.toBe('');
           expect(r.stdout, scenario).toContain(
@@ -4818,7 +4828,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           prHead: 'HEADSHA1',
           runCreated: RUN_CREATED,
           runStartedAttempt: RUN_RESTARTED,
-          reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+          reviews: reviewFixture('qwen-code-review-bot', 'HEADSHA1', AFTER),
         });
         expect(r.posted).not.toBe('');
       },
@@ -4834,7 +4844,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           prHead: 'HEADSHA1',
           runCreated: RUN_CREATED,
           runStartedAttempt: RUN_RESTARTED,
-          reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+          reviews: reviewFixture('qwen-code-review-bot', 'HEADSHA1', AFTER),
         });
         expect(r.posted).not.toBe('');
       },
@@ -4858,7 +4868,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           runCreated: RUN_CREATED,
           runStartedAttempt: RUN_RESTARTED,
           reviews: reviewFixture(
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             'OLDSHA',
             AFTER,
             COMPOSED_REVIEW_BODIES[0],
