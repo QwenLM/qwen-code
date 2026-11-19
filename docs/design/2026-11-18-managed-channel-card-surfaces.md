@@ -2,9 +2,9 @@
 
 [English](2026-11-18-managed-channel-card-surfaces.md) | [简体中文](2026-11-18-managed-channel-card-surfaces.zh-CN.md)
 
-Status: implemented in this change for the DingTalk grouped card; the
-live-tenant smoke and card rendering for other adapters stay separate. This is
-slice **H5e** of
+Status: implemented in this change for DingTalk interactive cards (private
+chat); the live-tenant smoke and card rendering for other adapters stay
+separate. This is slice **H5e** of
 [#12827](https://github.com/QwenLM/qwen-code/issues/12827), tracked by
 [#17716](https://github.com/QwenLM/qwen-code/issues/17716), under the Managed
 Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380). It
@@ -166,13 +166,19 @@ The send decision reads only this map and the segment ordinal:
 
 The last row is what makes eviction safe: a delivery whose progress was evicted
 never re-creates a card under an `outTrackId` the provider may already hold —
-its remaining segments simply arrive as text. A non-accepted receipt prunes the
-delivery's progress, because the delivery is terminal server-side and no later
-segment will render into it.
+its remaining segments simply arrive as text.
 
-A restart resumes accumulation from the persisted body. The orphan re-drive is
-unchanged: a persisted receipt replays, an unproved card segment settles
-`unknown`, and neither ever issues a second create or update.
+Progress is pruned as soon as the delivery is provably terminal, so a completed
+delivery does not retain its reply body on disk until 64 newer card deliveries
+evict it (the state file is re-stringified and fsynced on every persist). A
+non-accepted receipt prunes immediately. An accepted receipt prunes when the
+control plane's answer reports the delivery `delivered`: `receipt` now surfaces
+the settled delivery view (the Java endpoint already returns it; the TS client
+previously discarded it), and the adapter prunes on `delivered` while keeping
+progress on `partial`. The orphan re-drive prunes on a terminal settle too. A
+restart resumes accumulation from the persisted body; a persisted receipt
+replays, an unproved card segment settles `unknown`, and neither ever issues a
+second create or update.
 
 ### 4. An adapter declares card support; configuration gates it
 
@@ -185,9 +191,14 @@ Card mode engages only when all three hold: the adapter declares `cards`, the
 channel config carries a non-empty `cardTemplateId`, and the deps provide
 `sendCardSegment`. The template id is an operator-authored card template whose
 markdown component binds the `content` variable; it is read from the channel
-config beside `clientId` / `clientSecret`, trimmed, and rejected when it
-contains CR/LF/NUL (the credential rule). Without it the adapter is
-byte-for-byte on today's text path.
+config beside `clientId` / `clientSecret` and parsed by reusing
+`validCredential` (trim; reject a non-string, an empty value, or CR/LF/NUL), so
+the credential rule hardens in one copy. Without a usable id the adapter is
+byte-for-byte on today's text path. A configured-but-unusable id is announced
+once at construction (the fact, not the value) so "cards never appear" has a
+diagnosable cause; the refusal stays non-fatal. `cardTemplateId` is also
+declared in the DingTalk plugin's `management.fields`, so a channel editor or
+settings-API client can set it (an undeclared key is refused as not manageable).
 
 The capability declaration is consumed by the send gate itself, and a witness
 pins that an adapter with `cards: false` stays on text even with a template
@@ -210,24 +221,35 @@ readonly sendCardSegment?: (input: {
 `createManagedDingtalkDeps(proxy?, credentials?)` supplies it when credentials
 are given: a `DingtalkInteractiveCardClient` with `robotCode =
 credentials.clientId` (the Legacy construction), a cached `gettoken` provider
-mirroring `getProactiveToken` (refresh at `expires_in - 60`, permanent errcodes
-definitive), and `create` selecting `createAndDeliver` versus `updateInstance`.
-The target is `{ chatId: replyContext.senderId, isGroup: false }`: the managed
-path admits private chats only (group frames are dropped on ingress), and a
-direct card targets the user id.
+mirroring `getProactiveToken` (refresh at `expires_in - 60` with a 60-second
+floor, permanent errcodes definitive), and `create` selecting `createAndDeliver`
+versus `updateInstance`. The target is `{ chatId: replyContext.senderId,
+isGroup: false }`: the managed path admits private chats only (group frames are
+dropped on ingress), and a direct card targets the user id.
 
-Failure classification mirrors the webhook send: a non-retryable
+The managed client opts into `strictResponses`, a new option on the card client
+that Legacy callers leave off (their tolerant behaviour is unchanged). A
+receipt is write-once, so "the client did not throw" is not proof of delivery:
+in strict mode an unparseable 200 body throws (ambiguous), and a
+`createAndDeliver` answer with no `deliverResults` entry reporting success
+throws (ambiguous) — `createAndDeliver` has a delivery step that can fail
+independently of the HTTP 200. An edit with a readable 200 body is accepted.
+Failure classification then mirrors the webhook send: a non-retryable
 `DingtalkCardRequestError` (or a permanent token errcode) is definitive →
-`rejected`; a retryable status, a network failure, a timeout or an unreadable
-answer is ambiguous → `unknown`. The adapter's existing arm then stops the
-delivery and leaves the remaining segments server-side, exactly as a failed
+`rejected`; a retryable status, a network failure, a timeout or an unreadable /
+unconfirmed answer is ambiguous → `unknown`. The adapter's existing arm stops
+the delivery and leaves the remaining segments server-side, exactly as a failed
 text send does. A failed or ambiguous edit never triggers an automatic second
-send.
+send, and an undelivered card is never receipted `accepted`.
 
 Proxy-only egress is honored: when a proxy is configured, both the token fetch
 and the card calls go through a per-call `EnvHttpProxyAgent` dispatcher, the
-shape `sendWebhook` already uses. The card client takes a `fetch` option, so the
-dispatcher is injected without touching the Legacy client.
+shape `sendWebhook` already uses. Because `fetch` resolves on the response
+headers while both callers read the body afterwards, the wrapper buffers the
+body (`arrayBuffer`) and returns a dispatcher-free `Response` before destroying
+the dispatcher — destroying first would abort every proxied body read
+(`UND_ERR_DESTROYED`). The card client takes a `fetch` option, so the dispatcher
+is injected without touching the Legacy client.
 
 `TOKEN_API` and `PERMANENT_TOKEN_ERROR_CODES` become exports of
 `DingtalkAdapter.ts` so the managed token provider and the Legacy one share one
@@ -246,21 +268,35 @@ the API slice's work.
 
 ## Files affected
 
-- `packages/channels/base/src/managed-channel.ts` — `ManagedChannelCapabilities`,
-  exported from the base index; collocated contract test.
+- `packages/channels/base/src/managed-channel.ts` — `ManagedChannelCapabilities`
+  and the `receipt` return widened from `void` to the settled delivery view, so
+  the adapter can prune a completed delivery's card progress. Type-only changes
+  exported from the base index; exercised by the DingTalk and CLI suites (no
+  separate base runtime test is added).
 - `packages/channels/dingtalk/src/managed-dingtalk-adapter.ts` — the capability
-  declaration, the `cardTemplateId` config parse, the card send gate and loop,
-  the overflow fallback, progress pruning, the `outTrackId` derivation and the
-  body bound.
+  declaration, the `cardTemplateId` config parse (reusing `validCredential` and
+  announcing a configured-but-unusable id once), the card send gate and loop,
+  the overflow fallback, progress touch and pruning (on a `delivered` receipt
+  and on a terminal orphan settle), the card-refusal-does-not-evict-webhook
+  guard, the `outTrackId` derivation and the body bound.
 - `packages/channels/dingtalk/src/managed-state.ts` — the optional `cards` map,
   its validator clause and `MANAGED_CARD_PROGRESS_LIMIT`.
 - `packages/channels/dingtalk/src/managed-dingtalk-deps.ts` — `sendCardSegment`,
-  the cached token provider, the proxy egress wrapper.
+  the cached token provider, and the proxy egress wrapper that buffers the
+  response body before destroying the per-call dispatcher.
+- `packages/channels/dingtalk/src/interactive-card-client.ts` — the opt-in
+  `strictResponses` option (an unreadable or unconfirmed answer is ambiguous);
+  Legacy callers stay tolerant.
 - `packages/channels/dingtalk/src/DingtalkAdapter.ts` — additive exports of
   `TOKEN_API` and `PERMANENT_TOKEN_ERROR_CODES` only.
+- `packages/channels/dingtalk/src/index.ts` — the `cardTemplateId` management
+  field, so a channel editor / settings-API client can enable cards.
 - `packages/cli/src/commands/channel/managed-dingtalk.ts` — pass the parsed
   credentials to the deps factory.
-- Collocated tests for each of the above.
+- `packages/cli/src/commands/channel/managed-channel-client.ts` — `receipt`
+  surfaces the control plane's settled delivery view instead of discarding it.
+- Collocated tests for the adapter, state, deps, card client, command and
+  channel-settings store.
 - This design in both languages; the H5e follow-up row in the channel runtime
   design in both languages.
 
@@ -296,25 +332,47 @@ the DingTalk adapter slice.
 - **Discipline witnesses**: a definitive card refusal receipts `rejected` and
   stops the delivery; an ambiguous failure receipts `unknown`; neither issues a
   second create or update; a persist failure before the side effect abandons
-  the delivery to the lease reconciler; an orphaned card segment replays its
-  persisted receipt or settles `unknown`; a non-accepted receipt prunes the
-  progress.
+  the delivery to the lease reconciler and rolls back both the outbound entry
+  and the card map; an orphaned card segment replays its persisted receipt or
+  settles `unknown`; a non-accepted receipt prunes the progress; a `delivered`
+  receipt prunes the completed delivery's body while a `partial` receipt keeps
+  it; a definitive card refusal does not evict the cached `sessionWebhook` (the
+  card API's verdict is not the webhook's health).
 - **Gate witnesses**: no `cardTemplateId` → text path byte-for-byte;
   `cards: false` with a template and card deps → text path; card deps absent →
-  text path; a resend delivery derives a different `outTrackId`.
+  text path; a resend delivery derives a different `outTrackId`; a
+  configured-but-unusable template id is announced once and stays on text.
 - **Dep witnesses** (`managed-dingtalk-deps.test.ts`): `create` hits
   `createAndDeliver`, an edit hits `PUT /v1.0/card/instances` with
   `updateCardDataByKey`; the target is `IM_ROBOT.<senderId>`; the token is
-  cached, refreshed early, invalidated on a 401 and retried once; a permanent
-  token errcode is definitive and a transient one is not; the proxy dispatcher
-  is used when configured and destroyed afterwards.
+  cached, refreshed a minute early (witnessed at `expires_in - 60 ± 1s`), the
+  60-second floor keeps a short `expires_in` from caching an already-expired
+  token, invalidated on a 401 and retried once; a permanent token errcode is
+  definitive and a transient one is not; the proxy dispatcher is used when
+  configured and destroyed only after the response body is consumed (a
+  streaming body that errors once the dispatcher is destroyed pins the
+  ordering).
+- **Strict-response witnesses** (`interactive-card-client.test.ts` and deps):
+  Legacy (non-strict) resolves on a non-JSON 200 body and a missing
+  `deliverResults`; strict throws ambiguous on an unreadable body, a missing or
+  empty `deliverResults`, and resolves only on a confirmed success; an edit
+  with a readable body resolves and an unreadable one throws.
 - **State witnesses** (`managed-state.test.ts`): a state without `cards` still
   validates (backward compatibility); the map bound and the entry shape are
-  enforced; an over-bound or malformed map is refused.
+  enforced; an over-bound or malformed map is refused. The adapter bound test
+  asserts eviction identity (the least-recently-touched entry is evicted, the
+  freshest survives) and that a re-touched delivery survives, not just
+  cardinality.
+- **Settings witnesses** (`channel-settings-store.test.ts`): a DingTalk config
+  carrying `cardTemplateId` upserts (it was refused as not manageable before the
+  field was declared), the descriptor appears in the channel catalog, and a
+  changed value upserts too.
 - **Mutation checks**: removing the capability gate, the template gate, the
   overflow check, the persist-before-effect, the deterministic `outTrackId`,
-  the eviction-safe text fallback or the progress pruning each reds its
-  witness.
+  the eviction-safe text fallback, the progress pruning, the rollback snapshot
+  copy, the card-refusal webhook guard, the delivered-prune, the proxy
+  body-before-destroy ordering, the strict-response verdict, the token
+  early-refresh / floor, or the eviction identity each reds its witness.
 - **Baseline**: the existing DingTalk managed suites, the channel-base contract
   suite, the core record/operations/authority suites and the CLI funnel suites
   stay green unchanged; `npm run build && npm run typecheck && npm run lint`.

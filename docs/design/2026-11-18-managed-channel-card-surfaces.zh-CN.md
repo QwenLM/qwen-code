@@ -2,8 +2,8 @@
 
 [English](2026-11-18-managed-channel-card-surfaces.md) | [简体中文](2026-11-18-managed-channel-card-surfaces.zh-CN.md)
 
-状态：本次改动已实现 DingTalk 分组卡片；真实租户 smoke 与其他适配器的卡片渲染
-仍另行处理。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827)
+状态：本次改动已实现 DingTalk 互动卡片（单聊）；真实租户 smoke 与其他适配器的
+卡片渲染仍另行处理。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827)
 的 **H5e** 切片，由 [#17716](https://github.com/QwenLM/qwen-code/issues/17716)
 跟踪，属于 Managed Agent 提案
 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)。它建立在
@@ -136,11 +136,15 @@ H5e 在一个 provider 上补上这个缺口，同时不另造第二条交付来
 | ordinal > 0，无进度（被逐出或从未创建） | 文本                        |
 
 最后一行正是逐出安全的原因：进度被逐出的投递绝不会在 provider 可能已持有的
-`outTrackId` 下重新建卡——它剩余的分段直接以文本送达。非 accepted 回执会剪掉该
-投递的进度，因为投递在服务端已终态，不会再有分段渲染进去。
+`outTrackId` 下重新建卡——它剩余的分段直接以文本送达。
 
-重启从已持久化的正文恢复累积。孤儿重驱动不变：已持久化的回执重放，未证明的卡片
-分段落 `unknown`，两者都不会发出第二次创建或更新。
+一旦投递可证明已终态就剪掉进度，这样已完成的投递不会把回复正文留在磁盘上、直到
+被 64 个更新的卡片投递逐出（状态文件每次持久化都会重新 stringify 并 fsync）。
+非 accepted 回执立即剪掉。accepted 回执在控制面应答报告投递 `delivered` 时剪掉：
+`receipt` 现在透出落定的投递视图（Java 端点本就返回它，TS 客户端先前丢弃了），
+适配器在 `delivered` 时剪掉、在 `partial` 时保留进度。孤儿重驱动在终态落定时也
+剪掉。重启从已持久化的正文恢复累积；已持久化的回执重放，未证明的卡片分段落
+`unknown`，两者都不会发出第二次创建或更新。
 
 ### 4. 适配器声明卡片能力；配置门控它
 
@@ -152,8 +156,12 @@ H5e 在一个 provider 上补上这个缺口，同时不另造第二条交付来
 只有三者同时成立才进入卡片模式：适配器声明 `cards`、渠道配置带有非空
 `cardTemplateId`、deps 提供 `sendCardSegment`。模板 id 是运营自建的卡片模板，其
 markdown 组件绑定 `content` 变量；它从渠道配置里与 `clientId` / `clientSecret`
-并列读取，去除首尾空白，含 CR/LF/NUL 时拒绝（凭证规则）。没有它，适配器逐字节
-停在今天的文本路径上。
+并列读取，复用 `validCredential` 解析（去首尾空白；非字符串、空值或含 CR/LF/NUL
+时拒绝），让凭证规则只在一处收紧。没有可用 id 时，适配器逐字节停在今天的文本
+路径上。配置了但不可用的 id 会在构造时播报一次（记录事实而非取值），让「卡片始终
+不出现」有可诊断的原因；该拒绝保持非致命。`cardTemplateId` 也在 DingTalk 插件的
+`management.fields` 中声明，因此渠道编辑器或 settings-API 客户端可以设置它（未声明
+的键会被拒为 not manageable）。
 
 能力声明由发送门自身消费，并有一条见证钉住：`cards: false` 的适配器即使配了模板、
 装了卡片 deps 也走文本——声明是一道门，不是装饰。
@@ -175,18 +183,26 @@ readonly sendCardSegment?: (input: {
 `createManagedDingtalkDeps(proxy?, credentials?)` 在给定凭证时提供它：一个以
 `robotCode = credentials.clientId` 构造的 `DingtalkInteractiveCardClient`
 （Legacy 的构造方式）、一个镜像 `getProactiveToken` 的缓存 `gettoken` provider
-（在 `expires_in - 60` 刷新，永久 errcode 判确定性），由 `create` 选择
-`createAndDeliver` 还是 `updateInstance`。目标是
+（在 `expires_in - 60` 刷新、带 60 秒下限，永久 errcode 判确定性），由 `create`
+选择 `createAndDeliver` 还是 `updateInstance`。目标是
 `{ chatId: replyContext.senderId, isGroup: false }`：managed 路径只准入单聊
 （群帧在入站即丢弃），单聊卡片投放到 user id。
 
-失败分类镜像 webhook 发送：不可重试的 `DingtalkCardRequestError`（或永久 token
-errcode）是确定性 → `rejected`；可重试状态、网络失败、超时或不可读的应答是含糊
-→ `unknown`。适配器现有的分支随后停止这次投递，把剩余分段留在服务端，与文本发送
-失败完全一致。失败或含糊的编辑绝不触发自动二次发送。
+managed 客户端启用 `strictResponses`——卡片客户端的新选项，Legacy 调用方不启用
+（其宽容行为不变）。回执是写一次的，所以「客户端没抛错」不等于已送达：strict 模式
+下无法解析的 200 body 抛错（含糊），`createAndDeliver` 应答中没有报告 success 的
+`deliverResults` 条目也抛错（含糊）——`createAndDeliver` 有一个可独立于 HTTP 200
+失败的投放步骤。编辑遇到可读的 200 body 即 accepted。失败分类随后镜像 webhook
+发送：不可重试的 `DingtalkCardRequestError`（或永久 token errcode）是确定性 →
+`rejected`；可重试状态、网络失败、超时或不可读/未确认的应答是含糊 → `unknown`。
+适配器现有的分支停止这次投递，把剩余分段留在服务端，与文本发送失败完全一致。失败
+或含糊的编辑绝不触发自动二次发送，未送达的卡片绝不被回执为 `accepted`。
 
-代理-only 出口被尊重：配置了代理时，token 请求与卡片调用都走按调用创建、用后销毁
-的 `EnvHttpProxyAgent` dispatcher，即 `sendWebhook` 已在用的形状。卡片客户端接受
+代理-only 出口被尊重：配置了代理时，token 请求与卡片调用都走按调用创建的
+`EnvHttpProxyAgent` dispatcher，即 `sendWebhook` 已在用的形状。由于 `fetch` 在响应
+头到达时即 resolve、而两个调用方都在其后才读 body，包装层先把 body 缓冲
+（`arrayBuffer`）、返回一个不依赖 dispatcher 的 `Response`，然后才销毁 dispatcher
+——先销毁会中止每一次走代理的 body 读取（`UND_ERR_DESTROYED`）。卡片客户端接受
 `fetch` 选项，因此注入 dispatcher 不需要碰 Legacy 客户端。
 
 `TOKEN_API` 与 `PERMANENT_TOKEN_ERROR_CODES` 成为 `DingtalkAdapter.ts` 的导出，
@@ -204,19 +220,29 @@ Legacy 行为不变。
 ## 涉及文件
 
 - `packages/channels/base/src/managed-channel.ts` —— `ManagedChannelCapabilities`，
-  从 base index 导出；同目录契约测试。
+  以及 `receipt` 返回值从 `void` 拓宽为落定的投递视图，让适配器能剪掉已完成投递的
+  卡片进度。纯类型改动，从 base index 导出；由 DingTalk 与 CLI 套件验证（不新增
+  base 运行时测试）。
 - `packages/channels/dingtalk/src/managed-dingtalk-adapter.ts` —— 能力声明、
-  `cardTemplateId` 配置解析、卡片发送门与循环、溢出回退、进度剪枝、`outTrackId`
-  推导与正文上限。
+  `cardTemplateId` 配置解析（复用 `validCredential` 并播报一次不可用 id）、卡片
+  发送门与循环、溢出回退、进度触达与剪枝（`delivered` 回执与终态孤儿落定）、
+  卡片拒绝不逐出 webhook 的守卫、`outTrackId` 推导与正文上限。
 - `packages/channels/dingtalk/src/managed-state.ts` —— 可选 `cards` 映射、其校验
   子句与 `MANAGED_CARD_PROGRESS_LIMIT`。
 - `packages/channels/dingtalk/src/managed-dingtalk-deps.ts` —— `sendCardSegment`、
-  缓存 token provider、代理出口包装。
+  缓存 token provider、以及在销毁按调用 dispatcher 前先缓冲响应 body 的代理出口
+  包装。
+- `packages/channels/dingtalk/src/interactive-card-client.ts` —— opt-in 的
+  `strictResponses` 选项（不可读或未确认的应答判含糊）；Legacy 调用方保持宽容。
 - `packages/channels/dingtalk/src/DingtalkAdapter.ts` —— 仅增量导出 `TOKEN_API`
   与 `PERMANENT_TOKEN_ERROR_CODES`。
+- `packages/channels/dingtalk/src/index.ts` —— `cardTemplateId` 管理字段，让渠道
+  编辑器 / settings-API 客户端能启用卡片。
 - `packages/cli/src/commands/channel/managed-dingtalk.ts` —— 把解析后的凭证传给
   deps 工厂。
-- 上述各处的同目录测试。
+- `packages/cli/src/commands/channel/managed-channel-client.ts` —— `receipt`
+  透出控制面的落定投递视图，不再丢弃。
+- 适配器、state、deps、卡片客户端、命令与 channel-settings store 的同目录测试。
 - 本设计的中英两版；渠道运行时设计中英两版的 H5e 后续工作行。
 
 ## 范围边界
@@ -242,19 +268,35 @@ Legacy 行为不变。
   `outTrackId`；被逐出的进度把尾部以文本送达，绝不重新建卡。
 - **纪律见证**：确定性卡片拒绝回执 `rejected` 并停止投递；含糊失败回执
   `unknown`；两者都不发出第二次创建或更新；副作用前的持久化失败把投递放弃给租约
-  reconciler；孤儿卡片分段重放已持久化回执或落 `unknown`；非 accepted 回执剪掉
-  进度。
+  reconciler，并回滚 outbound 条目与卡片映射；孤儿卡片分段重放已持久化回执或落
+  `unknown`；非 accepted 回执剪掉进度；`delivered` 回执剪掉已完成投递的正文，而
+  `partial` 回执保留；确定性卡片拒绝不逐出缓存的 `sessionWebhook`（卡片 API 的
+  判定不等于 webhook 的健康）。
 - **门见证**：无 `cardTemplateId` → 逐字节文本路径；`cards: false` 且有模板与卡片
-  deps → 文本路径；缺卡片 deps → 文本路径；重发投递推导出不同的 `outTrackId`。
+  deps → 文本路径；缺卡片 deps → 文本路径；重发投递推导出不同的 `outTrackId`；
+  配置了但不可用的模板 id 播报一次并仍走文本。
 - **dep 见证**（`managed-dingtalk-deps.test.ts`）：`create` 命中
   `createAndDeliver`，编辑命中 `PUT /v1.0/card/instances` 且带
-  `updateCardDataByKey`；目标是 `IM_ROBOT.<senderId>`；token 被缓存、提前刷新、
-  401 作废并重试一次；永久 token errcode 判确定性、瞬态不判；配置代理时使用
-  dispatcher 并在之后销毁。
+  `updateCardDataByKey`；目标是 `IM_ROBOT.<senderId>`；token 被缓存、提前一分钟
+  刷新（在 `expires_in - 60 ± 1s` 处见证）、60 秒下限使短 `expires_in` 不会缓存
+  一个已过期 token、401 作废并重试一次；永久 token errcode 判确定性、瞬态不判；
+  配置代理时使用 dispatcher，且仅在响应 body 被消费后才销毁（一个「dispatcher
+  销毁后即报错」的流式 body 钉住该顺序）。
+- **strict 响应见证**（`interactive-card-client.test.ts` 与 deps）：Legacy
+  （非 strict）对非 JSON 200 body 与缺失 `deliverResults` 都正常返回；strict 对
+  不可读 body、缺失或空 `deliverResults` 抛含糊错，仅在确认 success 时正常返回；
+  编辑遇可读 body 正常返回、不可读则抛错。
 - **状态见证**（`managed-state.test.ts`）：不带 `cards` 的状态仍然通过校验（向后
-  兼容）；映射上限与条目形状被强制；超上限或畸形映射被拒绝。
+  兼容）；映射上限与条目形状被强制；超上限或畸形映射被拒绝。适配器上限测试断言
+  逐出身份（最久未触碰者被逐出、最新者存活）以及被重新触达的投递能存活，而不只是
+  数量。
+- **设置见证**（`channel-settings-store.test.ts`）：携带 `cardTemplateId` 的
+  DingTalk 配置可 upsert（声明该字段前会被拒为 not manageable），描述符出现在渠道
+  catalog 中，修改后的值也能 upsert。
 - **变异检查**：移除能力门、模板门、溢出检查、副作用前持久化、确定性
-  `outTrackId`、逐出安全的文本回退或进度剪枝，各自红掉对应见证。
+  `outTrackId`、逐出安全的文本回退、进度剪枝、回滚快照拷贝、卡片拒绝 webhook
+  守卫、delivered 剪枝、代理 body-先于-销毁顺序、strict 响应判定、token 提前刷新/
+  下限、或逐出身份，各自红掉对应见证。
 - **基线**：现有 DingTalk managed 套件、channel-base 契约套件、core 记录/操作/
   权限套件与 CLI 漏斗套件保持原样全绿；`npm run build && npm run typecheck &&
 npm run lint`。

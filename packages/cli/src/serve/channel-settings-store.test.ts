@@ -20,6 +20,7 @@ import stripJsonComments from 'strip-json-comments';
 import type { ChannelPlugin } from '@qwen-code/channel-base';
 import {
   registerPlugin,
+  supportedChannelCatalog,
   UNSAFE_OBJECT_KEYS,
 } from '../commands/channel/channel-registry.js';
 import {
@@ -2430,6 +2431,52 @@ describe('WorkspaceChannelSettingsStore', () => {
         'Channel field "interactiveCards.questionCard.legacyFlag" is not manageable.',
     });
     expect(fs.readFileSync(settingsPath, 'utf8')).toBe(beforeRejectedWrite);
+  });
+
+  it('manages cardTemplateId on a dingtalk channel (H5e R1-7)', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "dingtalk",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret"
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    // Before the field was declared this upsert threw "cardTemplateId is not
+    // manageable"; declaring it in the plugin lets an editor enable cards.
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        cardTemplateId: 'tpl.schema',
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+    expect(next.channels['bot']?.['cardTemplateId']).toBe('tpl.schema');
+
+    // The descriptor is exposed to management UIs / settings-API clients.
+    const catalog = await supportedChannelCatalog();
+    const dingtalk = catalog.find((entry) => entry.type === 'dingtalk');
+    expect(
+      dingtalk?.fields.some(
+        (field) => field.key === 'cardTemplateId' && field.kind === 'string',
+      ),
+    ).toBe(true);
+
+    // A changed value upserts too (manageable, not a preserved unknown key).
+    const again = await store.upsert('bot', {
+      expectedRevision: next.revision,
+      config: {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        cardTemplateId: 'tpl-2.schema',
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+    expect(again.channels['bot']?.['cardTemplateId']).toBe('tpl-2.schema');
   });
 
   it('rejects an unchanged reserved nested key instead of preserving it', async () => {

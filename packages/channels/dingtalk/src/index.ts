@@ -40,6 +40,15 @@ export const plugin: ChannelPlugin = {
         envResolvable: true,
       },
       {
+        key: 'cardTemplateId',
+        label: 'Card Template ID',
+        kind: 'string',
+        description:
+          'Operator-authored DingTalk card template id. When set, the managed ' +
+          'path (managed-dingtalk) renders each reply as one interactive card ' +
+          'instead of text messages; absent keeps the text path.',
+      },
+      {
         key: 'interactiveCards',
         label: 'Interactive Cards',
         kind: 'object',

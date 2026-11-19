@@ -79,6 +79,9 @@ function fakeControlPlane() {
         deliveryId: string,
       ) => (Error & { status?: number; code?: string }) | undefined)
     | undefined;
+  let receiptResponse:
+    | ((deliveryId: string, receipt: unknown) => unknown)
+    | undefined;
   const controlPlane: ManagedChannelControlPlane = {
     register: async (request) => {
       register.push(request);
@@ -114,6 +117,7 @@ function fakeControlPlane() {
       const error = receiptError?.(deliveryId);
       if (error) throw error;
       receipts.push({ deliveryId, receipt });
+      return receiptResponse?.(deliveryId, receipt);
     },
   };
   return {
@@ -154,6 +158,13 @@ function fakeControlPlane() {
         | undefined,
     ) => {
       receiptError = fn;
+    },
+    // Surface a settled delivery view from the receipt answer, as the real
+    // control plane does (H5e R1-4 prune-on-delivered).
+    setReceiptResponse: (
+      fn: ((deliveryId: string, receipt: unknown) => unknown) | undefined,
+    ) => {
+      receiptResponse = fn;
     },
   };
 }
@@ -2539,6 +2550,7 @@ describe('managed DingTalk card surfaces (H5e, #17716)', () => {
   const persistedOf = (adapter: ManagedDingtalkAdapter) =>
     JSON.parse(readFileSync(fileOf(adapter), 'utf8')) as {
       outbound: Array<{ receipt?: { outcome: string } }>;
+      webhooks: Record<string, string>;
       cards?: Record<
         string,
         { outTrackId: string; body: string; mode: string }
@@ -2853,6 +2865,9 @@ describe('managed DingTalk card surfaces (H5e, #17716)', () => {
     expect(
       (second.plane.receipts[0]!.receipt as { outcome: string }).outcome,
     ).toBe('unknown');
+    // The replayed unknown settles the delivery terminal: its card body is
+    // pruned, not retained on disk (R1-4).
+    expect(persistedOf(second.adapter).cards?.['d-1']).toBeUndefined();
     await second.adapter.disconnect();
   });
 
@@ -2938,9 +2953,40 @@ describe('managed DingTalk card surfaces (H5e, #17716)', () => {
     expect(Object.keys(persisted.cards ?? {}).length).toBeLessThanOrEqual(
       MANAGED_CARD_PROGRESS_LIMIT,
     );
+    // Identity, not just cardinality (R1-6): the least-recently-touched entry
+    // (d-0) is evicted and the freshest (d-64) survives. Deleting the last key
+    // instead would evict the delivery's own fresh progress and reds this.
+    expect(persisted.cards?.['d-0']).toBeUndefined();
+    expect(persisted.cards?.['d-64']).toBeDefined();
     // Writer and validator share the cap, so a fresh process loads the state.
     const second = await connectedCardAdapter(cwd);
     await second.adapter.disconnect();
+    await adapter.disconnect();
+  });
+
+  it('R1-6: a re-touched delivery survives eviction of the least-recently-touched', async () => {
+    const { adapter, plane } = await connectedCardAdapter();
+    // Fill the map with 64 single-segment card deliveries. Receipts are
+    // accepted but no delivered state is surfaced, so progress is retained.
+    plane.enqueue(
+      Array.from({ length: MANAGED_CARD_PROGRESS_LIMIT }, (_, i) =>
+        delivery(`d-${i}`, 1),
+      ),
+    );
+    await adapter.tick();
+    expect(Object.keys(persistedOf(adapter).cards ?? {})).toHaveLength(
+      MANAGED_CARD_PROGRESS_LIMIT,
+    );
+    // Re-touch d-0 with a second segment: it moves to most-recently-touched.
+    plane.enqueue([cardDelivery('d-0', [{ ordinal: 1, text: 'more' }])]);
+    await adapter.tick();
+    // A 65th delivery evicts the least-recently-touched (now d-1), not d-0.
+    plane.enqueue([delivery(`d-${MANAGED_CARD_PROGRESS_LIMIT}`, 1)]);
+    await adapter.tick();
+    const cards = persistedOf(adapter).cards ?? {};
+    expect(cards['d-0']).toBeDefined();
+    expect(cards['d-1']).toBeUndefined();
+    expect(cards[`d-${MANAGED_CARD_PROGRESS_LIMIT}`]).toBeDefined();
     await adapter.disconnect();
   });
 
@@ -2961,5 +3007,128 @@ describe('managed DingTalk card surfaces (H5e, #17716)', () => {
     expect(id).toBe(managedCardOutTrackId('chin-abc:reply'));
     expect(id.startsWith('qwen-managed-')).toBe(true);
     expect(id.length).toBeLessThanOrEqual(64);
+  });
+
+  it('R1-3: a definitive card refusal does not evict the cached webhook', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake, card } = await connectedCardAdapter(
+      tempCwd(),
+      CARD_CONFIG,
+      { log: (line) => lines.push(line) },
+    );
+    // Seed the conversation's webhook cache via an inbound frame, so the
+    // eviction would be observable (the card helper alone never populates it).
+    fake.push('seed', messageData({ msgId: 'seed' }));
+    await adapter.tick();
+    expect(Object.hasOwn(persistedOf(adapter).webhooks, 'conv-1')).toBe(true);
+    card.setBehavior('definitive');
+    plane.enqueue([delivery('d-card', 1)]);
+    await adapter.tick();
+    expect(
+      (plane.receipts.at(-1)!.receipt as { outcome: string }).outcome,
+    ).toBe('rejected');
+    // The card API's verdict says nothing about the webhook: the live cache
+    // stays, and no eviction is logged. Removing the card.render === 'text'
+    // guard would delete conv-1 and reds this.
+    expect(Object.hasOwn(persistedOf(adapter).webhooks, 'conv-1')).toBe(true);
+    expect(
+      lines.some((line) => line.includes('evicted the cached webhook')),
+    ).toBe(false);
+    await adapter.disconnect();
+  });
+
+  it('R1-4: a delivered receipt prunes the completed delivery card body', async () => {
+    const { adapter, plane, card } = await connectedCardAdapter();
+    // Surface the settled state as the real control plane does: partial while
+    // segments remain, delivered with the last.
+    plane.setReceiptResponse((_deliveryId, receipt) => {
+      const r = receipt as { outcome: string; ordinal?: number };
+      if (r.outcome !== 'accepted') return undefined;
+      return { state: r.ordinal === 1 ? 'delivered' : 'partial' };
+    });
+    plane.enqueue([delivery('d-1', 2)]);
+    await adapter.tick();
+    expect(card.calls.map((call) => call.create)).toEqual([true, false]);
+    expect(plane.receipts).toHaveLength(2);
+    // The delivered receipt proves the delivery terminal: its body is dropped,
+    // not retained until LRU eviction. Removing the prune reds this.
+    expect(persistedOf(adapter).cards?.['d-1']).toBeUndefined();
+    await adapter.disconnect();
+  });
+
+  it('R1-4: a partial receipt keeps the card progress for the next segment', async () => {
+    const { adapter, plane, card } = await connectedCardAdapter();
+    plane.setReceiptResponse((_deliveryId, receipt) =>
+      (receipt as { outcome: string }).outcome === 'accepted'
+        ? { state: 'partial' }
+        : undefined,
+    );
+    plane.enqueue([cardDelivery('d-1', [{ ordinal: 0, text: 'alpha' }])]);
+    await adapter.tick();
+    expect(persistedOf(adapter).cards?.['d-1']).toBeDefined();
+    plane.enqueue([cardDelivery('d-1', [{ ordinal: 1, text: 'beta' }])]);
+    await adapter.tick();
+    expect(card.calls.map((call) => call.create)).toEqual([true, false]);
+    expect(card.calls[1]!.body).toBe('alphabeta');
+    await adapter.disconnect();
+  });
+
+  it('R1-4: an orphan terminal settle prunes progress a failed persist retained', async () => {
+    const cwd = tempCwd();
+    const first = await connectedCardAdapter(cwd);
+    first.card.setBehavior('definitive');
+    // The receipt answer is lost, so the entry stays outbound and no removal
+    // persist runs; the receipt persist also fails, so disk keeps the pre-send
+    // progress. A hard kill (no disconnect) leaves that state for the restart.
+    first.plane.setReceiptError(() =>
+      Object.assign(new Error('answer lost'), { status: 503 }),
+    );
+    const store = storeOf(first.adapter);
+    const realSave = store.save.bind(store);
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      const s = state as { outbound: Array<{ receipt?: unknown }> };
+      if (s.outbound.some((entry) => entry.receipt)) {
+        throw new Error('disk full');
+      }
+      realSave(state);
+    });
+    first.plane.enqueue([delivery('d-1', 1)]);
+    await first.adapter.tick();
+    spy.mockRestore();
+    expect(persistedOf(first.adapter).cards?.['d-1']).toBeDefined();
+    const second = await connectedCardAdapter(cwd);
+    await second.adapter.tick();
+    // The orphan replays unknown (no persisted receipt) and prunes the body the
+    // failed persist retained. Removing the orphan prune reds this.
+    expect(persistedOf(second.adapter).cards?.['d-1']).toBeUndefined();
+    await second.adapter.disconnect();
+  });
+
+  it('R1-10: a configured-but-unusable template id is announced and stays text', async () => {
+    const lines: string[] = [];
+    const plane = fakeControlPlane();
+    const fake = fakeDeps({ log: (line) => lines.push(line) });
+    const card = cardSink();
+    const adapter = new ManagedDingtalkAdapter({
+      name: 'ding-card',
+      cwd: tempCwd(),
+      config: { ...CARD_CONFIG, cardTemplateId: 'tpl\n1' },
+      controlPlane: plane.controlPlane,
+      deps: { ...fake.deps, sendCardSegment: card.sendCardSegment },
+      pollLoop: false,
+    });
+    // The refusal is announced once at construction (the fact, not the value).
+    expect(
+      lines.some((line) =>
+        line.includes('cardTemplateId is configured but unusable'),
+      ),
+    ).toBe(true);
+    await adapter.connect();
+    plane.enqueue([delivery('d-1', 1)]);
+    await adapter.tick();
+    // Non-fatal: cards disabled, the reply still sends as text.
+    expect(card.calls).toHaveLength(0);
+    expect(fake.sent).toHaveLength(1);
+    await adapter.disconnect();
   });
 });

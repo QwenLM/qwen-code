@@ -199,5 +199,12 @@ export interface ManagedChannelControlPlane {
     event: ManagedInboundEvent,
   ): Promise<{ inputId: string; sessionId: string; replayed: boolean }>;
   claimDeliveries(limit: number): Promise<ManagedClaimedDelivery[]>;
-  receipt(deliveryId: string, receipt: ManagedReceipt): Promise<void>;
+  /**
+   * Report one segment's outcome. Resolves to the control plane's settled
+   * delivery view (an object carrying `state`) when it provides one, so a
+   * persisting adapter can prune a completed delivery's card progress on
+   * `delivered` (H5e, R1-4); implementations that do not surface it resolve to
+   * undefined. Widened from void; callers that ignore the result are unchanged.
+   */
+  receipt(deliveryId: string, receipt: ManagedReceipt): Promise<unknown>;
 }

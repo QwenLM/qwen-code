@@ -149,15 +149,29 @@ export function managedCardOutTrackId(deliveryId: string): string {
 
 /**
  * The operator-authored card template id from the channel config, or undefined
- * when absent. Trimmed and refused when it carries CR/LF/NUL (the credential
- * rule), so a copy-paste artifact cannot reach the card API as a template id.
+ * when absent or unusable. Reuses the credential rule (validCredential) rather
+ * than restating its CR/LF/NUL predicate, so the next hardening of that rule
+ * lands in one copy (R1-10); a copy-paste artifact cannot reach the card API.
  */
 export function dingtalkCardTemplateId(
   config: Readonly<Record<string, unknown>>,
 ): string | undefined {
   const raw = config['cardTemplateId'];
-  if (typeof raw !== 'string' || /[\r\n\0]/.test(raw)) return undefined;
-  return raw.trim() || undefined;
+  if (!validCredential(raw)) return undefined;
+  return raw.trim();
+}
+
+/**
+ * The settled delivery state a receipt answer surfaces, if any. The control
+ * plane returns the delivery view (carrying `state`); a double that does not
+ * surface it resolves to undefined, which reads as "not provably terminal".
+ */
+function settledDeliveryState(settled: unknown): string | undefined {
+  if (settled && typeof settled === 'object') {
+    const state = (settled as { state?: unknown }).state;
+    if (typeof state === 'string') return state;
+  }
+  return undefined;
 }
 
 interface InboxItem {
@@ -269,6 +283,19 @@ export class ManagedDingtalkAdapter {
     if (this.settings.pollIntervalRewritten) {
       this.log(
         `Managed DingTalk pollInterval ${String(options.config['pollInterval'])} is not an integer in [${MIN_POLL_INTERVAL}, ${MAX_POLL_INTERVAL}]; using ${this.settings.pollInterval} ms.`,
+      );
+    }
+    // A configured-but-unusable template id silently disables cards forever;
+    // announce the refusal once (the fact, not the value) so "cards never
+    // appear" has a diagnosable cause, like the pollInterval rewrite above.
+    // Non-fatal: without a usable template the adapter stays on the text path
+    // (R1-10).
+    if (
+      options.config['cardTemplateId'] !== undefined &&
+      this.cardTemplateId === undefined
+    ) {
+      this.log(
+        'Managed DingTalk cardTemplateId is configured but unusable (not a non-empty string, or it contains CR/LF/NUL); cards are disabled and replies use the text path.',
       );
     }
     this.pollLoop = options.pollLoop ?? true;
@@ -1121,8 +1148,9 @@ export class ManagedDingtalkAdapter {
           `Managed DingTalk could not persist the receipt for ${delivery.deliveryId}: ${persistErrorText(error)}; it is still reported and re-driven locally.`,
         );
       }
+      let settled: unknown;
       try {
-        await this.controlPlane.receipt(delivery.deliveryId, outcome);
+        settled = await this.controlPlane.receipt(delivery.deliveryId, outcome);
       } catch (error) {
         // One delivery's unreportable receipt never aborts the claimed
         // batch: the entry stays outbound with the outcome persisted, so
@@ -1133,6 +1161,15 @@ export class ManagedDingtalkAdapter {
           `Managed DingTalk receipt for ${delivery.deliveryId} could not be reported (${String(error)}); it re-drives on the next tick.`,
         );
         return;
+      }
+      // A `delivered` receipt proves the whole delivery terminal: drop its card
+      // body now rather than retaining it on disk until 64 newer card deliveries
+      // evict it (R1-4). The removal persist below carries the prune to disk.
+      if (
+        outcome.outcome === 'accepted' &&
+        settledDeliveryState(settled) === 'delivered'
+      ) {
+        this.pruneCardProgress(delivery.deliveryId);
       }
       state.outbound = state.outbound.filter(
         (candidate) =>
@@ -1163,11 +1200,10 @@ export class ManagedDingtalkAdapter {
       // receipt — the control plane may already hold it (its answer was
       // lost) and settles idempotently. Only a segment whose send never
       // produced an outcome settles unknown.
+      const replay = entry.receipt ?? { outcome: 'unknown' };
+      let settled: unknown;
       try {
-        await this.controlPlane.receipt(
-          entry.deliveryId,
-          entry.receipt ?? { outcome: 'unknown' },
-        );
+        settled = await this.controlPlane.receipt(entry.deliveryId, replay);
       } catch (error) {
         const status = (error as { status?: unknown }).status;
         const code = (error as { code?: unknown }).code;
@@ -1198,6 +1234,15 @@ export class ManagedDingtalkAdapter {
         this.log(
           `Managed DingTalk receipt for ${entry.deliveryId} was refused (${String(status)}); it is dropped.`,
         );
+      }
+      // A replayed non-accepted receipt (or a delivered one) settles the
+      // delivery terminal: drop its card body so a post-restart settle does not
+      // retain it on disk (R1-4). The removal persist below carries the prune.
+      if (
+        replay.outcome !== 'accepted' ||
+        settledDeliveryState(settled) === 'delivered'
+      ) {
+        this.pruneCardProgress(entry.deliveryId);
       }
       state.outbound = state.outbound.filter(
         (candidate) => candidate !== entry,

@@ -434,7 +434,23 @@ function createEgressFetch(proxy?: string): typeof fetch {
       const proxied = { ...init, dispatcher } as RequestInit & {
         dispatcher: import('undici').Dispatcher;
       };
-      return await globalThis.fetch(input, proxied);
+      const response = await globalThis.fetch(input, proxied);
+      // fetch resolves on the response headers, but both callers read the body
+      // afterwards (the token provider's response.json(), the card client's
+      // request()). Destroying the dispatcher here would abort that read
+      // (UND_ERR_DESTROYED) on every proxied call, so buffer the body first and
+      // hand back a dispatcher-free Response; the destroy below then cannot
+      // precede the read (R1-1).
+      const body = await response.arrayBuffer();
+      const nullBodyStatus =
+        response.status === 204 ||
+        response.status === 205 ||
+        response.status === 304;
+      return new Response(nullBodyStatus ? null : body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
     } finally {
       await dispatcher.destroy().catch(() => undefined);
     }
@@ -504,6 +520,10 @@ function createCardSender(
     getAccessToken: token.getAccessToken,
     invalidateAccessToken: token.invalidateAccessToken,
     fetch: egressFetch,
+    // The managed receipt is write-once: an unreadable or unconfirmed card
+    // answer must land unknown, never accepted for an undelivered card (R1-2).
+    // Legacy callers of the client stay tolerant.
+    strictResponses: true,
   });
   return async (input: CardSegmentInput): Promise<void> => {
     try {

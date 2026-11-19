@@ -870,4 +870,147 @@ describe('managed DingTalk card transport (H5e, #17716)', () => {
     const deps = createManagedDingtalkDeps();
     expect(deps.sendCardSegment).toBeUndefined();
   });
+
+  it('B11 strict: a 200 with an unreadable body is ambiguous, not accepted (R1-2)', async () => {
+    const { fetchMock } = cardRoutes({
+      card: () => new Response('not json', { status: 200 }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const deps = createManagedDingtalkDeps(undefined, CREDS);
+    await expect(deps.sendCardSegment!(CARD_INPUT)).rejects.toMatchObject({
+      definitive: false,
+    });
+  });
+
+  it('B12 strict: a create answer with no deliverResults is ambiguous (R1-2)', async () => {
+    const { fetchMock } = cardRoutes({
+      card: () => jsonResponse({ result: {} }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const deps = createManagedDingtalkDeps(undefined, CREDS);
+    await expect(deps.sendCardSegment!(CARD_INPUT)).rejects.toMatchObject({
+      definitive: false,
+    });
+  });
+
+  it('B13 strict: a create answer with empty deliverResults is ambiguous (R1-2)', async () => {
+    const { fetchMock } = cardRoutes({
+      card: () => jsonResponse({ result: { deliverResults: [] } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const deps = createManagedDingtalkDeps(undefined, CREDS);
+    await expect(deps.sendCardSegment!(CARD_INPUT)).rejects.toMatchObject({
+      definitive: false,
+    });
+  });
+
+  it('B14 strict: an edit with an unreadable body is ambiguous (R1-2)', async () => {
+    const { fetchMock } = cardRoutes({
+      card: () => new Response('', { status: 200 }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const deps = createManagedDingtalkDeps(undefined, CREDS);
+    await expect(
+      deps.sendCardSegment!({ ...CARD_INPUT, create: false }),
+    ).rejects.toMatchObject({ definitive: false });
+  });
+
+  it('B15 proxy: the body is consumed before the dispatcher is destroyed (R1-1)', async () => {
+    // A streaming body that errors once the dispatcher is destroyed pins the
+    // ordering: fetch resolves on headers, so destroying in the finally before
+    // the caller reads the body aborts every proxied read (UND_ERR_DESTROYED).
+    vi.resetModules();
+    vi.doMock('undici', () => ({
+      default: {
+        EnvHttpProxyAgent: class {
+          destroyed = false;
+          async destroy() {
+            this.destroyed = true;
+          }
+        },
+      },
+    }));
+    try {
+      const fetchDouble = vi.fn(async (url: string, init?: RequestInit) => {
+        const dispatcher = (
+          init as { dispatcher?: { destroyed?: boolean } } | undefined
+        )?.dispatcher;
+        const payload = url.startsWith(TOKEN_PREFIX)
+          ? JSON.stringify({ access_token: 'tok-1', expires_in: 7200 })
+          : JSON.stringify({ result: { deliverResults: [{ success: true }] } });
+        // highWaterMark 0: pull only when the body is actually read, not
+        // eagerly at construction — otherwise the chunk buffers before the
+        // destroy and the ordering regression would not be observable.
+        const stream = new ReadableStream<Uint8Array>(
+          {
+            pull(controller) {
+              if (dispatcher?.destroyed) {
+                controller.error(new TypeError('terminated'));
+                return;
+              }
+              controller.enqueue(new TextEncoder().encode(payload));
+              controller.close();
+            },
+          },
+          { highWaterMark: 0 },
+        );
+        return new Response(stream, {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      vi.stubGlobal('fetch', fetchDouble);
+      const fresh = await import('./managed-dingtalk-deps.js');
+      const deps = fresh.createManagedDingtalkDeps(
+        'http://proxy.internal:8080',
+        CREDS,
+      );
+      await expect(deps.sendCardSegment!(CARD_INPUT)).resolves.toBeUndefined();
+      expect(fetchDouble.mock.calls.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      vi.doUnmock('undici');
+      vi.resetModules();
+    }
+  });
+
+  it('B16 token refreshes a minute early, not at expiry (R1-5)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      const { fetchMock, calls } = cardRoutes();
+      vi.stubGlobal('fetch', fetchMock);
+      const deps = createManagedDingtalkDeps(undefined, CREDS);
+      await deps.sendCardSegment!(CARD_INPUT);
+      expect(tokenCallsOf(calls)).toHaveLength(1);
+      // expires_in 7200 → cached until t+7140s; at t+7139s still cached.
+      vi.setSystemTime(new Date('2026-01-01T01:58:59Z'));
+      await deps.sendCardSegment!({ ...CARD_INPUT, create: false });
+      expect(tokenCallsOf(calls)).toHaveLength(1);
+      // At t+7141s the early refresh has fired: a second gettoken.
+      vi.setSystemTime(new Date('2026-01-01T01:59:01Z'));
+      await deps.sendCardSegment!({ ...CARD_INPUT, create: false });
+      expect(tokenCallsOf(calls)).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('B17 token floor: a short expires_in is not cached already-expired (R1-5)', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+      const { fetchMock, calls } = cardRoutes({
+        token: () => jsonResponse({ access_token: 'tok-1', expires_in: 30 }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      const deps = createManagedDingtalkDeps(undefined, CREDS);
+      await deps.sendCardSegment!(CARD_INPUT);
+      // The 60s floor keeps the token cached for an immediate second send;
+      // without it, expires_in 30 - 60 caches an already-expired token.
+      await deps.sendCardSegment!({ ...CARD_INPUT, create: false });
+      expect(tokenCallsOf(calls)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

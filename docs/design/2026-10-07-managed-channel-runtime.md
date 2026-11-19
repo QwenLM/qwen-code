@@ -117,10 +117,10 @@ Each commit moves every state line at most one allowed step (the H0b successor r
 
 ## Follow-up work
 
-| Slice | Scope                                                                                                                                                           |
-| ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| H5d   | Second adapter by product priority; multi-segment plans with a per-segment ledger.                                                                              |
-| H5e   | Card-style segmented surfaces and edits where a provider supports them; DingTalk grouped cards in [card surfaces](2026-11-18-managed-channel-card-surfaces.md). |
-| Media | Attachment kinds beyond inline staging; tool access to staged attachments.                                                                                      |
-| API   | Public resend mutation; WebShell mirror routes for the channel resources.                                                                                       |
-| H6    | Automation deliveries reusing the delivery contract and the claim/receipt surface.                                                                              |
+| Slice | Scope                                                                                                                                                                              |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| H5d   | Second adapter by product priority; multi-segment plans with a per-segment ledger.                                                                                                 |
+| H5e   | Card-style segmented surfaces and edits where a provider supports them; DingTalk interactive cards (private chat) in [card surfaces](2026-11-18-managed-channel-card-surfaces.md). |
+| Media | Attachment kinds beyond inline staging; tool access to staged attachments.                                                                                                         |
+| API   | Public resend mutation; WebShell mirror routes for the channel resources.                                                                                                          |
+| H6    | Automation deliveries reusing the delivery contract and the claim/receipt surface.                                                                                                 |
