@@ -4767,7 +4767,7 @@
           "default": false
         },
         "modelAvailabilityTracking": {
-          "description": "Remember model health across requests within a session (experimental). When a fallback model exhausts its retries on a capacity error (429/503/529), the model fallback chain skips it for the rest of the turn instead of re-trying it on every request, and re-probes it once on the next turn; an explicit retry also re-probes skipped models. The primary model is still attempted on every request. A fallback model that hits permanent quota exhaustion (for example a free-tier or token-plan quota that only resets later) is marked unavailable for the rest of the session and skipped on every later request, rather than being re-probed each turn. When disabled, the fallback chain behaves exactly as before.",
+          "description": "Remember model health across requests within a session (experimental). When a fallback model exhausts its retries on a capacity error (429/503/529), the model fallback chain skips it for the rest of the turn instead of re-trying it on every request, and re-probes it once on the next turn; an explicit retry also re-probes models skipped for capacity in the current turn. The primary model is still attempted on every request. A fallback model that hits permanent quota exhaustion (for example a free-tier or token-plan quota that only resets later) is marked unavailable for the rest of the session and skipped on every later request; only a new session re-probes it. When disabled, the fallback chain behaves exactly as before.",
           "type": "boolean",
           "default": false
         },

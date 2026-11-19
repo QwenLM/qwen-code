@@ -57,25 +57,34 @@ the session instead of re-probing it each turn.
 
 Add `isTerminalQuotaError(error, classification)` next to the retry
 classification (`packages/core/src/utils/retryErrorClassification.ts`). It
-returns true exactly for the permanent-quota signals:
+returns true exactly for the permanent-quota signals, in this order:
 
-- `classification.reason === 'qwen-oauth-free-tier-quota'`, or
-- `classification.reason === 'allocated-quota-exceeded'`, or
-- `classification.reason === 'permanent-provider-code'` **and** the
-  `insufficient_quota` code (case/separator insensitive) appears in
-  `classification.providerCode` or in the error's `.type`/`.code`. The OpenAI
-  SDK puts `insufficient_quota` in `.type` with `code: null`; the classifier
-  reads that permanence via `providerType`, leaving `providerCode` empty, so the
-  error's own type/code is read too, or
+- `classification.reason === 'qwen-oauth-free-tier-quota'` or
+  `'allocated-quota-exceeded'` (the two fail-fast quota reasons), or
 - `isQuotaExhaustedError(error)` — the reset-time quota signal, read off the
-  error message so it is caught whether the error arrives raw or as the
-  formatted fast-fail `Error`, and regardless of how it classified.
+  error message. This arm runs **before** the code arm and independent of the
+  classification reason: a 429 classifies `rate-limit` (`isRateLimitError` runs
+  before the classifier's permanence arms) and a permanent non-quota code would
+  otherwise return early, so the message must be checked first. It catches the
+  error whether it arrives raw or as the formatted fast-fail `Error`.
+- the `insufficient_quota` code (case/separator insensitive) appearing in any of
+  `classification.providerCode`, the provider fields' `providerCode` /
+  `providerType` (`getProviderFields(error)`), or the error object's own
+  `.type`/`.code`. This is read **independent of `classification.reason`**: the
+  canonical OpenAI `429 insufficient_quota` classifies `rate-limit`, never
+  `permanent-provider-code`, so gating the code arm on that reason would miss
+  it. Reading the provider fields also covers the SDK shape that puts
+  `insufficient_quota` in `.type` with `code: null` (the classifier reads that
+  permanence via `providerType`, leaving `classification.providerCode` empty).
 
 Non-quota permanent errors (moderation `data_inspection_failed`, auth, billing
-other than `insufficient_quota`, malformed request) do **not** match: the
-`permanent-provider-code` arm is narrowed to the quota code, and the other
-reasons are not quota reasons. Transient capacity (429/503/529 retryable) does
-not match and keeps its existing `sticky_retry` behavior.
+other than `insufficient_quota`, malformed request) do **not** match: none of
+their codes is `insufficient_quota` and their messages carry no reset-time quota
+signal. Transient capacity (429/503/529 retryable, e.g. TPM throttling) does not
+match and keeps its existing `sticky_retry` behavior. The classifier itself is
+unchanged: a 429 stays `rate-limit`/`retryable` because the bounded retry ladder
+and `isFallbackEligible` depend on it; the quota signal is added alongside that
+classification, not by re-reasoning the 429 as fail-fast.
 
 ### 2. Wire it into the fallback catch block
 
@@ -115,14 +124,14 @@ uses, so same-model-different-route health stays separate.
 
 ## Key design decisions
 
-| Decision                                                   | Rationale                                                                                                                                                                                                                                                                                                                                              |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Fallback-only, not primary                                 | The primary is attempted every request (primary-skip is out of scope, #17377). Writing terminal for the primary would be a dead write with no reader.                                                                                                                                                                                                  |
-| Reason `quota` only                                        | The narrow slice wires the quota signal. `terminal` reason `capacity` stays available on the ledger but has no caller (main has no permanent-capacity classification; 529 is retryable).                                                                                                                                                               |
-| Terminal-first `else if`                                   | Avoids a double mark when a reset-time quota classifies retryable; `markRetryOncePerTurn` already refuses to downgrade terminal, and the `else if` makes the intent explicit.                                                                                                                                                                          |
-| Predicate reads classification + error type/code + message | The two fail-fast quota reasons come off the vetted classification; the `insufficient_quota` permanent code is read from `classification.providerCode` or the error's own `.type`/`.code` (covering the OpenAI `code: null` shape); the reset-time signal is message-based (`isQuotaExhaustedError`) and must be caught independent of classification. |
-| Gate unchanged                                             | Marking is gated on the bound `availability` (`isSessionTurn && isModelAvailabilityTrackingEnabled?.()`); gate-off behavior is byte-identical.                                                                                                                                                                                                         |
-| No `modelPolicy` action map                                | The preview's prompt-vs-silent `ModelPolicy` UI is a separate concern and out of scope (Option B: main architecture wins).                                                                                                                                                                                                                             |
+| Decision                                                              | Rationale                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Fallback-only, not primary                                            | The primary is attempted every request (primary-skip is out of scope, #17377). Writing terminal for the primary would be a dead write with no reader.                                                                                                                                                                                                                                                                                                                       |
+| Reason `quota` only                                                   | The narrow slice wires the quota signal. `terminal` reason `capacity` stays available on the ledger but has no caller (main has no permanent-capacity classification; 529 is retryable).                                                                                                                                                                                                                                                                                    |
+| Terminal-first `else if`                                              | Avoids a double mark when a reset-time quota classifies retryable; `markRetryOncePerTurn` already refuses to downgrade terminal, and the `else if` makes the intent explicit.                                                                                                                                                                                                                                                                                               |
+| Predicate reads the quota signal independent of classification reason | The two fail-fast quota reasons come off the classification; the reset-time message arm (`isQuotaExhaustedError`) runs first, independent of reason; the `insufficient_quota` code is read across `classification.providerCode`, the provider fields' code/type, and the error's own `.type`/`.code` — not gated on `permanent-provider-code`, because the canonical `429 insufficient_quota` classifies `rate-limit`. The classifier is unchanged (a 429 stays retryable). |
+| Gate unchanged                                                        | Marking is gated on the bound `availability` (`isSessionTurn && isModelAvailabilityTrackingEnabled?.()`); gate-off behavior is byte-identical.                                                                                                                                                                                                                                                                                                                              |
+| No `modelPolicy` action map                                           | The preview's prompt-vs-silent `ModelPolicy` UI is a separate concern and out of scope (Option B: main architecture wins).                                                                                                                                                                                                                                                                                                                                                  |
 
 ## Files affected
 
@@ -159,16 +168,26 @@ uses, so same-model-different-route health stays separate.
 
 - Predicate unit corpus with a killed mutation per signal (drop each arm →
   the matching case turns red).
-- Gate-on integration test through the real fallback wiring: fallback A hits a
-  permanent-quota error, fallback B serves; a second same-turn request and a
-  new-turn request both skip A (terminal survives `resetTurn`); a transient
-  capacity fallback still re-probes next turn (sticky unchanged).
+- Gate-on integration tests through the real fallback wiring, driven by the real
+  classifier: the canonical `429 insufficient_quota` (rate-limit/retryable, not
+  fast-failed) is marked terminal and fallback B serves, with A skipped on a
+  second same-turn request and a new-turn request (terminal survives
+  `resetTurn`); a statusless fail-fast quota stops the chain yet still marks A
+  terminal, and a fresh turn reaches B directly; a transient capacity fallback
+  still re-probes next turn (sticky unchanged).
 - Gate-off witness: inject a real service with the gate false, assert no
   `markTerminal` call and byte-identical fallback behavior.
 - A permanent real-HTTP test (real local OpenAI-compatible server + real SDK +
-  real `ModelAvailabilityService`) where a fallback returns a permanent-quota
-  body and is skipped on the next request, mirroring the #17377 real-socket
-  test; mutation-witnessed (disable terminal marking → re-probe observed).
+  real `ModelAvailabilityService`) where fallback A returns a reset-time quota
+  body. The retry layer's stop/continue decision is pinned by delegating the
+  quota fast-fail to the real source functions (`isQuotaExhaustedError` /
+  `formatQuotaExhaustedMessage`, replicating `retry.ts`): the real
+  `retryWithBackoff` cannot run over the real socket because its transient-429
+  rate-limit ladder uses real 1-5 min delays and fake timers freeze socket I/O.
+  Request 1 fast-fails the quota into a status-less formatted Error, so the chain
+  stops (B never called) but A is marked terminal; fresh turns skip A and serve
+  via B over the real socket. Mutation-witnessed (disable terminal marking →
+  re-probe observed).
 - core typecheck + lint + affected suites green; multi-pass self-audit.
 
 ## Open questions / residuals

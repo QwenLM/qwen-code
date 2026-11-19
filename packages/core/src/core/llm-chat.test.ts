@@ -9463,6 +9463,30 @@ describe('LlmChat', async () => {
         );
       };
       try {
+        // Pin the retry layer's stop/continue decision (R1-5). The real
+        // retryWithBackoff cannot run over this real socket: its transient-429
+        // rate-limit ladder uses real 1-5 min delays (the primary's TPM 429
+        // would time the test out) and fake timers freeze the socket I/O. So
+        // delegate the quota fast-fail to the real source functions, replicating
+        // retry.ts exactly: a reset-time quota becomes a status-less formatted
+        // Error (not fallback-eligible -> the chain stops), while any other
+        // error propagates raw (the primary's TPM 429 stays fallback-eligible).
+        // A pass-through mock would hide this and continue to fallback-b on
+        // request 1 — a path production never takes.
+        const { isQuotaExhaustedError, formatQuotaExhaustedMessage } =
+          await import('../utils/quotaErrorDetection.js');
+        mockRetryWithBackoff.mockImplementation(async (apiCall) => {
+          try {
+            return await apiCall();
+          } catch (error) {
+            if (isQuotaExhaustedError(error)) {
+              throw new Error(formatQuotaExhaustedMessage(error), {
+                cause: error,
+              });
+            }
+            throw error;
+          }
+        });
         const service = new ModelAvailabilityService();
         vi.mocked(
           mockConfig.isModelAvailabilityTrackingEnabled,
@@ -9502,44 +9526,41 @@ describe('LlmChat', async () => {
           })),
         );
 
-        // Request 1: primary 429 -> fallback-a quota-exhausted (terminal) -> b.
-        const events1 = await sendSessionCollect(
-          'test',
-          'real-http-terminal-turn',
-        );
-        expect(hasChunkText(events1, 'real-ok')).toBe(true);
+        // Request 1: primary 429 -> fallback-a reset-time quota. The real retry
+        // layer fast-fails it into a status-less "Quota exhausted" Error, which
+        // is not fallback-eligible, so the chain STOPS after fallback-a:
+        // fallback-b is never tried this request, but fallback-a is still
+        // marked terminal (the message arm matches the formatted Error).
+        await expect(
+          sendSessionCollect('test', 'real-http-terminal-turn'),
+        ).rejects.toThrow(/Quota exhausted/);
+        expect(requests).toContain('test-model');
         expect(requests).toContain('fallback-a');
+        expect(requests).not.toContain('fallback-b');
         expect(service.snapshot('fallback-a@real')).toEqual({
           available: false,
           reason: 'quota',
         });
 
-        // Request 2, same turn: the ledger skips the quota-exhausted fallback-a.
+        // Request 2, a fresh turn: terminal fallback-a is skipped at entry, so
+        // the chain reaches fallback-b directly and serves over the real socket.
         requests.length = 0;
         const events2 = await sendSessionCollect(
           'test',
-          'real-http-terminal-turn',
+          'real-http-terminal-turn-2',
         );
         expect(hasChunkText(events2, 'real-ok')).toBe(true);
         expect(requests).toContain('test-model');
         expect(requests).toContain('fallback-b');
         expect(requests).not.toContain('fallback-a');
 
-        // Request 3, a fresh ledger turn key (resetTurn): terminal survives the
-        // turn boundary, so fallback-a is STILL skipped over the real socket —
-        // the discrimination from the sticky case, which re-probes here.
+        // Request 3, another fresh turn (resetTurn): terminal survives the turn
+        // boundary, so fallback-a is STILL skipped — the discrimination from the
+        // sticky case, which re-probes here.
         requests.length = 0;
-        const events3 = await collect(
-          await chat.sendMessageStream(
-            'test-model',
-            { message: 'test' },
-            'real-http-terminal-turn',
-            undefined,
-            {
-              isSessionTurn: true,
-              ledgerTurnKey: 'real-http-terminal-turn/goal/goal-runtime:g1',
-            },
-          ),
+        const events3 = await sendSessionCollect(
+          'test',
+          'real-http-terminal-turn-3',
         );
         expect(hasChunkText(events3, 'real-ok')).toBe(true);
         expect(requests).toContain('test-model');
@@ -9715,14 +9736,16 @@ describe('LlmChat', async () => {
               : fallbackRoute('fallback-b', fallbackB),
           ),
       );
-      // A reset-time quota error carrying HTTP 429 classifies retryable
-      // (rate-limit), so it is fallback-eligible; terminal must still win over
-      // sticky_retry (the terminal-first else-if).
+      // The canonical 429 insufficient_quota (no reset time) classifies
+      // rate-limit/retryable, so it is fallback-eligible and the retry layer does
+      // not fast-fail it (production reaches the catch with the raw 429 and
+      // continues the chain). Terminal must still win over sticky_retry (the
+      // terminal-first else-if), reading the quota code independent of reason.
       const quotaError = Object.assign(
-        new StreamContentError(
-          '{"error":{"code":"429","message":"Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC."}}',
+        new Error(
+          'You exceeded your current quota, please check your plan and billing details.',
         ),
-        { status: 429 },
+        { status: 429, code: 'insufficient_quota', type: 'insufficient_quota' },
       );
       streamMock().mockRejectedValue(tpmCapacityError());
       fallbackA.mockRejectedValue(quotaError);
@@ -9872,10 +9895,10 @@ describe('LlmChat', async () => {
           ),
       );
       const quotaError = Object.assign(
-        new StreamContentError(
-          '{"error":{"code":"429","message":"Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC."}}',
+        new Error(
+          'You exceeded your current quota, please check your plan and billing details.',
         ),
-        { status: 429 },
+        { status: 429, code: 'insufficient_quota', type: 'insufficient_quota' },
       );
       streamMock().mockRejectedValue(tpmCapacityError());
       fallbackA.mockRejectedValue(quotaError);

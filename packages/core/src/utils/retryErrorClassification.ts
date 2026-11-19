@@ -665,24 +665,33 @@ export function isTerminalQuotaError(
   ) {
     return true;
   }
-  if (classification.reason === 'permanent-provider-code') {
-    // Permanence can come off the provider code or the SDK's `.type`: the
-    // OpenAI SDK puts `insufficient_quota` in `.type` with `code: null`, which
-    // the classifier reads via providerType, leaving classification.providerCode
-    // empty. Read the error's type/code too so that shape is marked terminal
-    // rather than re-probed each turn.
-    const errorTypeOrCode =
-      typeof error === 'object' && error !== null
-        ? ((error as { type?: unknown }).type ??
-          (error as { code?: unknown }).code)
-        : undefined;
-    return (
-      /insufficient[_-]?quota/i.test(classification.providerCode ?? '') ||
-      (typeof errorTypeOrCode === 'string' &&
-        /insufficient[_-]?quota/i.test(errorTypeOrCode))
-    );
+  // The reset-time quota signal is independent of how the error classified: a
+  // 429 classifies 'rate-limit' (isRateLimitError runs before the permanence
+  // arms) and a permanent non-quota code would otherwise return early below,
+  // so check the message before the code arm.
+  if (isQuotaExhaustedError(error)) {
+    return true;
   }
-  return isQuotaExhaustedError(error);
+  // The insufficient_quota code must be read independent of classification
+  // reason: the canonical OpenAI 429 insufficient_quota classifies 'rate-limit',
+  // never 'permanent-provider-code'. Read it off the classification, the
+  // provider fields (code and the SDK's `.type`, which the classifier reads via
+  // providerType when `code` is null), and the error object's own type/code.
+  const { providerCode, providerType } = getProviderFields(error);
+  const typeOrCode =
+    typeof error === 'object' && error !== null
+      ? ((error as { type?: unknown }).type ??
+        (error as { code?: unknown }).code)
+      : undefined;
+  return [
+    classification.providerCode,
+    providerCode,
+    providerType,
+    typeof typeOrCode === 'string' ? typeOrCode : undefined,
+  ].some(
+    (value) =>
+      typeof value === 'string' && /insufficient[_-]?quota/i.test(value),
+  );
 }
 
 /**

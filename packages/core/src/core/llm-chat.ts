@@ -5977,14 +5977,15 @@ export class LlmChat {
                     fallbackConfig,
                   ) ?? resolvedFallbackModel;
 
-                // Skip a fallback the health ledger already exhausted this turn.
-                if (
-                  availability &&
-                  !availability.snapshot(fallbackRouteKey).available
-                ) {
+                // Skip a fallback the health ledger marks unavailable: a
+                // terminal quota mark lasts the whole session, a sticky capacity
+                // mark only the current turn. Log the snapshot reason so the two
+                // are distinguishable when debugging a skipped fallback.
+                const fallbackHealth = availability?.snapshot(fallbackRouteKey);
+                if (fallbackHealth && !fallbackHealth.available) {
                   debugLogger.warn(
                     `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
-                      `marked unavailable for this turn.`,
+                      `marked unavailable (reason: ${fallbackHealth.reason ?? 'unknown'}).`,
                   );
                   continue;
                 }

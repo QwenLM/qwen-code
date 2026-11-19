@@ -1259,4 +1259,42 @@ describe('isTerminalQuotaError', () => {
     expect(classification.reason).toBe('permanent-provider-code');
     expect(isTerminalQuotaError(error, classification)).toBe(false);
   });
+
+  it('matches the canonical 429 insufficient_quota through the real classifier (R1-1)', () => {
+    // isRateLimitError runs before the permanence arms, so a real 429
+    // insufficient_quota classifies 'rate-limit', never 'permanent-provider-code'.
+    // The quota code must be read independent of the classification reason.
+    const error = Object.assign(
+      new Error(
+        'You exceeded your current quota, please check your plan and billing details.',
+      ),
+      { status: 429, code: 'insufficient_quota', type: 'insufficient_quota' },
+    );
+    const classification = classifyRetryError(error);
+    expect(classification.reason).toBe('rate-limit');
+    expect(isTerminalQuotaError(error, classification)).toBe(true);
+  });
+
+  it('matches a reset-time quota message under a permanent non-quota code (R1-1)', () => {
+    // The message arm must run before the code arm returns: a permanent
+    // non-quota code carrying reset-time quota wording is still terminal.
+    const error = Object.assign(
+      new Error(
+        'Your quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC.',
+      ),
+      { code: 'billing_error' },
+    );
+    const classification = classifyRetryError(error);
+    expect(classification.reason).toBe('permanent-provider-code');
+    expect(isTerminalQuotaError(error, classification)).toBe(true);
+  });
+
+  it('does not match a real 429 TPM throttle through the real classifier (R1-1)', () => {
+    const error = Object.assign(new Error('Throttling: TPM(1/1)'), {
+      status: 429,
+    });
+    const classification = classifyRetryError(error);
+    expect(classification.reason).toBe('rate-limit');
+    expect(isTerminalQuotaError(error, classification)).toBe(false);
+  });
 });

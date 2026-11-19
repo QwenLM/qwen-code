@@ -49,22 +49,30 @@ fallback；该路径在此不变。
 ### 1. 永久配额判定谓词
 
 在重试分类旁（`packages/core/src/utils/retryErrorClassification.ts`）新增
-`isTerminalQuotaError(error, classification)`。它恰对永久配额信号返回 true：
+`isTerminalQuotaError(error, classification)`。它按以下顺序恰对永久配额信号返回
+true：
 
-- `classification.reason === 'qwen-oauth-free-tier-quota'`，或
-- `classification.reason === 'allocated-quota-exceeded'`，或
-- `classification.reason === 'permanent-provider-code'` **且**
-  `insufficient_quota`（大小写/分隔符不敏感）出现在 `classification.providerCode`
-  或错误的 `.type`/`.code` 中。OpenAI SDK 把 `insufficient_quota` 放在 `.type`、
-  `code: null`；分类器经 `providerType` 读取该永久性，使 `providerCode` 为空，
-  故也读错误自身的 type/code，或
-- `isQuotaExhaustedError(error)`——重置时间配额信号，从错误消息读取，因此无论
-  错误以原始形状还是格式化 fast-fail `Error` 到达、无论它如何分类，都能捕获。
+- `classification.reason === 'qwen-oauth-free-tier-quota'` 或
+  `'allocated-quota-exceeded'`（两个 fail-fast 配额 reason），或
+- `isQuotaExhaustedError(error)`——重置时间配额信号，从错误消息读取。此臂在 code
+  臂**之前**、独立于分类 reason 运行：429 分类为 `rate-limit`（`isRateLimitError`
+  先于分类器的 permanence 臂），永久非配额 code 否则会提前 return，故须先查消息。
+  无论错误以原始形状还是格式化 fast-fail `Error` 到达都能捕获。
+- `insufficient_quota` code（大小写/分隔符不敏感）出现在
+  `classification.providerCode`、provider fields 的 `providerCode`/`providerType`
+  （`getProviderFields(error)`）、或错误对象自身 `.type`/`.code` 任一处。此读取
+  **独立于 `classification.reason`**：canonical OpenAI `429 insufficient_quota`
+  分类为 `rate-limit`、绝非 `permanent-provider-code`，若把 code 臂门控在该 reason
+  上就会漏掉它。读 provider fields 也覆盖 SDK 把 `insufficient_quota` 放在 `.type`、
+  `code: null` 的形状（分类器经 `providerType` 读取该永久性，使
+  `classification.providerCode` 为空）。
 
 非配额的永久错误（审核 `data_inspection_failed`、鉴权、`insufficient_quota`
-以外的计费、畸形请求）**不**命中：`permanent-provider-code` 分支被收窄到配额
-code，其余 reason 不是配额 reason。瞬时容量（429/503/529 可重试）不命中，保持
-既有 `sticky_retry` 行为。
+以外的计费、畸形请求）**不**命中：它们的 code 都不是 `insufficient_quota`，消息
+也无重置时间配额信号。瞬时容量（429/503/529 可重试，如 TPM 限流）不命中，保持既有
+`sticky_retry` 行为。分类器本身不变：429 仍 `rate-limit`/`retryable`，因为有界重试
+阶梯与 `isFallbackEligible` 都依赖它；配额信号是叠加在该分类之外，而非把 429 重新
+推理为 fail-fast。
 
 ### 2. 接进 fallback catch 块
 
@@ -101,14 +109,14 @@ terminal 优先于 sticky：恰好分类为可重试的重置时间配额被记�
 
 ## 关键设计决策
 
-| 决策                               | 理由                                                                                                                                                                                                                                |
-| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 仅 fallback，不含 primary          | primary 每请求必试（primary-skip 范围外，#17377）。给 primary 写 terminal 是没有读取方的死写。                                                                                                                                      |
-| 仅 reason `quota`                  | 窄切片接配额信号。台账上的 `terminal` reason `capacity` 仍可用但无调用方（main 无永久容量分类；529 可重试）。                                                                                                                       |
-| terminal 优先 `else if`            | 避免重置时间配额恰好分类可重试时的双重标记；`markRetryOncePerTurn` 本就拒绝降级 terminal，`else if` 让意图显式。                                                                                                                    |
-| 谓词读分类 + 错误 type/code + 消息 | 两个 fail-fast 配额 reason 取自已校验的分类；`insufficient_quota` 永久 code 取自分类的 providerCode 或错误自身 `.type`/`.code`（覆盖 OpenAI `code:null` 形状）；重置时间信号基于消息（`isQuotaExhaustedError`），须独立于分类捕获。 |
-| 门不变                             | 标记以绑定的 `availability` 为门（`isSessionTurn && isModelAvailabilityTrackingEnabled?.()`）；gate-off 行为逐字节不变。                                                                                                            |
-| 不做 `modelPolicy` action map      | preview 的 prompt-vs-silent `ModelPolicy` UI 是独立关注点，范围外（Option B：main 架构赢）。                                                                                                                                        |
+| 决策                             | 理由                                                                                                                                                                                                                                                                                                                                                      |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 仅 fallback，不含 primary        | primary 每请求必试（primary-skip 范围外，#17377）。给 primary 写 terminal 是没有读取方的死写。                                                                                                                                                                                                                                                            |
+| 仅 reason `quota`                | 窄切片接配额信号。台账上的 `terminal` reason `capacity` 仍可用但无调用方（main 无永久容量分类；529 可重试）。                                                                                                                                                                                                                                             |
+| terminal 优先 `else if`          | 避免重置时间配额恰好分类可重试时的双重标记；`markRetryOncePerTurn` 本就拒绝降级 terminal，`else if` 让意图显式。                                                                                                                                                                                                                                          |
+| 谓词独立于分类 reason 读配额信号 | 两个 fail-fast 配额 reason 取自分类；重置时间消息臂（`isQuotaExhaustedError`）优先、独立于 reason；`insufficient_quota` code 跨 `classification.providerCode`、provider fields 的 code/type、错误自身 `.type`/`.code` 读取——不门控在 `permanent-provider-code`，因为 canonical `429 insufficient_quota` 分类为 `rate-limit`。分类器不变（429 仍可重试）。 |
+| 门不变                           | 标记以绑定的 `availability` 为门（`isSessionTurn && isModelAvailabilityTrackingEnabled?.()`）；gate-off 行为逐字节不变。                                                                                                                                                                                                                                  |
+| 不做 `modelPolicy` action map    | preview 的 prompt-vs-silent `ModelPolicy` UI 是独立关注点，范围外（Option B：main 架构赢）。                                                                                                                                                                                                                                                              |
 
 ## 涉及文件
 
@@ -138,14 +146,21 @@ terminal 优先于 sticky：恰好分类为可重试的重置时间配额被记�
 ## 验证计划
 
 - 谓词单元语料，每个信号配被杀变异（删任一分支 → 对应用例转红）。
-- 经真实 fallback 接线的 gate-on 集成测试：fallback A 命中永久配额错误、
-  fallback B 服务；同轮第二个请求与新轮请求都跳过 A（terminal 跨 `resetTurn`
-  存活）；瞬时容量 fallback 仍下轮重探（sticky 不变）。
+- 经真实 fallback 接线、由真实分类器驱动的 gate-on 集成测试：canonical
+  `429 insufficient_quota`（rate-limit/可重试、不被 fast-fail）被标记 terminal、
+  fallback B 服务，同轮第二个请求与新轮请求都跳过 A（terminal 跨 `resetTurn`
+  存活）；无 status 的 fail-fast 配额停链但仍标记 A terminal，新轮直达 B；瞬时
+  容量 fallback 仍下轮重探（sticky 不变）。
 - gate-off 见证：注入真实 service 而门 false，断言无 `markTerminal` 调用且
   fallback 行为逐字节不变。
 - 永久 real-HTTP 测试（真实本地 OpenAI 兼容服务器 + 真实 SDK + 真实
-  `ModelAvailabilityService`）：某 fallback 返回永久配额 body，下一请求跳过它，
-  镜像 #17377 的真实 socket 测试；变异见证（禁用 terminal 标记 → 观察到重探）。
+  `ModelAvailabilityService`）：fallback A 返回重置时间配额 body。retry 层的
+  stop/continue 决策通过把配额 fast-fail 委托给真实源函数
+  （`isQuotaExhaustedError`/`formatQuotaExhaustedMessage`，复刻 `retry.ts`）钉住：
+  真实 `retryWithBackoff` 无法在真实 socket 上跑，因其瞬时 429 rate-limit 阶梯用
+  真实 1-5 分钟延迟、而 fake timers 会冻结 socket I/O。请求 1 把配额 fast-fail 成
+  无 status 格式化 Error，链停（B 未被调用）但 A 被标记 terminal；新轮跳过 A、经
+  真实 socket 由 B 服务。变异见证（禁用 terminal 标记 → 观察到重探）。
 - core typecheck + lint + 受影响套件绿；多轮自审。
 
 ## 开放问题 / 残余

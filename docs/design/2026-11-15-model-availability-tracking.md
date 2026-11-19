@@ -57,9 +57,10 @@ no zod / no external deps, so no zod-4 migration is needed for it:
   must exclude. Preview's `selectFirstAvailable` and `reset` helpers are
   deliberately not ported: nothing in the fallback-skipping wiring calls them
   and no follow-up plans to (primary selection is out of scope), so they would
-  be dead surface. The `terminal` state and `markTerminal` are retained despite
-  having no caller in this port because the deferred terminal/quota-marking
-  follow-up is their planned caller — unlike the two dropped helpers.
+  be dead surface. The `terminal` state and `markTerminal` had no caller in this
+  port; the [2026-11-19 terminal-quota design](./2026-11-19-model-availability-terminal-quota.md)
+  wires the fallback `catch` as their caller (reason `quota`) — unlike the two
+  dropped helpers, which still have none.
 - Invariants preserved from preview: a terminal failure is never downgraded to
   transient; `markRetryOncePerTurn` keeps `consumed` if already sticky (no
   infinite same-turn loop); `snapshot` reports unavailable for terminal or
@@ -188,8 +189,9 @@ no zod / no external deps, so no zod-4 migration is needed for it:
   foreign marks are ignored.
 - Error mapping for this first port is deliberately narrow: only the
   capacity statuses already admitted by `isFallbackEligible` feed the ledger
-  (`sticky_retry`). Terminal/quota marking is deferred to a follow-up so the
-  first PR does not change auth/billing behavior.
+  (`sticky_retry`). Permanent-quota failures feed `terminal` (reason `quota`)
+  as of the [2026-11-19 terminal-quota design](./2026-11-19-model-availability-terminal-quota.md);
+  this first port did not change auth/billing behavior.
 
 ### Feature gate
 
@@ -204,7 +206,7 @@ reversible; a later PR can flip the default once nightly evidence is in.
 | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Port the service logic (drop unused helpers), kebab-case | Pure state machine, well-tested in preview; no zod dependency so no zod-4 rework. `selectFirstAvailable`/`reset` have no caller here, so they are not ported.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Session-scoped on Config                                 | Matches main's per-session Config and preview's ownership; avoids a process-global health singleton.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| Only capacity → sticky_retry in this port                | `isFallbackEligible` already bounds the scope; terminal/quota marking would touch auth/billing, deferred.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Only capacity → sticky_retry in this port                | `isFallbackEligible` bounds this port's scope; permanent-quota → `terminal` (reason `quota`) landed in the 2026-11-19 terminal-quota design.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | Setting gate default off                                 | Behavior change to the fallback chain must be opt-in and reversible first.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | Turn boundary at request entry                           | `beginTurn`/`resetTurn` run in `sendMessageStream` before any model call, so an explicit Retry the primary serves still re-probes consumed fallbacks.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | Allowlist session turns (`isSessionTurn`)                | Membership is decided by the sender (`LlmClient` per `messageType`; the ACP session send and prepared resume set it true), not inferred from "went through `Turn`". Background senders (`turnModelRound` subagent/speculation, forked, suggestion, Notification/Teammate) leave it unset; a concurrent side query is excluded by its registered prompt id (covering its unflagged continuation), and ACP mid-turn continuations keep the turn's base `ledgerTurnKey`. An allowlist, not a prompt-id blacklist, because background ids (e.g. `session#agent#ordinal`) match no fixed blacklist and the shared internal-id filter also gates telemetry. |
@@ -302,7 +304,9 @@ reversible; a later PR can flip the default once nightly evidence is in.
   skips fallbacks; the primary is still attempted each request).
 - Terminal/quota marking: permanent-quota fallback marking lands in
   [2026-11-19-model-availability-terminal-quota.md](./2026-11-19-model-availability-terminal-quota.md).
-  The `modelPolicy` action map (prompt vs silent) remains out of scope.
-  `markHealthy` is the recovery API once terminal marking lands.
+  The `modelPolicy` action map (prompt vs silent) remains out of scope. A
+  terminal mark is cleared only by a new session: `markHealthy` runs on fallback
+  success, but a route skipped at chain entry is never re-attempted, so it does
+  not recover a terminal mark within the session.
 - Cross-session / account-wide health sharing.
 - Flipping the setting default.
