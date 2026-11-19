@@ -11,10 +11,14 @@ import {
   buildWorktreeSnapshotMeta,
   captureWorktreeSnapshot,
   carriedOverlayStillHeldBySource,
+  computeCarriedIdentities,
   GitWorktreeService,
+  isDisposableIgnoredEntry,
   readWorktreeSessionMarkerStrict,
   readWorktreeSessionStrict,
+  WORKTREE_SESSION_FILE,
   worktreeBranchForSlug,
+  worktreeHasPendingGitOperation,
   worktreeHasPopulatedGitlink,
   worktreeHasWork,
   type SessionService,
@@ -445,48 +449,137 @@ async function checkoutStillPopulated(worktreePath: string): Promise<boolean> {
 }
 
 /**
- * Identity of everything the archive can lose: the status record set plus the
- * patch text against HEAD. Used to prove the checkout still matches the
- * captured contents immediately before removal (P1 edits during capture).
- * Returns null on read failure so the caller preserves (fail-closed).
+ * Identity of everything the archive can lose: a per-path record of its status
+ * and raw-byte content identity — the same collapsed `status --ignored=matching
+ * -z` listing the has-work gate and the capture exclusion consult (R6-1), with
+ * `git hash-object --no-filters` identities for each non-disposable file record.
+ * The earlier status+`diff HEAD` digest saw only untracked NAMES and tracked
+ * content, so an autosave rewriting an untracked or ignored file mid-tar went
+ * unnoticed (R8-1); it also executed any configured textconv driver (R8-2).
+ * Disposable ignored output and daemon bookkeeping never count as drift —
+ * otherwise a build writing node_modules during the tar would strand every
+ * checkout. Returns null on read failure so the caller preserves (fail-closed).
  */
-async function checkoutChangeDigest(worktreePath: string): Promise<{
-  status: string;
-  diff: string;
-} | null> {
+async function checkoutChangeDigest(
+  worktreePath: string,
+): Promise<string | null> {
   try {
-    const [status, diff] = await Promise.all([
-      runGit(
-        worktreePath,
-        [
-          ...NO_EXEC_CONFIG,
-          '--no-optional-locks',
-          'status',
-          '--porcelain',
-          '--untracked-files=all',
-          '-z',
-        ],
-        undefined,
-        64 * 1024 * 1024,
-      ),
-      runGit(
-        worktreePath,
-        [
-          ...NO_EXEC_CONFIG,
-          '--no-optional-locks',
-          'diff',
-          'HEAD',
-          '--no-ext-diff',
-        ],
-        undefined,
-        64 * 1024 * 1024,
-      ),
-    ]);
-    return { status, diff };
+    const status = await runGit(
+      worktreePath,
+      [
+        ...NO_EXEC_CONFIG,
+        '--no-optional-locks',
+        'status',
+        '--porcelain',
+        '--untracked-files=all',
+        '--ignored=matching',
+        '-z',
+      ],
+      undefined,
+      64 * 1024 * 1024,
+    );
+    const records = status.split('\0');
+    const paths: string[] = [];
+    const types = new Map<string, string>();
+    const symlinkTargets = new Map<string, string>();
+    const pending: Array<{ xy: string; rel: string }> = [];
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i];
+      if (record.length === 0) continue;
+      const xy = record.slice(0, 2);
+      pending.push({ xy, rel: record.slice(3) });
+      // Rename/copy entries have a second BARE source-path record: it has no
+      // status prefix or path kind. Consuming it here avoids lstat-ing a
+      // truncated source and making every rename look unreadable (audit).
+      if (xy[0] === 'R' || xy[0] === 'C' || xy[1] === 'R' || xy[1] === 'C') {
+        i += 1;
+      }
+    }
+    const originalStatusCount = pending.length;
+    for (let i = 0; i < pending.length; i++) {
+      const { xy, rel } = pending[i];
+      // Disposable ignored output and daemon bookkeeping are waived by the
+      // same gate geometry; they are not work and never count as drift.
+      if (
+        rel === WORKTREE_SESSION_FILE ||
+        (rel.startsWith(`${WORKTREE_SESSION_FILE}.`) &&
+          !rel.slice(WORKTREE_SESSION_FILE.length + 1).includes('/') &&
+          rel.endsWith('.tmp'))
+      ) {
+        continue;
+      }
+      // Only the ORIGINAL collapsed ignored entry can authorize a disposable
+      // waiver. A non-disposable parent makes the tar include every child,
+      // including a nested node_modules subtree, so the digest must see it.
+      if (
+        i < originalStatusCount &&
+        xy === '!!' &&
+        isDisposableIgnoredEntry(rel)
+      ) {
+        continue;
+      }
+      // Ignored=matching collapses a non-disposable ignored directory. Enumerate
+      // it without following links so a rewrite inside the directory has a raw
+      // identity just like an ignored file (R8-1). The archive walks it too.
+      if (xy === '!!' && rel.endsWith('/')) {
+        const entries = await fsp.readdir(path.join(worktreePath, rel), {
+          withFileTypes: true,
+        });
+        for (const entry of entries) {
+          const child = `${rel}${entry.name}${entry.isDirectory() ? '/' : ''}`;
+          pending.push({ xy, rel: child });
+        }
+        continue;
+      }
+      const stat = await fsp
+        .lstat(path.join(worktreePath, rel))
+        .catch((error) => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+          throw error;
+        });
+      if (stat === null) {
+        // A tracked deletion is a real, archivable state, not a digest read
+        // failure. computeCarriedIdentities records it as a null identity.
+        types.set(rel, xy);
+        paths.push(rel);
+        continue;
+      }
+      paths.push(rel);
+      types.set(rel, xy);
+      if (stat.isSymbolicLink()) {
+        symlinkTargets.set(
+          rel,
+          await fsp.readlink(path.join(worktreePath, rel)),
+        );
+      }
+    }
+    const identities = new Map(
+      (await computeCarriedIdentities(worktreePath, paths)).map((e) => [
+        e.path,
+        e,
+      ]),
+    );
+    const lines = paths.sort().map((rel) => {
+      const id = identities.get(rel);
+      return `${rel}\0${types.get(rel)}\0${id?.hash ?? ''}\0${
+        id?.executable ? '1' : '0'
+      }\0${
+        id?.hash === null
+          ? 'absent'
+          : id
+            ? 'regular'
+            : symlinkTargets.has(rel)
+              ? `symlink:${JSON.stringify(symlinkTargets.get(rel))}`
+              : 'nonregular'
+      }`;
+    });
+    return lines.join('\0');
   } catch {
     return null;
   }
 }
+
+export const checkoutChangeDigestForTesting = checkoutChangeDigest;
 
 /**
  * Execute a verified cleanup after the record deletion was confirmed
@@ -591,12 +684,21 @@ export async function executeWorktreeCleanup(
   if (
     beforeDigest === null ||
     afterDigest === null ||
-    beforeDigest.status !== afterDigest.status ||
-    beforeDigest.diff !== afterDigest.diff
+    beforeDigest !== afterDigest
   ) {
     logWorktreeCleanupPreserve(
       sessionId,
-      'checkout changed during snapshot capture',
+      'checkout changed during cleanup (or its change digest is unreadable)',
+    );
+    return;
+  }
+  // A bisect/rebase/revert can start AFTER the pre-capture check without
+  // changing file bytes or HEAD. Its private administrative state is not in
+  // the archive or content digest, so re-observe it immediately before removal.
+  if (await worktreeHasPendingGitOperation(plan.lockKey)) {
+    logWorktreeCleanupPreserve(
+      sessionId,
+      'git operation became pending during cleanup',
     );
     return;
   }

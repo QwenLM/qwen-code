@@ -17,6 +17,8 @@ import {
   SessionWriterConflictError,
   SessionWriterLostError,
   GitWorktreeService,
+  readWorktreeSnapshotMeta,
+  restoreWorktreeSnapshot,
   type SessionWriterLease,
   Storage,
   getCronFilePath,
@@ -2222,23 +2224,38 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     return stderr.mock.calls.map((call) => String(call[0])).join('');
   }
 
-  // P6 U3: a dirty managed worktree is snapshotted then deleted, but a capture
-  // failure falls back to preserving the checkout. Either way the work is never
-  // lost — it survives in the checkout (preserve) or in the snapshot archive.
-  function workPreserved(
+  // P6 U3: pin the archive-and-delete arm, then prove the actual user bytes
+  // are readable from that archive — surviving the checkout cannot satisfy it.
+  async function expectWorkArchived(
     service: SessionService,
     sessionId: string,
     worktreePath: string,
-  ): boolean {
-    if (fs.existsSync(worktreePath)) return true;
+    relativeFile: string,
+    expected: string,
+  ): Promise<void> {
+    expect(fs.existsSync(worktreePath)).toBe(false);
     const dir = path.dirname(service.getWorktreeSessionPath(sessionId));
-    return fs
+    const archive = fs
       .readdirSync(dir)
-      .some(
+      .find(
         (name) =>
           name.startsWith(`${sessionId}.`) &&
           name.endsWith('.worktree-snapshot.tar.gz'),
       );
+    expect(archive).toBeDefined();
+    const base = archive!.replace(/\.tar\.gz$/, '.json');
+    const meta = await readWorktreeSnapshotMeta(path.join(dir, base));
+    const restored = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-work-archive-restore-'),
+    );
+    try {
+      await restoreWorktreeSnapshot(path.join(dir, archive!), restored, meta);
+      expect(fs.readFileSync(path.join(restored, relativeFile), 'utf8')).toBe(
+        expected,
+      );
+    } finally {
+      fs.rmSync(restored, { recursive: true, force: true });
+    }
   }
 
   it('removes the owned checkout and branch on a confirmed delete', async () => {
@@ -2870,7 +2887,13 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     });
 
     expect(result.removed).toEqual([sessionId]);
-    expect(workPreserved(service, sessionId, worktreePath)).toBe(true);
+    await expectWorkArchived(
+      service,
+      sessionId,
+      worktreePath,
+      'file.txt',
+      'modified\n',
+    );
   });
 
   it('preserves the work of a checkout with never-committed agent files (P6 U3 snapshot or keep)', async () => {
@@ -2886,7 +2909,13 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     });
 
     expect(result.removed).toEqual([sessionId]);
-    expect(workPreserved(service, sessionId, worktreePath)).toBe(true);
+    await expectWorkArchived(
+      service,
+      sessionId,
+      worktreePath,
+      'draft.ts',
+      'export {}\n',
+    );
   });
 
   it('keeps the checkout and warns on an invalid marker', async () => {
@@ -3053,7 +3082,13 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     });
 
     expect(result.removed).toEqual([sessionId]);
-    expect(workPreserved(service, sessionId, worktreePath)).toBe(true);
+    await expectWorkArchived(
+      service,
+      sessionId,
+      worktreePath,
+      '.qwen/pr-drafts/draft.md',
+      '# draft\n',
+    );
   });
 
   it('preserves the work of a checkout with untracked work when the repo hides untracked files (P6 U3 snapshot or keep)', async () => {
@@ -3076,7 +3111,13 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     });
 
     expect(result.removed).toEqual([sessionId]);
-    expect(workPreserved(service, sessionId, worktreePath)).toBe(true);
+    await expectWorkArchived(
+      service,
+      sessionId,
+      worktreePath,
+      'draft.ts',
+      'export {}\n',
+    );
   });
 
   it('cleans a checkout whose only ignored content is disposable build output', async () => {

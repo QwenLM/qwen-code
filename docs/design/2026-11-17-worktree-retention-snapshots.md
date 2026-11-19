@@ -86,6 +86,16 @@ work archived), restore fidelity (committed + dirty + untracked round-trip;
 unstaged/staged deletion and rename source re-applied over a recreated HEAD),
 atomic capture, unknown- and version-1 refusal, traversal-path refusal,
 missing-`.git` capture rejection (no archive), and a `core.fsmonitor` exec canary.
+Capture scans the real filesystem (tracking only `git status` would miss clean
+tracked protected-path case variants) and refuses those variants before tar;
+`ls-files -v` uses a 64 MiB capture buffer rather than truncating a large
+index. Restore validates EVERY member lexically and through its nearest existing
+parent, including Directory entries, before any removal or extraction; hardlink
+targets must stay inside the root. Absolute and parent-relative symlink targets
+remain supported without treating a parent symlink as an extraction target:
+archived symlinks are skipped during extraction and recreated only after all
+other members, so an archive cannot materialize an escaping parent for a later
+entry.
 
 ### U2 — `worktree.maxRetained` setting
 
@@ -113,19 +123,28 @@ snapshot is written but the checkout is preserved (`unmerged commits`), so
 commits. A capture failure also falls back to preserve (fail-closed: never
 delete without a durable snapshot); a state the snapshot cannot represent
 faithfully — staged content differing from the worktree, a non-UTF-8 deleted
-path, a staged edit on a skip-worktree path, or a paused merge/rebase
-(autostash) — likewise refuses capture and preserves. Removal is additionally
-conditional on the checkout still matching the captured contents: a `status -z`
-
-- `diff HEAD` digest is taken before capture and recomputed before removal, so
-  an editor autosave landing mid-tar preserves instead of deleting work the
-  archive could not cover. Each archive pair is uniquely named per capture
-  (`<sessionId>.<createdAt>.<pid>.worktree-snapshot.tar.gz`, header likewise) so
-  a reused session UUID can never overwrite an earlier snapshot; readers resolve
-  by the `<sessionId>.*.worktree-snapshot.*` prefix beside the sidecar (the chats
-  dir, or its `archive/` subdir for archived sessions — the reaper writes to the
-  sidecar's own directory), and a cleanup log line names the full path. The
-  reopen-restore affordance (U5) reads it back by that key.
+path, a staged edit or addition on a skip-worktree path, or a paused
+merge/rebase/cherry-pick/revert/bisect — likewise refuses capture and preserves.
+Removal is additionally conditional on the checkout still matching the captured
+contents: before and after capture the reaper records each non-disposable
+status path together with its status, raw-byte `hash-object --no-filters`
+identity, and executable bit. It expands collapsed non-disposable ignored
+directories without following links, and records symlink targets too. No
+`git diff` runs, so textconv cannot execute. Disposable-output waivers apply
+only to the original collapsed status entry: every child of a non-disposable
+ignored directory counts because tar archives it. Marker temp waivers are
+root-level only. An autosave rewriting bytes or retargeting a link mid-tar
+therefore preserves instead of deleting work the archive could not cover. A
+fresh pending-operation probe immediately before removal also refuses
+operations launched after the metadata check, even when file bytes and HEAD
+have not changed.
+Each archive pair is uniquely named per capture
+(`<sessionId>.<createdAt>.<pid>.worktree-snapshot.tar.gz`, header likewise) so
+a reused session UUID can never overwrite an earlier snapshot; readers resolve
+by the `<sessionId>.*.worktree-snapshot.*` prefix beside the sidecar (the chats
+dir, or its `archive/` subdir for archived sessions — the reaper writes to the
+sidecar's own directory), and a cleanup log line names the full path. The
+reopen-restore affordance (U5) reads it back by that key.
 
 ### U4 — Retention sweep
 
@@ -176,7 +195,11 @@ Reopening a chat whose worktree was deleted offers restore: a route recreates
 the worktree (detached at the recorded HEAD or on the recorded branch), calls
 `restoreWorktreeSnapshot` (U1) to extract the archive and re-apply the recorded
 deletions, then flips the sidecar back. Web Shell surfaces the affordance
-(chat header / session overview). i18n.
+(chat header / session overview). i18n. When multiple captures share a session
+prefix, U5 must compare header `createdAt`, then archive `mtimeNs`, then the
+full archive path lexicographically — never directory enumeration order. An
+unreadable competing header refuses selection rather than silently picking an
+older valid-looking archive.
 
 ## Acceptance (P6 overall)
 

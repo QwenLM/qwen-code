@@ -148,8 +148,8 @@ paths' _current_ identities once. A carried entry is waived only when
 
 Any other state of a carried path — staged (`M `, `A `, `D `), a deletion of
 carried content, a restored carried deletion, a symlink replacement, or any
-content/mode drift — is new work and preserves the checkout (the reaper snapshots
-it). Rename/copy records refuse outright. Non-carried entries keep the existing
+content/mode drift — is new work rather than an exemption; the reaper snapshots
+then deletes the checkout (P6 U3). Rename/copy records refuse outright. Non-carried entries keep the existing
 session-marker / disposable-output / symlink waivers. The exemption is exact-path,
 not prefix. The content comparison uses `git hash-object --no-filters` (with a
 `--` separator so a dash-leading path is not parsed as an option) at both carry
@@ -189,11 +189,14 @@ unchanged in this deliverable.
   tracked or untracked file, and a mode-only change each read as work (F1 cells).
 - A pristine carried deletion reads clean; restoring or staging it reads as work.
 - A session edit hidden under assume-unchanged or skip-worktree reads as work;
-  a staged edit on a skip-worktree path additionally refuses snapshot capture
-  (the sparse worktree cannot represent it), and a paused merge/rebase
-  operation preserves the checkout whole (its autostash is private state no
-  archive carries). Removal is conditional on the checkout still matching the
-  captured contents — an edit saved mid-capture preserves instead of deleting.
+  a staged edit or addition on a skip-worktree path additionally refuses
+  snapshot capture (the sparse worktree cannot represent it), and a paused
+  merge/rebase/cherry-pick/revert/bisect operation preserves the checkout whole
+  (its private state is not archivable). Removal is conditional on the checkout
+  still matching the captured contents: the before/after digest includes
+  per-path raw-byte identities and exec bits for untracked and ignored work,
+  without invoking diff/textconv, so a same-path late autosave preserves
+  instead of deleting. Protected-path case variants refuse capture before tar.
 - A checkout with any non-carried work (a late-arriving ignored file, a populated
   directory beyond the carried files) reads as work and is snapshotted then
   deleted (P6 U3) — never deleted bare. States the snapshot cannot represent

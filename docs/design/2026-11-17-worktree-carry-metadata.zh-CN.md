@@ -111,8 +111,8 @@ sparse-checkout 从不设置）恒拒绝；skip-worktree（`S`）仅在 `core.sp
 - 搬运删除（`hash === null`）：状态恰为 ` D`（未暂存删除）且路径仍缺席。
 
 搬运路径的任何其他状态——暂存（`M `、`A `、`D `）、删除搬运内容、恢复搬运删除、symlink
-替换、或任何内容/模式漂移——都是新工作并保留 checkout（回收器快照它）。rename/copy 记录
-直接拒绝。非搬运条目保留现有 session-marker / disposable-output / symlink 豁免。豁免是
+替换、或任何内容/模式漂移——都是不能豁免的新工作，回收器先快照再删除 checkout（P6 U3）。
+rename/copy 记录直接拒绝。非搬运条目保留现有 session-marker / disposable-output / symlink 豁免。豁免是
 精确路径而非前缀。内容比较在搬运与清理两侧都用 `git hash-object --no-filters`（带 `--`
 分隔符使以 `-` 开头的路径不被当作选项），故身份是磁盘原始字节的 blob 哈希。`--no-filters`
 是刻意的：路径的 clean 过滤器（`eol`/`text` 归一化）否则可能把一次编辑归一化掉，使被改动
@@ -139,9 +139,11 @@ sparse-checkout 从不设置）恒拒绝；skip-worktree（`S`）仅在 `core.sp
   untracked 文件的进一步未暂存编辑、仅模式变更，各读作工作（F1 单元）。
 - 原始搬运删除读作干净；恢复或暂存它读作工作。
 - 隐藏在 assume-unchanged 或 skip-worktree 下的会话编辑读作工作；skip-worktree 路径上的
-  暂存编辑进一步拒绝快照捕获（稀疏工作树无法表示它），暂停的 merge/rebase 操作整体保留
-  checkout（autostash 是归档无法携带的私有状态）。移除以检出仍与捕获内容一致为条件——
-  捕获期间的编辑触发保留而非删除。
+  暂存编辑或新增进一步拒绝快照捕获（稀疏工作树无法表示它），暂停的
+  merge/rebase/cherry-pick/revert/bisect 操作整体保留 checkout（其私有状态无法归档）。
+  移除以检出仍与捕获内容一致为条件：前后摘要包含 untracked 与 ignored 工作的逐路径
+  原始字节身份和可执行位，且不调用 diff/textconv，因此同路径迟到自动保存触发保留而非删除；
+  保护路径的大小写变体在 tar 启动前拒绝捕获。
 - 含任何非搬运工作（迟到的 ignored 文件、搬运文件之外填充的目录）的 checkout 读作工作，
   被先快照再删除（P6 U3）——绝不裸删。快照无法忠实表示的状态（暂存内容与工作树不同、
   隐藏索引位）拒绝捕获并改为保留 checkout；子模块对象库则即使 deinit 或 `git rm` 把

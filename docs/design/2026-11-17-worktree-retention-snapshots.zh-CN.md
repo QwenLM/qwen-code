@@ -60,6 +60,12 @@ P6 在 #17237 分支上分五个单元落地；每个可独立测试。
 node_modules 被排除；ignored 非 disposable 工作被归档）、恢复保真（committed+dirty+
 untracked 往返；未暂存/暂存删除与 rename 源在重建 HEAD 上重新施加）、原子捕获、未知与
 版本 1 拒绝、遍历路径拒绝、缺 `.git` 捕获拒绝（无归档）、`core.fsmonitor` 执行 canary。
+捕获扫描真实文件系统（仅看 `git status` 会漏掉 clean tracked 保护路径的大小写变体），
+在启动 tar 前拒绝这些变体；`ls-files -v` 使用 64 MiB 捕获缓冲，避免大索引截断。
+恢复先于任何删除/解包，对包括 Directory 在内的每个成员进行词法与最近存在父目录校验；
+hardlink 目标不得离开根目录。绝对与父相对符号链接目标继续支持，但父符号链接不得作为
+解包写入目标：tar 先跳过归档中的符号链接，待其它成员写完后再按受约束路径重建，
+使归档不能在后续子成员之前创建一个越界父链接。
 
 ### U2 — `worktree.maxRetained` 设置
 
@@ -78,9 +84,14 @@ untracked 往返；未暂存/暂存删除与 rename 源在重建 HEAD 上重新�
 detached）：此时快照已写但检出被保留（`unmerged commits`），故「无论 dirty 状态都移除」
 对 dirty 内容成立，对未合并 commit 不成立。捕获失败同样回退保留（fail-closed：未获持久
 快照绝不删除）；快照无法忠实表示的状态——暂存内容与工作树不同、非 UTF-8 删除路径、
-skip-worktree 路径上的暂存编辑、暂停的 merge/rebase（autostash）——同样拒绝捕获并保留。
-移除还以检出仍与捕获内容一致为条件：捕获前取 `status -z` + `diff HEAD` 摘要，移除前
-重算比对，编辑器在 tar 写入期间的自动保存触发漂移即保留而非删除归档覆盖不到的工作。
+skip-worktree 路径上的暂存编辑或新增、暂停的 merge/rebase/cherry-pick/revert/bisect——
+同样拒绝捕获并保留。移除还以检出仍与捕获内容一致为条件：捕获前后，回收器为每个
+非 disposable 状态路径记录其状态、`hash-object --no-filters` 原始字节身份与可执行位；
+递归展开折叠的非 disposable ignored 目录而不跟随链接，并记录符号链接目标。disposable
+豁免仅适用于最初折叠的 status 条目；非 disposable ignored 目录的全部子内容都计数，
+因为 tar 会归档它们。marker 临时文件豁免仅限根路径。不运行 `git diff`，故 textconv 不执行。
+自动保存在 tar 写入期间改写字节或重定向链接时，漂移触发保留而非删除归档覆盖不到的工作。
+移除前重新探测 pending 操作，以拒绝元数据检查后新启动的操作，即使文件字节与 HEAD 未变。
 每对归档按捕获时刻唯一命名（`<sessionId>.<createdAt>.<pid>.worktree-snapshot.tar.gz`，
 头部同规则），复用同一 session UUID 不再覆盖早先快照；读取方按 `<sessionId>.*.worktree-snapshot.*`
 前缀于 sidecar 旁解析（chats 目录，归档会话为其 `archive/` 子目录——回收器写入 sidecar
@@ -118,7 +129,9 @@ skip-worktree 路径上的暂存编辑、暂停的 merge/rebase（autostash）�
 
 重开 worktree 已删除的 chat 提供恢复：路由重建 worktree（detached 于记录 HEAD 或记录
 分支）、调 `restoreWorktreeSnapshot`（U1）解压归档并重新施加记录的删除、翻回 sidecar。
-Web Shell 呈现入口（chat 头/会话概览）。i18n。
+Web Shell 呈现入口（chat 头/会话概览）。i18n。同一 session 前缀存在多份捕获时，U5
+依次比较头部 `createdAt`、归档 `mtimeNs`、完整归档路径的字典序，绝不依赖目录枚举顺序；
+竞争头部不可读时拒绝选择，而非静默回退看似有效的旧归档。
 
 ## 验收（P6 整体）
 

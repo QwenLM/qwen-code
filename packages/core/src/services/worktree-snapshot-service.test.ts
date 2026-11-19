@@ -9,6 +9,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as tar from 'tar';
 import {
   captureWorktreeSnapshot,
   readWorktreeSnapshotMeta,
@@ -27,6 +28,20 @@ import {
 // temp file is private from the first byte. -1 means the file did not exist
 // when tar was called (node-tar would create it at 0666 & ~umask).
 const tarCreateEntryModes = vi.hoisted(() => [] as number[]);
+const lsFilesProbeBuffers = vi.hoisted(() => [] as Array<number | undefined>);
+vi.mock('../utils/git-branches.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/git-branches.js')>();
+  return {
+    ...actual,
+    runGit: (...args: Parameters<typeof actual.runGit>) => {
+      if (args[1].includes('ls-files') && args[1].includes('-v')) {
+        lsFilesProbeBuffers.push(args[3]);
+      }
+      return actual.runGit(...args);
+    },
+  };
+});
 vi.mock('tar', async (importOriginal) => {
   const actual = await importOriginal<typeof import('tar')>();
   const { statSync } = await import('node:fs');
@@ -67,6 +82,38 @@ function git(cwd: string, ...args: string[]): string {
     encoding: 'utf8',
     env: gitEnv,
   }).trim();
+}
+
+function rawTarMember(
+  name: string,
+  type: '0' | '1' | '2' = '0',
+  linkpath = '',
+  contents?: Buffer,
+): Buffer[] {
+  const header = Buffer.alloc(512);
+  header.write(name, 0);
+  header.write('0000644\0', 100);
+  header.write('0000000\0', 108);
+  header.write('0000000\0', 116);
+  header.write(
+    `${(contents?.length ?? 0).toString(8).padStart(11, '0')}\0`,
+    124,
+  );
+  header.write('00000000000\0', 136);
+  header.write('        ', 148);
+  header.write(type, 156);
+  header.write(linkpath, 157);
+  header.write('ustar', 257);
+  header.write('00', 263);
+  const checksum = header.reduce((sum, byte) => sum + byte, 0);
+  header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148);
+  const chunks: Buffer[] = [header];
+  if (contents) {
+    chunks.push(contents);
+    const padding = (512 - (contents.length % 512)) % 512;
+    if (padding > 0) chunks.push(Buffer.alloc(padding));
+  }
+  return chunks;
 }
 
 describe('worktreeSnapshotService (P6 U1)', () => {
@@ -158,6 +205,26 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     await expect(fs.access(metaPath)).resolves.toBeUndefined();
   });
 
+  it('captures the checkout when only the daemon marker is untracked (R8-7 control)', async () => {
+    await fs.writeFile(path.join(worktree, WORKTREE_SESSION_FILE), 'marker\n');
+    const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: {
+        ...meta(),
+        dirty: { tracked: 0, untracked: 0, deleted: [] },
+      },
+    });
+    const restored = await restoreOverHead(
+      snapshotPath,
+      metaPath,
+      'restored-marker-control',
+    );
+    await expect(
+      fs.access(path.join(restored, WORKTREE_SESSION_FILE)),
+    ).rejects.toThrow();
+  });
+
   it('round-trips the metadata header with the current schema version', async () => {
     const m = meta();
     const { metaPath } = await captureWorktreeSnapshot({
@@ -218,6 +285,154 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     );
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'refuses to extract a file through a pre-existing parent symlink (audit security)',
+    async () => {
+      const source = path.join(root, 'symlink-archive-source');
+      const archive = path.join(root, 'symlink-archive.tar.gz');
+      const outside = path.join(root, 'outside-target');
+      const restored = path.join(root, 'restore-parent-link');
+      await fs.mkdir(path.join(source, 'link'), { recursive: true });
+      await fs.mkdir(outside);
+      await fs.mkdir(restored);
+      await fs.writeFile(path.join(source, 'link', 'victim.txt'), 'attacker\n');
+      await fs.writeFile(path.join(outside, 'victim.txt'), 'outside-safe\n');
+      await fs.symlink(outside, path.join(restored, 'link'), 'dir');
+      await tar.create({ cwd: source, file: archive, gzip: true }, [
+        'link/victim.txt',
+      ]);
+      const names: string[] = [];
+      await tar.t({
+        file: archive,
+        onReadEntry: (entry) => names.push(entry.path),
+      });
+      expect(names).toContain('link/victim.txt');
+      expect(names).not.toContain('link/');
+      await expect(
+        restoreWorktreeSnapshot(archive, restored, {
+          ...meta(),
+          version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+          createdAt: Date.now(),
+        }),
+      ).rejects.toThrow(/outside worktree root/);
+      await expect(
+        fs.readFile(path.join(outside, 'victim.txt'), 'utf8'),
+      ).resolves.toBe('outside-safe\n');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses to write through an archive-created parent symlink (audit security)',
+    async () => {
+      const archive = path.join(root, 'created-link-archive.tar');
+      const outside = path.join(root, 'outside-created-link');
+      const restored = path.join(root, 'restore-created-link');
+      await fs.mkdir(restored, { recursive: true });
+      await fs.mkdir(outside, { recursive: true });
+      await fs.writeFile(path.join(outside, 'victim.txt'), 'outside-safe\n');
+      await fs.writeFile(
+        archive,
+        Buffer.concat([
+          ...rawTarMember('link', '2', '../outside-created-link'),
+          ...rawTarMember(
+            'link/victim.txt',
+            '0',
+            '',
+            Buffer.from('attacker\n'),
+          ),
+          Buffer.alloc(1024),
+        ]),
+      );
+      await expect(
+        restoreWorktreeSnapshot(archive, restored, {
+          ...meta(),
+          version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+          createdAt: Date.now(),
+        }),
+      ).rejects.toThrow();
+      await expect(
+        fs.readFile(path.join(outside, 'victim.txt'), 'utf8'),
+      ).resolves.toBe('outside-safe\n');
+    },
+  );
+
+  it('refuses a directory-only traversal member before extraction (audit security)', async () => {
+    const source = path.join(root, 'directory-archive-source');
+    const outside = path.join(root, 'outside-directory');
+    const archive = path.join(root, 'directory-archive.tar.gz');
+    const restored = path.join(root, 'restore-directory-traversal');
+    await fs.mkdir(source);
+    await fs.mkdir(outside);
+    await fs.mkdir(restored);
+    await tar.create({ cwd: source, file: archive, gzip: true }, [
+      '../outside-directory',
+    ]);
+    const names: string[] = [];
+    await tar.t({
+      file: archive,
+      onReadEntry: (entry) => names.push(entry.path),
+    });
+    expect(names.some((name) => name.startsWith('..'))).toBe(true);
+    await expect(
+      restoreWorktreeSnapshot(archive, restored, {
+        ...meta(),
+        version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+        createdAt: Date.now(),
+      }),
+    ).rejects.toThrow(/Unsafe path/);
+    await expect(fs.readdir(restored)).resolves.toEqual([]);
+  });
+
+  it('refuses a hardlink target escaping the restore root (audit security)', async () => {
+    const archive = path.join(root, 'hardlink-escape.tar');
+    const outsideTarget = path.join(root, 'outside-link-target');
+    await fs.writeFile(outsideTarget, 'outside-bytes\n');
+    await fs.writeFile(
+      archive,
+      Buffer.concat([
+        ...rawTarMember('member', '1', '../outside-link-target'),
+        Buffer.alloc(1024),
+      ]),
+    );
+    await expect(
+      restoreWorktreeSnapshot(archive, path.join(root, 'hardlink-restore'), {
+        ...meta(),
+        version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
+        createdAt: Date.now(),
+      }),
+    ).rejects.toThrow(/Unsafe path/);
+    await expect(fs.readFile(outsideTarget, 'utf8')).resolves.toBe(
+      'outside-bytes\n',
+    );
+  });
+
+  it.skipIf(process.platform === 'win32' || process.platform === 'darwin')(
+    'refuses a clean tracked protected path case-variant before capture (audit security)',
+    async () => {
+      // The marker is protected case-folded on restore but can be tracked in
+      // a real Git tree, so a clean variant reaches tar without any status row.
+      await fs.writeFile(
+        path.join(worktree, '.QWEN-SESSION'),
+        'tracked variant\n',
+      );
+      git(worktree, 'add', '.QWEN-SESSION');
+      git(worktree, 'commit', '-qm', 'track protected variant', '--no-verify');
+      expect(git(worktree, 'status', '--porcelain')).toBe('');
+      await fs.writeFile(path.join(worktree, 'unique-work.txt'), 'unique\n');
+      await expect(
+        captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        }),
+      ).rejects.toThrow(/case-variant protected path/);
+      await expect(
+        fs.readFile(path.join(worktree, 'unique-work.txt'), 'utf8'),
+      ).resolves.toBe('unique\n');
+      await expect(fs.readdir(snapshotDir)).rejects.toThrow();
+    },
+  );
+
   it('rejects a capture from a worktree path that does not exist', async () => {
     await expect(
       captureWorktreeSnapshot({
@@ -226,12 +441,9 @@ describe('worktreeSnapshotService (P6 U1)', () => {
         meta: meta(),
       }),
     ).rejects.toThrow();
-    // A failed capture must not leave a final archive behind.
-    await expect(
-      fs.access(
-        path.join(snapshotDir, 'session-snap.worktree-snapshot.tar.gz'),
-      ),
-    ).rejects.toThrow();
+    // A failed capture must not leave a final archive behind, whatever its
+    // unique per-capture suffix is.
+    await expect(fs.readdir(snapshotDir)).rejects.toThrow();
   });
 
   it('restores a clean committed tree faithfully', async () => {
@@ -833,6 +1045,16 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     await expect(readWorktreeSnapshotMeta(metaPath)).resolves.toBeTruthy();
   });
 
+  it('gives the hidden-index ls-files probe a 64 MiB capture buffer (R8-8)', async () => {
+    lsFilesProbeBuffers.length = 0;
+    await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-buffer',
+      slug: 'buffer',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+    });
+    expect(lsFilesProbeBuffers).toEqual([64 * 1024 * 1024]);
+  });
+
   it('refuses a staged edit hidden on a skip-worktree path (P1 sparse cone)', async () => {
     await fs.mkdir(path.join(worktree, 'one'));
     await fs.mkdir(path.join(worktree, 'two'));
@@ -870,6 +1092,91 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       },
     });
   });
+
+  it('refuses a staged addition hidden on a skip-worktree path (R8-3)', async () => {
+    await fs.mkdir(path.join(worktree, 'two'));
+    await fs.writeFile(path.join(worktree, 'two', 'b.txt'), 'two\n');
+    git(worktree, 'add', '.');
+    git(worktree, 'commit', '-qm', 'span', '--no-verify');
+    git(worktree, 'sparse-checkout', 'init', '--cone');
+    git(worktree, 'sparse-checkout', 'set', 'two');
+    await fs.mkdir(path.join(worktree, 'one'));
+    await fs.writeFile(path.join(worktree, 'one', 'new.txt'), 'outside cone\n');
+    git(worktree, 'add', '--sparse', 'one/new.txt');
+    git(worktree, 'sparse-checkout', 'reapply');
+    expect(git(worktree, 'status', '--porcelain')).toContain('A  one/new.txt');
+    await expect(
+      buildWorktreeSnapshotMeta(worktree, {
+        sessionId: 'session-sparse-add',
+        slug: 'sparse-add',
+        baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      }),
+    ).rejects.toThrow(/skip-worktree/);
+    // Removing the staged addition must preserve the clean-sparse carve-out:
+    // the same skip-worktree set is not itself a reason to refuse collection.
+    git(worktree, 'reset', '--hard', 'HEAD');
+    await expect(
+      buildWorktreeSnapshotMeta(worktree, {
+        sessionId: 'session-sparse-add-clean',
+        slug: 'sparse-add-clean',
+        baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      }),
+    ).resolves.toMatchObject({ dirty: { tracked: 0, untracked: 0 } });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'preserves absolute and parent-relative symlink targets on restore (R8-5)',
+    async () => {
+      const absoluteTarget = path.join(root, 'absolute-target');
+      await fs.writeFile(absoluteTarget, 'outside\n');
+      await fs.symlink(absoluteTarget, path.join(worktree, 'absolute-link'));
+      await fs.symlink(
+        '../relative-target',
+        path.join(worktree, 'parent-link'),
+      );
+      const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: {
+          ...meta(),
+          dirty: { tracked: 0, untracked: 2, deleted: [] },
+        },
+      });
+      const restored = await restoreOverHead(
+        snapshotPath,
+        metaPath,
+        'restored-link-targets',
+      );
+      for (const [name, target] of [
+        ['absolute-link', absoluteTarget],
+        ['parent-link', '../relative-target'],
+      ] as const) {
+        const link = path.join(restored, name);
+        expect((await fs.lstat(link)).isSymbolicLink()).toBe(true);
+        expect(await fs.readlink(link)).toBe(target);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.platform === 'darwin')(
+    'refuses to archive a case-variant protected path (R8-7)',
+    async () => {
+      await fs.writeFile(path.join(worktree, '.GIT'), 'real user content\n');
+      await expect(
+        captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: {
+            ...meta(),
+            dirty: { tracked: 0, untracked: 1, deleted: [] },
+          },
+        }),
+      ).rejects.toThrow(/case-variant protected path/);
+      await expect(
+        fs.readFile(path.join(worktree, '.GIT'), 'utf8'),
+      ).resolves.toBe('real user content\n');
+    },
+  );
 
   it('keeps both archives when a session UUID is reused (P1 collision)', async () => {
     await fs.writeFile(path.join(worktree, 'first.txt'), 'first\n');
@@ -913,6 +1220,64 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     expect(firstContents).toContain('second.txt');
   });
 
+  it('does not let a Y=R bare source inject disposable exclusions (audit capture)', async () => {
+    await fs.mkdir(path.join(worktree, '!! node_modules'));
+    await fs.mkdir(path.join(worktree, 'node_modules'));
+    await fs.writeFile(
+      path.join(worktree, '!! node_modules', 'source.txt'),
+      'rename-me\n',
+    );
+    await fs.writeFile(
+      path.join(worktree, 'node_modules', 'source.txt'),
+      'base\n',
+    );
+    git(
+      worktree,
+      'add',
+      '--',
+      '!! node_modules/source.txt',
+      'node_modules/source.txt',
+    );
+    git(worktree, 'commit', '-qm', 'rename sources', '--no-verify');
+    await fs.writeFile(
+      path.join(worktree, 'node_modules', 'source.txt'),
+      'edited\n',
+    );
+    await fs.rename(
+      path.join(worktree, '!! node_modules', 'source.txt'),
+      path.join(worktree, 'renamed.txt'),
+    );
+    git(worktree, 'add', '-N', 'renamed.txt');
+    expect(
+      execFileSync('git', ['status', '--porcelain', '-z'], {
+        cwd: worktree,
+        encoding: 'utf8',
+        env: gitEnv,
+      }),
+    ).toContain(' R renamed.txt\0!! node_modules/source.txt\0');
+    const snapshotMeta = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-source-injection',
+      slug: 'source-injection',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+    });
+    const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: snapshotMeta,
+    });
+    const restored = await restoreOverHead(
+      snapshotPath,
+      metaPath,
+      'restored-source-injection',
+    );
+    await expect(
+      fs.readFile(path.join(restored, 'node_modules', 'source.txt'), 'utf8'),
+    ).resolves.toBe('edited\n');
+    await expect(
+      fs.readFile(path.join(restored, 'renamed.txt'), 'utf8'),
+    ).resolves.toBe('rename-me\n');
+  });
+
   it('records a worktree-side rename source so restore does not resurrect it', async () => {
     // `mv` + `git add -N` yields Y='R' with a source record, not X='R': the
     // parser must consume both forms or the old name is resurrected (P1).
@@ -921,6 +1286,15 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       path.join(worktree, 'renamed.txt'),
     );
     git(worktree, 'add', '-N', 'renamed.txt');
+    // Pin the worktree-side R/C arm itself; a plain D plus ?? pair would
+    // exercise the ordinary deletion path instead (round-8 deferred witness).
+    expect(
+      execFileSync('git', ['status', '--porcelain', '-z'], {
+        cwd: worktree,
+        encoding: 'utf8',
+        env: gitEnv,
+      }),
+    ).toContain(' R renamed.txt\0committed.txt\0');
     const m = await buildWorktreeSnapshotMeta(worktree, {
       sessionId: 'session-rename-wt',
       slug: 'rename-wt',

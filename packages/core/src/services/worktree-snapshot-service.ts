@@ -97,9 +97,8 @@ function normalizeRel(p: string): string {
 function isProtectedRel(norm: string): boolean {
   // Case-fold: on APFS/NTFS a '.GIT/config' entry aliases '.git/config', so
   // a case-sensitive comparison would let a restore remove the git link
-  // (round-6 containment). The capture filter keeps its case-sensitive
-  // checks — it walks the local filesystem's real names, where on a
-  // case-sensitive volume '.GIT' is distinct content that must be archived.
+  // (round-6 containment). Capture refuses case variants before starting tar
+  // so it cannot create an archive its own reader would reject (R8-7).
   const lower = norm.toLowerCase();
   return (
     lower === '.git' ||
@@ -142,6 +141,34 @@ function isExcludedFromSnapshot(
   if (matcher.files.has(norm)) return true;
   const withSlash = `${norm}/`;
   return matcher.dirs.some((dir) => withSlash.startsWith(dir));
+}
+
+/**
+ * Check the filesystem entries, including clean tracked files absent from
+ * `git status`: a protected case variant would make the archive unreadable by
+ * the restore policy. Check only entries the archive actually includes, and
+ * never follow a directory symlink while enumerating.
+ */
+async function assertNoProtectedCaseVariantPaths(
+  worktreePath: string,
+  matcher: DisposableIgnoredMatcher,
+  prefix = '',
+): Promise<void> {
+  const directory = path.join(worktreePath, prefix);
+  const entries = await fs.readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (rel === '.git' || rel === WORKTREE_SESSION_FILE) continue;
+    if (isProtectedRel(rel)) {
+      throw new Error(
+        `Worktree snapshot: a case-variant protected path cannot be archived faithfully: ${rel}`,
+      );
+    }
+    if (isExcludedFromSnapshot(rel, matcher)) continue;
+    if (entry.isDirectory()) {
+      await assertNoProtectedCaseVariantPaths(worktreePath, matcher, rel);
+    }
+  }
 }
 
 async function atomicWriteFile(
@@ -196,13 +223,13 @@ export async function buildWorktreeSnapshotMeta(
       'Worktree snapshot meta: an index flag hides a file version; the capture cannot be faithful',
     );
   }
-  // A paused merge/rebase/cherry-pick (MERGE_AUTOSTASH) is private operation
+  // A paused merge/rebase/cherry-pick/revert/bisect holds private operation
   // state the tar cannot represent at all: the draft would vanish with the
   // admin dir even if the working files are archived. Refuse the capture;
   // the caller preserves the checkout (P1).
   if (await worktreeHasPendingGitOperation(worktreePath)) {
     throw new Error(
-      'Worktree snapshot meta: a merge/rebase is in progress; the operation state cannot be represented',
+      'Worktree snapshot meta: an in-progress git operation holds private state that a snapshot cannot represent',
     );
   }
   const headCommit = (
@@ -242,13 +269,12 @@ export async function buildWorktreeSnapshotMeta(
   // `ls-files -v` marks those entries with `S` whether or not sparse-checkout
   // is enabled (P1 sparse-cone).
   const skipWorktree = new Set<string>();
-  const lsV = await runGit(worktreePath, [
-    ...NO_EXEC_CONFIG,
-    '--no-optional-locks',
-    'ls-files',
-    '-v',
-    '-z',
-  ]);
+  const lsV = await runGit(
+    worktreePath,
+    [...NO_EXEC_CONFIG, '--no-optional-locks', 'ls-files', '-v', '-z'],
+    undefined,
+    64 * 1024 * 1024,
+  );
   for (const row of lsV.split('\0')) {
     // `ls-files -v` emits `<tag> <path>` (no mode/sha columns): S marks the
     // skip-worktree bit. Collect exactly those paths.
@@ -277,7 +303,11 @@ export async function buildWorktreeSnapshotMeta(
     // a staged blob the sparse working tree never materialized (P1). The
     // stage-vs-worktree check above cannot see it, so refuse explicitly.
     if (
-      (xy[0] === 'M' || xy[0] === 'R' || xy[0] === 'C' || xy[0] === 'T') &&
+      (xy[0] === 'M' ||
+        xy[0] === 'A' ||
+        xy[0] === 'R' ||
+        xy[0] === 'C' ||
+        xy[0] === 'T') &&
       skipWorktree.has(entry)
     ) {
       throw new Error(
@@ -340,7 +370,8 @@ export async function buildWorktreeSnapshotMeta(
 }
 
 /**
- * Capture a worktree to `<snapshotDir>/<sessionId>.worktree-snapshot.tar.gz`
+ * Capture a worktree to
+ * `<snapshotDir>/<sessionId>.<createdAt>.<pid>.worktree-snapshot.tar.gz`
  * with a `.json` metadata header beside it. Both writes are atomic (stage to a
  * temp file, rename), so a crash mid-capture never leaves a half-written
  * archive a later restore would trust. Rejects on any capture error — the
@@ -380,9 +411,30 @@ export async function captureWorktreeSnapshot(
     const record = records[i];
     if (record.length === 0) continue;
     const xy = record.slice(0, 2);
-    // A rename/copy record is followed by a bare source-path record; skip
-    // it so a source literally named '!! …' is not read as an ignored entry.
-    if (xy[0] === 'R' || xy[0] === 'C') i += 1;
+    const relativePath = normalizeRel(record.slice(3).replace(/\/$/, ''));
+    // Refuse BEFORE starting tar: throwing from tar's asynchronous filter
+    // escapes the capture promise as an uncaught exception. The normal .git
+    // link and daemon marker are intentionally omitted, not capture errors;
+    // only their case variants must follow the reader's fail-closed policy.
+    // An absent case-variant deletion is safe: it is absent from the tar and
+    // buildWorktreeSnapshotMeta already omits it from the deletion header.
+    if (
+      !xy.includes('D') &&
+      relativePath !== '.git' &&
+      !relativePath.startsWith('.git/') &&
+      relativePath !== WORKTREE_SESSION_FILE &&
+      isProtectedRel(relativePath)
+    ) {
+      throw new Error(
+        `Worktree snapshot: a case-variant protected path cannot be archived faithfully: ${relativePath}`,
+      );
+    }
+    // A rename/copy record is followed by a bare source-path record on
+    // EITHER side (X or Y): never reinterpret that source as an ignored entry
+    // (e.g. a source literally named '!! node_modules/source.txt').
+    if (xy[0] === 'R' || xy[0] === 'C' || xy[1] === 'R' || xy[1] === 'C') {
+      i += 1;
+    }
     if (xy === '!!') ignoredEntries.push(record.slice(3));
   }
   const matcher: DisposableIgnoredMatcher = {
@@ -395,6 +447,7 @@ export async function captureWorktreeSnapshot(
       ),
     ),
   };
+  await assertNoProtectedCaseVariantPaths(worktreePath, matcher);
   await fs.mkdir(snapshotDir, { recursive: true });
   const fullMeta: WorktreeSnapshotMeta = {
     version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
@@ -488,7 +541,8 @@ export async function readWorktreeSnapshotMeta(
  * Extract a snapshot over a freshly recreated worktree and re-apply the
  * recorded tracked deletions, without losing any archived content. The caller
  * recreates the worktree (detached at the recorded HEAD, or on the recorded
- * branch) first. Three steps, in order:
+ * branch) first. Extract non-link members with strict mode, then re-create
+ * archived symlinks after all other members.
  *
  * 1. Clear a conflicting HEAD target for every archived non-directory entry:
  *    node-tar replaces a file with a directory but not a directory with a
@@ -516,11 +570,20 @@ export async function restoreWorktreeSnapshot(
   const root = path.resolve(targetWorktreePath);
   const realRoot = await fs.realpath(root);
   const archived = new Map<string, string>();
+  const hardlinks: Array<[string, string]> = [];
+  const archivedSymlinks = new Map<string, string>();
   await tar.t({
     file: snapshotPath,
     onReadEntry: (entry) => {
       const norm = normalizeRel(entry.path).replace(/\/$/, '');
-      if (norm.length > 0) archived.set(norm, entry.type);
+      if (norm.length === 0) return;
+      archived.set(norm, entry.type);
+      if (entry.type === 'Link') {
+        hardlinks.push([norm, entry.linkpath ?? '']);
+      }
+      if (entry.type === 'SymbolicLink') {
+        archivedSymlinks.set(norm, entry.linkpath ?? '');
+      }
     },
   });
   const confine = (rel: string): string => {
@@ -542,19 +605,48 @@ export async function restoreWorktreeSnapshot(
   // parent symlink (deleting an outside file). Resolve the parent's realpath
   // and require it under the real root before any removal.
   const assertRealContained = async (target: string, rel: string) => {
-    const realParent = await fs
-      .realpath(path.dirname(target))
-      .catch(() => null);
-    if (realParent === null) return;
-    if (
-      realParent !== realRoot &&
-      !realParent.startsWith(realRoot + path.sep)
-    ) {
-      throw new Error(
-        `Snapshot path resolves outside worktree root via symlink: ${rel}`,
-      );
+    for (let parent = path.dirname(target); ; parent = path.dirname(parent)) {
+      let realParent: string;
+      try {
+        realParent = await fs.realpath(parent);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        // Missing descendants are created later, but at least one real
+        // ancestor must prove containment before tar can traverse them.
+        if (parent === root) throw error;
+        continue;
+      }
+      if (
+        realParent !== realRoot &&
+        !realParent.startsWith(realRoot + path.sep)
+      ) {
+        throw new Error(
+          `Snapshot path resolves outside worktree root via symlink: ${rel}`,
+        );
+      }
+      return;
     }
   };
+  // Check every member, including Directory entries, before ANY removal or
+  // extraction. preservePaths disables node-tar's own traversal protection;
+  // lexical checks alone would miss a pre-existing parent symlink (R8 audit).
+  for (const [rel] of archived) {
+    await assertRealContained(confine(rel), rel);
+  }
+  for (const [, targetRel] of hardlinks) {
+    const target = confine(targetRel);
+    await assertRealContained(target, targetRel);
+    const realTarget = await fs.realpath(target).catch(() => null);
+    if (
+      realTarget !== null &&
+      realTarget !== realRoot &&
+      !realTarget.startsWith(realRoot + path.sep)
+    ) {
+      throw new Error(
+        `Snapshot hardlink resolves outside worktree root: ${targetRel}`,
+      );
+    }
+  }
   for (const [rel, type] of archived) {
     if (type === 'Directory') continue;
     const target = confine(rel);
@@ -577,5 +669,26 @@ export async function restoreWorktreeSnapshot(
     file: snapshotPath,
     cwd: targetWorktreePath,
     strict: true,
+    // Keep absolute and ../ link targets (R8-5), but never materialize an
+    // archived symlink during extraction: a later member could traverse it as
+    // a parent and escape through a link created by the archive itself.
+    filter: (_path, entry) => 'type' in entry && entry.type !== 'SymbolicLink',
+    // Lexical member checks and real-ancestor checks above remain the
+    // OUT-OF-ROOT gate alongside the deferred link creation below.
+    preservePaths: true,
   });
+  for (const [rel, linkTarget] of archivedSymlinks) {
+    const target = confine(rel);
+    await assertRealContained(target, rel);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    const stat = await fs.lstat(target).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    });
+    if (stat?.isDirectory()) {
+      throw new Error(`Snapshot symlink conflicts with a directory: ${rel}`);
+    }
+    if (stat !== null) await fs.unlink(target);
+    await fs.symlink(linkTarget, target);
+  }
 }

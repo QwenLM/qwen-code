@@ -27,6 +27,7 @@ import {
   type WorktreeSession,
 } from '@qwen-code/qwen-code-core';
 import {
+  checkoutChangeDigestForTesting,
   executeWorktreeCleanup,
   type WorktreeCleanupPlan,
 } from './worktree-orphan-cleanup.js';
@@ -115,6 +116,38 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     };
   }
 
+  function editAtCaptureStart(sessionId: string, edit: () => void) {
+    let edited = false;
+    const timer = setInterval(() => {
+      const name = fs
+        .readdirSync(repoParent)
+        .find(
+          (entry) =>
+            entry.startsWith(`${sessionId}.`) &&
+            entry.includes('.worktree-snapshot.tar.gz.') &&
+            entry.endsWith('.tmp'),
+        );
+      let captureStarted = false;
+      try {
+        // Wait until the large payload is streaming, not just creation of the
+        // temp output: the small edited entries have then already been read.
+        captureStarted =
+          name !== undefined &&
+          fs.statSync(path.join(repoParent, name)).size >= 1024 * 1024;
+      } catch {
+        return;
+      }
+      if (!captureStarted) return;
+      clearInterval(timer);
+      edit();
+      edited = true;
+    }, 5);
+    return {
+      edited: () => edited,
+      stop: () => clearInterval(timer),
+    };
+  }
+
   it('snapshots then deletes a checkout whose only content is git-ignored (P6 U3)', async () => {
     // A longer session id keeps the archive path ABOVE safeLogValue's 82-char
     // budget, so the no-truncation assertion stays load-bearing (M37). The
@@ -149,6 +182,19 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     expect(fs.existsSync(plan.lockKey)).toBe(false);
     expect(archives(plan.sessionId).length > 0).toBe(true);
     expect(archiveMetas(plan.sessionId).length > 0).toBe(true);
+    const restored = path.join(repoParent, 'restored-ignored-work');
+    git(repoRoot, 'worktree', 'add', '--detach', restored, 'HEAD');
+    const snapshotMeta = await readWorktreeSnapshotMeta(
+      archiveMetas(plan.sessionId)[0],
+    );
+    await restoreWorktreeSnapshot(
+      archives(plan.sessionId)[0],
+      restored,
+      snapshotMeta,
+    );
+    expect(fs.readFileSync(path.join(restored, 'secret.env'), 'utf8')).toBe(
+      'AWS_KEY=x\n',
+    );
   });
 
   it('still removes a checkout holding only disposable build output', async () => {
@@ -278,27 +324,24 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     expect(archives(plan.sessionId).length > 0).toBe(true);
   });
 
-  it('preserves a dirty checkout when the snapshot capture fails (P6 U3 fail-closed)', async () => {
-    // A worktree with genuine work whose git state cannot be read: the
-    // preservation gates fail closed (an unreadable .git reads as populated),
-    // so the checkout is kept — never delete a checkout we cannot describe.
-    // Removing the worktree's .git makes every probe fail while the directory
-    // still holds work.
-    const plan = await planFor('snapfail');
-    fs.writeFileSync(path.join(plan.lockKey, 'work.txt'), 'mine\n');
-    fs.rmSync(path.join(plan.lockKey, '.git'), {
-      recursive: true,
-      force: true,
-    });
+  it.skipIf(process.platform === 'win32' || process.platform === 'darwin')(
+    'preserves a dirty checkout when the snapshot capture fails (P6 U3 fail-closed)',
+    async () => {
+      // .GIT is real work on a case-sensitive volume, not the git link. It
+      // passes the earlier has-work probes but capture refuses a protected
+      // case variant, so the preserve comes from the capture refusal itself.
+      const plan = await planFor('snapfail');
+      fs.writeFileSync(path.join(plan.lockKey, '.GIT'), 'real work\n');
 
-    await executeWorktreeCleanup(plan);
+      await executeWorktreeCleanup(plan);
 
-    expect(fs.existsSync(plan.lockKey)).toBe(true);
-    expect(fs.existsSync(path.join(plan.lockKey, 'work.txt'))).toBe(true);
-    // The preserve must come from the capture refusal itself, not from a
-    // later removal failure: no archive may have been written.
-    expect(archives('session-snapfail').length > 0).toBe(false);
-  });
+      expect(fs.existsSync(plan.lockKey)).toBe(true);
+      expect(fs.readFileSync(path.join(plan.lockKey, '.GIT'), 'utf8')).toBe(
+        'real work\n',
+      );
+      expect(archives('session-snapfail')).toHaveLength(0);
+    },
+  );
 
   it('preserves a no-carry checkout whose edit is hidden under assume-unchanged (F6 default path)', async () => {
     const plan = await planFor('hidden-nocarry');
@@ -555,28 +598,266 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     expect(archives(plan.sessionId).length).toBe(0);
   });
 
-  it('preserves edits saved while the archive is being written (P1)', async () => {
+  it('preserves same-path untracked and ignored rewrites during capture without running textconv (R8-1/R8-2)', async () => {
     const plan = await planFor('late-save');
+    // Both files already exist before the first digest: seeing their names is
+    // not enough. secret.env is ignored but NOT disposable, so it is part of
+    // the archive and its rewritten bytes must participate in the digest.
+    fs.writeFileSync(path.join(plan.lockKey, 'late.txt'), 'before\n');
+    fs.writeFileSync(path.join(plan.lockKey, 'secret.env'), 'before\n');
+    // The old status+`git diff HEAD` implementation could execute an external
+    // diff driver. Keep the sentinel outside the checkout being removed.
+    const textconvRan = path.join(repoParent, 'textconv-ran');
+    const textconvScript = path.join(repoParent, 'textconv.cjs');
+    fs.writeFileSync(
+      textconvScript,
+      `require('node:fs').writeFileSync(${JSON.stringify(textconvRan)}, 'ran');\n`,
+    );
+    git(
+      plan.lockKey,
+      'config',
+      'diff.trap.textconv',
+      `"${process.execPath}" "${textconvScript}"`,
+    );
+    fs.writeFileSync(
+      path.join(plan.lockKey, '.gitattributes'),
+      '.gitignore diff=trap\n',
+    );
+    fs.appendFileSync(path.join(plan.lockKey, '.gitignore'), 'tracked-edit\n');
+    // Positive control: the configured driver really runs when textconv is
+    // requested. Clear its marker before the production path so the final
+    // absence pins the implementation rather than a malformed configuration.
+    execFileSync('git', ['diff', '--textconv', 'HEAD'], {
+      cwd: plan.lockKey,
+      stdio: 'pipe',
+    });
+    expect(fs.existsSync(textconvRan)).toBe(true);
+    fs.rmSync(textconvRan);
     // Incompressible payload keeps the tar window open long enough for an
     // editor autosave to land mid-capture.
     fs.writeFileSync(
       path.join(plan.lockKey, 'payload.bin'),
       randomBytes(256 * 1024 * 1024),
     );
-    const timer = setTimeout(() => {
-      fs.writeFileSync(path.join(plan.lockKey, 'late.txt'), 'late-content\n');
-    }, 1000);
+    const lateEdit = editAtCaptureStart(plan.sessionId, () => {
+      fs.writeFileSync(
+        path.join(plan.lockKey, 'late.txt'),
+        'after-untracked\n',
+      );
+      fs.writeFileSync(
+        path.join(plan.lockKey, 'secret.env'),
+        'after-ignored\n',
+      );
+    });
     try {
       await executeWorktreeCleanup(plan);
     } finally {
-      clearTimeout(timer);
+      lateEdit.stop();
     }
     // Removal is conditional on the checkout still matching the capture:
-    // the late autosave must force preservation, not be covered by luck.
+    // late bytes must force preservation, and no diff driver may have run.
+    expect(lateEdit.edited()).toBe(true);
+    expect(archives(plan.sessionId)).toHaveLength(1);
     expect(fs.existsSync(plan.lockKey)).toBe(true);
     expect(fs.readFileSync(path.join(plan.lockKey, 'late.txt'), 'utf8')).toBe(
-      'late-content\n',
+      'after-untracked\n',
     );
+    expect(fs.readFileSync(path.join(plan.lockKey, 'secret.env'), 'utf8')).toBe(
+      'after-ignored\n',
+    );
+    expect(fs.existsSync(textconvRan)).toBe(false);
+  });
+
+  it('preserves edits inside a collapsed ignored directory during capture (R8-1)', async () => {
+    const plan = await planFor('late-ignored-directory');
+    fs.appendFileSync(path.join(plan.lockKey, '.gitignore'), 'private/\n');
+    fs.mkdirSync(path.join(plan.lockKey, 'private'));
+    fs.writeFileSync(
+      path.join(plan.lockKey, 'private', 'late.txt'),
+      'before\n',
+    );
+    expect(
+      execFileSync(
+        'git',
+        [
+          'status',
+          '--porcelain',
+          '--untracked-files=all',
+          '--ignored=matching',
+        ],
+        { cwd: plan.lockKey, encoding: 'utf8' },
+      ),
+    ).toContain('!! private/');
+    fs.writeFileSync(
+      path.join(plan.lockKey, 'payload.bin'),
+      randomBytes(256 * 1024 * 1024),
+    );
+    const lateEdit = editAtCaptureStart(plan.sessionId, () => {
+      fs.writeFileSync(
+        path.join(plan.lockKey, 'private', 'late.txt'),
+        'after-ignored-directory\n',
+      );
+    });
+    try {
+      await executeWorktreeCleanup(plan);
+    } finally {
+      lateEdit.stop();
+    }
+    expect(lateEdit.edited()).toBe(true);
+    expect(archives(plan.sessionId)).toHaveLength(1);
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(
+      fs.readFileSync(path.join(plan.lockKey, 'private', 'late.txt'), 'utf8'),
+    ).toBe('after-ignored-directory\n');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'preserves a symlink retargeted while the archive is being written (R8-1)',
+    async () => {
+      const plan = await planFor('late-symlink');
+      fs.symlinkSync('before-target', path.join(plan.lockKey, 'late-link'));
+      fs.writeFileSync(
+        path.join(plan.lockKey, 'payload.bin'),
+        randomBytes(256 * 1024 * 1024),
+      );
+      const link = path.join(plan.lockKey, 'late-link');
+      const lateEdit = editAtCaptureStart(plan.sessionId, () => {
+        fs.rmSync(link);
+        fs.symlinkSync('after-target', link);
+      });
+      try {
+        await executeWorktreeCleanup(plan);
+      } finally {
+        lateEdit.stop();
+      }
+      expect(lateEdit.edited()).toBe(true);
+      expect(archives(plan.sessionId)).toHaveLength(1);
+      expect(fs.existsSync(plan.lockKey)).toBe(true);
+      expect(fs.readlinkSync(link)).toBe('after-target');
+    },
+  );
+
+  it.each(['delete', 'rename'] as const)(
+    'archives and deletes after a tracked %s (audit digest)',
+    async (kind) => {
+      const plan = await planFor(`tracked-${kind}`);
+      if (kind === 'delete') {
+        fs.rmSync(path.join(plan.lockKey, '.gitignore'));
+      } else {
+        git(plan.lockKey, 'mv', '.gitignore', 'renamed.txt');
+      }
+      const digest = await checkoutChangeDigestForTesting(plan.lockKey);
+      expect(digest).not.toBeNull();
+      if (kind === 'delete') {
+        expect(digest?.includes('.gitignore\0 D\0\0')).toBe(true);
+        expect(digest?.includes('\0absent')).toBe(true);
+      } else {
+        // The source-path NUL record is not a status row and must not turn
+        // into a phantom path losing its first three characters.
+        expect(digest?.includes('tignore\0')).toBe(false);
+        expect(digest?.includes('renamed.txt\0R \0')).toBe(true);
+      }
+      await executeWorktreeCleanup(plan);
+      expect(archives(plan.sessionId)).toHaveLength(1);
+      expect(fs.existsSync(plan.lockKey)).toBe(false);
+      const meta = await readWorktreeSnapshotMeta(
+        archiveMetas(plan.sessionId)[0],
+      );
+      expect(meta.dirty.deleted).toContain('.gitignore');
+    },
+  );
+
+  it.each(['nested-disposable', 'nested-tmp', 'bisect'] as const)(
+    'preserves late audit state during capture: %s',
+    async (kind) => {
+      const plan = await planFor(`late-${kind}`);
+      if (kind === 'nested-disposable') {
+        fs.appendFileSync(path.join(plan.lockKey, '.gitignore'), 'private/\n');
+        fs.mkdirSync(path.join(plan.lockKey, 'private', 'node_modules'), {
+          recursive: true,
+        });
+        fs.writeFileSync(
+          path.join(plan.lockKey, 'private', 'node_modules', 'result.txt'),
+          'before\n',
+        );
+      } else if (kind === 'nested-tmp') {
+        fs.mkdirSync(path.join(plan.lockKey, '.qwen-session.notes'));
+        fs.writeFileSync(
+          path.join(plan.lockKey, '.qwen-session.notes', 'draft.tmp'),
+          'before\n',
+        );
+      }
+      fs.writeFileSync(
+        path.join(plan.lockKey, 'payload.bin'),
+        randomBytes(256 * 1024 * 1024),
+      );
+      const late = editAtCaptureStart(plan.sessionId, () => {
+        if (kind === 'nested-disposable') {
+          fs.writeFileSync(
+            path.join(plan.lockKey, 'private', 'node_modules', 'result.txt'),
+            'after\n',
+          );
+        } else if (kind === 'nested-tmp') {
+          fs.writeFileSync(
+            path.join(plan.lockKey, '.qwen-session.notes', 'draft.tmp'),
+            'after\n',
+          );
+        } else {
+          git(plan.lockKey, 'bisect', 'start');
+        }
+      });
+      try {
+        await executeWorktreeCleanup(plan);
+      } finally {
+        late.stop();
+      }
+      expect(late.edited()).toBe(true);
+      expect(archives(plan.sessionId)).toHaveLength(1);
+      expect(fs.existsSync(plan.lockKey)).toBe(true);
+      if (kind === 'nested-disposable') {
+        expect(
+          fs.readFileSync(
+            path.join(plan.lockKey, 'private', 'node_modules', 'result.txt'),
+            'utf8',
+          ),
+        ).toBe('after\n');
+      } else if (kind === 'nested-tmp') {
+        expect(
+          fs.readFileSync(
+            path.join(plan.lockKey, '.qwen-session.notes', 'draft.tmp'),
+            'utf8',
+          ),
+        ).toBe('after\n');
+      } else {
+        const gitDir = execFileSync('git', ['rev-parse', '--git-dir'], {
+          cwd: plan.lockKey,
+          encoding: 'utf8',
+        }).trim();
+        expect(
+          fs.existsSync(path.resolve(plan.lockKey, gitDir, 'BISECT_START')),
+        ).toBe(true);
+      }
+    },
+  );
+
+  it('preserves a clean tracked protected case-variant (audit capture)', async () => {
+    fs.writeFileSync(path.join(repoRoot, '.QWEN-SESSION'), 'tracked variant\n');
+    git(repoRoot, 'add', '.QWEN-SESSION');
+    git(repoRoot, 'commit', '-qm', 'track marker variant', '--no-verify');
+    const plan = await planFor('tracked-case-variant');
+    fs.writeFileSync(path.join(plan.lockKey, 'unique-work.txt'), 'unique\n');
+    expect(
+      execFileSync('git', ['status', '--porcelain', '--', '.QWEN-SESSION'], {
+        cwd: plan.lockKey,
+        encoding: 'utf8',
+      }),
+    ).toBe('');
+    await executeWorktreeCleanup(plan);
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(fs.existsSync(path.join(plan.lockKey, 'unique-work.txt'))).toBe(
+      true,
+    );
+    expect(archives(plan.sessionId)).toHaveLength(0);
   });
 
   it('snapshots rather than deleting when the source is an unrelated repository (S6-1)', async () => {
@@ -609,6 +890,16 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     });
     expect(result.success).toBe(true);
     const worktreePath = fs.realpathSync(result.worktree!.path);
+    // Premise of the decoy: the overlay really came from this different
+    // checkout, not from originalCwd. Without this assertion the test could
+    // pass by never exercising the sibling-source branch at all (S6-1).
+    expect(fs.realpathSync(checkout)).not.toBe(fs.realpathSync(repoRoot));
+    expect(fs.readFileSync(path.join(worktreePath, 'carry.txt'), 'utf8')).toBe(
+      'carried-untracked\n',
+    );
+    expect(
+      result.carriedEntries?.some((entry) => entry.path === 'carry.txt'),
+    ).toBe(true);
     const sessionId = 'session-unrelated-decoy';
     await writeWorktreeSessionMarker(worktreePath, sessionId);
     const plan: WorktreeCleanupPlan = {

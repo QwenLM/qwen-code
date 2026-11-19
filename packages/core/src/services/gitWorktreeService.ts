@@ -381,39 +381,43 @@ export async function hasHiddenIndexBit(
 }
 
 /**
- * Whether a merge/rebase/cherry-pick is paused in this worktree. The paused
- * operation's private state (MERGE_AUTOSTASH, MERGE_HEAD, REBASE_HEAD,
- * CHERRY_PICK_HEAD) lives in the per-worktree gitdir and is NOT representable
- * by a worktree tar + status header: cleanup must preserve, never delete and
- * hope a restore recreates it (P1 merge autostash). Uses `rev-parse
- * --git-path` so linked-worktree paths resolve to their real admin dir.
+ * Whether a merge/rebase/cherry-pick/revert/bisect is paused in this worktree.
+ * The paused operation's private state lives in the per-worktree gitdir and
+ * is NOT representable by a worktree tar + status header: cleanup must
+ * preserve, never delete and hope a restore recreates it (P1).
+ *
+ * Checked are pseudo-ref files (MERGE_AUTOSTASH, MERGE_HEAD, REBASE_HEAD,
+ * CHERRY_PICK_HEAD, REVERT_HEAD, BISECT_START) AND the pause DIRECTORIES
+ * (rebase-merge, rebase-apply, sequencer) — rebase `break`/`exec` and `git am`
+ * carry their state only in these directories. All paths resolve through one
+ * `rev-parse --git-dir` (the real admin dir of a linked worktree), so an
+ * in-progress operation reads as pending even on linked worktrees.
  * Fail-closed: a read error counts as pending.
  */
 export async function worktreeHasPendingGitOperation(
   worktreePath: string,
 ): Promise<boolean> {
-  const markers = [
+  const files = [
     'MERGE_AUTOSTASH',
     'MERGE_HEAD',
     'REBASE_HEAD',
     'CHERRY_PICK_HEAD',
+    'REVERT_HEAD',
+    'BISECT_START',
   ];
+  const pauseDirs = ['rebase-merge', 'rebase-apply', 'sequencer'];
   try {
-    for (const marker of markers) {
-      const rel = (
-        await runGit(worktreePath, [
-          ...NO_EXEC_CONFIG,
-          'rev-parse',
-          '--git-path',
-          marker,
-        ])
-      ).trim();
-      const markerPath = path.resolve(worktreePath, rel);
-      const present = await fs
-        .access(markerPath)
-        .then(() => true)
-        .catch(() => false);
-      if (present) return true;
+    const gitDir = (
+      await runGit(worktreePath, [...NO_EXEC_CONFIG, 'rev-parse', '--git-dir'])
+    ).trim();
+    const root = path.resolve(worktreePath, gitDir);
+    for (const rel of [...files, ...pauseDirs]) {
+      try {
+        await fs.access(path.join(root, rel));
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
     }
     return false;
   } catch (error) {

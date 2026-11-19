@@ -29,9 +29,12 @@ import {
   GitWorktreeService,
   WorktreeDirtyCarryConflictError,
   carriedOverlayStillHeldBySource,
+  computeCarriedIdentities,
+  worktreeHasPendingGitOperation,
   worktreeHasWork,
 } from './gitWorktreeService.js';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
+import { buildWorktreeSnapshotMeta } from './worktree-snapshot-service.js';
 
 // Whether the host filesystem folds final sigma (ς, U+03C2) to sigma (σ,
 // U+03C3) as one path — true on macOS's default case-insensitive volumes, false
@@ -118,6 +121,137 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     expect(result.success).toBe(true);
     return result.worktree!;
   }
+
+  it('treats a resolved but unfinished revert as pending (R8-4)', async () => {
+    await fs.writeFile(path.join(repoRoot, 'README.md'), 'revert-one\n');
+    git(repoRoot, 'add', 'README.md');
+    git(repoRoot, 'commit', '-qm', 'revert one', '--no-verify');
+    await fs.writeFile(path.join(repoRoot, 'README.md'), 'revert-two\n');
+    git(repoRoot, 'add', 'README.md');
+    git(repoRoot, 'commit', '-qm', 'revert two', '--no-verify');
+    const worktree = await create('revert-pending');
+    expect(gitOk(worktree.path, 'revert', 'HEAD~1')).toBe(false);
+    await fs.writeFile(path.join(worktree.path, 'README.md'), 'resolved\n');
+    git(worktree.path, 'add', 'README.md');
+    expect(git(worktree.path, 'status', '--porcelain')).toContain(
+      'M  README.md',
+    );
+    await expect(worktreeHasPendingGitOperation(worktree.path)).resolves.toBe(
+      true,
+    );
+    await expect(worktreeHasWork(worktree.path)).resolves.toBe(true);
+  });
+
+  it('treats a rebase break with only private autostash state as work (R8-6)', async () => {
+    await fs.writeFile(path.join(repoRoot, 'README.md'), 'rebase-second\n');
+    git(repoRoot, 'add', 'README.md');
+    git(repoRoot, 'commit', '-qm', 'rebase second', '--no-verify');
+    const worktree = await create('rebase-break');
+    const baseCommit = git(worktree.path, 'rev-parse', 'HEAD');
+    await fs.writeFile(
+      path.join(worktree.path, 'README.md'),
+      'autostashed-private\n',
+    );
+    const editor = path.join(repoParent, 'insert-break.cjs');
+    await fs.writeFile(
+      editor,
+      "require('node:fs').writeFileSync(process.argv[2], 'break\\n');\n",
+    );
+    execFileSync('git', ['rebase', '-i', '--autostash', 'HEAD~1'], {
+      cwd: worktree.path,
+      env: {
+        ...process.env,
+        GIT_SEQUENCE_EDITOR: `"${process.execPath}" "${editor}"`,
+      },
+      stdio: 'pipe',
+    });
+    expect(git(worktree.path, 'status', '--porcelain')).toBe('');
+    expect(git(worktree.path, 'stash', 'list')).toBe('');
+    const gitDir = git(worktree.path, 'rev-parse', '--git-dir');
+    expect(
+      existsSync(
+        path.resolve(worktree.path, gitDir, 'rebase-merge', 'autostash'),
+      ),
+    ).toBe(true);
+    await expect(worktreeHasPendingGitOperation(worktree.path)).resolves.toBe(
+      true,
+    );
+    await expect(worktreeHasWork(worktree.path)).resolves.toBe(true);
+    await expect(
+      buildWorktreeSnapshotMeta(worktree.path, {
+        sessionId: 'session-rebase-break',
+        slug: 'rebase-break',
+        baseCommit,
+      }),
+    ).rejects.toThrow(/in-progress git operation/);
+    git(worktree.path, 'rebase', '--abort');
+    expect(await read(path.join(worktree.path, 'README.md'))).toBe(
+      'autostashed-private\n',
+    );
+  });
+
+  it('treats a paused bisect as pending until it is reset (R8-6)', async () => {
+    const worktree = await create('bisect-pending');
+    git(worktree.path, 'bisect', 'start');
+    await expect(worktreeHasPendingGitOperation(worktree.path)).resolves.toBe(
+      true,
+    );
+    await expect(worktreeHasWork(worktree.path)).resolves.toBe(true);
+    git(worktree.path, 'bisect', 'reset');
+    await expect(worktreeHasPendingGitOperation(worktree.path)).resolves.toBe(
+      false,
+    );
+  });
+
+  it.each(['MERGE_AUTOSTASH', 'REBASE_HEAD', 'CHERRY_PICK_HEAD'])(
+    'detects the %s pending-operation marker',
+    async (marker) => {
+      const worktree = await create(`pending-${marker.toLowerCase()}`);
+      const gitDir = git(worktree.path, 'rev-parse', '--git-dir');
+      const state = path.resolve(worktree.path, gitDir, marker);
+      await fs.writeFile(state, 'pending-state\n');
+      await expect(worktreeHasPendingGitOperation(worktree.path)).resolves.toBe(
+        true,
+      );
+      await fs.rm(state);
+      await expect(worktreeHasPendingGitOperation(worktree.path)).resolves.toBe(
+        false,
+      );
+    },
+  );
+
+  it('hashes more than 200 paths including special-character names', async () => {
+    const worktree = await create('identity-batches');
+    const names =
+      process.platform === 'win32'
+        ? []
+        : ['quote"name.txt', 'nl\nname.txt', ' pad.txt '];
+    names.push('--stdin');
+    for (let i = names.length; i < 205; i++) {
+      names.push(`bulk-${String(i).padStart(3, '0')}.txt`);
+    }
+    for (const name of names) {
+      await fs.writeFile(path.join(worktree.path, name), `content:${name}\n`);
+    }
+    const entries = await computeCarriedIdentities(worktree.path, names);
+    expect(entries).toHaveLength(names.length);
+    expect(new Set(entries.map((entry) => entry.path))).toEqual(new Set(names));
+    for (const entry of entries) {
+      // Compare the mapping, not just the hash shape: swapping two paths'
+      // identities must fail. Compute expectations with real git hashing.
+      const expected = execFileSync(
+        'git',
+        ['hash-object', '--no-filters', '--stdin'],
+        {
+          cwd: worktree.path,
+          encoding: 'utf8',
+          input: `content:${entry.path}\n`,
+        },
+      ).trim();
+      expect(entry.hash).toBe(expected);
+      expect(entry.executable).toBe(false);
+    }
+  });
 
   it('carries unstaged, staged, and untracked changes into the worktree', async () => {
     await makeDirty(repoRoot);
