@@ -50,7 +50,7 @@ describe('UiRuntime', () => {
         ui.on('servers', 'input', calculate);
         calculate();`,
         { servers: { value: '2', checked: false } },
-      ),
+      ).patches,
     ).toEqual([{ kind: 'text', id: 'capacity', value: '250' }]);
     expect(
       runtime.dispatch(event('servers', '5', 'input'), {
@@ -221,7 +221,7 @@ describe('UiRuntime', () => {
           typeof require, typeof tools, typeof postMessage, typeof WebAssembly
         ]));`,
         {},
-      ),
+      ).patches,
     ).toEqual([
       {
         kind: 'text',
@@ -241,7 +241,7 @@ describe('UiRuntime', () => {
            ui.text('status', 'done');
          });`,
         {},
-      ),
+      ).patches,
     ).toEqual([{ kind: 'text', id: 'status', value: 'ready' }]);
     expect(runtime.dispatch(event(), {})).toEqual({
       patches: [{ kind: 'text', id: 'status', value: 'done' }],
@@ -289,7 +289,7 @@ describe('UiRuntime', () => {
       }
       Promise.resolve().then(next);
     `;
-    expect(createRuntime().initialize(script(256), {})).toEqual([
+    expect(createRuntime().initialize(script(256), {}).patches).toEqual([
       { kind: 'text', id: 'out', value: '256' },
     ]);
     const exceeded = createRuntime();
@@ -390,7 +390,7 @@ describe('UiRuntime', () => {
          ui.on('run', 'click', () => Promise.reject(new Error('failure'))
            .catch(() => ui.text('out', 'handled')));`,
         {},
-      ),
+      ).patches,
     ).toEqual([{ kind: 'text', id: 'out', value: 'recovered' }]);
     expect(runtime.dispatch(event(), {})).toEqual({
       patches: [{ kind: 'text', id: 'out', value: 'handled' }],
@@ -429,7 +429,7 @@ describe('UiRuntime', () => {
            ui.text('out', 'interactive');
          });`,
           {},
-        ),
+        ).patches,
       ).toEqual([{ kind: 'text', id: 'out', value: 'initial' }]);
       for (let i = 0; i < 2; i++) {
         expect(runtime.dispatch(event(), {})).toEqual({
@@ -471,5 +471,119 @@ describe('UiRuntime', () => {
     expect(() => createRuntime().dispatch(event(), {})).toThrow(
       /not initialized/,
     );
+  });
+
+  describe('view state', () => {
+    it('starts from the saved state and reports only rounds that set it', () => {
+      const runtime = createRuntime();
+      expect(
+        runtime.initialize(
+          `ui.text('out', JSON.stringify(ui.state.get()));
+           ui.on('add', 'click', () => {
+             const state = ui.state.get();
+             state.items.push(state.items.length + 1);
+             ui.state.set(state);
+             ui.state.set({ items: state.items, last: true });
+             ui.text('out', JSON.stringify(ui.state.get()));
+           });
+           ui.on('look', 'click', () => ui.text('out', 'looked'));`,
+          {},
+          '{"items":[1]}',
+        ),
+      ).toEqual({
+        patches: [{ kind: 'text', id: 'out', value: '{"items":[1]}' }],
+      });
+      const saved = '{"items":[1,2],"last":true}';
+      expect(runtime.dispatch(event('add'), {})).toEqual({
+        patches: [{ kind: 'text', id: 'out', value: saved }],
+        state: saved,
+        handled: true,
+      });
+      expect(runtime.dispatch(event('look'), {})).toEqual({
+        patches: [{ kind: 'text', id: 'out', value: 'looked' }],
+        handled: true,
+      });
+    });
+
+    it('returns a fresh copy and keeps the state API fixed', () => {
+      const runtime = createRuntime();
+      expect(
+        runtime.initialize(
+          `const copy = ui.state.get();
+           copy.value = 'changed';
+           ui.state.get = () => 'forged';
+           ui.text('out', [ui.state.get().value, Object.isFrozen(ui.state)].join());`,
+          {},
+          '{"value":"saved"}',
+        ).patches,
+      ).toEqual([{ kind: 'text', id: 'out', value: 'saved,true' }]);
+      expect(
+        createRuntime().initialize(
+          "ui.text('out', String(ui.state.get()));",
+          {},
+        ).patches,
+      ).toEqual([{ kind: 'text', id: 'out', value: 'null' }]);
+    });
+
+    it.each([
+      ['undefined', 'undefined', /JSON value/],
+      ['a function', '() => 1', /JSON value/],
+      ['a non-finite number', 'NaN', /JSON value/],
+      ['a nested undefined', '{ x: undefined }', /JSON value/],
+      ['a sparse array', '[, 1]', /JSON value/],
+      ['a map', 'new Map()', /JSON value/],
+      ['a date', 'new Date(0)', /JSON value/],
+      ['an object with toJSON', '{ toJSON: () => 1 }', /JSON value/],
+      [
+        'a getter that replaces its own field',
+        `({ get x() {
+          Object.defineProperty(this, 'x', { value: 1 });
+          return 1;
+        } })`,
+        /JSON value/,
+      ],
+      [
+        'a cycle',
+        '(() => { const a = {}; a.a = a; return a; })()',
+        /circular|cyclic/i,
+      ],
+      ['a value over 16 KiB', "'x'.repeat(16 * 1024)", /16 KiB/],
+    ])('lets the card catch a state set to %s', (_name, value, error) => {
+      const runtime = createRuntime();
+      const { patches, state } = runtime.initialize(
+        `try { ui.state.set(${value}); ui.text('out', 'set'); }
+         catch (error) { ui.text('out', error.message); }
+         ui.text('saved', String(ui.state.get()));`,
+        {},
+        '42',
+      );
+      expect(state).toBeUndefined();
+      expect(patches[0]?.value).toMatch(error);
+      expect(patches[1]?.value).toBe('42');
+    });
+
+    it('saves plain data without invoking inherited serialization hooks', () => {
+      const { state } = createRuntime().initialize(
+        `Object.prototype.toJSON = Array.prototype.toJSON = () => 1;
+         ui.state.set({ items: [2, { enabled: true }], label: '✓' });`,
+        {},
+      );
+      expect(state).toBe('{"items":[2,{"enabled":true}],"label":"✓"}');
+    });
+
+    it('fails the round for an uncaught state error', () => {
+      expect(() =>
+        createRuntime().initialize('ui.state.set(undefined);', {}),
+      ).toThrow(/Script error: TypeError: ui.state.set needs a JSON value/);
+    });
+
+    it.each([
+      ['malformed JSON', '{'],
+      ['more than 16 KiB', JSON.stringify('x'.repeat(16 * 1024))],
+    ])('refuses saved state that is %s', (_name, state) => {
+      expect(() => createRuntime().initialize('', {}, state)).toThrow(
+        /saved view state|JSON/i,
+      );
+    });
   });
 });

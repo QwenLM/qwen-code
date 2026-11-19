@@ -506,6 +506,11 @@
   min-width: min(280px, var(--radix-popover-content-available-width));
 }
 
+:global([data-web-shell-model-sheet]) .dropdownItemLabel {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .slashPanel {
   max-height: min(
     460px,
@@ -1870,6 +1875,33 @@
 .dropdownSubmenuSection {
   padding-top: 4px;
   border-top: 1px solid var(--border);
+}
+
+.sheetSectionRow {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.sheetSectionValue {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  color: var(--muted-foreground);
+  text-align: right;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.sheetSectionValue svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
 }
 
 .reasoningOptions {

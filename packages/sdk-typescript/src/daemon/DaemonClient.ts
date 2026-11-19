@@ -78,6 +78,8 @@ import type {
   DaemonForkSessionResult,
   DaemonRestoredSession,
   DaemonSession,
+  DaemonWorktreeBranchResult,
+  DaemonWorktreeHandoffResult,
   DaemonSessionArchiveState,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,
@@ -154,6 +156,7 @@ import type {
   DaemonGitRemotesResult,
   DaemonGitRemoteMutationResult,
   DaemonGitHubPullRequestList,
+  DaemonGitHubPullRequestFiles,
   DaemonGitHubPullRequestCreateResult,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceDirectories,
@@ -275,6 +278,8 @@ import type {
   DaemonDeleteMessageGroupsResult,
   DaemonRewindResult,
   ForkSessionRequest,
+  SendToSubSessionRequest,
+  DaemonSubSessionSendResult,
   DaemonSessionHooksStatus,
   DaemonWorkspaceExtensionsStatus,
   DaemonWorkspaceExtensionSummaries,
@@ -1723,6 +1728,8 @@ export class DaemonClient {
     if (range) params.set('range', range);
     if (options?.all) params.set('all', '1');
     if (options?.search) params.set('search', options.search);
+    if (options?.excludeRefs?.length)
+      params.set('exclude', options.excludeRefs.join(','));
     const qs = params.toString();
     return await this.jsonRequest<DaemonGitLog>(
       `/workspace/git/log${qs ? `?${qs}` : ''}`,
@@ -4042,6 +4049,84 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Turn a detached managed worktree into a named branch at its current HEAD
+   * ("Create branch here", `POST /session/:id/worktree-branch`, capability
+   * `session_worktree_branch_v1`). The session, checkout, and marker owner
+   * stay; only the branch metadata changes. Typed 409 bodies:
+   * `worktree_branch_unsupported` (not a managed worktree session),
+   * `worktree_already_branched` (the worktree already has a branch), and
+   * `branch_already_exists` (the requested name is taken).
+   */
+  async createWorktreeBranch(
+    sessionId: string,
+    name: string,
+    req: { workspaceCwd?: string } = {},
+  ): Promise<DaemonWorktreeBranchResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/worktree-branch`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          name,
+          ...(req.workspaceCwd !== undefined ? { cwd: req.workspaceCwd } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/worktree-branch',
+          );
+        }
+        return (await res.json()) as DaemonWorktreeBranchResult;
+      },
+      this.resolveSessionSpawnTimeoutMs(),
+    );
+  }
+
+  /**
+   * Move the same session between its managed worktree and the local
+   * checkout, carrying the work ("Hand off",
+   * `POST /session/:id/worktree-handoff`, capability
+   * `session_worktree_handoff_v1`). `to: 'local'` checks the worktree's
+   * branch out in the local checkout (creating one first for a detached
+   * worktree with commits; `name` overrides the auto-name) and applies its
+   * tracked dirty changes; the local checkout must be clean
+   * (`local_checkout_dirty`). `to: 'worktree'` creates a detached managed
+   * worktree from the session's current checkout with its dirty state.
+   * Refuses while a prompt is active.
+   */
+  async handoffWorktreeSession(
+    sessionId: string,
+    to: 'local' | 'worktree',
+    req: { name?: string; workspaceCwd?: string } = {},
+  ): Promise<DaemonWorktreeHandoffResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/worktree-handoff`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          to,
+          ...(req.name !== undefined ? { name: req.name } : {}),
+          ...(req.workspaceCwd !== undefined ? { cwd: req.workspaceCwd } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/worktree-handoff',
+          );
+        }
+        return (await res.json()) as DaemonWorktreeHandoffResult;
+      },
+      this.resolveSessionSpawnTimeoutMs(),
+    );
+  }
+
   async branchSession(
     sessionId: string,
     req: WorktreeBranchSessionRequest,
@@ -4134,6 +4219,40 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Send a prompt from `sessionId` to another session: a new one, in its own
+   * workspace or another registered one, or any other active session there.
+   * The target reports back to `sessionId` when its turn finishes.
+   */
+  async sendToSubSession(
+    sessionId: string,
+    req: SendToSubSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonSubSessionSendResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/sub-sessions`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({
+          prompt: req.prompt,
+          ...(req.workspace !== undefined ? { workspace: req.workspace } : {}),
+          ...(req.targetSessionId !== undefined
+            ? { targetSessionId: req.targetSessionId }
+            : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/sub-sessions');
+        }
+        return (await res.json()) as DaemonSubSessionSendResult;
+      },
+      // The daemon may spawn or restore the session before answering.
+      this.resolveSessionSpawnTimeoutMs(),
+    );
+  }
+
   async sessionContext(
     sessionId: string,
     clientId?: string,
@@ -4214,9 +4333,10 @@ export class DaemonClient {
   async sessionTasks(
     sessionId: string,
     clientId?: string,
+    opts: { includeSubSessions?: boolean } = {},
   ): Promise<DaemonSessionTasksStatus> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks${opts.includeSubSessions ? '?includeSubSessions=true' : ''}`,
       { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) {
@@ -8789,6 +8909,8 @@ export class WorkspaceDaemonClient {
     if (range) params.set('range', range);
     if (options?.all) params.set('all', '1');
     if (options?.search) params.set('search', options.search);
+    if (options?.excludeRefs?.length)
+      params.set('exclude', options.excludeRefs.join(','));
     if (options?.sessionId != null) params.set('sessionId', options.sessionId);
     const qs = params.toString();
     return this.client.workspaceJsonRequest<DaemonGitLog>(
@@ -9040,6 +9162,28 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       '/github/prs',
       'GET /workspaces/:workspace/github/prs',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitHubPullRequestFiles(
+    number: number,
+    cwd?: string,
+    sessionId?: string,
+    repo?: string,
+  ): Promise<DaemonGitHubPullRequestFiles> {
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    // An empty repo means "not supplied" (resolve locally); omit it so the
+    // route never sees a supplied-but-empty value it must reject.
+    if (repo != null && repo !== '') params.set('repo', repo);
+    const query = params.toString();
+    const suffix = `/github/prs/${number}/files${query ? `?${query}` : ''}`;
+    return this.client.workspaceJsonRequest<DaemonGitHubPullRequestFiles>(
+      this.workspaceSelector,
+      suffix,
+      'GET /workspaces/:workspace/github/prs/:number/files',
       { mode: 'rest' },
     );
   }

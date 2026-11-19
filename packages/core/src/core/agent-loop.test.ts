@@ -1170,7 +1170,8 @@ describe('runModelRound on a round source', () => {
       },
       'agent-prompt',
       undefined,
-      undefined,
+      // turnModelRound is a background round: no session-turn ledger flag.
+      {},
     );
     expect(result.turn).toBeInstanceOf(Turn);
     // The attempt the retry replaced is dropped.

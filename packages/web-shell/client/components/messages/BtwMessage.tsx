@@ -7,12 +7,20 @@ interface BtwMessageProps {
   question: string;
   answer: string;
   isPending: boolean;
+  /** Task explanations are button-triggered, not a typed /btw command. */
+  hidePrefix?: boolean;
+  /** The detail-panel mirror has no focusable surface of its own, so the
+   * composer panel's key hints would advertise keys that act on whatever
+   * control holds focus (Enter on the header "?" re-asks). */
+  hideShortcuts?: boolean;
 }
 
 export const BtwMessage = memo(function BtwMessage({
   question,
   answer,
   isPending,
+  hidePrefix = false,
+  hideShortcuts = false,
 }: BtwMessageProps) {
   const { t } = useI18n();
   const contentRef = useRef<HTMLDivElement>(null);
@@ -46,7 +54,7 @@ export const BtwMessage = memo(function BtwMessage({
         }}
       >
         <div className={styles.question}>
-          <span className={styles.prefix}>/btw </span>
+          {!hidePrefix && <span className={styles.prefix}>/btw </span>}
           <span>{question}</span>
         </div>
         <div ref={answerRef} className={styles.answer}>
@@ -57,9 +65,11 @@ export const BtwMessage = memo(function BtwMessage({
           )}
         </div>
       </div>
-      <div className={styles.shortcuts}>
-        {isPending ? t('btw.shortcuts.pending') : t('btw.shortcuts.done')}
-      </div>
+      {!hideShortcuts && (
+        <div className={styles.shortcuts}>
+          {isPending ? t('btw.shortcuts.pending') : t('btw.shortcuts.done')}
+        </div>
+      )}
     </div>
   );
 });

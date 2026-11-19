@@ -157,13 +157,15 @@ export function GeneratedUiSlot({
   );
   const toolsMatch = !!sessionId && tools?.sessionId === sessionId;
   const messagesMatch = !!sessionId && messages?.sessionId === sessionId;
+  const viewStateMatch = toolsMatch && !!tools?.viewState;
   const resource = useMemo(
     () =>
       resourceKey(display, source?.eventEpoch, {
         tools: toolsMatch,
         messages: messagesMatch,
+        ...(viewStateMatch ? { viewState: true } : {}),
       }),
-    [display, source?.eventEpoch, toolsMatch, messagesMatch],
+    [display, source?.eventEpoch, toolsMatch, messagesMatch, viewStateMatch],
   );
   const ordinaryActive =
     visible && ordinary?.key === key && ordinary.resourceKey === resource;
