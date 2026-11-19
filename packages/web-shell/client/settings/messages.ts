@@ -580,4 +580,277 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.visionModel': 'Модель зрения',
   'settings.description.visionModel':
     'Модель с поддержкой изображений, используемая как мост зрения. Оставьте пустым для автовыбора.',
+  'settings.category.General': 'Общие',
+  'settings.category.UI': 'Интерфейс',
+  'settings.category.Privacy': 'Конфиденциальность',
+  'settings.category.Model': 'Модель',
+  'settings.category.Context': 'Контекст',
+  'settings.category.Tools': 'Инструменты',
+  'settings.category.Daemon': 'Демон',
+  'settings.category.Connections': 'Подключения',
+  'settings.category.Experimental': 'Экспериментальные',
+  'settings.category.Advanced': 'Расширенные',
+  'settings.label.general.enableAutoUpdate': 'Включить автообновление',
+  'settings.description.general.enableAutoUpdate':
+    'При запуске автоматически проверять и устанавливать обновления.',
+  'settings.label.general.showSessionRecap': 'Показывать обзор сессии',
+  'settings.description.general.showSessionRecap':
+    'После возвращения в терминал спустя некоторое время автоматически показать строку «на чём остановились». По умолчанию выключено. В любой момент можно вызвать вручную через /recap.',
+  'settings.label.general.sessionRecapAwayThresholdMinutes':
+    'Порог отсутствия для обзора сессии (минуты)',
+  'settings.description.general.sessionRecapAwayThresholdMinutes':
+    'Сколько минут терминал должен быть не в фокусе, чтобы при следующем фокусе показать автоматический обзор. По умолчанию 5 минут, как в Claude Code; увеличьте, если часто ненадолго переключаетесь между окнами.',
+  'settings.label.general.cleanupPeriodDays': 'Период очистки (дни)',
+  'settings.description.general.cleanupPeriodDays':
+    'Сколько дней хранить резервные копии сессий для /rewind в ~/.qwen/file-history/ и debug-логи сессий в runtime debug/. Фоновая очистка выполняется не чаще раза в день. 0 — минимальное хранение (около 1 часа); сессии, которых касались за последний час, и текущая активная сессия всё равно защищены.',
+  'settings.label.general.gitCoAuthor.commit': 'Атрибуция: commit',
+  'settings.description.general.gitCoAuthor.commit':
+    'При создании commit через Qwen Code добавлять трейлер Co-authored-by и пофайловую git note с AI-атрибуцией. Если выключить, пропускаются оба.',
+  'settings.label.general.gitCoAuthor.pr': 'Атрибуция: PR',
+  'settings.description.general.gitCoAuthor.pr':
+    'При gh pr create добавлять в описание PR строку атрибуции Qwen Code.',
+  'settings.label.general.language': 'Язык: интерфейс',
+  'settings.description.general.language':
+    'Язык интерфейса. auto определяет его по системным настройкам; можно положить JS-файлы в ~/.qwen/locales/ и использовать собственный код языка.',
+  'settings.label.general.preventSystemSleep':
+    'Не давать системе уснуть во время работы',
+  'settings.description.general.preventSystemSleep':
+    'Не давать системе уснуть, пока Qwen Code стримит ответ модели или выполняет инструменты. Простой ввода и ожидание подтверждения прав не блокируют сон.',
+  'settings.label.review.attribution': 'Атрибуция: review',
+  'settings.description.review.attribution':
+    'В публикуемые на GitHub текст review и строковые комментарии добавляется подвал с моделью и версией CLI (например «_— qwen3-coder via Qwen Code /review (v0.21.2)_»). Если выключить, опубликованный review без видимой AI-атрибуции: нет подвала и нет меток «**[Critical]**»/«**[Suggestion]**» в списках. В исходном тексте атрибуция всё равно узнаваема: у каждого комментария невидимая метка серьёзности («<!-- qwen-review critical -->»), у тела review — ledger («<!-- qwen-review-ledger ... -->») — автоматизация, читающая комментарии (GitHub API, связанные workflow), по-прежнему узнаёт продукты /review, а presubmit-дедупликация узнаёт прошлые комментарии аккаунта ревьюера по метке серьёзности (кроме чужих комментариев без атрибуции). Ещё одно следствие: режим qwen-autofix «только Critical» (с 5-го раунда или раньше при бюджете роста diff) не сможет узнать опубликованные находки как Critical и отложить их. Действует только в областях User, System, SystemDefaults; значение Workspace игнорируется, репозиторий не задаёт политику ревьюера.',
+  'settings.label.review.effort': 'Effort по умолчанию: review',
+  'settings.description.review.effort':
+    'Сила /review, если не заданы --effort и нет запомненной проектом явной силы. «auto» сохраняет встроенные правила (high для PR, medium для локальных правок). Явно указанная или запомненная сила важнее; действующий --comment всё равно форсирует high, --fix — не ниже medium. Действует только в областях User, System, SystemDefaults; значение Workspace игнорируется, репозиторий не задаёт политику ревьюера.',
+  'settings.option.review.effort.auto':
+    'Авто (high для PR, medium для локальных)',
+  'settings.option.review.effort.low': 'Низкая',
+  'settings.option.review.effort.medium': 'Средняя',
+  'settings.option.review.effort.high': 'Высокая',
+  'settings.label.review.comment':
+    'Публиковать комментарии по умолчанию: review',
+  'settings.description.review.comment':
+    'Считать каждый PR /review выполненным с --comment: находки публикуются в PR даже без флага. Публикация всё равно привязана к указанному при вызове PR. Включайте, только если ревью всегда должно публиковаться. Действует только в областях User, System, SystemDefaults; значение Workspace игнорируется, репозиторий не задаёт политику ревьюера.',
+  'settings.label.review.severityFloor': 'Нижняя граница публикации: review',
+  'settings.description.review.severityFloor':
+    'Минимальный уровень публикации для PR /review без --severity-floor. «auto» сохраняет адаптив по раундам: до 5-го включительно публикуются Suggestion, с 6-го только Critical, остальные высокоуверенные Suggestion записываются и откладываются (низкоуверенные и Nice-to-have по-прежнему только в терминале); при «auto» в раундах 2–5 также откладываются новые Suggestion по коду, не менявшемуся с прошлого раунда — именно это не даёт раундам раздувать PR. «critical» с 1-го раунда держит эту позу; «suggestion» каждый раунд публикует Suggestion. Не-PR цели не имеют раундов и игнорируют это. Действует только в областях User, System, SystemDefaults; значение Workspace игнорируется, репозиторий не задаёт политику ревьюера.',
+  'settings.option.review.severityFloor.auto':
+    'Авто (с 6-го раунда только Critical)',
+  'settings.option.review.severityFloor.critical':
+    'Только Critical (каждый раунд)',
+  'settings.option.review.severityFloor.suggestion': 'Suggestion и Critical',
+  'settings.label.review.reverseAuditRounds':
+    'Верхняя граница обратного аудита: review',
+  'settings.description.review.reverseAuditRounds':
+    'Понижает верхнюю границу циклов обратного аудита в каждом интенсивном ревью. Граница обычно выбирается по топологии diff (маленький — 10, по частям — 5; гигантский — 3 при дедлайне ревью и 5 без него: урезание только из-за лимитов CI и только когда лимит есть), потому что один цикл на маленьком diff занимает одного агента, а на гигантском — около 90 минут. Настройка только понижает применимую ступень, не повышает: неположительные или вне диапазона значения (ниже 3 или выше ступени плана) игнорируются, ступень не меняется — JSON Schema здесь без типа integer, дробь пройдёт валидацию редактора, но будет отброшена в рантайме. Перед включением поймите цену: цикл заканчивается после двух раундов без новых находок, занижение границы не ускоряет сходимость, а чаще останавливает ревью до неё — каждая такая остановка раскрывается как непроверенная область, а верх вывода сжимается до Comment, поэтому более дешёвое ревью уже не может дать Approve. Чтобы снизить стоимость ревью в целом, сначала используйте «effort». Эта настройка никак не удлиняет цикл: дедлайн ревью ограничивает один прогон, а не продлевает его; на гигантском diff дедлайн снижает границу с 5 до 3, а не повышает. Действует только в областях User, System, SystemDefaults; значение Workspace игнорируется, репозиторий не задаёт политику ревьюера.',
+  'settings.label.output.showTimestamps': 'Показывать метки времени',
+  'settings.description.output.showTimestamps':
+    'Показывать метку [HH:MM:SS] перед каждым ответом ассистента.',
+  'settings.label.review.sandbox': 'Песочница для проверяемого кода: review',
+  'settings.description.review.sandbox':
+    'Запускать команды самого проверяемого репозитория в контейнере — `npm ci` с установочными скриптами, сборку, тесты и каждый мутационный зонд — а не от вашего имени напрямую. Ревью исполняет проверяемый код, и сегодня эти команды наследуют всё окружение процесса ревью (в CI — в том числе модель и GitHub-учётные данные). «auto» использует контейнер, если доступны docker или podman, иначе запускает напрямую; «required» отказывается запускать эти команды вне песочницы — тогда доказательства, зависящие от исполнения (находки сборки/тестов, вердикт мутации, `Source: [probe]`), в этом ревью недоступны, а само ревью не прерывается; «off» — сегодняшнее поведение и значение по умолчанию, потому что внезапный перенос сборки в контейнер меняет цель компиляции нативных модулей. Действует только в областях User, System, SystemDefaults; значение Workspace игнорируется, репозиторий не может выключить изоляцию, которая его ограничивает.',
+  'settings.option.review.sandbox.off':
+    'Выкл (запускать проверяемый код напрямую)',
+  'settings.option.review.sandbox.auto': 'Авто (контейнер, если он доступен)',
+  'settings.option.review.sandbox.required':
+    'Обязательно (никогда вне песочницы)',
+  'settings.label.review.approachRounds':
+    'Порог раундов для подсказки о направлении: review',
+  'settings.description.review.approachRounds':
+    'После скольких раундов ревью PR можно добавить пояснение, что проблема скорее в направлении изменений, а не в текущем патче. Оно появляется, только если diff с первой оценки ревью тоже вырос в несколько раз, и никогда на Approve. Это только раскрытие: не добавляет находок, не меняет вывод, ничего не блокирует — оно есть потому, что каждая находка якорится на строке текущего diff, поэтому ревью может сказать, где направление даёт течь, но не может сказать, что другой подход закрыл бы все эти дыры сразу. 0 оставляет встроенный порог в 5 раундов; больше — текст позже; очень большое значение выключает его. Неположительные значения игнорируются. Действует только в областях User, System, SystemDefaults; значение Workspace игнорируется, репозиторий не задаёт политику ревьюера.',
+  'settings.label.ui.theme': 'Тема',
+  'settings.description.ui.theme': 'Цветовая тема интерфейса.',
+  'settings.label.ui.allowedApprovalModes': 'Режимы одобрения Web Shell',
+  'settings.description.ui.allowedApprovalModes':
+    'Режимы одобрения выполнения, которые предлагает Web Shell. Если не задано, показываются default, auto-edit, auto и yolo; пустой список не даёт вариантов. Хостовый allowedApprovalModes важнее этой настройки. Влияет только на отображение, не меняет текущий режим и не навязывает права бэкенда. Действует только в областях User, System, SystemDefaults; значение Workspace игнорируется с предупреждением. Правите settings.json напрямую.',
+  'settings.label.ui.hideTips': 'Скрывать подсказки',
+  'settings.description.ui.hideTips': 'Скрывать подсказки в интерфейсе.',
+  'settings.label.ui.enableWelcomeBack': 'Показывать диалог «с возвращением»',
+  'settings.description.ui.enableWelcomeBack':
+    'Показывать диалог «с возвращением» при входе в проект с историей сессий. После выбора «начать новый чат» больше не показывается, пока не изменится сводка проекта.',
+  'settings.label.ui.enableUserFeedback': 'Включить отзыв пользователя',
+  'settings.description.ui.enableUserFeedback':
+    'После диалога показывать необязательную форму отзыва, чтобы улучшить работу Qwen.',
+  'settings.label.ui.compactMode': 'Компактный режим',
+  'settings.description.ui.compactMode':
+    'Снято: компактный вид всегда включён и в TUI, и в Web Shell. Ключ сохранён, чтобы старые файлы настроек не предупреждали.',
+  'settings.label.ui.shellOutputMaxLines': 'Максимум строк вывода Shell',
+  'settings.description.ui.shellOutputMaxLines':
+    'Максимум строк вывода shell, показываемых встроенно. 0 снимает лимит и показывает весь вывод; скрытые строки по-прежнему видны индикатором +N lines.',
+  'settings.label.ui.disableWorkflowKeywordTrigger':
+    'Отключить срабатывание по слову Workflow',
+  'settings.description.ui.disableWorkflowKeywordTrigger':
+    'Если включено, слово `workflow` в запросе больше не мягко направляет ход к инструменту Workflow (индикатор `workflow active` в подвале тоже скрывается). Действует, только когда workflow включены.',
+  'settings.label.ui.showStatusInTitle': 'Статус в заголовке окна',
+  'settings.description.ui.showStatusInTitle':
+    'Показывать имя и статус сессии Qwen Code в заголовке окна терминала.',
+  'settings.label.ui.showResponseTokensPerSecond':
+    'Показывать токены/сек ответа',
+  'settings.description.ui.showResponseTokensPerSecond':
+    'Пока модель стримит, рядом со счётчиком токенов ответа показывать оценку tokens/сек. Вступает в силу со следующей сессии.',
+  'settings.label.ui.showToolCallDetails':
+    'Показывать детали вызовов инструментов',
+  'settings.description.ui.showToolCallDetails':
+    'Показывать параметры и результаты инструментов встроенно. Если выключить, обычные вызовы сворачиваются в одну строку; в виртуализированной истории детали раскрываются кликом по сводке или Ctrl+O. Запросы одобрения, команды shell от пользователя и сфокусированный интерактивный shell остаются раскрытыми.',
+  'settings.label.privacy.usageStatisticsEnabled':
+    'Включить статистику использования',
+  'settings.description.privacy.usageStatisticsEnabled':
+    'Включить сбор статистики использования.',
+  'settings.label.fastModel': 'Быстрая модель',
+  'settings.description.fastModel':
+    'Модель для подсказок ввода и спекулятивного исполнения. Оставьте пустым, чтобы использовать основную. Более маленькая/быстрая модель (например qwen3-coder-flash) снижает задержку и стоимость.',
+  'settings.label.modelFallbacks': 'Резервные модели',
+  'settings.description.modelFallbacks':
+    'Список ID резервных моделей (через запятую, до 3), которые пробуются по порядку при ошибках ёмкости основной (429/503/529). Например «qwen-plus,qwen-turbo». Можно задать CLI --fallback-model.',
+  'settings.label.model.reasoningEffort': 'Сила рассуждения',
+  'settings.description.model.reasoningEffort':
+    'Сила размышления reasoning-моделей, действует для всех провайдеров. Задаётся через /effort. Провайдеры отображают её на диапазон текущей модели (Gemini — до «high»; Anthropic отрезает неподдерживаемые ступени). Пустое значение — значение по умолчанию модели/провайдера.',
+  'settings.option.model.reasoningEffort.low': 'Низкая',
+  'settings.option.model.reasoningEffort.medium': 'Средняя',
+  'settings.option.model.reasoningEffort.high': 'Высокая',
+  'settings.option.model.reasoningEffort.xhigh': 'Очень высокая',
+  'settings.option.model.reasoningEffort.max': 'Максимум',
+  'settings.label.mcpServers': 'MCP-серверы',
+  'settings.description.mcpServers': 'Конфигурация MCP-серверов.',
+  'settings.label.advisorMaxUses': 'Лимит вызовов Advisor за сессию',
+  'settings.description.advisorMaxUses':
+    'Максимум нативных запросов Advisor за сессию, общий для исполнителя и его субагентов. Неудачные запросы тоже считаются. 0 — без лимита. Каждый запрос отправляет содержимое сессии выбранному провайдеру и тратит дополнительные токены. Действуют только настройки областей user и system.',
+  'settings.label.context.fileFiltering.respectGitIgnore':
+    'Соблюдать .gitignore',
+  'settings.description.context.fileFiltering.respectGitIgnore':
+    'При поиске соблюдать файлы .gitignore.',
+  'settings.label.context.fileFiltering.respectQwenIgnore':
+    'Соблюдать .qwenignore',
+  'settings.description.context.fileFiltering.respectQwenIgnore':
+    'При поиске соблюдать файлы .qwenignore.',
+  'settings.label.context.fileFiltering.enableFuzzySearch':
+    'Включить нечёткий поиск',
+  'settings.description.context.fileFiltering.enableFuzzySearch':
+    'Включить нечёткий поиск при поиске файлов.',
+  'settings.label.tools.toolSearch.enabled': 'Включить ToolSearch',
+  'settings.description.tools.toolSearch.enabled':
+    'Если включено, отложенные инструменты сначала проверяют schema через ToolSearch, затем вызываются через ToolCall. Мост просмотра и вызова держит список объявленных инструментов стабильным — мост не переобъявляет раскрытые инструменты — и уменьшает размер промпта, не трогая префикс prompt-cache. Список объявлений всё же не неизменен: сессия переобъявляет при восстановлении; при обновлении набора инструментов (обнаружение MCP, первый вход в режим плана в живой истории, смена определений субагентов), если в живой истории есть прямой вызов всё ещё скрытого отложенного инструмента; когда смена определений субагентов переписывает описание самого инструмента agent; и когда MCP-сервер регистрируется в сессии с alwaysLoadTools: true.',
+  'settings.label.tools.toolSearch.threshold':
+    'Порог предзагрузки отложенных инструментов (%)',
+  'settings.description.tools.toolSearch.threshold':
+    'Доля окна контекста при старте сессии на предзагрузку отложенных инструментов (встроенных пакетов и MCP). Если schema всех отложенных инструментов умещается в бюджет, они объявляются в начале сессии, а не по требованию, и первый вызов обходится без моста tool_search. 0 отключает предзагрузку по порогу: отложенные инструменты грузятся по требованию через мост ToolSearch + ToolCall.',
+  'settings.label.tools.webSearch.enabled': 'Включить WebSearch',
+  'settings.description.tools.webSearch.enabled':
+    'false отключает встроенный инструмент web_search. Автозапуск при старте требует, чтобы enabled, model и бэкенд только из переменных окружения оставались незаданными; при true автовывод разрешён, только если бэкенд только из переменных окружения тоже не задан, иначе модель нужно указать. Переопределение: ENABLE_WEB_SEARCH.',
+  'settings.label.tools.webSearch.model': 'Модель поиска',
+  'settings.description.tools.webSearch.model':
+    'Селектор модели явного пути поиска («modelId» или «authType:modelId»). Если задан WEB_SEARCH_BASE_URL, это чистый ID модели этой точки; иначе должна совпасть запись modelProviders с envKey, совместимая с DashScope. Автопуть использует qwen3.8-flash. Переопределение: WEB_SEARCH_MODEL.',
+  'settings.label.tools.webSearch.webExtractor':
+    'Открывать страницы результатов',
+  'settings.description.tools.webSearch.webExtractor':
+    'Разрешить поисковому агенту открывать и читать страницы результатов (DashScope web_extractor), чтобы ответы были обоснованнее. DashScope тарифицирует это отдельно. Переопределение: WEB_SEARCH_EXTRACTOR.',
+  'settings.label.tools.webSearch.timeoutMs': 'Таймаут поиска (мс)',
+  'settings.description.tools.webSearch.timeoutMs':
+    'Общий бюджет времени одного вызова web_search в миллисекундах (по умолчанию 120000, максимум 600000; остальные значения откатываются к умолчанию). Поисковый агент делает несколько запросов и может открывать страницы; если бюджет исчерпан после хотя бы одного завершённого поиска, возвращаются частичные результаты — если бюджет кончился до первого поиска, инструмент сообщает ошибку таймаута, потому что рассказ без выполненного поиска не является аудируемым доказательством. Более низкий лимит одного инструмента (QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS) сработает раньше и отбросит частичные результаты; держите его выше этого бюджета. Переопределение: WEB_SEARCH_TIMEOUT_MS.',
+  'settings.label.tools.webSearch.maxPerSession': 'Максимум поисков за сессию',
+  'settings.description.tools.webSearch.maxPerSession':
+    'Максимум вызовов web_search в одной сессии (по умолчанию 200, максимум 10000; остальные значения откатываются к умолчанию). Счётчик общий с субагентами и сбрасывается при смене сессии (/clear, /resume, ветка). По достижении лимита дальнейшие поиски пропускаются, модели предлагается продолжить с уже собранным. Переопределение: WEB_SEARCH_MAX_PER_SESSION.',
+  'settings.label.tools.listDirectory.enabled': 'Включить ListDirectory',
+  'settings.description.tools.listDirectory.enabled':
+    'Включить встроенный инструмент list_directory. По умолчанию выключен; включается автоматически, если явно в белом списке coreTools (--core-tools / tools.core).',
+  'settings.label.tools.codeModeOnly': 'Только режим кода (экспериментально)',
+  'settings.description.tools.codeModeOnly':
+    'Обычные инструменты доступны модели только через изолированный exec JavaScript. Инструменты прямого управления остаются. Игнорируется в режимах safe и bare.',
+  'settings.label.tools.todoWrite.enabled': 'Включить Todo Write',
+  'settings.description.tools.todoWrite.enabled':
+    'Включить встроенный инструмент todo_write и его подсказку в системном промпте.',
+  'settings.label.tools.workflowsEnabled': 'Динамический Workflow',
+  'settings.description.tools.workflowsEnabled':
+    'Включить инструмент Workflow: модель может писать и запускать скрипт, оркестрирующий несколько субагентов параллельно. По умолчанию выключено; один запуск может породить много субагентов и токенов. QWEN_CODE_ENABLE_WORKFLOWS=1 и QWEN_CODE_DISABLE_WORKFLOWS=1 перекрывают настройку (запрет важнее). Не связано с видом «план и ревью» Session Workflow; чтобы слово «workflow» не направляло диалог, см. «Отключить срабатывание по слову Workflow».',
+  'settings.label.tools.lspEnabled': 'LSP-интеллект кода',
+  'settings.description.tools.lspEnabled':
+    'Экспериментально. Включает LSP без `--experimental-lsp`: переход к определению, поиск ссылок, подсказки, символы, диагностика и code action. По умолчанию выключено. Серверы берутся из `.lsp.json` рабочей области или включённых расширений и работают с вашими правами; серверы из рабочей области требуют явного доверия к папке — включите `security.folderTrust.enabled` и доверьтесь папке либо пусть IDE сообщит, что рабочая область доверенная — иначе они пропускаются. При `tools.executionSandbox` запуск отклоняется; `--safe-mode`, `QWEN_CODE_SAFE_MODE=1` и `--bare` стартуют без LSP. QWEN_CODE_ENABLE_LSP=1 / QWEN_CODE_DISABLE_LSP=1 перекрывают настройку (запрет важнее); проектные `.env` и `settings.env` их задать не могут.',
+  'settings.label.tools.workflowSizeGuideline':
+    'Масштаб динамического Workflow',
+  'settings.description.tools.workflowSizeGuideline':
+    'Рекомендуемый масштаб динамического workflow, который пишет модель: «small» — меньше 5 агентов, «medium» (по умолчанию) — меньше 15, «large» — меньше 50, «unrestricted» — без указания. Это совет, а не жёсткий лимит. От него же зависит, с какого числа агентов работающий workflow помечается как крупный (порог можно перекрыть QWEN_CODE_WORKFLOW_SIZE_WARNING_AGENTS). Изменение действует со следующего сообщения.',
+  'settings.option.tools.workflowSizeGuideline.small':
+    'Малый (меньше 5 агентов)',
+  'settings.option.tools.workflowSizeGuideline.medium':
+    'Средний (меньше 15 агентов)',
+  'settings.option.tools.workflowSizeGuideline.large':
+    'Крупный (меньше 50 агентов)',
+  'settings.option.tools.workflowSizeGuideline.unrestricted':
+    'Без ограничений (без указания)',
+  'settings.label.tools.workflowNameOnly': 'Только именованные Workflow',
+  'settings.description.tools.workflowNameOnly':
+    'Модель может запускать только именованные workflow: сохранённые и из расширений, по имени. Нельзя запускать встроенные скрипты или пути, и выполняющийся скрипт не может вкладывать скрипты по пути, поэтому каждый запуск модели можно сопоставить правилу прав Workflow(name:...). Это не замена политике одобрения: модель всё ещё может сохранить новый файл workflow и запустить его по имени, а правила на конкретное имя или сводку скрипта по-прежнему спрашивают. Запуски хоста через ACP (run-saved, run-script, retry, rerun) не ограничиваются. QWEN_CODE_WORKFLOW_NAME_ONLY=1 тоже включает. Workspace может задать только true.',
+  'settings.label.tools.shell.enableInteractiveShell':
+    'Интерактивный Shell (PTY)',
+  'settings.description.tools.shell.enableInteractiveShell':
+    'Использовать node-pty для интерактивного shell. Если не задано, явный одноразовый prompt по умолчанию идёт через child_process; интерактивный и ввод-ориентированный режимы — через PTY.',
+  'settings.label.policy.permissionStrategy': 'Стратегия согласования прав',
+  'settings.description.policy.permissionStrategy':
+    'Как решать запросы прав при нескольких клиентах. first-responder — действует первый ответивший клиент; designated — решает только инициатор; consensus — нужно согласие N из M; local-only — решать могут только loopback-клиенты. Нужен перезапуск daemon.',
+  'settings.option.policy.permissionStrategy.first-responder':
+    'Первый ответивший',
+  'settings.option.policy.permissionStrategy.designated':
+    'Назначенный инициатор',
+  'settings.option.policy.permissionStrategy.consensus': 'Кворум согласия',
+  'settings.option.policy.permissionStrategy.local-only': 'Только локально',
+  'settings.label.serve.maxSessions': 'Максимум одновременных сессий',
+  'settings.description.serve.maxSessions':
+    'Верхняя граница одновременно живых сессий одной рабочей области; лишние новые запросы получают 503, подключение к уже существующим не затрагивается. 0 — без лимита. Действует только в областях пользователя, системы и системных умолчаний; если передан qwen serve --max-sessions, действует аргумент. После изменения нужен перезапуск daemon.',
+  'settings.label.experimental.cron': 'Включить инструменты Cron/Loop',
+  'settings.description.experimental.cron':
+    'Включить внутрисессионные инструменты cron/loop. Тогда модель может создавать периодические подсказки через cron_create, cron_list и cron_delete. Можно отключить переменной QWEN_CODE_DISABLE_CRON=1.',
+  'settings.label.experimental.sessionWorkflow':
+    'Session Workflow: план и ревью',
+  'settings.description.experimental.sessionWorkflow':
+    'Показывать DAG Session Workflow и представлять режим Plan как «план и ревью».',
+  'settings.label.experimental.emitToolUseSummaries':
+    'Сводки использования инструментов',
+  'settings.description.experimental.emitToolUseSummaries':
+    'После каждой пачки инструментов генерировать короткую LLM-метку. Метка завершённой группы заменяет общий заголовок Tool × N; у принудительно раскрытых групп ниже показывается приглушённая строка ● <label>. Нужна настроенная быстрая модель.',
+  'settings.label.experimental.sessionWriterLease':
+    'Включить аренду записи сессии ACP',
+  'settings.description.experimental.sessionWriterLease':
+    'Включить межпроцессный барьер записи для устойчивых сессий ACP и daemon. Действующее значение замораживается при старте процесса ACP или daemon. Каждый параллельный писатель ACP или daemon должен включить это; интерактивные и headless-писатели в протоколе не участвуют.',
+  'settings.label.experimental.agentTeam': 'Включить Agent Team',
+  'settings.description.experimental.agentTeam':
+    'Включить инструменты командной работы агентов (экспериментально). Тогда модель может создавать команды агентов и координировать работу через team_create, team_delete, send_message, task_create, task_update и task_list. Также включается QWEN_CODE_ENABLE_AGENT_TEAM=1.',
+  'settings.label.experimental.agentCollaboration':
+    'Включить сотрудничество агентов',
+  'settings.description.experimental.agentCollaboration':
+    'Включить сотрудничество устойчивых агентов рабочей области в общих потоках задач (экспериментально). Независимо от Agent Team: ни один переключатель не подразумевает другой. Включение только разрешает сотрудничество; открытие агента внешним вызывающим, доверие к соединению и регистрация host по-прежнему требуют явной настройки. Также включается QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.',
+  'settings.label.experimental.unifiedAgentLoop': 'Единый Agent Loop',
+  'settings.description.experimental.unifiedAgentLoop':
+    'Запускать сессии на общем agent loop. Если не задано, у каждого входа своё умолчание: headless (`-p` и stream-json), Ink TUI и субагенты идут на общем loop, ACP (Zed, VS Code, Web Shell, channel), OpenTUI и Hosted Harness — на своих (для этих входов это экспериментально). `true` переводит всех на общий loop (раунд модели Hosted Harness тоже на нём, с сохранением journal-диспетчеризации инструментов), `false` — всех на свои loop, включая headless, Ink TUI и субагентов. QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP перекрывает по входам: `1` включает все, `0` выключает все, список через запятую (например `headless,acp=0`) принуждает названные входы (headless, acp, ink, opentui, agent-core, speculation, hosted). Голые `1`/`0` распознаются только как целое значение, не внутри списка; неназванные входы откатываются к этой настройке. Проектные `.env` и `settings.env` переменную задать не могут.',
+  'settings.label.experimental.eventBusAgentLoop': 'Agent Loop на шине событий',
+  'settings.description.experimental.eventBusAgentLoop':
+    'Запускать общий agent loop на архитектуре шины событий (экспериментально). Действует для входов на общем agent loop: по умолчанию headless (`-p` и stream-json), Ink TUI и субагенты, а при experimental.unifiedAgentLoop ещё ACP (Zed, VS Code, Web Shell, channel) и OpenTUI; остальные поверхности оставляют свою внутреннюю реализацию loop. QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP перекрывает: `1` включает, `0` выключает, список через запятую (например `headless=0`) принуждает названные входы (headless, acp, ink, opentui, agent-core; `speculation` зарезервировано). Сегодня действуют только уже подключённые входы; голые `1`/`0` — только как целое значение, не внутри списка, неназванные входы откатываются к этой настройке. Проектные `.env` и `settings.env` переменную задать не могут.',
+  'settings.label.experimental.artifact': 'Включить Artifacts',
+  'settings.description.experimental.artifact':
+    'Включить инструменты artifact, по умолчанию включены. В интерактивных не-SDK сессиях модель может публиковать самодостаточные HTML-страницы как интерактивный Artifact и открывать их в браузере; не-SDK сессии daemon могут использовать record_artifact, который пишет только метаданные. false или QWEN_CODE_DISABLE_ARTIFACT=1 отключают оба.',
+  'settings.label.experimental.modelAvailabilityTracking':
+    'Отслеживание доступности моделей',
+  'settings.description.experimental.modelAvailabilityTracking':
+    'Запоминать состояние моделей между запросами в одном сеансе (экспериментально). Если резервная модель исчерпала попытки из-за временной перегрузки (429/503/529), цепочка пропускает её до конца текущего хода и проверяет один раз в следующем ходе. Повтор запроса вручную также проверяет пропущенные модели. Основная модель по-прежнему вызывается при каждом запросе. Окончательное исчерпание квоты сразу приводит к ошибке и не считается временной перегрузкой. При отключении цепочка резервных моделей работает как раньше.',
+  'settings.label.experimental.liveVoice.enabled': 'Live Voice: живой голос',
+  'settings.description.experimental.liveVoice.enabled':
+    'Включить экспериментальный голосовой диалог в реальном времени в Web Shell на macOS.',
+  'settings.label.experimental.liveVoice.shortcut':
+    'Глобальная горячая клавиша Live Voice',
+  'settings.description.experimental.liveVoice.shortcut':
+    'Electron accelerator, который глобально регистрирует Qwen Live Host.',
+  'settings.label.goals.modelProposed': 'Goal, предложенная моделью',
+  'settings.description.goals.modelProposed':
+    'Управляет инструментом propose_goal: модель может предложить Goal сессии на ваше одобрение. «alwaysAsk» (по умолчанию) показывает каждое предложение в диалоге, пока вы не примете, Goal не ставится; «disabled» убирает инструмент. Вручную введённый /goal не затрагивается. Это подтверждение полномочий, действует только из областей User, System, SystemDefaults; значение Workspace игнорируется.',
+  'settings.option.goals.modelProposed.alwaysAsk': 'Всегда спрашивать',
+  'settings.option.goals.modelProposed.disabled': 'Отключено',
+  'settings.label.omni.enabled': 'Включить доставку медиа Omni',
+  'settings.description.omni.enabled':
+    'Включить медиаконвейер omni. Медиафайлы по @ (видео, изображения, аудио) и медиа по URL @https:// распознаются (ffprobe), хранятся адресно по содержимому в .qwen/omni/objects/, загружаются через временный канал DashScope и доставляются как oss:// URL, а не inline base64. Действует только для совместимых с DashScope точек. Также включается QWEN_CODE_ENABLE_OMNI=1.',
+  'settings.label.agents.arena.preserveArtifacts': 'Сохранять артефакты Arena',
+  'settings.description.agents.arena.preserveArtifacts':
+    'Если включено, worktree Arena и файлы состояния сессии сохраняются после конца сессии или выхода главного агента.',
+  'settings.label.worktree.defaultForNewSessions':
+    'Новые сессии по умолчанию в Worktree',
+  'settings.description.worktree.defaultForNewSessions':
+    'Если включено (по умолчанию), новые сессии Web Shell в доверенном Git workspace по умолчанию идут в изолированный worktree: композер по умолчанию в режиме Worktree, worktree создаётся при отправке первого сообщения. false — по умолчанию текущая ветка. Меняет только умолчание композера Web Shell; явный выбор режима и API daemon не затрагиваются.',
 };
