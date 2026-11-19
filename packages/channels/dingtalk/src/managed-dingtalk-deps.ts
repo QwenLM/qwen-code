@@ -20,16 +20,12 @@ import { ROBOT_MESSAGE_HOSTS } from './DingtalkAdapter.js';
 const WEBHOOK_TIMEOUT_MS = 30_000;
 const RECONNECT_RETRY_MS = 5_000;
 // The SDK's connect() resolves when the WebSocket is *constructed*, not when it
-// opens. Bound the whole attempt so a blocked wss: upgrade becomes a rejection,
-// not a deaf start; discovery below carries its own, shorter bound.
+// opens. One clock covers the whole attempt — discovery and the wss: upgrade
+// together — so a blocked handshake becomes a rejection, not a deaf start.
+// Discovery's abort shares this horizon rather than taking a shorter one: a
+// shorter bound would narrow the allowance discovery already had, and a
+// slow-but-succeeding tenant would start failing every attempt.
 const CONNECT_TIMEOUT_MS = 20_000;
-// Endpoint discovery is bounded on its own, below the attempt budget, so the
-// budget is left to cover the wss: upgrade. The SDK's own getEndpoint() has no
-// timeout at all, and it console.log()s the resolved config (clientSecret) and
-// the gateway response (endpoint/ticket) — which is why the connect path used
-// to mute console.log process-wide for as long as discovery stayed pending.
-// Owning discovery removes both the unbounded wait and the need to mute.
-const DISCOVERY_TIMEOUT_MS = 15_000;
 // The discovery contract, pinned against dingtalk-stream-sdk-nodejs 2.0.4
 // dist/client.mjs getEndpoint(); a bump that changes it must change these.
 const TOKEN_URL = 'https://oapi.dingtalk.com/gettoken';
@@ -143,7 +139,7 @@ function createStreamClient(
   internals.getEndpoint = async () => {
     const discovered = await discoverEndpoint(
       client.config,
-      AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
+      AbortSignal.timeout(CONNECT_TIMEOUT_MS),
     );
     client.config.access_token = discovered.accessToken;
     // The SDK stores the whole gateway object here even though its published
@@ -249,8 +245,9 @@ function createStreamClient(
       socket.on('close', fail);
     });
   };
-  // Bound the whole attempt (getEndpoint has no timeout either) so a hung
-  // endpoint call or handshake becomes a rejection instead of a pending promise.
+  // Bound the whole attempt so a hung discovery or handshake becomes a
+  // rejection instead of a pending promise. Discovery's abort shares this
+  // horizon and additionally cancels the request the attempt abandons.
   const attempt = (): Promise<void> =>
     new Promise<void>((resolve, reject) => {
       let timedOut = false;

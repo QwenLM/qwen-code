@@ -192,11 +192,15 @@ describe('managed DingTalk endpoint discovery (#17173 R11)', () => {
     },
   );
 
-  // The signal's own deadline is real-timer based, so the bound itself is
-  // exercised by the real-environment probe; here we pin that both legs are
-  // wired to one, which is what makes discovery abortable at all.
-  it('wires both discovery legs to an abort signal', async () => {
+  // A signal that never aborts would satisfy an instanceof check, so pin the
+  // deadline itself: one real timeout, at the attempt's horizon. Sharing that
+  // horizon is deliberate — a shorter bound would narrow the allowance
+  // discovery already had under the attempt budget.
+  it('gives discovery a real deadline at the attempt horizon', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
     const stream = await startOpen();
+    expect(timeout).toHaveBeenCalledTimes(1);
+    expect(timeout.mock.calls[0]![0]).toBe(CONNECT_TIMEOUT_MS);
     expect(calls).toHaveLength(2);
     for (const call of calls) {
       expect(call.init?.signal).toBeInstanceOf(AbortSignal);
@@ -245,5 +249,18 @@ describe('managed DingTalk endpoint discovery (#17173 R11)', () => {
     );
     expect(sdk).toContain('"access-token": result.data.access_token');
     expect(sdk).toContain('this.dw_url = `${endpoint}?ticket=${ticket}`');
+    // The names discoverEndpoint hand-transcribes. Pinning only the URLs and
+    // the header would let a rename of any of these pass while discovery kept
+    // sending the old names, failing every managed connect.
+    for (const literal of [
+      'appkey=${this.config.clientId}',
+      'appsecret=${this.config.clientSecret}',
+      'clientId: this.config.clientId',
+      'clientSecret: this.config.clientSecret',
+      'ua: this.config.ua',
+      'subscriptions: this.config.subscriptions',
+    ]) {
+      expect(sdk).toContain(literal);
+    }
   });
 });

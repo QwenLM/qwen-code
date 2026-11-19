@@ -43,9 +43,11 @@ So the unbounded scope exists to cover one synchronous log and one log whose tim
 
 Take ownership of endpoint discovery on the managed path. Replace the instance's `getEndpoint` with a bounded, abortable, silent implementation, so the connect path emits no `console.log` and needs no suppression scope at all.
 
-This removes the hang by removing its cause rather than by shortening the mute, and it also closes the unbounded-discovery gap the attempt budget could previously only paper over.
+This removes the hang by removing its cause rather than by shortening the mute, and it also cancels the request the attempt abandons, which the budget alone could not do.
 
-The discovery contract is small and stable: two URLs, one JSON payload, one header. It is pinned against the pinned SDK version by a test that reads the SDK's own published source, so a dependency bump that changes the contract reds the suite instead of silently diverging.
+The two bounds are **not** additive. `attempt()` arms its 20 s timer before it calls the SDK's connect, and that connect awaits discovery, so one clock covers discovery and the wss upgrade together. Discovery's abort therefore shares the attempt's horizon instead of taking a shorter one: a shorter bound would narrow the allowance discovery already had under the budget, and a tenant whose two discovery calls legitimately take longer than that shorter bound would start failing every attempt where it previously succeeded. What the abort adds at the same horizon is cancellation of the abandoned request, not a second, earlier deadline.
+
+The discovery contract is small and stable: two URLs, two query names, four payload keys, one header. Every one of those is pinned against the pinned SDK version by a test that reads the SDK's own published source, so a bump that renames any of them reds the suite instead of letting discovery keep sending the old names.
 
 ## Changes
 
@@ -70,5 +72,5 @@ The discovery contract is small and stable: two URLs, one JSON payload, one head
 
 - A discovery that never answers leaves the process's `console.log` unmodified, both during the attempt and after its budget expires.
 - Neither the resolved config nor the gateway response is printed on any connect path outcome, including a late resolution after the budget expired.
-- Discovery is bounded by an abort, not only by the outer attempt budget.
+- Discovery carries a real abort deadline at the attempt's horizon — pinned by spying the timeout constructor, so a never-aborting signal reds the suite — and the allowance discovery had under the budget is not narrowed.
 - Removing the override, or restoring the SDK's own `getEndpoint`, reds a witness.
