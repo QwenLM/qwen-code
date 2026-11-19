@@ -565,6 +565,52 @@ public class JdbcManagedToolResultStore
         return new ArtifactPage(List.copyOf(rows.subList(0, Math.min(rows.size(), limit))), through, rows.size() > limit);
     }
 
+    private static final String WORKSPACE_ARTIFACT_SOURCE =
+            " FROM ma_artifact a JOIN ma_operation r ON r.operation_kind = 'TOOL_RESULT_PROJECTION'"
+                    + " AND r.operation_id = a.result_id JOIN ma_session s ON s.tenant_id = r.tenant_id"
+                    + " AND s.session_id = r.session_id WHERE r.tenant_id = ? AND r.workspace_id = ?"
+                    + " AND s.workspace_id = ? AND r.state = 'READY' AND s.session_kind = 'PUBLIC'"
+                    + " AND s.status NOT IN ('DELETED', 'DELETING')"
+                    + " AND (s.owner_only = 0 OR COALESCE(s.owner_actor_key, s.creator_actor_key) = ?)";
+
+    public WorkspaceArtifactPage listWorkspaceArtifacts(String tenant, byte[] actorKey, String workspace,
+            Long watermark, Long beforeId, int limit) {
+        require(
+                limit >= 1 && limit <= 100 && (watermark == null) == (beforeId == null),
+                "Invalid workspace artifact page");
+        long through =
+                watermark == null
+                        ? jdbc.queryForObject(
+                                "SELECT COALESCE(MAX(a.id), 0)" + WORKSPACE_ARTIFACT_SOURCE,
+                                Long.class,
+                                tenant,
+                                workspace,
+                                workspace,
+                                actorKey)
+                        : watermark;
+        require(through >= 0, "Invalid workspace artifact watermark");
+        List<Object> args = new ArrayList<>(List.of(tenant, workspace, workspace, actorKey, through));
+        String cursor = "";
+        if (beforeId != null) {
+            cursor = " AND a.id < ?";
+            args.add(beforeId);
+        }
+        args.add(limit + 1);
+        List<WorkspaceRow> rows =
+                jdbc.query(
+                        "SELECT a.id, " + ManagedSchemaProjection.ARTIFACT.columns("a")
+                                + ", r.request_json" + WORKSPACE_ARTIFACT_SOURCE
+                                + " AND a.id <= ?" + cursor + " ORDER BY a.id DESC LIMIT ?",
+                        (row, index) -> new WorkspaceRow(artifact(row, index), row.getLong("id")),
+                        args.toArray());
+        List<WorkspaceRow> page = rows.subList(0, Math.min(rows.size(), limit));
+        List<Artifact> artifacts = page.stream().map(WorkspaceRow::artifact).toList();
+        long lastId = page.isEmpty() ? 0 : page.getLast().id();
+        return new WorkspaceArtifactPage(List.copyOf(artifacts), through, rows.size() > limit, lastId);
+    }
+
+    private record WorkspaceRow(Artifact artifact, long id) { }
+
     private Artifact artifact(ResultSet row, int index) throws SQLException {
         return new Artifact(
                 parse(row.getString("descriptor_json")),

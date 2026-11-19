@@ -160,6 +160,16 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_000;
 // capped-result retry guidance, and stale-callback invalidation then add 220
 // bytes, bringing the current tree to 2,148,976. The warning sits 24 above
 // that measurement, while the existing ceiling retains 624 bytes of headroom.
+//
+// The workspace artifact library copy (nine keys across three locales) is
+// interactive-only: managed-artifact-library-messages.transcript-stub.ts
+// replaces it in transcript mode, so it contributes no document bytes. Its
+// upstream branch measured 2,148,522 JS bytes with the copy inlined and
+// 2,146,575 with the stub (CSS 2,423,645, separate), 46 above the 2,146,529
+// lane measurement #17746 re-tracked. The forbidden-input guard passes and
+// the third-party input mix is unchanged. The merged branch's ceiling follows
+// the recovery-inbox measurements above, rather than lowering that branch's
+// budget or reserving space for interactive-only copy.
 const MAX_DOCUMENT_RUNTIME_BYTES = 2_149_600;
 
 // Modules that must not be reachable from the document entry, checked against
