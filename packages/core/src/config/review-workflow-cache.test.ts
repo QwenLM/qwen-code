@@ -13,7 +13,7 @@ import type { LlmChat } from '../core/llm-chat.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { ExecTool } from '../tools/exec.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { ToolRegistry } from '../tools/tool-registry.js';
+import { DiscoveredTool, ToolRegistry } from '../tools/tool-registry.js';
 import { ToolSearchTool } from '../tools/tool-search.js';
 
 describe('Workflow registration and cache continuity', () => {
@@ -79,7 +79,7 @@ describe('Workflow registration and cache continuity', () => {
     expect(JSON.stringify(setTools.mock.lastCall?.[0])).toBe(before);
   });
 
-  it('makes Workflow available only while enabled in a reloaded session', async () => {
+  async function startWithWorkflowsOff(): Promise<Config> {
     const config = new Config({
       cwd: directory,
       targetDir: directory,
@@ -93,21 +93,55 @@ describe('Workflow registration and cache continuity', () => {
       skipMcpDiscovery: true,
       skipHooks: true,
     });
+    return config;
+  }
+
+  it('reconciles Workflow against the setting and disabled list on reload', async () => {
+    const config = await startWithWorkflowsOff();
     try {
       const registry = config.getToolRegistry();
       const refreshTools = vi.spyOn(config.getLlmClient(), 'setTools');
       expect(registry.getTool(ToolNames.WORKFLOW)).toBeUndefined();
 
-      await config.applyWorkflowsEnabledSetting(undefined);
-      expect(registry.getTool(ToolNames.WORKFLOW)?.name).toBe(
-        ToolNames.WORKFLOW,
-      );
+      const disabled = new Set([ToolNames.WORKFLOW]);
+      await config.applyWorkflowsEnabledSetting(undefined, disabled);
+      expect(config.isWorkflowsEnabled()).toBe(false);
+      expect(registry.hasRegisteredTool(ToolNames.WORKFLOW)).toBe(false);
 
-      await config.applyWorkflowsEnabledSetting(false);
+      await config.applyWorkflowsEnabledSetting(undefined, new Set());
+      const workflow = registry.getTool(ToolNames.WORKFLOW);
+      expect(workflow?.name).toBe(ToolNames.WORKFLOW);
+
+      await config.applyWorkflowsEnabledSetting(true, disabled);
       expect(registry.getAllToolNames()).not.toContain(ToolNames.WORKFLOW);
       expect(await registry.ensureTool(ToolNames.WORKFLOW)).toBeUndefined();
       expect(registry.getTool(ToolNames.WORKFLOW)).toBeUndefined();
-      expect(refreshTools).toHaveBeenCalledTimes(2);
+
+      await config.applyWorkflowsEnabledSetting(true, new Set());
+      expect(registry.getTool(ToolNames.WORKFLOW)).toBe(workflow);
+      expect(refreshTools).toHaveBeenCalledTimes(3);
+    } finally {
+      await config.shutdown();
+    }
+  });
+
+  it('keeps a same-name custom tool available across Workflow settings changes', async () => {
+    const config = await startWithWorkflowsOff();
+    try {
+      const registry = config.getToolRegistry();
+      const custom = new DiscoveredTool(
+        config,
+        ToolNames.WORKFLOW,
+        'Custom discovered workflow',
+        {},
+      );
+      registry.registerTool(custom);
+      expect(registry.getAllToolNames()).toContain(ToolNames.WORKFLOW);
+      expect(registry.getTool(ToolNames.WORKFLOW)).toBe(custom);
+
+      await config.applyWorkflowsEnabledSetting(true);
+      expect(registry.getTool(ToolNames.WORKFLOW)).toBe(custom);
+      expect(config.isWorkflowsEnabled()).toBe(false);
     } finally {
       await config.shutdown();
     }

@@ -16040,6 +16040,7 @@ class QwenAgent implements Agent {
           );
         }
 
+        const disabledToolsByWorkspace = new Map<string, ReadonlySet<string>>();
         const sessions = [...this.sessions.entries()];
         const refreshed: string[] = [];
         const skipped: string[] = [];
@@ -16047,17 +16048,21 @@ class QwenAgent implements Agent {
         const results = await Promise.allSettled(
           sessions.map(async ([id, session]) => {
             const config = session.getConfig();
-            if (changed.has('tools')) {
-              const disabled = normalizeDisabledToolList(
-                newMerged.tools?.disabled,
+            const workspace = this.sessionWorkspaceRoot(config);
+            let disabledTools = disabledToolsByWorkspace.get(workspace);
+            if (!disabledTools) {
+              const settings = this.loadRequestSettings(workspace);
+              disabledTools = new Set(
+                normalizeDisabledToolList(settings.merged.tools?.disabled),
               );
-              config.setDisabledTools(new Set(disabled));
+              disabledToolsByWorkspace.set(workspace, disabledTools);
             }
             // Workflow admission and controls follow the live flag even
             // while a turn or a detached workflow is running.
             const workflowsWereEnabled = config.isWorkflowsEnabled();
             await config.applyWorkflowsEnabledSetting(
               newMerged.tools?.workflowsEnabled,
+              disabledTools,
             );
             if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
               if (!config.isWorkflowsEnabled()) {

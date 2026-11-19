@@ -600,7 +600,7 @@ export class ToolRegistry {
       case ToolNames.IMAGE_GEN:
         return this.config.isImageGenerationEnabled();
       case ToolNames.WORKFLOW:
-        return this.config.isWorkflowsEnabled();
+        return this.hasCustomWorkflowTool() || this.config.isWorkflowsEnabled();
       default:
         return true;
     }
@@ -608,6 +608,11 @@ export class ToolRegistry {
 
   hasRegisteredTool(name: string): boolean {
     return this.tools.has(name) || this.factories.has(name);
+  }
+
+  hasCustomWorkflowTool(): boolean {
+    const tool = this.tools.get(ToolNames.WORKFLOW);
+    return tool !== undefined && !('buildSessionOwnedBackground' in tool);
   }
 
   /**

@@ -260,6 +260,7 @@ vi.mock('../tools/tool-registry', () => {
   ToolRegistryMock.prototype.getAllTools = vi.fn(() => []); // Mock methods if needed
   ToolRegistryMock.prototype.getAllToolNames = vi.fn(() => []);
   ToolRegistryMock.prototype.hasRegisteredTool = vi.fn(() => false);
+  ToolRegistryMock.prototype.hasCustomWorkflowTool = vi.fn(() => false);
   ToolRegistryMock.prototype.getTool = vi.fn();
   ToolRegistryMock.prototype.getFunctionDeclarations = vi.fn(() => []);
   // PR 14b fix (codex round 4): per-instance manager stub so the

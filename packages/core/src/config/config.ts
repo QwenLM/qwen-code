@@ -11239,7 +11239,9 @@ export class Config {
       this.provisionalWorkspace ||
       this.executionEnvironment ||
       this.sessionExecutionEngine === 'managed' ||
-      this.sessionSourceType === 'agent-host'
+      this.sessionSourceType === 'agent-host' ||
+      this.disabledTools.has(ToolNames.WORKFLOW) ||
+      this.toolRegistry?.hasCustomWorkflowTool()
     );
   }
 
@@ -11269,11 +11271,17 @@ export class Config {
    */
   async applyWorkflowsEnabledSetting(
     enabled: boolean | undefined,
+    disabledTools?: ReadonlySet<string>,
   ): Promise<void> {
-    if (enabled === undefined && this.workflowsEnabledByReviewSkill) return;
-    this.workflowsEnabledByReviewSkill = false;
     const wasEnabled = this.isWorkflowsEnabled();
-    this.setWorkflowsEnabled(enabled);
+    if (disabledTools && !this.bareMode && !this.safeMode) {
+      this.setDisabledTools(disabledTools);
+    }
+    if (enabled !== undefined || !this.workflowsEnabledByReviewSkill) {
+      this.workflowsEnabledByReviewSkill = false;
+      this.workflowsEnabled = enabled;
+    }
+    this.refreshWorkflowMode();
     const isEnabled = this.isWorkflowsEnabled();
     if (!this.initialized || wasEnabled === isEnabled) return;
 
@@ -13643,12 +13651,16 @@ export class Config {
   }
 
   private async registerWorkflowTool(registry: ToolRegistry): Promise<boolean> {
+    if (registry.hasCustomWorkflowTool()) return false;
     if (registry.hasRegisteredTool(ToolNames.WORKFLOW)) return true;
     await this.registerLazyTool(registry, ToolNames.WORKFLOW, async () => {
       const { WorkflowTool } = await import('../tools/workflow/workflow.js');
       return new WorkflowTool(this);
     });
-    return registry.hasRegisteredTool(ToolNames.WORKFLOW);
+    return (
+      !registry.hasCustomWorkflowTool() &&
+      registry.hasRegisteredTool(ToolNames.WORKFLOW)
+    );
   }
 
   private async registerImageGenerationTool(

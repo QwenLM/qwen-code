@@ -36453,6 +36453,7 @@ describe('sessionLanguage multi-session propagation', () => {
       refreshAuth: vi.fn().mockResolvedValue(undefined),
       switchModel: vi.fn().mockResolvedValue(undefined),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      storage: { getProjectRoot: vi.fn().mockReturnValue('/tmp') },
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getAvailableModels: vi.fn().mockReturnValue([]),
       getModes: vi.fn().mockReturnValue([]),
@@ -38879,15 +38880,20 @@ describe('sessionLanguage multi-session propagation', () => {
       getProjectHooks: vi.fn().mockReturnValue({}),
     } as unknown as LoadedSettings;
     let workflowsEnabled: boolean | undefined = true;
+    let workflowDisabled = false;
     const registryCancel = vi.fn();
     const cancelBackgroundRuns = vi.fn(() => ['wf_bg']);
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-wf-reload'),
-      isWorkflowsEnabled: vi.fn(() => workflowsEnabled ?? true),
-      applyWorkflowsEnabledSetting: vi.fn((enabled: boolean | undefined) => {
-        workflowsEnabled = enabled;
-      }),
-      setDisabledTools: vi.fn(),
+      isWorkflowsEnabled: vi.fn(
+        () => (workflowsEnabled ?? true) && !workflowDisabled,
+      ),
+      applyWorkflowsEnabledSetting: vi.fn(
+        (enabled: boolean | undefined, disabled: ReadonlySet<string>) => {
+          workflowsEnabled = enabled;
+          workflowDisabled = disabled.has('workflow');
+        },
+      ),
       getBareMode: vi.fn().mockReturnValue(false),
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       getFolderTrust: vi.fn().mockReturnValue(true),
@@ -38959,7 +38965,7 @@ describe('sessionLanguage multi-session propagation', () => {
           applyWorkflowsEnabledSetting: ReturnType<typeof vi.fn>;
         }
       ).applyWorkflowsEnabledSetting,
-    ).toHaveBeenCalledWith(false);
+    ).toHaveBeenCalledWith(false, new Set());
     // The `workflows` command left with the flag: the client is told.
     expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
     // A background run admitted before the reload could no longer be seen
@@ -38980,7 +38986,7 @@ describe('sessionLanguage multi-session propagation', () => {
           applyWorkflowsEnabledSetting: ReturnType<typeof vi.fn>;
         }
       ).applyWorkflowsEnabledSetting,
-    ).toHaveBeenLastCalledWith(undefined);
+    ).toHaveBeenLastCalledWith(undefined, new Set());
     expect(workflowsEnabled).toBeUndefined();
     expect(sendAvailableCommandsUpdate).toHaveBeenCalledTimes(2);
     expect(cfg.setWorkflowKeywordTriggerEnabled.mock.calls).toEqual([
@@ -39016,6 +39022,30 @@ describe('sessionLanguage multi-session propagation', () => {
       cancelled: false,
       reason: 'disabled',
     });
+
+    // An intervening session load can advance the shared settings snapshot
+    // without applying the same settings to this existing session.
+    reloadedSettings = { tools: { disabled: ['workflow'] } };
+    mergedSettings = reloadedSettings;
+    cfg.storage.getProjectRoot.mockReturnValue('/reload');
+    cfg.getTargetDir.mockReturnValue('/reload/subdir');
+    vi.mocked(loadSettings).mockClear();
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {}),
+    ).resolves.toMatchObject({ changedKeys: [] });
+    expect(loadSettings).toHaveBeenCalledWith(
+      '/reload',
+      expect.objectContaining({ skipLoadEnvironment: true }),
+    );
+    expect(loadSettings).not.toHaveBeenCalledWith(
+      '/reload/subdir',
+      expect.anything(),
+    );
+    expect(cfg.applyWorkflowsEnabledSetting).toHaveBeenLastCalledWith(
+      undefined,
+      new Set(['workflow']),
+    );
+    expect(cfg.isWorkflowsEnabled()).toBe(false);
 
     mockConnectionState.resolve();
     await agentPromise;

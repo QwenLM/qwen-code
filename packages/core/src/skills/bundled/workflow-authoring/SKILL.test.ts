@@ -345,7 +345,7 @@ describe('the worked example', () => {
     dispatch: (prompt: string, opts: { label?: string }) => Promise<unknown>,
     args?: unknown,
   ) {
-    return new WorkflowTool({} as unknown as Config, {
+    return new WorkflowTool({ isWorkflowsEnabled: () => true } as Config, {
       // The stub returns plain objects for `schema` dispatches, which the
       // production dispatch would have validated; the cast says so.
       dispatch: dispatch as unknown as WorkflowAgentDispatch,

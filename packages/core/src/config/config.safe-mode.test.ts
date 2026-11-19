@@ -43,6 +43,7 @@ vi.mock('../tools/tool-registry', () => {
   ToolRegistryMock.prototype.discoverAllTools = vi.fn();
   ToolRegistryMock.prototype.getAllTools = vi.fn(() => []);
   ToolRegistryMock.prototype.getAllToolNames = vi.fn(() => []);
+  ToolRegistryMock.prototype.hasCustomWorkflowTool = vi.fn(() => false);
   ToolRegistryMock.prototype.getTool = vi.fn();
   ToolRegistryMock.prototype.getFunctionDeclarations = vi.fn(() => []);
   ToolRegistryMock.mockImplementation(function (this: {
