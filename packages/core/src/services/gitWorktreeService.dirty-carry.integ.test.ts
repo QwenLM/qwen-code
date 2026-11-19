@@ -2173,6 +2173,8 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
     const wt = result.worktree!.path;
     await fs.writeFile(path.join(wt, '.qwen-session.abc123.tmp'), 'partial\n');
     await expect(worktreeHasWork(wt)).resolves.toBe(false);
+    await fs.writeFile(path.join(wt, '.qwen-session.abc123.txt'), 'late\n');
+    await expect(worktreeHasWork(wt)).resolves.toBe(true);
   });
 
   it('a hidden index bit on a CLEAN file still refuses (F6 bit arms)', async () => {

@@ -37,6 +37,13 @@ const sourceHashGate = vi.hoisted(() => ({
     | { source: string; started: () => void; resume: Promise<void> }
     | undefined,
 }));
+const digestReadFailure = vi.hoisted(() => ({
+  active: undefined as { source: string; remaining: number } | undefined,
+}));
+const carriedSourceVerification = vi.hoisted(() => ({
+  active: undefined as { source: string; afterCheck: () => void } | undefined,
+}));
+const captureInconsistent = vi.hoisted(() => ({ active: false }));
 vi.mock(
   '@qwen-code/qwen-code-core/utils/git-branches.js',
   async (importOriginal) => {
@@ -63,6 +70,56 @@ vi.mock(
     };
   },
 );
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    captureWorktreeSnapshot: async (
+      ...args: Parameters<typeof actual.captureWorktreeSnapshot>
+    ) => {
+      const result = await actual.captureWorktreeSnapshot(...args);
+      return captureInconsistent.active
+        ? { ...result, checkoutMatchesCapture: false }
+        : result;
+    },
+    carriedOverlayStillHeldBySource: async (
+      ...args: Parameters<typeof actual.carriedOverlayStillHeldBySource>
+    ) => {
+      const held = await actual.carriedOverlayStillHeldBySource(...args);
+      const gate = carriedSourceVerification.active;
+      if (gate && args[0] === gate.source) gate.afterCheck();
+      return held;
+    },
+    computeCarriedIdentities: async (
+      worktreePath: string,
+      paths: readonly string[],
+    ) => {
+      const pending = actual.computeCarriedIdentities(worktreePath, paths);
+      const failure = digestReadFailure.active;
+      if (
+        failure &&
+        worktreePath === failure.source &&
+        paths.includes('secret.env') &&
+        failure.remaining > 0
+      ) {
+        failure.remaining -= 1;
+        throw new Error('injected digest read failure');
+      }
+      const gate = sourceHashGate.active;
+      if (
+        gate &&
+        worktreePath === gate.source &&
+        paths.includes('large-carry.bin')
+      ) {
+        gate.started();
+        await gate.resume;
+      }
+      return pending;
+    },
+  };
+});
 
 function git(cwd: string, ...args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'pipe' });
@@ -128,6 +185,9 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
 
   afterEach(() => {
     sourceHashGate.active = undefined;
+    digestReadFailure.active = undefined;
+    carriedSourceVerification.active = undefined;
+    captureInconsistent.active = false;
     fs.rmSync(repoParent, { recursive: true, force: true });
   });
 
@@ -445,6 +505,106 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     );
   });
 
+  it.each(['initial', 'final', 'both'])(
+    'preserves a carried checkout when the %s digest read fails',
+    async (point) => {
+      if (point === 'final') {
+        fs.writeFileSync(
+          path.join(repoRoot, 'large-carry.bin'),
+          randomBytes(16 * 1024),
+        );
+      }
+      const plan = await carriedPlan(`digest-${point}`, true);
+      const ignoredFile = path.join(plan.lockKey, 'secret.env');
+      fs.writeFileSync(ignoredFile, 'digest-exercise\n');
+      const before = await checkoutChangeDigestForTesting(plan.lockKey);
+      expect(before).not.toBeNull();
+      let fault!: { source: string; remaining: number };
+      let sourceStarted!: () => void;
+      let releaseSource!: () => void;
+      if (point === 'final') {
+        new Promise<void>((resolve) => {
+          sourceStarted = resolve;
+        });
+        const resume = new Promise<void>((resolve) => {
+          releaseSource = resolve;
+        });
+        sourceHashGate.active = {
+          source: plan.lockKey,
+          started: sourceStarted,
+          resume,
+        };
+      }
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const cleanup = executeWorktreeCleanup(plan);
+      let incidentLog = '';
+      try {
+        if (point === 'final') {
+          await sourceStarted;
+          sourceHashGate.active = undefined;
+          fault = { source: plan.lockKey, remaining: 1 };
+          digestReadFailure.active = fault;
+          releaseSource();
+        } else {
+          fault = {
+            source: plan.lockKey,
+            remaining: point === 'both' ? 2 : 1,
+          };
+          digestReadFailure.active = fault;
+        }
+        await cleanup;
+      } finally {
+        if (point === 'final') releaseSource();
+        sourceHashGate.active = undefined;
+        digestReadFailure.active = undefined;
+        incidentLog = stderrSpy.mock.calls
+          .map((call) => String(call[0]))
+          .join('');
+        stderrSpy.mockRestore();
+      }
+      expect(fault.remaining).toBe(0);
+      expect(fs.existsSync(plan.lockKey)).toBe(true);
+      expect(archives(plan.sessionId)).toHaveLength(1);
+      expect(incidentLog).toContain(
+        'checkout changed during cleanup (or its change digest is unreadable)',
+      );
+      expect(fs.readFileSync(ignoredFile, 'utf8')).toBe('digest-exercise\n');
+      expect(
+        fs.readFileSync(path.join(plan.lockKey, 'carry.txt'), 'utf8'),
+      ).toBe('carried-untracked\n');
+      expect(await checkoutChangeDigestForTesting(plan.lockKey)).toBe(before);
+    },
+  );
+
+  it('preserves the checkout when the returned capture is not current', async () => {
+    const plan = await planFor('capture-not-current');
+    fs.writeFileSync(path.join(plan.lockKey, 'secret.env'), 'keep-me\n');
+    const before = await checkoutChangeDigestForTesting(plan.lockKey);
+    captureInconsistent.active = true;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    let incidentLog = '';
+    try {
+      await executeWorktreeCleanup(plan);
+    } finally {
+      captureInconsistent.active = false;
+      incidentLog = stderrSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      stderrSpy.mockRestore();
+    }
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(fs.readFileSync(path.join(plan.lockKey, 'secret.env'), 'utf8')).toBe(
+      'keep-me\n',
+    );
+    expect(archives(plan.sessionId)).toHaveLength(1);
+    expect(incidentLog).toContain('checkout changed during capture');
+    expect(await checkoutChangeDigestForTesting(plan.lockKey)).toBe(before);
+  });
+
   it('collects a carried-only checkout when the sidecar records the overlay (R9-6)', async () => {
     const plan = await carriedPlan('carried-collect', true);
 
@@ -455,6 +615,40 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     // checkout still holds it. Dropping the gate's carriedEntries argument
     // would read the overlay as work and write an archive instead.
     expect(archives('session-carried-collect').length > 0).toBe(false);
+  });
+
+  it('preserves a carried checkout when the source changes after verification', async () => {
+    const plan = await carriedPlan('late-source-verification', true);
+    let checks = 0;
+    carriedSourceVerification.active = {
+      source: repoRoot,
+      afterCheck: () => {
+        checks += 1;
+        if (checks === 1) {
+          fs.writeFileSync(path.join(repoRoot, 'carry.txt'), 'source-moved\n');
+        }
+      },
+    };
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    let incidentLog = '';
+    try {
+      await executeWorktreeCleanup(plan);
+    } finally {
+      incidentLog = stderrSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      stderrSpy.mockRestore();
+    }
+    expect(fs.readFileSync(path.join(plan.lockKey, 'carry.txt'), 'utf8')).toBe(
+      'carried-untracked\n',
+    );
+    expect(checks).toBe(2);
+    expect(incidentLog).toContain('carried source changed during cleanup');
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(fs.existsSync(path.join(repoRoot, 'carry.txt'))).toBe(true);
+    expect(archives(plan.sessionId)).toHaveLength(0);
   });
 
   it('snapshots then deletes a carried-only checkout with no recorded overlay (R9-6 legacy + P6 U3)', async () => {
@@ -1064,6 +1258,95 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
         fs.existsSync(path.resolve(plan.lockKey, gitDir, 'BISECT_START')),
       ).toBe(true);
     }
+  });
+
+  it('preserves a submodule initialized during capture (R13-1)', async () => {
+    const subRoot = path.join(repoParent, 'subrepo');
+    fs.mkdirSync(subRoot);
+    git(subRoot, 'init', '-q');
+    git(subRoot, 'config', 'user.email', 't@e.com');
+    git(subRoot, 'config', 'user.name', 't');
+    git(subRoot, 'config', 'commit.gpgsign', 'false');
+    git(subRoot, 'commit', '-qm', 'sub', '--allow-empty', '--no-verify');
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        subRoot,
+        'lib',
+      ],
+      { cwd: repoRoot, stdio: 'pipe' },
+    );
+    git(repoRoot, 'commit', '-qm', 'add submodule', '--no-verify');
+    const plan = await planFor('late-submodule');
+    fs.writeFileSync(
+      path.join(plan.lockKey, 'payload.bin'),
+      randomBytes(256 * 1024 * 1024),
+    );
+    const before = await checkoutChangeDigestForTesting(plan.lockKey);
+    const statusBefore = execFileSync('git', ['status', '--porcelain'], {
+      cwd: plan.lockKey,
+      encoding: 'utf8',
+    });
+    let moduleStore = '';
+    const late = editAtCaptureStart(plan.sessionId, () => {
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'protocol.file.allow=always',
+          'submodule',
+          'update',
+          '--init',
+          '-q',
+          'lib',
+        ],
+        { cwd: plan.lockKey, stdio: 'pipe' },
+      );
+      moduleStore = execFileSync(
+        'git',
+        ['-C', 'lib', 'rev-parse', '--absolute-git-dir'],
+        { cwd: plan.lockKey, encoding: 'utf8' },
+      ).trim();
+      expect(
+        execFileSync('git', ['status', '--porcelain'], {
+          cwd: plan.lockKey,
+          encoding: 'utf8',
+        }),
+      ).toBe(statusBefore);
+    });
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    let incidentLog = '';
+    try {
+      await executeWorktreeCleanup(plan);
+    } finally {
+      incidentLog = stderrSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      late.stop();
+      stderrSpy.mockRestore();
+    }
+    expect(late.edited()).toBe(true);
+    expect(
+      moduleStore.startsWith(
+        path.join(repoRoot, '.git', 'worktrees') + path.sep,
+      ),
+    ).toBe(true);
+    expect(path.relative(plan.lockKey, moduleStore).startsWith('..')).toBe(
+      true,
+    );
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(fs.existsSync(moduleStore)).toBe(true);
+    expect(incidentLog).toContain(
+      'initialized submodule appeared during cleanup',
+    );
+    expect(await checkoutChangeDigestForTesting(plan.lockKey)).toBe(before);
   });
 
   it.skipIf(process.platform === 'win32')(

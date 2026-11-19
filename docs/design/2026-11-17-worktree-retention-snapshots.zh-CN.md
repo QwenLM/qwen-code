@@ -60,6 +60,13 @@ P6 在 #17237 分支上分五个单元落地；每个可独立测试。
 node_modules 被排除；ignored 非 disposable 工作被归档）、恢复保真（committed+dirty+
 untracked 往返；未暂存/暂存删除与 rename 源在重建 HEAD 上重新施加）、原子捕获、未知与
 版本 1 拒绝、遍历路径拒绝、缺 `.git` 捕获拒绝（无归档）、`core.fsmonitor` 执行 canary。
+每个完成的捕获结果带有 `checkoutMatchesCapture`：真实 tar 字节、属主可执行位、符号链接目标
+与 HEAD/分支都同最终 checkout 比对。该标志为 false 时，清理拒绝移除检出，同时保留已完成的
+归档和磁盘上的迟到内容；即使两次外部摘要相同，也能识别中间 A/B/A 文件版本。任何不属于普通
+文件、目录或符号链接的条目（FIFO、socket、设备等）都拒绝捕获，不允许 node-tar 静默漏掉它。
+仓库实际对象格式决定两侧采用相同的 SHA-1 或 SHA-256 blob 身份，未知格式失败关闭。
+受保护或不支持的 tar 条目使结果为 false，不允许异常穿透 parser 回调逃逸。只有重读本进程
+私有生成的归档才取消 decompression-ratio 上限，以免拒绝合法的高压缩内容；外部归档恢复仍保留原限制。
 捕获扫描真实文件系统（仅看 `git status` 会漏掉 clean tracked 保护路径的大小写变体），
 在启动 tar 前拒绝这些变体；`ls-files -v` 使用 64 MiB 捕获缓冲，避免大索引截断。
 恢复先于任何删除/解包，对包括 Directory 在内的每个成员进行词法与最近存在父目录校验；
@@ -82,7 +89,10 @@ marker，则在任何清理之前拒绝，不能只相信成员的词法路径�
 
 托管会话 worktree 被会话归档/删除移除时（`executeWorktreeCleanup` 与归档流），移除前
 捕获快照（U1），然后尝试移除——快照保存了 dirty work，故对**仅托管会话 worktree** 解除
-`worktreeHasWork` 拒绝；工具/agent worktree 保留现有拒绝语义。移除仍委托
+`worktreeHasWork` 拒绝；工具/agent worktree 保留现有拒绝语义。归档先取 coordinator 锁，
+再取 worktree ownership 锁；在 sidecar 存活期间校验 ownership，确认移动后在同锁下重读
+archived sidecar。仅当其仍指向已验证的 checkout 才清理；chat 记录和 archived sidecar 保留。
+删除则要求 ownership 记录已先移除。移除仍委托
 `removeUserWorktree`，它拒绝携带无 ref 可达 commit 的检出（缺省托管 worktree 是
 detached）：此时快照已写但检出被保留（`unmerged commits`），故「无论 dirty 状态都移除」
 对 dirty 内容成立，对未合并 commit 不成立。捕获失败同样回退保留（fail-closed：未获持久
@@ -98,6 +108,8 @@ skip-worktree 路径上的暂存编辑或新增、暂停的 merge/rebase/cherry-
 移除前重新探测 pending 操作，以拒绝元数据检查后新启动的操作，即使文件字节与 HEAD 未变。
 同一位置复用共享的隐藏索引位探针，它先于最后一道 pending 探测：捕获中途新设的 flag
 令 tracked 编辑在前后摘要中均不可见时，也不能仅因摘要一致就删除。
+最后的 populated-gitlink 探测还在捕获期间初始化 submodule 时保留检出：对象库位于检出根之外，
+归档与删除都不保留它。
 稀疏例外通过 `git sparse-checkout check-rules` 区分合法省略与规则包含路径上的异常 S
 所隐藏的删除意图。规则排除本身还不够：实体化 S 在 `sparse.expectFilesOutsideOfPatterns=true`
 让 status 保持为空时，仍可能藏有编辑内容。只有 leaf 确实不存在、且最近存在祖先为目录时才豁免；

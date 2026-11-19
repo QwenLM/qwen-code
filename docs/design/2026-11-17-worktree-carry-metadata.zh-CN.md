@@ -128,12 +128,18 @@ rename/copy 记录直接拒绝。非搬运条目保留现有 session-marker / di
 `executeWorktreeCleanup` 调用 `worktreeHasWork(plan.lockKey, sidecar.carriedEntries)`。
 仅含原始搬运内容的 checkout 读作干净；免快照回收前，回收器还校验搬运来源检出
 （`sidecar.carriedFrom ?? sidecar.originalCwd`）仍逐内容持有该覆盖层，不再持有或不可读
-时改为快照（R5-2/R5-14）。含真实会话工作——包括对搬运路径的会话改动——的 checkout 读作
-工作并被先快照再删除（P6 U3）。core 保留清扫（`worktreeCleanup.ts`）在本交付项中保持不变。
+时改为快照（R5-2/R5-14）。裸回收前立即复核来源；发生变化或读取失败时保留目标，而不是
+丢弃最后一副本。归档移动会话记录和 sidecar 后，在同一 ownership 锁内重新读取该 sidecar，
+仅当归档副本仍指向原 checkout 时才清理；删除则要求会话记录已先行移除。捕获还会读回
+真实 tar 内容、可执行位和链接目标，与最终 checkout 不一致时拒绝。含真实会话工作——包括
+对搬运路径的会话改动——的 checkout 读作工作并被先快照再删除（P6 U3）。core 保留清扫
+（`worktreeCleanup.ts`）在本交付项中保持不变。
 
 ## 验收
 
 - 仅含原始搬运覆盖层的会话 worktree 在会话删除后被孤儿回收器回收（复现 S8 的回归）。
+- 会话归档后，真实 dirty checkout 在完成快照后被移除；archived sidecar 保留，
+  可从其旁的归档恢复原始字节。
 - 搬运来源不再持有覆盖层或不可读时，仅含原始搬运内容的 checkout 改为快照——包括来源
   是 `carriedFrom` 记录的兄弟检出、而 `originalCwd`（诱饵）仍匹配搬运时身份的情形
   （R5-2/R5-14）。
@@ -146,8 +152,10 @@ rename/copy 记录直接拒绝。非搬运条目保留现有 session-marker / di
   移除以检出仍与捕获内容一致为条件：前后摘要包含 untracked 与 ignored 工作的逐路径
   原始字节身份和可执行位，且不调用 diff/textconv，因此同路径迟到自动保存触发保留而非删除。
   首次摘要在 has-work 与搬运来源分类之前取得，来源哈希期间新保存的文件不会授权无归档删除。
-  移除前复核共享隐藏索引位，再复核 pending 操作，后者仍是删除前的最后一道检查。
+  移除前复核共享隐藏索引位，再复核 pending 操作。
   捕获期间新设置的 index bit 及随后编辑即使不进入 status，也不能授权删除。
+  最后的 populated-gitlink 探测还在捕获期间初始化 submodule 时保留检出：对象库位于检出根之外，
+  归档与删除都不保留它。
   clean-sparse 例外仅限 Git 当前 sparse-checkout 规则实际排除且确实不存在的路径；
   实体化的 S 与规则内隐藏的删除意图都继续保护。
   `ls-files` 只关闭特定的稀疏索引展开提示，其他 stderr 仍按失败关闭处理。

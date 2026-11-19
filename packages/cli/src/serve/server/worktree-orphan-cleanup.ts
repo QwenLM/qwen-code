@@ -212,7 +212,7 @@ export async function preclassifyWorktreeCleanup(
   };
 }
 
-/** Serialize one session's delete + cleanup with restores and resets. */
+/** Serialize one session's record mutation + cleanup with restores and resets. */
 export function acquireWorktreeCleanupLock(
   plan: WorktreeCleanupPlan,
 ): Promise<() => void> {
@@ -280,7 +280,7 @@ async function findLiveSessionNamingCheckout(
 
 /**
  * Full ownership verification, called under the cleanup lock before the
- * record is deleted. The sidecar is re-read because the pre-read was
+ * record is deleted or archived. The sidecar is re-read because the pre-read was
  * advisory; the marker must name exactly this session; the checkout
  * must resolve under the workspace worktree roots; and no other
  * session's sidecar may name the same checkout (a freshly transferred
@@ -583,8 +583,9 @@ async function checkoutChangeDigest(
 export const checkoutChangeDigestForTesting = checkoutChangeDigest;
 
 /**
- * Execute a verified cleanup after the record deletion was confirmed
- * (`kind === 'removed'`), still under the cleanup lock. The marker is
+ * Execute a verified cleanup after the record deletion or archive move was
+ * confirmed, still under the cleanup lock. Archive keeps its sidecar in the
+ * archived location; delete has already removed its ownership record. The marker is
  * re-verified (nothing may have flipped it since classification). A checkout
  * with work is snapshotted then deleted (P6 U3); a pristine one is deleted
  * bare only while the carry source still holds the overlay; a state the
@@ -599,7 +600,10 @@ export async function executeWorktreeCleanup(
   const { sessionId, sidecar } = plan;
   const marker = await readWorktreeSessionMarkerStrict(plan.lockKey);
   if (marker.state !== 'valid' || marker.sessionId !== sessionId) {
-    logWorktreeCleanupPreserve(sessionId, 'marker changed after delete');
+    logWorktreeCleanupPreserve(
+      sessionId,
+      'marker changed after session mutation',
+    );
     return;
   }
   // An initialized submodule holds its own object database (possibly unpushed
@@ -647,6 +651,8 @@ export async function executeWorktreeCleanup(
   ) {
     needsSnapshot = true;
   }
+  // A bare carried-only path has no archive; its checked source gate applies.
+  let checkoutMatchesCapture = true;
   if (needsSnapshot) {
     // P6 U3: a managed session worktree with genuine work is snapshotted then
     // deleted instead of preserved forever — the archive preserves the work
@@ -660,16 +666,17 @@ export async function executeWorktreeCleanup(
         slug: sidecar.slug,
         baseCommit: sidecar.worktreeBase ?? sidecar.originalHeadCommit,
       });
-      const { snapshotPath } = await captureWorktreeSnapshot({
+      const snapshot = await captureWorktreeSnapshot({
         worktreePath: plan.lockKey,
         snapshotDir: path.dirname(plan.sidecarPath),
         meta,
       });
+      checkoutMatchesCapture = snapshot.checkoutMatchesCapture;
       // Name the archive so the snapshot is discoverable after the record and
       // sidecar are gone. It is keyed by sessionId in the chats dir; the
       // reopen-restore affordance (P6 U5) reads it back by that key, and the
       // retention sweep (P6 U4) prunes it.
-      logWorktreeCleanupSnapshot(sessionId, snapshotPath);
+      logWorktreeCleanupSnapshot(sessionId, snapshot.snapshotPath);
     } catch (error) {
       logWorktreeCleanupPreserve(
         sessionId,
@@ -712,6 +719,35 @@ export async function executeWorktreeCleanup(
       sessionId,
       'git operation became pending during cleanup',
     );
+    return;
+  }
+  if (
+    !needsSnapshot &&
+    sidecar.carriedEntries &&
+    sidecar.carriedEntries.length > 0 &&
+    !(await carriedOverlayStillHeldBySource(
+      sidecar.carriedFrom ?? sidecar.originalCwd,
+      sidecar.carriedEntries,
+      plan.lockKey,
+    ))
+  ) {
+    logWorktreeCleanupPreserve(
+      sessionId,
+      'carried source changed during cleanup',
+    );
+    return;
+  }
+  // A submodule initialized during capture keeps its object store outside
+  // the checkout root: neither the archive nor removal preserves that store.
+  if (await worktreeHasPopulatedGitlink(plan.lockKey)) {
+    logWorktreeCleanupPreserve(
+      sessionId,
+      'initialized submodule appeared during cleanup',
+    );
+    return;
+  }
+  if (!checkoutMatchesCapture) {
+    logWorktreeCleanupPreserve(sessionId, 'checkout changed during capture');
     return;
   }
   // originalCwd is the root the creating worktree service used; the

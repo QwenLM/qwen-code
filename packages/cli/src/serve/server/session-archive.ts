@@ -497,6 +497,42 @@ async function deletePersistedSessionWithLease(
   };
 }
 
+function sessionLiveOnBridge(
+  bridge: Partial<Pick<AcpSessionBridge, 'getSessionSummary'>>,
+  candidate: string,
+): boolean {
+  if (!bridge.getSessionSummary) return true;
+  try {
+    bridge.getSessionSummary(normalizeSessionIdForLookup(candidate));
+    return true;
+  } catch (error) {
+    return !(
+      isSessionNotFoundError(error) &&
+      (error as SessionNotFoundError).code !== 'session_closing'
+    );
+  }
+}
+
+async function prepareWorktreeCleanup(
+  service: SessionService,
+  sessionId: string,
+  runtimeWorkspaceCwd?: string,
+) {
+  const activeSidecarPath = service.getWorktreeSessionPath(sessionId);
+  const archivedSidecarPath = service.getWorktreeSessionPathForArchiveState(
+    sessionId,
+    'archived',
+  );
+  if (
+    !fs.existsSync(activeSidecarPath) &&
+    (archivedSidecarPath === activeSidecarPath ||
+      !fs.existsSync(archivedSidecarPath))
+  ) {
+    return undefined;
+  }
+  return preclassifyWorktreeCleanup(service, sessionId, runtimeWorkspaceCwd);
+}
+
 export async function deleteDaemonSessions(params: {
   sessionIds: string[];
   service: SessionService;
@@ -534,18 +570,8 @@ export async function deleteDaemonSessions(params: {
   // on this runtime's bridge. Only a genuine not-found counts as gone; any
   // other answer, a `session_closing` refusal included, or a bridge
   // without the query counts as live, so the checkout is kept.
-  const isSessionLive = (candidate: string): boolean => {
-    if (!bridge.getSessionSummary) return true;
-    try {
-      bridge.getSessionSummary(normalizeSessionIdForLookup(candidate));
-      return true;
-    } catch (error) {
-      return !(
-        isSessionNotFoundError(error) &&
-        (error as SessionNotFoundError).code !== 'session_closing'
-      );
-    }
-  };
+  const isSessionLive = (candidate: string): boolean =>
+    sessionLiveOnBridge(bridge, candidate);
   // Ownership-verified worktree cleanup (#11024): classify before the
   // record deletion (the deletion destroys the sidecar), execute only
   // after a confirmed removal, all under the worktree ownership lock so
@@ -577,7 +603,7 @@ export async function deleteDaemonSessions(params: {
     ) {
       return coordinator.runExclusiveMany([sessionId], mutateSession);
     }
-    const cleanupPlan = await preclassifyWorktreeCleanup(
+    const cleanupPlan = await prepareWorktreeCleanup(
       service,
       sessionId,
       runtimeWorkspaceCwd,
@@ -931,12 +957,14 @@ function sanitizeLogLine(message: string): string {
 export async function archiveDaemonSessions(params: {
   sessionIds: string[];
   service: SessionService;
-  bridge: Pick<AcpSessionBridge, 'closeSession'>;
+  bridge: Pick<AcpSessionBridge, 'closeSession'> &
+    Partial<Pick<AcpSessionBridge, 'getSessionSummary'>>;
   coordinator: SessionArchiveCoordinator;
   coordinatorLockHeld?: boolean;
   resolveConflicts?: boolean;
   requireIdle?: boolean;
   assertCanMutate?: () => void;
+  runtimeWorkspaceCwd?: string;
 }): Promise<DaemonArchiveSessionsResult> {
   const {
     sessionIds,
@@ -947,6 +975,7 @@ export async function archiveDaemonSessions(params: {
     resolveConflicts = false,
     requireIdle = false,
     assertCanMutate,
+    runtimeWorkspaceCwd,
   } = params;
   const uniqueSessionIds = [
     ...new Set(sessionIds.map(normalizeSessionIdForLookup)),
@@ -1082,9 +1111,83 @@ export async function archiveDaemonSessions(params: {
             maintenanceError,
           };
         };
+        const activeSidecar = service.getWorktreeSessionPath(sessionId);
+        const archivedSidecar = service.getWorktreeSessionPathForArchiveState(
+          sessionId,
+          'archived',
+        );
+        if (
+          !fs.existsSync(activeSidecar) &&
+          (archivedSidecar === activeSidecar || !fs.existsSync(archivedSidecar))
+        ) {
+          return await (coordinatorLockHeld
+            ? mutateSession()
+            : coordinator.runExclusiveMany([sessionId], mutateSession));
+        }
+        const archiveAndCleanup = async () => {
+          const cleanupPlan = await prepareWorktreeCleanup(
+            service,
+            sessionId,
+            runtimeWorkspaceCwd ?? service.getProjectRoot(),
+          );
+          if (!cleanupPlan) return mutateSession();
+          const releaseCleanupLock =
+            await acquireWorktreeCleanupLock(cleanupPlan);
+          try {
+            const ownership = await verifyWorktreeCleanupOwnership(
+              cleanupPlan,
+              (candidate) => sessionLiveOnBridge(bridge, candidate),
+            );
+            if (!ownership.ok) {
+              logWorktreeCleanupPreserve(sessionId, ownership.reason);
+            }
+            const result = await mutateSession();
+            if (
+              ownership.ok &&
+              (result.kind === 'archived' || result.kind === 'resolvedConflict')
+            ) {
+              try {
+                assertCanMutate?.();
+                const archivedPlan = await prepareWorktreeCleanup(
+                  service,
+                  sessionId,
+                  runtimeWorkspaceCwd ?? service.getProjectRoot(),
+                );
+                const archivedSidecar =
+                  service.getWorktreeSessionPathForArchiveState(
+                    sessionId,
+                    'archived',
+                  );
+                if (
+                  !archivedPlan ||
+                  archivedPlan.sidecarPath !== archivedSidecar ||
+                  archivedPlan.sidecar.slug !== cleanupPlan.sidecar.slug ||
+                  archivedPlan.sidecar.worktreePath !==
+                    cleanupPlan.sidecar.worktreePath ||
+                  archivedPlan.lockKey !== cleanupPlan.lockKey
+                ) {
+                  logWorktreeCleanupPreserve(
+                    sessionId,
+                    'archive sidecar changed during cleanup',
+                  );
+                } else {
+                  await executeWorktreeCleanup(archivedPlan);
+                }
+              } catch (error) {
+                logWorktreeCleanupPreserve(
+                  sessionId,
+                  `cleanup execution failed: ${errorMessage(error)}`,
+                );
+              }
+            }
+            return result;
+          } finally {
+            releaseCleanupLock();
+          }
+        };
         return await (coordinatorLockHeld
-          ? mutateSession()
-          : coordinator.runExclusiveMany([sessionId], mutateSession));
+          ? archiveAndCleanup()
+          : coordinator.runExclusiveMany([sessionId], archiveAndCleanup));
       } catch (error) {
         if (error instanceof DaemonDrainingError) {
           throw error;

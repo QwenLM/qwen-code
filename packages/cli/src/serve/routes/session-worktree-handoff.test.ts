@@ -2273,6 +2273,7 @@ describe('POST /session/:id/worktree-handoff', () => {
     const sidecar = await fixture.readSidecar();
     expect(sidecar.state).toBe('valid');
     if (sidecar.state === 'valid') {
+      expect(sidecar.session.carriedFrom).toBe(fixture.workspaceDir);
       const entries = sidecar.session.carriedEntries ?? [];
       const paths = entries.map((e) => e.path);
       expect(paths).toContain('README.md');

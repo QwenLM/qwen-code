@@ -174,16 +174,26 @@ holds the overlay content-for-content; otherwise it is snapshotted (R5-2).
 checkout reads clean; before collecting it without a snapshot the reaper also
 verifies the carry SOURCE checkout (`sidecar.carriedFrom ?? sidecar.originalCwd`)
 still holds the overlay content-for-content, and snapshots instead when it does
-not or cannot be read (R5-2/R5-14). A checkout with genuine session work —
-including a session change to a carried path — reads as work and is snapshotted
-then deleted (P6 U3). The core retention sweep (`worktreeCleanup.ts`) is
-unchanged in this deliverable.
+not or cannot be read (R5-2/R5-14). Immediately before a bare collection it
+re-validates that source; a change or read failure preserves the target rather
+than discarding the only remaining copy. Archiving moves the session record and
+sidecar, then re-reads the sidecar under the same ownership lock and permits
+cleanup only if the archived copy still names that checkout. Deletion instead
+requires the record to have been removed first. Two external digests alone
+cannot certify the archive: capture reads back its raw tar contents,
+executable bits and link targets, and rejects a mismatch with the final
+checkout. A checkout with genuine session work — including a session
+change to a carried path — reads as work and is snapshotted then deleted (P6
+U3). The core retention sweep (`worktreeCleanup.ts`) is unchanged in this
+deliverable.
 
 ## Acceptance
 
 - A session worktree whose only content is the pristine carried overlay is
   collected by the orphan reaper after the session is deleted (regression
   reproducing S8).
+- After a session is archived, a genuinely dirty checkout is snapshotted and
+  removed, while its archived sidecar remains to locate the original bytes.
 - A pristine carried-only checkout is snapshotted instead when the carry source
   no longer holds the overlay or cannot be read — including when the source is
   a sibling checkout recorded in `carriedFrom` while `originalCwd` (the decoy)
@@ -204,8 +214,11 @@ unchanged in this deliverable.
   carried-source classification, so a new file saved during source hashing
   cannot authorize a snapshot-free deletion. Protected-path case variants
   refuse capture before tar. A late shared hidden-index-bit check precedes the
-  pending-operation check, which remains the final probe before removal, so a
-  flag and edit hidden from status cannot authorize deletion. Its clean-sparse
+  pending-operation check, so a flag and edit hidden from status cannot
+  authorize deletion. A final populated-gitlink probe also preserves the
+  checkout when a submodule is initialized during capture: its object store
+  lives outside the checkout root and neither the archive nor removal retains
+  it. Its clean-sparse
   carve-out is limited to absent paths actually excluded by Git's own sparse
   rules; materialized S paths and unexpected in-scope deletions are refused.
   Only the named sparse-index expansion advice is suppressed, never other

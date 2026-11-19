@@ -29964,6 +29964,7 @@ describe('createServeApp', () => {
           JSON.parse(await fsp.readFile(sidecarPath, 'utf8')),
         ).toMatchObject({
           workspaceCwd: repo,
+          carriedFrom: realpathSync(repo),
           worktreeBranch: '',
           originalHeadCommit: baseCommit,
           worktreeBase: baseCommit,

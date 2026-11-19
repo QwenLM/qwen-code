@@ -71,6 +71,20 @@ worktree to a self-contained archive and restores it:
   recorded deletions) is refused because it cannot faithfully restore a
   deletion. Capture is atomic (stage to a temp file, rename) so a crash
   mid-capture never leaves a half-written archive a later restore would trust.
+  Each completed result carries `checkoutMatchesCapture`: capture compares
+  actual tar bytes, owner-exec bits, symlink targets and HEAD/branch with the
+  final checkout. When that flag is false, cleanup rejects removal while
+  retaining both the completed archive and the late on-disk content. This
+  catches an intermediate A/B/A file version even when the two external
+  digests match. Any filesystem entry other than a regular file,
+  directory or symlink (FIFO, socket, device and similar nodes) refuses capture
+  rather than being silently omitted by node-tar. The repository's actual
+  object format selects the matching SHA-1 or SHA-256 Git blob identity on
+  both sides; unknown formats fail closed. Protected or unsupported tar
+  entries make the result false instead of escaping through a parser callback.
+  Only re-reading the private, locally generated archive disables the
+  decompression-ratio cap that would reject valid highly compressible work;
+  restore of external archives keeps its own limits.
 - **Repository pinning + hardening**: capture and meta build first require the
   worktree's own `.git` (`fs.access`), so git cannot answer about an enclosing
   repository when the link is gone (verify finding F4); both run their git
@@ -121,7 +135,12 @@ When a managed session worktree is removed by session archive/delete
 (`executeWorktreeCleanup` and the archive flow), capture a snapshot (U1) before
 removal, then attempt removal — the snapshot preserves the dirty work, so the
 `worktreeHasWork` refusal is lifted for **managed session worktrees only**;
-tool/agent worktrees keep the existing refusal semantics. Removal is still
+tool/agent worktrees keep the existing refusal semantics. Archive takes the
+coordinator lock before the worktree ownership lock, verifies ownership while
+the sidecar is present, and after a confirmed move re-reads the archived
+sidecar under that same lock. Cleanup proceeds only while it still names the
+verified checkout; the chat record and archived sidecar survive. Delete
+instead requires the ownership record to have been removed first. Removal is still
 delegated to `removeUserWorktree`, which refuses a checkout carrying commits no
 ref reaches (the default managed worktree is detached): in that case the
 snapshot is written but the checkout is preserved (`unmerged commits`), so
@@ -146,8 +165,11 @@ therefore preserves instead of deleting work the archive could not cover. A
 fresh pending-operation probe immediately before removal also refuses
 operations launched after the metadata check, even when file bytes and HEAD
 have not changed. The shared sparse-aware hidden-index probe runs just before
-that final pending probe: a late flag that hides a tracked edit from both
-digests cannot authorize removal merely because their values match. The
+that pending probe: a late flag that hides a tracked edit from both digests
+cannot authorize removal merely because their values match. A final
+populated-gitlink probe also preserves a submodule initialized during capture:
+its object store lives outside the checkout root and neither the archive nor
+removal preserves it. The
 sparse exemption uses `git sparse-checkout check-rules` to distinguish a
 legitimate omission from an unexpected S hiding a deletion in an included
 path. Exclusion alone is insufficient: a present S path may hide edited

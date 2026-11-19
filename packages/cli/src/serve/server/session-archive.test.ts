@@ -2232,9 +2232,12 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     worktreePath: string,
     relativeFile: string,
     expected: string,
+    archiveState: 'active' | 'archived' = 'active',
   ): Promise<void> {
     expect(fs.existsSync(worktreePath)).toBe(false);
-    const dir = path.dirname(service.getWorktreeSessionPath(sessionId));
+    const dir = path.dirname(
+      service.getWorktreeSessionPathForArchiveState(sessionId, archiveState),
+    );
     const archive = fs
       .readdirSync(dir)
       .find(
@@ -2278,6 +2281,53 @@ describe('deleteDaemonSessions worktree cleanup', () => {
         encoding: 'utf8',
       }),
     ).not.toContain(worktreePath);
+  });
+
+  it('preserves the synchronous coordinator prefix for delete without a sidecar', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440088';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const service = new SessionService(workspaceDir);
+    const coordinator = new SessionArchiveCoordinator();
+
+    const pending = deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator,
+    });
+
+    expect(() => coordinator.assertNotTransitioning(sessionId)).toThrow(
+      SessionArchivingError,
+    );
+    await expect(pending).resolves.toMatchObject({ removed: [sessionId] });
+  });
+
+  it('archives a chat and snapshots its dirty checkout before removal (P6 U3)', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440089';
+    const { service, worktreePath } = setupWorktreeSession(sessionId);
+    fs.writeFileSync(path.join(worktreePath, 'file.txt'), 'archive-me\n');
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.archived).toEqual([sessionId]);
+    const sidecarPath = service.getWorktreeSessionPathForArchiveState(
+      sessionId,
+      'archived',
+    );
+    expect(fs.existsSync(sidecarPath)).toBe(true);
+    await expectWorkArchived(
+      service,
+      sessionId,
+      worktreePath,
+      'file.txt',
+      'archive-me\n',
+      'archived',
+    );
   });
 
   it('keeps the checkout when the session record was never there', async () => {

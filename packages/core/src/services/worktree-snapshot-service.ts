@@ -19,9 +19,11 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import * as tar from 'tar';
 import {
   WORKTREE_SESSION_FILE,
+  computeCarriedIdentities,
   hasHiddenIndexBit,
   isDisposableIgnoredEntry,
   worktreeHasPendingGitOperation,
@@ -66,6 +68,8 @@ export interface CaptureWorktreeSnapshotOptions {
 export interface WorktreeSnapshotPaths {
   snapshotPath: string;
   metaPath: string;
+  /** Whether actual archive contents and HEAD/branch match the final checkout. */
+  checkoutMatchesCapture: boolean;
 }
 
 /**
@@ -167,6 +171,11 @@ async function assertNoProtectedCaseVariantPaths(
     if (isExcludedFromSnapshot(rel, matcher)) continue;
     if (entry.isDirectory()) {
       await assertNoProtectedCaseVariantPaths(worktreePath, matcher, rel);
+    } else if (!entry.isFile() && !entry.isSymbolicLink()) {
+      // node-tar silently emits no entry for FIFOs, sockets and devices.
+      throw new Error(
+        `Worktree snapshot: non-regular filesystem entry cannot be archived faithfully: ${rel}`,
+      );
     }
   }
 }
@@ -377,6 +386,143 @@ export async function buildWorktreeSnapshotMeta(
   };
 }
 
+// Before/after digests alone miss an A/B/A write: tar can hold the intermediate
+// bytes. Compare actual archive contents with the final checkout instead of
+// discarding a completed snapshot whose earlier bytes may still be useful.
+async function checkoutMatchesCapture(
+  worktreePath: string,
+  snapshotPath: string,
+  matcher: DisposableIgnoredMatcher,
+  meta: CaptureWorktreeSnapshotOptions['meta'],
+): Promise<boolean> {
+  const regularFiles: string[] = [];
+  const symlinks = new Map<string, string>();
+  const collect = async (prefix = ''): Promise<void> => {
+    const entries = await fs.readdir(path.join(worktreePath, prefix), {
+      withFileTypes: true,
+    });
+    for (const entry of entries) {
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (isExcludedFromSnapshot(rel, matcher)) continue;
+      if (entry.isDirectory()) {
+        await collect(rel);
+      } else if (entry.isSymbolicLink()) {
+        symlinks.set(rel, await fs.readlink(path.join(worktreePath, rel)));
+      } else if (entry.isFile()) {
+        regularFiles.push(rel);
+      } else {
+        throw new Error(
+          `Worktree snapshot: non-regular filesystem entry cannot be archived faithfully: ${rel}`,
+        );
+      }
+    }
+  };
+  await collect();
+
+  const current = new Map<string, string>();
+  for (const entry of await computeCarriedIdentities(
+    worktreePath,
+    regularFiles,
+  )) {
+    if (entry.hash === null || !regularFiles.includes(entry.path)) {
+      throw new Error('Worktree snapshot: contents changed during capture');
+    }
+    current.set(
+      entry.path,
+      `file:${entry.hash}:${entry.executable ? '1' : '0'}`,
+    );
+  }
+  if (current.size !== regularFiles.length) {
+    throw new Error('Worktree snapshot: contents changed during capture');
+  }
+  for (const [rel, target] of symlinks) {
+    current.set(rel, `symlink:${JSON.stringify(target)}`);
+  }
+
+  const objectFormat = (
+    await runGit(worktreePath, [
+      ...NO_EXEC_CONFIG,
+      '--no-optional-locks',
+      'rev-parse',
+      '--show-object-format',
+    ])
+  ).trim();
+  if (objectFormat !== 'sha1' && objectFormat !== 'sha256') {
+    throw new Error(
+      `Unsupported Git object format in worktree snapshot: ${objectFormat}`,
+    );
+  }
+  const captured = new Map<string, string>();
+  const hardlinks = new Map<string, string>();
+  let archiveValid = true;
+  await tar.t({
+    file: snapshotPath,
+    strict: true,
+    // This is the private archive just written by this process, not an
+    // untrusted restore input. Restore keeps its own decompression limits.
+    maxDecompressionRatio: Number.POSITIVE_INFINITY,
+    onReadEntry: (entry) => {
+      const rel = normalizeRel(entry.path);
+      if (!rel || rel === '.') return;
+      if (isProtectedRel(rel)) {
+        archiveValid = false;
+        return;
+      }
+      if (entry.type === 'File') {
+        const hash = createHash(objectFormat);
+        hash.update(`blob ${entry.size}\0`);
+        entry.on('data', (chunk: Buffer) => hash.update(chunk));
+        entry.on('end', () => {
+          captured.set(
+            rel,
+            `file:${hash.digest('hex')}:${
+              (entry.mode ?? 0) & 0o100 ? '1' : '0'
+            }`,
+          );
+        });
+      } else if (entry.type === 'SymbolicLink') {
+        captured.set(rel, `symlink:${JSON.stringify(entry.linkpath ?? '')}`);
+      } else if (entry.type === 'Link') {
+        hardlinks.set(rel, normalizeRel(entry.linkpath ?? ''));
+      } else if (entry.type !== 'Directory') {
+        archiveValid = false;
+      }
+    },
+  });
+  for (const [rel, target] of hardlinks) {
+    const content = captured.get(target);
+    if (content === undefined) {
+      archiveValid = false;
+    } else {
+      captured.set(rel, content);
+    }
+  }
+  const mismatch = [...new Set([...current.keys(), ...captured.keys()])]
+    .sort()
+    .find((rel) => current.get(rel) !== captured.get(rel));
+  await fs.access(path.join(worktreePath, '.git'));
+  const [headCommit, branch] = await Promise.all([
+    runGit(worktreePath, [
+      ...NO_EXEC_CONFIG,
+      '--no-optional-locks',
+      'rev-parse',
+      'HEAD',
+    ]),
+    runGit(worktreePath, [
+      ...NO_EXEC_CONFIG,
+      '--no-optional-locks',
+      'branch',
+      '--show-current',
+    ]),
+  ]);
+  return (
+    archiveValid &&
+    mismatch === undefined &&
+    headCommit.trim() === meta.headCommit &&
+    branch.trim() === meta.branch
+  );
+}
+
 /**
  * Capture a worktree to
  * `<snapshotDir>/<sessionId>.<createdAt>.<pid>.worktree-snapshot.tar.gz`
@@ -473,8 +619,9 @@ export async function captureWorktreeSnapshot(
   const snapshotPath = `${base}.tar.gz`;
   const metaPath = `${base}.json`;
 
-  await atomicWriteFile(snapshotPath, (tmp) =>
-    tar.create(
+  let matchesCheckout = true;
+  await atomicWriteFile(snapshotPath, async (tmp) => {
+    await tar.create(
       {
         cwd: worktreePath,
         file: tmp,
@@ -484,14 +631,24 @@ export async function captureWorktreeSnapshot(
         filter: (p) => !isExcludedFromSnapshot(p, matcher),
       },
       ['.'],
-    ),
-  );
+    );
+    matchesCheckout = await checkoutMatchesCapture(
+      worktreePath,
+      tmp,
+      matcher,
+      meta,
+    );
+  });
 
   await atomicWriteFile(metaPath, async (tmp) => {
     await fs.writeFile(tmp, `${JSON.stringify(fullMeta, null, 2)}\n`, 'utf8');
   });
 
-  return { snapshotPath, metaPath };
+  return {
+    snapshotPath,
+    metaPath,
+    checkoutMatchesCapture: matchesCheckout,
+  };
 }
 
 /**

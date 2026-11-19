@@ -6,6 +6,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import { readFileSync, writeFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -29,6 +31,10 @@ import {
 // when tar was called (node-tar would create it at 0666 & ~umask).
 const tarCreateEntryModes = vi.hoisted(() => [] as number[]);
 const lsFilesProbeBuffers = vi.hoisted(() => [] as Array<number | undefined>);
+const captureTiming = vi.hoisted(() => ({
+  afterRead: undefined as undefined | ((relativePath: string) => void),
+  beforeCreate: undefined as undefined | (() => void),
+}));
 vi.mock('../utils/git-branches.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../utils/git-branches.js')>();
@@ -45,20 +51,55 @@ vi.mock('../utils/git-branches.js', async (importOriginal) => {
 vi.mock('tar', async (importOriginal) => {
   const actual = await importOriginal<typeof import('tar')>();
   const { statSync } = await import('node:fs');
+  const onRead = Object.getOwnPropertySymbols(actual.WriteEntry.prototype).find(
+    (symbol) => symbol.description === 'onread',
+  );
+  if (!onRead) throw new Error('Missing WriteEntry onread probe');
+  const descriptor = Object.getOwnPropertyDescriptor(
+    actual.WriteEntry.prototype,
+    onRead,
+  );
+  if (typeof descriptor?.value !== 'function') {
+    throw new Error('WriteEntry onread is not a function');
+  }
+  const originalRead = descriptor.value as (
+    this: { absolute?: string },
+    bytesRead: number,
+  ) => void;
+  const nodePath = await import('node:path');
+  const readWrapper = function (
+    this: { absolute?: string },
+    bytesRead: number,
+  ): void {
+    if (this.absolute) {
+      captureTiming.afterRead?.(nodePath.basename(this.absolute));
+    }
+    return originalRead.call(this, bytesRead);
+  };
+  Object.defineProperty(actual.WriteEntry.prototype, onRead, {
+    ...descriptor,
+    value: readWrapper,
+  });
   // The service only ever calls create(options-with-file, entries); narrow
   // the overloaded command to that shape for the delegating call.
   const createFile = actual.create as (
-    options: { file: string },
+    options: { file: string; maxReadSize?: number },
     entries: string[],
   ) => Promise<void>;
   const create = Object.assign(
-    (options: { file: string }, entries: string[]) => {
+    (options: { file: string; maxReadSize?: number }, entries: string[]) => {
       try {
         tarCreateEntryModes.push(statSync(options.file).mode & 0o777);
       } catch {
         tarCreateEntryModes.push(-1);
       }
-      return createFile(options, entries);
+      captureTiming.beforeCreate?.();
+      return createFile(
+        captureTiming.afterRead
+          ? { ...options, maxReadSize: 4 * 1024 * 1024 }
+          : options,
+        entries,
+      );
     },
     {
       syncFile: actual.create.syncFile,
@@ -138,6 +179,8 @@ describe('worktreeSnapshotService (P6 U1)', () => {
   });
 
   afterEach(async () => {
+    captureTiming.afterRead = undefined;
+    captureTiming.beforeCreate = undefined;
     await fs.rm(root, { recursive: true, force: true });
   });
 
@@ -203,6 +246,137 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       fs.access(path.join(restored, WORKTREE_SESSION_FILE)),
     ).rejects.toThrow();
     await expect(fs.access(metaPath)).resolves.toBeUndefined();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a FIFO rather than silently omitting it from the archive',
+    async () => {
+      await fs.writeFile(path.join(worktree, 'untracked.txt'), 'real work\n');
+      execFileSync('mkfifo', [path.join(worktree, 'session-pipe')]);
+      await expect(
+        captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        }),
+      ).rejects.toThrow('non-regular filesystem entry');
+    },
+  );
+
+  it('detects when tar captures an intermediate ABA file version', async () => {
+    const target = path.join(worktree, '000-target.txt');
+    const original = randomBytes(20 * 1024 * 1024);
+    const intermediate = randomBytes(20 * 1024 * 1024);
+    await fs.writeFile(target, original);
+    await fs.writeFile(path.join(worktree, '.gitignore'), 'node_modules\n');
+    await fs.mkdir(path.join(worktree, 'node_modules'));
+    await fs.writeFile(
+      path.join(worktree, 'node_modules', 'ignored.txt'),
+      'ignored\n',
+    );
+    await fs.writeFile(
+      path.join(worktree, 'zzz-payload.txt'),
+      Buffer.alloc(1024 * 1024, 0x78),
+    );
+    const targetVersions: string[] = [];
+    captureTiming.afterRead = (relativePath) => {
+      if (relativePath !== '000-target.txt') return;
+      targetVersions.push(readFileSync(target).subarray(0, 6).toString('hex'));
+      if (targetVersions.length === 1) {
+        writeFileSync(target, intermediate);
+      } else if (targetVersions.length === 5) {
+        writeFileSync(target, original);
+      }
+    };
+    const result = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: meta(),
+    });
+    expect(targetVersions).toEqual([
+      original.subarray(0, 6).toString('hex'),
+      intermediate.subarray(0, 6).toString('hex'),
+      intermediate.subarray(0, 6).toString('hex'),
+      intermediate.subarray(0, 6).toString('hex'),
+      intermediate.subarray(0, 6).toString('hex'),
+    ]);
+    expect(readFileSync(target).equals(original)).toBe(true);
+    const chunks: Buffer[] = [];
+    await tar.t({
+      file: result.snapshotPath,
+      strict: true,
+      onReadEntry: (entry) => {
+        if (entry.path.replace(/^\.\//, '') === '000-target.txt') {
+          entry.on('data', (chunk: Buffer) => chunks.push(chunk));
+        }
+      },
+    });
+    const captured = Buffer.concat(chunks);
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(captured.length).toBe(original.length);
+    expect(captured.equals(original)).toBe(false);
+    expect(captured.subarray(-6).equals(intermediate.subarray(-6))).toBe(true);
+    expect(result.checkoutMatchesCapture).toBe(false);
+  });
+
+  it('does not let a late protected path escape through an archive callback', async (ctx) => {
+    const upperGit = path.join(worktree, '.GIT');
+    const aliasExists = await fs.lstat(upperGit).then(
+      () => true,
+      () => false,
+    );
+    if (aliasExists) ctx.skip();
+    captureTiming.beforeCreate = () => {
+      writeFileSync(upperGit, 'late protected path\n');
+    };
+    const result = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: meta(),
+    });
+    expect(result.checkoutMatchesCapture).toBe(false);
+  });
+
+  it('accepts a large, highly compressible stable checkout', async () => {
+    await fs.writeFile(
+      path.join(worktree, 'zeros.bin'),
+      Buffer.alloc(20 * 1024 * 1024),
+    );
+    const result = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: meta(),
+    });
+    expect(result.checkoutMatchesCapture).toBe(true);
+    expect((await fs.stat(result.snapshotPath)).size * 1000).toBeLessThan(
+      20 * 1024 * 1024,
+    );
+  });
+
+  it('matches an unchanged sha256 repository', async () => {
+    const shaRepo = path.join(root, 'sha256-repo');
+    await fs.mkdir(shaRepo);
+    git(shaRepo, 'init', '-q', '-b', 'main', '--object-format=sha256');
+    git(shaRepo, 'config', 'user.email', 't@e.com');
+    git(shaRepo, 'config', 'user.name', 't');
+    git(shaRepo, 'config', 'commit.gpgsign', 'false');
+    await fs.writeFile(path.join(shaRepo, 'committed.txt'), 'base\n');
+    git(shaRepo, 'add', '.');
+    git(shaRepo, 'commit', '-qm', 'init', '--no-verify');
+    await fs.appendFile(path.join(shaRepo, 'committed.txt'), 'dirty\n');
+    const head = git(shaRepo, 'rev-parse', 'HEAD');
+    expect(git(shaRepo, 'rev-parse', '--show-object-format')).toBe('sha256');
+    const result = await captureWorktreeSnapshot({
+      worktreePath: shaRepo,
+      snapshotDir,
+      meta: {
+        ...meta(),
+        baseCommit: head,
+        headCommit: head,
+        dirty: { tracked: 1, untracked: 0, deleted: [] },
+      },
+    });
+    expect(result.checkoutMatchesCapture).toBe(true);
   });
 
   it('captures the checkout when only the daemon marker is untracked (R8-7 control)', async () => {
