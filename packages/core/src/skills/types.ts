@@ -316,27 +316,36 @@ export function parseAllowedToolsField(
 }
 
 /**
- * Validate that a skill `name` is safe to embed into prompts and reminders
- * verbatim. Throws with a descriptive message if not — the surrounding
- * parser converts this into a `parseErrors` entry and skips the skill,
- * matching the existing "missing field" / "wrong type" error behavior.
- */
-/**
  * Parses the optional `mcp` frontmatter field: MCP server names this skill
- * depends on. Accepts a single string or a list of strings; anything else
- * is ignored so malformed entries never break skill loading (#17317).
+ * depends on. Accepts a single string or a list of strings; entries are
+ * trimmed and comma-joined shorthand (`mcp: "github, notion"`) is split,
+ * so padded or comma-separated values never invent a server name no
+ * configuration can match (#17323 F4). Anything else is ignored so
+ * malformed entries never break skill loading (#17317).
  */
 export function parseMcpServersField(
   frontmatter: Record<string, unknown>,
 ): string[] | undefined {
   const raw = frontmatter['mcp'];
-  return Array.isArray(raw)
-    ? raw.filter((v): v is string => typeof v === 'string' && v.length > 0)
-    : typeof raw === 'string' && raw.length > 0
-      ? [raw]
+  const normalize = (v: string): string[] =>
+    v
+      .split(',')
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0);
+  const parsed = Array.isArray(raw)
+    ? raw.flatMap((v) => (typeof v === 'string' ? normalize(v) : []))
+    : typeof raw === 'string'
+      ? normalize(raw)
       : undefined;
+  return parsed && parsed.length > 0 ? parsed : undefined;
 }
 
+/**
+ * Validate that a skill `name` is safe to embed into prompts and reminders
+ * verbatim. Throws with a descriptive message if not — the surrounding
+ * parser converts this into a `parseErrors` entry and skips the skill,
+ * matching the existing "missing field" / "wrong type" error behavior.
+ */
 export function validateSkillName(name: string): void {
   if (!SKILL_NAME_PATTERN.test(name)) {
     throw new Error(

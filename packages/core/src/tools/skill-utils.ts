@@ -6,6 +6,7 @@
 
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { Config } from '../config/config.js';
+import type { McpServerUnavailableReason } from '../config/mcp-server-config.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig, SkillLevel } from '../skills/types.js';
 import type { ToolRegistry } from './tool-registry.js';
@@ -73,6 +74,70 @@ export function skillModelInvocationBlock(
  */
 export function buildSkillLlmContent(baseDir: string, body: string): string {
   return `Base directory for this skill: ${baseDir}\nImportant: ALWAYS resolve absolute paths from this base directory when working with skills.\n\n${body}\n`;
+}
+
+/**
+ * Per-reason guidance for a dependency that is configured but currently
+ * unusable, phrased to join into one sentence when several reasons apply.
+ */
+const UNAVAILABLE_GUIDANCE: Record<McpServerUnavailableReason, string> = {
+  excluded: 'remove them from mcp.excluded',
+  not_allowed: 'add them to mcp.allowed',
+  pending_approval: 'approve them via /mcp',
+  removed: 're-add them to your MCP configuration',
+};
+
+/**
+ * Warning text for a skill's declared `mcp:` dependencies that are not
+ * usable yet, or '' when every dependency is registered and admitted.
+ * Shared by the Skill tool activation and the two user-invoked activation
+ * paths (slash command, bundled skill) so all three warn identically
+ * (#17323 F3).
+ *
+ * Classification order matters: `getMcpServerUnavailableReason` is the
+ * canonical admission classifier (excluded / not_allowed /
+ * pending_approval / removed), while `getMcpServers()` deliberately KEEPS
+ * excluded servers — the UI layer is expected to consult
+ * `isMcpServerDisabled()` — so a membership check against it alone reports
+ * an excluded dependency as usable (#17323 F1). Only names with no
+ * unavailable reason AND no registration are "not configured" (#17323 F2:
+ * an allow-list-blocked server must not be told to edit settings.json).
+ */
+export function buildMcpDependencyWarning(
+  config: Config,
+  skill: SkillConfig,
+): string {
+  if (!skill.mcpServers || skill.mcpServers.length === 0) return '';
+  const usable = new Set(Object.keys(config.getMcpServers?.() ?? {}));
+  const missing: string[] = [];
+  const unusable: Array<{ name: string; reason: McpServerUnavailableReason }> = [];
+  for (const name of skill.mcpServers) {
+    const reason = config.getMcpServerUnavailableReason?.(name);
+    if (reason) {
+      unusable.push({ name, reason });
+    } else if (!usable.has(name)) {
+      missing.push(name);
+    }
+  }
+  let warning = '';
+  if (missing.length > 0) {
+    warning +=
+      ` Warning: this skill declares MCP dependencies that are not configured: ` +
+      `${missing.join(', ')}. Add them to settings.json ` +
+      `"mcpServers" (or the equivalent managed config) and restart, or ` +
+      `skill tool calls that need them will fail.`;
+  }
+  if (unusable.length > 0) {
+    const guidance = [
+      ...new Set(unusable.map((u) => UNAVAILABLE_GUIDANCE[u.reason])),
+    ].join(' / ');
+    warning +=
+      ` Warning: this skill declares MCP dependencies that are configured ` +
+      `but currently unusable: ${unusable.map((u) => u.name).join(', ')}. ` +
+      `They are already in your MCP configuration — ${guidance}, or skill ` +
+      `tool calls that need them will fail.`;
+  }
+  return warning;
 }
 
 /**

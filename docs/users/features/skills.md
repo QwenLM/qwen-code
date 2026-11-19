@@ -503,6 +503,7 @@ Accepted shapes:
 
 - A single server name: `mcp: jira`
 - A list of server names: `mcp: [jira, confluence]`
+- Comma-separated shorthand is accepted, and surrounding whitespace is ignored: `mcp: "jira, confluence"`
 
 The check distinguishes two cases:
 

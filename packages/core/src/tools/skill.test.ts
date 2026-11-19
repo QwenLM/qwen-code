@@ -288,7 +288,27 @@ describe('SkillTool', () => {
     expect(text).toContain('MCP dependencies that are not configured');
   });
 
-  it('distinguishes excluded from unconfigured MCP dependencies (#17323 R3-1)', async () => {
+  /**
+   * Stub the CANONICAL admission classifier. A real Config's
+   * getMcpServers() KEEPS excluded servers (the UI layer is expected to
+   * consult isMcpServerDisabled()), so membership in it must not be the
+   * usability test — an excluded dependency is absent from neither view
+   * and used to fall through silently (#17323 F1).
+   */
+  const setUnavailableReasons = (
+    reasons: Record<
+      string,
+      'removed' | 'not_allowed' | 'excluded' | 'pending_approval'
+    >,
+  ) => {
+    (
+      config as unknown as {
+        getMcpServerUnavailableReason: ReturnType<typeof vi.fn>;
+      }
+    ).getMcpServerUnavailableReason = vi.fn((name: string) => reasons[name]);
+  };
+
+  it('distinguishes unusable from unconfigured MCP dependencies (#17323 R3-1)', async () => {
     const skill = mcpSkill('mcp-mixed', [
       'github',
       'excluded-srv',
@@ -296,26 +316,38 @@ describe('SkillTool', () => {
     ]);
     setSkills([skill]);
     loads(skill);
-    // getMcpServers returns the admission-FILTERED view: excluded-srv is
-    // absent from it (already filtered out), not-configured was never there.
-    const servers: Record<string, unknown> = { github: {} };
-    (
-      config as unknown as { getMcpServers: ReturnType<typeof vi.fn> }
-    ).getMcpServers = vi.fn().mockReturnValue(servers);
-    (
-      config as unknown as { getExcludedMcpServers: ReturnType<typeof vi.fn> }
-    ).getExcludedMcpServers = vi.fn().mockReturnValue(['excluded-srv']);
+    // Real-Config shape: excluded-srv IS in getMcpServers() (excluded
+    // servers are deliberately retained) but the canonical classifier
+    // names it; not-configured is in neither.
+    setMcpServers('github', 'excluded-srv');
+    setUnavailableReasons({ 'excluded-srv': 'excluded' });
 
     const text = await execText('mcp-mixed');
     // Both cases reported, with different guidance
     expect(text).toContain('not configured');
     expect(text).toContain('not-configured');
-    expect(text).toContain('excluded or blocked');
+    expect(text).toContain('configured but currently unusable');
     expect(text).toContain('excluded-srv');
+    expect(text).toContain('remove them from mcp.excluded');
     // The excluded server is NOT told to "add to settings.json"
-    expect(text).not.toContain(
-      'add them to settings.json "mcpServers" (or the equivalent managed config) and restart, or skill tool calls that need them will fail. Warning: this skill declares MCP dependencies that are configured but currently unusable (excluded or blocked): excluded-srv',
-    );
+    expect(text).not.toContain('not configured: excluded-srv');
+  });
+
+  it('reports an allow-list-blocked dependency as unusable, not unconfigured (#17323 F2)', async () => {
+    const skill = mcpSkill('mcp-allowed', ['github']);
+    setSkills([skill]);
+    loads(skill);
+    // Real-Config shape for mcp.allowed: github IS in settings.json (and in
+    // the merged map), but the allow-list filters it out of getMcpServers()
+    // and the classifier says not_allowed.
+    setMcpServers('other');
+    setUnavailableReasons({ github: 'not_allowed' });
+
+    const text = await execText('mcp-allowed');
+    expect(text).toContain('configured but currently unusable');
+    expect(text).toContain('add them to mcp.allowed');
+    // Following the old advice would change nothing — it must not appear.
+    expect(text).not.toContain('not configured');
   });
 
   it('adds no MCP warning when all declared servers are registered (#17317)', async () => {
