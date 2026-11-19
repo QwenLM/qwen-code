@@ -1,6 +1,16 @@
 export { WeComChannel } from './WeComAdapter.js';
 export { WeComCallbackChannel } from './wecom-callback-adapter.js';
 export { callbackPlugin } from './callback-plugin.js';
+export { WeComWebhookChannel } from './WeComWebhookChannel.js';
+export { webhookPlugin } from './webhook-plugin.js';
+export { ManagedWecomAdapter, wecomSettings } from './managed-wecom-adapter.js';
+export type {
+  WecomReplyContext,
+  WecomSettings,
+  ManagedWecomAdapterDeps,
+  ManagedWecomAdapterOptions,
+} from './managed-wecom-adapter.js';
+export { createManagedWecomDeps } from './managed-wecom-deps.js';
 
 import { WeComChannel } from './WeComAdapter.js';
 import type { ChannelPlugin } from '@qwen-code/channel-base';

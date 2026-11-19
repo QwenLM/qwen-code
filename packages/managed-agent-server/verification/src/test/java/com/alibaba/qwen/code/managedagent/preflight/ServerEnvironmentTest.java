@@ -1514,7 +1514,7 @@ class ServerEnvironmentTest {
 
     @Test
     void listsEachFileOfAConfigTree() throws IOException {
-        // Kubernetes mounts a Secret as one file for each property.
+        // A mounted Secret presents one file for each property.
         Path password = write("secrets/spring.datasource.password", "hunter2");
         Path port = write("secrets/server.port", "9090");
         Files.setPosixFilePermissions(password, PosixFilePermissions.fromString("rw-r--r--"));
@@ -1579,14 +1579,12 @@ class ServerEnvironmentTest {
         // Paths to files that hold a secret, and IDs, hold none.
         for (String plain : List.of("server.port",
                 "qwen.managed-agent.runtime-broker.credential-key-id",
-                "qwen.managed-agent.harness.pool.kubernetes-token-file",
                 "qwen.managed-agent.harness.pool.key-store-password-file",
                 "qwen.managed-agent.harness.pool.key-store-file",
                 "qwen.managed-agent.harness.credentials-file",
-                "qwen.managed-agent.runtime-broker.resident-kubernetes-token-file",
                 "qwen.managed-agent.auth.mode", "spring.datasource.username",
                 "qwen.managed-agent.runtime-broker.credentialKeyId",
-                "qwen.managed-agent.harness.pool.kubernetesTokenFile")) {
+                "qwen.managed-agent.harness.pool.keyStoreFile")) {
             assertTrue(!ManagedAgentPreflight.secretProperty(plain), plain);
         }
     }
@@ -1604,7 +1602,7 @@ class ServerEnvironmentTest {
                 + "</properties>\n");
         // A path to a file that holds a secret is none.
         Path path = write("conf/pool.yml",
-                "qwen.managed-agent.harness.pool.kubernetes-token-file: /var/run/token\n");
+                "qwen.managed-agent.harness.pool.key-store-file: /var/run/keystore.p12\n");
         for (Path file : List.of(yaml, properties, xml, path)) {
             Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-r--r--"));
         }

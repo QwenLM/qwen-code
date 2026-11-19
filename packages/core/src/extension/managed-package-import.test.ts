@@ -73,8 +73,9 @@ describe('Managed package import', () => {
     const zip = path.join(temporary, 'skill.zip');
     const archive = archiver.create('zip');
     const writing = pipeline(archive, createWriteStream(zip));
+    const body = 'Read "🐱"\n${extensionPath} and ${CLAUDE_PLUGIN_ROOT}.';
     archive.append(
-      '---\nname: inspect\ndescription: inspect ZIP\n---\nRead assets.',
+      `---\nname: inspect\ndescription: inspect ZIP\nuser-invocable: false\n---\n${body}`,
       { name: 'download/SKILL.md' },
     );
     archive.append('#!/bin/sh\necho inspect', {
@@ -90,7 +91,44 @@ describe('Managed package import', () => {
       { destination: path.join(temporary, 'output') },
     );
     expect(result.inspection.skills[0].name).toBe('inspect:inspect');
+    const root = 'extension://ext_40f1d684-9c5c-4e59-9937-66ea43b649e6';
+    expect(result.standaloneSkill).toEqual({
+      name: 'inspect:inspect',
+      description: 'inspect ZIP',
+      userInvocable: false,
+      catalogEntryBytes: Buffer.byteLength(
+        JSON.stringify({
+          name: 'inspect:inspect',
+          description: 'inspect ZIP',
+          body: `Read "🐱"\n${root} and ${root}.`,
+          user_invocable: false,
+          model_invocable: true,
+          asset_directory: `${root}/skills/inspect/`,
+        }),
+      ),
+    });
     expect(result.inspection.files).toContain('skills/inspect/scripts/run.sh');
+  });
+  it.each([
+    ['', 'body is empty'],
+    [' \n\t', 'body is empty'],
+    ['${extensionPath}'.repeat(11000), 'body exceeds'],
+  ])('refuses an invalid standalone body (case %#)', async (body, error) => {
+    const zip = path.join(temporary, 'skill.zip');
+    const archive = archiver.create('zip');
+    const writing = pipeline(archive, createWriteStream(zip));
+    archive.append(
+      `---\nname: inspect\ndescription: inspect files\n---\n${body}`,
+      { name: 'SKILL.md' },
+    );
+    await archive.finalize();
+    await writing;
+    const source = await input(await fs.readFile(zip), 'skill');
+    await expect(
+      prepareManagedPackageImport(source.file, source.metadata, {
+        destination: path.join(temporary, 'output'),
+      }),
+    ).rejects.toThrow(error);
   });
   it('wraps an MCP document deterministically without resolving its credentials', async () => {
     const source = await input(

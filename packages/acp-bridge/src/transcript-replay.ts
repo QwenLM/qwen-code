@@ -487,9 +487,25 @@ export function createAgentRecordTranscriptUpdate(
     typeof payload['error'] === 'string' && payload['error'].length > 0
       ? payload['error']
       : undefined;
+  const sentTo = isObjectRecord(payload['sentTo'])
+    ? payload['sentTo']
+    : undefined;
   const mentionMeta: QwenAgentMessageMeta = {
     kind: 'agent_mention',
     mentionedAgentIds,
+    ...(sentTo &&
+    typeof sentTo['sessionId'] === 'string' &&
+    typeof sentTo['workspaceCwd'] === 'string'
+      ? {
+          sentTo: {
+            sessionId: sentTo['sessionId'],
+            workspaceCwd: sentTo['workspaceCwd'],
+            ...(typeof sentTo['title'] === 'string'
+              ? { title: sentTo['title'] }
+              : {}),
+          },
+        }
+      : {}),
     ...(mentionedSquadIds.length > 0 ? { mentionedSquadIds } : {}),
     ...(mentionError ? { error: mentionError } : {}),
     ...(author ? { author } : {}),
@@ -600,6 +616,8 @@ export interface TranscriptTimingMeta {
   readonly durationMs: number;
   /** `kind === 'request'`: dispatch to first user-visible content. */
   readonly ttftMs?: number;
+  /** `kind === 'request'`: request start to first user-visible content. */
+  readonly firstVisibleOffsetMs?: number;
   /** `kind === 'request'`: 'error' comes from an `api_error` record. */
   readonly status?: 'ok' | 'error';
   readonly responseId?: string;
@@ -981,6 +999,7 @@ function parseTelemetryTiming(
   }
 
   const ttftMs = finiteNumber(uiEvent['ttft_ms']);
+  const firstVisibleOffsetMs = finiteNumber(uiEvent['first_visible_offset_ms']);
   const model = nonEmptyString(uiEvent['model']);
   // A request is logged the moment its stream ends, so its `event.timestamp`
   // really is this span's end and the start time follows from the duration.
@@ -1002,6 +1021,11 @@ function parseTelemetryTiming(
     status: eventName === EVENT_API_RESPONSE ? 'ok' : 'error',
     ...(ttftMs !== undefined && ttftMs >= 0 && ttftMs <= durationMs
       ? { ttftMs }
+      : {}),
+    ...(firstVisibleOffsetMs !== undefined &&
+    firstVisibleOffsetMs >= 0 &&
+    firstVisibleOffsetMs <= durationMs
+      ? { firstVisibleOffsetMs }
       : {}),
     ...(model !== undefined ? { model } : {}),
   };
@@ -1266,7 +1290,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           role: 'assistant',
           text: this.formatGap(gap),
           ...meta,
-          extra: { qwenDiscreteMessage: true },
+          extra: { source: 'history_gap', qwenDiscreteMessage: true },
         }),
       );
     }

@@ -3,6 +3,7 @@ import {
   createWebShellDaemonScenario,
   installMockDaemon,
   replayCompleteEvent,
+  type MockDaemonController,
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
 
@@ -13,6 +14,14 @@ const workspaces = ['primary', 'second', 'third'].map((name, index) => ({
   trusted: true,
 }));
 let scenario: WebShellDaemonScenario;
+let daemon: MockDaemonController;
+
+function sessionDate(workspaceIndex: number, index: number): Date {
+  if (workspaceIndex < 2 || index < 2)
+    return new Date(2026, 0, workspaceIndex === 1 ? 1 : 2, 0, index);
+  if (index < 5) return new Date(2025, 11, 20, 0, index);
+  return new Date(2025, 9, 1, 0, index);
+}
 
 function workspaceRow(page: Page, index: number) {
   return page.locator(`[data-sidebar-workspace="${workspaces[index]!.cwd}"]`);
@@ -28,6 +37,34 @@ async function order(page: Page) {
     .evaluateAll((rows) =>
       rows.map((row) => row.getAttribute('data-sidebar-workspace')),
     );
+}
+
+async function openWorkspaceFilter(page: Page) {
+  const displayOptions = page.getByRole('button', {
+    name: 'Display options',
+    exact: true,
+  });
+  await expect(displayOptions).toBeVisible();
+  await displayOptions.locator('../..').hover();
+  await displayOptions.click();
+  await page.getByRole('menuitem', { name: /^Workspace/ }).hover();
+  await expect(
+    page.getByRole('menuitemradio', { name: 'All', exact: true }),
+  ).toBeVisible();
+}
+
+async function openGroupBy(page: Page) {
+  const displayOptions = page.getByRole('button', {
+    name: 'Display options',
+    exact: true,
+  });
+  await expect(displayOptions).toBeVisible();
+  await displayOptions.locator('../..').hover();
+  await displayOptions.click();
+  await page.getByRole('menuitem', { name: /^Group by/ }).hover();
+  await expect(
+    page.getByRole('menuitemradio', { name: 'Workspace', exact: true }),
+  ).toBeVisible();
 }
 
 async function startDrag(page: Page, index: number) {
@@ -51,22 +88,23 @@ test.beforeEach(async ({ page }, testInfo) => {
         'multi_workspace_sessions',
         'workspace_qualified_rest_core',
         'workspace_order',
+        'session_organization',
       ],
       workspaces,
     },
-    sessions: workspaces.flatMap((workspace) =>
+    sessions: workspaces.flatMap((workspace, workspaceIndex) =>
       Array.from({ length: 7 }, (_, index) => ({
         sessionId: `${workspace.id}-${index}`,
         workspaceCwd: workspace.cwd,
         displayName: `${workspace.id} session ${index + 1}`,
-        createdAt: new Date(2026, 0, 1, 0, index).toISOString(),
-        updatedAt: new Date(2026, 0, 1, 0, index).toISOString(),
+        createdAt: sessionDate(workspaceIndex, index).toISOString(),
+        updatedAt: sessionDate(workspaceIndex, index).toISOString(),
         clientCount: 0,
         hasActivePrompt: false,
       })),
     ),
   });
-  const daemon = await installMockDaemon(page, scenario, {
+  daemon = await installMockDaemon(page, scenario, {
     baseURL: String(testInfo.project.use.baseURL),
   });
   await page.goto(`/session/${scenario.sessionId}`);
@@ -76,6 +114,111 @@ test.beforeEach(async ({ page }, testInfo) => {
   );
   await expect(header(page, 2)).toBeVisible();
   await expect(header(page, 0)).toHaveAttribute('draggable', 'true');
+});
+
+test('workspace filtering survives reload and restores defaults', async ({
+  page,
+}, testInfo) => {
+  const secondLabel = workspaces[1]!.cwd.split('/').at(-1)!;
+  await openWorkspaceFilter(page);
+  await expect(
+    page.getByRole('menuitemradio', { name: 'All', exact: true }),
+  ).toHaveAttribute('aria-checked', 'true');
+  await page.screenshot({ path: testInfo.outputPath('workspace-filter.png') });
+  await page
+    .getByRole('menuitemradio', { name: secondLabel, exact: true })
+    .click();
+  await expect.poll(() => order(page)).toEqual([workspaces[1]!.cwd]);
+  await page.reload();
+  await expect(header(page, 1)).toBeVisible();
+  expect(await order(page)).toEqual([workspaces[1]!.cwd]);
+  await openWorkspaceFilter(page);
+  await expect(
+    page.getByRole('menuitemradio', { name: secondLabel, exact: true }),
+  ).toHaveAttribute('aria-checked', 'true');
+  await page
+    .getByRole('menuitemradio', { name: 'No workspace', exact: true })
+    .click();
+  await expect.poll(() => order(page)).toEqual([]);
+  await openWorkspaceFilter(page);
+  await page
+    .getByRole('menuitem', { name: 'Restore defaults', exact: true })
+    .click();
+  await expect
+    .poll(() => order(page))
+    .toEqual(workspaces.map((workspace) => workspace.cwd));
+});
+
+test('activity date grouping filters, persists, and restores workspace grouping', async ({
+  page,
+}, testInfo) => {
+  await page.clock.setFixedTime(new Date(2026, 0, 2, 12));
+  await openGroupBy(page);
+  await expect(
+    page.getByRole('menuitemradio', { name: 'Workspace', exact: true }),
+  ).toHaveAttribute('aria-checked', 'true');
+  await page.screenshot({ path: testInfo.outputPath('group-by-menu.png') });
+  await page
+    .getByRole('menuitemradio', { name: 'Activity date', exact: true })
+    .click();
+  await expect.poll(() => order(page)).toEqual([]);
+  await expect(
+    page.getByText('Recent conversations', { exact: true }),
+  ).toBeVisible();
+  const today = page.getByRole('region', { name: 'Today', exact: true });
+  const thisWeek = page.getByRole('region', {
+    name: 'This week',
+    exact: true,
+  });
+  const last30Days = page.getByRole('region', {
+    name: 'Last 30 days',
+    exact: true,
+  });
+  const older = page.getByRole('region', { name: 'Older', exact: true });
+  await expect(today).toContainText('· 9');
+  await today.getByRole('button', { name: 'Show 4 more', exact: true }).click();
+  await expect(today).toContainText('sidebar-primary session 7');
+  await expect(today).toContainText('sidebar-third session 2');
+  await expect(thisWeek).toContainText('sidebar-second session 7');
+  await expect(last30Days).toContainText('sidebar-third session 3');
+  await expect(older).toContainText('sidebar-third session 6');
+  await page.screenshot({ path: testInfo.outputPath('activity-date.png') });
+
+  await openWorkspaceFilter(page);
+  await page
+    .getByRole('menuitemradio', { name: 'sidebar-second', exact: true })
+    .click();
+  await expect(today).toHaveCount(0);
+  await expect(last30Days).toHaveCount(0);
+  await expect(older).toHaveCount(0);
+  await expect(thisWeek).toContainText('sidebar-second session 7');
+  await expect(thisWeek).not.toContainText('sidebar-primary');
+  await expect(thisWeek).not.toContainText('sidebar-third');
+
+  await page.reload();
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: scenario.sessionId, replayedCount: 0 }),
+  );
+  await expect(thisWeek).toBeVisible();
+  await expect(thisWeek).toContainText('sidebar-second session 7');
+  await openGroupBy(page);
+  await expect(
+    page.getByRole('menuitemradio', { name: 'Activity date', exact: true }),
+  ).toHaveAttribute('aria-checked', 'true');
+  await page.keyboard.press('Escape');
+  await openWorkspaceFilter(page);
+  await expect(
+    page.getByRole('menuitemradio', { name: 'sidebar-second', exact: true }),
+  ).toHaveAttribute('aria-checked', 'true');
+  await page
+    .getByRole('menuitem', { name: 'Restore defaults', exact: true })
+    .click();
+  await expect
+    .poll(() => order(page))
+    .toEqual(workspaces.map((workspace) => workspace.cwd));
+  await expect(today).toHaveCount(0);
+  await expect(thisWeek).toHaveCount(0);
 });
 
 test('bulk collapse/expand retains headers and five-session previews', async ({
