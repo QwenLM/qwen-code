@@ -20,7 +20,11 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { execFileSync } from 'node:child_process';
 import { Storage } from '../config/storage.js';
-import { resetDebugLoggingState, setDebugLogSession } from './debugLogger.js';
+import {
+  resetDebugLoggingState,
+  runWithDebugLogSession,
+  setDebugLogSession,
+} from './debugLogger.js';
 import {
   _getFileLockCountForTest,
   _recoverObjectsFromLine,
@@ -739,6 +743,52 @@ describe('writeLine / writeLineSync / write', () => {
           );
           expect(fs.readFileSync(files[1], 'utf8')).toBe(
             '{"second":\n{"next":1}\n\n{"repeated":1}\n',
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
+
+    it('warns once per debug session for the same denied path', async () => {
+      const sessionA = `jsonl-tail-log-session-a-${name}`;
+      const sessionB = `jsonl-tail-log-session-b-${name}`;
+      await withDebugLog(sessionA, true, async (logPathA) => {
+        const logPathB = Storage.getDebugLogPath(sessionB);
+        const file = tmpFile('{"partial":');
+        const error = Object.assign(new Error('read denied'), {
+          code: 'EACCES',
+        });
+        const spy = denyTailProbe(error);
+        const appendFor = (sessionId: string, record: unknown) =>
+          runWithDebugLogSession({ getSessionId: () => sessionId }, () =>
+            append(file, record),
+          );
+        const settleDebugLogWrites = () =>
+          new Promise<void>((resolve) => setImmediate(resolve));
+
+        try {
+          await appendFor(sessionA, { write: 'a1' });
+          await vi.waitFor(() => {
+            expect(tailWarnings(logPathA, file)).toHaveLength(1);
+          });
+          await appendFor(sessionA, { write: 'a2' });
+          await settleDebugLogWrites();
+          expect(tailWarnings(logPathA, file)).toHaveLength(1);
+          expect(tailWarnings(logPathB, file)).toHaveLength(0);
+
+          await appendFor(sessionB, { write: 'b1' });
+          await vi.waitFor(() => {
+            expect(tailWarnings(logPathB, file)).toHaveLength(1);
+          });
+          await appendFor(sessionB, { write: 'b2' });
+          await settleDebugLogWrites();
+
+          expect(tailWarnings(logPathA, file)).toHaveLength(1);
+          expect(tailWarnings(logPathB, file)).toHaveLength(1);
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"partial":\n{"write":"a1"}\n\n{"write":"a2"}\n\n' +
+              '{"write":"b1"}\n\n{"write":"b2"}\n',
           );
         } finally {
           spy.mockRestore();

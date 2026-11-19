@@ -28,7 +28,11 @@ import { atomicWriteFileSync } from './atomicFileWrite.js';
 import readline from 'node:readline';
 import { finished } from 'node:stream/promises';
 import { Mutex } from 'async-mutex';
-import { createDebugLogger, isDebugLogFileEnabled } from './debugLogger.js';
+import {
+  createDebugLogger,
+  getActiveDebugSessionId,
+  isDebugLogFileEnabled,
+} from './debugLogger.js';
 
 const debugLogger = createDebugLogger('JSONL');
 
@@ -356,16 +360,20 @@ function canAppendWithoutTailInspection(
 
   // Preserve append-only files when the tail cannot be read, but expose that
   // tail inspection was skipped without flooding every subsequent line.
+  const debugSessionId = getActiveDebugSessionId();
+  const diagnosticKey =
+    debugSessionId === null ? null : JSON.stringify([filePath, debugSessionId]);
   if (
     debugLogger.isEnabled() &&
     isDebugLogFileEnabled() &&
-    !diagnosedTailReadFailures.has(filePath)
+    diagnosticKey !== null &&
+    !diagnosedTailReadFailures.has(diagnosticKey)
   ) {
     if (diagnosedTailReadFailures.size >= MAX_DIAGNOSED_TAIL_READ_FAILURES) {
       const oldest = diagnosedTailReadFailures.values().next().value;
       if (oldest !== undefined) diagnosedTailReadFailures.delete(oldest);
     }
-    diagnosedTailReadFailures.add(filePath);
+    diagnosedTailReadFailures.add(diagnosticKey);
     debugLogger.warn(
       `Cannot inspect JSONL tail in ${filePath}; appending with a conservative newline separator:`,
       error,
