@@ -219,8 +219,8 @@
       "zh": "渠道适配器对一条出站投递的认领在未收到回执时保持有效的时长。超时后，对账任务将该投递结果记为未知，且不会自动重发。不带单位的数字按秒计。"
     },
     "qwen.managed-agent.channels.enabled": {
-      "en": "Whether the trusted channel adapter routes under `/internal/managed-channels/` (register, disconnect, inbound events, delivery claims, receipts and resends) are served. They authenticate by the tenant header alone, so startup refuses it unless `qwen.managed-agent.internal-server.port` sets a separate internal listener.",
-      "zh": "是否提供 `/internal/managed-channels/` 下的受信渠道适配器路由（注册、断开、入站事件、投递认领、回执与重发）。这些路由仅凭租户请求头鉴权，因此未通过 `qwen.managed-agent.internal-server.port` 配置独立的内部监听端口时，启动时拒绝。"
+      "en": "Whether the trusted channel adapter routes under `/internal/managed-channels/` (register, disconnect, inbound events, delivery claims, receipts and resends, and PR-watch binding create/list/retire plus private PR-event injection) are served. They authenticate by the tenant header alone, so startup refuses it unless `qwen.managed-agent.internal-server.port` sets a separate internal listener.",
+      "zh": "是否提供 `/internal/managed-channels/` 下的受信渠道适配器路由（注册、断开、入站事件、投递认领、回执与重发，以及 PR-watch 绑定的创建/列表/退订与私有 PR 事件注入）。这些路由仅凭租户请求头鉴权，因此未通过 `qwen.managed-agent.internal-server.port` 配置独立的内部监听端口时，启动时拒绝。"
     },
     "qwen.managed-agent.channels.scan-delay": {
       "en": "How long the channel reconcile pass waits between runs; each run settles up to 50 outbound delivery claims older than `qwen.managed-agent.channels.claim-lease` as unknown. Accepts a duration such as `30s`; a plain number is milliseconds.",
