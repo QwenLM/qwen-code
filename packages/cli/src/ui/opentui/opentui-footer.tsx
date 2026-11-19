@@ -18,7 +18,8 @@
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import wrapAnsi from 'wrap-ansi';
-import { useTerminalDimensions } from '@opentui/react';
+import { useRenderer, useTerminalDimensions } from '@opentui/react';
+import { MouseButton } from '@opentui/core';
 import { ApprovalMode, type Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import type {
@@ -48,11 +49,46 @@ import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
 import { formatExecutionSandbox } from '../utils/execution-sandbox-display.js';
 import { C } from './theme.js';
 import { statusLineStyledText } from './status-line-text.js';
+import { stripAnsi } from './a11y-plain-text.js';
 
 /** One coloured run of the footer's bottom hint row. */
 interface HintPart {
   text: string;
   color: string;
+}
+
+interface EffortClickSpan {
+  lineIndex: number;
+  start: number;
+  end: number;
+}
+
+/**
+ * Locate the tier run inside the wrapped status line so only that substring is
+ * clickable. A line carrying ANSI is skipped: slicing it at a visible column
+ * would cut an escape sequence. The preset path normally has none, and a
+ * command status line never supplies a segment in the first place.
+ */
+function findEffortSpan(
+  lines: readonly string[],
+  segment: string | undefined,
+  effort: string | undefined,
+): EffortClickSpan | undefined {
+  if (!segment || !effort || !segment.endsWith(` ${effort}`)) {
+    return undefined;
+  }
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+    const line = lines[lineIndex];
+    if (stripAnsi(line) !== line) continue;
+    const at = line.indexOf(segment);
+    if (at === -1) continue;
+    return {
+      lineIndex,
+      start: at + segment.length - effort.length,
+      end: at + segment.length,
+    };
+  }
+  return undefined;
 }
 
 /**
@@ -201,6 +237,8 @@ export interface OpenTuiFooterProps {
   /** Armed two-press quit warning: takes the bottom hint slot and gates the
    * status line off, as it does in ink. */
   exitHint?: string | null;
+  /** Opens the effort picker from the clickable tier in the status line. */
+  onOpenEffort?: () => void;
 }
 
 /** The status line (ink `Footer` parity). */
@@ -216,7 +254,9 @@ export function OpenTuiFooter({
   shellModeActive = false,
   vimMode,
   exitHint = null,
+  onOpenEffort,
 }: OpenTuiFooterProps) {
+  const renderer = useRenderer();
   const workflowMode = useWorkflowMode(config);
   const { width } = useTerminalDimensions();
   const generationConfig = config.getContentGeneratorConfig();
@@ -299,6 +339,20 @@ export function OpenTuiFooter({
   })
     .split('\n')
     .slice(0, 2);
+  // Only the tier run is a click target; a wrap that splits the model segment
+  // leaves the rest of the line as plain text.
+  const effortSpan = findEffortSpan(
+    statusLines,
+    statusLine.reasoningSegment?.text,
+    statusLine.reasoningSegment?.effort,
+  );
+  const statusTextStyle = {
+    color:
+      !statusLine.respectUserColors && statusLine.useThemeColors
+        ? C.accent
+        : undefined,
+    dim: !statusLine.respectUserColors && !statusLine.useThemeColors,
+  };
   // One truncated line in ink; cut part by part against the remaining budget so
   // the coloured mode label survives narrowing instead of being dropped whole.
   const hintRow: HintPart[] = [];
@@ -340,19 +394,48 @@ export function OpenTuiFooter({
       >
         <box flexDirection="column" width={statusWidth}>
           {statusLine.lines.length > 0 &&
-            statusLines.map((line, index) => (
-              <text
-                key={index}
-                content={statusLineStyledText(line, {
-                  color:
-                    !statusLine.respectUserColors && statusLine.useThemeColors
-                      ? C.accent
-                      : undefined,
-                  dim:
-                    !statusLine.respectUserColors && !statusLine.useThemeColors,
-                })}
-              />
-            ))}
+            statusLines.map((line, index) => {
+              if (effortSpan?.lineIndex !== index) {
+                return (
+                  <text
+                    key={index}
+                    content={statusLineStyledText(line, statusTextStyle)}
+                  />
+                );
+              }
+              const before = line.slice(0, effortSpan.start);
+              const effort = line.slice(effortSpan.start, effortSpan.end);
+              const after = line.slice(effortSpan.end);
+              return (
+                <box key={index} flexDirection="row">
+                  {before && (
+                    <text
+                      content={statusLineStyledText(before, statusTextStyle)}
+                    />
+                  )}
+                  <box
+                    onMouseUp={(event) => {
+                      if (event.button !== MouseButton.LEFT) return;
+                      // A selectable-text click starts a zero-length selection;
+                      // a drag leaves text. Only the former is a tap.
+                      if (renderer.getSelection?.()?.getSelectedText().trim()) {
+                        return;
+                      }
+                      onOpenEffort?.();
+                    }}
+                  >
+                    <text
+                      content={statusLineStyledText(effort, statusTextStyle)}
+                    />
+                  </box>
+                  {after && (
+                    <text
+                      content={statusLineStyledText(after, statusTextStyle)}
+                    />
+                  )}
+                </box>
+              );
+            })}
           {activeWorktree &&
             !settings.merged.ui?.hideBuiltinWorktreeIndicator && (
               <text attributes={2}>

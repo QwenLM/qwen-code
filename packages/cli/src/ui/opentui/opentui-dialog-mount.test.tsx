@@ -223,6 +223,11 @@ const CONFIG = {
   getSessionId: () => 'owned-session',
   getExtensionManager: () => undefined,
   getModel: () => 'fake-model',
+  getContentGeneratorConfig: () => ({
+    model: 'fake-model',
+    authType: 'openai',
+    reasoning: { effort: 'max' },
+  }),
   getFileCheckpointingEnabled: () => true,
   getHookSystem: mockGetHookSystem,
   getChatRecordingService: () => ({ recordSlashCommand }),
@@ -433,6 +438,41 @@ describe('OpenTuiDialogMount routing', () => {
     expect(
       mocks.state.dialogProps['settings']?.['availableTerminalHeight'],
     ).toBe(20);
+  });
+
+  it('shows a footer-picked effort without recording /effort', () => {
+    mount({ dialog: 'effort', openedFromFooter: true });
+    const notify = mocks.state.dialogProps['effort']?.['notify'] as (
+      text: string,
+      level?: 'info' | 'error',
+    ) => void;
+
+    act(() => notify('Reasoning effort: max.', 'info'));
+
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({ text: 'Reasoning effort: max.' }),
+      expect.any(Number),
+    );
+    expect(recordSlashCommand).not.toHaveBeenCalled();
+  });
+
+  it('hands the footer tier to the picker as its preselection', () => {
+    mount({ dialog: 'effort', openedFromFooter: true });
+    expect(mocks.state.dialogProps['effort']?.['initialEffort']).toBe('max');
+  });
+
+  it('records a /effort-opened result as the typed command', () => {
+    mount({ dialog: 'effort' });
+    const notify = mocks.state.dialogProps['effort']?.['notify'] as (
+      text: string,
+      level?: 'info' | 'error',
+    ) => void;
+
+    act(() => notify('Reasoning effort: max.', 'info'));
+
+    expect(recordSlashCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: 'result', rawCommand: '/effort' }),
+    );
   });
 
   it('forwards settings restart requests to the shell owner', () => {

@@ -6,13 +6,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act, render, screen, waitFor } from '@testing-library/react';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BUILT_IN_OUTPUT_STYLES,
   type Config,
   type OutputStyleDefinition,
 } from '@qwen-code/qwen-code-core';
+import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { getCachedStringWidth } from '../utils/textUtils.js';
@@ -46,9 +53,18 @@ const mocks = vi.hoisted(() => {
             ),
           ),
         );
+        const source = config as Record<string, unknown> | null;
         return React.createElement(
           type === 'box' ? 'div' : 'span',
-          { ...(key === undefined ? {} : { key }), 'data-p': captured },
+          {
+            ...(key === undefined ? {} : { key }),
+            'data-p': captured,
+            // Mouse parity is observable from these tests only if the handler
+            // reaches the DOM node; the real renderer gets it as a prop.
+            ...(typeof source?.['onMouseUp'] === 'function'
+              ? { onMouseUp: source['onMouseUp'] as (event: unknown) => void }
+              : {}),
+          },
           children,
         );
       }
@@ -1633,28 +1649,112 @@ describe('OpenTuiEffortDialog', () => {
   function renderEffortDialog(
     reasoningEffort: string | undefined,
     availableTerminalHeight?: number,
+    nestedStaticEffort = false,
+    providerKey = 'openai',
+    initialEffort?: ReasoningEffort,
+    options: {
+      sibling?: Record<string, unknown>;
+      persistedBaseUrl?: string;
+      workspaceTier?: string;
+      modelGenerationConfig?: Record<string, unknown>;
+    } = {},
   ) {
     const setValue = vi.fn();
+    const setValues = vi.fn();
+    const recomputeMerged = vi.fn();
     const notify = vi.fn();
     let applied = reasoningEffort;
     const setReasoningEffort = vi.fn((tier: string) => {
       applied = tier;
     });
+    const makeStatic = () =>
+      nestedStaticEffort
+        ? {
+            extra_body: { reasoning: { effort: 'max' }, temperature: 1 },
+            samplingParams: { reasoning: { effort: 'max' } },
+          }
+        : {
+            extra_body: { reasoning_effort: 'max', temperature: 1 },
+            samplingParams: { reasoning_effort: 'max' },
+          };
+    const generation = { ...makeStatic(), authType: 'openai' } as {
+      extra_body?: Record<string, unknown>;
+      samplingParams?: Record<string, unknown>;
+      authType?: string;
+    };
+    const registryGeneration = makeStatic() as {
+      extra_body?: Record<string, unknown>;
+      samplingParams?: Record<string, unknown>;
+    };
+    const userSettings = {
+      ...(options.modelGenerationConfig
+        ? {
+            model: {
+              generationConfig: options.modelGenerationConfig,
+            },
+          }
+        : {}),
+      modelProviders: {
+        [providerKey]: [
+          {
+            id: 'deepseek-v4-pro',
+            name: 'DeepSeek V4 Pro',
+            baseUrl: 'https://active.example',
+            generationConfig: makeStatic(),
+          },
+          ...(options.sibling ? [options.sibling] : []),
+        ],
+      },
+    };
+    const workspaceSettings = {
+      general: {},
+      ...(options.workspaceTier
+        ? { model: { reasoningEffort: options.workspaceTier } }
+        : {}),
+    };
     const config = {
       getModel: () => 'deepseek-v4-pro',
       getAuthType: () => 'openai',
       getReasoningEffort: () => applied,
       setReasoningEffort,
+      getContentGeneratorConfig: () => generation,
+      getModelsConfig: () => ({
+        getGenerationConfig: () => generation,
+        getResolvedModel: () => ({ generationConfig: registryGeneration }),
+      }),
       getResolvedModelConfig: () => ({
         capabilities: { reasoning: capability },
       }),
     } as unknown as Config;
     const settings = {
       isTrusted: true,
-      user: { settings: {} },
-      workspace: { settings: { general: {} } },
-      merged: {},
+      user: { settings: userSettings },
+      workspace: { settings: workspaceSettings },
+      merged: {
+        providerProtocol: { 'my-gateway': 'openai' },
+        ...(options.persistedBaseUrl
+          ? {
+              model: {
+                baseUrl: options.persistedBaseUrl,
+              },
+            }
+          : {}),
+      },
       setValue,
+      setValues,
+      recomputeMerged,
+      forScope: (scope: SettingScope) => {
+        const scopeSettings =
+          scope === SettingScope.User
+            ? userSettings
+            : scope === SettingScope.Workspace
+              ? workspaceSettings
+              : {};
+        return {
+          settings: scopeSettings,
+          originalSettings: scopeSettings,
+        };
+      },
     } as unknown as LoadedSettings;
     render(
       <OpenTuiEffortDialog
@@ -1662,10 +1762,20 @@ describe('OpenTuiEffortDialog', () => {
         settings={settings}
         onClose={vi.fn()}
         notify={notify}
+        initialEffort={initialEffort}
         availableTerminalHeight={availableTerminalHeight}
       />,
     );
-    return { setValue, setReasoningEffort, notify };
+    return {
+      setValue,
+      setValues,
+      recomputeMerged,
+      setReasoningEffort,
+      notify,
+      generation,
+      registryGeneration,
+      userSettings,
+    };
   }
 
   it('lists only the tiers the resolved model exposes, with ink labels', () => {
@@ -1711,6 +1821,224 @@ describe('OpenTuiEffortDialog', () => {
       SettingScope.User,
       'model.reasoningEffort',
       'high',
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+  });
+
+  it('persists a footer pick and removes the static provider override', () => {
+    const harness = renderEffortDialog('max');
+    press('down');
+    press('return');
+
+    expect(harness.setReasoningEffort).toHaveBeenCalledWith('high');
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.reasoningEffort',
+      'high',
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+    const providerWrite = harness.setValue.mock.calls.find(
+      ([, key]) => key === 'modelProviders.openai',
+    );
+    expect(providerWrite).toBeDefined();
+    const nextProviders = providerWrite![2] as Array<{
+      generationConfig: {
+        extra_body?: Record<string, unknown>;
+        samplingParams?: Record<string, unknown>;
+      };
+    }>;
+    // The static keys would win after restart; removing them leaves the saved
+    // global tier as the single authority.
+    expect(nextProviders[0]?.generationConfig.extra_body).toEqual({
+      temperature: 1,
+    });
+    expect(nextProviders[0]?.generationConfig.samplingParams).toBeUndefined();
+    expect(harness.notify).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears a workspace-owned tier so the pick survives restart', () => {
+    const harness = renderEffortDialog(
+      'max',
+      undefined,
+      false,
+      'openai',
+      undefined,
+      { workspaceTier: 'max' },
+    );
+    press('down');
+    press('return');
+
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'model.reasoningEffort',
+      undefined,
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+    expect(harness.recomputeMerged).toHaveBeenCalled();
+  });
+
+  it('persists through a custom provider key mapped by providerProtocol', () => {
+    const harness = renderEffortDialog('max', undefined, false, 'my-gateway');
+    press('down');
+    press('return');
+
+    const providerWrite = harness.setValue.mock.calls.find(
+      ([, key]) => key === 'modelProviders.my-gateway',
+    );
+    expect(providerWrite).toBeDefined();
+    const nextProviders = providerWrite![2] as Array<{
+      generationConfig: { extra_body?: Record<string, unknown> };
+    }>;
+    expect(nextProviders[0]?.generationConfig.extra_body).toEqual({
+      temperature: 1,
+    });
+  });
+
+  it('leaves a same-id sibling without a baseUrl untouched', () => {
+    const sibling = {
+      id: 'deepseek-v4-pro',
+      generationConfig: {
+        extra_body: { reasoning_effort: 'max' },
+        samplingParams: { reasoning_effort: 'max' },
+      },
+    };
+    const harness = renderEffortDialog(
+      'max',
+      undefined,
+      false,
+      'openai',
+      undefined,
+      {
+        sibling,
+        persistedBaseUrl: 'https://active.example',
+      },
+    );
+    press('down');
+    press('return');
+
+    const providerWrite = harness.setValue.mock.calls.find(
+      ([, key]) => key === 'modelProviders.openai',
+    );
+    const nextProviders = providerWrite![2] as Array<Record<string, unknown>>;
+    const active = nextProviders[0] as {
+      generationConfig: { extra_body?: Record<string, unknown> };
+    };
+    expect(active.generationConfig.extra_body).toEqual({ temperature: 1 });
+    expect(nextProviders[1]).toEqual(sibling);
+  });
+
+  it('strips the live static effort blocks so the session tier wins', () => {
+    const harness = renderEffortDialog('max');
+
+    press('down');
+    press('return');
+
+    // The provider builder merges extra_body/samplingParams last, so the
+    // current session must drop those knobs to let reasoning.effort through.
+    expect(harness.generation.extra_body).toEqual({ temperature: 1 });
+    expect(harness.generation.samplingParams).toBeUndefined();
+    // Same-model sub-agents inherit the registry copy, not just the live one.
+    expect(harness.registryGeneration.extra_body).toEqual({ temperature: 1 });
+    expect(harness.registryGeneration.samplingParams).toBeUndefined();
+  });
+
+  it('removes the static effort from model.generationConfig too', () => {
+    const harness = renderEffortDialog(
+      'max',
+      undefined,
+      false,
+      'openai',
+      undefined,
+      {
+        modelGenerationConfig: {
+          extra_body: { reasoning_effort: 'max', temperature: 1 },
+          samplingParams: { reasoning_effort: 'max' },
+        },
+      },
+    );
+    press('down');
+    press('return');
+
+    expect(harness.setValues).toHaveBeenCalledWith([
+      {
+        scope: SettingScope.User,
+        key: 'model.generationConfig.extra_body.reasoning_effort',
+        value: undefined,
+      },
+      {
+        scope: SettingScope.User,
+        key: 'model.generationConfig.samplingParams',
+        value: undefined,
+      },
+    ]);
+
+    const generationConfig = harness.userSettings.model?.generationConfig as {
+      extra_body?: Record<string, unknown>;
+      samplingParams?: Record<string, unknown>;
+    };
+    // Sibling keys survive; the emptied samplingParams block is gone.
+    expect(generationConfig.extra_body).toEqual({ temperature: 1 });
+    expect('samplingParams' in generationConfig).toBe(false);
+  });
+
+  it('strips the nested reasoning.effort shape too', () => {
+    const harness = renderEffortDialog('max', undefined, true);
+
+    press('down');
+    press('return');
+
+    expect(harness.generation.extra_body).toEqual({ temperature: 1 });
+    expect(harness.generation.samplingParams).toBeUndefined();
+    const providerWrite = harness.setValue.mock.calls.find(
+      ([, key]) => key === 'modelProviders.openai',
+    );
+    const nextProviders = providerWrite![2] as Array<{
+      generationConfig: {
+        extra_body?: Record<string, unknown>;
+        samplingParams?: Record<string, unknown>;
+      };
+    }>;
+    expect(nextProviders[0]?.generationConfig.extra_body).toEqual({
+      temperature: 1,
+    });
+    expect(nextProviders[0]?.generationConfig.samplingParams).toBeUndefined();
+  });
+
+  it('preselects the footer tier when the footer opened the picker', () => {
+    renderEffortDialog(undefined, undefined, false, 'openai', 'max');
+
+    expect(isSelected('max — ')).toBe(true);
+    expect(screen.queryByText(/No effort configured/)).toBeNull();
+  });
+
+  it('reports a persistence failure instead of pretending it saved', () => {
+    const harness = renderEffortDialog('max');
+    harness.setValue.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+
+    press('down');
+    press('return');
+
+    expect(harness.setValue).toHaveBeenCalledTimes(1);
+    expect(harness.notify).toHaveBeenCalledWith('disk full', 'error');
+  });
+
+  it('selects a tier with a left click, like the keyboard path', () => {
+    const harness = renderEffortDialog('max');
+
+    fireEvent.mouseUp(screen.getByText(/high — /), { button: 0 });
+
+    expect(harness.setReasoningEffort).toHaveBeenCalledWith('high');
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.reasoningEffort',
+      'high',
+      undefined,
+      { throwOnWriteFailure: true },
     );
   });
 

@@ -27,8 +27,28 @@ import {
   REASONING_EFFORT_TIERS,
 } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
-import { SettingScope, type LoadedSettings } from '../../config/settings.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import {
+  getHomeEnvFallbackVars,
+  SettingScope,
+  type LoadedSettings,
+} from '../../config/settings.js';
+import {
+  getPersistScopeForModelSelection,
+  getWritableScopes,
+} from '../../config/modelProvidersScope.js';
+import { findRawModelProviderEntries } from '../../config/loadedSettingsAdapter.js';
+import {
+  deleteNestedPropertySafe,
+  settingExistsInScope,
+} from '../../config/settingsUtils.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { preserveModelProviderPlaceholders } from '@qwen-code/qwen-code-core/providers/model-config-serialization.js';
+import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
+import type {
+  ModelConfig,
+  ModelProvidersConfig,
+} from '@qwen-code/qwen-code-core/models/types.js';
+import { tryResolveModelProtocol } from '@qwen-code/qwen-code-core/models/modelRegistry.js';
 import {
   getScopeItems,
   getScopeMessageForSetting,
@@ -600,21 +620,417 @@ export function OpenTuiApprovalModeDialog(props: {
   );
 }
 
+/**
+ * A static effort in `extra_body`/`samplingParams` outranks the session tier in
+ * the provider's request builder (the DeepSeek path merges those raw knobs
+ * last). The picker removes those keys from the live config and from the
+ * persisted provider entry, leaving `model.reasoningEffort` as the single
+ * authority. Both supported shapes are covered: the flat `reasoning_effort`
+ * string and the nested `reasoning.effort`; sibling keys are preserved.
+ */
+function stripEffortBlock(block: Record<string, unknown> | undefined): {
+  block: Record<string, unknown> | undefined;
+  changed: boolean;
+  /** Paths removed relative to this block, for a per-key disk delete. */
+  removedPaths: string[];
+} {
+  if (!block) return { block, changed: false, removedPaths: [] };
+  let next = block;
+  let changed = false;
+  const removedPaths: string[] = [];
+  if (typeof block['reasoning_effort'] === 'string') {
+    const { reasoning_effort: _drop, ...rest } = next;
+    next = rest;
+    changed = true;
+    removedPaths.push('reasoning_effort');
+  }
+  const reasoning = block['reasoning'];
+  if (reasoning && typeof reasoning === 'object' && !Array.isArray(reasoning)) {
+    const nested = reasoning as Record<string, unknown>;
+    if (typeof nested['effort'] === 'string') {
+      const { effort: _drop, ...rest } = nested;
+      changed = true;
+      if (Object.keys(rest).length > 0) {
+        next = { ...next, reasoning: rest };
+        removedPaths.push('reasoning.effort');
+      } else {
+        const { reasoning: _dropReasoning, ...without } = next;
+        next = without;
+        removedPaths.push('reasoning');
+      }
+    }
+  }
+  return { block: changed ? next : block, changed, removedPaths };
+}
+
+function stripLiveEffortOverrides(config: Config): void {
+  // `applyReasoningEffort` is a no-op when thinking is explicitly disabled;
+  // removing a raw knob there would change a config the picker cannot edit.
+  if (config.getContentGeneratorConfig()?.reasoning === false) return;
+  const strip = (
+    generation:
+      | {
+          extra_body?: Record<string, unknown>;
+          samplingParams?: Record<string, unknown>;
+        }
+      | undefined,
+  ): void => {
+    if (!generation) return;
+    const extraBody = stripEffortBlock(generation.extra_body);
+    if (extraBody.changed) {
+      generation.extra_body =
+        extraBody.block && Object.keys(extraBody.block).length > 0
+          ? extraBody.block
+          : undefined;
+    }
+    const samplingParams = stripEffortBlock(generation.samplingParams);
+    if (samplingParams.changed) {
+      generation.samplingParams =
+        samplingParams.block && Object.keys(samplingParams.block).length > 0
+          ? samplingParams.block
+          : undefined;
+    }
+  };
+  strip(config.getContentGeneratorConfig());
+  const modelsConfig = config.getModelsConfig?.();
+  strip(modelsConfig?.getGenerationConfig?.());
+  const generation = config.getContentGeneratorConfig?.();
+  const authType = generation?.authType;
+  const modelId = config.getModel?.();
+  if (authType && modelId) {
+    // Same-model sub-agents inherit the registry entry's generationConfig.
+    const resolved = modelsConfig?.getResolvedModel?.(
+      authType,
+      modelId,
+      generation?.baseUrl,
+    );
+    strip(resolved?.generationConfig);
+  }
+}
+
+interface ActiveProviderEntry {
+  scope: SettingScope;
+  key: string;
+  entries: unknown[];
+  index: number;
+}
+
+/**
+ * The one effective provider entry the live config came from. `modelProviders`
+ * is merged per provider key, so the owning scope can differ from the entry's
+ * protocol key. Matching mirrors `findModelConfig`: id + authType, with the
+ * live baseUrl first and the persisted `model.baseUrl` second; an ambiguous set
+ * yields no target rather than rewriting a sibling provider. System-owned
+ * buckets are visible here so a shadowed writable bucket is never rewritten.
+ */
+function findActiveProviderEntry(
+  config: Config,
+  settings: LoadedSettings,
+): ActiveProviderEntry | undefined {
+  const authType = config.getContentGeneratorConfig?.()?.authType;
+  const activeId = config.getModel?.();
+  if (!authType || !activeId) return undefined;
+
+  const seenKeys = new Set<string>();
+  const effective: Array<{
+    scope: SettingScope;
+    key: string;
+    entries: unknown[];
+  }> = [];
+  for (const scope of [
+    SettingScope.System,
+    ...(settings.isTrusted ? [SettingScope.Workspace] : []),
+    SettingScope.User,
+    SettingScope.SystemDefaults,
+  ]) {
+    const providers = settings.forScope(scope).settings.modelProviders;
+    if (!providers || typeof providers !== 'object') continue;
+    for (const [key, entries] of Object.entries(providers)) {
+      if (!Array.isArray(entries) || seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      effective.push({ scope, key, entries });
+    }
+  }
+
+  const candidates: ActiveProviderEntry[] = [];
+  for (const bucket of effective) {
+    for (let index = 0; index < bucket.entries.length; index++) {
+      const entry = bucket.entries[index];
+      if (!entry || typeof entry !== 'object') continue;
+      const record = entry as Record<string, unknown>;
+      if (record['id'] !== activeId) continue;
+      if (
+        tryResolveModelProtocol(
+          bucket.key,
+          record as { wireApi?: 'chat-completions' | 'responses' },
+          settings.merged.providerProtocol,
+        ) !== authType
+      ) {
+        continue;
+      }
+      candidates.push({ ...bucket, index });
+    }
+  }
+  const entryBaseUrl = ({ entries, index }: ActiveProviderEntry) =>
+    (entries[index] as Record<string, unknown>)['baseUrl'];
+  const trimUrl = (value: unknown) =>
+    typeof value === 'string' ? value.replace(/\/+$/, '') : undefined;
+  const liveBaseUrl = trimUrl(config.getContentGeneratorConfig?.()?.baseUrl);
+  if (liveBaseUrl) {
+    const exact = candidates.filter(
+      (candidate) => trimUrl(entryBaseUrl(candidate)) === liveBaseUrl,
+    );
+    if (exact.length === 1) return exact[0];
+  }
+  const persistedBaseUrl = trimUrl(settings.merged.model?.baseUrl);
+  if (persistedBaseUrl) {
+    const exact = candidates.filter(
+      (candidate) => trimUrl(entryBaseUrl(candidate)) === persistedBaseUrl,
+    );
+    if (exact.length === 1) return exact[0];
+  }
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+/** Write or clear `model.reasoningEffort` in one scope. */
+function writeReasoningSelection(
+  settings: LoadedSettings,
+  scope: SettingScope,
+  value: ReasoningEffort | undefined,
+): void {
+  settings.setValue(scope, 'model.reasoningEffort', value, undefined, {
+    throwOnWriteFailure: true,
+  });
+  if (value !== undefined) return;
+  const file = settings.forScope(scope);
+  for (const target of [file.settings, file.originalSettings]) {
+    if (target) {
+      deleteNestedPropertySafe(
+        target as Record<string, unknown>,
+        'model.reasoningEffort',
+      );
+    }
+  }
+  settings.recomputeMerged();
+}
+
+/**
+ * `model.generationConfig` is the global fallback for the same raw effort
+ * knobs. Strip those from the raw scope objects too: it is written through the
+ * original (unexpanded) value so placeholders survive.
+ */
+function stripModelGenerationConfigEffort(settings: LoadedSettings): void {
+  for (const scope of getWritableScopes(settings)) {
+    const file = settings.forScope(scope);
+    const rawModel = file.originalSettings?.model as
+      | Record<string, unknown>
+      | undefined;
+    const generationConfig = rawModel?.['generationConfig'];
+    if (!generationConfig || typeof generationConfig !== 'object') continue;
+    const raw = generationConfig as Record<string, unknown>;
+    const extraBody = stripEffortBlock(
+      raw['extra_body'] as Record<string, unknown> | undefined,
+    );
+    const samplingParams = stripEffortBlock(
+      raw['samplingParams'] as Record<string, unknown> | undefined,
+    );
+    if (!extraBody.changed && !samplingParams.changed) continue;
+    // An object value is deep-merged by the JSONC writer, so a block that kept
+    // a sibling (e.g. temperature) would silently retain the removed effort
+    // key. Write each removed path as `undefined` instead: that becomes a
+    // delete operation. A block emptied completely is deleted as a whole.
+    const changes: string[] = [];
+    if (extraBody.changed) {
+      if (!extraBody.block || Object.keys(extraBody.block).length === 0) {
+        changes.push('extra_body');
+      } else {
+        changes.push(
+          ...extraBody.removedPaths.map((path) => `extra_body.${path}`),
+        );
+      }
+    }
+    if (samplingParams.changed) {
+      if (
+        !samplingParams.block ||
+        Object.keys(samplingParams.block).length === 0
+      ) {
+        changes.push('samplingParams');
+      } else {
+        changes.push(
+          ...samplingParams.removedPaths.map(
+            (path) => `samplingParams.${path}`,
+          ),
+        );
+      }
+    }
+    settings.setValues(
+      changes.map((path) => ({
+        scope,
+        key: `model.generationConfig.${path}`,
+        value: undefined,
+      })),
+    );
+    for (const path of changes) {
+      for (const target of [file.settings.model, file.originalSettings.model]) {
+        if (target) {
+          deleteNestedPropertySafe(
+            target as Record<string, unknown>,
+            `generationConfig.${path}`,
+          );
+        }
+      }
+    }
+    file.settings.model = resolveEnvVarsInObject(
+      file.originalSettings.model,
+      getHomeEnvFallbackVars(),
+    ) as typeof file.settings.model;
+    settings.recomputeMerged();
+  }
+}
+
+/**
+ * Persist the picked tier, and remove the static effort keys so the global
+ * tier is not shadowed after a restart: the active provider entry (its own
+ * per-key merged scope), the registry copy (live session), and
+ * `model.generationConfig` (global fallback). A provider id containing a dot
+ * cannot be addressed by the settings dot path, so its entry is left untouched
+ * rather than corrupting the tree.
+ */
+function persistEffortSelection(
+  config: Config | undefined,
+  settings: LoadedSettings,
+  effort: ReasoningEffort,
+): void {
+  const persistScope = getPersistScopeForModelSelection(settings);
+  const writableScopes = getWritableScopes(settings);
+  const clearScopes = writableScopes.filter(
+    (scope) =>
+      scope !== persistScope &&
+      settingExistsInScope(
+        'model.reasoningEffort',
+        settings.forScope(scope).settings,
+      ),
+  );
+
+  // Removing a raw knob while thinking is explicitly disabled would destroy a
+  // setting the picker cannot meaningfully edit; only the tier is persisted.
+  const reasoningDisabled =
+    config?.getContentGeneratorConfig?.()?.reasoning === false;
+  const active = config ? findActiveProviderEntry(config, settings) : undefined;
+  if (
+    !reasoningDisabled &&
+    active &&
+    writableScopes.includes(active.scope) &&
+    !active.key.includes('.')
+  ) {
+    const record = active.entries[active.index] as Record<string, unknown>;
+    const generationConfig = record['generationConfig'];
+    if (generationConfig && typeof generationConfig === 'object') {
+      const generation = generationConfig as Record<string, unknown>;
+      const extraBody = stripEffortBlock(
+        generation['extra_body'] as Record<string, unknown> | undefined,
+      );
+      const samplingParams = stripEffortBlock(
+        generation['samplingParams'] as Record<string, unknown> | undefined,
+      );
+      if (extraBody.changed || samplingParams.changed) {
+        const nextGeneration = { ...generation };
+        if (extraBody.changed) {
+          if (extraBody.block && Object.keys(extraBody.block).length > 0) {
+            nextGeneration['extra_body'] = extraBody.block;
+          } else {
+            delete nextGeneration['extra_body'];
+          }
+        }
+        if (samplingParams.changed) {
+          if (
+            samplingParams.block &&
+            Object.keys(samplingParams.block).length > 0
+          ) {
+            nextGeneration['samplingParams'] = samplingParams.block;
+          } else {
+            delete nextGeneration['samplingParams'];
+          }
+        }
+        const nextEntries = [...active.entries];
+        nextEntries[active.index] = {
+          ...record,
+          generationConfig: nextGeneration,
+        };
+        // The in-memory bucket holds env-expanded values; the raw bucket keeps
+        // `${VAR}` placeholders. Restore them before saving so a credential is
+        // never written to settings.json in plaintext.
+        const file = settings.forScope(active.scope);
+        const previous = file.settings.modelProviders?.[active.key] ?? [];
+        const resolvedProviders = (
+          active.key === AuthType.USE_OPENAI
+            ? (settings.merged.modelProviders ?? {})
+            : { [active.key]: previous }
+        ) as ModelProvidersConfig;
+        const rawProviders = (
+          active.key === AuthType.USE_OPENAI
+            ? Object.fromEntries(
+                Object.keys(resolvedProviders).map((id) => [
+                  id,
+                  findRawModelProviderEntries(settings, id) ?? [],
+                ]),
+              )
+            : {
+                [active.key]:
+                  findRawModelProviderEntries(settings, active.key) ?? [],
+              }
+        ) as ModelProvidersConfig;
+        const persistedEntries = preserveModelProviderPlaceholders(
+          nextEntries as ModelConfig[],
+          active.key,
+          resolvedProviders,
+          rawProviders,
+          settings.merged.providerProtocol,
+        );
+        // The static key is what can shadow the global tier, so write it first:
+        // a failed second write must not leave the old shadow in place.
+        settings.setValue(
+          active.scope,
+          `modelProviders.${active.key}`,
+          persistedEntries,
+          undefined,
+          { throwOnWriteFailure: true },
+        );
+        file.settings.modelProviders = resolveEnvVarsInObject(
+          file.originalSettings.modelProviders,
+          getHomeEnvFallbackVars(),
+        );
+        settings.recomputeMerged();
+      }
+    }
+  }
+
+  if (!reasoningDisabled) {
+    stripModelGenerationConfigEffort(settings);
+  }
+  writeReasoningSelection(settings, persistScope, effort);
+  for (const scope of clearScopes) {
+    writeReasoningSelection(settings, scope, undefined);
+  }
+}
+
 export function OpenTuiEffortDialog(props: {
   config?: Config;
   settings: LoadedSettings;
   onClose: () => void;
   notify?: (text: string, level?: 'info' | 'error') => void;
+  /** Footer entry: preselect the tier the footer currently displays. */
+  initialEffort?: ReasoningEffort;
   /** The popup region's row budget; the tier list windows from it. */
   availableTerminalHeight?: number;
 }) {
-  const { config, settings, onClose, notify } = props;
+  const { config, settings, onClose, notify, initialEffort } = props;
   const tiers = config
     ? [...getReasoningEffortsForConfig(config)]
     : (REASONING_EFFORT_TIERS as ReasoningEffort[]);
   // Pre-select the live tier only when this model exposes it; an unset or
   // out-of-range effort starts at the top (ink EffortDialog parity).
-  const currentEffort = config?.getReasoningEffort?.();
+  const currentEffort = initialEffort ?? config?.getReasoningEffort?.();
   const configuredIndex = currentEffort ? tiers.indexOf(currentEffort) : -1;
   const items: Array<LabeledItem<ReasoningEffort>> = tiers.map((tier) => ({
     key: tier,
@@ -664,22 +1080,26 @@ export function OpenTuiEffortDialog(props: {
     maxItemsToShow: tierWindow.maxItemsToShow,
     onSelect: (effort) => {
       try {
-        // Apply at runtime (next turn) and persist for future sessions;
-        // provider adapters clamp the tier per model (ink useEffortCommand
-        // parity — the request pipeline reads the live config per request).
+        // Apply at runtime (next turn); provider adapters clamp the tier per
+        // model (ink useEffortCommand parity — the request pipeline reads the
+        // live config per request).
         if (config) {
           applyReasoningEffort(config, effort);
+          // A saved raw knob outranks the session tier in the request builder;
+          // drop it in memory so the wire and the footer follow the picker.
+          stripLiveEffortOverrides(config);
         }
-        settings.setValue(
-          getPersistScopeForModelSelection(settings),
-          'model.reasoningEffort',
-          effort,
-        );
+        persistEffortSelection(config, settings, effort);
         // Read back after the apply: the message names what the provider
         // actually clamped the tier to, not what the row asked for.
         if (config) notify?.(formatEffortChangeMessage(config, effort));
-      } catch {
-        /* ignore */
+      } catch (error) {
+        // Persisting is the point of this picker; a silent failure would tell
+        // the user it survived when a restart will drop it.
+        notify?.(
+          error instanceof Error ? error.message : String(error),
+          'error',
+        );
       }
       onClose();
     },

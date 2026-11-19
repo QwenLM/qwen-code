@@ -63,6 +63,7 @@ vi.mock('../contexts/UIStateContext.js', () => ({
 
 type MockContentGeneratorConfig = {
   contextWindowSize: number;
+  authType?: string;
   reasoning?: StatusLinePresetReasoning;
 };
 
@@ -79,6 +80,7 @@ const mockConfig = {
     getModelDisplayName: (model: string) =>
       model === 'main-model' ? 'Main Model' : 'Test Model',
   })),
+  getResolvedModelConfig: vi.fn((..._args: unknown[]) => undefined as unknown),
   getCliVersion: vi.fn(() => '1.0.0'),
   getContentGeneratorConfig: vi.fn(getMockContentGeneratorConfig),
 };
@@ -205,6 +207,7 @@ describe('useStatusLine', () => {
     mockVimMode.vimEnabled = false;
     mockVimMode.vimMode = 'INSERT';
     mockConfig.getModelDisplayName.mockReturnValue('Test Model');
+    mockConfig.getResolvedModelConfig.mockReturnValue(undefined);
     mockConfig.getTargetDir.mockReturnValue('/test/dir');
     mockConfig.getContentGeneratorConfig.mockReturnValue({
       contextWindowSize: 131072,
@@ -461,6 +464,79 @@ describe('useStatusLine', () => {
 
       expect(result.current.useThemeColors).toBe(true);
       expect(result.current.lines).toEqual(['Test Model']);
+    });
+
+    it('exposes the reasoning segment for the clickable effort target', () => {
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        contextWindowSize: 131072,
+        reasoning: { effort: 'high' },
+      });
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model-with-reasoning'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(result.current.lines).toEqual(['Test Model high']);
+      expect(result.current.reasoningSegment).toEqual({
+        text: 'Test Model high',
+        effort: 'high',
+      });
+    });
+
+    it('leaves a toggle-only model effort inert even with a stale tier', () => {
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        contextWindowSize: 131072,
+        authType: 'openai',
+        reasoning: { effort: 'high' },
+      });
+      mockConfig.getResolvedModelConfig.mockReturnValue({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            toggleOnly: true,
+            disableField: 'thinking',
+          },
+        },
+      } as never);
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model-with-reasoning'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      // The display still carries the carried-over tier, but the picker has
+      // no rows, so the footer must not offer a click target.
+      expect(result.current.lines).toEqual(['Test Model high']);
+      expect(result.current.reasoningSegment).toBeUndefined();
+    });
+
+    it('exposes no effort target without the reasoning tier or preset item', () => {
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        contextWindowSize: 131072,
+        reasoning: { effort: 'high' },
+      });
+      setStatusLineConfig({ type: 'preset', items: ['model'] });
+      const modelOnly = renderHook(() => useStatusLine());
+      expect(modelOnly.result.current.reasoningSegment).toBeUndefined();
+      modelOnly.unmount();
+
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        contextWindowSize: 131072,
+        reasoning: false,
+      });
+      setStatusLineConfig({ type: 'preset', items: ['model-with-reasoning'] });
+      const thinkingOff = renderHook(() => useStatusLine());
+      expect(thinkingOff.result.current.reasoningSegment).toBeUndefined();
+      thinkingOff.unmount();
+
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        contextWindowSize: 131072,
+        reasoning: { effort: 'high' },
+      });
+      setStatusLineConfig({ type: 'command', command: 'echo hi' });
+      const command = renderHook(() => useStatusLine());
+      expect(command.result.current.reasoningSegment).toBeUndefined();
     });
 
     it('looks up the current branch pull request number with gh', async () => {

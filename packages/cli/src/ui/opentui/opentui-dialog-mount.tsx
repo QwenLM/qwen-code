@@ -40,6 +40,7 @@ import type { LoadedSettings, SettingScope } from '../../config/settings.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import { reloadPluginsRuntime } from '../../config/extension-runtime-reload.js';
 import type { StatusLineState } from '../hooks/useStatusLine.js';
+import { getReasoningForDisplay } from '../../acp-integration/model-configuration.js';
 import { useSubscriptionSignedIn } from '../hooks/use-subscription-command-visibility.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
@@ -539,16 +540,31 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
         />
       );
 
-    case 'effort':
+    case 'effort': {
+      const generation = config.getContentGeneratorConfig?.();
+      const displayed =
+        request.openedFromFooter && generation
+          ? getReasoningForDisplay(config, generation)
+          : undefined;
       return (
         <OpenTuiEffortDialog
           config={config}
           settings={settings}
           onClose={onClose}
-          notify={(text, level) => reportResult('/effort', text, level)}
+          initialEffort={displayed ? displayed.effort : undefined}
+          notify={(text, level) =>
+            // A footer pick never typed `/effort`; show the result without
+            // recording a command the user did not run.
+            reportResult(
+              request.openedFromFooter ? null : '/effort',
+              text,
+              level,
+            )
+          }
           availableTerminalHeight={props.availableTerminalHeight}
         />
       );
+    }
 
     case 'output-style':
       return (

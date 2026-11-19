@@ -12,7 +12,7 @@
  */
 
 import { beforeEach, describe, it, expect, vi } from 'vitest';
-import { act, render } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 
 // theme.ts builds a SyntaxStyle at module scope, which needs the OpenTUI
 // native FFI — unavailable in the test runtime. Stub the graphics surface.
@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => {
     dimensions: { width: 110, height: 40 },
     gitBranch: 'main' as string | undefined,
     promptTokens: 0,
+    selectionText: '',
     /** Stands in for a loaded locale's WITTY_LOADING_PHRASES array. */
     localePhrases: [] as string[],
   };
@@ -47,6 +48,13 @@ const mocks = vi.hoisted(() => {
         const source = (config ?? {}) as Record<string, unknown>;
         for (const name of ['fg', 'bg', 'borderColor', 'attributes']) {
           if (source[name] !== undefined) dom[`data-${name}`] = source[name];
+        }
+        // The real renderable receives the handlers; pass them through so a
+        // mouse test can click the rendered run.
+        for (const name of ['onMouseDown', 'onMouseUp']) {
+          if (typeof source[name] === 'function') {
+            dom[name] = source[name];
+          }
         }
         return React.createElement(
           type === 'box' ? 'div' : 'span',
@@ -73,6 +81,11 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('@opentui/react', () => ({
   useTerminalDimensions: () => mocks.state.dimensions,
+  useRenderer: () => ({
+    getSelection: () => ({
+      getSelectedText: () => mocks.state.selectionText,
+    }),
+  }),
 }));
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
@@ -373,6 +386,7 @@ describe('OpenTuiFooter', () => {
 
   beforeEach(() => {
     mocks.state.promptTokens = 0;
+    mocks.state.selectionText = '';
     mocks.styleText.mockClear();
     mocks.state.gitBranch = 'main';
     mocks.state.dimensions = { width: 110, height: 40 };
@@ -467,6 +481,70 @@ describe('OpenTuiFooter', () => {
     expect(off.container.textContent).toContain(
       'qwen3-coder-plus reasoning off',
     );
+  });
+
+  it('opens the effort picker from the tier run and only that run', () => {
+    const onOpenEffort = vi.fn();
+    render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        onOpenEffort={onOpenEffort}
+        statusLine={{
+          lines: ['qwen3-coder-plus high'],
+          useThemeColors: true,
+          respectUserColors: false,
+          hideContextIndicator: false,
+          reasoningSegment: {
+            text: 'qwen3-coder-plus high',
+            effort: 'high',
+          },
+        }}
+      />,
+    );
+
+    const tier = screen.getByText('high');
+    mocks.state.selectionText = '';
+    fireEvent.mouseUp(tier, { button: 0 });
+    expect(onOpenEffort).toHaveBeenCalledOnce();
+
+    // A drag that ends on the tier leaves selected text, so it is a selection
+    // release rather than a click.
+    mocks.state.selectionText = 'high';
+    fireEvent.mouseUp(tier, { button: 0 });
+    expect(onOpenEffort).toHaveBeenCalledOnce();
+
+    // The model name run stays inert; only the tier is a target.
+    fireEvent.mouseUp(screen.getByText('qwen3-coder-plus'), { button: 0 });
+    expect(onOpenEffort).toHaveBeenCalledOnce();
+  });
+
+  it('leaves the tier run inert when the status line wraps it apart', () => {
+    // A narrow footer wraps before the tier, so no rendered line contains the
+    // whole segment; the tier text stays plain instead of guessing a target.
+    mocks.state.dimensions = { width: 20, height: 40 };
+    const onOpenEffort = vi.fn();
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        onOpenEffort={onOpenEffort}
+        statusLine={{
+          lines: ['qwen3-coder-plus high'],
+          useThemeColors: true,
+          respectUserColors: false,
+          hideContextIndicator: false,
+          reasoningSegment: {
+            text: 'qwen3-coder-plus high',
+            effort: 'high',
+          },
+        }}
+      />,
+    );
+
+    expect(container.textContent).toContain('high');
+    fireEvent.mouseUp(screen.getByText(/high/), { button: 0 });
+    expect(onOpenEffort).not.toHaveBeenCalled();
   });
 
   it('omits the git segment outside a repository', () => {

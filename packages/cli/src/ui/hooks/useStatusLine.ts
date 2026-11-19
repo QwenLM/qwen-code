@@ -9,7 +9,11 @@ import { exec, type ChildProcess } from 'child_process';
 import wrapAnsi from 'wrap-ansi';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import { getReasoningForDisplay } from '../../acp-integration/model-configuration.js';
+import {
+  getReasoningEffortsForConfig,
+  getReasoningForDisplay,
+} from '../../acp-integration/model-configuration.js';
+import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import type { UIState } from '../contexts/UIStateContext.js';
 import type { SessionMetrics } from '../contexts/SessionContext.js';
@@ -18,6 +22,7 @@ import {
   buildStatusLinePresetData,
   buildStatusLinePresetLines,
   DEFAULT_STATUS_LINE_PRESET_CONFIG,
+  formatModelWithReasoning,
   normalizeStatusLinePresetConfig,
   type StatusLinePresetConfig,
   type StatusLinePresetItemId,
@@ -264,6 +269,7 @@ export function useStatusLineState(
   useThemeColors: boolean;
   respectUserColors: boolean;
   hideContextIndicator: boolean;
+  reasoningSegment?: { text: string; effort: ReasoningEffort };
 } {
   const settingsStatusLineConfig = getStatusLineConfig(settings);
   const statusLineConfigOverride = uiState.statusLineConfigOverride;
@@ -335,6 +341,26 @@ export function useStatusLineState(
     generationConfig && getReasoningForDisplay(config, generationConfig);
   const reasoningEffortKey =
     reasoningConfig === false ? 'off' : (reasoningConfig?.effort ?? '');
+  // The tier run inside the preset's model-with-reasoning item. The OpenTUI
+  // footer uses it to make only that substring clickable; a command status
+  // line has no such item, so it never yields a target.
+  const reasoningSegment =
+    statusLinePreset?.items.includes('model-with-reasoning') &&
+    reasoningConfig &&
+    reasoningConfig.effort &&
+    // A toggle-only model can carry a stale global tier, but its picker has no
+    // rows; leave that text inert instead of opening an empty dialog.
+    getReasoningEffortsForConfig(config).length > 0
+      ? {
+          text: formatModelWithReasoning(
+            currentModel
+              ? config.getModelsConfig().getModelDisplayName(currentModel)
+              : config.getModelDisplayName(),
+            reasoningConfig,
+          ),
+          effort: reasoningConfig.effort,
+        }
+      : undefined;
   const prevStateRef = useRef<{
     sessionId: string;
     promptTokenCount: number;
@@ -797,6 +823,7 @@ export function useStatusLineState(
 
   return {
     lines: output,
+    reasoningSegment,
     useThemeColors: statusLinePreset?.useThemeColors === true,
     respectUserColors:
       statusLineConfig?.type === 'command' &&
