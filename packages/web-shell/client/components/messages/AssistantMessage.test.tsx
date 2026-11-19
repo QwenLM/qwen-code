@@ -769,6 +769,44 @@ describe('AssistantMessage Mod rows', () => {
     }
   });
 
+  it('falls back to the raw source when the original is only a blocked image', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    try {
+      const ask = answered('rewritten', false);
+      const content = '![](https://example.com/a.png)';
+      const container = render(
+        <ModRowAskerContext.Provider value={new ModRowAsker(ask)}>
+          <ModReplyRowsProvider
+            messages={[{ id: 'reply', role: 'assistant', content }]}
+          >
+            <ModAssistantMessage
+              messageId="reply"
+              content={content}
+              showFooterActions
+            />
+          </ModReplyRowsProvider>
+        </ModRowAskerContext.Provider>,
+      );
+      await act(async () => {});
+      // The hidden document-mode copy source renders the fallback chip; its
+      // text must not defeat the empty-extraction raw-markdown fallback.
+      expect(container.querySelector('[hidden]')?.textContent).toBe(
+        'Failed to load',
+      );
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Copy content"]',
+          )!
+          .click(),
+      );
+      expect(writeText).toHaveBeenLastCalledWith(content);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('asks for a reply only once it is complete and on screen, and keeps the answer off it', async () => {
     const observers: Array<
       (entries: Array<{ isIntersecting: boolean }>) => void
