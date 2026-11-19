@@ -12,7 +12,12 @@ import {
   buildSessionRecoveryPlan,
   buildSessionRecoveryPlanFromApiHistory,
 } from './session-recovery.js';
-import { fnCall, modelText, userText } from '../test-utils/model-fixtures.js';
+import {
+  fnCall,
+  fnResponse,
+  modelText,
+  userText,
+} from '../test-utils/model-fixtures.js';
 
 const TIMESTAMP = '2026-07-11T00:00:00.000Z';
 
@@ -153,6 +158,40 @@ describe('buildSessionRecoveryPlan', () => {
     expect(apiHistory).toEqual(supplied);
     expect(plan.originalApiHistory.at(-1)?.role).toBe('model');
     expect(plan.apiHistory.at(-1)?.role).toBe('user');
+  });
+
+  it('hoists a real response from a later user turn during resume', () => {
+    const plan = buildSessionRecoveryPlanFromApiHistory({
+      sessionId: 'session-1',
+      apiHistory: [
+        {
+          role: 'model',
+          parts: [fnCall('read_file', { path: 'a.txt' }, 'call-resume')],
+        },
+        userText('follow-up prompt'),
+        modelText('continuing response'),
+        {
+          role: 'user',
+          parts: [fnResponse('read_file', { output: 'ok' }, 'call-resume')],
+        },
+      ],
+    });
+
+    expect(plan.repairs).toEqual([]);
+    expect(plan.apiHistory).toEqual([
+      {
+        role: 'model',
+        parts: [fnCall('read_file', { path: 'a.txt' }, 'call-resume')],
+      },
+      {
+        role: 'user',
+        parts: [
+          fnResponse('read_file', { output: 'ok' }, 'call-resume'),
+          { text: 'follow-up prompt' },
+        ],
+      },
+      modelText('continuing response'),
+    ]);
   });
 
   it('marks sessions with history gaps as degraded and disables continuation', () => {
