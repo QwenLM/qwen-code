@@ -299,7 +299,15 @@ describe('Managed Agent gate triggers', () => {
 describe('Managed Agent gate required check', () => {
   const name = (event, tier, touched) =>
     evaluate(gate.jobs.gate.name, {
-      github: github(event),
+      github: github(
+        event,
+        event === 'pull_request_review'
+          ? {
+              review: { state: 'approved' },
+              pull_request: { state: 'open' },
+            }
+          : {},
+      ),
       needs: { scope: { outputs: { tier, touched } } },
     });
 
@@ -315,7 +323,7 @@ describe('Managed Agent gate required check', () => {
       'Managed Agent review (no full run)',
     ],
     ['pull_request_review', 'none', 'false', 'Managed Agent gate'],
-    ['pull_request_review', '', 'true', 'Managed Agent review (no full run)'],
+    ['pull_request_review', '', 'true', 'Managed Agent gate'],
     ['push', 'fast', 'true', 'Managed Agent gate'],
     ['merge_group', 'fast', 'true', 'Managed Agent gate'],
     // A failed tier selection leaves the outputs empty and must still
@@ -496,6 +504,7 @@ describe('Managed Agent gate tier selection', () => {
     join(dir, 'gh'),
     [
       '#!/usr/bin/env bash',
+      'if [[ -n "${FAKE_FAIL:-}" && "$2" == *"${FAKE_FAIL}"* ]]; then exit 22; fi',
       'case "$2" in',
       '  */check-runs*filter=all*) printf "%s" "${FAKE_ALL_URLS}" ;;',
       '  */check-runs*) printf "%s" "${FAKE_URLS}" ;;',
@@ -506,7 +515,7 @@ describe('Managed Agent gate tier selection', () => {
   );
   chmodSync(join(dir, 'gh'), 0o755);
 
-  const tier = (env) => {
+  const runTier = (env) => {
     const output = join(dir, 'output');
     writeFileSync(output, '');
     const result = spawnSync('bash', ['-c', step.run], {
@@ -528,8 +537,12 @@ describe('Managed Agent gate tier selection', () => {
       },
       encoding: 'utf8',
     });
+    return { result, output: readFileSync(output, 'utf8').trim() };
+  };
+  const tier = (env) => {
+    const { result, output } = runTier(env);
     expect(result.status, result.stderr).toBe(0);
-    return readFileSync(output, 'utf8').trim();
+    return output;
   };
   const url = (run) =>
     `https://github.com/QwenLM/qwen-code/actions/runs/${run}/job/9`;
@@ -551,6 +564,15 @@ describe('Managed Agent gate tier selection', () => {
         FAKE_FULL: '42',
       }),
     ).toBe('tier=none');
+  });
+
+  it('fails tier selection when a prior full-run lookup fails', () => {
+    const { result } = runTier({
+      EVENT_NAME: 'pull_request',
+      FAKE_ALL_URLS: url(42),
+      FAKE_FAIL: 'actions/runs/42',
+    });
+    expect(result.status).not.toBe(0);
   });
 
   it('runs the full suite on the first approval of a touched head', () => {

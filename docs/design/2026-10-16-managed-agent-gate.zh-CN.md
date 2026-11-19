@@ -84,8 +84,7 @@ helper 与配置、`sdk-java.yml` 运行的脚本，以及门禁自身文件。P
 | `pull_request_review` | 改到，未跑全量           | 非必需的 `Managed Agent review (no full run)`            |
 | `pull_request_review` | 非 approve，或 PR 已关闭 | 所有 job 跳过，不生成必需名字的 check                    |
 | `push`、`merge_group` | 改到                     | fast 层级结果                                            |
-| `pull_request_review` | 改到，层级选择失败       | 非必需的 `Managed Agent review (no full run)` 失败       |
-| 其他任意              | 层级选择失败             | `Managed Agent gate` 失败                                |
+| 任意                  | 层级选择失败             | `Managed Agent gate` 失败                                |
 
 非 approve 的 review，以及 PR 关闭后才提交的 review，都不启动任何 job：GitHub 仍会
 创建这次运行，但它永远选不到 `none` 以上的层级——或者它要报告的检查已经不再门禁任何

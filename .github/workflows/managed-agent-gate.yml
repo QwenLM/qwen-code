@@ -225,12 +225,15 @@ jobs:
           # same name, is not coverage.
           run_reports_full() {
             local run="$1"
-            local event prs
+            local event prs metadata jobs
             [[ "${run}" != "${RUN_ID}" ]] || return 1
-            IFS=$'\t' read -r event prs <<< "$(gh api "repos/${REPO}/actions/runs/${run}" --jq '[.event, ([.pull_requests[].number] | map(tostring) | join(" "))] | @tsv')"
+            metadata="$(gh api "repos/${REPO}/actions/runs/${run}" --jq '[.event, ([.pull_requests[].number] | map(tostring) | join(" "))] | @tsv')" || exit 1
+            IFS=$'\t' read -r event prs <<< "${metadata}"
+            [[ -n "${event}" ]] || exit 1
             [[ "${event}" == 'pull_request_review' ]] || return 1
             [[ " ${prs} " == *" ${PR_NUMBER} "* ]] || return 1
-            [[ "$(gh api "repos/${REPO}/actions/runs/${run}/jobs?per_page=100" --jq '[.jobs[].name | startswith("SDK Java (full)")] | any')" == 'true' ]]
+            jobs="$(gh api "repos/${REPO}/actions/runs/${run}/jobs?per_page=100" --jq '[.jobs[].name | startswith("SDK Java (full)")] | any')" || exit 1
+            [[ "${jobs}" == 'true' ]]
           }
 
           # A reopened or manually rerun pull request must not let a new fast
@@ -302,6 +305,8 @@ jobs:
     name: >-
       ${{ (needs.scope.outputs.tier == 'full' || needs.scope.outputs.touched != 'true' ||
       (needs.scope.outputs.tier == 'fast' && github.event_name == 'pull_request') ||
+      (github.event_name == 'pull_request_review' && github.event.review.state == 'approved' &&
+      github.event.pull_request.state == 'open' && needs.scope.outputs.tier == '') ||
       (github.event_name != 'pull_request' && github.event_name != 'pull_request_review')) && 'Managed Agent gate' ||
       'Managed Agent review (no full run)' }}
     needs:

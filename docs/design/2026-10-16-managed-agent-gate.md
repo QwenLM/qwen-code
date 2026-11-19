@@ -97,8 +97,7 @@ for every run whose result can gate a merge. Its conclusion and the
 | `pull_request_review` | touched, no full run            | non-required `Managed Agent review (no full run)`          |
 | `pull_request_review` | not an approval, or a closed PR | all jobs skip; no required-context check                   |
 | `push`, `merge_group` | touched                         | fast-tier result                                           |
-| `pull_request_review` | touched, tier selection failed  | non-required `Managed Agent review (no full run)` fail     |
-| any other             | tier selection failed           | `Managed Agent gate` fail                                  |
+| any                   | tier selection failed           | `Managed Agent gate` fail                                  |
 
 A review that is not an approval, or one submitted after its pull request
 closed, starts no job: GitHub still creates the run, but it can never select a
