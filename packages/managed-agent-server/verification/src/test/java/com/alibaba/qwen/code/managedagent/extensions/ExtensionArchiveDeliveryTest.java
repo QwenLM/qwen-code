@@ -81,7 +81,7 @@ class ExtensionArchiveDeliveryTest {
         when(packages.resolvePin("tenant", "workspace", pin)).thenReturn(new ExtensionPackages.ResolvedPackage(descriptor, lease, Map.of()));
         var upload = new CompletableFuture<Map<String, Object>>();
         when(transport.installExtensionPackage(eq(binding), eq(pin.packageDigest()), eq(file))).thenReturn(upload);
-        var coordinator = new ManagedRuntimeCoordinator(null, sessions, null, null, null, false, null, null, bindings, transport);
+        var coordinator = new ManagedRuntimeCoordinator(null, sessions, null, null, null, null, bindings, transport);
         coordinator.configureExtensions(packages);
         try {
             var delivered = preparation.get().prepare(binding, "session", Map.of("extensions",

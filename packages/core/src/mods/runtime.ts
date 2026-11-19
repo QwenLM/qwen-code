@@ -23,6 +23,8 @@ import {
 } from './dispatch.js';
 import {
   ENGINE_NODE,
+  MOD_RENDER_PINNED_PROPS,
+  MOD_ROW_SITES,
   adjustRenderTree,
   invalidRenderText,
   validateRenderTree,
@@ -259,6 +261,8 @@ export class ModRuntime {
     completeModel?: ModModelHost,
     // Where each plugin's `$.store` is kept; absent, the host keeps none.
     store?: ModStore,
+    // Whether this host raises `tool.call` and `tool.check`.
+    tools = true,
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
@@ -301,6 +305,7 @@ export class ModRuntime {
           version,
           sites: render?.sites ?? [],
           prompts,
+          tools,
           submits: queuePrompt !== undefined,
           models: completeModel !== undefined,
           stores: store !== undefined,
@@ -412,9 +417,9 @@ export class ModRuntime {
     props?: ModRenderInput['props'];
   }> {
     const answer = await this.request({ type: 'render', input }, signal);
+    const row = MOD_ROW_SITES.has(input.component);
     let settled = answer;
-    if (input.component === 'AssistantMessage')
-      settled = record(answer) ? answer['tree'] : undefined;
+    if (row) settled = record(answer) ? answer['tree'] : undefined;
     const hooks = this.renderHooksFor(input.component);
     const owner = hooks.length === 1 ? hooks[0] : 'hooks';
     const notes: string[] = [];
@@ -431,7 +436,7 @@ export class ModRuntime {
       );
       return { tree: ENGINE_NODE, notes };
     }
-    if (input.component === 'AssistantMessage') {
+    if (row) {
       // A row draws the engine's own message, with the props that reached it.
       if (
         !record(settled) ||
@@ -443,13 +448,16 @@ export class ModRuntime {
         );
         return { tree: ENGINE_NODE, notes, props: input.props };
       }
+      const before: Record<string, unknown> = { ...input.props };
       const props = record(answer) ? answer['props'] : undefined;
       const text = record(props) ? props['text'] : undefined;
       if (
         !record(props) ||
         typeof text !== 'string' ||
-        (text !== input.props.text && invalidRenderText(text) !== undefined) ||
-        props['isFirstOfReply'] !== input.props.isFirstOfReply
+        (text !== before['text'] && invalidRenderText(text) !== undefined) ||
+        MOD_RENDER_PINNED_PROPS[input.component].some(
+          (key) => props[key] !== before[key],
+        )
       )
         return { tree: ENGINE_NODE, notes, props: input.props };
       return {

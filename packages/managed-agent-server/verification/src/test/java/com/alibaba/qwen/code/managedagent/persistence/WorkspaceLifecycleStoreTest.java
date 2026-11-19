@@ -69,7 +69,7 @@ class WorkspaceLifecycleStoreTest {
                 new DataSourceTransactionManager(fixture.jdbc.getDataSource())));
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(fixture.jdbc,
                 new JdbcManagedExtensionRecordStore(fixture.jdbc), null, executionStore, fixture.store, null, null, null,
-                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), null);
+                com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound());
         var journal = fixture.transactions.execute(ignored -> new ExtensionRecordJournal(store, "tenant", "workspace", fixture.session).open());
         var templates = ManagedHookRecordContractTest.fixtures().get("templates");
         var data = new ManagedSessionStoreModels.CommitResource("hook-data", "hook-data", 1, 2,
@@ -246,6 +246,26 @@ class WorkspaceLifecycleStoreTest {
                     assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced");
                     assertThat(error.isRetryable()).isFalse();
                 });
+    }
+
+    /**
+     * A content-only extension child is a real Session in the same Workspace, generation and
+     * storage, and its owner was copied from the parent by the launch. The external-files profile
+     * does not admit child Sessions: {@code insertChildSession} refuses at creation, so the
+     * parent fails fast instead of minting a child that can never be admitted.
+     */
+    @Test
+    void externalFilesParentCannotAdmitAChildSession() {
+        var fixture = fixture();
+        fixture.jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES, "tenant", fixture.session);
+
+        assertThatThrownBy(() -> fixture.transactions.executeWithoutResult(ignored -> fixture.store.insertChildSessionCommand(
+                "tenant", fixture.session, "child-create", "digest", "child",
+                java.util.List.of(), "payload",
+                new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(fixture.session, fixture.session, "child-run", 1))))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("child_parent_unavailable"));
     }
 
     @Test

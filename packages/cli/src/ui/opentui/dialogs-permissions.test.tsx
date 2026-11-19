@@ -41,9 +41,13 @@ const mocks = vi.hoisted(() => {
       const config = key === undefined ? props : { ...props, key };
       const children = (config?.children ?? null) as React.ReactNode;
       if (type === 'box' || type === 'text') {
+        const id = (config as { id?: string } | null)?.id;
         return React.createElement(
           type === 'box' ? 'div' : 'span',
-          key === undefined ? null : { key },
+          {
+            ...(key === undefined ? null : { key }),
+            ...(id ? { 'data-screen-reader-id': id } : null),
+          },
           children,
         );
       }
@@ -156,6 +160,47 @@ describe('OpenTuiPermissionsDialog rule rows', () => {
     for (const directory of temporaryDirectories.splice(0)) {
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it('routes the rule-list search box through the screen-reader input lane', () => {
+    const { container } = renderPermissions([]);
+    const field = () =>
+      container.querySelector(
+        '[data-screen-reader-id^="screen-reader-input-line"]',
+      );
+    expect(
+      field()?.querySelector(
+        '[data-screen-reader-id="screen-reader-caret-active-0"]',
+      ),
+    ).toBeTruthy();
+    press('r');
+    press('e');
+    expect(
+      field()?.querySelector(
+        '[data-screen-reader-id="screen-reader-caret-active-2"]',
+      ),
+    ).toBeTruthy();
+    expect(field()?.textContent).toContain('re');
+  });
+
+  it('marks the empty search box as a placeholder while keeping its caret', () => {
+    const { container } = renderPermissions([]);
+    const field = () =>
+      container.querySelector(
+        '[data-screen-reader-id^="screen-reader-input-line"]',
+      );
+    expect(field()?.getAttribute('data-screen-reader-id')).toBe(
+      'screen-reader-input-line-placeholder',
+    );
+    expect(
+      field()?.querySelector(
+        '[data-screen-reader-id="screen-reader-caret-active-0"]',
+      ),
+    ).toBeTruthy();
+    press('r');
+    expect(field()?.getAttribute('data-screen-reader-id')).toBe(
+      'screen-reader-input-line',
+    );
   });
 
   it('edits a permission rule at its caret before submitting it', () => {

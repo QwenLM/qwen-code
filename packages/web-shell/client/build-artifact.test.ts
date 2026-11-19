@@ -537,6 +537,24 @@ describe('build artifact — transcript entry (#11031)', () => {
     }
   });
 
+  it('keeps artifact-library copy and lookups in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]managed\.artifactLibrary\./);
+    expect(js).not.toContain(
+      'No artifacts have been produced in this workspace yet.',
+    );
+    expect(js).not.toContain('此工作区还没有产出产物。');
+    expect(js).not.toContain('В этом Workspace ещё нет артефактов.');
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('managed.artifactLibrary.title');
+    expect(interactive).toContain('Artifact library');
+    expect(interactive).toContain('产物库');
+    expect(interactive).toContain('Библиотека артефактов');
+  });
+
   it('keeps workspace mutations out of the read-only transcript entry', () => {
     const transcript = readTranscriptBundle();
     const packaged = readPackageJavascript();
@@ -693,6 +711,22 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(readPackageJavascript()).toContain('trajectory.pill.live');
     expect(readPackageJavascript()).toContain('trajectory.filter.search');
     expect(readPackageJavascript()).toContain('Search loaded records');
+  });
+
+  it('keeps the Russian and Traditional Chinese catalogs in the interactive entry only', () => {
+    const transcript = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('Что вы хотите сделать?');
+    expect(interactive).toContain('Недельный лимит кредитов исчерпан');
+    expect(interactive).toContain('Вас @упомянули в комментарии');
+    expect(interactive).toContain('週額度已用完');
+    expect(transcript).not.toContain('Что вы хотите сделать?');
+    expect(transcript).not.toContain('Недельный лимит кредитов исчерпан');
+    expect(transcript).not.toContain('Вас @упомянули в комментарии');
+    expect(transcript).not.toContain('週額度已用完');
   });
 
   it('still carries what a transcript actually renders', () => {

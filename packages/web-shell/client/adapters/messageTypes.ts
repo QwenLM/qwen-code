@@ -8,6 +8,7 @@ import type {
   DaemonBackgroundTurn,
   DaemonSessionArtifactInput,
   DaemonInputAnnotation,
+  DaemonInputSourceAnnotation,
   QwenAgentMessageMeta,
 } from '@qwen-code/sdk/daemon';
 
@@ -157,6 +158,8 @@ export interface DaemonUserMessage extends DaemonMessageMeta {
     attachmentId?: string;
   }>;
   inputAnnotations?: DaemonInputAnnotation[];
+  /** The other session that sent this message (`/send`, a sub-session launch). */
+  sentFrom?: DaemonInputSourceAnnotation;
   source?: string;
   /** `_meta.qwenAgentMessage` of an @-mention (`kind: 'agent_mention'`). */
   agentMessage?: QwenAgentMessageMeta;
@@ -245,6 +248,9 @@ export interface DaemonBtwMessage extends DaemonMessageMeta {
   question: string;
   answer: string;
   isPending: boolean;
+  /** Set when the question explains a background task, so the task's detail
+   * panel can mirror the answer in place. Absent for typed /btw. */
+  taskId?: string;
 }
 
 export interface DaemonInsightProgressMessage extends DaemonMessageMeta {

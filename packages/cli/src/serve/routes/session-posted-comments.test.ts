@@ -46,7 +46,7 @@ function shellCreationEntry(commentId: number): string {
           functionResponse: {
             name: 'run_shell_command',
             response: {
-              output: `Command: gh pr comment 1 --body a\nDirectory: (root)\nOutput: https://github.com/o/r/pull/1#issuecomment-${commentId}\nError: (none)\nExit Code: 0\n`,
+              output: `Command: gh pr comment 1 --body a\nDirectory: (root)\nOutput (stdout and stderr combined): https://github.com/o/r/pull/1#issuecomment-${commentId}\nExecution Error: (none)\nExit Code: 0\n`,
             },
           },
         },

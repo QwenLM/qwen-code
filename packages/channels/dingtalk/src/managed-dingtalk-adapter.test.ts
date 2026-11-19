@@ -5,16 +5,19 @@
  */
 
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  CHANNEL_INBOUND_TRUNCATION_NOTICE,
   MANAGED_OUTBOUND_LIMIT,
   type ManagedChannelControlPlane,
   type ManagedClaimedDelivery,
@@ -22,6 +25,7 @@ import {
 } from '@qwen-code/channel-base';
 import {
   ManagedDingtalkAdapter,
+  dingtalkSettings,
   type ManagedDingtalkAdapterDeps,
   type DingtalkWebhookFailure,
 } from './managed-dingtalk-adapter.js';
@@ -53,13 +57,15 @@ function messageData(overrides: Record<string, unknown> = {}): string {
   });
 }
 
-function fakeControlPlane() {
+function fakeControlPlane(destinationKey = 'cp|tenant-a|chan-1') {
   const register: unknown[] = [];
   const submit: ManagedInboundEvent[] = [];
   const receipts: Array<{ deliveryId: string; receipt: unknown }> = [];
   const admitted = new Map<string, string>();
   let queue: ManagedClaimedDelivery[] = [];
+  let disconnectCalls = 0;
   let submitError: (Error & { status?: number; code?: string }) | undefined;
+  let registerError: (Error & { status?: number; code?: string }) | undefined;
   let refuseSubmit: { status: number; code?: string } | undefined;
   let submitErrorFor:
     | ((
@@ -73,10 +79,18 @@ function fakeControlPlane() {
       ) => (Error & { status?: number; code?: string }) | undefined)
     | undefined;
   const controlPlane: ManagedChannelControlPlane = {
+    destinationKey,
     register: async (request) => {
+      if (registerError) {
+        const error = registerError;
+        registerError = undefined;
+        throw error;
+      }
       register.push(request);
     },
-    disconnect: async () => {},
+    disconnect: async () => {
+      disconnectCalls += 1;
+    },
     submitInbound: async (event) => {
       submitAttempts += 1;
       const perEvent = submitErrorFor?.(event.platformEventId);
@@ -112,11 +126,15 @@ function fakeControlPlane() {
     register,
     submit,
     receipts,
+    disconnectCalls: () => disconnectCalls,
     enqueue: (deliveries: ManagedClaimedDelivery[]) => {
       queue = deliveries;
     },
     failNextSubmit: (error: Error & { status?: number; code?: string }) => {
       submitError = error;
+    },
+    failNextRegister: (error: Error & { status?: number; code?: string }) => {
+      registerError = error;
     },
     submitAttempts: () => submitAttempts,
     // Simulate an admission the server committed but whose answer was lost:
@@ -148,7 +166,9 @@ function fakeControlPlane() {
   };
 }
 
-function fakeDeps() {
+function fakeDeps(
+  hooks: { log?: (line: string) => void; beforeSend?: () => void } = {},
+) {
   let handler: ((messageId: string, data: string) => boolean) | undefined;
   const sent: Array<{ webhook: string; text: string }> = [];
   let behavior: 'ok' | 'definitive' | 'transient' = 'ok';
@@ -159,6 +179,7 @@ function fakeDeps() {
     },
     sendWebhook: async (webhook, text) => {
       sent.push({ webhook, text });
+      hooks.beforeSend?.();
       if (behavior !== 'ok') {
         const error = new Error(
           behavior === 'definitive' ? 'refused' : 'timeout',
@@ -169,7 +190,7 @@ function fakeDeps() {
     },
     lock: async () => async () => {},
     now: () => 1_750_000_000_000,
-    log: () => {},
+    log: hooks.log ?? (() => {}),
   };
   return {
     deps,
@@ -220,9 +241,12 @@ afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
 });
 
-async function connectedAdapter(cwd = tempCwd()) {
+async function connectedAdapter(
+  cwd = tempCwd(),
+  hooks: { log?: (line: string) => void; beforeSend?: () => void } = {},
+) {
   const plane = fakeControlPlane();
-  const fake = fakeDeps();
+  const fake = fakeDeps(hooks);
   const adapter = new ManagedDingtalkAdapter({
     name: 'ding-1',
     cwd,
@@ -373,7 +397,13 @@ describe('managed DingTalk adapter inbound', () => {
     await adapter.disconnect();
   });
 
-  it('a webhook-less frame admitted on the cache refreshes recency (R3-4)', async () => {
+  // The fill drives 780 fsync-backed state writes, so disk latency decides the
+  // runtime: the same sequence measured 1.6ms and 14ms per write minutes apart
+  // on one host, and 38ms per write outlasts the old flat 30s (#17558). No timer
+  // or network wait here, so a generous ceiling costs no fail-fast.
+  it('a webhook-less frame admitted on the cache refreshes recency (R3-4)', async (ctx) => {
+    // Pin the ceiling: a dropped third argument must fail here, not in CI.
+    expect(ctx.task.timeout).toBe(120_000);
     const { adapter, fake } = await connectedAdapter();
     const hook = (session: string): string =>
       `https://oapi.dingtalk.com/robot/sendBySession?session=${session}`;
@@ -419,7 +449,7 @@ describe('managed DingTalk adapter inbound', () => {
     const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
     expect(Object.hasOwn(persisted.webhooks, 'conv-0')).toBe(true);
     await adapter.disconnect();
-  }, 30_000);
+  }, 120_000);
 
   it('a __proto__ conversationId with its own webhook is admitted and cached as an own key (R3-5)', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
@@ -558,17 +588,29 @@ describe('managed DingTalk adapter inbound', () => {
     );
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
-    expect(plane.submit[0]!.text).toHaveLength(32_000);
+    const text = plane.submit[0]!.text;
+    // The notice is reserved inside the char cap, so the marked result still
+    // fits the 32,000-unit bound and ends with the notice.
+    expect(text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
+    expect(text).toBe(
+      'x'.repeat(32_000 - CHANNEL_INBOUND_TRUNCATION_NOTICE.length) +
+        CHANNEL_INBOUND_TRUNCATION_NOTICE,
+    );
+    expect(text).toHaveLength(32_000);
     await adapter.disconnect();
   });
 
   it('clamps a CJK text to the byte envelope even under the character bound', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
-    // 25,000 CJK characters are under the 32,000-character line but ~75 KB in
-    // UTF-8, over the 64 KiB envelope: the byte cut must land on a code point.
+    // The leading ASCII byte makes the reduced byte budget land MID-code-point
+    // for the 3-byte CJK char, so the code-point walk must actually reject a
+    // partial character instead of landing on an exact boundary (#17173 R2-6).
     fake.push(
       'msg-cjk',
-      messageData({ msgId: 'msg-cjk', text: { content: '中'.repeat(25_000) } }),
+      messageData({
+        msgId: 'msg-cjk',
+        text: { content: 'a' + '中'.repeat(25_000) },
+      }),
     );
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
@@ -576,8 +618,35 @@ describe('managed DingTalk adapter inbound', () => {
     expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(
       64 * 1024 - 4096,
     );
-    expect(text.length).toBeLessThan(25_000);
-    expect(text).toBe('中'.repeat(text.length));
+    // The notice's escaped bytes (73) are reserved from the 61,440-byte budget,
+    // leaving 61,367 for the core: 'a' + floor((61367-1)/3) = 20,455 CJK chars.
+    expect(text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
+    expect(text).toBe(
+      'a' + '中'.repeat(20_455) + CHANNEL_INBOUND_TRUNCATION_NOTICE,
+    );
+    await adapter.disconnect();
+  });
+
+  it('the byte cut keeps astral code points whole at a mid-pair budget', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    // 4-byte astral chars at a budget with a remainder: the exact expected
+    // string pins the maximal whole-code-point fit, so an off-by-one in the
+    // walk or a miscomputed byte budget reds it (#17173 R2-6).
+    fake.push(
+      'msg-astral',
+      messageData({
+        msgId: 'msg-astral',
+        text: { content: 'a' + '😀'.repeat(20_000) },
+      }),
+    );
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(1);
+    const text = plane.submit[0]!.text;
+    // Core budget 61,367 bytes: 'a' + floor((61367-1)/4) = 15,341 astral chars.
+    expect(text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
+    expect(text).toBe(
+      'a' + '😀'.repeat(15_341) + CHANNEL_INBOUND_TRUNCATION_NOTICE,
+    );
     await adapter.disconnect();
   });
 
@@ -1257,6 +1326,7 @@ describe('managed DingTalk adapter review fixes', () => {
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
     const text = plane.submit[0]!.text;
+    expect(text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
     expect(Buffer.byteLength(JSON.stringify(text), 'utf8')).toBeLessThanOrEqual(
       64 * 1024,
     );
@@ -1266,8 +1336,8 @@ describe('managed DingTalk adapter review fixes', () => {
 
   it('does not admit a lone surrogate at the character-cap boundary (F1)', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
-    // 31,001 ASCII + 1,000 emoji: the 32,000-UTF-16-unit cap lands inside a
-    // surrogate pair; the admitted text must stay well-formed.
+    // 31,001 ASCII + 1,000 emoji: the reduced core char cap lands inside a
+    // surrogate pair; the admitted text must stay well-formed and marked.
     fake.push(
       'msg-astral',
       messageData({
@@ -1278,6 +1348,9 @@ describe('managed DingTalk adapter review fixes', () => {
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
     expect(plane.submit[0]!.text.isWellFormed()).toBe(true);
+    expect(
+      plane.submit[0]!.text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE),
+    ).toBe(true);
     await adapter.disconnect();
   });
 
@@ -1678,5 +1751,1227 @@ describe('managed DingTalk adapter review fixes', () => {
     ]);
     await second.adapter.disconnect();
     await first.adapter.disconnect();
+  });
+});
+
+describe('managed DingTalk webhook cache authority (#17173 round 5)', () => {
+  it('a definitively refused webhook is evicted so admission stops trusting it', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    fake.push('seed', messageData({ msgId: 'seed' }));
+    await adapter.tick();
+    fake.setBehavior('definitive');
+    plane.enqueue([delivery('d-evict', 1)]);
+    await adapter.tick();
+    expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
+      'rejected',
+    );
+    // The dead target is gone from the persisted cache the gate trusts, and
+    // the eviction itself is visible (R1-1).
+    const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
+    expect(Object.hasOwn(persisted.webhooks, 'conv-1')).toBe(false);
+    expect(
+      lines.some(
+        (line) =>
+          line.includes('evicted the cached webhook') &&
+          line.includes('conv-1'),
+      ),
+    ).toBe(true);
+    // A webhook-less frame can no longer be admitted against the dead target;
+    // the acked drop is logged once for the burst, never the webhook (R1-1).
+    fake.push('after', messageData({ msgId: 'after', sessionWebhook: '' }));
+    fake.push('after-2', messageData({ msgId: 'after-2', sessionWebhook: '' }));
+    await adapter.tick();
+    expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+      'dingtalk:seed',
+    ]);
+    const gateDrops = lines.filter(
+      (line) =>
+        line.includes('no sessionWebhook and none cached') &&
+        line.includes('conv-1'),
+    );
+    expect(gateDrops).toHaveLength(1);
+    expect(gateDrops[0]).toContain('after');
+    expect(lines.join('\n')).not.toContain('session=abc');
+    // A fresh webhook re-commits the conversation.
+    fake.push(
+      'recommit',
+      messageData({
+        msgId: 'recommit',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/sendBySession?session=fresh',
+      }),
+    );
+    await adapter.tick();
+    expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+      'dingtalk:seed',
+      'dingtalk:recommit',
+    ]);
+    await adapter.disconnect();
+  });
+
+  it('a transient webhook failure keeps the cached webhook', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    fake.push('seed', messageData({ msgId: 'seed' }));
+    await adapter.tick();
+    fake.setBehavior('transient');
+    plane.enqueue([delivery('d-keep', 1)]);
+    await adapter.tick();
+    expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
+      'unknown',
+    );
+    const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
+    expect(Object.hasOwn(persisted.webhooks, 'conv-1')).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('a fresher webhook committed mid-send survives a definitive refusal', async () => {
+    const hooks: { beforeSend?: () => void } = {};
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), hooks);
+    fake.push('seed', messageData({ msgId: 'seed' }));
+    await adapter.tick();
+    const fresh = 'https://oapi.dingtalk.com/robot/sendBySession?session=fresh';
+    // A new frame commits a fresher webhook while the send is in flight; the
+    // refusal below used the OLD webhook, so the fresh entry must stay.
+    hooks.beforeSend = () => {
+      fake.push('mid', messageData({ msgId: 'mid', sessionWebhook: fresh }));
+    };
+    fake.setBehavior('definitive');
+    plane.enqueue([delivery('d-mid', 1)]);
+    await adapter.tick();
+    expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
+      'rejected',
+    );
+    const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
+    expect(persisted.webhooks['conv-1']).toBe(fresh);
+    await adapter.disconnect();
+  });
+});
+
+describe('managed DingTalk admission diagnostics (#17173 R10/R12)', () => {
+  it('the no-claim-slot refusal logs once per outage and re-arms on recovery', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    const noSlot = () =>
+      lines.filter((line) => line.includes('no durable claim slot'));
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('f1', messageData({ msgId: 'f1' }));
+    fake.push('f2', messageData({ msgId: 'f2' }));
+    await adapter.tick();
+    // f1 paid the first-occurrence drop; f2 is held and the stall engaged.
+    expect(fake.push('f3', messageData({ msgId: 'f3' }))).toBe(false);
+    expect(fake.push('f4', messageData({ msgId: 'f4' }))).toBe(false);
+    expect(noSlot()).toHaveLength(1);
+    // The held probe converges and the stall lifts; the next accepted frame
+    // re-arms the line for a future outage.
+    plane.setRefuseSubmit(undefined);
+    await adapter.tick();
+    expect(fake.push('f3', messageData({ msgId: 'f3' }))).toBe(true);
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('f5', messageData({ msgId: 'f5' }));
+    await adapter.tick();
+    expect(fake.push('f6', messageData({ msgId: 'f6' }))).toBe(false);
+    expect(noSlot()).toHaveLength(2);
+    await adapter.disconnect();
+  });
+
+  it('a reconnect re-arms the no-claim-slot line', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    const noSlot = () =>
+      lines.filter((line) => line.includes('no durable claim slot'));
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('f1', messageData({ msgId: 'f1' }));
+    fake.push('f2', messageData({ msgId: 'f2' }));
+    await adapter.tick();
+    expect(fake.push('f3', messageData({ msgId: 'f3' }))).toBe(false);
+    expect(noSlot()).toHaveLength(1);
+    await adapter.disconnect();
+    await adapter.connect();
+    // The persisted held claim re-arms the stall on connect; the outage line
+    // must be armed again too, not inherited latched from the last session.
+    expect(fake.push('f4', messageData({ msgId: 'f4' }))).toBe(false);
+    expect(noSlot()).toHaveLength(2);
+    await adapter.disconnect();
+  });
+
+  it('a non-text drop leaves a visible log line', async () => {
+    const lines: string[] = [];
+    const { adapter, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    expect(
+      fake.push('pic', messageData({ msgId: 'pic', msgtype: 'picture' })),
+    ).toBe(true);
+    await adapter.tick();
+    // The common trigger — a non-text frame carrying both ids — must be
+    // diagnosed as non-text, not as a malformed frame (R1-4).
+    const picLine = lines.find((line) => line.includes('pic'));
+    expect(picLine).toContain('not a text frame');
+    expect(picLine).toContain('picture');
+    expect(picLine).not.toContain('conversationId');
+    // A genuinely missing field names that field instead.
+    expect(
+      fake.push(
+        'nosender',
+        messageData({ msgId: 'nosender', senderStaffId: '', senderId: '' }),
+      ),
+    ).toBe(true);
+    await adapter.tick();
+    const noSenderLine = lines.find((line) => line.includes('nosender'));
+    expect(noSenderLine).toContain('missing senderId');
+    expect(noSenderLine).not.toContain('not a text frame');
+    await adapter.disconnect();
+  });
+
+  it('a rewritten pollInterval is announced; a valid one is silent', () => {
+    const lines: string[] = [];
+    const fake = fakeDeps({ log: (line) => lines.push(line) });
+    const plane = fakeControlPlane();
+    const make = (pollInterval: unknown) =>
+      new ManagedDingtalkAdapter({
+        name: 'ding-1',
+        cwd: tempCwd(),
+        config: { ...CONFIG, pollInterval },
+        controlPlane: plane.controlPlane,
+        deps: fake.deps,
+        pollLoop: false,
+      });
+    const rewritten = make('fast');
+    expect(rewritten.settings.pollInterval).toBe(2_000);
+    expect(rewritten.settings.pollIntervalRewritten).toBe(true);
+    const announced = lines.filter((line) => line.includes('pollInterval'));
+    expect(announced).toHaveLength(1);
+    // The message must state the bounds the clamp actually enforces: the
+    // production line derives them from the shared constants, so moving a
+    // bound moves the message and reds this pin (R1-3).
+    expect(announced[0]).toContain('[250, 2147483647]');
+    lines.length = 0;
+    expect(make(500).settings.pollInterval).toBe(500);
+    expect(make(500).settings.pollIntervalRewritten).toBe(false);
+    expect(make('2000').settings.pollInterval).toBe(2_000);
+    expect(make('2000').settings.pollIntervalRewritten).toBe(false);
+    expect(lines).toHaveLength(0);
+  });
+
+  it('a failed claim save is logged, not silent', async () => {
+    const lines: string[] = [];
+    const { adapter, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    fake.push('seed', messageData({ msgId: 'seed' }));
+    await adapter.tick();
+    const store = (
+      adapter as unknown as { store: { save: (s: unknown) => void } }
+    ).store;
+    const realSave = store.save.bind(store);
+    let failing = true;
+    const saveSpy = vi
+      .spyOn(store, 'save')
+      .mockImplementation((state: unknown) => {
+        if (failing) throw new Error('disk full');
+        realSave(state);
+      });
+    const acceptFailures = () =>
+      lines.filter((line) => line.includes('could not durably accept'));
+    expect(fake.push('m1', messageData({ msgId: 'm1' }))).toBe(false);
+    expect(acceptFailures()).toHaveLength(1);
+    expect(acceptFailures()[0]).toContain('m1');
+    // A persistent store outage redelivers every frame; the line is latched
+    // to one per episode, not one per redelivery (R1-2).
+    expect(fake.push('m2', messageData({ msgId: 'm2' }))).toBe(false);
+    expect(acceptFailures()).toHaveLength(1);
+    // Recovery re-arms the line: an accepted frame clears the latch, so the
+    // next outage episode logs again.
+    failing = false;
+    expect(fake.push('m3', messageData({ msgId: 'm3' }))).toBe(true);
+    failing = true;
+    expect(fake.push('m4', messageData({ msgId: 'm4' }))).toBe(false);
+    expect(acceptFailures()).toHaveLength(2);
+    saveSpy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('the outbound ledger entry is durable before the webhook send (R4)', async () => {
+    const hooks: { beforeSend?: () => void } = {};
+    const { adapter, plane } = await connectedAdapter(tempCwd(), hooks);
+    let ledgerAtSend: Array<{ deliveryId: string; ordinal: number }> = [];
+    hooks.beforeSend = () => {
+      ledgerAtSend = JSON.parse(
+        readFileSync(adapter.stateFile, 'utf8'),
+      ).outbound;
+    };
+    plane.enqueue([delivery('d-pre', 1)]);
+    await adapter.tick();
+    expect(ledgerAtSend).toEqual([
+      expect.objectContaining({ deliveryId: 'd-pre', ordinal: 0 }),
+    ]);
+    await adapter.disconnect();
+  });
+});
+
+describe('managed DingTalk lifecycle pins (#17173 R2-7/R2-9/R4)', () => {
+  it('polls by default when the caller omits pollLoop (R2-7)', async () => {
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    // The production CLI caller omits pollLoop; the adapter must drive its
+    // own tick instead of waiting for a manual one.
+    const adapter = new ManagedDingtalkAdapter({
+      name: 'ding-1',
+      cwd: tempCwd(),
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: fake.deps,
+    });
+    await adapter.connect();
+    fake.push('auto', messageData({ msgId: 'auto' }));
+    await vi.waitFor(
+      () => {
+        expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+          'dingtalk:auto',
+        ]);
+      },
+      { timeout: 5_000 },
+    );
+    await adapter.disconnect();
+  }, 10_000);
+
+  it('stop() aborts the in-flight poll delay so a large interval cannot hang shutdown (R2-9)', async () => {
+    vi.useFakeTimers();
+    try {
+      const plane = fakeControlPlane();
+      const fake = fakeDeps();
+      const adapter = new ManagedDingtalkAdapter({
+        name: 'ding-1',
+        cwd: tempCwd(),
+        config: { ...CONFIG, pollInterval: 2_147_483_647 },
+        controlPlane: plane.controlPlane,
+        deps: fake.deps,
+      });
+      await adapter.connect();
+      // Let the loop's first tick finish so it is actually parked in the
+      // poll delay; a disconnect that lands before the first tick completes
+      // would exit the loop without ever exercising the abort.
+      await vi.advanceTimersByTimeAsync(0);
+      // The loop is parked in a ~24.8-day delay; without the abort in stop()
+      // this disconnect never resolves and the test times out.
+      await adapter.disconnect();
+      expect(plane.disconnectCalls()).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 10_000);
+
+  it('disconnect() closes the control plane (R4)', async () => {
+    const { adapter, plane } = await connectedAdapter();
+    expect(plane.disconnectCalls()).toBe(0);
+    await adapter.disconnect();
+    expect(plane.disconnectCalls()).toBe(1);
+  });
+});
+
+describe('managed DingTalk settings pins (#17173 R2-11)', () => {
+  it('rejects credentials with whitespace edges or embedded control characters', () => {
+    const base = { clientId: 'robot-app', clientSecret: 'secret' };
+    expect(() =>
+      dingtalkSettings({ ...base, clientId: 'robot-app\n' }),
+    ).toThrow(/clientId/);
+    expect(() =>
+      dingtalkSettings({ ...base, clientSecret: 'sec\rret' }),
+    ).toThrow(/clientSecret/);
+    expect(() =>
+      dingtalkSettings({ ...base, clientSecret: 'sec\0ret' }),
+    ).toThrow(/clientSecret/);
+    expect(() => dingtalkSettings({ ...base, clientId: '   ' })).toThrow(
+      /clientId/,
+    );
+    expect(() => dingtalkSettings({ ...base, clientSecret: '' })).toThrow(
+      /clientSecret/,
+    );
+    const ok = dingtalkSettings(base);
+    expect(ok.clientId).toBe('robot-app');
+    expect(ok.clientSecret).toBe('secret');
+    // Copy-paste surrounding spaces are trimmed, not rejected.
+    expect(
+      dingtalkSettings({ ...base, clientId: ' robot-app ' }).clientId,
+    ).toBe('robot-app');
+  });
+
+  it('refuses privatePolicy pairing instead of silently coercing it', () => {
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    expect(
+      () =>
+        new ManagedDingtalkAdapter({
+          name: 'ding-1',
+          cwd: tempCwd(),
+          config: { ...CONFIG, privatePolicy: 'pairing' },
+          controlPlane: plane.controlPlane,
+          deps: fake.deps,
+          pollLoop: false,
+        }),
+    ).toThrow(/pairing/);
+  });
+});
+
+describe('managed DingTalk persist-failure guards (#17173 R10)', () => {
+  type StoreLike = {
+    save: (s: unknown) => void;
+    directory: string;
+  };
+  const storeOf = (adapter: ManagedDingtalkAdapter): StoreLike =>
+    (adapter as unknown as { store: StoreLike }).store;
+  const stateOf = (
+    adapter: ManagedDingtalkAdapter,
+  ): { pending: unknown[]; outbound: unknown[] } =>
+    (
+      adapter as unknown as {
+        state: { pending: unknown[]; outbound: unknown[] };
+      }
+    ).state;
+
+  it('a failed settle persist rolls back so the claim re-drives into the replayed answer', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    fake.push('m1', messageData({ msgId: 'm1' }));
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    let failSettle = false;
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      if (failSettle && (state as { pending: unknown[] }).pending.length === 0)
+        throw new Error('disk full');
+      realSave(state);
+    });
+    failSettle = true;
+    await adapter.tick();
+    // The admission answer arrived but the settle write failed: the claim
+    // must stay in memory AND on disk, not vanish from this process's
+    // re-drive while disk still holds it.
+    expect(stateOf(adapter).pending).toHaveLength(1);
+    expect(
+      JSON.parse(readFileSync(adapter.stateFile, 'utf8')).pending,
+    ).toHaveLength(1);
+    expect(
+      lines.some((line) => line.includes('could not persist the admission')),
+    ).toBe(true);
+    failSettle = false;
+    await adapter.tick();
+    // The re-drive meets the idempotent replayed answer and settles.
+    expect(plane.submitAttempts()).toBe(2);
+    expect(stateOf(adapter).pending).toHaveLength(0);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed ledger persist abandons the send before the side effect', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      if ((state as { outbound: unknown[] }).outbound.length > 0)
+        throw new Error('disk full');
+      realSave(state);
+    });
+    plane.enqueue([delivery('d-1', 1)]);
+    await adapter.tick();
+    // No ledger on disk means no send may happen: the entry is the
+    // double-send guard, and the rollback must clear memory too.
+    expect(fake.sent).toHaveLength(0);
+    expect(stateOf(adapter).outbound).toHaveLength(0);
+    expect(
+      JSON.parse(readFileSync(adapter.stateFile, 'utf8')).outbound,
+    ).toHaveLength(0);
+    expect(lines.some((line) => line.includes('outbound ledger'))).toBe(true);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed receipt persist still reports the outcome to the control plane', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      const outbound = (state as { outbound: Array<{ receipt?: unknown }> })
+        .outbound;
+      if (outbound.some((entry) => entry.receipt)) throw new Error('disk full');
+      realSave(state);
+    });
+    plane.enqueue([delivery('d-1', 1)]);
+    await adapter.tick();
+    // The send already happened: the server-side settle is the durable
+    // record, so the outcome must still be reported.
+    expect(fake.sent).toHaveLength(1);
+    expect(plane.receipts).toHaveLength(1);
+    expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
+      'accepted',
+    );
+    expect(
+      lines.some((line) => line.includes('could not persist the receipt')),
+    ).toBe(true);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed hold persist keeps the stall armed in memory', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      const pending = (state as { pending: Array<{ held?: boolean }> }).pending;
+      if (pending.some((entry) => entry.held)) throw new Error('disk full');
+      realSave(state);
+    });
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('f1', messageData({ msgId: 'f1' }));
+    fake.push('f2', messageData({ msgId: 'f2' }));
+    await adapter.tick();
+    // f1 paid the first-occurrence drop; f2's hold write failed but the
+    // stall must still gate admission in this process.
+    expect(fake.push('f3', messageData({ msgId: 'f3' }))).toBe(false);
+    expect(lines.some((line) => line.includes('held claim'))).toBe(true);
+    expect(lines.some((line) => line.includes('tick failed'))).toBe(false);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed refusal-drop persist never aborts the tick', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    fake.push('f1', messageData({ msgId: 'f1' }));
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    let failing = false;
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      if (failing) throw new Error('disk full');
+      realSave(state);
+    });
+    plane.setRefuseSubmit({ status: 400 });
+    failing = true;
+    await adapter.tick();
+    expect(stateOf(adapter).pending).toHaveLength(0);
+    expect(lines.some((line) => line.includes('refused admission'))).toBe(true);
+    expect(lines.some((line) => line.includes('tick failed'))).toBe(false);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed orphan removal persist continues the remaining orphans', async () => {
+    const lines: string[] = [];
+    const plane = fakeControlPlane();
+    const fake = fakeDeps({ log: (line) => lines.push(line) });
+    const adapter = new ManagedDingtalkAdapter({
+      name: 'ding-1',
+      cwd: tempCwd(),
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: fake.deps,
+      pollLoop: false,
+    });
+    const store = storeOf(adapter);
+    mkdirSync(store.directory, { recursive: true });
+    store.save({
+      version: 1,
+      generation: 1,
+      pending: [],
+      outbound: [
+        { deliveryId: 'o-1', ordinal: 0, messageId: 'm-1' },
+        { deliveryId: 'o-2', ordinal: 0, messageId: 'm-2' },
+      ],
+      recent: [],
+      webhooks: {},
+    });
+    const realSave = store.save.bind(store);
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      if ((state as { outbound: unknown[] }).outbound.length === 1)
+        throw new Error('disk full');
+      realSave(state);
+    });
+    await adapter.connect();
+    // The first removal write fails; the second orphan must still be
+    // reported, not abandoned with the escaped throw.
+    expect(plane.receipts.map((receipt) => receipt.deliveryId)).toEqual([
+      'o-1',
+      'o-2',
+    ]);
+    expect(lines.some((line) => line.includes('orphan removal'))).toBe(true);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('the settle write that removes a held claim carries the streak reset (R1-2)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('f1', messageData({ msgId: 'f1' }));
+    fake.push('f2', messageData({ msgId: 'f2' }));
+    await adapter.tick(); // stall armed, f2 held, streak 2
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    const settleWrites: Array<{ pending: number; refusals?: number }> = [];
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      const s = state as { pending: unknown[]; instanceRefusals?: number };
+      if (s.pending.length === 0)
+        settleWrites.push({
+          pending: s.pending.length,
+          refusals: s.instanceRefusals,
+        });
+      realSave(state);
+    });
+    plane.setRefuseSubmit(undefined);
+    await adapter.tick(); // held probe admitted fresh
+    // ONE write removes the claim AND carries the reset streak: a split
+    // would let a crash leave disk with pending:[] and the stale streak,
+    // so the first transient refusal after a restart would re-hold at once.
+    expect(settleWrites).toEqual([{ pending: 0, refusals: 0 }]);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed settle write rolls back the streak and the stall too (R1-2)', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('f1', messageData({ msgId: 'f1' }));
+    fake.push('f2', messageData({ msgId: 'f2' }));
+    await adapter.tick(); // stall armed, f2 held, streak 2
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    let failedOnce = false;
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      const s = state as { pending: unknown[] };
+      if (!failedOnce && s.pending.length === 0) {
+        failedOnce = true;
+        throw new Error('disk full');
+      }
+      realSave(state);
+    });
+    plane.setRefuseSubmit(undefined);
+    await adapter.tick(); // the settle write fails
+    // Everything the settle touched is rolled back: the claim stays held,
+    // the streak stands, and the stall still gates admission.
+    const persisted = JSON.parse(readFileSync(adapter.stateFile, 'utf8'));
+    expect(persisted.pending).toHaveLength(1);
+    expect(persisted.instanceRefusals).toBe(2);
+    expect(stateOf(adapter).pending).toHaveLength(1);
+    expect(fake.push('f3', messageData({ msgId: 'f3' }))).toBe(false);
+    spy.mockRestore();
+    await adapter.tick(); // re-drive converges and lifts the stall
+    expect(stateOf(adapter).pending).toHaveLength(0);
+    expect(fake.push('f4', messageData({ msgId: 'f4' }))).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('the settle-failure line is latched per outage episode (R1-1)', async () => {
+    const lines: string[] = [];
+    const { adapter, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    fake.push('m1', messageData({ msgId: 'm1' }));
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    let failing = false;
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      const s = state as { pending: unknown[] };
+      if (failing && s.pending.length === 0) throw new Error('disk full');
+      realSave(state);
+    });
+    const settleLines = () =>
+      lines.filter((line) => line.includes('could not persist the admission'));
+    failing = true;
+    await adapter.tick();
+    await adapter.tick(); // the rollback keeps m1 pending; it re-drives
+    expect(settleLines()).toHaveLength(1);
+    failing = false;
+    await adapter.tick(); // m1 settles; the latch clears
+    fake.push('m2', messageData({ msgId: 'm2' }));
+    failing = true;
+    await adapter.tick(); // a second outage episode logs again
+    expect(settleLines()).toHaveLength(2);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed policy-drop persist continues with the remaining claims (R1-4)', async () => {
+    const lines: string[] = [];
+    const plane = fakeControlPlane();
+    const fake = fakeDeps({ log: (line) => lines.push(line) });
+    const adapter = new ManagedDingtalkAdapter({
+      name: 'ding-1',
+      cwd: tempCwd(),
+      config: CONFIG, // allowedUsers: ['staff-1']
+      controlPlane: plane.controlPlane,
+      deps: fake.deps,
+      pollLoop: false,
+    });
+    const store = storeOf(adapter);
+    mkdirSync(store.directory, { recursive: true });
+    const claim = (msgId: string, sender: string) => ({
+      eventId: `dingtalk:${msgId}`,
+      event: {
+        accountGeneration: 1,
+        platformEventId: `dingtalk:${msgId}`,
+        semanticRevision: 1,
+        scope: {
+          kind: 'chat_thread',
+          senderId: null,
+          chatId: 'conv-1',
+          threadId: 'conv-1',
+        },
+        senderId: sender,
+        chatId: 'conv-1',
+        threadId: 'conv-1',
+        subject: null,
+        text: 'hello',
+        attachments: [],
+        replyContext: {
+          conversationId: 'conv-1',
+          sessionWebhook:
+            'https://oapi.dingtalk.com/robot/sendBySession?session=abc',
+          senderId: sender,
+          robotCode: 'robot-app',
+        },
+      },
+    });
+    store.save({
+      version: 1,
+      generation: 1,
+      pending: [claim('revoked', 'intruder'), claim('kept', 'staff-1')],
+      outbound: [],
+      recent: [],
+      webhooks: {
+        'conv-1': 'https://oapi.dingtalk.com/robot/sendBySession?session=abc',
+      },
+    });
+    const realSave = store.save.bind(store);
+    let failedOnce = false;
+    await adapter.connect();
+    // Install after connect: the policy-drop write is the first write of the
+    // tick, and connect's own initial persist must succeed.
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      if (!failedOnce) {
+        failedOnce = true;
+        throw new Error('disk full');
+      }
+      realSave(state);
+    });
+    await adapter.tick();
+    // The revoked claim drops in memory despite the failed write, and the
+    // loop CONTINUES: the second claim still reaches the control plane.
+    expect(stateOf(adapter).pending).toHaveLength(0);
+    expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+      'dingtalk:kept',
+    ]);
+    expect(lines.some((line) => line.includes('policy drop'))).toBe(true);
+    expect(lines.some((line) => line.includes('tick failed'))).toBe(false);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+
+  it('a failed settled-segment removal persist continues the claimed batch (R1-5)', async () => {
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    const store = storeOf(adapter);
+    const realSave = store.save.bind(store);
+    let failedOnce = false;
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      const s = state as { outbound: unknown[] };
+      // The first removal write shrinks outbound to empty; fail it once.
+      if (!failedOnce && s.outbound.length === 0) {
+        failedOnce = true;
+        throw new Error('disk full');
+      }
+      realSave(state);
+    });
+    plane.enqueue([delivery('d-1', 1), delivery('d-2', 1)]);
+    await adapter.tick();
+    // Both deliveries send and report; the failed removal must not abandon
+    // the second delivery the control plane already moved to sending.
+    expect(fake.sent).toHaveLength(2);
+    expect(plane.receipts.map((receipt) => receipt.deliveryId)).toEqual([
+      'd-1',
+      'd-2',
+    ]);
+    expect(lines.some((line) => line.includes('settled segment'))).toBe(true);
+    expect(lines.some((line) => line.includes('tick failed'))).toBe(false);
+    spy.mockRestore();
+    await adapter.disconnect();
+  });
+});
+
+describe('managed DingTalk adapter registration-identity isolation', () => {
+  function pendingOf(adapter: ManagedDingtalkAdapter): string[] {
+    const state = (
+      adapter as unknown as { state: { pending: Array<{ eventId: string }> } }
+    ).state;
+    return state.pending.map((entry) => entry.eventId);
+  }
+
+  function adapterFor(
+    cwd: string,
+    plane: ReturnType<typeof fakeControlPlane>,
+    fake: ReturnType<typeof fakeDeps>,
+    lock?: ManagedDingtalkAdapterDeps['lock'],
+  ) {
+    return new ManagedDingtalkAdapter({
+      name: 'ding-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: lock ? { ...fake.deps, lock } : fake.deps,
+      pollLoop: false,
+    });
+  }
+
+  it('a destination change never replays one tenant pending into another', async () => {
+    const cwd = tempCwd();
+    // Tenant A stages a pending claim (its admission answer has not landed).
+    const planeA = fakeControlPlane('cp|tenant-a|chan-1');
+    const fakeA = fakeDeps();
+    const adapterA = adapterFor(cwd, planeA, fakeA);
+    await adapterA.connect();
+    fakeA.push('m1', messageData({ msgId: 'm1' }));
+    expect(pendingOf(adapterA)).toEqual(['dingtalk:m1']);
+    const stateFileA = adapterA.stateFile;
+    await adapterA.disconnect();
+
+    // Restart the SAME configured entry against tenant B: a different
+    // destination keys a different ledger FILE beneath the SAME entry directory
+    // (the directory is the per-entry connection lock, not per-destination), so
+    // A's pending claim is never loaded into B nor submitted under B's tenant
+    // header.
+    const planeB = fakeControlPlane('cp|tenant-b|chan-1');
+    const fakeB = fakeDeps();
+    const adapterB = adapterFor(cwd, planeB, fakeB);
+    await adapterB.connect();
+    expect(adapterB.stateFile).not.toBe(stateFileA);
+    expect(dirname(adapterB.stateFile)).toBe(dirname(stateFileA));
+    expect(pendingOf(adapterB)).toEqual([]);
+    await adapterB.tick();
+    expect(planeB.submit).toHaveLength(0);
+    await adapterB.disconnect();
+
+    // A's pending claim is still available to A on its own restart.
+    const planeA2 = fakeControlPlane('cp|tenant-a|chan-1');
+    const fakeA2 = fakeDeps();
+    const adapterA2 = adapterFor(cwd, planeA2, fakeA2);
+    await adapterA2.connect();
+    expect(adapterA2.stateFile).toBe(stateFileA);
+    expect(pendingOf(adapterA2)).toEqual(['dingtalk:m1']);
+    await adapterA2.disconnect();
+  });
+
+  it('a workspace change within one tenant never replays the prior owner pending', async () => {
+    const cwd = tempCwd();
+    const planeA = fakeControlPlane('cp|tenant-a|chan-1|actor|ws-a|.');
+    const fakeA = fakeDeps();
+    const adapterA = adapterFor(cwd, planeA, fakeA);
+    await adapterA.connect();
+    fakeA.push('m1', messageData({ msgId: 'm1' }));
+    expect(pendingOf(adapterA)).toEqual(['dingtalk:m1']);
+    const stateFileA = adapterA.stateFile;
+    await adapterA.disconnect();
+
+    // Same tenant/channel, different workspace: the ledger follows the owning
+    // workspace, so B loads nothing and submits nothing of A's.
+    const planeB = fakeControlPlane('cp|tenant-a|chan-1|actor|ws-b|.');
+    const fakeB = fakeDeps();
+    const adapterB = adapterFor(cwd, planeB, fakeB);
+    await adapterB.connect();
+    expect(adapterB.stateFile).not.toBe(stateFileA);
+    expect(dirname(adapterB.stateFile)).toBe(dirname(stateFileA));
+    expect(pendingOf(adapterB)).toEqual([]);
+    await adapterB.tick();
+    expect(planeB.submit).toHaveLength(0);
+    await adapterB.disconnect();
+  });
+
+  it('a second destination of the same robot app is refused the connection lock', async () => {
+    const cwd = tempCwd();
+    const locked = new Set<string>();
+    const lockFake: ManagedDingtalkAdapterDeps['lock'] = async (directory) => {
+      if (locked.has(directory)) throw new Error('ELOCKED');
+      locked.add(directory);
+      return async () => {
+        locked.delete(directory);
+      };
+    };
+    const planeA = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fakeA = fakeDeps();
+    const adapterA = adapterFor(cwd, planeA, fakeA, lockFake);
+    await adapterA.connect();
+    // Same robot app, different destination: the connection lock is per entry,
+    // so the second instance is refused before it can run concurrently and
+    // duplicate inbound processing.
+    const planeB = fakeControlPlane('cp|tenant-b|chan-1|actor|ws|.');
+    const fakeB = fakeDeps();
+    const adapterB = adapterFor(cwd, planeB, fakeB, lockFake);
+    await expect(adapterB.connect()).rejects.toThrow(
+      /owned by another process/,
+    );
+    await adapterA.disconnect();
+  });
+
+  it('logs the stranded legacy ledger on upgrade rather than dropping it silently', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    // Seed the pre-upgrade single ledger in the entry directory before connect.
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        // Asymmetric counts (2 pending, 3 outbound) so swapping the two count
+        // assignments or the two interpolations reds this test (R2-2).
+        pending: [
+          {
+            eventId: 'dingtalk:legacy',
+            event: { platformEventId: 'dingtalk:legacy' },
+          },
+          {
+            eventId: 'dingtalk:legacy2',
+            event: { platformEventId: 'dingtalk:legacy2' },
+          },
+        ],
+        outbound: [
+          { deliveryId: 'd-1', ordinal: 0, messageId: 'm-1' },
+          { deliveryId: 'd-2', ordinal: 1, messageId: 'm-2' },
+          { deliveryId: 'd-3', ordinal: 2, messageId: 'm-3' },
+        ],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    // The notice names the legacy path and both consequences separately:
+    // inbound claims lost AND outbound segments dropped (R2-1 split clauses).
+    expect(stranded[0]).toContain(join(dir, 'managed-state.json'));
+    expect(stranded[0]).toContain('2 pending');
+    expect(stranded[0]).toContain('3 outbound');
+    expect(stranded[0]).toContain('are lost');
+    expect(stranded[0]).toContain(
+      'un-receipted outbound segments were dropped',
+    );
+    // Not adopted: the legacy pending never enters this registration's state.
+    // Assert the state itself, not plane.submit — connect() never drives
+    // resubmitPending(), so an empty submit list could not discriminate an
+    // adoption mutant (R2-3).
+    expect(pendingOf(adapter)).toEqual([]);
+    // Archive contract (R3-3): after a successful start the legacy file is
+    // renamed — not deleted — to a .stranded- sibling that still holds the
+    // seeded claims, and a second start does not re-announce it. Assert the
+    // effects, not a shared path prefix that both names satisfy.
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(false);
+    const archived = readdirSync(dir).filter((f) =>
+      f.startsWith('managed-state.json.stranded-'),
+    );
+    expect(archived).toHaveLength(1);
+    const archivedState = JSON.parse(
+      readFileSync(join(dir, archived[0]), 'utf8'),
+    );
+    expect(archivedState.pending).toHaveLength(2);
+    expect(archivedState.outbound).toHaveLength(3);
+    // A log line names the archived path, so an operator following the notice
+    // (which names the pre-rename path) can still find the claims (R4-1).
+    expect(lines.some((l) => l.includes(join(dir, archived[0])))).toBe(true);
+    await adapter.disconnect();
+    lines.length = 0;
+    const adapter2 = adapterFor(cwd, plane, fake);
+    await adapter2.connect();
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(0);
+    await adapter2.disconnect();
+  });
+
+  it('a quiescent legacy ledger (0/0) is reported without a loss alarm', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [],
+        outbound: [],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    // The design doc requires one line naming the path and counts even for a
+    // quiescent upgrade, but nothing was lost, so no loss alarm (R2-1).
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 pending');
+    expect(stranded[0]).toContain('0 outbound');
+    expect(stranded[0]).not.toContain('are lost');
+    await adapter.disconnect();
+  });
+
+  it('a legacy ledger staged after a rollback is still reported (keyed ledger exists)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    // The entry already upgraded once: a keyed ledger exists.
+    await adapter.connect();
+    await adapter.disconnect();
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(0);
+    // A rollback stages fresh legacy claims; the next upgrade must report them
+    // even though the keyed ledger exists (R2-6).
+    lines.length = 0;
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [
+          {
+            eventId: 'dingtalk:rollback',
+            event: { platformEventId: 'dingtalk:rollback' },
+          },
+        ],
+        outbound: [],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    const adapter2 = adapterFor(cwd, plane, fake);
+    await adapter2.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('1 pending');
+    expect(stranded[0]).toContain('are lost');
+    // A pending-only strand staged no outbound segment, so the outbound
+    // consequence must be absent — the symmetric negative of the outbound-only
+    // case, killing an `if (true)` outbound guard (R4-2).
+    expect(stranded[0]).not.toContain(
+      'un-receipted outbound segments were dropped',
+    );
+    expect(pendingOf(adapter2)).toEqual([]);
+    await adapter2.disconnect();
+  });
+
+  it('an unreadable legacy ledger reports unknown counts and a possible loss, not an empty one', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    // A crash-truncated legacy: the parse fails, so the counts are unknown.
+    writeFileSync(join(dir, 'managed-state.json'), '{not json');
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    // Not rendered as a quiescent "0 pending / 0 outbound, nothing lost"
+    // (R3-1): the counts are unknown and a possible loss is named.
+    expect(stranded[0]).toContain('unknown pending');
+    expect(stranded[0]).toContain('unknown outbound');
+    expect(stranded[0]).toContain('could not be read');
+    expect(stranded[0]).not.toContain('0 pending');
+    await adapter.disconnect();
+  });
+
+  it('an outbound-only legacy strand names the outbound consequence, not lost inbound claims', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [],
+        outbound: [
+          { deliveryId: 'd-1', ordinal: 0, messageId: 'm-1' },
+          { deliveryId: 'd-2', ordinal: 1, messageId: 'm-2' },
+          { deliveryId: 'd-3', ordinal: 2, messageId: 'm-3' },
+        ],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 pending');
+    expect(stranded[0]).toContain('3 outbound');
+    // The outbound consequence is named; no inbound "claims … are lost" is
+    // claimed for a ledger that staged no inbound claims (R2-1 fix-induced).
+    expect(stranded[0]).toContain(
+      'un-receipted outbound segments were dropped',
+    );
+    expect(stranded[0]).not.toContain('are lost');
+    await adapter.disconnect();
+  });
+
+  it('a failed first start leaves the legacy ledger unarchived for a rollback to recover', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    // The stream cannot connect: the ordinary failed-first-start shape.
+    fake.deps.createStreamClient = () => ({
+      connect: async () => {
+        throw new Error('stream unreachable');
+      },
+      disconnect: () => {},
+    });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [
+          {
+            eventId: 'dingtalk:legacy',
+            event: { platformEventId: 'dingtalk:legacy' },
+          },
+        ],
+        outbound: [],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    await expect(adapter.connect()).rejects.toThrow('stream unreachable');
+    // The strand was reported, but the archive is deferred until the start
+    // succeeds (R3-2): the legacy file is still present so a rollback to the
+    // pre-upgrade build can recover it.
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(1);
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+    expect(
+      readdirSync(dir).filter((f) =>
+        f.startsWith('managed-state.json.stranded-'),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('a register-refused first start also leaves the legacy ledger unarchived', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [
+          {
+            eventId: 'dingtalk:legacy',
+            event: { platformEventId: 'dingtalk:legacy' },
+          },
+        ],
+        outbound: [],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    // The stream connects, but the control plane refuses registration. The
+    // archive must stay deferred past ensureRegistered, not just past
+    // stream.connect — hoisting it above registration would red this (R4-3).
+    plane.failNextRegister(
+      Object.assign(new Error('channel_disconnected'), {
+        status: 409,
+        code: 'channel_disconnected',
+      }),
+    );
+    await expect(adapter.connect()).rejects.toThrow('channel_disconnected');
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+    expect(
+      readdirSync(dir).filter((f) =>
+        f.startsWith('managed-state.json.stranded-'),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('a webhook-less frame after an identity change is dropped (cache is identity-scoped)', async () => {
+    const cwd = tempCwd();
+    // Identity A admits a frame carrying a sessionWebhook, caching it for conv-1.
+    const planeA = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fakeA = fakeDeps();
+    const adapterA = adapterFor(cwd, planeA, fakeA);
+    await adapterA.connect();
+    fakeA.push('a1', messageData({ msgId: 'a1' }));
+    await adapterA.tick();
+    expect(planeA.submit).toHaveLength(1);
+    await adapterA.disconnect();
+
+    // Identity B (same entry, different registration) starts with an empty
+    // webhook cache: a webhook-less frame for the known conversation conv-1 has
+    // no reply target and is dropped (acked + deduped), not admitted. This pins
+    // the identity-scoped partition of the webhook cache (R1-5): hoisting the
+    // cache to entry scope would admit this frame and red this test.
+    const planeB = fakeControlPlane('cp|tenant-b|chan-1|actor|ws|.');
+    const fakeB = fakeDeps();
+    const adapterB = adapterFor(cwd, planeB, fakeB);
+    await adapterB.connect();
+    fakeB.push('b1', messageData({ msgId: 'b1', sessionWebhook: '' }));
+    await adapterB.tick();
+    expect(planeB.submit).toHaveLength(0);
+    await adapterB.disconnect();
   });
 });

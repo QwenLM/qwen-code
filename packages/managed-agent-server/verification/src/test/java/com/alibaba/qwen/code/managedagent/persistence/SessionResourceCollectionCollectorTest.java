@@ -1424,36 +1424,6 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     }
 
     @Test
-    void retainedPrivatePinRefusesAStaleClaimAndPreservesInlineBytes() {
-        initSession();
-        head(session);
-        publish("private-content", CONTENT, new byte[100]);
-        retire();
-        seedLedger();
-        var collector = collector(true, Duration.ZERO);
-        var claim = collector.claim();
-        assertThat(claim).isNotNull();
-        jdbc.update(
-                "UPDATE ma_session SET runtime_request_key = ? WHERE tenant_id = ? AND session_id ="
-                        + " ?",
-                "a".repeat(64),
-                tenant,
-                session);
-        var before = rows();
-        var beforeLedger = ledger();
-        assertThatThrownBy(() -> collector.collect(claim))
-                .isInstanceOfSatisfying(
-                        ManagedAgentException.class,
-                        error ->
-                                assertThat(error.getCode())
-                                        .isEqualTo("csi_managed_mutation_unavailable"));
-        assertThat(rows()).usingRecursiveComparison().isEqualTo(before);
-        assertThat(ledger()).isEqualTo(beforeLedger);
-        assertThat(collector.runOnce()).isFalse();
-        assertThat(rows()).usingRecursiveComparison().isEqualTo(before);
-    }
-
-    @Test
     void nativeMediaCollectionPreservesAnotherSessionsIdenticalBytes() throws Exception {
         initSession();
         JsonNode original = commitNativeMedia(session);

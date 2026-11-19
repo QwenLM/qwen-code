@@ -2245,6 +2245,27 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('forwards excludeRefs as the exclude query parameter on both clients', async () => {
+      const ok = { v: 1 as const, workspaceCwd: '/w', available: true };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.workspaceGitLog(50, 0, 'base..HEAD', {
+        excludeRefs: ['abc123', 'def456'],
+      });
+      await client
+        .workspaceByCwd('/work/main')
+        .workspaceGitLog(50, 0, '/wt', 'base..HEAD', {
+          excludeRefs: ['abc123', 'def456'],
+          sessionId: 's1',
+        });
+
+      expect(calls.map((c) => c.url)).toEqual([
+        'http://daemon/workspace/git/log?limit=50&skip=0&range=base..HEAD&exclude=abc123%2Cdef456',
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/log?limit=50&skip=0&cwd=%2Fwt&range=base..HEAD&exclude=abc123%2Cdef456&sessionId=s1',
+      ]);
+    });
+
     it('reads workspace-qualified GitHub pull requests over REST', async () => {
       const list = {
         v: 1 as const,
@@ -2272,6 +2293,92 @@ describe('DaemonClient', () => {
       ).resolves.toEqual(list);
       expect(calls.map((call) => [call.method, call.url])).toEqual([
         ['GET', 'http://daemon/workspaces/%2Fwork%2Fsecondary/github/prs'],
+      ]);
+    });
+
+    it('fetches a PR file list over REST with cwd and sessionId', async () => {
+      const files = {
+        v: 1 as const,
+        workspaceCwd: '/work/secondary',
+        available: true,
+        files: [{ path: 'src/a.ts', additions: 10, deletions: 2 }],
+        hiddenCount: 0,
+        additions: 10,
+        deletions: 2,
+        headSha: 'abc1234',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, files));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client
+          .workspaceByCwd('/work/secondary')
+          .workspaceGitHubPullRequestFiles(42, '/work/secondary', 'sess-1'),
+      ).resolves.toEqual(files);
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        [
+          'GET',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/github/prs/42/files?cwd=%2Fwork%2Fsecondary&sessionId=sess-1',
+        ],
+      ]);
+    });
+
+    it('forwards the bound PR repo slug as a query parameter', async () => {
+      const files = {
+        v: 1 as const,
+        workspaceCwd: '/work/secondary',
+        available: true,
+        files: [],
+        hiddenCount: 0,
+        additions: 0,
+        deletions: 0,
+        headSha: '',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, files));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client
+        .workspaceByCwd('/work/secondary')
+        .workspaceGitHubPullRequestFiles(
+          42,
+          '/work/secondary',
+          'sess-1',
+          'o/r',
+        );
+
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        [
+          'GET',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/github/prs/42/files?cwd=%2Fwork%2Fsecondary&sessionId=sess-1&repo=o%2Fr',
+        ],
+      ]);
+    });
+
+    it('omits an empty repo slug so the route resolves the PR locally', async () => {
+      // An empty repo means "not supplied"; forwarding `repo=` would hand the
+      // route a supplied-but-empty value it must reject with 400.
+      const files = {
+        v: 1 as const,
+        workspaceCwd: '/work/secondary',
+        available: true,
+        files: [],
+        hiddenCount: 0,
+        additions: 0,
+        deletions: 0,
+        headSha: '',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, files));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client
+        .workspaceByCwd('/work/secondary')
+        .workspaceGitHubPullRequestFiles(42, '/work/secondary', 'sess-1', '');
+
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        [
+          'GET',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/github/prs/42/files?cwd=%2Fwork%2Fsecondary&sessionId=sess-1',
+        ],
       ]);
     });
 
@@ -2570,6 +2677,128 @@ describe('DaemonClient', () => {
       const call = slowFetch.mock.calls[0]!;
       expect(String(call[0])).toBe(
         `http://daemon/workspaces/%2Fwork%2Fsecondary/git/pull?cwd=${encodeURIComponent(cwd)}`,
+      );
+    });
+
+    it('sends checkout resolution options in the body on both routes', async () => {
+      const ok = {
+        branch: 'feat/thing',
+        detached: false,
+        stashSha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.workspaceGitCheckout('feat/thing', { stash: true }),
+      ).resolves.toEqual(ok);
+      await client
+        .workspaceByCwd('/work/secondary')
+        .workspaceGitCheckout('feat/thing', '/work/secondary', 'session-a', {
+          force: true,
+        });
+
+      expect(String(calls[0]!.url)).toBe(
+        'http://daemon/workspace/git/checkout',
+      );
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        ref: 'feat/thing',
+        stash: true,
+      });
+      expect(String(calls[1]!.url)).toBe(
+        'http://daemon/workspaces/%2Fwork%2Fsecondary/git/checkout?cwd=%2Fwork%2Fsecondary&sessionId=session-a',
+      );
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        ref: 'feat/thing',
+        force: true,
+      });
+    });
+
+    it('lets workspaceGitCheckout outsize the client default fetch timeout', async () => {
+      let resolveResponse: ((value: Response) => void) | undefined;
+      const slowFetch = vi.fn(
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveResponse = resolve;
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+        fetchTimeoutMs: 1,
+      });
+
+      const inflight = client.workspaceGitCheckout(
+        'feat/thing',
+        { stash: true },
+        1_000,
+      );
+      setTimeout(() => {
+        resolveResponse?.(
+          jsonResponse(200, { branch: 'feat/thing', detached: false }),
+        );
+      }, 5);
+
+      await expect(inflight).resolves.toEqual({
+        branch: 'feat/thing',
+        detached: false,
+      });
+      const call = slowFetch.mock.calls[0]!;
+      expect(JSON.parse(String((call[1] as RequestInit).body))).toEqual({
+        ref: 'feat/thing',
+        stash: true,
+      });
+    });
+
+    it('forwards the per-call checkout timeout on the workspace-qualified route', async () => {
+      let resolveResponse: ((value: Response) => void) | undefined;
+      const slowFetch = vi.fn(
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveResponse = resolve;
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+        fetchTimeoutMs: 1,
+      });
+      const cwd = '/work/secondary/packages/app';
+
+      const inflight = client
+        .workspaceByCwd('/work/secondary')
+        .workspaceGitCheckout(
+          'feat/thing',
+          cwd,
+          undefined,
+          { force: true },
+          1_000,
+        );
+      setTimeout(() => {
+        resolveResponse?.(
+          jsonResponse(200, { branch: 'feat/thing', detached: false }),
+        );
+      }, 5);
+
+      await expect(inflight).resolves.toEqual({
+        branch: 'feat/thing',
+        detached: false,
+      });
+      const call = slowFetch.mock.calls[0]!;
+      expect(String(call[0])).toBe(
+        `http://daemon/workspaces/%2Fwork%2Fsecondary/git/checkout?cwd=${encodeURIComponent(cwd)}`,
       );
     });
 
@@ -5987,6 +6216,52 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[0]!.body!)).toEqual({
         name: 'Side task',
       });
+    });
+  });
+
+  describe('sendToSubSession', () => {
+    it('posts the send to the sub-sessions route of the caller', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(202, { sessionId: 'kid', workspaceCwd: '/work/b' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.sendToSubSession(
+        'main-1',
+        { prompt: 'look', workspace: '/work/b', targetSessionId: 'kid' },
+        'client-1',
+      );
+
+      expect(result).toEqual({ sessionId: 'kid', workspaceCwd: '/work/b' });
+      expect(calls[0]?.url).toBe('http://daemon/session/main-1/sub-sessions');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        prompt: 'look',
+        workspace: '/work/b',
+        targetSessionId: 'kid',
+      });
+    });
+
+    it('asks the tasks route for the sends it reports back', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          sessionId: 'main-1',
+          now: 1,
+          tasks: [],
+          subSessions: [],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.sessionTasks('main-1', undefined, {
+        includeSubSessions: true,
+      });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/main-1/tasks?includeSubSessions=true',
+      );
     });
   });
 

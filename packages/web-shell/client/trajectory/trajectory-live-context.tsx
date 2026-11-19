@@ -13,6 +13,8 @@ const emptySnapshot: TrajectoryLiveSnapshot = {
   status: 'unavailable',
   requests: { entries: new Map() },
   tools: { entries: new Map() },
+  hooks: { entries: new Map() },
+  hookPromptIds: new Map(),
   incomplete: false,
   truncated: false,
 };
