@@ -2,8 +2,13 @@
 
 [English](2026-11-18-managed-channel-card-surfaces.md) | [简体中文](2026-11-18-managed-channel-card-surfaces.zh-CN.md)
 
-状态：本次改动已实现 DingTalk 互动卡片（单聊）；真实租户 smoke 与其他适配器的
-卡片渲染仍另行处理。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827)
+状态：已在 [#17748](https://github.com/QwenLM/qwen-code/pull/17748)（squash
+`5d91810c8f`）合入 DingTalk 互动卡片（单聊）。验证账本：build / typecheck /
+lint rc=0；DingTalk、channel-base、core 渠道与 CLI 套件全绿；三轮评审共 29 条
+承重规则变异下变红；真实 CONNECT 代理 A/B 与真实全链路集成（真实 HTTP 控制面 +
+真实卡片代理/TLS origin + 真实磁盘状态，`delivered` 回执剪掉卡片正文）通过。延后
+后续项（真实租户 smoke、其他 provider、读模型元数据、流式、群卡片）在
+[#17813](https://github.com/QwenLM/qwen-code/issues/17813) 跟踪。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827)
 的 **H5e** 切片，由 [#17716](https://github.com/QwenLM/qwen-code/issues/17716)
 跟踪，属于 Managed Agent 提案
 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)。它建立在

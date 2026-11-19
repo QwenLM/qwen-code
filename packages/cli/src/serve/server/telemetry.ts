@@ -854,6 +854,7 @@ export function resolveDaemonTelemetryRoute(
     if (req.method === 'POST') {
       if (
         suffix === '/workspace/settings' ||
+        suffix === '/workspace/settings/vision-bridge' ||
         suffix === '/workspace/voice' ||
         suffix === '/workspace/voice/transcribe' ||
         suffix === '/workspace/permissions' ||
