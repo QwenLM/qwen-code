@@ -688,6 +688,52 @@ describe('DeleteSessionDialog selection', () => {
     expect(hint()).not.toContain('background work');
   });
 
+  it('keeps a delete outcome across a refresh that carries no load error', async () => {
+    // Mirroring the load error must not reach outcomes: the effect only runs
+    // when the error itself changes.
+    deleteSessionsMock.mockResolvedValue({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId: 's1', error: 'locked' }],
+    });
+    sessions = initialSessions.slice();
+    mount();
+    clickRow(1);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+    rerender();
+    rerender();
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+  });
+
+  it('lets the refusal speak again once a load error clears', () => {
+    // The list refetches every second, so one failed poll must not mute the
+    // refusal for the rest of the dialog's life.
+    scopedSessionsError = new Error('load boom');
+    sessions = [
+      {
+        ...initialSessions[0],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    expect(hint()).toContain('load boom');
+
+    scopedSessionsError = undefined;
+    rerender();
+    expect(hint()).toBe('');
+    clickRow(0);
+    expect(isChecked(rows()[0]!)).toBe(false);
+    expect(hint()).toBe(
+      'A session with background work cannot be deleted; deleting would stop it',
+    );
+  });
+
   it('keeps a settled delete failure in the hint when a blocked row is clicked', async () => {
     // The failure text has no second rendering site in this dialog, so a later
     // refusal must not be able to take the slot away from it.

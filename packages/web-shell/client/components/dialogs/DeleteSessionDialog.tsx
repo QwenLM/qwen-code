@@ -80,8 +80,10 @@ export function DeleteSessionDialog({
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Mirror the load error rather than latch it: the list refetches every
+  // second, so one failed poll must not mute the hint for the dialog's life.
   useEffect(() => {
-    if (sessionsError) setMessage(sessionsError.message);
+    setMessage(sessionsError ? sessionsError.message : null);
   }, [sessionsError]);
 
   const filtered = useMemo(

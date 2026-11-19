@@ -99,7 +99,7 @@ Reuse the existing trailing busy marker instead of adding a new indicator:
   An idle attached session stays deletable (#12619). The hint tracks live state
   rather than the click: it names whichever rule blocks the row now, goes away
   once the row is deletable again, and stays quiet while a delete is running or
-  an error or delete outcome holds the slot — the dialog renders those nowhere
+  a live error or a delete outcome holds the slot — the dialog renders those nowhere
   else, so a refusal must not take the slot from them.
 - Three staleness holes close with it. Selection mode keeps its own copy of
   each ticked session, so its refresh contract now carries the background flag
