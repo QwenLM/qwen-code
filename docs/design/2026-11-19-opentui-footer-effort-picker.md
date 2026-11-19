@@ -82,8 +82,9 @@ Direct `/effort` keeps its existing preselect and recording behaviour.
 ### Persistence
 
 The pick writes `model.reasoningEffort` to the scope that owns
-`modelProviders` and clears the key in higher-precedence writable scopes that
-carry it, mirroring the ACP session's reasoning persistence.
+`modelProviders` and clears the key only in higher-precedence writable scopes
+that carry it. A lower-precedence scope cannot shadow the write, so its value
+is preserved (a Workspace pick does not erase the user's global default).
 
 The active provider entry is selected by protocol + model id, with the live
 base URL first and the persisted `model.baseUrl` second. If no unique entry can
@@ -91,11 +92,15 @@ be identified, the static rewrite is skipped rather than touching a sibling
 provider.
 
 For the identified entry, the static effort keys are removed from
-`extra_body` and `samplingParams` (flat `reasoning_effort` and nested
-`reasoning.effort`), preserving sibling keys. `model.generationConfig` is
-handled the same way for its global fallback copy. Removal is written as
-per-path `undefined` values so the JSONC writer emits delete operations; a
-whole-object write would deep-merge and leave the old key behind.
+`extra_body` and `samplingParams`. A nested `reasoning` object is removed as a
+unit, because the OpenAI pipeline can treat the object's presence as an
+override regardless of its `effort`; any sibling keys (for example
+`budget_tokens`) are removed with it and reported in the UI rather than
+silently lost. Flat `reasoning_effort` is removed on its own.
+`model.generationConfig` is handled the same way for its global fallback copy.
+Removal is written as per-path `undefined` values so the JSONC writer emits
+delete operations; a whole-object write would deep-merge and leave the old key
+behind.
 
 The provider-array write goes through the same placeholder preservation as the
 provider-install adapter: raw `${VAR}` placeholders are restored before saving,
@@ -110,8 +115,9 @@ same-model sub-agents do not inherit the old static knob before restart.
 
 The entry is available for models with effort tiers: the built-in GPT,
 DeepSeek and tiered Qwen families, plus any model declaring
-`capabilities.reasoning.efforts`. Toggle-only models and models without
-reasoning capabilities show no click target.
+`capabilities.reasoning.efforts`. Toggle-only models, models without reasoning
+capabilities, and a displayed tier that is not in the model's ladder show no
+click target.
 
 ## Constraints and known limitations
 

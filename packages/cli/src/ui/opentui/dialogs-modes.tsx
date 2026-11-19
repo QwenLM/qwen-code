@@ -626,18 +626,29 @@ export function OpenTuiApprovalModeDialog(props: {
  * last). The picker removes those keys from the live config and from the
  * persisted provider entry, leaving `model.reasoningEffort` as the single
  * authority. Both supported shapes are covered: the flat `reasoning_effort`
- * string and the nested `reasoning.effort`; sibling keys are preserved.
+ * string and the nested `reasoning.effort`.
+ *
+ * A nested `reasoning` object is treated as a unit: the OpenAI pipeline skips
+ * the configured tier whenever that object exists, so keeping it with a
+ * sibling (e.g. `budget_tokens`) would suppress the pick. The whole object is
+ * removed; any sibling keys are reported to the caller instead of vanishing
+ * silently.
  */
 function stripEffortBlock(block: Record<string, unknown> | undefined): {
   block: Record<string, unknown> | undefined;
   changed: boolean;
   /** Paths removed relative to this block, for a per-key disk delete. */
   removedPaths: string[];
+  /** Nested `reasoning` keys removed along with `effort`. */
+  droppedSiblings: string[];
 } {
-  if (!block) return { block, changed: false, removedPaths: [] };
+  if (!block) {
+    return { block, changed: false, removedPaths: [], droppedSiblings: [] };
+  }
   let next = block;
   let changed = false;
   const removedPaths: string[] = [];
+  const droppedSiblings: string[] = [];
   if (typeof block['reasoning_effort'] === 'string') {
     const { reasoning_effort: _drop, ...rest } = next;
     next = rest;
@@ -648,25 +659,30 @@ function stripEffortBlock(block: Record<string, unknown> | undefined): {
   if (reasoning && typeof reasoning === 'object' && !Array.isArray(reasoning)) {
     const nested = reasoning as Record<string, unknown>;
     if (typeof nested['effort'] === 'string') {
-      const { effort: _drop, ...rest } = nested;
+      droppedSiblings.push(
+        ...Object.keys(nested).filter((key) => key !== 'effort'),
+      );
+      const { reasoning: _dropReasoning, ...without } = next;
+      next = without;
       changed = true;
-      if (Object.keys(rest).length > 0) {
-        next = { ...next, reasoning: rest };
-        removedPaths.push('reasoning.effort');
-      } else {
-        const { reasoning: _dropReasoning, ...without } = next;
-        next = without;
-        removedPaths.push('reasoning');
-      }
+      removedPaths.push('reasoning');
     }
   }
-  return { block: changed ? next : block, changed, removedPaths };
+  return {
+    block: changed ? next : block,
+    changed,
+    removedPaths,
+    droppedSiblings,
+  };
 }
 
-function stripLiveEffortOverrides(config: Config): void {
+function stripLiveEffortOverrides(config: Config): string[] {
+  const droppedSiblings: string[] = [];
   // `applyReasoningEffort` is a no-op when thinking is explicitly disabled;
   // removing a raw knob there would change a config the picker cannot edit.
-  if (config.getContentGeneratorConfig()?.reasoning === false) return;
+  if (config.getContentGeneratorConfig()?.reasoning === false) {
+    return droppedSiblings;
+  }
   const strip = (
     generation:
       | {
@@ -682,6 +698,7 @@ function stripLiveEffortOverrides(config: Config): void {
         extraBody.block && Object.keys(extraBody.block).length > 0
           ? extraBody.block
           : undefined;
+      droppedSiblings.push(...extraBody.droppedSiblings);
     }
     const samplingParams = stripEffortBlock(generation.samplingParams);
     if (samplingParams.changed) {
@@ -689,6 +706,7 @@ function stripLiveEffortOverrides(config: Config): void {
         samplingParams.block && Object.keys(samplingParams.block).length > 0
           ? samplingParams.block
           : undefined;
+      droppedSiblings.push(...samplingParams.droppedSiblings);
     }
   };
   strip(config.getContentGeneratorConfig());
@@ -706,6 +724,7 @@ function stripLiveEffortOverrides(config: Config): void {
     );
     strip(resolved?.generationConfig);
   }
+  return droppedSiblings;
 }
 
 interface ActiveProviderEntry {
@@ -819,7 +838,8 @@ function writeReasoningSelection(
  * knobs. Strip those from the raw scope objects too: it is written through the
  * original (unexpanded) value so placeholders survive.
  */
-function stripModelGenerationConfigEffort(settings: LoadedSettings): void {
+function stripModelGenerationConfigEffort(settings: LoadedSettings): string[] {
+  const droppedSiblings: string[] = [];
   for (const scope of getWritableScopes(settings)) {
     const file = settings.forScope(scope);
     const rawModel = file.originalSettings?.model as
@@ -863,6 +883,10 @@ function stripModelGenerationConfigEffort(settings: LoadedSettings): void {
         );
       }
     }
+    droppedSiblings.push(
+      ...extraBody.droppedSiblings,
+      ...samplingParams.droppedSiblings,
+    );
     settings.setValues(
       changes.map((path) => ({
         scope,
@@ -886,6 +910,7 @@ function stripModelGenerationConfigEffort(settings: LoadedSettings): void {
     ) as typeof file.settings.model;
     settings.recomputeMerged();
   }
+  return droppedSiblings;
 }
 
 /**
@@ -900,17 +925,22 @@ function persistEffortSelection(
   config: Config | undefined,
   settings: LoadedSettings,
   effort: ReasoningEffort,
-): void {
+): string[] {
+  const droppedSiblings: string[] = [];
   const persistScope = getPersistScopeForModelSelection(settings);
   const writableScopes = getWritableScopes(settings);
-  const clearScopes = writableScopes.filter(
-    (scope) =>
-      scope !== persistScope &&
+  // Only a higher-precedence scope can shadow the persisted tier. Clearing a
+  // lower-precedence scope would delete an unrelated global preference (for
+  // example, a Workspace pick must not erase the user's default tier).
+  const persistIndex = writableScopes.indexOf(persistScope);
+  const clearScopes = writableScopes
+    .slice(0, Math.max(0, persistIndex))
+    .filter((scope) =>
       settingExistsInScope(
         'model.reasoningEffort',
         settings.forScope(scope).settings,
       ),
-  );
+    );
 
   // Removing a raw knob while thinking is explicitly disabled would destroy a
   // setting the picker cannot meaningfully edit; only the tier is persisted.
@@ -934,6 +964,10 @@ function persistEffortSelection(
         generation['samplingParams'] as Record<string, unknown> | undefined,
       );
       if (extraBody.changed || samplingParams.changed) {
+        droppedSiblings.push(
+          ...extraBody.droppedSiblings,
+          ...samplingParams.droppedSiblings,
+        );
         const nextGeneration = { ...generation };
         if (extraBody.changed) {
           if (extraBody.block && Object.keys(extraBody.block).length > 0) {
@@ -1006,12 +1040,13 @@ function persistEffortSelection(
   }
 
   if (!reasoningDisabled) {
-    stripModelGenerationConfigEffort(settings);
+    droppedSiblings.push(...stripModelGenerationConfigEffort(settings));
   }
   writeReasoningSelection(settings, persistScope, effort);
   for (const scope of clearScopes) {
     writeReasoningSelection(settings, scope, undefined);
   }
+  return droppedSiblings;
 }
 
 export function OpenTuiEffortDialog(props: {
@@ -1079,6 +1114,7 @@ export function OpenTuiEffortDialog(props: {
     initialIndex: Math.max(0, configuredIndex),
     maxItemsToShow: tierWindow.maxItemsToShow,
     onSelect: (effort) => {
+      const droppedSiblings: string[] = [];
       try {
         // Apply at runtime (next turn); provider adapters clamp the tier per
         // model (ink useEffortCommand parity — the request pipeline reads the
@@ -1087,12 +1123,23 @@ export function OpenTuiEffortDialog(props: {
           applyReasoningEffort(config, effort);
           // A saved raw knob outranks the session tier in the request builder;
           // drop it in memory so the wire and the footer follow the picker.
-          stripLiveEffortOverrides(config);
+          droppedSiblings.push(...stripLiveEffortOverrides(config));
         }
-        persistEffortSelection(config, settings, effort);
+        droppedSiblings.push(
+          ...persistEffortSelection(config, settings, effort),
+        );
         // Read back after the apply: the message names what the provider
         // actually clamped the tier to, not what the row asked for.
         if (config) notify?.(formatEffortChangeMessage(config, effort));
+        const dropped = [...new Set(droppedSiblings)];
+        if (dropped.length > 0) {
+          // A nested reasoning object is removed as a unit so the tier can
+          // reach the wire; its siblings cannot be preserved silently.
+          notify?.(
+            `Removed static reasoning keys: ${dropped.join(', ')}.`,
+            'info',
+          );
+        }
       } catch (error) {
         // Persisting is the point of this picker; a silent failure would tell
         // the user it survived when a restart will drop it.

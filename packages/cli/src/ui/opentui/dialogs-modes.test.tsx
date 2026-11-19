@@ -1656,6 +1656,10 @@ describe('OpenTuiEffortDialog', () => {
       sibling?: Record<string, unknown>;
       persistedBaseUrl?: string;
       workspaceTier?: string;
+      userTier?: string;
+      workspaceOwnsProviders?: boolean;
+      nestedSibling?: boolean;
+      placeholderKey?: boolean;
       modelGenerationConfig?: Record<string, unknown>;
     } = {},
   ) {
@@ -1667,50 +1671,74 @@ describe('OpenTuiEffortDialog', () => {
     const setReasoningEffort = vi.fn((tier: string) => {
       applied = tier;
     });
-    const makeStatic = () =>
-      nestedStaticEffort
+    const nestedReasoning = options.nestedSibling
+      ? { effort: 'max', budget_tokens: 8192 }
+      : { effort: 'max' };
+    const makeStatic = () => {
+      const base = nestedStaticEffort
         ? {
-            extra_body: { reasoning: { effort: 'max' }, temperature: 1 },
-            samplingParams: { reasoning: { effort: 'max' } },
+            extra_body: { reasoning: nestedReasoning, temperature: 1 },
+            samplingParams: { reasoning: nestedReasoning },
           }
         : {
             extra_body: { reasoning_effort: 'max', temperature: 1 },
             samplingParams: { reasoning_effort: 'max' },
           };
+      if (options.placeholderKey) {
+        (base.extra_body as Record<string, unknown>)['apiKey'] =
+          'sk-live-secret';
+      }
+      return base;
+    };
     const generation = { ...makeStatic(), authType: 'openai' } as {
       extra_body?: Record<string, unknown>;
       samplingParams?: Record<string, unknown>;
       authType?: string;
     };
+    const modelsGeneration = makeStatic() as {
+      extra_body?: Record<string, unknown>;
+      samplingParams?: Record<string, unknown>;
+    };
     const registryGeneration = makeStatic() as {
       extra_body?: Record<string, unknown>;
       samplingParams?: Record<string, unknown>;
     };
-    const userSettings = {
+    const providers = {
+      [providerKey]: [
+        {
+          id: 'deepseek-v4-pro',
+          name: 'DeepSeek V4 Pro',
+          baseUrl: 'https://active.example',
+          generationConfig: makeStatic(),
+        },
+        ...(options.sibling ? [options.sibling] : []),
+      ],
+    };
+    const rawProviders = options.placeholderKey
+      ? (structuredClone(providers) as typeof providers)
+      : providers;
+    if (options.placeholderKey) {
+      const rawEntry = rawProviders[providerKey][0] as {
+        generationConfig: { extra_body: Record<string, unknown> };
+      };
+      rawEntry.generationConfig.extra_body['apiKey'] = '${DASHSCOPE_API_KEY}';
+    }
+    const userModel = {
       ...(options.modelGenerationConfig
-        ? {
-            model: {
-              generationConfig: options.modelGenerationConfig,
-            },
-          }
+        ? { generationConfig: options.modelGenerationConfig }
         : {}),
-      modelProviders: {
-        [providerKey]: [
-          {
-            id: 'deepseek-v4-pro',
-            name: 'DeepSeek V4 Pro',
-            baseUrl: 'https://active.example',
-            generationConfig: makeStatic(),
-          },
-          ...(options.sibling ? [options.sibling] : []),
-        ],
-      },
+      ...(options.userTier ? { reasoningEffort: options.userTier } : {}),
+    };
+    const userSettings = {
+      ...(Object.keys(userModel).length > 0 ? { model: userModel } : {}),
+      ...(options.workspaceOwnsProviders ? {} : { modelProviders: providers }),
     };
     const workspaceSettings = {
       general: {},
       ...(options.workspaceTier
         ? { model: { reasoningEffort: options.workspaceTier } }
         : {}),
+      ...(options.workspaceOwnsProviders ? { modelProviders: providers } : {}),
     };
     const config = {
       getModel: () => 'deepseek-v4-pro',
@@ -1719,7 +1747,7 @@ describe('OpenTuiEffortDialog', () => {
       setReasoningEffort,
       getContentGeneratorConfig: () => generation,
       getModelsConfig: () => ({
-        getGenerationConfig: () => generation,
+        getGenerationConfig: () => modelsGeneration,
         getResolvedModel: () => ({ generationConfig: registryGeneration }),
       }),
       getResolvedModelConfig: () => ({
@@ -1732,6 +1760,13 @@ describe('OpenTuiEffortDialog', () => {
       workspace: { settings: workspaceSettings },
       merged: {
         providerProtocol: { 'my-gateway': 'openai' },
+        ...(options.placeholderKey
+          ? {
+              modelProviders: {
+                [providerKey]: providers[providerKey],
+              },
+            }
+          : {}),
         ...(options.persistedBaseUrl
           ? {
               model: {
@@ -1750,9 +1785,27 @@ describe('OpenTuiEffortDialog', () => {
             : scope === SettingScope.Workspace
               ? workspaceSettings
               : {};
+        let originalSettings = scopeSettings;
+        if (options.placeholderKey) {
+          if (scope === SettingScope.User && !options.workspaceOwnsProviders) {
+            originalSettings = {
+              ...userSettings,
+              modelProviders: rawProviders,
+            };
+          }
+          if (
+            scope === SettingScope.Workspace &&
+            options.workspaceOwnsProviders
+          ) {
+            originalSettings = {
+              ...workspaceSettings,
+              modelProviders: rawProviders,
+            };
+          }
+        }
         return {
           settings: scopeSettings,
-          originalSettings: scopeSettings,
+          originalSettings,
         };
       },
     } as unknown as LoadedSettings;
@@ -1773,8 +1826,10 @@ describe('OpenTuiEffortDialog', () => {
       setReasoningEffort,
       notify,
       generation,
+      modelsGeneration,
       registryGeneration,
       userSettings,
+      workspaceSettings,
     };
   }
 
@@ -1897,6 +1952,31 @@ describe('OpenTuiEffortDialog', () => {
     });
   });
 
+  it('restores ${VAR} placeholders when rewriting the provider array', () => {
+    const harness = renderEffortDialog(
+      'max',
+      undefined,
+      false,
+      'openai',
+      undefined,
+      { placeholderKey: true },
+    );
+    press('down');
+    press('return');
+
+    const providerWrite = harness.setValue.mock.calls.find(
+      ([, key]) => key === 'modelProviders.openai',
+    );
+    const nextProviders = providerWrite![2] as Array<{
+      generationConfig: { extra_body?: Record<string, unknown> };
+    }>;
+    expect(nextProviders[0]?.generationConfig.extra_body).toEqual({
+      temperature: 1,
+      apiKey: '${DASHSCOPE_API_KEY}',
+    });
+    expect(JSON.stringify(nextProviders)).not.toContain('sk-live-secret');
+  });
+
   it('leaves a same-id sibling without a baseUrl untouched', () => {
     const sibling = {
       id: 'deepseek-v4-pro',
@@ -1940,7 +2020,10 @@ describe('OpenTuiEffortDialog', () => {
     // current session must drop those knobs to let reasoning.effort through.
     expect(harness.generation.extra_body).toEqual({ temperature: 1 });
     expect(harness.generation.samplingParams).toBeUndefined();
-    // Same-model sub-agents inherit the registry copy, not just the live one.
+    // The rebuildable generation config and the registry copy are distinct
+    // objects in production; both must be stripped.
+    expect(harness.modelsGeneration.extra_body).toEqual({ temperature: 1 });
+    expect(harness.modelsGeneration.samplingParams).toBeUndefined();
     expect(harness.registryGeneration.extra_body).toEqual({ temperature: 1 });
     expect(harness.registryGeneration.samplingParams).toBeUndefined();
   });
@@ -2005,6 +2088,66 @@ describe('OpenTuiEffortDialog', () => {
       temperature: 1,
     });
     expect(nextProviders[0]?.generationConfig.samplingParams).toBeUndefined();
+  });
+
+  it('removes a sibling-bearing reasoning object as a unit and reports it', () => {
+    const harness = renderEffortDialog(
+      'max',
+      undefined,
+      true,
+      'openai',
+      undefined,
+      { nestedSibling: true },
+    );
+    press('down');
+    press('return');
+
+    // Keeping `reasoning: { budget_tokens }` would suppress the picked tier;
+    // the whole object is removed, and the lost sibling is reported.
+    expect(harness.generation.extra_body).toEqual({ temperature: 1 });
+    expect(harness.generation.samplingParams).toBeUndefined();
+    const providerWrite = harness.setValue.mock.calls.find(
+      ([, key]) => key === 'modelProviders.openai',
+    );
+    const nextProviders = providerWrite![2] as Array<{
+      generationConfig: { extra_body?: Record<string, unknown> };
+    }>;
+    expect(nextProviders[0]?.generationConfig.extra_body).toEqual({
+      temperature: 1,
+    });
+    expect(harness.notify).toHaveBeenCalledWith(
+      expect.stringContaining('budget_tokens'),
+      'info',
+    );
+  });
+
+  it('preserves a lower-precedence User tier when Workspace owns providers', () => {
+    const harness = renderEffortDialog(
+      'max',
+      undefined,
+      false,
+      'openai',
+      undefined,
+      { workspaceOwnsProviders: true, userTier: 'max' },
+    );
+    press('down');
+    press('return');
+
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'model.reasoningEffort',
+      'high',
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+    expect(harness.setValue).not.toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.reasoningEffort',
+      undefined,
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+    expect(harness.userSettings.model?.reasoningEffort).toBe('max');
   });
 
   it('preselects the footer tier when the footer opened the picker', () => {

@@ -1,101 +1,103 @@
-# OpenTUI footer 可點擊的 reasoning effort
+# OpenTUI footer 可点击的 reasoning effort
 
 [English](2026-11-19-opentui-footer-effort-picker.md) | [简体中文](2026-11-19-opentui-footer-effort-picker.zh-CN.md)
 
-- 狀態：已實作，等待審查
+- 状态：已实现，等待审查
 - 日期：2026-11-19
-- 範圍：僅 OpenTUI 互動式 renderer；Ink 不變
+- 范围：仅 OpenTUI 交互式 renderer；Ink 不变
 
-## 問題
+## 问题
 
-OpenTUI footer 已經會在模型名稱旁顯示目前的 reasoning tier（`<model> <effort>`），但 tier 只是純文字。要切換仍得記住 `/effort` 指令並手動輸入，即使同樣的 effort picker 在其他桌面 UI 只差一個點擊。
+OpenTUI footer 已经会在模型名称旁显示当前 reasoning tier（`<model> <effort>`），但 tier 只是纯文本。切换仍需要记住 `/effort` 指令并手动输入，即使同样的 effort picker 在其他桌面 UI 只差一次点击。
 
-第二個問題出現在 provider entry 帶有靜態 effort knob 的模型（`generationConfig.extra_body.reasoning_effort` 或 `generationConfig.samplingParams.reasoning_effort`，可能是 flat 或 nested）。這些 raw request 值最後才合併，優先權高於 `model.reasoningEffort`。只寫 global 設定的 picker 可能回報成功，但實際 wire 與重開後仍是靜態 tier。
+第二个问题出现在 provider entry 带有静态 effort knob 的模型（`generationConfig.extra_body.reasoning_effort` 或 `generationConfig.samplingParams.reasoning_effort`，可能是 flat 或 nested）。这些 raw request 值最后才合并，优先级高于 `model.reasoningEffort`。只写 global 设置的 picker 可能报告成功，但实际 wire 与重启后仍是静态 tier。
 
-## 目標
+## 目标
 
-- 只讓 status line 中的 tier run 可點；模型名稱與其他 status-line 內容保持不可點。
-- 開啟既有 effort picker，並預選 footer 目前顯示的 tier。
-- 選取結果跨 session 持久化。
-- 選取後留下單一權威：移除作用中 provider entry 的靜態 effort key，避免重開後蓋過 global tier。
-- 與選取自動複製共存：在 footer 拖曳選取文字不可開啟 picker。
-- Ink 行為維持不變。
+- 只让 status line 中的 tier run 可点；模型名称与其他 status-line 内容保持不可点。
+- 打开既有 effort picker，并预选 footer 当前显示的 tier。
+- 选择结果跨 session 持久化。
+- 选择后留下单一权威：移除作用中 provider entry 的静态 effort key，避免重启后被 global tier 覆盖。
+- 与选择自动复制共存：在 footer 拖拽选择文字不可打开 picker。
+- Ink 行为保持不变。
 
-## 非目標
+## 非目标
 
-- 不新增 effort picker UI；重用既有對話框。
-- 不改 provider 專屬 budget knob（`thinking_budget`、`budget_tokens`、`thinkingLevel`）；它們仍是明確的 escape hatch。
-- 不寫入 operator 所有的 System/SystemDefaults 設定。
-- 不處理 provider model switch 邏輯。
+- 不新增 effort picker UI；复用既有对话框。
+- 不改 provider 专属 budget knob（`thinking_budget`、`budget_tokens`、`thinkingLevel`）；它们仍是明确的 escape hatch。
+- 不写入 operator 所有的 System/SystemDefaults 设置。
+- 不处理 provider model switch 逻辑。
 
-## 設計
+## 设计
 
-### 點擊目標
+### 点击目标
 
-`useStatusLineState` 只在 status line preset 包含 `model-with-reasoning`、顯示中的 reasoning 有 tier，且模型至少提供一個 tier 時回傳 `reasoningSegment`。Footer 在已換行的 status line 中定位該精確 segment，僅把 tier 子字串包進可點擊 box。
+`useStatusLineState` 只在 status line preset 包含 `model-with-reasoning`、显示中的 reasoning 有 tier，且该 tier 属于模型提供的档位列表时返回 `reasoningSegment`。Footer 在已换行的 status line 中定位该精确 segment，仅把 tier 子字符串包进可点击 box。
 
-含有 ANSI escape 的行，或換行把 model segment 拆開的行，保持不可點。這避免切斷 escape sequence 或猜測欄位。
+含有 ANSI escape 的行，或换行把 model segment 拆开的行，保持不可点。这避免切断 escape sequence 或猜测列位置。
 
-### 點擊與拖曳
+### 点击与拖拽
 
-OpenTUI 在可選取文字上按左鍵會先啟動選取並在派送 `onMouseDown` 前返回，因此無法用 mousedown 錨點區分點擊與拖曳。Footer 在 `mouseUp` 時檢查 renderer 目前的選取是否含文字：
+OpenTUI 在可选中文字上按左键会先启动选择并在派送 `onMouseDown` 前返回，因此无法用 mousedown 锚点区分点击与拖拽。Footer 在 `mouseUp` 时检查 renderer 当前的选择是否包含文字：
 
-- 空選取：視為點擊，開啟 picker
-- 非空選取：可能是拖曳自動複製，不開啟
+- 空选择：视为点击，打开 picker
+- 非空选择：可能是拖拽自动复制，不打开
 
-這也相容 PR 16799 的選取自動複製行為。
+这也兼容 PR 16799 的选择自动复制行为。
 
-### Footer 開啟的 picker
+### Footer 打开的 picker
 
-Footer 以 `openedFromFooter: true` 開啟 effort 對話框。對話框：
+Footer 以 `openedFromFooter: true` 打开 effort 对话框。对话框：
 
-- 以顯示路徑回報的 tier 預選，讓高亮列與 footer 一致，即使 tier 來自靜態 provider knob；
+- 以显示路径报告的 tier 预选，让高亮行与 footer 一致；
 - 立即套用 tier；
-- 把結果寫入 transcript，但不記錄成使用者輸入的 `/effort` 指令。
+- 把结果写入 transcript，但不记录成用户输入的 `/effort` 指令。
 
-直接 `/effort` 維持原本的預選與記錄行為。
+直接 `/effort` 保持原有的预选与记录行为。
 
 ### 持久化
 
-選取會把 `model.reasoningEffort` 寫入擁有 `modelProviders` 的 scope，並清除其他優先權更高的 writable scope 中的同名 key，與 ACP session 的 reasoning 持久化一致。
+选择会把 `model.reasoningEffort` 写入拥有 `modelProviders` 的 scope，并清除优先级更高、且带有同名 key 的 writable scope；低优先级的 scope 不会被删除，因此 Workspace 的选择不会抹掉 User 的全局偏好。
 
-作用中的 provider entry 以 protocol + model id 定位，先比對 live base URL，再比對持久化的 `model.baseUrl`。若無法唯一識別，就跳過靜態改寫，避免動到 sibling provider。
+作用中的 provider entry 以 protocol + model id 定位，先比对 live base URL，再比对持久化的 `model.baseUrl`。若无法唯一识别，就跳过静态改写，避免动到 sibling provider。
 
-對辨識出的 entry，從 `extra_body` 與 `samplingParams` 移除靜態 effort key（flat `reasoning_effort` 與 nested `reasoning.effort`），保留兄弟鍵。`model.generationConfig` 的全域 fallback 也以同樣方式處理。移除動作以逐路徑 `undefined` 寫入，讓 JSONC writer 產生 delete operation；整包物件寫入會被深度合併，舊 key 會留下。
+对识别出的 entry，从 `extra_body` 与 `samplingParams` 移除静态 effort key。Nested `reasoning` 对象会被视为一个整体删除，因为 OpenAI pipeline 只要看到该对象存在就可能跳过 configured tier；若该对象还有 `budget_tokens` 等兄弟键，这些键会一并移除，并在 UI 中提示。Flat `reasoning_effort` 则单独删除。`model.generationConfig` 的全局 fallback 以同样方式处理。
 
-Provider array 寫入沿用 provider-install adapter 的 placeholder 保留邏輯：寫檔前還原原始 `${VAR}`，避免把 env 展開後的密鑰寫進 `settings.json`。寫入使用 `throwOnWriteFailure`；持久化失敗時對話框回報錯誤，而不是成功訊息。
+移除动作以逐路径 `undefined` 写入，让 JSONC writer 产生 delete operation；整包对象写入会被深度合并，旧 key 会留下。
 
-Live 與 registry 副本也會在目前 session 清理，避免同模型 sub-agent 在重開前繼承舊靜態 knob。
+Provider array 写入沿用 provider-install adapter 的 placeholder 保留逻辑：写档前还原原始 `${VAR}`，避免把 env 展开后的密钥写进 `settings.json`。写入使用 `throwOnWriteFailure`；持久化失败时对话框报告错误，而不是成功消息。
 
-### 模型涵蓋範圍
+Live 与 registry 副本也会在当前 session 清理，避免同模型 sub-agent 在重启前继承旧静态 knob。
 
-此入口適用於有 effort tier 的模型：內建 GPT、DeepSeek、tiered Qwen 家族，以及任何宣告 `capabilities.reasoning.efforts` 的模型。Toggle-only 或沒有 reasoning 能力的模型不顯示可點目標。
+### 模型覆盖范围
 
-## 限制與已知問題
+此入口适用于有 effort tier 的模型：内置 GPT、DeepSeek、tiered Qwen 家族，以及任何声明 `capabilities.reasoning.efforts` 的模型。Toggle-only 模型、没有 reasoning 能力的模型，以及显示 tier 不在模型档位列表内的情况，都不显示可点目标。
 
-- System/SystemDefaults 設定由 operator 擁有；其中的靜態 effort key 仍優先於持久化 tier，picker 無法改寫。
-- Provider 專屬 budget knob 不會映射到 canonical ladder。
-- 含 `.` 的 provider id 無法用 settings dot path 定位；其靜態 key 移除會跳過，避免破壞設定樹。
-- 改寫 `modelProviders.<key>` 是整包 array 寫入；若載入到儲存之間有同一個 provider array 的並行修改，可能被覆蓋。
-- Status line 為了點擊目標拆成三個 text run；rebase 到 selection-clipboard PR 後需要做一次視覺確認。
-- 原始持久化錯誤以技術文字顯示，未翻譯。
+## 限制与已知问题
 
-## 驗證
+- System/SystemDefaults 设置由 operator 拥有；其中的静态 effort key 仍优先于持久化 tier，picker 无法改写。
+- Provider 专属 budget knob 不会映射到 canonical ladder。
+- 含 `.` 的 provider id 无法用 settings dot path 定位；其静态 key 移除会跳过，避免破坏设置树。
+- 改写 `modelProviders.<key>` 是整包 array 写入；若载入到保存之间有同一个 provider array 的并行修改，可能被覆盖。
+- Status line 为了点击目标拆成三个 text run；rebase 到 selection-clipboard PR 后需要做一次视觉确认。
+- 原始持久化错误以技术文字显示，未翻译。
 
-- 目標單元測試涵蓋 segment 暴露、toggle-only 不可點、footer 預選、點擊與拖曳選取、provider entry 定位（自訂 key、live/persisted base URL、sibling 不動）、flat/nested 靜態移除、全域 `model.generationConfig` 移除、workspace tier 清除、placeholder 路徑形狀，以及失敗通知。
-- PTY 端到端測試會點擊 footer tier、選擇不同 tier、確認 `model.reasoningEffort` 與 provider 靜態 knob 已移除、重新啟動 CLI，並讀回新 tier。
-- `prettier`、`eslint` 與 CLI TypeScript build 通過。
+## 验证
 
-## 驗收標準
+- 目标单元测试覆盖 segment 暴露、toggle-only 不可点、tier membership、footer 预选、点击与拖拽选择、provider entry 定位（自定义 key、live/persisted base URL、sibling 不动）、flat/nested 静态移除、nested 兄弟键移除提示、全局 `model.generationConfig` 移除、workspace/User scope 行为、placeholder 路径形状，以及失败通知。
+- PTY 端到端测试会点击 footer tier、选择不同 tier、确认 `model.reasoningEffort` 与 provider 静态 knob 已移除、重新启动 CLI，并读回新 tier。
+- `prettier`、`eslint` 与 CLI TypeScript build 通过。
 
-- 點擊 tier 會開啟 picker；點擊其他 status-line 內容不會。
-- 拖曳選取後在 tier 上放開不會開啟 picker。
-- 選擇 tier 後 footer 與實際 request 設定都會更新。
-- 重開後選擇的 tier 仍生效，且在 writable scope 中沒有 provider 靜態 knob 蓋過它。
-- Ink 輸出與互動不變。
+## 验收标准
 
-## 後續工作
+- 点击 tier 会打开 picker；点击其他 status-line 内容不会。
+- 拖拽选择后在 tier 上放开不会打开 picker。
+- 选择 tier 后 footer 与实际 request 设置都会更新。
+- 重启后选择的 tier 仍生效，且在 writable scope 中没有更高优先级的 provider 静态 knob 覆盖它。
+- Ink 输出与交互不变。
 
-- 為 JSONC delete 路徑補一個使用暫存真實 settings 檔的測試。
-- 決定 System 所有的靜態 knob 是否要顯示使用者可見警告。
-- Selection-clipboard PR 合併後，重新檢查 footer 選取複製。
+## 后续工作
+
+- 为 JSONC delete 路径补一个使用临时真实 settings 档的测试。
+- 决定 System 所有的静态 knob 是否要显示用户可见警告。
+- Selection-clipboard PR 合并后，重新检查 footer 选择复制。

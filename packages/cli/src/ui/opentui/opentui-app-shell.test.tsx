@@ -1215,6 +1215,18 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.loadingProps?.['streaming']).toBe(true);
   });
 
+  it('does not offer the footer effort picker while streaming', async () => {
+    renderApp({ streaming: true });
+    await settle();
+    expect(mocks.state.footerProps?.['onOpenEffort']).toBeUndefined();
+  });
+
+  it('offers the footer effort picker when idle', async () => {
+    renderApp({ streaming: false });
+    await settle();
+    expect(mocks.state.footerProps?.['onOpenEffort']).toBeTypeOf('function');
+  });
+
   it.each(['NORMAL', 'INSERT', undefined] as const)(
     'passes current Vim mode %s to the status command and footer',
     async (vimMode) => {

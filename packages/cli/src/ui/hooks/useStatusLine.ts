@@ -346,13 +346,18 @@ export function useStatusLineState(
   // The tier run inside the preset's model-with-reasoning item. The OpenTUI
   // footer uses it to make only that substring clickable; a command status
   // line has no such item, so it never yields a target.
+  const reasoningEfforts = statusLinePreset?.items.includes(
+    'model-with-reasoning',
+  )
+    ? getReasoningEffortsForConfig(config)
+    : [];
   const reasoningSegment =
-    statusLinePreset?.items.includes('model-with-reasoning') &&
     reasoningConfig &&
     reasoningConfig.effort &&
-    // A toggle-only model can carry a stale global tier, but its picker has no
-    // rows; leave that text inert instead of opening an empty dialog.
-    getReasoningEffortsForConfig(config).length > 0
+    // The displayed tier must be one the picker can preselect. A toggle-only
+    // model (empty ladder) or a stale tier outside a narrower ladder stays
+    // inert instead of opening a picker that would persist row 0.
+    reasoningEfforts.includes(reasoningConfig.effort)
       ? {
           text: formatModelWithReasoning(
             currentModel

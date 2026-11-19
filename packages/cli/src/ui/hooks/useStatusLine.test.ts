@@ -520,6 +520,33 @@ describe('useStatusLine', () => {
       expect(result.current.reasoningSegment).toBeUndefined();
     });
 
+    it('leaves a tier outside the model ladder inert', () => {
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        contextWindowSize: 131072,
+        authType: 'openai',
+        reasoning: { effort: 'max' },
+      });
+      mockConfig.getResolvedModelConfig.mockReturnValue({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            efforts: ['low', 'medium', 'high'],
+            disableField: 'thinking',
+          },
+        },
+      } as never);
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model-with-reasoning'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      // The footer still renders the stored tier, but the picker cannot
+      // preselect it, so it must not offer a target that would persist row 0.
+      expect(result.current.lines).toEqual(['Test Model max']);
+      expect(result.current.reasoningSegment).toBeUndefined();
+    });
+
     it('exposes no effort target without the reasoning tier or preset item', () => {
       mockConfig.getContentGeneratorConfig.mockReturnValue({
         contextWindowSize: 131072,
