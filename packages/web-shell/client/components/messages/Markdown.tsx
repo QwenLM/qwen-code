@@ -975,12 +975,42 @@ function MarkdownLink({
   );
 }
 
+// Display-layer heuristic only: isSafeImageSrc is a shared security gate
+// whose same-origin consumers (e.g. /images/logo.png) must keep passing, so
+// local-path detection lives here and onError covers whatever it misses.
+const LOCAL_FILE_PATH =
+  /^(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|\/(?:Users|home|tmp|var|opt|private|Volumes|mnt|media|srv)\/)/;
+
+export function isLocalFilePath(src: string | undefined): boolean {
+  return !!src && LOCAL_FILE_PATH.test(src.trim());
+}
+
 function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
   const renderMode = useTranscriptRenderMode();
-  const safeSrc = isSafeImageSrc(src, renderMode === 'document')
-    ? src
-    : undefined;
-  return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
+  const { t } = useI18n();
+  const [failedSrc, setFailedSrc] = useState<string>();
+  const localPath = isLocalFilePath(src);
+  const safeSrc =
+    !localPath && isSafeImageSrc(src, renderMode === 'document')
+      ? src
+      : undefined;
+  if (localPath || !safeSrc || failedSrc === src) {
+    // data: URIs would dump a base64 blob into the chat; document-mode srcs
+    // arrive pre-stripped so remote URLs never reach this text either.
+    const displaySrc = src && !/^data:/i.test(src) ? src : '';
+    const text =
+      (localPath ? displaySrc || alt : alt || displaySrc) ||
+      t('common.failedToLoad');
+    return <span className={styles.imageFallback}>{text}</span>;
+  }
+  return (
+    <img
+      src={safeSrc}
+      alt={alt || ''}
+      className={styles.image}
+      onError={() => setFailedSrc(src)}
+    />
+  );
 }
 
 /**

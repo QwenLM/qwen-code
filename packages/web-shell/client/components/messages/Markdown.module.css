@@ -194,6 +194,22 @@
   display: block;
 }
 
+.imageFallback {
+  display: inline-block;
+  max-width: 100%;
+  margin: 1.5rem 0;
+  padding: 4px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  background: var(--secondary);
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+  user-select: text;
+}
+
 .codeBlock {
   margin: 8px 0;
   min-width: 0;

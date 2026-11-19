@@ -20,6 +20,7 @@ import {
   getCodeHighlighter,
 } from './codeHighlighter';
 import {
+  isLocalFilePath,
   isSafeHref,
   isSafeImageSrc,
   Markdown,
@@ -332,8 +333,9 @@ describe('document image policy', () => {
       );
     });
 
-    expect(container.querySelector('img')?.getAttribute('src')).toBeNull();
+    expect(container.querySelector('img')).toBeNull();
     expect(container.innerHTML).not.toContain('https://example.com');
+    expect(container.textContent).toContain('remote');
 
     act(() => root.unmount());
     container.remove();
@@ -360,6 +362,201 @@ describe('document image policy', () => {
       '{"series":[]}',
     );
     expect(container.textContent).not.toContain('Show chart');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+});
+
+describe('isLocalFilePath', () => {
+  it.each([
+    '/Users/foo/shot.png',
+    '/home/foo/shot.png',
+    '/tmp/shot.png',
+    '/var/folders/shot.png',
+    '/opt/shot.png',
+    '/private/tmp/shot.png',
+    '/Volumes/Data/shot.png',
+    '/mnt/data/shot.png',
+    '/media/usb/shot.png',
+    '/srv/www/shot.png',
+    'C:\\temp\\shot.png',
+    'C:/temp/shot.png',
+    '\\\\server\\share\\shot.png',
+    '~/shot.png',
+    '~\\shot.png',
+  ])('detects %s', (src) => {
+    expect(isLocalFilePath(src)).toBe(true);
+  });
+
+  it.each([
+    '/images/logo.png',
+    '/assets/foo.png',
+    '/e2e/repro-image-ok.png',
+    '/Users.png',
+    'https://example.com/img.png',
+    '//evil.com/img.png',
+    'data:image/png;base64,iVBOR',
+    'images/logo.png',
+    undefined,
+    '',
+  ])('does not flag %s', (src) => {
+    expect(isLocalFilePath(src)).toBe(false);
+  });
+});
+
+describe('markdown image fallback', () => {
+  it('renders local filesystem paths as text, not a broken img', () => {
+    const view = renderMd('![screenshot](/Users/foo/Projects/demo/shot.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      expect(view.querySelector('[class*="imageFallback"]')?.textContent).toBe(
+        '/Users/foo/Projects/demo/shot.png',
+      );
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('renders gate-failing local paths as text chips', () => {
+    const view = renderMd('![shot](~/shots/shot.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      expect(view.querySelector('[class*="imageFallback"]')?.textContent).toBe(
+        '~/shots/shot.png',
+      );
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it.each([
+    'C:\\temp\\shot.png',
+    'C:/temp/shot.png',
+    'file:///tmp/shot.png',
+    '\\\\server\\share\\shot.png',
+  ])('shows the alt text for %s', (src) => {
+    // Drive-letter paths and file:// URLs are rewritten to '' by
+    // react-markdown's urlTransform; UNC backslashes arrive percent-encoded
+    // (%5C). Either way the chip falls back to the alt text.
+    const view = renderMd(`![shot](${src})`);
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      expect(view.querySelector('[class*="imageFallback"]')?.textContent).toBe(
+        'shot',
+      );
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('still renders same-origin asset paths as images', () => {
+    const view = renderMd('![logo](/images/logo.png)');
+    try {
+      expect(view.querySelector('img')?.getAttribute('src')).toBe(
+        '/images/logo.png',
+      );
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('degrades a failed image load to the alt text', () => {
+    const view = renderMd('![chart](https://example.invalid/missing.png)');
+    try {
+      const img = view.querySelector('img')!;
+      expect(img).toBeTruthy();
+      act(() => {
+        img.dispatchEvent(new Event('error'));
+      });
+      expect(view.querySelector('img')).toBeNull();
+      expect(view.querySelector('[class*="imageFallback"]')?.textContent).toBe(
+        'chart',
+      );
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('degrades a failed load without alt to the src', () => {
+    const view = renderMd('![](https://example.invalid/missing.png)');
+    try {
+      const img = view.querySelector('img')!;
+      act(() => {
+        img.dispatchEvent(new Event('error'));
+      });
+      expect(view.querySelector('[class*="imageFallback"]')?.textContent).toBe(
+        'https://example.invalid/missing.png',
+      );
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('retries when the src changes after a failure', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = (content: string) =>
+      act(() => {
+        root.render(
+          createElement(
+            I18nProvider,
+            { language: 'en' },
+            createElement(Markdown, { content }),
+          ),
+        );
+      });
+
+    render('![chart](https://example.invalid/a.png)');
+    const img = container.querySelector('img')!;
+    act(() => {
+      img.dispatchEvent(new Event('error'));
+    });
+    expect(container.querySelector('img')).toBeNull();
+
+    render('![chart](https://example.invalid/b.png)');
+    expect(container.querySelector('img')?.getAttribute('src')).toBe(
+      'https://example.invalid/b.png',
+    );
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it.each([
+    'data:image/png;base64,iVBORw0KGgo=',
+    'DATA:image/png;base64,iVBORw0KGgo=',
+  ])('does not echo a failed data URI (%s) as text in document mode', (uri) => {
+    // Only document mode lets data URIs reach the img (interactive mode's
+    // urlTransform strips them), so that is where a failed one can load-fail.
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(
+            TranscriptRenderModeProvider,
+            { value: 'document' },
+            createElement(Markdown, {
+              content: `![](${uri})`,
+            }),
+          ),
+        ),
+      );
+    });
+
+    const img = container.querySelector('img')!;
+    expect(img).toBeTruthy();
+    act(() => {
+      img.dispatchEvent(new Event('error'));
+    });
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.innerHTML).not.toContain('iVBORw0KGgo');
+    expect(container.textContent).toContain('Failed to load');
 
     act(() => root.unmount());
     container.remove();
