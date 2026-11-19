@@ -34505,6 +34505,54 @@ describe('Session', () => {
           ).not.toHaveBeenCalled();
         });
 
+        it('leaves a turn that is finishing after its tools alone', async () => {
+          mockToolRegistry.getTool.mockReturnValue(
+            readFileTool(
+              vi.fn().mockResolvedValue({
+                llmContent: 'ok',
+                returnDisplay: 'ok',
+                terminateTurn: true,
+              }),
+            ),
+          );
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockClient.extMethod = vi
+            .fn()
+            .mockResolvedValue({ messages: ['urgent: stop'] });
+          let markFinishing!: () => void;
+          const finishing = new Promise<void>((resolve) => {
+            markFinishing = resolve;
+          });
+          let finish!: () => void;
+          const finished = new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+          session.messageRewriter = {
+            interceptUpdate: vi.fn(async (update: SessionUpdate) => {
+              await session.sendUpdate(update);
+            }),
+            flushTurn: vi.fn().mockResolvedValue(undefined),
+            waitForPendingRewrites: vi.fn(async () => {
+              markFinishing();
+              await finished;
+            }),
+          } as unknown as Session['messageRewriter'];
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(createStreamWithChunks([readFileCall]))
+            .mockResolvedValue(createEmptyStream());
+
+          const done = startPrompt();
+          await finishing;
+          // The tool batch has settled and the tool ended the turn.
+          session.sendMidTurnInputNow();
+          finish();
+
+          await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+        });
+
         it('leaves input recovered from a timed-out drain to the tool boundary', async () => {
           mockToolRegistry.getTool.mockReturnValue(
             readFileTool(
@@ -55487,7 +55535,7 @@ describe('Session', () => {
 
       expect(result.parts[0].functionResponse?.response).toEqual({
         error:
-          'The user interrupted this tool call to send you a message, which follows. Read it before deciding whether to run the tool again.\n\nTool call aborted',
+          'The user interrupted this tool call to send you a message, which follows. Read it before deciding whether to run the tool again.',
       });
     });
 

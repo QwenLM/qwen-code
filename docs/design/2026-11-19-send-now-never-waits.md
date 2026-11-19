@@ -103,10 +103,12 @@ background first and then the other tools are interrupted.
 ### Interrupt (PR 1)
 
 1. `sendMidTurnInputNow()` first lets an open response drain and cut, as
-   today. If no drain started (the response has a tool call, tools are running,
-   approval is pending, between two model requests, and so on) and no drain
-   request is in flight, it aborts the turn's `pendingPrompt` with
-   `MID_TURN_SEND_NOW_ABORT_REASON`.
+   today. While the turn is calling tools (the response has a tool call, or the
+   batch it called has not settled, running or waiting for approval) and no
+   drain request is in flight, it aborts the turn's `pendingPrompt` with
+   `MID_TURN_SEND_NOW_ABORT_REASON`. The tool phase ends when the batch
+   settles: a later request waits for the tool-boundary drain or a cut of the
+   next response, and never ends a turn that is already finishing.
 2. The reason is a controlled cancellation like Stop, so the turn ends as
    `cancelled`. It skips the session-wide steps of `cancelPendingPrompt`: the
    cron scheduler keeps running, the cron queue is kept, and background
@@ -222,9 +224,10 @@ in that phase.
   its FIFO. If the user has also queued an ordinary prompt, the click still ends
   the turn, but the message waits for that prompt's tool boundary.
 - An interrupt during a pending approval abandons that request on the agent
-  side; whether the daemon clears its pending approval when the turn ends is not
-  verified yet. Web Shell cannot click in that phase, so only other clients are
-  affected.
+  side; the daemon cancels the approvals still pending under the prompt when it
+  settles, so other clients' approval cards go away. A held send-now request is
+  also dropped when its turn ends, so it never reaches the next turn. Goal turns
+  have no prompt id, so approvals pending under them are out of scope here.
 
 ## Validation plan
 

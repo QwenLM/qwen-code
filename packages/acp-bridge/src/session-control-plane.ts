@@ -10654,6 +10654,7 @@ export function createSessionControlPlane(
   const settleMidTurnQueueAfterAutomaticTurn = (sessionId: string) => {
     const entry = byId.get(sessionId);
     if (!entry) return;
+    delete entry.sendNowAfterDrains;
     advanceTurnActivity(entry);
     entry.sessionLastSeenAt = Date.now();
     touchActivity(entry);
@@ -12498,6 +12499,13 @@ export function createSessionControlPlane(
           const undrainedMessages = shouldSettleMidTurnQueue
             ? entry.midTurnMessageQueue.splice(0)
             : [];
+          // A send-now request held for a drain belongs to this turn; the
+          // promotion below delivers what it asked for.
+          delete entry.sendNowAfterDrains;
+          // An approval this turn asked for can no longer be answered: a
+          // send-now interrupt ends the turn from inside the child, which
+          // stops waiting on the request without the host's cancel path.
+          permissionMediator.cancelForPrompt(sessionId, pendingEntry.promptId);
           // Release the old turn before handing back queue-only messages. Its
           // caller synchronously reserves the next FIFO slot, then ordinary
           // promotions follow it without exposing the fallback as queued.

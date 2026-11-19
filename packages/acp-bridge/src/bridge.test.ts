@@ -41691,7 +41691,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     ['drops it when the input is gone by then', true],
   ])(
     'holds a send-now request while a drain resolves attachments: %s',
-    async (_label, removeFirst) => {
+    async (_label, removeQueued) => {
       const firstTurn = deferred<void>();
       const order: string[] = [];
       const handle = makeChannel({
@@ -41746,7 +41746,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         // The drain took `first` but has not answered: the child would read a
         // request with no drain out as `second` still being queued.
         expect(requests()).toEqual([]);
-        if (removeFirst) {
+        if (removeQueued) {
           expect(
             bridge.removeMidTurnMessage(session.sessionId, 'm2', client),
           ).toEqual({ removed: true });
@@ -41755,7 +41755,7 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         gate.resolve([]);
         await expect(drain).resolves.toMatchObject({ messages: ['first'] });
         await new Promise((r) => setTimeout(r, 10));
-        if (removeFirst) {
+        if (removeQueued) {
           expect(requests()).toEqual([]);
         } else {
           await vi.waitFor(() => expect(requests()).toHaveLength(1));
@@ -41769,6 +41769,112 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       }
     },
   );
+
+  it('drops a held send-now request when its turn ends first', async () => {
+    const firstTurn = deferred<void>();
+    const secondTurn = deferred<void>();
+    const handle = makeChannel({
+      promptImpl: async (req: PromptRequest) => {
+        const text = (req.prompt[0] as { text?: string }).text;
+        if (text === 'work') await firstTurn.promise;
+        if (text === 'second') await secondTurn.promise;
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const turn = bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'work' }],
+    });
+    await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+    const client = { clientId: session.clientId };
+    const requests = () =>
+      handle.agent.extMethodCalls.filter(
+        (call) => call.method === MID_TURN_SEND_NOW_METHOD,
+      );
+    const resolveSpy = vi.spyOn(
+      SessionAttachmentStore.prototype,
+      'resolveContent',
+    );
+    const gate =
+      deferred<Awaited<ReturnType<SessionAttachmentStore['resolveContent']>>>();
+    resolveSpy.mockReturnValueOnce(gate.promise);
+    try {
+      bridge.enqueueMidTurnMessage(session.sessionId, 'first', client, 'm1');
+      const drain = handle.agentConnection.extMethod(
+        MID_TURN_QUEUE_DRAIN_METHOD,
+        { sessionId: session.sessionId },
+      );
+      await vi.waitFor(() => expect(resolveSpy).toHaveBeenCalled());
+      bridge.enqueueMidTurnMessage(session.sessionId, 'second', client, 'm2');
+      expect(bridge.sendMidTurnMessagesNow(session.sessionId, client)).toEqual({
+        requested: true,
+      });
+
+      // The turn ends before the drain answers: `second` runs as the next
+      // turn, and input queued in that turn was never sent now.
+      firstTurn.resolve();
+      await turn;
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(2));
+      bridge.enqueueMidTurnMessage(session.sessionId, 'third', client, 'm3');
+      gate.resolve([]);
+      await drain;
+      await new Promise((r) => setTimeout(r, 10));
+      expect(requests()).toEqual([]);
+    } finally {
+      resolveSpy.mockRestore();
+      firstTurn.resolve();
+      secondTurn.resolve();
+      await bridge.shutdown();
+    }
+  });
+
+  it('cancels an approval a turn the child ended left open', async () => {
+    let permission: Promise<unknown> | undefined;
+    const asked = deferred<void>();
+    const handle = makeChannel({
+      promptImpl: async (req: PromptRequest) => {
+        // A send-now interrupt ends the turn from inside the child, which
+        // stops waiting on its approval request.
+        permission = handle.agentConnection.requestPermission({
+          sessionId: req.sessionId,
+          toolCall: { toolCallId: 'write-1', title: 'write' },
+          options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+        });
+        await asked.promise;
+        return { stopReason: 'cancelled' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const abort = new AbortController();
+    const events: BridgeEvent[] = [];
+    const collection = (async () => {
+      for await (const event of bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      }))
+        events.push(event);
+    })();
+    try {
+      const turn = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'work' }],
+      });
+      await vi.waitFor(() =>
+        expect(events.some((e) => e.type === 'permission_request')).toBe(true),
+      );
+      asked.resolve();
+      await expect(turn).resolves.toMatchObject({ stopReason: 'cancelled' });
+      await expect(permission).resolves.toMatchObject({
+        outcome: { outcome: 'cancelled' },
+      });
+    } finally {
+      abort.abort();
+      await collection.catch(() => {});
+      await bridge.shutdown();
+    }
+  });
 
   it('logs a send-now request an older agent rejects and keeps the queue', async () => {
     const firstTurn = deferred<void>();

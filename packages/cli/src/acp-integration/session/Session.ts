@@ -28,6 +28,7 @@ import {
   INCOMPLETE_ARGS_EDIT_REJECTION,
   INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE,
   isToolCallConcurrencySafe,
+  TOOL_DISCARDED_FOR_USER_MESSAGE,
   TOOL_INTERRUPTED_FOR_USER_MESSAGE,
   TRUNCATION_EDIT_REJECTION,
   TRUNCATION_RETRY_LOOP_DIRECTIVE,
@@ -2815,8 +2816,7 @@ export class Session implements SessionContext {
   private pullForOpenResponse: (() => void) | undefined;
   // Whether that response has started a tool call.
   private openResponseHasToolCall: (() => boolean) | undefined;
-  // The turn whose last response called tools that have not reached their
-  // tool-boundary drain yet.
+  // The turn whose last response called tools, until that tool batch settles.
   private midTurnToolPhaseFor: AbortSignal | undefined;
   // Drain requests awaiting the host's answer.
   private midTurnDrainsInFlight = 0;
@@ -12419,7 +12419,6 @@ export class Session implements SessionContext {
     // them from both queues. We stash them (see the timeout branch) and
     // re-inject them here on the next batch.
     const recovered = this.#takeRecoveredMidTurnMessages();
-    this.midTurnToolPhaseFor = undefined;
 
     // A stopped turn takes nothing more from the host, which promotes what is
     // still queued once the turn ends.
@@ -16327,6 +16326,16 @@ export class Session implements SessionContext {
    * keeps its repeated parameter-error and partial-edit stops, per turn.
    */
   async #runSharedToolBatch(
+    ...args: Parameters<Session['runSharedToolBatchUntracked']>
+  ): Promise<RunToolResult> {
+    try {
+      return await this.runSharedToolBatchUntracked(...args);
+    } finally {
+      this.midTurnToolPhaseFor = undefined;
+    }
+  }
+
+  private async runSharedToolBatchUntracked(
     abortSignal: AbortSignal,
     promptId: string,
     requests: ToolCallRequestInfo[],
@@ -16504,7 +16513,22 @@ export class Session implements SessionContext {
     });
   }
 
+  /**
+   * Runs a tool batch. Once it settles, the turn is no longer calling tools:
+   * a send-now request then waits for the tool-boundary drain or the next
+   * response instead of ending a turn that may already be finishing.
+   */
   private async runToolCalls(
+    ...args: Parameters<Session['runToolCallsUntracked']>
+  ): Promise<RunToolResult> {
+    try {
+      return await this.runToolCallsUntracked(...args);
+    } finally {
+      this.midTurnToolPhaseFor = undefined;
+    }
+  }
+
+  private async runToolCallsUntracked(
     abortSignal: AbortSignal,
     promptId: string,
     functionCalls: FunctionCall[],
@@ -20195,7 +20219,12 @@ export class Session implements SessionContext {
 
             if (activeToolAbortSignal.aborted) {
               return earlyErrorResponse(
-                new Error(TOOL_POST_EXECUTION_CANCELLED_MESSAGE),
+                new Error(
+                  activeToolAbortSignal.reason ===
+                  MID_TURN_SEND_NOW_ABORT_REASON
+                    ? TOOL_DISCARDED_FOR_USER_MESSAGE
+                    : TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
+                ),
                 toolName,
                 {
                   status: 'cancelled',
@@ -20318,9 +20347,13 @@ export class Session implements SessionContext {
 
           const interruptedBeforeCompletion =
             toolResult.interruptedBeforeCompletion === true;
+          const forUserMessage =
+            activeToolAbortSignal.reason === MID_TURN_SEND_NOW_ABORT_REASON;
           const cancelReason = !interruptedBeforeCompletion
-            ? TOOL_POST_EXECUTION_CANCELLED_MESSAGE
-            : activeToolAbortSignal.reason === MID_TURN_SEND_NOW_ABORT_REASON
+            ? forUserMessage
+              ? TOOL_DISCARDED_FOR_USER_MESSAGE
+              : TOOL_POST_EXECUTION_CANCELLED_MESSAGE
+            : forUserMessage
               ? TOOL_INTERRUPTED_FOR_USER_MESSAGE
               : TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE;
           if (
@@ -20582,9 +20615,7 @@ export class Session implements SessionContext {
           return earlyErrorResponse(
             status === 'cancelled' &&
               activeToolAbortSignal.reason === MID_TURN_SEND_NOW_ABORT_REASON
-              ? new Error(
-                  `${TOOL_INTERRUPTED_FOR_USER_MESSAGE}\n\n${error.message}`,
-                )
+              ? new Error(TOOL_INTERRUPTED_FOR_USER_MESSAGE)
               : error,
             toolName,
             {

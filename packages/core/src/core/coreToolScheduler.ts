@@ -495,7 +495,7 @@ const TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE =
 export const USER_MESSAGE_INTERRUPT_ABORT_REASON = 'qwen:mid-turn-send-now';
 export const TOOL_INTERRUPTED_FOR_USER_MESSAGE =
   'The user interrupted this tool call to send you a message, which follows. Read it before deciding whether to run the tool again.';
-const TOOL_DISCARDED_FOR_USER_MESSAGE =
+export const TOOL_DISCARDED_FOR_USER_MESSAGE =
   'The tool had already completed, but its output was discarded when the user interrupted to send you a message, which follows. Read it before deciding whether to run the tool again.';
 
 function interruptedForUserMessage(signal: AbortSignal): boolean {
