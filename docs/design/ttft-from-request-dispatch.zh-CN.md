@@ -35,7 +35,7 @@ TTFT 从 `LoggingContentGenerator.generateContentStream` 开头开始计时。�
 
 ### D2 — 以第一次发出为准
 
-一次 `generateContentStream` 调用内只取第一次上报。因此 provider 在这次调用内再次发出的请求，例如 SDK 重试或 pipeline 重试，仍计入 TTFT，与[按完整请求时间计算输出速度](output-speed-full-request.zh-CN.md)的描述一致。`retryWithBackoff` 的每次尝试都是独立的 `generateContentStream` 调用，各自从自己的发出时刻计时。非流式入口会清除继承来的 dispatch 监听，避免流式请求构建期间的嵌套调用启动外层计时。读取流期间发出的请求（例如 Anthropic 在流为空时补发的非流式探测请求）发生在观察范围之外。
+一次 `generateContentStream` 调用内只取第一次上报。因此 provider 在这次调用内再次发出的请求，例如 SDK 重试或 pipeline 重试，仍计入 TTFT，与[按完整请求时间计算输出速度](output-speed-full-request.zh-CN.md)的描述一致。`retryWithBackoff` 的每次尝试都是独立的 `generateContentStream` 调用，各自从自己的发出时刻计时。非流式调用、流的读取和关闭都会清除继承来的 dispatch 监听。这样嵌套请求及其读取期间的重试都不会启动外层计时。
 
 ### D3 — 由 TTFT 派生的时间
 

@@ -35,7 +35,7 @@ A generator that never reports dispatch keeps the old start, the beginning of `g
 
 ### D2 — The first dispatch wins
 
-Only the first report within one `generateContentStream` call counts. A request the provider sends again inside that call, for example an SDK retry or a pipeline retry, therefore stays in TTFT, as [Output speed over the full request](output-speed-full-request.md) describes. Each attempt of `retryWithBackoff` is its own `generateContentStream` call and is timed from its own dispatch. The non-streaming entry point clears an inherited dispatch observer, so a nested request during stream setup cannot start the outer clock. A request sent while the stream is being read, such as the Anthropic non-streaming probe after an empty stream, runs outside the observed call.
+Only the first report within one `generateContentStream` call counts. A request the provider sends again inside that call, for example an SDK retry or a pipeline retry, therefore stays in TTFT, as [Output speed over the full request](output-speed-full-request.md) describes. Each attempt of `retryWithBackoff` is its own `generateContentStream` call and is timed from its own dispatch. Non-streaming calls and stream iteration or cleanup clear inherited dispatch observers. A nested request, including a retry when reading the nested stream, cannot start the enclosing request's clock.
 
 ### D3 — Times derived from TTFT
 

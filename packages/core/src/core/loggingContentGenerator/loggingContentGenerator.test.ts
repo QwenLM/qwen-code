@@ -1979,6 +1979,47 @@ describe('LoggingContentGenerator', () => {
     }
   });
 
+  it('keeps a nested stream retry from starting the outer TTFT clock', async () => {
+    let now = 0;
+    const dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const inner = makeGenerator({
+      stream: async () => {
+        now = 200;
+        markRequestDispatched();
+        return (async function* () {
+          now = 300;
+          markRequestDispatched();
+          now = 600;
+          yield resp('inner');
+        })();
+      },
+    });
+    const outer = makeGenerator({
+      stream: async () => {
+        await streamFrom(inner, 'inner');
+        now = 800;
+        markRequestDispatched();
+        return (async function* () {
+          now = 1000;
+          yield resp('outer');
+        })();
+      },
+    });
+
+    try {
+      await streamFrom(outer, 'outer');
+
+      expect(
+        vi.mocked(logApiResponse).mock.calls.map((call) => call[1]),
+      ).toMatchObject([
+        { response_id: 'inner', ttft_ms: 400 },
+        { response_id: 'outer', ttft_ms: 200, first_visible_offset_ms: 1000 },
+      ]);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
   it('reports zero generation time when all visible output arrives in one chunk', async () => {
     await runTimedStream(
       [

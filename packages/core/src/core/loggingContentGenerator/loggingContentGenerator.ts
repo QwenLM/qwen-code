@@ -110,6 +110,14 @@ function snapshotRetryMetadata(): {
   };
 }
 
+function withStreamContext<T>(scopedContext: Context, run: () => T): T {
+  // Dispatch timing is settled before iteration. Clear the consumer's
+  // observer so later retries stay scoped to this stream.
+  return context.with(scopedContext, () =>
+    observeRequestDispatch(undefined, run),
+  );
+}
+
 function bindAsyncGeneratorToContext<TYield, TReturn, TNext>(
   stream: AsyncGenerator<TYield, TReturn, TNext>,
   scopedContext: Context,
@@ -119,11 +127,11 @@ function bindAsyncGeneratorToContext<TYield, TReturn, TNext>(
   // provider iteration and wrapper-side telemetry retain the request context.
   return {
     next: (...args: [] | [TNext]) =>
-      context.with(scopedContext, () => stream.next(...args)),
+      withStreamContext(scopedContext, () => stream.next(...args)),
     return: (value: TReturn | PromiseLike<TReturn>) =>
-      context.with(scopedContext, () => stream.return(value)),
+      withStreamContext(scopedContext, () => stream.return(value)),
     throw: (error: unknown) =>
-      context.with(scopedContext, () => stream.throw(error)),
+      withStreamContext(scopedContext, () => stream.throw(error)),
     [Symbol.asyncIterator]() {
       return this;
     },
@@ -780,7 +788,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       return: async (value) => {
         try {
           if (!iterated)
-            await context.with(spanContext, () => stream.return(value));
+            await withStreamContext(spanContext, () => stream.return(value));
           return await wrapped.return(value);
         } catch (error) {
           lifecycle.finish('error');
@@ -798,7 +806,9 @@ export class LoggingContentGenerator implements ContentGenerator {
       throw: async (error) => {
         try {
           if (!iterated) {
-            await context.with(spanContext, () => stream.return(undefined));
+            await withStreamContext(spanContext, () =>
+              stream.return(undefined),
+            );
           }
           return await wrapped.throw(error);
         } catch (actualError) {
