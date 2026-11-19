@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import textwrap
+import traceback
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
-from qwen_code_sdk import ProcessExitError, SDKUserMessage, query
+from qwen_code_sdk import (
+    CanUseToolContext,
+    PermissionResult,
+    ProcessExitError,
+    SDKUserMessage,
+    query,
+)
 
 
 @pytest.mark.asyncio
@@ -206,15 +215,127 @@ async def test_control_calls_preserve_process_exit_during_initialize(
     )
     result = query("unused", {"path_to_qwen_executable": str(peer)})
     try:
-        for _ in range(2):
-            with pytest.raises(ProcessExitError, match=f"exited with code {exit_code}"):
+        depths = []
+        for _ in range(20):
+            with pytest.raises(
+                ProcessExitError, match=f"exited with code {exit_code}"
+            ) as caught:
                 await asyncio.wait_for(result.supported_commands(), timeout=2)
+            assert caught.value.exit_code == exit_code
+            depths.append(len(traceback.extract_tb(caught.value.__traceback__)))
+        assert len(set(depths)) == 1
         assert result.is_closed()
         assert result._pending_control_requests == {}
     finally:
         await result.close()
         if result._input_task is not None:
             await asyncio.gather(result._input_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_clean_exit_during_initialize_does_not_write_prompt(
+    tmp_path: Path, streaming: bool
+) -> None:
+    received = tmp_path / "received.jsonl"
+    peer = tmp_path / "exit_during_initialize.py"
+    peer.write_text(
+        "import sys\nfrom pathlib import Path\n"
+        f"Path({str(received)!r}).write_text(sys.stdin.readline(), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+
+    async def messages() -> AsyncIterator[SDKUserMessage]:
+        yield {"type": "user", "message": {"role": "user", "content": "unused"}}
+
+    result = query(
+        messages() if streaming else "unused",
+        {
+            "path_to_qwen_executable": str(peer),
+            "timeout": {"stream_close": 0.01},
+        },
+    )
+    try:
+        await result._ensure_started()
+        assert result._router_task is not None
+        await asyncio.wait_for(result._router_task, timeout=2)
+        assert result._input_task is not None
+        await asyncio.wait_for(result._input_task, timeout=2)
+        assert result._input_task.exception() is None
+        assert result.is_closed()
+        assert not result._closed
+        requests = [json.loads(line) for line in received.read_text().splitlines()]
+        assert len(requests) == 1
+        assert requests[0]["request"]["subtype"] == "initialize"
+    finally:
+        await result.close()
+        if result._input_task is not None:
+            await asyncio.gather(result._input_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_clean_exit_cancels_incoming_permission_callback(tmp_path: Path) -> None:
+    callback_started = tmp_path / "callback-started"
+    peer = tmp_path / "exit_with_permission.py"
+    peer.write_text(
+        textwrap.dedent(
+            f"""
+            import json
+            import sys
+            import time
+            from pathlib import Path
+
+            request = json.loads(sys.stdin.readline())
+            print(json.dumps({{
+                "type": "control_response",
+                "response": {{
+                    "subtype": "success",
+                    "request_id": request["request_id"],
+                    "response": {{}},
+                }},
+            }}), flush=True)
+            print(json.dumps({{
+                "type": "control_request",
+                "request_id": "permission-1",
+                "request": {{
+                    "subtype": "can_use_tool", "tool_name": "Read", "input": {{}},
+                }},
+            }}), flush=True)
+            deadline = time.monotonic() + 5
+            while not Path({str(callback_started)!r}).exists():
+                if time.monotonic() >= deadline:
+                    sys.exit(17)
+                time.sleep(0.01)
+            """
+        ),
+        encoding="utf-8",
+    )
+    callback_finished = asyncio.Event()
+
+    async def can_use_tool(
+        name: str, tool_input: dict[str, Any], context: CanUseToolContext
+    ) -> PermissionResult:
+        try:
+            callback_started.touch()
+            await asyncio.Event().wait()
+            return {"behavior": "deny", "message": "unreachable"}
+        finally:
+            callback_finished.set()
+
+    result = query(
+        "unused",
+        {"path_to_qwen_executable": str(peer), "can_use_tool": can_use_tool},
+    )
+    try:
+        await result._ensure_started()
+        assert result._router_task is not None
+        await asyncio.wait_for(result._router_task, timeout=10)
+        child = result._transport._process
+        assert child is not None and child.returncode == 0
+        assert result._incoming_control_requests == {}
+        assert callback_finished.is_set()
+    finally:
+        await result.close()
 
 
 @pytest.mark.asyncio

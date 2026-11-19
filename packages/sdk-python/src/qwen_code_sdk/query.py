@@ -106,13 +106,17 @@ class Query:
 
     async def _ensure_started(self) -> None:
         if self._closed:
-            raise self._close_reason or RuntimeError("Query is closed")
+            raise (
+                self._close_reason or RuntimeError("Query is closed")
+            ).with_traceback(None)
         if self._started:
             return
 
         async with self._start_lock:
             if self._closed:
-                raise self._close_reason or RuntimeError("Query is closed")
+                raise (
+                    self._close_reason or RuntimeError("Query is closed")
+                ).with_traceback(None)
             if self._started:
                 return
             await self._transport.start()
@@ -390,12 +394,16 @@ class Query:
         data: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if self.is_closed():
-            raise self._close_reason or RuntimeError("Query is closed")
+            raise (
+                self._close_reason or RuntimeError("Query is closed")
+            ).with_traceback(None)
 
         if subtype != "initialize":
             await self._wait_initialized()
             if self.is_closed():
-                raise self._close_reason or RuntimeError("Query is closed")
+                raise (
+                    self._close_reason or RuntimeError("Query is closed")
+                ).with_traceback(None)
 
         request_id = str(uuid4())
 
@@ -623,6 +631,7 @@ class Query:
         self._terminal_event_sent = True
         self._cancel_event.set()
         self._fail_pending_control_requests(RuntimeError("Query is closed"))
+        await self._cancel_incoming_control_requests()
         await self._message_queue.put(_DONE)
 
     async def _finish_with_error(self, exc: Exception) -> None:
