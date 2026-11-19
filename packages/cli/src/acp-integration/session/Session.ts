@@ -355,6 +355,7 @@ import {
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
   CHANNEL_TURN_NOTICE_META_KEY,
   CHANNEL_WORKFLOW_ORIGIN_META_KEY,
+  MID_TURN_DRAIN_BATCH,
   parseChannelWorkflowOrigin,
   type ChannelWorkflowOrigin,
 } from '@qwen-code/channel-base';
@@ -395,6 +396,7 @@ import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/ses
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   SERVE_CONTROL_EXT_METHODS,
+  type BridgeModRowAnswer,
   type ServeSessionContextStatus,
 } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
@@ -429,7 +431,12 @@ import {
 } from '../extension-skills.js';
 
 import { RequestError } from '@agentclientprotocol/sdk';
-import { AcpModSession, type AcpModTurn } from './acp-mod-session.js';
+import {
+  AcpModSession,
+  type AcpModTurn,
+  parseAcpModRow,
+} from './acp-mod-session.js';
+import type { ModRenderSite } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { subscriptionQuotaFromError } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import type {
   AvailableCommand,
@@ -1703,7 +1710,9 @@ const MID_TURN_KEEP_RESOLVE_TIMEOUT_MS = 2_000;
 // full drain budget.
 const ACTIVE_TURN_POLL_INTERVAL_MS = 10;
 const CHANNEL_TASK_POLL_INTERVAL_MS = 100;
-const MAX_MID_TURN_DRAIN_ITEMS = 10;
+// Shared with the ACP bridge that produces the drain response, so the
+// producer's batch and this consumer's cap cannot drift apart.
+const MAX_MID_TURN_DRAIN_ITEMS = MID_TURN_DRAIN_BATCH;
 const MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT =
   '[Attachment could not be processed]';
 const MAX_MID_TURN_RESOURCE_TEXT_LENGTH = 100_000;
@@ -3018,6 +3027,7 @@ export class Session implements SessionContext {
   // Implement SessionContext interface
   readonly sessionId: string;
   private mods?: AcpModSession;
+  private modsInstalled = false;
   /** The end of the session's Mods, which `dispose` starts. */
   modsClosed?: Promise<void>;
   private sessionReasoningSelection?: ReasoningSelection;
@@ -3059,6 +3069,8 @@ export class Session implements SessionContext {
     private readonly onPeerDeliveriesExpired?: (
       deliveries: PeerQueuedDelivery[],
     ) => void,
+    /** The Mod row sites the client draws. */
+    private readonly modRowSites: readonly ModRenderSite[] = [],
   ) {
     this.sessionId = id;
     this.requestLifecycleSessionId = id;
@@ -4403,6 +4415,7 @@ export class Session implements SessionContext {
             ? {
                 workspace: req.workspace,
                 workspaceGeneration: req.workspaceGeneration,
+                ...(req.requiresYolo ? { requiresYolo: true } : {}),
               }
             : {}),
           ...(req.sessionId ? { sessionId: req.sessionId } : {}),
@@ -5623,7 +5636,9 @@ export class Session implements SessionContext {
       this.settings,
       this.sessionId,
       this.client,
+      this.modRowSites,
     );
+    this.modsInstalled = true;
     const rewriteConfig = loadRewriteConfig(this.settings);
     if (rewriteConfig?.enabled) {
       debugLogger.info('Message rewrite middleware enabled');
@@ -5633,6 +5648,23 @@ export class Session implements SessionContext {
         (update) => this.sendUpdate(update),
       );
     }
+  }
+
+  /** Answers a Mod row the client draws. */
+  async askModRow(
+    component: unknown,
+    props: unknown,
+  ): Promise<BridgeModRowAnswer> {
+    if (this.mods) return this.mods.askRow(component, props);
+    if (!parseAcpModRow(component, props)) return { status: 'unhooked' };
+    // The Mods start once the history is replayed; a session that started
+    // without them keeps none, whatever the settings say later.
+    return {
+      status:
+        !this.modsInstalled && this.settings.merged.experimental?.mods
+          ? 'unanswered'
+          : 'unhooked',
+    };
   }
 
   /**
@@ -6177,7 +6209,11 @@ export class Session implements SessionContext {
         result,
       );
       return result;
-    } catch (error) {
+    } catch (caught) {
+      const error =
+        caught instanceof ManagedRuntimeOutcomeUnknownError
+          ? managedOutcomeUnknownError(caught)
+          : caught;
       recordAdmissionCancellation();
       const pendingSend = turnRecording?.abortController;
       const abortReason =

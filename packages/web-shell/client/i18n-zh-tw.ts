@@ -4235,6 +4235,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'workflow.graph.omitted': (v) =>
     `為保證效能，執行圖已省略 ${v?.lanes ?? 0} 個階段、${v?.nodes ?? 0} 個 Agent 和 ${v?.edges ?? 0} 條連線。`,
   'workflow.noPhase': '未分階段',
+  'workflow.phase.notStarted': '未開始',
   'workflow.dispatchCount': (v) => `${v?.count ?? 0} 個排程`,
   'workflow.selectedDispatch': '已選排程',
   'workflow.dependencies': '依賴',
@@ -6075,6 +6076,17 @@ export const ZH_TW: Record<string, MessageValue> = {
   'settings.label.agents.arena.preserveArtifacts': '保留 Arena 產物',
   'settings.description.agents.arena.preserveArtifacts':
     '啟用後，Arena worktree 和會話狀態檔案會在會話結束或主智慧體退出後保留。',
+  'managed.artifactLibrary.title': '產物庫',
+  'managed.artifactLibrary.description':
+    '此工作區各會話產出的產物，按最新優先排列。',
+  'managed.artifactLibrary.empty': '此工作區還沒有產出產物。',
+  'managed.artifactLibrary.unavailable': '此伺服器不支援產物庫。',
+  'managed.artifactLibrary.workspaceGone': '此工作區已不再對你的帳戶可用。',
+  'managed.artifactLibrary.loadFailed': '無法載入產物庫：',
+  'managed.artifactLibrary.unavailableBadge': '不可用',
+  'managed.artifactLibrary.sessionFallback': '會話',
+  'managed.artifactLibrary.refresh': '重新整理',
+  'managed.artifactLibrary.close': '關閉',
   'managed.tasks.title': '會話任務',
   'managed.tasks.activeChildren': (v) => `活動子 Agent：${v?.count}`,
   'managed.tasks.awaitingApproval': '等待審批',

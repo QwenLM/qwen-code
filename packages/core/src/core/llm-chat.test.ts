@@ -15248,6 +15248,10 @@ describe('LlmChat', async () => {
       expect(eventsOfType(events, StreamEventType.RETRY)).toEqual([
         { type: StreamEventType.RETRY, maxOutputTokensEscalated: 64_000 },
       ]);
+      // #16417 M5: the per-response limit the Turn reads must track the
+      // escalation — a MAX_TOKENS cut during the escalated round names the
+      // escalated limit, not the initial grant.
+      expect(chat.getLastRequestMaxOutputTokens()).toBe(64_000);
       expect(mockLogContentRetry).not.toHaveBeenCalledWith(
         mockConfig,
         expect.objectContaining({ error_type: 'NO_RESPONSE_TEXT' }),
@@ -15256,6 +15260,24 @@ describe('LlmChat', async () => {
         userText('complete the tool call'),
         modelText('Completed after escalation.'),
       ]);
+    });
+
+    it('records the initial clamp as the request maxOutputTokens (#16417 M4)', async () => {
+      // M4: deleting the initial-clamp assignment leaves this getter
+      // undefined on the ordinary first-send path, so a MAX_TOKENS cut in
+      // that round cannot name the limit — the assignment is load-bearing
+      // even when no escalation or recovery follows.
+      mockGeneratorConfig({
+        model: 'claude-sonnet-4-6',
+        contextWindowSize: 131_072,
+      });
+      serveStreams(streamOf(textChunk('hello', 'STOP')));
+      await drain(
+        await sendOn('claude-sonnet-4-6', 'hi', 'prompt-initial-clamp'),
+      );
+      expect(chat.getLastRequestMaxOutputTokens()).toBe(
+        requestAt(0).config?.maxOutputTokens,
+      );
     });
 
     it('re-clamps maxOutputTokens on each recovery send as the prompt grows (window invariant)', async () => {
@@ -15290,6 +15312,12 @@ describe('LlmChat', async () => {
       expect(requestAt(0).config?.maxOutputTokens).toBe(49_721);
       // Recovery: the prompt grew to ~121K → the 4,000 floor, not 49,721.
       expect(requestAt(1).config?.maxOutputTokens).toBe(4_000);
+      // #16417 P2: the per-response limit the Turn reads must track the
+      // recovery re-clamp, not the initial grant — otherwise a MAX_TOKENS
+      // cut in the recovery round would name a stale, oversized limit.
+      expect(chat.getLastRequestMaxOutputTokens()).toBe(
+        requestAt(1).config?.maxOutputTokens,
+      );
     });
 
     it('re-clamps recovery sends even when an intermediate response omits usage metadata', async () => {

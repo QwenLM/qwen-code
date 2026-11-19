@@ -42,6 +42,11 @@ export type { ManagedReceipt };
 export const MANAGED_DINGTALK_PENDING_LIMIT = 32;
 export const RECENT_LIMIT = 256;
 export const WEBHOOK_LIMIT = 256;
+// H5e of #12827: one card progress entry per in-flight card delivery. Bounded
+// like the outbound ledger; least-recently-touched eviction keeps a long-lived
+// instance from growing the state file without limit. An evicted entry is safe:
+// the send path reads its absence as "text", never as "create a second card".
+export const MANAGED_CARD_PROGRESS_LIMIT = 64;
 
 export interface ManagedDingtalkPendingEvent {
   eventId: string;
@@ -62,6 +67,19 @@ export interface ManagedDingtalkOutboundSegment {
   receipt?: ManagedReceipt;
 }
 
+/**
+ * The rendered card of one in-flight delivery (H5e). `body` is the accumulated
+ * card text the provider already holds, persisted before each edit so a restart
+ * resumes the same snapshot; `mode` records the overflow fallback to text. The
+ * outTrackId is re-derivable from the deliveryId, but persisting it keeps the
+ * handle and the body it names in one atomic write.
+ */
+export interface ManagedDingtalkCardProgress {
+  outTrackId: string;
+  body: string;
+  mode: 'card' | 'text';
+}
+
 export interface ManagedDingtalkState {
   version: 1;
   generation: number;
@@ -70,6 +88,7 @@ export interface ManagedDingtalkState {
   outbound: ManagedDingtalkOutboundSegment[];
   recent: string[];
   webhooks: Record<string, string>;
+  cards?: Record<string, ManagedDingtalkCardProgress>;
 }
 
 export function validManagedDingtalkState(
@@ -123,7 +142,23 @@ export function validManagedDingtalkState(
         key.length > 0 &&
         typeof entry === 'string' &&
         entry.length > 0,
-    )
+    ) &&
+    (state.cards === undefined ||
+      (!!state.cards &&
+        typeof state.cards === 'object' &&
+        !Array.isArray(state.cards) &&
+        Object.keys(state.cards).length <= MANAGED_CARD_PROGRESS_LIMIT &&
+        Object.entries(state.cards).every(
+          ([key, entry]) =>
+            typeof key === 'string' &&
+            key.length > 0 &&
+            !!entry &&
+            typeof entry === 'object' &&
+            typeof entry.outTrackId === 'string' &&
+            entry.outTrackId.length > 0 &&
+            typeof entry.body === 'string' &&
+            (entry.mode === 'card' || entry.mode === 'text'),
+        )))
   );
 }
 

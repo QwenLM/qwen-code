@@ -465,6 +465,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/mod-row',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/mod-row',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/btw',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/btw',

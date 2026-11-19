@@ -23,6 +23,7 @@ import type {
 import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
 import { MODEL_SHEET_QUERY } from '../hooks/useIsTouchComposer';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import styles from './ChatEditor.module.css';
 import type { VoiceButtonHandle } from '../voice/VoiceButton';
 import type {
   WebShellUnavailableModel,
@@ -605,6 +606,41 @@ function rerenderChatEditor(
   if (!entry) throw new Error('container is not mounted by renderChatEditor');
   renderChatEditorInto(entry.root, entry.portalRoot, props);
 }
+
+describe('ChatEditor composer glow', () => {
+  it('removes the glow and stops responding to keystrokes when disabled', () => {
+    const contentDOM = document.createElement('div');
+    composerCoreState.viewRef.current = { contentDOM };
+    const container = renderChatEditor({});
+    const surface = container.querySelector<HTMLElement>(
+      '[data-web-shell-composer-surface]',
+    )!;
+
+    expect(surface.querySelector(`.${styles.dacAura}`)).not.toBeNull();
+    expect(surface.querySelector(`.${styles.dacHalo}`)).not.toBeNull();
+    contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'a' }));
+    expect(surface.hasAttribute('data-dac-typing')).toBe(true);
+    expect(surface.style.getPropertyValue('--dac-glow-pulse')).toBe('1.0000');
+
+    rerenderChatEditor(container, {
+      customization: { composerGlowEnabled: false },
+    });
+
+    expect(surface.querySelector(`.${styles.dacAura}`)).toBeNull();
+    expect(surface.querySelector(`.${styles.dacHalo}`)).toBeNull();
+    expect(surface.style.getPropertyValue('--dac-glow-pulse')).toBe('0.0000');
+    contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'b' }));
+    expect(surface.hasAttribute('data-dac-typing')).toBe(false);
+    expect(surface.style.getPropertyValue('--dac-glow-pulse')).toBe('0.0000');
+
+    rerenderChatEditor(container, {
+      customization: { composerGlowEnabled: true },
+    });
+    expect(surface.querySelector(`.${styles.dacHalo}`)).not.toBeNull();
+    contentDOM.dispatchEvent(new KeyboardEvent('keydown', { key: 'c' }));
+    expect(surface.hasAttribute('data-dac-typing')).toBe(true);
+  });
+});
 
 describe('ChatEditor simple composer', () => {
   const simple = { composerVariant: 'simple' } as const;
@@ -4437,6 +4473,73 @@ describe('ChatEditor toolbar popovers', () => {
     } finally {
       bounds.mockRestore();
       scrollWidth.mockRestore();
+    }
+  });
+
+  it('gives the approval label first use of the width toggle space', () => {
+    const mode = '[data-web-shell-mode-button]';
+    const toggle = 'button[aria-label="Ultra wide"]';
+    let toolbarWidth = 213;
+    const resizeCallbacks = new Map<Element, () => void>();
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(private readonly update: () => void) {}
+
+        observe(element: Element) {
+          resizeCallbacks.set(element, this.update);
+        }
+
+        disconnect() {}
+      },
+    );
+    const bounds = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function () {
+        if (this.matches('[data-toolbar-measure="mode:expanded"]')) {
+          return { width: 68 } as DOMRect;
+        }
+        if (this.matches('[data-toolbar-measure="mode:collapsed"]')) {
+          return { width: 20 } as DOMRect;
+        }
+        if (this.querySelector(':scope > [data-web-shell-toolbar-leading]')) {
+          return { width: toolbarWidth } as DOMRect;
+        }
+        if (this.querySelector(':scope > [data-web-shell-composer-submit]')) {
+          return { width: this.querySelector(toggle) ? 92 : 60 } as DOMRect;
+        }
+        return { width: this.matches(toggle) ? 32 : 0 } as DOMRect;
+      });
+    const scrollWidth = vi
+      .spyOn(HTMLElement.prototype, 'scrollWidth', 'get')
+      .mockImplementation(function () {
+        return this.querySelector(mode)?.textContent ? 138 : 90;
+      });
+
+    try {
+      const container = renderChatEditor({
+        showChatWidthToggle: true,
+        visibleToolbarActions: ['approvalMode', 'widthMode'],
+        onChatWidthModeChange: vi.fn(),
+      });
+      const toolbar = container.querySelector(
+        '[data-web-shell-toolbar-leading]',
+      )!.parentElement!;
+      const resize = resizeCallbacks.get(toolbar)!;
+      for (const width of [213, 260, 213, 185, 213]) {
+        toolbarWidth = width;
+        for (let frame = 0; frame < 3; frame++) {
+          act(resize);
+          expect(Boolean(container.querySelector(mode)?.textContent)).toBe(
+            width >= 213,
+          );
+          expect(Boolean(container.querySelector(toggle))).toBe(width === 260);
+        }
+      }
+    } finally {
+      bounds.mockRestore();
+      scrollWidth.mockRestore();
+      vi.unstubAllGlobals();
     }
   });
 
