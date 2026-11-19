@@ -461,6 +461,13 @@ describe('OpenTuiDialogMount routing', () => {
     expect(mocks.state.dialogProps['effort']?.['initialEffort']).toBe('max');
   });
 
+  it('leaves a typed /effort picker to its own preselection', () => {
+    mount({ dialog: 'effort' });
+    expect(
+      mocks.state.dialogProps['effort']?.['initialEffort'],
+    ).toBeUndefined();
+  });
+
   it('records a /effort-opened result as the typed command', () => {
     mount({ dialog: 'effort' });
     const notify = mocks.state.dialogProps['effort']?.['notify'] as (

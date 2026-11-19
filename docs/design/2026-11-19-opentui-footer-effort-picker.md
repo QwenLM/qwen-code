@@ -139,6 +139,9 @@ click target.
   live/persisted base URL, sibling untouched), flat/nested static removal,
   global `model.generationConfig` removal, workspace tier clearing, placeholder
   path shape, and failure notification.
+- A real temporary settings file test covers per-path JSONC deletion, nested
+  whole-object removal, sibling preservation, and `${VAR}` placeholder
+  retention without writing the resolved secret.
 - A PTY end-to-end run clicks the footer tier, selects a different tier,
   verifies `model.reasoningEffort` and the removal of the provider static knob,
   restarts the CLI, and reads the new tier back.
@@ -156,7 +159,6 @@ click target.
 
 ## Follow-up
 
-- Add a real temporary-settings-file test for the JSONC delete path.
 - Decide whether System-owned static knobs should produce a user-visible
   warning.
 - Re-check footer selection copying after the selection-clipboard PR lands.

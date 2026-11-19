@@ -6,6 +6,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import {
   act,
   fireEvent,
@@ -21,7 +24,12 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
-import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import {
+  LoadedSettings,
+  SettingScope,
+  type Settings,
+  type SettingsFile,
+} from '../../config/settings.js';
 import { getCachedStringWidth } from '../utils/textUtils.js';
 
 const mocks = vi.hoisted(() => {
@@ -135,6 +143,7 @@ import {
   OpenTuiApprovalModeDialog,
   OpenTuiEffortDialog,
   OpenTuiOutputStyleDialog,
+  stripModelGenerationConfigEffort,
 } from './dialogs-modes.js';
 import { wrappedRows } from './dialogs-core.js';
 import {
@@ -1658,8 +1667,11 @@ describe('OpenTuiEffortDialog', () => {
       workspaceTier?: string;
       userTier?: string;
       workspaceOwnsProviders?: boolean;
+      systemOwnsProviders?: boolean;
       nestedSibling?: boolean;
       placeholderKey?: boolean;
+      liveBaseUrl?: string;
+      reasoningDisabled?: boolean;
       modelGenerationConfig?: Record<string, unknown>;
     } = {},
   ) {
@@ -1669,7 +1681,7 @@ describe('OpenTuiEffortDialog', () => {
     const notify = vi.fn();
     let applied = reasoningEffort;
     const setReasoningEffort = vi.fn((tier: string) => {
-      applied = tier;
+      if (!options.reasoningDisabled) applied = tier;
     });
     const nestedReasoning = options.nestedSibling
       ? { effort: 'max', budget_tokens: 8192 }
@@ -1690,10 +1702,17 @@ describe('OpenTuiEffortDialog', () => {
       }
       return base;
     };
-    const generation = { ...makeStatic(), authType: 'openai' } as {
+    const generation = {
+      ...makeStatic(),
+      authType: 'openai',
+      ...(options.liveBaseUrl ? { baseUrl: options.liveBaseUrl } : {}),
+      ...(options.reasoningDisabled ? { reasoning: false as const } : {}),
+    } as {
       extra_body?: Record<string, unknown>;
       samplingParams?: Record<string, unknown>;
       authType?: string;
+      baseUrl?: string;
+      reasoning?: false;
     };
     const modelsGeneration = makeStatic() as {
       extra_body?: Record<string, unknown>;
@@ -1731,7 +1750,9 @@ describe('OpenTuiEffortDialog', () => {
     };
     const userSettings = {
       ...(Object.keys(userModel).length > 0 ? { model: userModel } : {}),
-      ...(options.workspaceOwnsProviders ? {} : { modelProviders: providers }),
+      ...(options.workspaceOwnsProviders || options.systemOwnsProviders
+        ? {}
+        : { modelProviders: providers }),
     };
     const workspaceSettings = {
       general: {},
@@ -1740,6 +1761,9 @@ describe('OpenTuiEffortDialog', () => {
         : {}),
       ...(options.workspaceOwnsProviders ? { modelProviders: providers } : {}),
     };
+    const systemSettings = options.systemOwnsProviders
+      ? { modelProviders: providers }
+      : {};
     const config = {
       getModel: () => 'deepseek-v4-pro',
       getAuthType: () => 'openai',
@@ -1784,7 +1808,9 @@ describe('OpenTuiEffortDialog', () => {
             ? userSettings
             : scope === SettingScope.Workspace
               ? workspaceSettings
-              : {};
+              : scope === SettingScope.System
+                ? systemSettings
+                : {};
         let originalSettings = scopeSettings;
         if (options.placeholderKey) {
           if (scope === SettingScope.User && !options.workspaceOwnsProviders) {
@@ -1985,6 +2011,7 @@ describe('OpenTuiEffortDialog', () => {
         samplingParams: { reasoning_effort: 'max' },
       },
     };
+    const siblingSnapshot = structuredClone(sibling);
     const harness = renderEffortDialog(
       'max',
       undefined,
@@ -2007,7 +2034,7 @@ describe('OpenTuiEffortDialog', () => {
       generationConfig: { extra_body?: Record<string, unknown> };
     };
     expect(active.generationConfig.extra_body).toEqual({ temperature: 1 });
-    expect(nextProviders[1]).toEqual(sibling);
+    expect(nextProviders[1]).toEqual(siblingSnapshot);
   });
 
   it('strips the live static effort blocks so the session tier wins', () => {
@@ -2148,6 +2175,203 @@ describe('OpenTuiEffortDialog', () => {
       { throwOnWriteFailure: true },
     );
     expect(harness.userSettings.model?.reasoningEffort).toBe('max');
+  });
+
+  it('deletes static effort paths from a real settings file and keeps placeholders', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-effort-jsonc-'));
+    const previousKey = process.env['TEST_KEY'];
+    process.env['TEST_KEY'] = 'resolved-secret';
+    try {
+      const settingsPath = path.join(root, 'settings.json');
+      const raw = {
+        $version: 4,
+        model: {
+          generationConfig: {
+            extra_body: {
+              reasoning: { effort: 'max', budget_tokens: 8192 },
+              temperature: 1,
+              apiKey: '${TEST_KEY}',
+            },
+            samplingParams: { reasoning_effort: 'max' },
+          },
+        },
+      } as Settings;
+      const resolved = structuredClone(raw);
+      const resolvedGeneration = resolved.model!
+        .generationConfig as unknown as {
+        extra_body: Record<string, unknown>;
+      };
+      resolvedGeneration.extra_body['apiKey'] = 'resolved-secret';
+      fs.writeFileSync(settingsPath, JSON.stringify(raw));
+      const empty = (filePath: string): SettingsFile => ({
+        settings: {} as Settings,
+        originalSettings: {} as Settings,
+        path: filePath,
+      });
+      const loaded = new LoadedSettings(
+        empty(path.join(root, 'system.json')),
+        empty(path.join(root, 'system-defaults.json')),
+        { settings: resolved, originalSettings: raw, path: settingsPath },
+        empty(path.join(root, 'workspace', 'settings.json')),
+        true,
+        new Set(),
+      );
+
+      const dropped = stripModelGenerationConfigEffort(loaded);
+      expect(dropped).toContain('budget_tokens');
+
+      const saved = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as {
+        model: {
+          generationConfig: {
+            extra_body?: Record<string, unknown>;
+            samplingParams?: Record<string, unknown>;
+          };
+        };
+      };
+      // The nested reasoning object and the emptied samplingParams block are
+      // deleted on disk; unrelated sibling fields and the raw placeholder stay.
+      expect(saved.model.generationConfig.extra_body).toEqual({
+        temperature: 1,
+        apiKey: '${TEST_KEY}',
+      });
+      expect(saved.model.generationConfig.samplingParams).toBeUndefined();
+      expect(JSON.stringify(saved)).not.toContain('resolved-secret');
+    } finally {
+      if (previousKey === undefined) delete process.env['TEST_KEY'];
+      else process.env['TEST_KEY'] = previousKey;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not rewrite a System-owned provider bucket', () => {
+    const harness = renderEffortDialog(
+      'max',
+      undefined,
+      false,
+      'openai',
+      undefined,
+      { systemOwnsProviders: true },
+    );
+    press('down');
+    press('return');
+
+    const providerWrites = harness.setValue.mock.calls.filter(([, key]) =>
+      String(key).startsWith('modelProviders.'),
+    );
+    expect(providerWrites).toHaveLength(0);
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.reasoningEffort',
+      'high',
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+  });
+
+  it('uses the live baseUrl to pick the active provider entry', () => {
+    const sibling = {
+      id: 'deepseek-v4-pro',
+      baseUrl: 'https://other.example',
+      generationConfig: {
+        extra_body: { reasoning_effort: 'max', temperature: 1 },
+        samplingParams: { reasoning_effort: 'max' },
+      },
+    };
+    const harness = renderEffortDialog(
+      'max',
+      undefined,
+      false,
+      'openai',
+      undefined,
+      { sibling, liveBaseUrl: 'https://other.example' },
+    );
+    press('down');
+    press('return');
+
+    const providerWrite = harness.setValue.mock.calls.find(
+      ([, key]) => key === 'modelProviders.openai',
+    );
+    const nextProviders = providerWrite![2] as Array<{
+      generationConfig: { extra_body?: Record<string, unknown> };
+    }>;
+    // The live URL selects the second entry; the first one is untouched.
+    expect(nextProviders[0]?.generationConfig.extra_body).toEqual({
+      reasoning_effort: 'max',
+      temperature: 1,
+    });
+    expect(nextProviders[1]?.generationConfig.extra_body).toEqual({
+      temperature: 1,
+    });
+  });
+
+  it('skips static-key removal while thinking is explicitly disabled', () => {
+    const harness = renderEffortDialog(
+      'max',
+      undefined,
+      false,
+      'openai',
+      undefined,
+      { reasoningDisabled: true },
+    );
+    press('down');
+    press('return');
+
+    const providerWrites = harness.setValue.mock.calls.filter(([, key]) =>
+      String(key).startsWith('modelProviders.'),
+    );
+    expect(providerWrites).toHaveLength(0);
+    expect(harness.setValues).not.toHaveBeenCalled();
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.reasoningEffort',
+      'high',
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+  });
+
+  it('maps a sibling-bearing nested reasoning object to a whole-path delete', () => {
+    const harness = renderEffortDialog(
+      'max',
+      undefined,
+      false,
+      'openai',
+      undefined,
+      {
+        modelGenerationConfig: {
+          extra_body: {
+            reasoning: { effort: 'max', budget_tokens: 8192 },
+            temperature: 1,
+          },
+          samplingParams: { reasoning: { effort: 'max' } },
+        },
+      },
+    );
+    press('down');
+    press('return');
+
+    expect(harness.setValues).toHaveBeenCalledWith([
+      {
+        scope: SettingScope.User,
+        key: 'model.generationConfig.extra_body.reasoning',
+        value: undefined,
+      },
+      {
+        scope: SettingScope.User,
+        key: 'model.generationConfig.samplingParams',
+        value: undefined,
+      },
+    ]);
+    const generationConfig = harness.userSettings.model?.generationConfig as {
+      extra_body?: Record<string, unknown>;
+      samplingParams?: Record<string, unknown>;
+    };
+    expect(generationConfig.extra_body).toEqual({ temperature: 1 });
+    expect('samplingParams' in generationConfig).toBe(false);
+    expect(harness.notify).toHaveBeenCalledWith(
+      expect.stringContaining('budget_tokens'),
+      'info',
+    );
   });
 
   it('preselects the footer tier when the footer opened the picker', () => {

@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => {
     gitBranch: 'main' as string | undefined,
     promptTokens: 0,
     selectionText: '',
+    selectionAvailable: true,
     /** Stands in for a loaded locale's WITTY_LOADING_PHRASES array. */
     localePhrases: [] as string[],
   };
@@ -82,9 +83,10 @@ const mocks = vi.hoisted(() => {
 vi.mock('@opentui/react', () => ({
   useTerminalDimensions: () => mocks.state.dimensions,
   useRenderer: () => ({
-    getSelection: () => ({
-      getSelectedText: () => mocks.state.selectionText,
-    }),
+    getSelection: () =>
+      mocks.state.selectionAvailable
+        ? { getSelectedText: () => mocks.state.selectionText }
+        : null,
   }),
 }));
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
@@ -404,6 +406,7 @@ describe('OpenTuiFooter', () => {
   beforeEach(() => {
     mocks.state.promptTokens = 0;
     mocks.state.selectionText = '';
+    mocks.state.selectionAvailable = true;
     mocks.styleText.mockClear();
     mocks.state.gitBranch = 'main';
     mocks.state.dimensions = { width: 110, height: 40 };
@@ -531,8 +534,35 @@ describe('OpenTuiFooter', () => {
     fireEvent.mouseUp(tier, { button: 0 });
     expect(onOpenEffort).toHaveBeenCalledOnce();
 
-    // The model name run stays inert; only the tier is a target.
+    // The model name run stays inert; only the tier is a target. Reset the
+    // selection so this assertion is not silently blocked by the guard.
+    mocks.state.selectionText = '';
     fireEvent.mouseUp(screen.getByText('qwen3-coder-plus'), { button: 0 });
+    expect(onOpenEffort).toHaveBeenCalledOnce();
+  });
+
+  it('treats a missing renderer selection as a tap', () => {
+    mocks.state.selectionAvailable = false;
+    const onOpenEffort = vi.fn();
+    render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        onOpenEffort={onOpenEffort}
+        statusLine={{
+          lines: ['qwen3-coder-plus high'],
+          useThemeColors: true,
+          respectUserColors: false,
+          hideContextIndicator: false,
+          reasoningSegment: {
+            text: 'qwen3-coder-plus high',
+            effort: 'high',
+          },
+        }}
+      />,
+    );
+
+    fireEvent.mouseUp(screen.getByText('high'), { button: 0 });
     expect(onOpenEffort).toHaveBeenCalledOnce();
   });
 

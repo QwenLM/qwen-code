@@ -85,6 +85,7 @@ Live 与 registry 副本也会在当前 session 清理，避免同模型 sub-age
 ## 验证
 
 - 目标单元测试覆盖 segment 暴露、toggle-only 不可点、tier membership、footer 预选、点击与拖拽选择、provider entry 定位（自定义 key、live/persisted base URL、sibling 不动）、flat/nested 静态移除、nested 兄弟键移除提示、全局 `model.generationConfig` 移除、workspace/User scope 行为、placeholder 路径形状，以及失败通知。
+- 真实临时 settings 档测试覆盖逐路径 JSONC 删除、nested 整包移除、兄弟键保留，以及 `${VAR}` placeholder 保留且不写入展开后的密钥。
 - PTY 端到端测试会点击 footer tier、选择不同 tier、确认 `model.reasoningEffort` 与 provider 静态 knob 已移除、重新启动 CLI，并读回新 tier。
 - `prettier`、`eslint` 与 CLI TypeScript build 通过。
 
@@ -98,6 +99,5 @@ Live 与 registry 副本也会在当前 session 清理，避免同模型 sub-age
 
 ## 后续工作
 
-- 为 JSONC delete 路径补一个使用临时真实 settings 档的测试。
 - 决定 System 所有的静态 knob 是否要显示用户可见警告。
 - Selection-clipboard PR 合并后，重新检查 footer 选择复制。

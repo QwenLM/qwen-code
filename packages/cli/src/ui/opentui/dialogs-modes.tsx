@@ -838,7 +838,9 @@ function writeReasoningSelection(
  * knobs. Strip those from the raw scope objects too: it is written through the
  * original (unexpanded) value so placeholders survive.
  */
-function stripModelGenerationConfigEffort(settings: LoadedSettings): string[] {
+export function stripModelGenerationConfigEffort(
+  settings: LoadedSettings,
+): string[] {
   const droppedSiblings: string[] = [];
   for (const scope of getWritableScopes(settings)) {
     const file = settings.forScope(scope);

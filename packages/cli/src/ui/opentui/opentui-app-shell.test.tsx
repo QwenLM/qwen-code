@@ -1227,6 +1227,22 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.footerProps?.['onOpenEffort']).toBeTypeOf('function');
   });
 
+  it('opens the effort picker with the footer source when idle', async () => {
+    renderApp({ streaming: false });
+    await settle();
+    const open = mocks.state.footerProps?.['onOpenEffort'] as () => void;
+
+    await act(async () => {
+      open();
+    });
+    await settle();
+
+    expect(mocks.state.dialogProps?.['request']).toMatchObject({
+      dialog: 'effort',
+      openedFromFooter: true,
+    });
+  });
+
   it.each(['NORMAL', 'INSERT', undefined] as const)(
     'passes current Vim mode %s to the status command and footer',
     async (vimMode) => {
