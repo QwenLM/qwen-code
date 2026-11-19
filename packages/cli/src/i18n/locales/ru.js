@@ -503,7 +503,7 @@ export default {
   'Skip Startup Context': 'Пропустить начальный контекст',
   'Enable OpenAI Logging': 'Включить логирование OpenAI',
   'OpenAI Logging Directory': 'Директория логов OpenAI',
-  Timeout: 'Таймаут',
+  Timeout: 'Тайм-аут',
   'Max Retries': 'Макс. количество попыток',
   'Load Memory From Include Directories':
     'Загружать память из включенных директорий',
@@ -1304,7 +1304,7 @@ export default {
     'Пожалуйста, посетите этот URL для авторизации:',
   'Waiting for authorization': 'Ожидание авторизации',
   'Time remaining:': 'Осталось времени:',
-  'Qwen OAuth Authentication Timeout': 'Таймаут авторизации Qwen OAuth',
+  'Qwen OAuth Authentication Timeout': 'Тайм-аут авторизации Qwen OAuth',
   'OAuth token expired (over {{seconds}} seconds). Please select authentication method again.':
     'Токен OAuth истек (более {{seconds}} секунд). Пожалуйста, выберите метод авторизации снова.',
   'Press any key to return to authentication type selection.':
@@ -2771,7 +2771,7 @@ export default {
     'Включён минимальный режим, поэтому хуки в этой сессии не выполняются.',
   'All hooks are disabled by the disableAllHooks setting.':
     'Все хуки отключены настройкой disableAllHooks.',
-  'Timeout:': 'Таймаут:',
+  'Timeout:': 'Тайм-аут:',
   'Status message:': 'Сообщение о статусе:',
   'Condition:': 'Условие:',
   'Options:': 'Параметры:',
