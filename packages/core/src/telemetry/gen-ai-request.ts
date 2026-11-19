@@ -306,6 +306,33 @@ export class GenAiExchangeController {
     }
   }
 
+  /**
+   * Stamp one attribute contributed by the provider's HTTP response (headers
+   * or a wire field the normalized response drops). Call sites gate on their
+   * own conditions; this only enforces that a finalized or foreign-generation
+   * attempt cannot still write to the span.
+   */
+  recordResponseAttribute(
+    handle: GenAiAttemptHandle | undefined,
+    key: string,
+    value: string | undefined,
+  ): void {
+    if (
+      !handle ||
+      handle.controller !== this ||
+      handle.generation !== this.generation ||
+      this.finalized ||
+      value === undefined
+    ) {
+      return;
+    }
+    try {
+      this.span.setAttribute(key, value);
+    } catch {
+      debugLogger.debug(`Failed to set ${key} span attribute`);
+    }
+  }
+
   finalize(success: boolean): string[] | undefined {
     if (this.finalized) return undefined;
     this.finalized = true;

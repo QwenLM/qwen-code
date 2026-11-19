@@ -7786,6 +7786,110 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('keys the pending-restore marker per session on a shared channel', async () => {
+    const restoringId = 'restore-keying-restoring';
+    const settledId = 'restore-keying-settled';
+    const link = (sessionId: string, url: string) => ({
+      id: stableSessionArtifactId(sessionId, `url:${url}`),
+      kind: 'link',
+      storage: 'external_url',
+      source: 'client',
+      status: 'available',
+      title: url,
+      url,
+      retention: 'restorable',
+      clientRetained: true,
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    });
+    let releaseRestore!: () => void;
+    const restoreGate = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    const originalRestore = SessionArtifactStore.prototype.restore;
+    const stores = new Map<string, SessionArtifactStore>();
+    const restoreSpy = vi
+      .spyOn(SessionArtifactStore.prototype, 'restore')
+      .mockImplementation(async function (
+        this: SessionArtifactStore,
+        snapshot,
+        options,
+      ) {
+        if (!snapshot) return originalRestore.call(this, snapshot, options);
+        // Key by the snapshot's session id — the store's own sessionId is
+        // private, and tsc --build typechecks the test files.
+        stores.set(snapshot.sessionId, this);
+        if (snapshot.sessionId !== restoringId) {
+          return originalRestore.call(this, snapshot, options);
+        }
+        const first = await originalRestore.call(
+          this,
+          { ...snapshot, artifacts: snapshot.artifacts.slice(0, 1) },
+          options,
+        );
+        await restoreGate;
+        const rest = await originalRestore.call(this, snapshot, options);
+        return [...first, ...rest];
+      });
+    onTestFinished(() => {
+      releaseRestore();
+      restoreSpy.mockRestore();
+    });
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          loadSessionImpl: (request) =>
+            ({
+              artifactSnapshot: {
+                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                sessionId: request.sessionId,
+                sequence: 7,
+                artifacts: [
+                  link(
+                    request.sessionId,
+                    `https://example.com/${request.sessionId}-a`,
+                  ),
+                  link(
+                    request.sessionId,
+                    `https://example.com/${request.sessionId}-b`,
+                  ),
+                ],
+                warnings: [],
+              },
+            }) as LoadSessionResponse,
+        }).channel,
+    });
+
+    const restoringLoad = bridge.loadSession({
+      sessionId: restoringId,
+      workspaceCwd: WS_A,
+    });
+    // The second session loads on the SAME channel while the first
+    // restore is gated: its settled count must not be withheld by the
+    // other session's pending marker.
+    await bridge.loadSession({ sessionId: settledId, workspaceCwd: WS_A });
+    await vi.waitFor(() => {
+      expect(stores.get(restoringId)?.count()).toBe(1);
+    });
+    const rows = bridge.listWorkspaceSessions(WS_A);
+    const restoringRow = rows.find((s) => s.sessionId === restoringId);
+    const settledRow = rows.find((s) => s.sessionId === settledId);
+    expect(restoringRow?.artifactCount).toBeUndefined();
+    expect(restoringRow?.artifactCountPending).toBe(true);
+    expect(settledRow?.artifactCount).toBe(2);
+    expect(settledRow?.artifactCountPending).toBeUndefined();
+
+    releaseRestore();
+    await restoringLoad;
+    const after = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === restoringId);
+    expect(after?.artifactCount).toBe(2);
+    expect(after?.artifactCountPending).toBeUndefined();
+
+    await bridge.shutdown();
+  });
+
   it('clears durable artifacts but keeps live ephemerals when rewind returns an empty artifact snapshot', async () => {
     const persistedSnapshots: unknown[] = [];
     const handle = makeChannel({
