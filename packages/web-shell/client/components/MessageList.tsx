@@ -3800,8 +3800,12 @@ export const MessageList = memo(
     // (collapsed once complete). `displayItems` stays the full, pre-collapse
     // list — used only to locate rows hidden inside a collapsed turn — while
     // `visibleItems` is what actually renders.
-    const { collapseCompletedTurns, sourceReferences, assistantFeedback } =
-      useWebShellCustomization();
+    const {
+      collapseCompletedTurns,
+      sourceReferences,
+      assistantFeedback,
+      overscan = 15,
+    } = useWebShellCustomization();
     // `sourceSessionId` is the transcript's own session, which is what a mark
     // belongs to.
     const {
@@ -4786,7 +4790,7 @@ export const MessageList = memo(
           estimateItemSize(index)
         );
       },
-      overscan: 15,
+      overscan,
       anchorTo: 'end',
       useFlushSync: false,
       useAnimationFrameWithResizeObserver: true,
