@@ -941,6 +941,54 @@ describe('TurnBoundaryCompactionEngine', () => {
       },
     );
 
+    it.each([
+      {
+        name: 'first-chunk-only toolUseId',
+        firstTurn: { ...backgroundTurn, toolUseId: 'tool-1' },
+        secondTurn: backgroundTurn,
+      },
+      {
+        name: 'same turnId with different taskId',
+        firstTurn: backgroundTurn,
+        secondTurn: { ...backgroundTurn, taskId: 'task-b' },
+      },
+    ])(
+      'keeps background-turn descriptor changes discrete in full and summary replay: $name',
+      ({ firstTurn, secondTurn }) => {
+        const first = withIdentity(makeTextChunk(1, 'first'), {
+          backgroundTurn: firstTurn,
+        });
+        const second = withIdentity(makeTextChunk(2, 'second'), {
+          backgroundTurn: secondTurn,
+        });
+        const engine = new TurnBoundaryCompactionEngine();
+        engine.ingest(first);
+        engine.ingest(second);
+
+        for (const mode of ['full', 'summary'] as const) {
+          const snapshot = engine.snapshot(mode);
+          expect(snapshot.liveJournal).toEqual([first, second]);
+          expect(extractTexts(snapshot.liveJournal)).toEqual([
+            'first',
+            'second',
+          ]);
+          expect(
+            snapshot.liveJournal.map(
+              (event) =>
+                (
+                  event.data as {
+                    update: {
+                      _meta: { backgroundTurn: Record<string, unknown> };
+                    };
+                  }
+                ).update._meta.backgroundTurn,
+            ),
+          ).toEqual([firstTurn, secondTurn]);
+          expect(snapshot.lastEventId).toBe(2);
+        }
+      },
+    );
+
     it('preserves tool boundaries in live replay', () => {
       const engine = new TurnBoundaryCompactionEngine();
       engine.ingest(makeTextChunk(1, 'Before'));

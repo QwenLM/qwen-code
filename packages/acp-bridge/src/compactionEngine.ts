@@ -101,7 +101,7 @@ interface LiveJournalTextSegment {
   chunks: string[];
   sourceRecordIds?: readonly string[];
   parentToolCallId?: string;
-  backgroundTurnId?: string;
+  backgroundTurnIdentity?: string;
   promptId?: string;
   originatorClientId?: string;
   sessionId?: string;
@@ -514,7 +514,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       journal.entryBytes[currentIndex]! + bytes <= this.maxJournalBytes &&
       current.sessionUpdate === textChunk.sessionUpdate &&
       current.parentToolCallId === textChunk.parentToolCallId &&
-      current.backgroundTurnId === textChunk.backgroundTurnId &&
+      current.backgroundTurnIdentity === textChunk.backgroundTurnIdentity &&
       stringArraysEqual(current.sourceRecordIds, textChunk.sourceRecordIds) &&
       current.promptId === event.promptId &&
       current.originatorClientId === event.originatorClientId &&
@@ -536,7 +536,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
           chunks: [textChunk.text],
           sourceRecordIds: textChunk.sourceRecordIds,
           parentToolCallId: textChunk.parentToolCallId,
-          backgroundTurnId: textChunk.backgroundTurnId,
+          backgroundTurnIdentity: textChunk.backgroundTurnIdentity,
           promptId: event.promptId,
           originatorClientId: event.originatorClientId,
           sessionId: captureSessionId(event),
@@ -1111,7 +1111,7 @@ function liveJournalTextChunk(event: BridgeEvent):
       text: string;
       sourceRecordIds?: readonly string[];
       parentToolCallId?: string;
-      backgroundTurnId?: string;
+      backgroundTurnIdentity?: string;
     }
   | undefined {
   if (event.type !== 'session_update') return undefined;
@@ -1141,7 +1141,9 @@ function liveJournalTextChunk(event: BridgeEvent):
     text: content.text,
     sourceRecordIds: extractSourceRecordIdsFromMeta(data?.update?._meta),
     parentToolCallId: extractParentToolCallIdFromMeta(data?.update?._meta),
-    backgroundTurnId: extractBackgroundTurnIdFromMeta(data?.update?._meta),
+    backgroundTurnIdentity: extractBackgroundTurnIdentityFromMeta(
+      data?.update?._meta,
+    ),
   };
 }
 
@@ -1272,11 +1274,14 @@ function extractParentToolCallIdFromMeta(meta: unknown): string | undefined {
   return undefined;
 }
 
-function extractBackgroundTurnIdFromMeta(meta: unknown): string | undefined {
+function extractBackgroundTurnIdentityFromMeta(
+  meta: unknown,
+): string | undefined {
   if (typeof meta !== 'object' || meta === null) return undefined;
-  return parseBackgroundNotificationTurn(
+  const backgroundTurn = parseBackgroundNotificationTurn(
     (meta as Record<string, unknown>)['backgroundTurn'],
-  )?.turnId;
+  );
+  return backgroundTurn ? JSON.stringify(backgroundTurn) : undefined;
 }
 
 function extractSourceRecordIdsFromMeta(
