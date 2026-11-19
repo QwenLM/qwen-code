@@ -2001,7 +2001,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             a click there changes nothing. */}
         <scrollbox
           ref={(el) => {
-            historyScrollRef.current = el as ScrollBoxRenderable | null;
+            const box = el as ScrollBoxRenderable | null;
+            historyScrollRef.current = box;
+            transcriptScrollRef.current = box;
           }}
           flexGrow={1}
           flexShrink={1}
@@ -2010,7 +2012,6 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           stickyStart="bottom"
           focusable={false}
           scrollbarOptions={openTuiScrollbarOptions(showOpenTuiScrollbar)}
-          ref={transcriptScrollRef}
           onMouseDown={handleShellMouseDown}
         >
           <OpenTuiBanner config={config} settings={settings} />

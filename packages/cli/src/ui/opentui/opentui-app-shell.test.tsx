@@ -2423,7 +2423,7 @@ describe('OpenTuiApp shell wiring', () => {
   });
 
   it.each([true, false])(
-    'routes history keys only for screen-reader=%s without moving composer focus',
+    'routes history keys for screen-reader=%s without moving composer focus',
     async (screenReader) => {
       const view = renderApp({ screenReader });
       await settle();
@@ -2452,12 +2452,20 @@ describe('OpenTuiApp shell wiring', () => {
           stopPropagation: vi.fn(),
         };
         act(() => mocks.state.keyboardHandlers.at(-1)!(key));
-        expect(key.preventDefault).toHaveBeenCalledTimes(screenReader ? 1 : 0);
+        const historyKey = name === 'up' || name === 'down';
+        expect(key.preventDefault).toHaveBeenCalledTimes(
+          screenReader || !historyKey ? 1 : 0,
+        );
       }
       expect(scrollBy.mock.calls).toEqual(
-        screenReader ? [[-1], [1], [-18], [18]] : [],
+        screenReader
+          ? [[-1], [1], [-18], [18]]
+          : [
+              [-1, 'viewport'],
+              [1, 'viewport'],
+            ],
       );
-      expect(scrollTo.mock.calls).toEqual(screenReader ? [[0], [900]] : []);
+      expect(scrollTo.mock.calls).toEqual([[0], [900]]);
       expect(mocks.state.inputProps?.['focus']).toBe(true);
     },
   );
