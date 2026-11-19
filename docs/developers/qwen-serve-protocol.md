@@ -4455,7 +4455,7 @@ Request body:
 }
 ```
 
-The child checks that `props` holds exactly the site's props with their kinds and builds the event's envelope itself: `surface: 'desktop'`, and a `requestId` digested from the component and props, so the same props are the same row for every client. Rows render one at a time in the session's Mod dispatch queue, each within 30 seconds; an answer is kept, so a second client or a reload is answered without running the hooks again. Non-strict mutation gate, as for `/session/:id/recap`: the call can cost model tokens, since a hook may call `$.model.complete`, and mutates no state. No SSE event is published.
+The child checks that `props` holds exactly the site's props with their kinds and builds the event's envelope itself: `surface: 'desktop'`, and a `requestId` digested from the component and props, so the same props are the same row for every client. Rows render one at a time in the session's Mod dispatch queue, each within 30 seconds; an answer is kept, so a second client or a reload is answered without running the hooks again. Non-strict mutation gate, as for `/session/:id/recap`: the call can cost model tokens, since a hook may call `$.model.complete`, and mutates no state. The row and its answer publish no SSE event; a hook that logs with `$.ui.log` publishes the usual `mod_log`.
 
 Response (200), one of:
 

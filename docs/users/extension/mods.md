@@ -157,7 +157,9 @@ removed, with the limits of headless runs. Clients that do not know the method
 ignore it. The Web Shell daemon forwards each one to the session's event stream
 as a `mod_log` event with the same fields, and the Web Shell shows it in the
 transcript as an informational line, `[Mod <plugin>] <text>`. These lines are
-not saved with the session, so a reloaded transcript no longer shows them.
+not saved with the session: a page reloaded while the daemon holds the session
+shows them again from its event history, and a session loaded again from disk
+does not.
 
 ## Supported subset
 

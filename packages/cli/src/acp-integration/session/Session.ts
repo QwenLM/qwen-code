@@ -3020,6 +3020,7 @@ export class Session implements SessionContext {
   // Implement SessionContext interface
   readonly sessionId: string;
   private mods?: AcpModSession;
+  private modsInstalled = false;
   /** The end of the session's Mods, which `dispose` starts. */
   modsClosed?: Promise<void>;
   private sessionReasoningSelection?: ReasoningSelection;
@@ -5629,6 +5630,7 @@ export class Session implements SessionContext {
       this.client,
       this.modRowSites,
     );
+    this.modsInstalled = true;
     const rewriteConfig = loadRewriteConfig(this.settings);
     if (rewriteConfig?.enabled) {
       debugLogger.info('Message rewrite middleware enabled');
@@ -5647,11 +5649,13 @@ export class Session implements SessionContext {
   ): Promise<BridgeModRowAnswer> {
     if (this.mods) return this.mods.askRow(component, props);
     if (!parseAcpModRow(component, props)) return { status: 'unhooked' };
-    // The Mods start once the history is replayed.
+    // The Mods start once the history is replayed; a session that started
+    // without them keeps none, whatever the settings say later.
     return {
-      status: this.settings.merged.experimental?.mods
-        ? 'unanswered'
-        : 'unhooked',
+      status:
+        !this.modsInstalled && this.settings.merged.experimental?.mods
+          ? 'unanswered'
+          : 'unhooked',
     };
   }
 

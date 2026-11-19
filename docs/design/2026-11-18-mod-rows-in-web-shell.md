@@ -61,7 +61,7 @@ The Web Shell offers the assistant messages that hold the model's reply. It does
 
 ### Logs in the transcript
 
-The SDK knows the `mod_log` event and turns each into an informational line, `[Mod <plugin>] <text>`, as the terminals print it. A line does not end the reply block it arrives during; it sits below it. The lines are not saved with the session, as in the terminals.
+The SDK knows the `mod_log` event and turns each into an informational line, `[Mod <plugin>] <text>`, as the terminals print it. A line does not end the reply block it arrives during; it sits below it. As in the terminals, the lines are not saved with the session: a page reloaded while the daemon holds the session replays them from the session's event history, and a session loaded again from disk shows none.
 
 ### The setting
 
