@@ -19,8 +19,9 @@ import { documentExportBudgetMs } from '../../integration-tests/document-export-
 // The browser gate that consumes these budgets runs on both runner classes:
 // ci.yml's PR-gated web_shell_e2e_smoke shard 1 selects the shared self-hosted
 // ARM64 pool or ubuntu-latest, and e2e.yml's nightly leg runs on ubuntu-latest.
-// Only the self-hosted pool measured the overruns, so the tier decision is
-// pinned here, where test:scripts collects it on every PR.
+// Neither maps RUNNER_ENVIRONMENT into the gate step, so the tier decision keys
+// on CI — the marker every runner provides — and is pinned here, where
+// test:scripts collects it on every PR.
 const repoRoot = resolve(import.meta.dirname, '../..');
 const gateSource = readFileSync(
   join(repoRoot, 'integration-tests/chat-transcript-document.test.ts'),
@@ -118,25 +119,35 @@ const WINDOW_END_PIN =
 const FOCUS_PIN = /^\s*(?:it|describe|test)\s*\.\s*(?:only|skip|todo)\s*\(/m;
 
 describe('document export budgets', () => {
-  it('keeps the tight 60s ceiling off the shared self-hosted pool', () => {
+  it('keeps the tight 60s ceiling off CI', () => {
     expect(documentExportBudgetMs({})).toBe(60_000);
-    expect(documentExportBudgetMs({ CI: 'true' })).toBe(60_000);
+    expect(documentExportBudgetMs({ CI: 'false' })).toBe(60_000);
+    // A local shell carrying a runner marker is still a local run: only CI
+    // scales the budget, exactly as interactive/wait.ts does.
+    expect(
+      documentExportBudgetMs({
+        RUNNER_ENVIRONMENT: 'self-hosted',
+      }),
+    ).toBe(60_000);
+  });
+
+  it('widens the ceiling on every CI runner that measured the overruns', () => {
+    // The lane that runs this gate maps only TMPDIR into the step, so
+    // RUNNER_ENVIRONMENT is absent there on the ARM64 pool and on
+    // ubuntu-latest alike. Keying the tier on it left the 3x headroom inert
+    // and the 60s ceiling measured 64.5s (#17884). CI is the marker every
+    // runner class actually provides.
+    const budget = documentExportBudgetMs({ CI: 'true' });
+    expect(budget).toBe(180_000);
+    // Both runner classes, with and without the marker the lane never maps.
+    expect(
+      documentExportBudgetMs({ CI: 'true', RUNNER_ENVIRONMENT: 'self-hosted' }),
+    ).toBe(180_000);
     expect(
       documentExportBudgetMs({
         CI: 'true',
         RUNNER_ENVIRONMENT: 'github-hosted',
       }),
-    ).toBe(60_000);
-  });
-
-  it('widens the ceiling on the self-hosted pool that measured the overruns', () => {
-    const budget = documentExportBudgetMs({
-      RUNNER_ENVIRONMENT: 'self-hosted',
-    });
-    expect(budget).toBe(180_000);
-    // The pool's real CI environment carries both markers.
-    expect(
-      documentExportBudgetMs({ CI: 'true', RUNNER_ENVIRONMENT: 'self-hosted' }),
     ).toBe(180_000);
     // The per-case timeout (budget + 30s slack) outranks the suite default,
     // so the budget assertion is the one that reports a wedged run. The
