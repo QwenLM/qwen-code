@@ -44,7 +44,7 @@
 ## 验收标准
 
 - core parity 套件绿（35 测试），含 bundled 与各 shell 的 Parsing 库存、allow-list 与调用点测试、sidecar 集合钉、Java 提供集合与 profile→key 路由映射、解析器派生的 caveat 子句、双求值器一致性，及重生 sidecar 逐字节 parity。
-- scripts 元套件绿（183 测试），含 fake createdId 钉、可执行分类器收窄、可执行 minted-id 提取与被执行的分类器接线扫描器。
+- scripts 元套件绿（184 测试：改动的 `managed-agent-server-e2e.test.js` 88 条，加 `hosted-process-ci.test.js` 96 条），含 fake createdId 钉、可执行分类器收窄、可执行 minted-id 提取与被执行的分类器接线扫描器。
 - 变异见证：additive-fallback 分类器变异使非 block 方向红；deny-list 哨兵回退使新哨兵方向红；伪造 fake createdId 使其钉红；删除 Parsing 规则使库存钉红；门后 sibling fallback（第二绑定、换 call id 或手搭 tool call）使分类器接线钉红；`let` 决策在门后重赋值为内联 allow 使构造点集合红；对决策的 `??=` 改写使重赋值集合红；伪造 schema-properties 初始化式使来源集合红；caveat 上界改 N ≤ 45 使派生断言红，调低 Managed 编译器日域上界同样红；删 Java `SHELL_V3` 路由分支使路由目标集合红。含绑定名、allow 字面量与工具名的注释保持绿。各字节级还原复绿。
 - 真实打包栈 `--loop-skill` 与 `--loop-fire` 臂以重生 sidecar 绿（jar 重建）。
 - 这些 sidecar 的 Java 消费方 `ManagedLoopSkillTest` 以重生 body 绿（19 测试），sibling SDK 从被测源码安装。
@@ -226,7 +226,7 @@ core 邻近面是整面跑而非抽样：`src/managed-runtime` 加 `src/skills/b
 
 真实环境验证在本 head 重跑而非承接，因为第四次合并改了 12 个 Java 文件与 13 个 cli/core 文件：全量构建绿且 core 与 cli 的 dist 按构建起点时间戳断言已刷新，jar 重建，`ManagedLoopSkillTest` 以重生 sidecar 跑出 19/19，bundle 重建并断言已刷新，重建 jar 内四个 sidecar 与已提交契约逐字节相等。臂：`--loop-skill` success（session `6a36196e-b6d6-4aac-a37a-fff0b8a10795`、modelRounds 6、cron create/list/delete 均见证）；`--loop-fire` success（session `01b1b51c-cc4d-4f9b-be6c-81019be0afe6`、schedule `asch_ebf79227b1238167ff6217b3d0e052bb`、fireTrigger=scheduled、fireOutcome=fired、fireState=completed、occurrenceKey `schedule:2026-11-19T01:15:00Z`、modelRounds 5）。
 
-套件规模：core 35、scripts 元 183（改动文件 88）。
+该轮套件规模：core 35、scripts 元 183（改动文件 88）。
 
 ## 第 11 轮评审：哨兵诊断断言了守卫从未核实的事实
 
@@ -240,6 +240,10 @@ core 邻近面是整面跑而非抽样：`src/managed-runtime` 加 `src/skills/b
 拒绝行为不变：同样的 body 被拒、同样的 profile、对未知 token 仍失败关闭。只有措辞变了，而编码旧措辞的七处断言现按 profile 断言新措辞，故每个方向都保有自己的见证。生成的 sidecar 未触碰——parity 测试重生并逐字节比对且保持绿——故这是生成器里的诊断改动，不是发布的模型面向内容的改动。
 
 见证：把两条消息都回退为旧的 `non-expanding sentinel` 措辞会使 **4 个用例红**，各自点名它期望的措辞；字节级还原回到 35/35。core `tsc --build`、eslint 与 prettier 净。
+
+第五次合入 main（合并提交 `50a39ddbc8`，以 merge base 判定与本 PR 文件零重叠），改了 217 个 Java/cli/core 文件，故整栈重建而非复用：全量构建 rc=0 且 core 与 cli 的 dist 断言已刷新，jar 重建，`ManagedLoopSkillTest` **19/19**，bundle 重建并断言已刷新，重建 jar 内四个 sidecar 与已提交契约逐字节相等。臂：`--loop-skill` success（session `4b05a9ad-2f7a-4323-9154-6e63895b5caf`、modelRounds 6、cron create/list/delete 均见证）；`--loop-fire` success（session `229ac023-e0fe-4b59-9593-19848279e71f`、schedule `asch_5d9999101c86d3d0578238c5e0faa8e9`、fireTrigger=scheduled、fireOutcome=fired、fireState=completed、occurrenceKey `schedule:2026-11-19T05:53:00Z`、modelRounds 5）。
+
+scripts 元计数从 183 增至 **184**，因为 main 给 `hosted-process-ci.test.js` 新增了一条用例（95 → 96）；改动文件仍是 88。本 head 上 core 35/35、core `tsc --build` 净。
 
 ## 开放问题
 

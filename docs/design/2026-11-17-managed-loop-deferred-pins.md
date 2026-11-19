@@ -44,7 +44,7 @@ Only the six named deferred items. The remaining ~64 deferred entries (doc stale
 ## Acceptance criteria
 
 - Core parity suite green (35 tests), including the bundled and per-shell Parsing inventories, the allow-list and call-site tests, the sidecar-set pin, the Java supply-set and profile→key routing map, the parser-derived caveat clauses, the two-evaluator agreement and the regenerated-sidecar byte-for-byte parity.
-- Scripts meta suites green (183 tests), including the fake createdId pins, the executable classifier narrowing, the executable minted-id extraction and the executed classifier-wiring scanner.
+- Scripts meta suites green (184 tests: 88 in the changed `managed-agent-server-e2e.test.js` plus 96 in `hosted-process-ci.test.js`), including the fake createdId pins, the executable classifier narrowing, the executable minted-id extraction and the executed classifier-wiring scanner.
 - Mutation witnesses: the additive-fallback classifier mutation reddens the non-block directions; the deny-list sentinel revert reddens the new-sentinel direction; a fabricated fake createdId reddens its pin; a deleted Parsing rule reddens the inventory pin; a post-gate sibling fallback (second binding, another call id, or a hand-built tool call) reddens the classifier-wiring pin; a `let` decision reassigned to an inline allow reddens the construction-site set; a `??=` rewrite of the decision reddens the reassignment set; a fabricated schema-properties initializer reddens the provenance set; a caveat bound of N ≤ 45 reddens the derived assertion, as does lowering the Managed compiler's day-of-month upper bound; deleting the Java `SHELL_V3` routing branch reddens the routing-target set. A comment naming the binding, the allow literal and the tool name stays green. Each restored byte-equal returns green.
 - Real packaged-stack `--loop-skill` and `--loop-fire` arms green with the regenerated sidecars (jar rebuilt).
 - The Java consumer of those sidecars, `ManagedLoopSkillTest`, green (19 tests) against the regenerated bodies, with the sibling SDK installed from the source being tested.
@@ -226,7 +226,7 @@ The branch was merged with main outside this session (merge commit `00f24627d4`)
 
 Real-environment verification was re-run at this head rather than carried over, because the fourth merge changed 12 Java files and 13 cli/core files: the full build is green with core and cli dist asserted refreshed against its start timestamp, the jar rebuilt, `ManagedLoopSkillTest` 19/19 against the regenerated sidecars, the bundle rebuilt and asserted refreshed, and the rebuilt jar's four sidecars byte-equal to the committed contracts. Arms: `--loop-skill` success (session `6a36196e-b6d6-4aac-a37a-fff0b8a10795`, modelRounds 6, cron create/list/delete all witnessed); `--loop-fire` success (session `01b1b51c-cc4d-4f9b-be6c-81019be0afe6`, schedule `asch_ebf79227b1238167ff6217b3d0e052bb`, `fireTrigger=scheduled`, `fireOutcome=fired`, `fireState=completed`, occurrenceKey `schedule:2026-11-19T01:15:00Z`, modelRounds 5).
 
-Suite sizes: core 35, scripts meta 183 (the changed file 88).
+Suite sizes at that round: core 35, scripts meta 183 (the changed file 88).
 
 ## Round-11 review: the sentinel diagnostic claimed a fact the guard never checked
 
@@ -240,6 +240,10 @@ Round 11 posted no inline findings and one deferred item, and downgraded its own
 The rejection behaviour is unchanged: same bodies rejected, same profiles, still fail-closed on an unknown token. Only the wording moved, and the seven assertion sites that encoded the old wording now assert the new one per profile, so each direction keeps its own witness. The generated sidecars are untouched — the parity test regenerates and compares them byte-for-byte and stays green — so this is a diagnostic change in the generator, not a change to shipped model-facing content.
 
 Witness: reverting both messages to the old `non-expanding sentinel` wording reddens **4 tests**, each naming the wording it expected; a byte-equal restore returns 35/35. core `tsc --build`, eslint and prettier clean.
+
+Main was merged a fifth time (merge commit `50a39ddbc8`, zero overlap with this PR's files measured against the merge base), which changed 217 Java/cli/core files, so the whole stack was rebuilt rather than reused: full build rc=0 with core and cli dist asserted refreshed, jar rebuilt, `ManagedLoopSkillTest` **19/19**, bundle rebuilt and asserted refreshed, and the rebuilt jar's four sidecars byte-equal to the committed contracts. Arms: `--loop-skill` success (session `4b05a9ad-2f7a-4323-9154-6e63895b5caf`, modelRounds 6, cron create/list/delete all witnessed); `--loop-fire` success (session `229ac023-e0fe-4b59-9593-19848279e71f`, schedule `asch_5d9999101c86d3d0578238c5e0faa8e9`, `fireTrigger=scheduled`, `fireOutcome=fired`, `fireState=completed`, occurrenceKey `schedule:2026-11-19T05:53:00Z`, modelRounds 5).
+
+The scripts meta count grew from 183 to **184** because main added one case to `hosted-process-ci.test.js` (95 → 96); the changed file is still 88. Core is 35/35 and core `tsc --build` is clean at this head.
 
 ## Open questions
 
