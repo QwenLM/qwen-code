@@ -50,6 +50,7 @@ import { DaemonConnectionHelp } from './DaemonConnectionHelp';
 // daemon cold-starts a runtime instead of hanging on one request.
 const PROBE_TIMEOUT_MS = 10_000;
 const RETRY_DELAY_MS = 2_000;
+const CAPABILITIES_BODY_WAIT_MS = 250;
 // Ceiling for a server-supplied Retry-After: a front proxy or rate limiter
 // may ask for minutes, which would park the gate screen far past operator
 // patience; re-probing at the ceiling is cheap and self-correcting.
@@ -263,6 +264,35 @@ function isReusableRuntimeCapabilities(
   );
 }
 
+// Headers have already authenticated this probe. Reuse its optional body only
+// if it arrives promptly; a stalled body must not restart authentication.
+async function readOptionalCapabilities(
+  response: Response,
+  controller: AbortController,
+): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: () => void = () => {};
+  try {
+    return await Promise.race([
+      Promise.resolve()
+        .then(() => response.json())
+        .catch(() => undefined),
+      new Promise<undefined>((resolve) => {
+        onAbort = () => resolve(undefined);
+        controller.signal.addEventListener('abort', onAbort, { once: true });
+        if (controller.signal.aborted) onAbort();
+        timer = setTimeout(() => {
+          resolve(undefined);
+          controller.abort();
+        }, CAPABILITIES_BODY_WAIT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    controller.signal.removeEventListener('abort', onAbort);
+  }
+}
+
 export function StandaloneAuth({
   baseUrl,
   initialToken,
@@ -410,11 +440,9 @@ export function StandaloneAuth({
         });
         if (controllerRef.current !== controller) return;
         if (response.ok) {
-          const body: unknown = await response.json().catch(() => undefined);
+          clearTimeout(timeout);
+          const body = await readOptionalCapabilities(response, controller);
           if (controllerRef.current !== controller) return;
-          if (controller.signal.aborted) {
-            throw new Error('Capabilities response body timed out');
-          }
           const initialCapabilities = isReusableRuntimeCapabilities(body)
             ? body
             : undefined;

@@ -1225,6 +1225,8 @@ it.each([
   ],
   ['managed mode marker without features', { mode: 'managed' }],
   ['empty non-JSON response', undefined],
+  ['invalid feature entries', { features: [42], workspaces: [] }],
+  ['invalid workspace envelope', { features: [], workspaces: {} }],
 ])(
   'authenticates without forwarding incomplete capabilities (%s)',
   async (_label, body) => {
@@ -1249,60 +1251,87 @@ it.each([
   },
 );
 
-it('retries instead of mounting when reading the 200 OK body times out', async () => {
+it.each(['resolve', 'reject'] as const)(
+  'accepts 2xx headers with a stalled body and ignores its late %s',
+  async (outcome) => {
+    vi.useFakeTimers();
+    let finish!: (value: unknown) => void;
+    let fail!: (reason: unknown) => void;
+    let signal: AbortSignal | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init?: RequestInit) => {
+        signal = init?.signal ?? undefined;
+        return Promise.resolve({
+          ...stubResponse({ status: 200 }),
+          json: () =>
+            new Promise((resolve, reject) => {
+              finish = resolve;
+              fail = reject;
+            }),
+        });
+      }),
+    );
+    const renderChildren = vi.fn((token?: string) => <p>Connected {token}</p>);
+    await act(async () =>
+      root.render(
+        <StandaloneAuth baseUrl="http://daemon.test" initialToken="secret">
+          {renderChildren}
+        </StandaloneAuth>,
+      ),
+    );
+    expect(container.textContent).not.toContain('Connected');
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(container.textContent).toContain('Connected');
+    expect(getDaemonToken('http://daemon.test')).toBe('secret');
+    expect(signal?.aborted).toBe(true);
+    expect(renderChildren.mock.calls).toEqual([['secret']]);
+    await act(async () => {
+      if (outcome === 'resolve') finish({ features: [], workspaces: [] });
+      else fail(new Error('late read failure'));
+      await vi.advanceTimersByTimeAsync(12_000);
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(renderChildren.mock.calls).toEqual([['secret']]);
+    expect(container.textContent).toContain('Connected');
+  },
+);
+
+it('retires a pending body without accepting or aborting its replacement probe', async () => {
   vi.useFakeTimers();
-  let calls = 0;
+  let finish!: (value: unknown) => void;
+  const signals: AbortSignal[] = [];
   vi.stubGlobal(
     'fetch',
     vi.fn((_url: string, init?: RequestInit) => {
-      calls += 1;
-      if (calls === 1) {
-        return Promise.resolve({
-          status: 200,
-          ok: true,
-          headers: new Headers(),
-          json: () =>
-            new Promise((_resolve, reject) => {
-              init?.signal?.addEventListener('abort', () =>
-                reject(new Error('aborted')),
-              );
-            }),
-        });
-      }
+      signals.push(init!.signal!);
       return Promise.resolve(
-        stubResponse({
-          status: 200,
-          body: {
-            v: 1,
-            features: ['workspace_files'],
-            workspaces: [{ id: 'primary', cwd: '/work/a', primary: true }],
-          },
-        }),
+        signals.length === 1
+          ? {
+              ...stubResponse({ status: 200 }),
+              json: () =>
+                new Promise((resolve) => {
+                  finish = resolve;
+                }),
+            }
+          : stubResponse({ status: 401 }),
       );
     }),
   );
-  const renderChildren = vi.fn((token?: string, caps?: unknown) => (
-    <p>
-      Connected {token ?? 'open'} {caps ? 'seeded' : 'unseeded'}
-    </p>
-  ));
-
+  await mount('secret');
   await act(async () =>
     root.render(
-      <StandaloneAuth baseUrl="http://daemon.test" initialToken="secret">
-        {renderChildren}
+      <StandaloneAuth baseUrl="http://other.test" initialToken="secret">
+        {() => <p>Incorrectly accepted</p>}
       </StandaloneAuth>,
     ),
   );
-  expect(renderChildren).not.toHaveBeenCalled();
-
-  await act(async () => vi.advanceTimersByTimeAsync(10_000));
-  expect(container.textContent).toContain('Cannot reach');
-  expect(renderChildren).not.toHaveBeenCalled();
-
-  await act(async () => vi.advanceTimersByTimeAsync(2_000));
-  expect(renderChildren).toHaveBeenCalledWith(
-    'secret',
-    expect.objectContaining({ features: ['workspace_files'] }),
-  );
+  await act(async () => {
+    finish({ features: [], workspaces: [] });
+    await vi.advanceTimersByTimeAsync(300);
+  });
+  expect(signals[0].aborted).toBe(true);
+  expect(signals[1].aborted).toBe(false);
+  expect(container.textContent).not.toContain('Incorrectly accepted');
+  expect(container.textContent).toContain('Invalid or expired token');
 });
