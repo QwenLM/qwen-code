@@ -523,6 +523,41 @@ describe('RecordArtifactTool', () => {
     );
   });
 
+  it('still records code-review reports under .qwen/reviews', async () => {
+    const ws = await workspace();
+    await ws.write('.qwen/reviews/pr-1.json', '{"artifactType":"code_review"}');
+
+    const result = await ws.record(
+      'Code review result',
+      '.qwen/reviews/pr-1.json',
+    );
+
+    expectFirst(result, {
+      title: 'pr-1.json',
+      workspacePath: '.qwen/reviews/pr-1.json',
+    });
+  });
+
+  it('accepts files whose own names look hidden but live in visible paths', async () => {
+    const ws = await workspace();
+    await ws.write('dist', 'file');
+    await ws.write('.gitignore', 'node_modules');
+    await ws.write('notes/.draft.md', 'draft');
+
+    expectFirst(await ws.record('File named dist', 'dist'), {
+      title: 'dist',
+      workspacePath: 'dist',
+    });
+    expectFirst(await ws.record('Dotfile', '.gitignore'), {
+      title: '.gitignore',
+      workspacePath: '.gitignore',
+    });
+    expectFirst(await ws.record('Draft note', 'notes/.draft.md'), {
+      title: '.draft.md',
+      workspacePath: 'notes/.draft.md',
+    });
+  });
+
   it('keeps accepting files in visible directories with similar names', async () => {
     const ws = await workspace();
     await ws.write('notes/qwen-tmp-report.md', 'md');
