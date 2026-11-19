@@ -14,6 +14,44 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ManagedHostedRecoveryRecordsTest {
     private final ObjectMapper json = new ObjectMapper();
 
+    @ParameterizedTest
+    @ValueSource(strings = {"context_search", "context_remember", "context_get", "context_forget"})
+    void acceptsMemoryContinuationWithoutRuntimeAndRejectsOtherTools(String tool) {
+        var resources = new java.util.HashMap<String, ManagedSessionStoreModels.StoredResource>();
+        for (var entry : java.util.Map.of("definition", "managed-definition", "root", "managed-root",
+                "assistant", "managed-message", "input", "managed-tool-input", "tool", "managed-tool-definition").entrySet()) {
+            resources.put(entry.getKey(), stored(entry.getKey(), entry.getValue(), json.createObjectNode()));
+        }
+        ObjectNode body = json.createObjectNode().put("v", 1).put("promptId", "prompt").putNull("runtime")
+                .put("batchId", "batch").put("model", "fixture").put("round", 0)
+                .put("stage", "final").put("approvalOrdinal", 0).putNull("actionId");
+        body.putObject("sessionKey").put("tenantId", "tenant").put("workspaceId", "workspace").put("sessionId", "session");
+        body.putObject("sourceActivation").put("activationId", "activation").put("epoch", 1);
+        body.set("definitionRef", reference(resources.get("definition")));
+        body.set("rootSnapshotRef", reference(resources.get("root")));
+        body.set("assistantRef", reference(resources.get("assistant")));
+        ObjectNode call = body.putArray("calls").addObject().put("runtimeCallId", "call")
+                .put("requestDigest", "a".repeat(64)).put("argsDigest", "sha256:" + "a".repeat(64))
+                .put("prepareKey", "prompt:call").put("partIndex", 0).putNull("refusal").putNull("actionId");
+        call.putObject("call").put("name", tool).put("callId", "call").putObject("args");
+        call.putObject("prepareReference").put("sessionId", "prompt").put("promptId", "prompt")
+                .put("callId", "call").put("argsDigest", "a".repeat(64));
+        call.set("inputRef", reference(resources.get("input")));
+        call.set("definitionRef", reference(resources.get("tool")));
+        org.assertj.core.api.ThrowableAssert.ThrowingCallable validate = () ->
+                ManagedHostedRecoveryRecords.validateResource(stored("continuation", "hosted-approval-continuation", body),
+                        "tenant", "workspace", "session", resources::get);
+        assertThatCode(validate).doesNotThrowAnyException();
+        call.put("prepareKey", "foreign:call");
+        assertThatThrownBy(validate).hasMessageContaining("correlation");
+        call.put("prepareKey", "prompt:call");
+        ((ObjectNode) call.get("call")).put("name", "run_shell_command");
+        assertThatThrownBy(validate).hasMessageContaining("another tool");
+        ((ObjectNode) call.get("call")).put("name", tool);
+        body.remove("runtime");
+        assertThatThrownBy(validate).hasMessageContaining("exactly");
+    }
+
     private ObjectNode cleanup() {
         ObjectNode body = json.createObjectNode().put("v", 1).put("promptId", "prompt")
                 .put("runtimeSessionId", "prompt").put("bindingId", "binding")

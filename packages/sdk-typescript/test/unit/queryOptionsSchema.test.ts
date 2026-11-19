@@ -123,7 +123,10 @@ describe('QueryOptionsSchema', () => {
     const result = QueryOptionsSchema.safeParse({ extraArgs: [flag] });
     expect(result.success).toBe(false);
     if (!result.success) {
-      expect(result.error.issues[0]?.message).toContain('reserved flag');
+      expect(result.error.issues[0]).toMatchObject({
+        path: ['extraArgs'],
+        message: `extraArgs cannot contain reserved flag: ${flag}`,
+      });
     }
   });
 

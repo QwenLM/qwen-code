@@ -356,6 +356,37 @@ describe('WebTerminalRegistry', () => {
     await expectError('Failed to spawn shell');
   });
 
+  it('records a failure end receipt for a failed creation, never a release receipt', async () => {
+    // The hold settles on the failure end receipt, so a failed load/spawn must
+    // write failedCreations (not released). Deleting the writer in
+    // finishCreating must red these assertions, not leave every suite green.
+    osPlatform.mockReturnValue('linux');
+    const registry = new WebTerminalRegistry();
+    loadPty.mockResolvedValueOnce({ impl: null, loadError: null });
+    await expect(
+      registry.create({
+        terminalId: 'failed-load',
+        workspaceCwd: '/workspace',
+      }),
+    ).resolves.toMatchObject({ error: expect.any(String) });
+    expect(registry.isFailedCreation('failed-load')).toBe(true);
+    expect(registry.isReleased('failed-load')).toBe(false);
+
+    loadPty.mockResolvedValue(ptyLoaded());
+    spawn.mockImplementationOnce(() => {
+      throw new Error('spawn failed');
+    });
+    await expect(
+      registry.create({
+        terminalId: 'failed-spawn',
+        workspaceCwd: '/workspace',
+      }),
+    ).resolves.toMatchObject({ error: expect.any(String) });
+    expect(registry.isFailedCreation('failed-spawn')).toBe(true);
+    expect(registry.isReleased('failed-spawn')).toBe(false);
+    registry.dispose();
+  });
+
   it('spawns Windows terminals with the bundled ConPTY backend', async () => {
     // Mirrors the shellExecutionService bundled-backend case: the inbox
     // backend orphans a `conhost.exe --headless` per natural shell exit
@@ -457,6 +488,10 @@ describe('WebTerminalRegistry', () => {
       error: 'Web terminal creation cancelled',
     });
     expect(spawn).not.toHaveBeenCalled();
+    // A cancelled creation was released: it leaves the clean release receipt
+    // (not the failure end), so a later status poll settles the hold.
+    expect(registry.isReleased('terminal:pending-headless')).toBe(true);
+    expect(registry.isFailedCreation('terminal:pending-headless')).toBe(false);
   });
 
   it('does not spawn after disposal wins during the headless load', async () => {

@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -19,7 +20,7 @@ import java.util.Set;
 public final class ManagedExtensionAgentLaunch {
     private ManagedExtensionAgentLaunch() { }
 
-    public static void require(JdbcTemplate jdbc, ManagedExtensionRecordStore records,
+    public static void require(JdbcTemplate jdbc, JdbcManagedExtensionRecordStore records,
             SessionRecord parent, JsonNode launch) {
         try {
             ManagedExtensionRecords.closed(launch, Set.of("version", "sourcePromptId", "approvalMode", "approvalRevision",
@@ -126,7 +127,7 @@ public final class ManagedExtensionAgentLaunch {
         }
     }
 
-    public static JsonNode readContributions(ManagedExtensionRecordStore records, String tenant, String session, JsonNode ref) {
+    public static JsonNode readContributions(JdbcManagedExtensionRecordStore records, String tenant, String session, JsonNode ref) {
         JsonNode manifest = records.readRecordResource(tenant, session, ref);
         ManagedExtensionRecords.closed(manifest, Set.of("kind", "formatVersion", "byteLength", "digest", "parts"), "Contribution manifest");
         long length = ManagedExtensionRecords.count(manifest.get("byteLength"), 1, 2 * 1024 * 1024, "Contribution length");
@@ -150,7 +151,7 @@ public final class ManagedExtensionAgentLaunch {
         if (bytes.length != length || !DigestUtils.sha256Hex(bytes).equals(manifest.path("digest").asText())) {
             throw refused();
         }
-        JsonNode contributions = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
+        JsonNode contributions = ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
         if (contributions == null) {
             throw refused();
         }
@@ -184,7 +185,7 @@ public final class ManagedExtensionAgentLaunch {
         if (Set.of("write_file", "edit", "todo_write").contains(name)) {
             return true;
         }
-        if (WorkspaceToolProfiles.SHELL.equals(profile) && Set.of("run_shell_command", "monitor", "web_fetch").contains(name)) {
+        if (WorkspaceToolProfiles.isPublicShell(profile) && Set.of("run_shell_command", "monitor", "web_fetch").contains(name)) {
             return true;
         }
         return WorkspaceToolProfiles.isShellOrMcp(profile) && name.matches("mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_.-]+");

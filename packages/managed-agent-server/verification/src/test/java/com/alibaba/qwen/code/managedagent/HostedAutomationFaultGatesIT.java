@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
+import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -450,7 +451,7 @@ class HostedAutomationFaultGatesIT {
         String session = createSession("claim-crash");
         String id = create(session, "FG11C_CLAIM", "0 0 1 1 *", "claim-crash-base");
         String key = "claim-crash-run";
-        String runId = com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.automationRunId(id,
+        String runId = AutomationLedgerStore.automationRunId(id,
                 "manual:" + key);
         Hold hold = storeHold("claim-crash", body -> (runId + ":2").equals(body.path("commandId").asText()));
         var answer = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
@@ -516,7 +517,7 @@ class HostedAutomationFaultGatesIT {
                 ThreadPoolTaskScheduler.class), Duration.ofSeconds(30));
         String id = create(session, "FG11C_SETTLED", "* * * * *", "settled-crash-base");
         String key = "settled-crash-run";
-        String runId = com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.automationRunId(id,
+        String runId = AutomationLedgerStore.automationRunId(id,
                 "manual:" + key);
         // Arm the hold before the POST: the Harness kicks the wake pump before answering
         // fire_run, so revision 3 can otherwise reach the store before the hold exists.
@@ -599,7 +600,7 @@ class HostedAutomationFaultGatesIT {
         String session = createSession("transport");
         String id = create(session, "FG11B_TRANSPORT", "0 0 1 1 *", "transport-base");
         String key = "transport-run";
-        String runId = com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.automationRunId(id,
+        String runId = AutomationLedgerStore.automationRunId(id,
                 "manual:" + key);
         storeDrop.set(runId + ":1");
         JsonNode run = request("POST", "/v1/agent-automations/" + id + "/runs", null, key, 202);
@@ -2667,6 +2668,15 @@ class HostedAutomationFaultGatesIT {
         Path log = temporary.resolve("harness.log");
         if (Files.exists(log)) {
             Files.copy(log, cases.resolve("harness.log"), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
+        if ("fg11f".equals(letter) && jdbc != null) {
+            Files.writeString(cases.resolve("publication-state.json"), json.writeValueAsString(Map.of(
+                    "resources", jdbc.queryForList("SELECT session_id, resource_id, kind, byte_length, sha256, storage_kind, state, capture_state, OCTET_LENGTH(inline_bytes) AS inline_byte_length"
+                            + " FROM ma_resource WHERE tenant_id = ? AND kind = 'managed-tool-outcome' ORDER BY resource_id LIMIT 16", tenant),
+                    "publications", jdbc.queryForList("SELECT session_id, publication_id, producer_phase, is_quarantined, admission_resource_id"
+                            + " FROM ma_output_capture WHERE tenant_id = ? ORDER BY publication_id LIMIT 16", tenant),
+                    "heads", jdbc.queryForList("SELECT session_id, storage_version, journal_revision, committed_sequence, recovery_status, recovery_detail_code"
+                            + " FROM ma_session_head WHERE tenant_id = ? AND head_kind = 'MANAGED_SESSION' ORDER BY session_id LIMIT 16", tenant))));
         }
     }
 

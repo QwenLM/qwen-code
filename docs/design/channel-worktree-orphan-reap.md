@@ -117,9 +117,25 @@ Classification (before record deletion, under the worktree lock):
    equivalent, same allowed-roots derivation as the create route).
 6. Cross-session sharing: a scan of the sidecar dir's `*.worktree.json`
    must find no **other** session's sidecar naming the same (canonical)
-   worktree path. A tombstone predecessor (`supersededBy` naming
-   exactly the session being deleted) legitimately names the same
-   checkout — it is evidence of the transfer, not sharing.
+   worktree path. A tombstone — a sidecar carrying `supersededBy`, left by
+   a session that handed the checkout on in a reset — legitimately names
+   the same checkout: it is evidence of the transfer, not sharing. It
+   cannot own the checkout while the marker (rule 4), read under the
+   ownership lock every reset also takes, names the session being
+   deleted. The link itself is not followed: each reset rewrites only the
+   pair it transfers between, so after several resets older tombstones
+   name sessions that may since have been deleted or archived. When the
+   only tombstone is the direct predecessor (`supersededBy` naming the
+   session being deleted), it is discounted regardless: the bridge may
+   have reopened it at the workspace root since (scheduled-task
+   keepalive, ACP load), and refusing would then leak the checkout for
+   good, so a direct predecessor whose own sever did not finish is not
+   protected here. When older tombstones name the checkout too, they are
+   discounted only once no session naming it is still on the bridge —
+   neither a tombstone in this dir nor any session in the other archive
+   state's dir — because a reset whose sever did not finish leaves its
+   superseded session running, possibly with background work in the
+   checkout.
 
 Execution (after confirmed deletion, still under the worktree lock):
 

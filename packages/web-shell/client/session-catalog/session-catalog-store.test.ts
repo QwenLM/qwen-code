@@ -1172,6 +1172,49 @@ describe('SessionCatalogStore', () => {
     }
   });
 
+  it('separates question-sort cache pages and preserves their order on assistant activity', async () => {
+    legacy.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'b',
+          workspaceCwd: '/work',
+          lastUserPromptAt: '2026-08-17T00:00:02.000Z',
+          updatedAt: '2026-08-17T00:00:02.000Z',
+        },
+        {
+          sessionId: 'a',
+          workspaceCwd: '/work',
+          lastUserPromptAt: '2026-08-17T00:00:01.000Z',
+          updatedAt: '2026-08-17T00:00:01.000Z',
+        },
+      ],
+    });
+    const sorted = {
+      ...query('/work'),
+      options: {
+        ...query('/work').options,
+        sortBy: 'lastUserPromptAt' as const,
+      },
+    };
+    expect(getSessionCatalogQueryKey(sorted)).not.toBe(
+      getSessionCatalogQueryKey(query('/work')),
+    );
+    await store.loadOnce(sorted, { fresh: true });
+    store.applyLiveState('/work', [
+      {
+        sessionId: 'a',
+        clientCount: 1,
+        hasActivePrompt: true,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+        updatedAt: '2026-08-17T00:10:00.000Z',
+      },
+    ]);
+    const rows = store.getSnapshot(sorted).page?.sessions;
+    expect(rows?.map((row) => row.sessionId)).toEqual(['b', 'a']);
+    expect(rows?.[1].updatedAt).toBe('2026-08-17T00:10:00.000Z');
+  });
+
   it('keeps pinned rows ahead when reordering an organized page', async () => {
     legacy.mockResolvedValue({
       sessions: [

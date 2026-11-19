@@ -334,6 +334,15 @@ describe('useStatusLine', () => {
       expect(result.current.respectUserColors).toBe(false);
     });
 
+    it('reports whether the lines came from a command or a preset', () => {
+      setStatusLineConfig({ type: 'command', command: 'date' });
+      const command = renderHook(() => useStatusLine());
+      expect(command.result.current.commandSourced).toBe(true);
+      setStatusLineConfig({ type: 'preset', items: ['model'] });
+      const preset = renderHook(() => useStatusLine());
+      expect(preset.result.current.commandSourced).toBe(false);
+    });
+
     it('returns hideContextIndicator false by default', () => {
       setStatusLineConfig({ type: 'command', command: 'echo hello' });
       const { result } = renderHook(() => useStatusLine());

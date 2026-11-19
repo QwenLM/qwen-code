@@ -28,7 +28,7 @@ class WorkspaceCreationAdmissionLockTest {
     protected StoreLockTrace trace;
     protected JdbcTemplate jdbc;
     protected TransactionTemplate transactions;
-    protected ManagedWorkspaceRegistry registry;
+    protected JdbcManagedWorkspaceRegistry registry;
 
     protected DataSource dataSource() {
         var data = new JdbcDataSource();
@@ -44,7 +44,7 @@ class WorkspaceCreationAdmissionLockTest {
         trace = new StoreLockTrace(source);
         jdbc = new ManagedSchemaJdbcTemplate(trace);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(trace));
-        registry = new ManagedWorkspaceRegistry(jdbc);
+        registry = new JdbcManagedWorkspaceRegistry(jdbc);
         register("chosen", true);
         register("unselected", false);
         trace.clear();
@@ -53,7 +53,7 @@ class WorkspaceCreationAdmissionLockTest {
     @Test
     void defaultSelectionReadsTheChosenWorkspaceOnce() {
         var resolved = transactions.execute(status -> {
-            WorkspaceLifecycleStore.lockPlacement(jdbc, "tenant");
+            JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, "tenant");
             return registry.resolveForCreation("tenant", "actor", null);
         });
         assertThat(resolved.binding().getWorkspaceId()).isEqualTo("chosen");
@@ -65,7 +65,7 @@ class WorkspaceCreationAdmissionLockTest {
     @Test
     void explicitSelectionReadsTheChosenWorkspaceOnce() {
         var resolved = transactions.execute(status -> {
-            WorkspaceLifecycleStore.lockPlacement(jdbc, "tenant");
+            JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, "tenant");
             return registry.resolveForCreation("tenant", "actor", new WorkspaceSelection("unselected", "child"));
         });
         assertThat(resolved.binding().getWorkspaceId()).isEqualTo("unselected");

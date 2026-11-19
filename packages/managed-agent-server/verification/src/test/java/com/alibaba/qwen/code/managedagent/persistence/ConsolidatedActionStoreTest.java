@@ -6,6 +6,9 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedActionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -35,7 +38,7 @@ class ConsolidatedActionStoreTest {
     private static final String ACTION = "tool_approval_01234567890123456789012345678901";
     private ConsolidatedStoreFixture fixture;
     private JdbcTemplate jdbc;
-    private ManagedActionStore actions;
+    private JdbcManagedActionStore actions;
     private TransactionTemplate transactions;
     private String scope;
 
@@ -46,7 +49,7 @@ class ConsolidatedActionStoreTest {
         ManagedSchema.initialize(source);
         jdbc = new JdbcTemplate(source);
         transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
-        scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session");
+        scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
         jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,status,approval_mode,gmt_create,gmt_modified)"
                 + " VALUES (?,?,?,'ACTIVE','manual',0,0)", "tenant", "session", "agent");
         AgentStateStore state = mock(AgentStateStore.class);
@@ -57,7 +60,7 @@ class ConsolidatedActionStoreTest {
                         row.getString("delivery_state"), row.getString("session_status_before"), row.getString("receipt_id"),
                         row.getString("claim_owner"), row.getLong("claim_generation"), row.getInt("attempt_count")),
                 call.getArgument(0), call.getArgument(1), call.getArgument(2)).stream().findFirst());
-        actions = new ManagedActionStore(jdbc, state);
+        actions = new JdbcManagedActionStore(jdbc, state);
         project("requested", null, 1);
     }
 
@@ -72,11 +75,11 @@ class ConsolidatedActionStoreTest {
     void actionProjectionOwnsReferencesAndDoesNotEnterDomainQueries() throws Exception {
         assertThat(actions.find("tenant", "session", ACTION).orElseThrow().state()).isEqualTo("requested");
         assertThat(actions.list("tenant", "session", null, null, 10)).hasSize(1);
-        assertThat(new ManagedExtensionRecordStore(jdbc).listTasks("tenant", "session", null, null, 10).tasks()).isEmpty();
+        assertThat(new JdbcManagedExtensionRecordStore(jdbc).listTasks("tenant", "session", null, null, 10).tasks()).isEmpty();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind='SESSION_RECORD'", Long.class)).isEqualTo(1);
         project("decided", response("allow"), 2);
         assertThat(actions.find("tenant", "session", ACTION).orElseThrow().decisionDigest())
-                .isEqualTo(com.alibaba.qwen.code.managedagent.repository.ManagedActionStore.decisionDigest(response("allow")));
+                .isEqualTo(ManagedActionStore.decisionDigest(response("allow")));
         assertThat(actions.list("tenant", "session", null, null, 10)).isEmpty();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind='SESSION_RECORD'", Long.class)).isEqualTo(2);
     }
@@ -115,7 +118,7 @@ class ConsolidatedActionStoreTest {
         jdbc.update("UPDATE ma_session SET workspace_id='workspace',workspace_generation=1,"
                 + "workspace_storage_id='storage',cwd_relative='.',context_config_ref='config',"
                 + "context_revision=1,workspace_config_ref='config',workspace_policy_ref='policy'");
-        byte[] actor = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor");
+        byte[] actor = ManagedWorkspaceRegistry.actorKey("tenant", "actor");
         ManagedReceipts.insert(jdbc,
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace.SESSION_CREATE_ACTOR,
                 "tenant", com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope.ACTOR,
@@ -133,7 +136,7 @@ class ConsolidatedActionStoreTest {
         JsonNode response = JSON.createObjectNode()
                 .put("policyRevision", "p1").put("inputRevision", 7).put("optionId", "allow");
 
-        assertThat(com.alibaba.qwen.code.managedagent.repository.ManagedActionStore.decisionDigest(response)).isEqualTo(
+        assertThat(ManagedActionStore.decisionDigest(response)).isEqualTo(
                 "d61ff840d95b8aaa9b24999e2910fc687098d73b225c0837b6ec6718fb038ae5");
     }
 

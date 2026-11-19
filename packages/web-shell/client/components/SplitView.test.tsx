@@ -234,7 +234,12 @@ vi.mock('./ChatPane', () => ({
         data-plan-visible={String(props.planControlVisible)}
         data-model-management={JSON.stringify(props.modelManagement)}
         data-pane-workspace={props.workspaceCwd}
-        data-session-details={props.sessionSummary?.sessionId}
+        data-session-details={
+          props.showSessionDetails !== false
+            ? props.sessionSummary?.sessionId
+            : undefined
+        }
+        data-execution-worktree={props.sessionSummary?.worktree?.path}
         data-maximized={props.isMaximized ? 'true' : 'false'}
         data-pane-active={props.isActive ? '' : undefined}
         data-slash-handler={props.onSlashCommand ? 'true' : 'false'}
@@ -246,6 +251,7 @@ vi.mock('./ChatPane', () => ({
           props.onBeforeContextCompress ? 'true' : 'false'
         }
         data-hidden={props.hidden ? 'true' : 'false'}
+        data-open-goals={props.onOpenGoals ? 'true' : 'false'}
         data-report-catalog-turn-completion={
           props.reportCatalogTurnCompletion ? 'true' : 'false'
         }
@@ -268,6 +274,11 @@ vi.mock('./ChatPane', () => ({
               workspaceCwd: props.workspaceCwd,
             })}
           </span>
+        )}
+        {props.onOpenGoals && (
+          <button data-testid="pane-open-goals" onClick={props.onOpenGoals}>
+            goals
+          </button>
         )}
         {props.onToggleMaximize && (
           <button data-testid="pane-maximize" onClick={props.onToggleMaximize}>
@@ -686,6 +697,7 @@ describe('SplitView', () => {
   });
 
   it('omits title details when the host disables them', () => {
+    sessionsState[0].worktree = { path: '/tmp/project/.qwen/worktrees/one' };
     waitingSessions = new Set(['s1']);
     const onPendingPanesChange = vi.fn();
     render({
@@ -697,6 +709,9 @@ describe('SplitView', () => {
     expect(
       panes().some((pane) => pane.hasAttribute('data-session-details')),
     ).toBe(false);
+    expect(panes()[0].getAttribute('data-execution-worktree')).toBe(
+      '/tmp/project/.qwen/worktrees/one',
+    );
     expect(
       container!.querySelector(
         '[title="Go to the next session awaiting input"]',
@@ -1619,6 +1634,35 @@ describe('SplitView', () => {
     expect(
       container!.querySelectorAll('[data-testid="host-from-props"]'),
     ).toHaveLength(2);
+  });
+
+  it('forwards onOpenGoals to every ChatPane, and only when wired', () => {
+    // ChatPane.test pins the pane-to-strip hop; this pins the SplitView hop
+    // so deleting `onOpenGoals={onOpenGoals}` in SplitView reds a case.
+    const onOpenGoals = vi.fn();
+    render({ sessionIds: ['s1', 's2'], onOpenGoals });
+    const wired = panes();
+    expect(wired).toHaveLength(2);
+    for (const pane of wired) {
+      expect(pane.getAttribute('data-open-goals')).toBe('true');
+    }
+    const buttons = container!.querySelectorAll<HTMLButtonElement>(
+      '[data-testid="pane-open-goals"]',
+    );
+    expect(buttons).toHaveLength(2);
+    act(() => {
+      buttons[0].click();
+      buttons[1].click();
+    });
+    expect(onOpenGoals).toHaveBeenCalledTimes(2);
+
+    rerender({ sessionIds: ['s1', 's2'] });
+    for (const pane of panes()) {
+      expect(pane.getAttribute('data-open-goals')).toBe('false');
+    }
+    expect(
+      container!.querySelector('[data-testid="pane-open-goals"]'),
+    ).toBeNull();
   });
 
   describe('prunes panes whose session left the active catalog', () => {

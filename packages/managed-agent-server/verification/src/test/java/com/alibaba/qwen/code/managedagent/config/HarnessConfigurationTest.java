@@ -9,14 +9,14 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.persistence.HarnessPlacementStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionSkills;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.SshWorkspaceStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcHarnessPlacementStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSshWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -58,12 +58,12 @@ class HarnessConfigurationTest {
                 "default", "hosted-workspace-shell/1", null, 1));
         when(sessions.findChildLineage("tenant", sessionId))
                 .thenReturn(new SessionLineage(parentId, parentId, "child-run", 1));
-        var actions = mock(ManagedActionStore.class);
+        var actions = mock(JdbcManagedActionStore.class);
         when(actions.approvalMode("tenant", sessionId)).thenReturn("default");
-        var skills = mock(ManagedSessionSkills.class);
+        var skills = mock(JdbcManagedSessionSkills.class);
         when(skills.snapshot("tenant", sessionId)).thenReturn(List.of());
-        var extensions = mock(ManagedExtensionRecordStore.class);
-        var resources = mock(ManagedSessionStore.class);
+        var extensions = mock(JdbcManagedExtensionRecordStore.class);
+        var resources = mock(JdbcManagedSessionStore.class);
         var json = new ObjectMapper();
         var run = json.readTree("{\"inputRef\":{\"resourceId\":\"launch\"}}");
         var launch = json.readTree("""
@@ -95,8 +95,8 @@ class HarnessConfigurationTest {
         try (var sdk = mockStatic(HostedHarnessClient.class, CALLS_REAL_METHODS)) {
             sdk.when(HostedHarnessClient::builder).thenReturn(builder);
             try (var connector = new HarnessConfiguration().hostedHarnessConnector(properties,
-                    sessions, mock(WorkspaceExecutionStore.class), actions, mock(ManagedAgentDefinitionStore.class),
-                    resources, mock(SshWorkspaceStore.class), mock(HarnessPlacementStore.class), skills, json, extensions)) {
+                    sessions, mock(JdbcWorkspaceExecutionStore.class), actions, mock(JdbcManagedAgentDefinitionStore.class),
+                    resources, mock(JdbcSshWorkspaceStore.class), mock(JdbcHarnessPlacementStore.class), skills, json, extensions)) {
                 assertThat(connector.createOrLoad("tenant", sessionId, false).bootId()).isEqualTo(bootId);
                 var request = ArgumentCaptor.forClass(CreateHarnessSession.class);
                 verify(client).createSession(request.capture());
@@ -152,11 +152,11 @@ class HarnessConfigurationTest {
             try (var sdk = mockStatic(HostedHarnessClient.class, CALLS_REAL_METHODS)) {
                 sdk.when(HostedHarnessClient::builder).thenReturn(builder);
                 try (var connector = new HarnessConfiguration().hostedHarnessConnector(properties,
-                        mock(AgentStateStore.class), mock(WorkspaceExecutionStore.class),
-                        mock(ManagedActionStore.class), mock(ManagedAgentDefinitionStore.class),
-                        mock(ManagedSessionStore.class), mock(SshWorkspaceStore.class),
-                        mock(HarnessPlacementStore.class), mock(ManagedSessionSkills.class),
-                        new ObjectMapper(), mock(ManagedExtensionRecordStore.class))) {
+                        mock(AgentStateStore.class), mock(JdbcWorkspaceExecutionStore.class),
+                        mock(JdbcManagedActionStore.class), mock(JdbcManagedAgentDefinitionStore.class),
+                        mock(JdbcManagedSessionStore.class), mock(JdbcSshWorkspaceStore.class),
+                        mock(JdbcHarnessPlacementStore.class), mock(JdbcManagedSessionSkills.class),
+                        new ObjectMapper(), mock(JdbcManagedExtensionRecordStore.class))) {
                     Object pool = ReflectionTestUtils.getField(connector, "delegate");
                     ReflectionTestUtils.invokeMethod(pool, "refresh");
                     accepted.put(base, ((List<?>) ReflectionTestUtils.getField(pool, "accepting")).size());

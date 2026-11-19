@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessProtocolFailu
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessSessionRefusedFailure;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -220,7 +221,7 @@ class AdmittedTurnRetryTerminalStateTest {
             boolean expectFailure) {
         AgentStateStore store = dispatchTransientFailure(retryCount,
                 new ManagedAgentProperties(),
-                com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable()).store();
+                WorkspaceExecutionStore.unavailable()).store();
 
         if (expectFailure) {
             verifyParked(store, "workspace_unavailable");

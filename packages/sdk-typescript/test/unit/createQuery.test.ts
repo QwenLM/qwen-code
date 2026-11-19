@@ -93,6 +93,7 @@ describe('query()', () => {
         } satisfies QueryOptions,
       }),
     ).toThrow(/systemPrompt/);
+    expect(mockProcessTransport).not.toHaveBeenCalled();
   });
 
   it('passes new option fields through to TransportOptions', async () => {

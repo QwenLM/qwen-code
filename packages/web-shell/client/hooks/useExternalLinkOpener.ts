@@ -2,6 +2,7 @@ import { useCallback } from 'react';
 import type { MouseEvent } from 'react';
 import { useI18n } from '../i18n';
 import { requestToast } from '../components/ToastHost';
+import { useWebShellPortalRoot } from '../portalRoot';
 import { extractErrorDetail } from '../utils/errorDetail';
 import {
   isDesktopShell,
@@ -20,6 +21,9 @@ import {
  */
 export function useExternalLinkOpener() {
   const { t } = useI18n();
+  // Scope the failure toast to this shell: an unscoped dispatch is dropped
+  // when a host page mounts several shells and nothing holds focus.
+  const toastScope = useWebShellPortalRoot();
   return useCallback(
     (event: MouseEvent<HTMLAnchorElement>, url: string | undefined) => {
       if (!url || !isExternalOpenUrl(url) || !isDesktopShell()) return;
@@ -28,9 +32,10 @@ export function useExternalLinkOpener() {
         requestToast(
           'error',
           t('common.openFailed', { message: extractErrorDetail(error) }),
+          toastScope,
         );
       });
     },
-    [t],
+    [t, toastScope],
   );
 }

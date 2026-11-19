@@ -196,6 +196,10 @@
       "@qwen-code/channel-email": ["../packages/channels/email/src/index.ts"],
       "@qwen-code/channel-wecom": ["../packages/channels/wecom/src/index.ts"],
       "@qwen-code/channel-feishu": ["../packages/channels/feishu/src/index.ts"],
+      "@qwen-code/channel-generic-webhook": [
+        "../packages/channels/generic-webhook/src/index.ts"
+      ],
+      "@qwen-code/network-policy": ["../packages/network-policy/src/index.ts"],
       "@qwen-code/channel-qqbot": ["../packages/channels/qqbot/src/index.ts"],
       "@qwen-code/channel-github": ["../packages/channels/github/src/index.ts"],
       "@qwen-code/channel-gitlab": ["../packages/channels/gitlab/src/index.ts"],

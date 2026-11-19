@@ -23,6 +23,13 @@ public interface ToolPublicationObjectStore {
         return open(key);
     }
 
+    /**
+     * Range read with the same guard-before-each-request contract as {@link #open(String, Runnable)}.
+     * The caller closes the stream after verifying its complete contents. Implementations must not
+     * retry without re-running the guard.
+     */
+    public InputStream openRange(String key, long offset, long length, Runnable guard);
+
     /** Physically delete the exact owned key; an absent object is already deleted. */
     public default void deleteIfPresent(String key) {
         throw new UnsupportedOperationException("Output deletion is not supported by this adapter");

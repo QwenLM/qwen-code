@@ -28,6 +28,7 @@ import {
   extractTitle,
 } from './markdown.js';
 import { downloadMedia } from './media.js';
+import { withConnectLoggingSuppressed } from './connect-logging.js';
 import {
   DingTalkMediaUploadError,
   findImageMarkers,
@@ -644,7 +645,12 @@ const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text}
 const PROACTIVE_FILE_MSG_KEY = 'sampleFile';
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
-const ROBOT_MESSAGE_HOSTS = new Set(['api.dingtalk.com', 'oapi.dingtalk.com']);
+// Shared with the managed adapter's webhook send so both paths validate the
+// sessionWebhook host against the same allowlist.
+export const ROBOT_MESSAGE_HOSTS = new Set([
+  'api.dingtalk.com',
+  'oapi.dingtalk.com',
+]);
 /**
  * gettoken business errors a retry cannot fix: an invalid appkey/secret or a
  * missing app. Any other errcode (-1 system busy, 88 throttled, ...) is
@@ -901,32 +907,6 @@ type DingTalkClientInternals = DWClient & {
   onCallback(message: DWClientDownStream): void;
 };
 
-/* eslint-disable no-console -- swapping console.log out is the whole job here */
-let connectLogDepth = 0;
-let unsuppressedConsoleLog: typeof console.log | undefined;
-
-// Connects can overlap — a manager replacement starts while another is still
-// in flight, and either may settle first — so only the depth 1→0 transition
-// restores, to what the 0→1 transition saved. An inner scope restoring its own
-// capture would put the no-op back and leave logging off process-wide.
-async function withConnectLoggingSuppressed<T>(
-  connect: () => Promise<T>,
-): Promise<T> {
-  if (connectLogDepth++ === 0) {
-    unsuppressedConsoleLog = console.log;
-    console.log = () => {};
-  }
-  try {
-    return await connect();
-  } finally {
-    if (--connectLogDepth === 0 && unsuppressedConsoleLog) {
-      console.log = unsuppressedConsoleLog;
-      unsuppressedConsoleLog = undefined;
-    }
-  }
-}
-/* eslint-enable no-console */
-
 type DingtalkChannelConfig = ChannelConfig & {
   useConnectionManager?: unknown;
   interactiveCards?: unknown;
@@ -1057,11 +1037,16 @@ export class DingtalkChannel extends ChannelBase {
     this.outputMode = parseChannelOutputMode(name, config.outputMode, true);
     this.backgroundOutputCoordinator = new BackgroundOutputCoordinator({
       outputMode: this.outputMode,
-      getTarget: (sessionId) => this.router.getTarget(sessionId),
-      getSourceLabel: (sessionId) =>
-        this.getBackgroundResponseSourceLabel(sessionId),
-      resolveDelivery: (sessionId) =>
-        this.resolveBackgroundResponseDelivery(sessionId),
+      getTarget: (sessionId, workflowOrigin) =>
+        workflowOrigin
+          ? this.workflowTarget(sessionId, workflowOrigin)
+          : this.router.getTarget(sessionId),
+      getSourceLabel: (sessionId, workflowOrigin) =>
+        this.getBackgroundResponseSourceLabel(sessionId, workflowOrigin),
+      resolveDelivery: (sessionId, workflowOrigin) =>
+        workflowOrigin
+          ? this.resolveBackgroundResponseDelivery(sessionId, workflowOrigin)
+          : this.resolveBackgroundResponseDelivery(sessionId),
       createDelivery: (sessionId, target) =>
         this.createBackgroundOutputDelivery(sessionId, target),
       isRetryableError: (error) =>
@@ -2883,7 +2868,14 @@ export class DingtalkChannel extends ChannelBase {
     text: string,
     context?: BackgroundResponseContext,
   ): Promise<void> {
-    const target = this.router.getTarget(sessionId);
+    const workflowOrigin =
+      context?.kind === 'workflow' ? context.channelWorkflowOrigin : undefined;
+    if (context?.kind === 'workflow' && !workflowOrigin) return;
+    const getTarget = () =>
+      workflowOrigin
+        ? this.workflowTarget(sessionId, workflowOrigin)
+        : this.router.getTarget(sessionId);
+    const target = getTarget();
     if (!target || target.channelName !== this.name) {
       return super.dispatchBackgroundResponse(sessionId, text, context);
     }
@@ -2894,9 +2886,10 @@ export class DingtalkChannel extends ChannelBase {
       return;
     }
     if (!text.trim()) return;
-    const delivery = await this.resolveBackgroundResponseDelivery(sessionId);
-    if (!delivery || this.router.getTarget(sessionId) !== delivery.target)
-      return;
+    const delivery = workflowOrigin
+      ? await this.resolveBackgroundResponseDelivery(sessionId, workflowOrigin)
+      : await this.resolveBackgroundResponseDelivery(sessionId);
+    if (!delivery || getTarget() !== delivery.target) return;
     await this.deliverBackgroundResponseToTarget(
       sessionId,
       text,
@@ -2993,7 +2986,7 @@ export class DingtalkChannel extends ChannelBase {
             !this.supportsProactiveTarget(target.target)
           ) {
             preparedReplyBody ??= await this.prepareBackgroundOutput(
-              target.target,
+              target,
               body,
             );
           }
@@ -3070,10 +3063,13 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   private prepareBackgroundOutput(
-    target: SessionTarget,
+    { target, workflowOrigin }: BackgroundOutputTarget,
     text: string,
   ): Promise<string> {
-    return this.supportsProactiveSend() && this.supportsProactiveTarget(target)
+    const useProactive =
+      (workflowOrigin !== undefined && !workflowOrigin.userInitiated) ||
+      (this.supportsProactiveSend() && this.supportsProactiveTarget(target));
+    return useProactive
       ? this.prepareFileOutput(text, (file, mediaId) =>
           this.sendProactiveFile(target, file, mediaId),
         )
@@ -3083,24 +3079,28 @@ export class DingtalkChannel extends ChannelBase {
   protected override async deliverBackgroundResponseToTarget(
     sessionId: string,
     text: string,
-    delivery: { target: SessionTarget; sourceLabel?: string },
+    delivery: BackgroundOutputTarget,
     prepared = false,
     result?: { status: string; partial?: boolean },
   ): Promise<void> {
-    const { target, sourceLabel } = delivery;
+    const { target, sourceLabel, workflowOrigin } = delivery;
+    const unattendedWorkflow =
+      workflowOrigin !== undefined && !workflowOrigin.userInitiated;
+    const resultChatId =
+      target.isGroup || unattendedWorkflow ? target.chatId : target.senderId;
     if (
       this.statusCardController &&
       this.supportsProactiveDeliveryTarget(target) &&
-      (target.isGroup === true || this.isStableTargetId(target.senderId))
+      this.isStableTargetId(resultChatId)
     ) {
       if (!prepared) {
-        text = await this.prepareBackgroundOutput(target, text);
+        text = await this.prepareBackgroundOutput(delivery, text);
         prepared = true;
       }
       if (
         await this.statusCardController.deliverCompletedResult(
           {
-            chatId: target.isGroup ? target.chatId : target.senderId,
+            chatId: resultChatId,
             isGroup: target.isGroup === true,
           },
           text,
@@ -3113,6 +3113,19 @@ export class DingtalkChannel extends ChannelBase {
     }
     if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
       return super.deliverBackgroundResponseToTarget(sessionId, text, delivery);
+    }
+    if (workflowOrigin) {
+      if (unattendedWorkflow) {
+        return this.pushProactive(target, text, sourceLabel);
+      }
+      return this.sendReply(
+        target.chatId,
+        text,
+        undefined,
+        sourceLabel,
+        prepared,
+        true,
+      );
     }
     await this.deliverBackgroundReply(
       target.chatId,

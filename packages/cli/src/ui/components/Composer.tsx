@@ -97,6 +97,7 @@ export const Composer = ({ footerRef }: ComposerProps) => {
               : uiState.currentLoadingPhrase
           }
           elapsedTime={uiState.elapsedTime}
+          showCancelHint={!uiState.commandCancellationBlocked}
           candidatesTokens={responseCandidateTokens}
           taskStartTokens={taskStartTokens}
           taskStartStreamingChars={taskStartStreamingChars}
@@ -113,11 +114,13 @@ export const Composer = ({ footerRef }: ComposerProps) => {
        * affordance during long-running calls. The full timer/spinner/phrase
        * UI is still suppressed to avoid layout breakage.
        */}
-      {!uiState.embeddedShellFocused && suppressBottomLoadingIndicator && (
-        <Box paddingLeft={2}>
-          <Text color={theme.text.secondary}>({t('Esc to cancel')})</Text>
-        </Box>
-      )}
+      {!uiState.embeddedShellFocused &&
+        suppressBottomLoadingIndicator &&
+        !uiState.commandCancellationBlocked && (
+          <Box paddingLeft={2}>
+            <Text color={theme.text.secondary}>({t('Esc to cancel')})</Text>
+          </Box>
+        )}
 
       {!uiState.isStatusLineDialogOpen && (
         <QueuedMessageDisplay messageQueue={uiState.messageQueue} />

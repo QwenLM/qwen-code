@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from '../utils/random-uuid.js';
 import {
   useCallback,
   useEffect,
@@ -424,11 +425,7 @@ export function SplitView({
   // A per-tab/per-mount nonce: two browser tabs opening the same split must not
   // register the same daemon client id, or suppressOwnUserEcho would treat one
   // tab's prompt as the other's own echo and drop it from the transcript.
-  const [instanceId] = useState(() =>
-    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID()
-      : Math.random().toString(36).slice(2),
-  );
+  const [instanceId] = useState(() => randomUUID());
 
   const paneIdsRef = useRef(paneIds);
   paneIdsRef.current = paneIds;
@@ -1036,11 +1033,8 @@ export function SplitView({
                     <ChatPane
                       showResponseTokensPerSecond={showResponseTokensPerSecond}
                       title={titleById.get(sessionId)}
-                      sessionSummary={
-                        showSessionDetails
-                          ? sessionById.get(sessionId)
-                          : undefined
-                      }
+                      sessionSummary={sessionById.get(sessionId)}
+                      showSessionDetails={showSessionDetails}
                       isActive={activeId === sessionId}
                       onApprovalChange={handleApprovalChange}
                       workspaceCwd={paneWorkspaceCwd}
