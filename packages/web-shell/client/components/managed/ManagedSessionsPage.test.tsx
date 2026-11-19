@@ -644,6 +644,7 @@ describe('ManagedSessionsPage', () => {
       button!.click();
       await flush();
     });
+    await act(async () => vi.dynamicImportSettled());
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
     // A side panel opens: interactive dips false, but the live terminal must
     // not unmount (that would send the release frame and SIGTERM the PTY).
