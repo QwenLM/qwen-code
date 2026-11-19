@@ -360,6 +360,40 @@ describe('POST /sessions/recovery', () => {
     expect(response.body.workspaces[0].items).toEqual([]);
   });
 
+  it('omits a session when a torn record spans the whole tail window', async () => {
+    const fixture = makeFixture();
+    const hidden = randomUUID();
+    fixture.seed(hidden, [inFlight('p1', Date.now())]);
+    const transcriptPath = path.join(
+      path.dirname(fixture.sessionService.getPromptLedgerPath(hidden)),
+      `${hidden}.jsonl`,
+    );
+    const history = Array.from({ length: 12 }, (_, index) =>
+      JSON.stringify({
+        uuid: `history-${index}`,
+        parentUuid: null,
+        sessionId: hidden,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: fixture.runtime.workspaceCwd,
+        version: '1.0.0',
+        message: { role: 'user', parts: [{ text: 'history' }] },
+      }),
+    ).join('\n');
+    const tornTail = '{"type":"system","subtype":"se' + 'x'.repeat(70 * 1024);
+    expect(Buffer.byteLength(tornTail)).toBeGreaterThan(64 * 1024);
+    writeFileSync(transcriptPath, `${history}\n${tornTail}`, {
+      encoding: 'utf8',
+      flag: 'a',
+    });
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery')
+      .send({ workspaces: [fixture.runtime.workspaceId] });
+
+    expect(response.body.workspaces[0].items).toEqual([]);
+  });
+
   it('reads source metadata only for recovery candidates', async () => {
     const metadataRead = vi.spyOn(
       SessionService.prototype,

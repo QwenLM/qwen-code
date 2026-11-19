@@ -11444,7 +11444,11 @@ export function registerSessionRoutes(
       if (readStart > 0) {
         const peek = Buffer.alloc(1);
         fs.readSync(fd, peek, 0, 1, readStart - 1);
-        if (peek[0] !== 0x0a) lines.shift();
+        if (peek[0] !== 0x0a) {
+          // Dropping the only clipped record would erase all torn-tail evidence.
+          if (lines.length === 1) return false;
+          lines.shift();
+        }
       }
       for (const line of lines) {
         if (line === '') continue;

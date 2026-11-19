@@ -115,6 +115,9 @@ When creation metadata has no source, the fallback also requires every
 non-empty JSONL record in the bounded transcript tail to parse. An invalid or
 torn record, including one truncated before the `session_source` subtype, is
 indeterminate metadata rather than evidence of an ordinary source-less session.
+If the window contains no newline and consists solely of a clipped record
+fragment, discarding that fragment would leave no evidence to inspect; the
+fallback treats this case as indeterminate too.
 
 Before emitting an item, the route checks the runtime's in-memory session
 summary and omits a session whose prompt is active or queued. That check does
