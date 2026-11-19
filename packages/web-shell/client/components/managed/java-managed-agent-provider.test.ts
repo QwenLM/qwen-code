@@ -1144,6 +1144,75 @@ describe('createJavaManagedAgentProvider', () => {
     },
   );
 
+  it('wires the workspace artifact reader and maps the page capability flag', async () => {
+    const page = { data: [], nextCursor: null, hasMore: false };
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (url) =>
+      jsonResponse(
+        String(url).endsWith('/workspaces/query')
+          ? {
+              data: [],
+              defaultWorkspace: null,
+              hasMore: false,
+              capabilities: {
+                workspaceBinding: true,
+                workspaceContext: false,
+                workspaceArtifactLibrary: true,
+              },
+            }
+          : page,
+      ),
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant-a:actor-a',
+      enableWorkspaceBinding: true,
+      fetch: fetchImpl,
+    });
+    expect(
+      (await provider.workspaceBinding!.list({ clientId: 'client' }))
+        .artifactLibrary,
+    ).toBe(true);
+    const abort = new AbortController();
+    expect(
+      await provider.workspaceArtifacts!.listArtifacts('ws-a', {
+        clientId: 'client',
+        cursor: 'next',
+        limit: 50,
+        signal: abort.signal,
+      }),
+    ).toEqual(page);
+    expect(String(fetchImpl.mock.calls[1][0])).toContain(
+      '/workspaces/artifacts/query',
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      workspaceId: 'ws-a',
+      cursor: 'next',
+      limit: 50,
+    });
+    expect(fetchImpl.mock.calls[1][1]?.signal).toBe(abort.signal);
+  });
+
+  it('defaults the artifact library flag to false when the page omits it', async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: [],
+        defaultWorkspace: null,
+        hasMore: false,
+        capabilities: { workspaceBinding: true, workspaceContext: false },
+      }),
+    );
+    const provider = createJavaManagedAgentProvider({
+      baseUrl: 'https://product.example',
+      productScope: 'tenant-a:actor-a',
+      enableWorkspaceBinding: true,
+      fetch: fetchImpl,
+    });
+    expect(
+      (await provider.workspaceBinding!.list({ clientId: 'client' }))
+        .artifactLibrary,
+    ).toBe(false);
+  });
+
   it('creates a bound empty session without requiring turnId', async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (input) =>
       jsonResponse(

@@ -416,6 +416,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/agent/web-shell/v1/workspaces/artifacts/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * List a Workspace's artifacts across its Sessions
+         * @description Authorized artifact metadata page across the Sessions bound to the Workspace, newest projection first by the global artifact row id. Admission precedes validation: a trusted actor (401 actor_required without one) holding a READER grant on the Workspace (404 workspace_not_found below it, including unknown Workspaces); deployment artifact reads off answer 404 artifact_not_found. Rows exclude CONTROL, DELETED and DELETING Sessions, other actors' owner-only Sessions, legacy unbound Sessions, and publications whose source Workspace differs from the Session's current binding; archived Sessions stay visible. The opaque cursor binds tenant, actor and Workspace and freezes the first page's row-id watermark: rows projected later do not shift or duplicate later pages. Unavailable artifacts remain listed with availability=unavailable and can_read_content=false; a lost Workspace grant re-checked on unavailable rows answers 404 workspace_not_found. Byte reads use the unchanged Session-scoped content route. No Session load, unarchive, or primary fallback.
+         */
+        post: operations["queryWebShellWorkspaceArtifacts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/web-shell/v1/sessions/unarchive": {
         parameters: {
             query?: never;
@@ -2091,6 +2111,8 @@ export interface components {
                 workspaceDirectorySelection?: boolean;
                 /** @description Trusted single-user local deployment can browse and import existing host directories without a pre-registered Workspace. Missing or false means unsupported. */
                 localDirectoryImport?: boolean;
+                /** @description Supports the workspace-wide artifact query across bound Sessions. Missing or false means unsupported; current actor and Workspace read-grant checks still apply. */
+                workspaceArtifactLibrary?: boolean;
             };
             /** @description Same authorized explicit default as default_workspace, including when outside this page; null if absent or not creatable. A non-null default is active and has canCreateSession=true. */
             defaultWorkspace: (components["schemas"]["WebShellWorkspace"] & {
@@ -2472,6 +2494,12 @@ export interface components {
         };
         WebShellArtifactQueryRequest: {
             sessionId: string;
+            cursor?: string | null;
+            /** @default 20 */
+            limit?: number;
+        };
+        WebShellWorkspaceArtifactQueryRequest: {
+            workspaceId: string;
             cursor?: string | null;
             /** @default 20 */
             limit?: number;
@@ -4934,6 +4962,69 @@ export interface operations {
             };
             403: components["responses"]["Forbidden"];
             /** @description Unknown or unreadable resource. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            413: components["responses"]["PayloadTooLarge"];
+            /** @description Resource temporarily unavailable. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    queryWebShellWorkspaceArtifacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellWorkspaceArtifactQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Authorized workspace artifact metadata page. */
+            200: {
+                headers: {
+                    "Cache-Control"?: "no-store";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellArtifactPage"];
+                };
+            };
+            /** @description Invalid request. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Trusted actor required. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            /** @description Unknown or unreadable Workspace, or artifact reads disabled. */
             404: {
                 headers: {
                     [name: string]: unknown;
