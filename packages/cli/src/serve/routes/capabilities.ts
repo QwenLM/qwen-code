@@ -5,6 +5,10 @@
  */
 
 import type { Application } from 'express';
+import {
+  isTruthy,
+  QWEN_CODE_SIMPLE_ENV_VAR,
+} from '@qwen-code/qwen-code-core/utils/bareMode.js';
 import { isSafeModeEnv } from '@qwen-code/qwen-code-core/utils/safe-mode.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
@@ -69,13 +73,14 @@ async function workflowsEnabledForRuntime(
       ? (runtime.env.effectiveEnv ?? {})
       : (runtime.env.effectiveEnv ?? daemonEnv);
   const safeMode = isSafeModeEnv(env);
+  const bareMode =
+    runtime.sessionBareMode ?? isTruthy(env[QWEN_CODE_SIMPLE_ENV_VAR]);
   if (env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
   const settings = runtime.readWorkflowSettings?.();
   if (settings === null || (!safeMode && settings?.toolDenied)) return false;
   const enabled =
     env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1' ||
-    (settings?.enabled ??
-      (runtime.env.mode === 'runtime-overlay' && !safeMode));
+    (settings?.enabled ?? !(bareMode || safeMode));
   if (!enabled) return false;
   const engine = await runtime.selectDefaultSessionEngine?.();
   return !runtime.generationGuard?.closed && engine !== 'managed';

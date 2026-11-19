@@ -1614,6 +1614,7 @@ export function createServeApp(
           mode: 'parent-process',
           overlayKeys: [],
         },
+        ...(deps.bridge ? {} : { sessionBareMode: false }),
         bridge,
         workspaceService: workspace,
         routeFileSystemFactory: fsFactory,

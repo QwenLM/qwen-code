@@ -5938,6 +5938,33 @@ describe('createServeApp', () => {
           },
         },
       };
+      const bareOverlay: WorkspaceRuntime = {
+        ...makeWorkspaceRuntimeForTest({
+          workspaceId: 'bare-overlay-id',
+          workspaceCwd: '/workspace/bare-overlay',
+          primary: false,
+          bridge: fakeBridge(),
+        }),
+        env: {
+          mode: 'runtime-overlay',
+          overlayKeys: [],
+          effectiveEnv: { QWEN_CODE_SIMPLE: '1' },
+        },
+      };
+      const nonBareSession = {
+        ...bareOverlay,
+        workspaceId: 'non-bare-session-id',
+        workspaceCwd: '/workspace/non-bare-session',
+        bridge: fakeBridge(),
+        sessionBareMode: false,
+      };
+      const ordinaryOverlay = {
+        ...bareOverlay,
+        workspaceId: 'ordinary-overlay-id',
+        workspaceCwd: '/workspace/ordinary-overlay',
+        bridge: fakeBridge(),
+        env: { ...bareOverlay.env, effectiveEnv: {} },
+      };
       const settingsEnabled = {
         ...makeWorkspaceRuntimeForTest({
           workspaceId: 'settings-enabled-id',
@@ -6012,6 +6039,9 @@ describe('createServeApp', () => {
         workspaceRegistry: createWorkspaceRegistry([
           primary,
           secondary,
+          bareOverlay,
+          nonBareSession,
+          ordinaryOverlay,
           settingsEnabled,
           toolDenied,
           paired,
@@ -6034,6 +6064,18 @@ describe('createServeApp', () => {
         expect.objectContaining({
           id: 'secondary-id',
           workflowsEnabled: false,
+        }),
+        expect.objectContaining({
+          id: 'bare-overlay-id',
+          workflowsEnabled: false,
+        }),
+        expect.objectContaining({
+          id: 'non-bare-session-id',
+          workflowsEnabled: true,
+        }),
+        expect.objectContaining({
+          id: 'ordinary-overlay-id',
+          workflowsEnabled: true,
         }),
         expect.objectContaining({
           id: 'settings-enabled-id',
@@ -6092,6 +6134,37 @@ describe('createServeApp', () => {
           }),
         ]),
       );
+    });
+
+    it('defaults Workflow on for a trusted parent-process runtime', async () => {
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge(),
+        primaryWorkspaceTrusted: true,
+        daemonEnv: {},
+      });
+      const response = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body.workspaces).toEqual([
+        expect.objectContaining({ workflowsEnabled: true }),
+      ]);
+    });
+
+    it('uses the owned ACP launcher mode instead of an inherited bare flag', async () => {
+      const app = createServeApp(baseOpts, undefined, {
+        primaryWorkspaceTrusted: true,
+        daemonEnv: { QWEN_CODE_SIMPLE: '1' },
+      });
+      const response = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body.workspaces).toEqual([
+        expect.objectContaining({ workflowsEnabled: true }),
+      ]);
     });
 
     it('advertises the scoped workspace-memory tags on the wire', async () => {
@@ -6513,7 +6586,7 @@ describe('createServeApp', () => {
           cwd: WS_BOUND,
           primary: true,
           trusted: true,
-          workflowsEnabled: false,
+          workflowsEnabled: true,
         },
       ]);
 
@@ -6673,7 +6746,7 @@ describe('createServeApp', () => {
         displayName: 'Conversations',
         primary: false,
         trusted: true,
-        workflowsEnabled: false,
+        workflowsEnabled: true,
         kind: 'live',
       });
       expect(response.body.features).not.toContain('multi_workspace_sessions');

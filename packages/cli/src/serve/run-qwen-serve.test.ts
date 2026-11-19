@@ -10307,6 +10307,7 @@ describe('runQwenServe runtime startup failures', () => {
       expect(capturedRuntimeEnv['QWEN_TEST_RUNTIME_VALUE']).toBe('boot');
       const pinnedRuntimeBaseDir = path.join(tmpDir, '.runtime-boot');
       expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
+      expect(primaryRuntime?.sessionBareMode).toBeUndefined();
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
       expect(primaryRuntime?.readWorkflowSettings?.()).toEqual({
         enabled: true,
@@ -10757,6 +10758,7 @@ describe('runQwenServe runtime startup failures', () => {
         pinnedRuntimeBaseDir,
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(secondaryRuntime?.sessionBareMode).toBe(false);
       expect(secondaryRuntime?.readWorkflowSettings?.()).toEqual({
         enabled: true,
         toolDenied: false,
@@ -10787,6 +10789,7 @@ describe('runQwenServe runtime startup failures', () => {
       const dynamicRuntime = await createWorkspaceRuntime!(dynamic, {
         provenance: 'existing',
       });
+      expect(dynamicRuntime.sessionBareMode).toBe(false);
       expect(dynamicRuntime.readWorkflowSettings?.()).toEqual({
         enabled: true,
         toolDenied: true,

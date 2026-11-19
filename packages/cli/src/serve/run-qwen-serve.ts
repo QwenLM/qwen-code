@@ -6852,6 +6852,7 @@ async function runQwenServeImpl(
         removable: false,
         registrationIds: workspaceInputs[0]?.registrationIds ?? [],
         env: primaryRuntimeEnv,
+        ...(deps.bridge ? {} : { sessionBareMode: false }),
         readWorkflowSettings: () =>
           readWorkflowSettings(boundWorkspace, runtimeEffectiveEnv),
         selectDefaultSessionEngine: bindDefaultSessionEngine(
@@ -7497,6 +7498,7 @@ async function runQwenServeImpl(
         removable: workspaceInput.removable,
         registrationIds: workspaceInput.registrationIds,
         env: secondaryEnv.metadata,
+        sessionBareMode: false,
         readWorkflowSettings: () =>
           readWorkflowSettings(workspaceInput.cwd, secondaryEnv.effectiveEnv),
         selectDefaultSessionEngine: bindDefaultSessionEngine(
@@ -8603,6 +8605,7 @@ async function runQwenServeImpl(
           buildOptions?.removable ?? provenance !== 'live-conversation',
         registrationIds: [...(buildOptions?.registrationIds ?? [])],
         env: wsEnv.metadata,
+        sessionBareMode: false,
         readWorkflowSettings: () =>
           readWorkflowSettings(cwd, wsEnv.effectiveEnv),
         selectDefaultSessionEngine: bindDefaultSessionEngine(

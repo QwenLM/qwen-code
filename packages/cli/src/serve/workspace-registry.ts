@@ -44,6 +44,8 @@ export interface WorkspaceRuntime {
   /** Persistent registration ids that restore this runtime on daemon startup. */
   registrationIds?: string[];
   readonly env: WorkspaceRuntimeEnvMetadata;
+  /** Bare mode after applying the session launcher's environment policy. */
+  readonly sessionBareMode?: boolean;
   readonly readWorkflowSettings?: () => {
     enabled: boolean | undefined;
     toolDenied: boolean;
