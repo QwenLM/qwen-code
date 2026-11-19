@@ -286,11 +286,14 @@ export interface AgentLoopOptions {
   keepCancelledResults?: ToolBatchOptions['keepCancelledResults'];
   /** Leave recording to the host via `nextRound` or the loop result. */
   deferRecording?: boolean;
+  /** Waits for Runtime execution to settle and rejects if its outcome is unknown. */
+  getPendingToolSettlement?: () => Promise<void> | undefined;
   /**
    * Run the loop on the event-bus implementation instead of the procedural
    * one. Opt-in; the two are behaviorally equivalent, except that a run
    * whose signal aborted ends as `cancelled` once it has not settled within
-   * a cap, and its host hears nothing after that. See
+   * a cap, except when the host still has pending tool settlement.
+   * After the cap the host hears nothing further. See
    * docs/design/2026-11-11-event-bus-agent-loop.md.
    */
   useEventBus?: boolean;
@@ -816,10 +819,16 @@ function skippedResponse(
 /** One `CoreToolScheduler` for the whole batch. */
 export function createSchedulerExecutor(
   config: Config,
-  options: Partial<SchedulerOptions> = {},
+  options: Partial<SchedulerOptions> &
+    Pick<AgentLoopOptions, 'getPendingToolSettlement'> = {},
   runtimeView?: RuntimeContentGeneratorView,
 ): AgentLoopToolExecutor {
-  const { onToolResultFullTurnModel } = options;
+  const {
+    getPendingToolSettlement,
+    onToolResultFullTurnModel,
+    onManagedRuntimeOutcomeUnknown,
+    ...schedulerOptions
+  } = options;
   return {
     run: (requests, signal, hooks) =>
       new Promise<CompletedToolCall[]>((resolve, reject) => {
@@ -828,25 +837,39 @@ export function createSchedulerExecutor(
         // Calls an `exec` script makes report through the same callbacks;
         // their output belongs to the `exec` call.
         const parents = new Map<string, string>();
+        let managedBatchFailed = false;
+        const isFinished = () =>
+          managedBatchFailed || hooks.isFinished?.() === true;
         const scheduler = new CoreToolScheduler({
           getPreferredEditor: () => undefined,
           onEditorClose: () => {},
-          ...options,
+          ...schedulerOptions,
           config,
-          isFinished: hooks.isFinished,
-          ...(hooks.isFinished &&
-            onToolResultFullTurnModel && {
-              onToolResultFullTurnModel: (model) =>
-                !hooks.isFinished?.() &&
-                onToolResultFullTurnModel.call(options, model),
-            }),
+          ...(onManagedRuntimeOutcomeUnknown && {
+            onManagedRuntimeOutcomeUnknown: (error, callId) => {
+              managedBatchFailed = true;
+              onManagedRuntimeOutcomeUnknown(error, callId);
+              // The remaining Runtime calls may still be in flight even though
+              // host post-processing no longer needs to finish before failing.
+              const pending = getPendingToolSettlement?.();
+              if (pending) {
+                void pending.then(() => reject(error), reject);
+              }
+            },
+            onManagedRuntimeBatchFailed: reject,
+          }),
+          isFinished,
+          ...(onToolResultFullTurnModel && {
+            onToolResultFullTurnModel: (model) =>
+              !isFinished() && onToolResultFullTurnModel.call(options, model),
+          }),
           outputUpdateHandler: (callId, chunk) => {
-            if (hooks.isFinished?.()) return;
+            if (isFinished()) return;
             options.outputUpdateHandler?.(callId, chunk);
             hooks.output(parents.get(callId) ?? callId, chunk);
           },
           onToolCallsUpdate: (toolCalls) => {
-            if (hooks.isFinished?.()) return;
+            if (isFinished()) return;
             for (const call of toolCalls) {
               const { callId, parentCallId } = call.request;
               if (!batch.has(callId)) {
@@ -862,9 +885,10 @@ export function createSchedulerExecutor(
             options.onToolCallsUpdate?.(toolCalls);
           },
           beforeToolLaunch: (call: ScheduledToolCall) =>
+            !isFinished() &&
             hooks.beforeLaunch(call.request, [...settled.values()]),
           onAllToolCallsComplete: async (completedCalls) => {
-            if (!hooks.isFinished?.()) {
+            if (!isFinished()) {
               await options.onAllToolCallsComplete?.(completedCalls);
             }
             resolve(completedCalls);

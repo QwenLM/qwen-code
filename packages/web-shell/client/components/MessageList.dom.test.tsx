@@ -25,6 +25,7 @@ import styles from './MessageList.module.css';
 
 const virtualizerTestState = vi.hoisted(() => ({
   getItemKeys: [] as Array<(index: number) => string | number>,
+  overscan: vi.fn(),
   itemSizeCache: new Map<string | number, number>(),
   resizeItem: vi.fn(),
   scrollToIndex: vi.fn(),
@@ -163,12 +164,15 @@ vi.mock('@tanstack/react-virtual', () => ({
     count,
     enabled,
     getItemKey,
+    overscan,
   }: {
     count: number;
     enabled: boolean;
     getItemKey: (index: number) => string | number;
+    overscan: number;
   }) => {
     virtualizerTestState.getItemKeys.push(getItemKey);
+    virtualizerTestState.overscan(overscan);
     const virtualItems =
       enabled && virtualizerTestState.renderItems
         ? Array.from({ length: Math.min(count, 5) }, (_, index) => ({
@@ -242,6 +246,7 @@ afterEach(() => {
   virtualizerTestState.resizeItem.mockClear();
   virtualizerTestState.renderItems = true;
   virtualizerTestState.getItemKeys.length = 0;
+  virtualizerTestState.overscan.mockClear();
   messageItemTestState.toolArrays.length = 0;
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -4779,6 +4784,15 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
     click(toggle(c, 'u1'));
     expect(isCollapsed(c, 'g1')).toBe(true);
+  });
+
+  it.each([
+    [undefined, 15],
+    [0, 0],
+    [6, 6],
+  ])('uses overscan %s as %s virtual rows', (overscan, expected) => {
+    mount(simpleTurns(110), undefined, { customization: { overscan } });
+    expect(virtualizerTestState.overscan).toHaveBeenLastCalledWith(expected);
   });
 
   it('renders virtual scroll rows with sizer and row width classes', () => {

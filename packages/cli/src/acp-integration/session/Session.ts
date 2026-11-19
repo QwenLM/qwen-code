@@ -6192,7 +6192,11 @@ export class Session implements SessionContext {
         result._meta?.[OUTPUT_TRUNCATED_META_KEY] === true
         ? { ...result, stopReason: 'max_tokens' }
         : result;
-    } catch (error) {
+    } catch (caught) {
+      const error =
+        caught instanceof ManagedRuntimeOutcomeUnknownError
+          ? managedOutcomeUnknownError(caught)
+          : caught;
       recordAdmissionCancellation();
       const pendingSend = turnRecording?.abortController;
       const abortReason =
