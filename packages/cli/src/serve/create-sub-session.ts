@@ -36,6 +36,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { lstatSync, realpathSync } from 'node:fs';
 import { basename } from 'node:path';
 import {
   createDebugLogger,
@@ -72,6 +73,7 @@ import {
   isReservedStandaloneSessionSourceType,
   isScheduledTaskRunSource,
 } from '@qwen-code/acp-bridge/sessionSource';
+import { isWithinRoot } from '../config/path-comparison.js';
 import { normalizeSessionIdForLookup } from '../config/session-id.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { StandaloneSessionService } from './conversations/standalone-session-service.js';
@@ -1292,15 +1294,22 @@ export function createSubSessionLauncher(
     sessionId: string,
     callerSessionId: string,
     byPerson: boolean,
-  ): Promise<BridgeSession> => {
+  ): Promise<{
+    session: BridgeSession;
+    assertWorktreeReady(sessionId: string): void;
+  }> => {
     if (sessionId === normalizeSessionIdForLookup(callerSessionId)) {
       throw new Error('A session cannot send a message to itself.');
     }
+    const service = new SessionService(boundWorkspace, { runtimeBaseDir });
+    const storedId = await resolveSessionIdForRestore(service, sessionId);
     let metadata:
       | { parentSessionId?: string; sourceType?: string; sourceId?: string }
       | undefined;
+    let isLive = false;
     try {
       const live = bridge.getSessionSummary(sessionId);
+      isLive = true;
       metadata = {
         ...(live.parentSessionId !== undefined
           ? { parentSessionId: live.parentSessionId }
@@ -1312,23 +1321,11 @@ export function createSubSessionLauncher(
       };
     } catch (error) {
       if (!(error instanceof SessionNotFoundError)) throw error;
-      const service = new SessionService(boundWorkspace, { runtimeBaseDir });
-      const storedId = await resolveSessionIdForRestore(service, sessionId);
       if (storedId !== undefined) {
         metadata = await service.readCreationMetadataIfReadable(
           storedId,
           'active',
         );
-        if (metadata) {
-          const worktree = await readWorktreeSessionStrict(
-            service.getWorktreeSessionPath(storedId),
-          );
-          if (worktree.state !== 'missing') {
-            throw new Error(
-              'Open the destination worktree session before sending a follow-up.',
-            );
-          }
-        }
       }
     }
     if (!metadata) {
@@ -1339,11 +1336,76 @@ export function createSubSessionLauncher(
             : ' If it lives in another workspace, also pass that `workspace`.'),
       );
     }
-    return bridge.resumeSession({
+    // A preceding turn can create or replace the sidecar without updating
+    // the bridge. Recheck its identity at the guarded write.
+    const sidecarVersion = (sidecarPath: string) => {
+      const stat = lstatSync(sidecarPath, {
+        bigint: true,
+        throwIfNoEntry: false,
+      });
+      return stat && `${stat.dev}:${stat.ino}:${stat.ctimeNs}`;
+    };
+    const sidecars = [...new Set([sessionId, storedId ?? sessionId])].map(
+      (id) => {
+        const path = service.getWorktreeSessionPath(id);
+        return { path, version: sidecarVersion(path) };
+      },
+    );
+    const worktrees = await Promise.all(
+      sidecars.map(({ path }) => readWorktreeSessionStrict(path)),
+    );
+    const sidecarsUnchanged = () =>
+      sidecars.every(({ path, version }) => sidecarVersion(path) === version);
+    if (
+      !sidecarsUnchanged() ||
+      worktrees.some(
+        ({ state }) => state === 'invalid' || (!isLive && state === 'valid'),
+      )
+    ) {
+      throw new Error(
+        'Open the destination worktree session before sending a follow-up.',
+      );
+    }
+    const persistedPaths = worktrees.flatMap((result) =>
+      result.state === 'valid' ? [result.session.worktreePath] : [],
+    );
+    let checkedRoot: string | undefined;
+    const assertWorktreeReady = (targetId: string) => {
+      if (!sidecarsUnchanged()) {
+        throw new Error(
+          'The destination worktree changed. Retry the follow-up.',
+        );
+      }
+      const { effectiveCwd, worktree } =
+        bridge.getSessionExecutionSnapshot(targetId);
+      const worktreePath = worktree?.path ?? persistedPaths[0] ?? checkedRoot;
+      if (!worktreePath) return;
+      let ready = false;
+      try {
+        const root = realpathSync.native(worktreePath);
+        ready =
+          (checkedRoot === undefined || checkedRoot === root) &&
+          persistedPaths.every((path) => root === realpathSync.native(path)) &&
+          isWithinRoot(realpathSync.native(effectiveCwd), root);
+        if (ready) checkedRoot = root;
+      } catch {
+        // A path that cannot be resolved is not ready.
+      }
+      if (!ready) {
+        throw new Error(
+          'The destination session has not restored its worktree directory. Open the destination session and retry the follow-up.',
+        );
+      }
+    };
+    // Recheck live targets after reading storage. If one closed in the
+    // meantime, do not let the bridge fall back to restoring it cold.
+    if (isLive) assertWorktreeReady(sessionId);
+    const session = await bridge.resumeSession({
       sessionId,
       workspaceCwd: boundWorkspace,
       ...metadata,
     });
+    return { session, assertWorktreeReady };
   };
 
   const run = async (
@@ -1529,13 +1591,16 @@ export function createSubSessionLauncher(
     let promptAdmission: Promise<void> | undefined;
     const prepareAndQueue = async (): Promise<BridgeSession> => {
       let sub: BridgeSession;
+      let assertWorktreeReady: (() => void) | undefined;
       if (followUpSessionId !== undefined) {
-        sub = await resumeExistingSession(
+        const resumed = await resumeExistingSession(
           bridge,
           followUpSessionId,
           info.callerSessionId,
           byPerson,
         );
+        sub = resumed.session;
+        assertWorktreeReady = () => resumed.assertWorktreeReady(sub.sessionId);
         // The bridge keys the session by the id it resumed, which can differ
         // in spelling from the one the caller passed.
         if (sub.clientId !== undefined) {
@@ -1673,6 +1738,7 @@ export function createSubSessionLauncher(
 
       if (!standalone) {
         assertLocalCurrent?.();
+        assertWorktreeReady?.();
         if (remote && stopAc.signal.aborted) {
           throw new Error('The target workspace stopped before dispatch.');
         }
@@ -1695,6 +1761,8 @@ export function createSubSessionLauncher(
           : remote
             ? remote.source
             : promptSource(bridge, info.callerSessionId, boundWorkspace);
+        const assertApprovalCurrent =
+          dispatchApproval?.assertCanDispatch ?? assertLocalCurrent;
         turn = bridge.sendPrompt(
           sessionId,
           {
@@ -1719,8 +1787,13 @@ export function createSubSessionLauncher(
                   },
                 }
               : {}),
-            assertCanDispatch: assertLocalCurrent,
             ...dispatchApproval,
+            assertCanDispatch: assertWorktreeReady
+              ? () => {
+                  assertApprovalCurrent?.();
+                  assertWorktreeReady();
+                }
+              : assertApprovalCurrent,
           },
         );
         queuedTurn = turn;

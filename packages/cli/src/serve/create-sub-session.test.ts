@@ -13,6 +13,7 @@ import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   ACTIVE_WORK_CLOSE_TIMEOUT_MS,
   type AcpSessionBridge,
+  type BridgeSessionExecutionSnapshot,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   SessionOrganizationService,
@@ -115,6 +116,7 @@ function makeFakeBridge(opts?: {
   beforeModeChange?: () => Promise<void>;
   beforeQueuedDispatch?: () => Promise<void>;
   beforePromptDispatch?: () => void;
+  sessionExecution?: Record<string, BridgeSessionExecutionSnapshot>;
   /** Sessions this bridge does not hold live (`getSessionSummary` throws). */
   notLive?: readonly string[];
   /** Sessions `resumeSession` restores (besides the reaped parent). */
@@ -241,6 +243,11 @@ function makeFakeBridge(opts?: {
         displayName: opts?.titles?.[sessionId],
       };
     },
+    getSessionExecutionSnapshot: (sessionId: string) =>
+      opts?.sessionExecution?.[sessionId] ?? {
+        workspaceCwd: '/tmp/ws',
+        effectiveCwd: '/tmp/ws',
+      },
     appendExternalRecord: async (sessionId: string, request: unknown) => {
       externalRecords.push({ sessionId, request });
       return { sessionId, recordId: `record-${externalRecords.length}` };
@@ -3991,6 +3998,143 @@ describe('following up a sub-session', () => {
       }
     },
   );
+
+  describe('worktree targets', () => {
+    async function worktreeTarget(queued?: Promise<void>) {
+      const root = await mkdtemp(path.join(tmpdir(), 'qwen-follow-up-'));
+      const workspaceCwd = path.join(root, 'workspace');
+      const worktreePath = path.join(
+        workspaceCwd,
+        '.qwen',
+        'worktrees',
+        'task',
+      );
+      const nestedCwd = path.join(worktreePath, 'src');
+      const runtimeBaseDir = path.join(root, 'runtime');
+      await mkdir(nestedCwd, { recursive: true });
+      const worktree = { slug: 'task', path: worktreePath, branch: 'task' };
+      const execution: BridgeSessionExecutionSnapshot = {
+        workspaceCwd,
+        effectiveCwd: workspaceCwd,
+      };
+      const writeSidecar = () =>
+        worktreeSessionService.writeWorktreeSession(
+          new SessionService(workspaceCwd, {
+            runtimeBaseDir,
+          }).getWorktreeSessionPath('kid'),
+          {
+            slug: 'task',
+            worktreePath,
+            worktreeBranch: 'task',
+            originalCwd: workspaceCwd,
+            originalBranch: 'main',
+            originalHeadCommit: 'abc123',
+          },
+        );
+      const fake = makeFakeBridge({
+        resumable: ['kid'],
+        defaultMode: 'default',
+        sessionExecution: { kid: execution },
+        ...(queued
+          ? { beforeQueuedDispatch: () => queued, blockAfterEvents: true }
+          : { events: (pid) => [chunkFor(pid, 'ok'), turnComplete(pid)] }),
+      });
+      const launcher = createSubSessionLauncher({
+        getBridge: () => fake.bridge,
+        boundWorkspace: workspaceCwd,
+        runtimeBaseDir,
+        getArchiveCoordinator,
+      });
+      return {
+        execution,
+        fake,
+        launcher,
+        nestedCwd,
+        worktree,
+        writeSidecar,
+        cleanup: () => rm(root, { recursive: true, force: true }),
+      };
+    }
+
+    it.each(['live metadata', 'legacy sidecar'])(
+      'requires a restored cwd for a live target identified by %s',
+      async (source) => {
+        const target = await worktreeTarget();
+        try {
+          if (source === 'live metadata') {
+            target.execution.worktree = target.worktree;
+          } else {
+            await target.writeSidecar();
+          }
+          const message = 'has not restored its worktree directory';
+          await expect(followUp(target.launcher)).rejects.toThrow(message);
+          await expect(
+            target.launcher.launchForPerson({
+              callerSessionId: 'caller',
+              sessionId: 'kid',
+              prompt: 'and now?',
+            }),
+          ).rejects.toThrow(message);
+          expect(target.fake.resumes).toEqual([]);
+          expect(target.fake.prompts).toEqual([]);
+
+          target.execution.effectiveCwd = target.nestedCwd;
+          await expect(followUp(target.launcher)).resolves.toMatchObject({
+            sessionId: 'kid',
+            result: 'ok',
+          });
+          expect(target.fake.prompts).toHaveLength(1);
+        } finally {
+          await target.cleanup();
+        }
+      },
+    );
+
+    it.each(['changes cwd', 'creates a sidecar'])(
+      'fails a queued follow-up if the preceding turn %s',
+      async (change) => {
+        let releaseQueue!: () => void;
+        const queue = new Promise<void>((resolve) => (releaseQueue = resolve));
+        const target = await worktreeTarget(queue);
+        try {
+          if (change === 'changes cwd') {
+            target.execution.worktree = target.worktree;
+            target.execution.effectiveCwd = target.nestedCwd;
+          }
+          await expect(
+            followUp(target.launcher, 'sent'),
+          ).resolves.toMatchObject({
+            sessionId: 'kid',
+          });
+          expect(target.fake.prompts).toEqual([]);
+          if (change === 'changes cwd') {
+            target.execution.effectiveCwd = target.execution.workspaceCwd;
+            delete target.execution.worktree;
+          } else {
+            await target.writeSidecar();
+          }
+          releaseQueue();
+          await vi.waitFor(() =>
+            expect(target.fake.notifications).toHaveLength(1),
+          );
+          expect(target.fake.notifications[0]!.notification.status).toBe(
+            'failed',
+          );
+          expect(
+            target.fake.notifications[0]!.notification.modelText,
+          ).toContain(
+            change === 'changes cwd'
+              ? 'has not restored its worktree directory'
+              : 'The destination worktree changed',
+          );
+          expect(target.fake.prompts).toEqual([]);
+        } finally {
+          releaseQueue();
+          await target.cleanup();
+        }
+      },
+    );
+  });
 
   it('the tool may follow up a session another session started', async () => {
     const { fake, launcher } = ownChild({

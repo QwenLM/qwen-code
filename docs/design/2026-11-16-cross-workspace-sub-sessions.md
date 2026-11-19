@@ -151,6 +151,10 @@ session the idle reaper already closed, from the creation records at the head
 of its transcript. The caller itself, an unknown or archived session, and a
 standalone session are refused. A closed worktree session must be opened
 before a follow-up so the daemon verifies and restores its worktree first.
+For a live worktree session, the launcher checks before attaching and again
+at dispatch that the effective directory is inside the worktree. If the
+persisted worktree metadata changes while the prompt is queued, the follow-up
+fails and can be retried.
 
 The first version reached only sessions the caller created, because a
 follow-up puts the caller model's text into the target as a user turn. That
