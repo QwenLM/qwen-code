@@ -142,6 +142,14 @@ just made, so an incoming event names the attempt it belongs to. An event the
 adapter cannot bind stays unverified instead of declaring a new attempt
 complete.
 
+This attempt-id invariant holds for prompt evidence, where the daemon names a
+unique `promptId` per turn. Decision evidence is the documented exception: the
+daemon decision event names only the `requestId` (stable across attempts), so
+`settleDecisionRequest` correlates at the request level — to the request's single
+active attempt — not by attempt id. Replay-safe attempt-level decision
+correlation would require a backend attempt discriminator the daemon does not
+currently emit; see the slice-2c controller design note.
+
 The attempt is recorded **before** the transport runs, for two reasons. Rows
 then sit in dispatch order, and retention — which keeps the latest terminal row
 per kind and target by position — keeps the later-_dispatched_ attempt rather

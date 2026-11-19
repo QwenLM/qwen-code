@@ -97,19 +97,28 @@ Decisions (approval / question):
   **request-level**: the engine routes the evidence to the request's single active
   (non-terminal) attempt and freezes approval currency **when the evidence
   arrives**, not when the POST resolves. A late event for an already-terminal
-  attempt is a no-op; the binding hook dedupes replayed decision events. The
-  decision target carries only `sessionId`/`requestId` (no per-attempt id), so
-  terminal-row retention still dedupes per request.
+  attempt is a no-op. The decision target carries only `sessionId`/`requestId` (no
+  per-attempt id), so terminal-row retention still dedupes per request.
+  **Replay limitation:** because the event carries no attempt discriminator, a
+  replayed delivery from the settlement channel can land on a live retry;
+  request-level correlation is replay-unsafe unless the settlement channel is
+  deduped or carries a backend attempt identity. That is an integration
+  requirement on the binding hook / provider — the adapter cannot distinguish
+  attempts from `{requestId, applied}` alone — and is tracked as follow-up, not
+  claimed as solved here.
 - A request has **at most one non-terminal decision attempt**: a second dispatch
-  while one is live (bound or in flight) is refused, so no sibling is orphaned and
-  the request cannot become permanently unanswerable.
+  while one is live (bound or in flight) is refused, so no sibling is orphaned.
+  **Liveness limitation:** an accepted attempt that never receives a settlement
+  event stays non-terminal and keeps refusing retries; giving it a bounded exit
+  (a timeout, or the `acknowledge`/`abandon` exposure deferred to the surface
+  switch) is follow-up work, so "never permanently unanswerable" is not claimed
+  for that state.
 - A retry after a failed decision earns its own evidence (a failed decision keeps
   the request live). Because the engine applies evidence to the active attempt, a
   rejected or retried dispatch never inherits a previous attempt's verdict.
 - A dispatch whose admission is not confirmed (`rejected`, or a thrown transport
   leaving `unknown`) is not bound as if accepted: it is given the engine's
-  `abandon` exit so it cannot hold the request permanently unanswerable or latch
-  the phase.
+  `abandon` exit so a lost admission response does not latch the phase.
 
 ### Bounded correlation state
 
@@ -182,9 +191,19 @@ while the neighbouring cases stay green.
   consumed terminal rows (otherwise they grow per distinct target). `abandon` is
   already used internally to give an unconfirmed dispatch an exit.
 - Decision correlation is request-level because the daemon decision event names
-  only the request (no attempt/option discriminator). The binding hook must dedupe
-  replayed decision events; attempt-level decision correlation would require a
-  backend attempt identity the daemon does not currently emit.
+  only the request (no attempt/option discriminator). Replay-safe decision
+  correlation requires the settlement channel to be deduped or to carry a backend
+  attempt identity the daemon does not currently emit; until then a replayed
+  delivery can land on a live retry. This is an integration requirement, not
+  solved at the adapter layer.
+- An accepted decision attempt that never receives a settlement event needs a
+  bounded exit (a timeout, or the `acknowledge`/`abandon` exposure above) so it
+  cannot keep refusing retries; likewise a cancel/submit for a turn admitted
+  before the controller mounted needs the binding hook to seed the live-turn
+  queue. Both belong to the surface switch.
+- Approval currency must be seeded for requests already live at construction
+  (`deps.liveApprovalRequestIds`, or a subscription that replays the live set),
+  honoring `pendingApprovals[].status` so superseded requests are not seeded live.
 - A cancel dispatched with no live turn settles `failed` (a terminal exit); the
   surface still enables cancel only while a turn is in flight.
 - `deps.settledPhase` is populated by the binding hook from the session's settled

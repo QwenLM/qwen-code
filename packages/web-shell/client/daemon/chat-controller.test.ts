@@ -38,6 +38,11 @@ function harness(overrides?: Partial<DaemonChatControllerDeps>) {
   const cancelTransports: Array<ReturnType<typeof deferredAdmission>> = [];
   const permissionTransports: Array<ReturnType<typeof deferredAdmission>> = [];
   const questionTransports: Array<ReturnType<typeof deferredAdmission>> = [];
+  const permissionCalls: Array<{ requestId: string; optionId: string }> = [];
+  const questionCalls: Array<{
+    requestId: string;
+    answers: readonly QuestionAnswer[];
+  }> = [];
 
   const deps: DaemonChatControllerDeps = {
     sessionId: 's1',
@@ -58,12 +63,14 @@ function harness(overrides?: Partial<DaemonChatControllerDeps>) {
       cancelTransports.push(deferred);
       return deferred.promise;
     },
-    submitPermission: () => {
+    submitPermission: (requestId, optionId) => {
+      permissionCalls.push({ requestId, optionId });
       const deferred = deferredAdmission();
       permissionTransports.push(deferred);
       return deferred.promise;
     },
-    submitQuestionAnswers: () => {
+    submitQuestionAnswers: (requestId, answers) => {
+      questionCalls.push({ requestId, answers });
       const deferred = deferredAdmission();
       questionTransports.push(deferred);
       return deferred.promise;
@@ -149,6 +156,8 @@ function harness(overrides?: Partial<DaemonChatControllerDeps>) {
     hasPromptListener: () => promptListener !== undefined,
     hasDecisionListener: () => decisionListener !== undefined,
     hasCurrencyListener: () => currencyListener !== undefined,
+    permissionCalls,
+    questionCalls,
   };
 }
 
@@ -345,6 +354,8 @@ describe('daemon controller: approvals and questions', () => {
     const h = harness();
     h.emitCurrency('r1', true);
     const pending = h.controller.respondApproval('r1', 'allow');
+    // The transport receives the request and option the surface chose.
+    expect(h.permissionCalls).toEqual([{ requestId: 'r1', optionId: 'allow' }]);
     h.resolvePermission();
     const result = await pending;
     expect(result.outcome).toBe('unsettled');
@@ -487,6 +498,13 @@ describe('daemon controller: pass-through facts and lifecycle', () => {
     expect(h.hasDecisionListener()).toBe(true);
     expect(h.hasCurrencyListener()).toBe(true);
     abort.abort();
+    expect(h.hasPromptListener()).toBe(false);
+    expect(h.hasDecisionListener()).toBe(false);
+    expect(h.hasCurrencyListener()).toBe(false);
+  });
+
+  it('releases subscriptions when constructed with an already-aborted signal', () => {
+    const h = harness({ signal: AbortSignal.abort() });
     expect(h.hasPromptListener()).toBe(false);
     expect(h.hasDecisionListener()).toBe(false);
     expect(h.hasCurrencyListener()).toBe(false);
@@ -704,6 +722,8 @@ describe('daemon controller: in-flight and racing correlation', () => {
     h.resolveCancel();
     await cancel;
     h.emitPrompt({ promptId: 'pA', outcome: 'cancelled' });
+    // The first cancel settled on its own turn's terminal event.
+    expect(opsOf(h.controller, 'cancel')[0]?.state).toBe('established');
     const b = h.controller.submit(input);
     h.admitSubmit('pB');
     await b;
@@ -711,6 +731,7 @@ describe('daemon controller: in-flight and racing correlation', () => {
     h.resolveCancel();
     await cancel2;
     h.emitPrompt({ promptId: 'pB', outcome: 'cancelled' });
+    expect(opsOf(h.controller, 'cancel')[0]?.state).toBe('established');
     deferredA.resolve('accepted');
     const resultA = await a;
     expect(resultA.outcome).toBe('established');
@@ -856,5 +877,53 @@ describe('daemon controller: in-flight and racing correlation', () => {
     h.resolveQuestion();
     await first;
     expect(opsOf(h.controller, 'question')).toHaveLength(1);
+  });
+
+  it('seeds approval currency for requests live at construction', async () => {
+    const h = harness({
+      liveApprovalRequestIds: ['r1'],
+      pendingApprovals: [{ id: 'r1', status: 'pending' }],
+    });
+    const pending = h.controller.respondApproval('r1', 'allow');
+    h.resolvePermission();
+    await pending;
+    h.emitDecision({ requestId: 'r1', applied: true });
+    expect(opsOf(h.controller, 'approval')[0]?.state).toBe('established');
+  });
+
+  it('a decision for one request does not settle another', async () => {
+    const h = harness();
+    h.emitCurrency('r1', true);
+    h.emitCurrency('r2', true);
+    const a = h.controller.respondApproval('r1', 'allow');
+    h.resolvePermission();
+    await a;
+    const b = h.controller.respondApproval('r2', 'allow');
+    h.resolvePermission();
+    await b;
+    h.emitDecision({ requestId: 'r1', applied: true });
+    const ops = opsOf(h.controller, 'approval');
+    expect(ops.find((o) => o.target.requestId === 'r1')?.state).toBe(
+      'established',
+    );
+    expect(ops.find((o) => o.target.requestId === 'r2')?.state).toBe(
+      'unsettled',
+    );
+  });
+
+  it('a finished prompt is evicted from the cancel queue', async () => {
+    const h = harness();
+    const a = h.controller.submit(input);
+    h.admitSubmit('pA');
+    await a;
+    h.emitPrompt({ promptId: 'pA', outcome: 'completed' });
+    const b = h.controller.submit(input);
+    h.admitSubmit('pB');
+    await b;
+    const cancel = h.controller.cancel();
+    h.resolveCancel();
+    await cancel;
+    h.emitPrompt({ promptId: 'pB', outcome: 'cancelled' });
+    expect(opsOf(h.controller, 'cancel')[0]?.state).toBe('established');
   });
 });

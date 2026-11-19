@@ -105,9 +105,17 @@ export interface DaemonChatControllerDeps {
   ): () => void;
   // Currency of approval requests: live when a request arrives, not-live only
   // when it is superseded or cancelled — never merely because it was answered.
+  // The subscription must replay the current live set to a new listener at
+  // subscribe time; alternatively (or additionally) the binding hook seeds the
+  // requests already live at construction via liveApprovalRequestIds, so a
+  // request that arrived before the controller mounted is not read as
+  // superseded. Seed ids are the live (not-superseded) requests, not merely the
+  // members of pendingApprovals (superseded approvals stay listed until
+  // confirmed).
   subscribeApprovalCurrency(
     listener: (requestId: string, live: boolean) => void,
   ): () => void;
+  readonly liveApprovalRequestIds?: readonly string[];
 
   // The phase to report when no operation holds it open. The binding hook
   // populates it from the session's settled state (e.g. a failed session).
@@ -274,15 +282,28 @@ export function createDaemonChatController(
     (requestId, live) => intents.setApprovalRequestLive(requestId, live),
   );
 
-  deps.signal?.addEventListener(
-    'abort',
-    () => {
-      unsubscribePromptSettlement();
-      unsubscribeDecisionSettlement();
-      unsubscribeApprovalCurrency();
-    },
-    { once: true },
-  );
+  // Seed requests already live at construction (e.g. a permission outstanding
+  // across a reload), so they are not read as superseded before any currency
+  // event is delivered.
+  for (const requestId of deps.liveApprovalRequestIds ?? []) {
+    intents.setApprovalRequestLive(requestId, true);
+  }
+
+  const releaseSubscriptions = (): void => {
+    unsubscribePromptSettlement();
+    unsubscribeDecisionSettlement();
+    unsubscribeApprovalCurrency();
+  };
+  if (deps.signal?.aborted) {
+    // An already-aborted signal never fires its abort listener (e.g. a
+    // StrictMode mount after a memoised controller's cleanup ran), so release
+    // synchronously instead of leaking the listeners for the provider's life.
+    releaseSubscriptions();
+  } else {
+    deps.signal?.addEventListener('abort', releaseSubscriptions, {
+      once: true,
+    });
+  }
 
   const target = (extra?: Partial<IntentTarget>): IntentTarget => ({
     sessionId: deps.sessionId,
