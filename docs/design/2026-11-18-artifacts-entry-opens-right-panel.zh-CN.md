@@ -104,8 +104,10 @@ environmentPanelItems.includes('artifacts') && connection.sessionId`，其
   `artifactPanelOpen ? closeArtifactPanel() : openArtifactsListPanel(sessionId)`。
 - 去掉 `environmentPanelItems.includes('artifacts')` 门控条件；入口现在依赖右侧
   面板而非环境面板。保留
-  `artifactsHeaderItemVisible && mainView === 'chat' && connection.sessionId`；
-  计数为 0 时按钮仍隐藏。
+  `artifactsHeaderItemVisible && mainView === 'chat' && connection.sessionId`。
+  按钮在 `artifactCount > 0` 时渲染；或右面板打开且产物列表 tab 为激活 tab
+  （`artifactsTabActive`，即 `activeArtifactPanelTabId === 'artifacts:<sessionId>'`）
+  时渲染，使恢复出的零产物产物 tab 保留关闭入口；零产物且无关 tab 打开时不出现。
 - `ChatContextHeader.tsx`：给产物按钮加 `aria-pressed={rightPanelOpen}`
   （`rightPanelOpen` 已是 `artifactPanelOpen`）。由于右侧开关在打开时隐藏，面板
   打开后产物按钮就是头部可见的开/关入口。

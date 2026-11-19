@@ -120,8 +120,12 @@ string) => void` prop wired to `openArtifactPanel` at the call site.
   `artifactPanelOpen ? closeArtifactPanel() : openArtifactsListPanel(sessionId)`.
 - Drop the `environmentPanelItems.includes('artifacts')` gate condition; the entry
   now depends on the right panel, not the environment panel. Keep
-  `artifactsHeaderItemVisible && mainView === 'chat' && connection.sessionId`;
-  the button still hides when the count is 0.
+  `artifactsHeaderItemVisible && mainView === 'chat' && connection.sessionId`.
+  The button renders when `artifactCount > 0`, or when the right panel is open
+  AND the artifacts list tab is the active tab (`artifactsTabActive`, i.e.
+  `activeArtifactPanelTabId === 'artifacts:<sessionId>'`) so a restored
+  zero-artifact artifacts tab keeps its close affordance; it never appears for
+  unrelated open tabs at zero artifacts.
 - `ChatContextHeader.tsx`: give the artifacts button
   `aria-pressed={rightPanelOpen}` (`rightPanelOpen` is already
   `artifactPanelOpen`). Because the right-panel toggle hides while open, the

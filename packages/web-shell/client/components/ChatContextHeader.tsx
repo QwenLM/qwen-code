@@ -53,6 +53,12 @@ interface ChatContextHeaderProps {
   artifactCount?: number;
   /** Toggles the right panel's artifacts list tab; hidden when omitted. */
   onOpenArtifacts?: () => void;
+  /**
+   * Whether the artifacts list tab is the active right-panel tab. With zero
+   * artifacts the entry still renders as the close affordance only in that
+   * case, not for unrelated open tabs.
+   */
+  artifactsTabActive?: boolean;
   /** Shows the Local Control QR entry; hidden when omitted. */
   onOpenLocalControlSettings?: () => void;
 }
@@ -75,6 +81,7 @@ export function ChatContextHeader({
   onOpenContextUsage,
   artifactCount,
   onOpenArtifacts,
+  artifactsTabActive,
   onOpenLocalControlSettings,
 }: ChatContextHeaderProps) {
   const { t } = useI18n();
@@ -189,7 +196,7 @@ export function ChatContextHeader({
         )}
         {onOpenArtifacts &&
           artifactCount != null &&
-          (artifactCount > 0 || rightPanelOpen) && (
+          (artifactCount > 0 || (rightPanelOpen && artifactsTabActive)) && (
             <button
               type="button"
               className={`${styles.action} ${styles.artifactAction}`}

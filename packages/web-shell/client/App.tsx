@@ -23513,6 +23513,8 @@ export function App({
   // requires both props, but the custom renderChatHeader contract does not.
   // The entry toggles the right panel's artifacts list tab, independent of the
   // environment panel.
+  const artifactsTabActive =
+    activeArtifactPanelTabId === `artifacts:${connection.sessionId}`;
   const artifactsHeaderEntry =
     artifactsHeaderItemVisible && mainView === 'chat' && connection.sessionId
       ? {
@@ -23521,6 +23523,7 @@ export function App({
           // hook retires the hint when authoritative data arrives.
           artifactCount:
             artifacts.length > 0 ? artifacts.length : (artifactCountHint ?? 0),
+          artifactsTabActive,
           onOpenArtifacts: () => {
             if (artifactPanelOpen) {
               closeArtifactPanel();

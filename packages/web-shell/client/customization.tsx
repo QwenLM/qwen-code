@@ -268,8 +268,10 @@ export interface ChatHeaderRenderInfo {
   onOpenContextUsage?: () => void;
   /**
    * Number of session artifacts. Published together with `onOpenArtifacts`
-   * only when the artifacts list tab can actually be opened, so a count never
-   * appears without a way to act on it.
+   * only when the artifacts list tab can actually be opened or closed, so a
+   * count never appears without a way to act on it: either there are artifacts
+   * to reveal, or the artifacts list tab is the active right-panel tab and the
+   * entry serves as its close affordance.
    */
   artifactCount?: number;
   /**
@@ -277,6 +279,12 @@ export interface ChatHeaderRenderInfo {
    * reveals the session's artifacts; clicking again closes the right panel.
    */
   onOpenArtifacts?: () => void;
+  /**
+   * Whether the artifacts list tab is the active right-panel tab. With zero
+   * artifacts the entry renders only in that case (as the close affordance),
+   * not while unrelated right-panel tabs are open.
+   */
+  artifactsTabActive?: boolean;
   /** Opens Settings deep-linked to Local Control (Daemon category). */
   onOpenLocalControlSettings?: () => void;
 }
