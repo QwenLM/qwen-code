@@ -7,15 +7,17 @@
 import type { Application, Request, Response } from 'express';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
+import { resolveModelId } from '@qwen-code/qwen-code-core/utils/modelId.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   redactMcpServersSetting,
   restoreRedactedMcpServersSetting,
 } from '../../config/mcp-server-secrets.js';
-import type {
-  SettingEnumOption,
-  SettingsType,
-  SettingsValue,
+import {
+  getSettingsSchema,
+  type SettingEnumOption,
+  type SettingsType,
+  type SettingsValue,
 } from '../../config/settingsSchema.js';
 import {
   getDialogSettingKeys,
@@ -39,6 +41,10 @@ import {
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import {
+  WorkspaceSettingsPartialPersistError,
+  type WorkspaceSettingsWrite,
+} from '../workspace-service/types.js';
 import {
   ACP_ROUTE_ID_PREFIX,
   parseAcpModelOption,
@@ -82,10 +88,12 @@ const OUTPUT_LANGUAGE_OPTIONS = SUPPORTED_LANGUAGES.map(
   }),
 );
 
-// `voiceModel`, `imageModel`, and `advisorModel` are `showInDialog: false` (so
-// not in the dialog allowlist), but the Web Shell settings panel still renders
-// their rows and needs to read + persist them; for `voiceModel` the daemon
-// `/voice/stream` then reads it back via `loadSettings`.
+// `voiceModel`, `imageModel`, `advisorModel`, and `visionBridgeTimeoutMs` are
+// `showInDialog: false` (so not in the dialog allowlist), but the Web Shell
+// settings panel still renders their rows and needs to read + persist them
+// (`visionBridgeTimeoutMs` is also written by Web Shell's
+// `/model --vision --timeout`); for `voiceModel` the daemon `/voice/stream`
+// then reads it back via `loadSettings`.
 const WEB_SHELL_SETTINGS = new Set([
   'ui.allowedApprovalModes',
   'ui.compactMode',
@@ -93,6 +101,7 @@ const WEB_SHELL_SETTINGS = new Set([
   'voiceModel',
   'imageModel',
   'advisorModel',
+  'visionBridgeTimeoutMs',
   'mcpServers',
   'worktree.defaultForNewSessions',
 ]);
@@ -833,6 +842,16 @@ export function registerWorkspaceSettingsRoutes(
   );
 }
 
+function isVisionModelSelector(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  try {
+    const modelId = resolveModelId(value)?.modelId;
+    return modelId !== undefined && !/(?:^|\s)--/.test(modelId);
+  } catch {
+    return false;
+  }
+}
+
 export function registerWorkspaceQualifiedSettingsRoutes(
   app: Application,
   deps: Pick<
@@ -841,6 +860,11 @@ export function registerWorkspaceQualifiedSettingsRoutes(
   > & {
     workspaceRegistry: WorkspaceRegistry;
     invalidateServeFeaturesCache: () => void;
+    persistSettings?: (
+      workspace: string,
+      writes: WorkspaceSettingsWrite[],
+      assertGenerationOpen: () => void,
+    ) => Promise<void>;
   },
 ): void {
   const allowedKeys = getAllowedKeys(false);
@@ -1105,6 +1129,91 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         scope,
         value: publicValue,
         requiresRestart: def.requiresRestart || imageSyncFailed,
+      });
+    },
+  );
+
+  const { persistSettings } = deps;
+  if (!persistSettings) return;
+
+  app.post(
+    '/workspaces/:workspace/settings/vision-bridge',
+    deps.mutate({ strict: true }),
+    async (req: Request, res: Response) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const { model, timeoutMs } = deps.safeBody(req);
+      const schema = getSettingsSchema();
+      const modelError = isVisionModelSelector(model)
+        ? validateSettingValue(schema.visionModel, model)
+        : 'Expected a vision model selector';
+      const validationError =
+        modelError ??
+        validateSettingValue(schema.visionBridgeTimeoutMs, timeoutMs);
+      if (validationError) {
+        res.status(400).json({ error: validationError, code: 'invalid_value' });
+        return;
+      }
+      const clientId = parseAndValidateWorkspaceClientId(
+        req,
+        res,
+        runtime.bridge,
+      );
+      if (clientId === null) return;
+
+      const scope = SettingScope.Workspace;
+      const assertGenerationOpen = () => runtime.generationGuard?.assertOpen();
+      const writes = [
+        { scope, key: 'visionModel', value: model },
+        { scope, key: 'visionBridgeTimeoutMs', value: timeoutMs },
+      ];
+      try {
+        await persistSettings(
+          runtime.workspaceCwd,
+          writes,
+          assertGenerationOpen,
+        );
+        assertGenerationOpen();
+      } catch (err) {
+        const cause =
+          err instanceof WorkspaceSettingsPartialPersistError ? err.cause : err;
+        if (sendGenerationClosedError(res, cause)) return;
+        writeStderrLine(
+          `qwen serve: POST /workspaces/:workspace/settings/vision-bridge persist error (workspace=${runtime.workspaceCwd}): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Failed to persist vision bridge settings',
+          code: 'persist_error',
+        });
+        return;
+      }
+
+      deps.invalidateServeFeaturesCache();
+      for (const { key, value } of writes) {
+        runtime.bridge.publishWorkspaceEvent({
+          type: 'settings_changed',
+          data: {
+            key,
+            value:
+              key === 'visionModel' && typeof value === 'string'
+                ? publicAuxModelSelectorValue(value)
+                : value,
+            scope: 'workspace',
+          },
+          ...(clientId ? { originatorClientId: clientId } : {}),
+        });
+      }
+      res.status(200).json({
+        key: 'visionBridgeTimeoutMs',
+        scope: 'workspace',
+        value: timeoutMs,
+        requiresRestart: schema.visionBridgeTimeoutMs.requiresRestart,
       });
     },
   );

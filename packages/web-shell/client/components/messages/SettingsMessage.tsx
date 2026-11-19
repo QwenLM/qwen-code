@@ -1365,13 +1365,13 @@ export function SettingsMessage({
                           }
 
                           if (
-                            item.setting.key === LANGUAGE_SETTING_KEY &&
+                            (item.setting.key === LANGUAGE_SETTING_KEY ||
+                              item.setting.key === 'visionBridgeTimeoutMs') &&
                             scope === 'workspace' &&
                             !workspaceSettingsWritable
                           ) {
-                            // `/language ui --project` is refused in a
-                            // standalone session, so a workspace row here
-                            // could only fail after the user picked a value.
+                            // Standalone sessions can edit these settings at
+                            // user scope only.
                             return null;
                           }
 
