@@ -6410,6 +6410,35 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(targetedGates).toContain('is a semantic merge conflict');
     expect(targetedGates).toContain('`expected 112 to be 104`');
 
+    const webShellPath = '.qwen/skills/verify-pr/references/web-shell.md';
+    if (flat.includes('references/web-shell.md') || existsSync(webShellPath)) {
+      expect(flat).toContain('references/web-shell.md');
+      expect(flat).toContain(
+        "Verify the model's reply from backend assistant output",
+      );
+      expect(flat).toContain(
+        'Confirm turn completion from the backend terminal state for the prompt',
+      );
+      const webShell = readFileSync(webShellPath, 'utf8').replace(/\s+/g, ' ');
+      expect(webShell).toContain("page.route('**/capabilities'");
+      expect(webShell).toContain(
+        'Verify that no stale Finished badge appears for Home.',
+      );
+      expect(webShell).toContain(
+        '`storedKey: true`, `keyConfigured: true`, and `enabled: false`',
+      );
+      expect(webShell).toContain('Use the same isolated `QWEN_HOME`');
+      expect(webShell).toContain('qwen serve --channel my-plugin-test');
+      expect(webShell).toContain(
+        'the channel session appears in the intended workspace and that the reply reaches the sender',
+      );
+      expect(webShell).toContain('GET /session/<sessionId>/turns/<promptId>');
+      expect(webShell).toContain(
+        'Require the response to report `state: completed` for that prompt in that session.',
+      );
+      expect(webShell).toContain('`context.sessionId` and `request.model`');
+    }
+
     // The Android recipe lives in a reference file the restored .qwen tree
     // carries, so the pointer must resolve.
     expect(flat).toContain('references/android.md');

@@ -582,6 +582,17 @@ function renderChatEditorInto(
   });
 }
 
+function touchComposer() {
+  composerCoreState.mobileComposer = {
+    textareaRef: createRef<HTMLTextAreaElement>(),
+    expandedTextareaRef: createRef<HTMLTextAreaElement>(),
+    value: '',
+    onChange: vi.fn(),
+    onBlur: vi.fn(),
+    placeholder: 'Ask anything',
+  } satisfies MobileComposerBackend;
+}
+
 function renderChatEditor(props: ChatEditorRenderProps) {
   const container = document.createElement('div');
   container.dataset.webShellRoot = '';
@@ -688,6 +699,33 @@ describe('ChatEditor simple composer', () => {
     expect(
       compact.querySelector('[data-web-shell-composer-editor]'),
     ).not.toBeNull();
+  });
+
+  it('requests editor focus after expanding and collapsing the mobile composer', () => {
+    touchComposer();
+    const container = renderChatEditor({ customization: simple });
+    const composer = container.querySelector('[data-web-shell-composer]')!;
+    expect(composer.getAttribute('data-web-shell-composer-variant')).toBe(
+      'simple',
+    );
+
+    for (const [action, variant] of [
+      ['expand', 'default'],
+      ['collapse', 'simple'],
+    ]) {
+      const toggle = composer.querySelector<HTMLButtonElement>(
+        `[data-web-shell-composer-${action}]`,
+      )!;
+      composerCoreState.focus.mockClear();
+      act(() => toggle.click());
+      expect(composer.getAttribute('data-web-shell-composer-variant')).toBe(
+        variant,
+      );
+      expect(
+        composerCoreState.focus,
+        `focus after ${action}`,
+      ).toHaveBeenCalled();
+    }
   });
 
   it('preserves the editor mount when switching between variants', () => {
@@ -1167,17 +1205,6 @@ describe('ChatEditor add menu (+)', () => {
     });
     expect(trigger(container)).toBeNull();
   });
-
-  function touchComposer() {
-    composerCoreState.mobileComposer = {
-      textareaRef: createRef<HTMLTextAreaElement>(),
-      expandedTextareaRef: createRef<HTMLTextAreaElement>(),
-      value: '',
-      onChange: vi.fn(),
-      onBlur: vi.fn(),
-      placeholder: 'Ask anything',
-    } satisfies MobileComposerBackend;
-  }
 
   it('yields the touch commands-only entry to the host too', () => {
     touchComposer();

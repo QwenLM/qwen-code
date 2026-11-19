@@ -122,6 +122,12 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.label.visionModel': 'Vision Model',
   'settings.description.visionModel':
     'Image-capable model used as the vision bridge. Leave empty to auto-select.',
+  // `/model --vision --timeout` writes this setting; kept here with the
+  // settings strings so the transcript export drops them.
+  'model.setVisionTimeout': 'Set Vision Bridge Timeout',
+  'model.invalidOption': (v) => `Invalid /model option "${v?.option ?? ''}".`,
+  'model.invalidVisionTimeout': (v) =>
+    `Invalid --timeout value "${v?.value ?? ''}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.`,
 };
 
 export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
@@ -332,6 +338,13 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.visionModel': '视觉模型',
   'settings.description.visionModel':
     '用于视觉桥接的图像能力模型。留空则自动选择。',
+  'model.setVisionTimeout': '设置视觉桥接超时',
+  'model.invalidOption': (v) => `无效的 /model 选项“${v?.option ?? ''}”。`,
+  'model.invalidVisionTimeout': (v) =>
+    `无效的 --timeout 值 "${v?.value ?? ''}"。请使用正整数秒数，例如 60、60s 或 90000ms。`,
+  'settings.label.visionBridgeTimeoutMs': '视觉桥接超时（毫秒）',
+  'settings.description.visionBridgeTimeoutMs':
+    '视觉桥接图片转写调用的单次超时（毫秒，正整数，最大 2147483647）。留空使用内置的 30 秒。视觉端点较慢或经过代理时可调大。也可用 /model --vision --timeout <秒数> 设置。',
   'settings.label.modelFallbacks': '模型回退',
   'settings.description.modelFallbacks':
     '主模型遇到容量错误（429/503/529）时按序尝试的回退模型 ID 列表（逗号分隔，最多 3 个）。例如“qwen-plus,qwen-turbo”。可用 CLI --fallback-model 设置。',
@@ -487,6 +500,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.experimental.generatedUi': 'Generated UI',
   'settings.description.experimental.generatedUi':
     'Показывать интерактивные виды из встроенного Generated UI в поддерживаемых локальных сессиях, например Web Shell. Включено по умолчанию. Перезапустите владеющую сессию, чтобы применить изменения.',
+  'settings.label.experimental.mods': 'Mods (экспериментально)',
+  'settings.description.experimental.mods':
+    'Включить экспериментальные Mods из включённых расширений в доверенных локальных терминальных, headless и ACP сессиях. Требуется перезапуск.',
 
   'settings.models.editWindow': 'Изменить окно контекста',
   'settings.models.windowHint':
@@ -702,6 +718,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.fastModel': 'Быстрая модель',
   'settings.description.fastModel':
     'Модель для подсказок ввода и спекулятивного исполнения. Оставьте пустым, чтобы использовать основную. Более маленькая/быстрая модель (например qwen3-coder-flash) снижает задержку и стоимость.',
+  'settings.label.visionBridgeTimeoutMs': 'Тайм-аут Vision Bridge (мс)',
+  'settings.description.visionBridgeTimeoutMs':
+    'Тайм-аут одной попытки в миллисекундах для вызова транскрипции изображений vision bridge (положительное целое до 2147483647). Без значения используются встроенные 30 с. Увеличьте для медленных или проксируемых vision-эндпоинтов. Задаётся через /model --vision --timeout <секунды>.',
   'settings.label.modelFallbacks': 'Резервные модели',
   'settings.description.modelFallbacks':
     'Список ID резервных моделей (через запятую, до 3), которые пробуются по порядку при ошибках ёмкости основной (429/503/529). Например «qwen-plus,qwen-turbo». Можно задать CLI --fallback-model.',
