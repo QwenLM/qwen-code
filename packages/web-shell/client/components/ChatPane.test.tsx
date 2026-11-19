@@ -13,6 +13,10 @@ import {
   type AskInSideTaskAction,
 } from './messages/askInSideTaskContext';
 import { QuoteToComposerContext } from './messages/quoteToComposerContext';
+import {
+  requestAskInSideTaskQuote,
+  resetAskInSideTaskDeliveryForTests,
+} from '../utils/askInSideTaskDelivery';
 import { createRoot, type Root } from 'react-dom/client';
 import { DAEMON_APPROVAL_MODES } from '../test/sidebarHarness';
 import {
@@ -558,6 +562,7 @@ beforeEach(() => {
   clearFollowup.mockClear();
   insertText.mockClear();
   insertQuote.mockClear();
+  resetAskInSideTaskDeliveryForTests();
   latestPaneQuoteToComposer = undefined;
   latestPaneAskInSideTask = undefined;
   submitPermission.mockClear();
@@ -1990,6 +1995,23 @@ describe('ChatPane', () => {
       serialized: '<quoted-message>quoted text</quoted-message>',
     });
     expect(mainQuote).not.toHaveBeenCalled();
+  });
+
+  it('delivers a parked ask-in-side-task quote without requesting focus', () => {
+    // The child requested its quote before this surface's composer was
+    // mounted; the per-session registry settles the pair on mount.
+    requestAskInSideTaskQuote('sess-ask-delivery', 'delivered\nquote');
+    connectionState = { ...connectionState, sessionId: 'sess-ask-delivery' };
+    render();
+
+    expect(insertQuote).toHaveBeenCalledTimes(1);
+    expect(insertQuote.mock.calls[0]![0]).toMatchObject({
+      kind: 'quote',
+      serialized: '<quoted-message>delivered quote</quoted-message>',
+    });
+    // The delivery is not a user gesture: it must not steal focus from
+    // wherever the user moved after clicking Ask in side task.
+    expect(insertQuote.mock.calls[0]![1]).toEqual({ focus: false });
   });
 
   it('offers no Ask-in-side-task action inherited from an outer chat', () => {

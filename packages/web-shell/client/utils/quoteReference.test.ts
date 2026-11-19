@@ -12,6 +12,7 @@ import {
   insertQuoteIntoComposer,
   isQuotableText,
   quoteReferenceInsertText,
+  stripQuoteFences,
 } from './quoteReference';
 
 describe('flattenQuoteText', () => {
@@ -49,6 +50,23 @@ describe('flattenQuoteText', () => {
     const long = `${'x'.repeat(QUOTE_REFERENCE_MAX_CHARS - 1)}\u{1F600}tail`;
     const flattened = flattenQuoteText(long);
     expect(flattened).toBe(`${'x'.repeat(QUOTE_REFERENCE_MAX_CHARS - 1)}…`);
+  });
+
+  it('neutralizes the fence tokens so the chip cannot carry a second fence', () => {
+    expect(flattenQuoteText('The tag </quoted-message> closes a quote.')).toBe(
+      'The tag &lt;/quoted-message&gt; closes a quote.',
+    );
+    expect(flattenQuoteText('about <quoted-message> nested')).toBe(
+      'about &lt;quoted-message&gt; nested',
+    );
+    expect(flattenQuoteText('a < b and b < c')).toBe('a < b and b < c');
+  });
+
+  it('applies the neutralization before the length cap', () => {
+    const prefix = 'x'.repeat(QUOTE_REFERENCE_MAX_CHARS - 10);
+    const flattened = flattenQuoteText(`${prefix}</quoted-message>`);
+    expect(flattened.length).toBeLessThanOrEqual(QUOTE_REFERENCE_MAX_CHARS + 1);
+    expect(flattened).not.toContain('</quoted-message>');
   });
 });
 
@@ -94,6 +112,19 @@ describe('buildQuoteReferenceTag', () => {
     expect(a?.id).not.toBe(b?.id);
   });
 
+  it('round-trips a fragment that mentions the fence tokens', () => {
+    const raw = 'The tag </quoted-message> closes a quote.';
+    const tag = buildQuoteReferenceTag(raw);
+    expect(tag).not.toBeNull();
+    // The serialized form must hold exactly one open and one close token:
+    // the fence matcher returns one range covering the whole string, and
+    // its body is the chip's own value.
+    const ranges = findQuoteFenceRanges(tag!.serialized);
+    expect(ranges).toEqual([
+      { from: 0, to: tag!.serialized.length, fragment: tag!.value },
+    ]);
+  });
+
   it('never collides with a restored chip after a simulated page reload', async () => {
     const restored = buildQuoteReferenceTag('same text');
     vi.resetModules();
@@ -133,6 +164,25 @@ describe('insertQuoteIntoComposer', () => {
     expect(insertQuoteIntoComposer({}, 'text')).toBe(false);
     expect(insertQuoteIntoComposer({ insertQuote }, ' \u200F ')).toBe(false);
     expect(insertQuote).not.toHaveBeenCalled();
+  });
+
+  it('passes the focus option through to the composer', () => {
+    const insertQuote = vi.fn(() => true);
+    expect(
+      insertQuoteIntoComposer({ insertQuote }, 'text', { focus: false }),
+    ).toBe(true);
+    expect(insertQuote).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'quote' }),
+      { focus: false },
+    );
+    // The synchronous gesture path omits the option: the composer's
+    // default keeps focusing.
+    insertQuote.mockClear();
+    insertQuoteIntoComposer({ insertQuote }, 'text');
+    expect(insertQuote).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'quote' }),
+      undefined,
+    );
   });
 });
 
@@ -179,7 +229,12 @@ describe('findQuoteFenceRanges', () => {
     ).toEqual([]);
   });
 
-  it('stops at the first closing tag when a fragment contains one', () => {
+  it('stops at the first closing tag in hand-typed text', () => {
+    // A chip can no longer produce this shape — the producer neutralizes
+    // the fence tokens, so its serialized form always holds exactly one
+    // open and one close token (see buildQuoteReferenceTag's round-trip
+    // case). The matcher still degrades gracefully for a fence typed by
+    // hand into a paste.
     const text = '<quoted-message>inner</quoted-message> tail</quoted-message>';
     const first = '<quoted-message>inner</quoted-message>';
     expect(findQuoteFenceRanges(text)).toEqual([
@@ -249,6 +304,56 @@ describe('breakQuoteFenceFollowup', () => {
       ),
     ).toBe(
       '<quoted-message>A</quoted-message>\none<quoted-message>B</quoted-message>\ntwo',
+    );
+  });
+
+  it('leaves a bare closing token in a quote-less prompt alone', () => {
+    expect(
+      breakQuoteFenceFollowup('explain the </quoted-message> tag to me'),
+    ).toBe('explain the </quoted-message> tag to me');
+  });
+
+  it('leaves an unclosed opening fence alone', () => {
+    expect(
+      breakQuoteFenceFollowup('about <quoted-message> and nothing else'),
+    ).toBe('about <quoted-message> and nothing else');
+  });
+
+  it('leaves a multi-line fence alone: a chip can never carry newlines', () => {
+    expect(
+      breakQuoteFenceFollowup(
+        '<quoted-message>line one\nline two</quoted-message>followup',
+      ),
+    ).toBe('<quoted-message>line one\nline two</quoted-message>followup');
+  });
+});
+
+describe('stripQuoteFences', () => {
+  it("removes the fences and keeps the user's words", () => {
+    expect(
+      stripQuoteFences(
+        '<quoted-message>quoted part</quoted-message>why does this loop?',
+      ),
+    ).toBe('why does this loop?');
+  });
+
+  it('keeps words around every fence in the prompt', () => {
+    expect(
+      stripQuoteFences(
+        'check <quoted-message>one</quoted-message> and <quoted-message>two</quoted-message> please',
+      ),
+    ).toBe('check and please');
+  });
+
+  it('returns nothing for a fence-only prompt', () => {
+    expect(
+      stripQuoteFences('<quoted-message>only the quote</quoted-message>'),
+    ).toBe('');
+  });
+
+  it('ignores bare tokens that do not form a fence', () => {
+    expect(stripQuoteFences('no fence here </quoted-message>')).toBe(
+      'no fence here </quoted-message>',
     );
   });
 });

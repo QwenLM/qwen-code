@@ -20,9 +20,25 @@ const BIDI_CONTROL_RE = /\p{Bidi_Control}/gu;
  * flattened on purpose: an inline chip is a single editor range, and a
  * multi-line serialized form would leave ghost lines behind the chip, so
  * a quote is always one line.
+ *
+ * The fence's own tokens are entity-escaped here, before the length cap:
+ * an unescaped closing tag in the body would truncate the chip at the
+ * first re-parse (the fence matcher stops at the first closing tag), and
+ * an unescaped opening tag would let the body carry a second fence the
+ * annotation round trip cannot verify. Escaping keeps the mention readable
+ * in the chip, its tooltip and the sent prompt while the serialized form
+ * always holds exactly one open and one close token.
  */
+const QUOTE_FENCE_TOKEN_RE = /<\/?quoted-message>/g;
+const escapeQuoteFenceToken = (token: string): string =>
+  token.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
 export function flattenQuoteText(raw: string): string {
-  const cleaned = raw.replace(BIDI_CONTROL_RE, '').replace(/\s+/g, ' ').trim();
+  const cleaned = raw
+    .replace(BIDI_CONTROL_RE, '')
+    .replace(QUOTE_FENCE_TOKEN_RE, escapeQuoteFenceToken)
+    .replace(/\s+/g, ' ')
+    .trim();
   if (cleaned.length <= QUOTE_REFERENCE_MAX_CHARS) return cleaned;
   let end = QUOTE_REFERENCE_MAX_CHARS;
   // Never cut a surrogate pair in half: a lone high surrogate would end up
@@ -85,9 +101,15 @@ export function quoteReferenceInsertText(flattened: string): string {
 // A click in the composer places the caret before the chip's trailing break,
 // so a follow-up typed on the fence's line glues to the closing tag once the
 // trailing break is trimmed at submit; re-break such a glued follow-up where
-// every send path converges, so it always starts on its own line.
+// every send path converges, so it always starts on its own line. Only a
+// complete chip fence (open + single-line body + close) is re-broken: a
+// prompt that merely mentions the closing token as plain text carries no
+// quote and must be sent untouched.
 export function breakQuoteFenceFollowup(text: string): string {
-  return text.replace(/<\/quoted-message>[ \t]*(?=\S)/g, '</quoted-message>\n');
+  return text.replace(
+    /<quoted-message>[^\n]+?<\/quoted-message>[ \t]*(?=\S)/g,
+    (fence) => `${fence.replace(/[ \t]+$/, '')}\n`,
+  );
 }
 
 function hashQuoteText(text: string): string {
@@ -130,22 +152,39 @@ export function buildQuoteReferenceTag(
   };
 }
 
+/**
+ * Strips complete quote fences from a prompt so text derived from it — a
+ * side task's first-prompt name — reads the user's words, not the chip's
+ * fence: a 200+ char quote in front of the question would otherwise
+ * swallow the whole name. A fence-only prompt strips to nothing and the
+ * caller leaves the session unnamed.
+ */
+export function stripQuoteFences(text: string): string {
+  return text.replace(QUOTE_FENCE_MATCH_RE, ' ').replace(/\s+/g, ' ').trim();
+}
+
 /** The part of the composer handle a quote insertion needs. */
 export interface QuoteComposerTarget {
-  insertQuote?(tag: WebShellComposerTag): boolean;
+  insertQuote?(
+    tag: WebShellComposerTag,
+    options?: { focus?: boolean },
+  ): boolean;
 }
 
 /**
  * The one quote-insertion policy both chat hosts (main chat and split-view
  * panes) share. Returns whether a chip was inserted; the composer itself
- * declines while disabled or in shell mode.
+ * declines while disabled or in shell mode. The `focus` option is passed
+ * through so the asynchronous ask-in-side-task delivery can insert without
+ * stealing focus from the control the user moved to.
  */
 export function insertQuoteIntoComposer(
   composer: QuoteComposerTarget | null | undefined,
   raw: string,
+  options?: { focus?: boolean },
 ): boolean {
   if (!composer?.insertQuote) return false;
   const tag = buildQuoteReferenceTag(raw);
   if (!tag) return false;
-  return composer.insertQuote(tag);
+  return composer.insertQuote(tag, options);
 }

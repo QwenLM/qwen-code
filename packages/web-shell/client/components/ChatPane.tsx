@@ -626,8 +626,13 @@ export function ChatPane({
   useEffect(() => {
     const sessionId = connection.sessionId;
     if (!sessionId) return;
-    registerAskInSideTaskInsert(sessionId, handleQuoteSelection);
-  }, [connection.sessionId, handleQuoteSelection]);
+    // The delivery is not a user gesture: it must not steal focus from
+    // wherever the user moved after clicking Ask in side task (the same
+    // rule the asynchronous upload completions follow).
+    registerAskInSideTaskInsert(sessionId, (text) =>
+      insertQuoteIntoComposer(editorRef.current, text, { focus: false }),
+    );
+  }, [connection.sessionId]);
   const transcriptViewportRef = useRef<MessageListHandle>(null);
   const {
     followupState,

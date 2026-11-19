@@ -28,6 +28,7 @@ import { ChatPane } from '../ChatPane';
 import { Button } from '../ui/button';
 import { Spinner } from '../ui/spinner';
 import { requestAskInSideTaskQuote } from '../../utils/askInSideTaskDelivery';
+import { stripQuoteFences } from '../../utils/quoteReference';
 import { useSessionCatalogController } from '../../session-catalog/session-catalog-hooks';
 
 interface SideTaskPanelProps {
@@ -302,7 +303,13 @@ function SideTaskSession({
   }, [connection.displayName, onTitleChange, tabId]);
   const nameFromFirstPrompt = useCallback(
     (text: string) => {
-      const nextTitle = Array.from(text.trim()).slice(0, 200).join('');
+      // The first prompt carries the delivered quote's fence in front of
+      // the user's words: name after the words, not the fence (a 200+ char
+      // quote would swallow the whole name), while the prompt itself is
+      // sent untouched.
+      const nextTitle = Array.from(stripQuoteFences(text))
+        .slice(0, 200)
+        .join('');
       if (!nextTitle) return;
       onTitleChange(tabId, nextTitle);
       void (async () => {

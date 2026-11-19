@@ -1043,9 +1043,16 @@ export interface EditorHandle extends WebShellComposerApi {
    * the user's next command on its own line after it, moves the caret
    * after it and scrolls it into view. Declines with `false` while the
    * composer is disabled, and in shell mode, where the draft runs as a
-   * shell command and the fence's `<`/`>` would become redirects.
+   * shell command and the fence's `<`/`>` would become redirects. The
+   * asynchronous ask-in-side-task delivery passes `{ focus: false }` so a
+   * quote arriving seconds after the click never steals focus or the
+   * viewport from the control the user moved to — the rule the end-placed
+   * `addTags` completions already follow.
    */
-  insertQuote?(tag: WebShellComposerTag): boolean;
+  insertQuote?(
+    tag: WebShellComposerTag,
+    options?: { focus?: boolean },
+  ): boolean;
 }
 
 // ---- Compartments (shared) ----
@@ -5248,7 +5255,7 @@ export function useComposerCore(
   );
 
   const insertQuote = useCallback(
-    (tag: WebShellComposerTag): boolean => {
+    (tag: WebShellComposerTag, options?: { focus?: boolean }): boolean => {
       if (disabledRef.current) return false;
       if (shellModeRef.current) {
         emitImageIngestionNotice('warning', t('composer.quote.shellMode'));
@@ -5262,6 +5269,12 @@ export function useComposerCore(
       }
       const view = viewRef.current;
       if (!view) return false;
+      // The synchronous gesture callers focus the composer; the
+      // asynchronous ask-in-side-task delivery opts out, so a quote that
+      // arrives seconds after the click never steals focus — or the
+      // viewport — from the control the user moved to (the rule the
+      // end-placed upload completions above already follow).
+      const focus = options?.focus !== false;
       const { doc } = view.state;
       const tagText = serializeComposerTag(tag);
       // Line breaks stay document text outside the chip range: the chip's
@@ -5282,9 +5295,9 @@ export function useComposerCore(
           tag: resolveComposerTagIcon(tag),
         }),
         selection: { anchor: doc.length + insert.length },
-        scrollIntoView: true,
+        scrollIntoView: focus,
       });
-      view.focus();
+      if (focus) view.focus();
       return true;
     },
     [

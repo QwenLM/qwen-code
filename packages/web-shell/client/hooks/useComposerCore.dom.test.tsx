@@ -3275,6 +3275,54 @@ describe('useComposerCore tags', () => {
       );
     });
 
+    it('still focuses the composer for a synchronous gesture (default)', async () => {
+      await mount();
+      const view = latest!.viewRef.current!;
+      const outside = container!.querySelector<HTMLInputElement>(
+        'input[data-testid="composer-surface-input"]',
+      )!;
+      outside.focus();
+      expect(document.activeElement).toBe(outside);
+
+      act(() => {
+        latest!.handle.insertQuote!(quoteTag);
+      });
+
+      expect(view.state.doc.toString()).toBe(
+        '<quoted-message>fragment</quoted-message>\n',
+      );
+      expect(document.activeElement).not.toBe(outside);
+    });
+
+    it("keeps the user's control focused for an asynchronous delivery ({ focus: false })", async () => {
+      await mount();
+      const view = latest!.viewRef.current!;
+      const dispatch = vi.spyOn(view, 'dispatch');
+      const outside = container!.querySelector<HTMLInputElement>(
+        'input[data-testid="composer-surface-input"]',
+      )!;
+      outside.focus();
+      expect(document.activeElement).toBe(outside);
+
+      // The ask-in-side-task handoff reaches insertQuote seconds after the
+      // click, once the child settles empty: nothing on that path is a
+      // user gesture, so it must not steal focus or the viewport from the
+      // control the user moved to while the child was provisioning.
+      let inserted = false;
+      act(() => {
+        inserted = latest!.handle.insertQuote!(quoteTag, { focus: false });
+      });
+
+      expect(inserted).toBe(true);
+      expect(view.state.doc.toString()).toBe(
+        '<quoted-message>fragment</quoted-message>\n',
+      );
+      expect(dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({ scrollIntoView: false }),
+      );
+      expect(document.activeElement).toBe(outside);
+    });
+
     it('sends the follow-up on its own line after a click back onto the fence line', async () => {
       const onSubmit = vi.fn();
       await mount({ onSubmit });
