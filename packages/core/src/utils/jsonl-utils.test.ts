@@ -621,30 +621,36 @@ describe('writeLine / writeLineSync / write', () => {
         return openSync(...args);
       });
     };
-    const trackDebugAppends = (logPath: string) => {
+    const trackDebugAppends = (
+      logPath: string,
+      beforeDebugAppend?: () => void,
+    ) => {
       const appendFile = fs.promises.appendFile.bind(fs.promises);
       const attempts: Array<Promise<boolean>> = [];
       const spy = vi.spyOn(fs.promises, 'appendFile').mockImplementation(((
         ...args: Parameters<typeof fs.promises.appendFile>
       ) => {
-        const attempt = appendFile(...args);
-        if (args[0] === logPath) {
-          attempts.push(
-            attempt.then(
-              () => true,
-              () => false,
-            ),
-          );
+        if (args[0] !== logPath) {
+          return appendFile(...args);
         }
+        beforeDebugAppend?.();
+        const attempt = appendFile(...args);
+        attempts.push(
+          attempt.then(
+            () => true,
+            () => false,
+          ),
+        );
         return attempt;
       }) as typeof fs.promises.appendFile);
       return { spy, attempts };
     };
     const settleDelivery = async (attempt: Promise<boolean>) => {
-      await attempt;
+      const delivered = await attempt;
       // The logger reports completion through another promise link; yield once
       // so its callback updates the dedupe state before the next append.
       await new Promise<void>((resolve) => setImmediate(resolve));
+      return delivered;
     };
 
     it.each([
@@ -789,6 +795,49 @@ describe('writeLine / writeLineSync / write', () => {
           expect(fs.readFileSync(file, 'utf8')).toBe(
             '{"partial":\n{"stage":"blocked"}\n\n' +
               '{"stage":"recovered"}\n\n{"stage":"deduplicated"}\n',
+          );
+        } finally {
+          appendSpy.mockRestore();
+          denySpy.mockRestore();
+        }
+      });
+    });
+
+    it('reports delivery when the debug directory recovers before the append', async () => {
+      const sessionId = `jsonl-tail-log-dir-recovery-${name}`;
+      await withDebugLog(sessionId, true, async () => {
+        const file = tmpFile('{"partial":');
+        const runtime = tmpPath('dir-recovery-runtime');
+        fs.writeFileSync(runtime, 'not a directory');
+        Storage.setRuntimeBaseDir(runtime);
+        const logPath = Storage.getDebugLogPath(sessionId);
+        let recovered = false;
+        const { spy: appendSpy, attempts } = trackDebugAppends(logPath, () => {
+          if (recovered) return;
+          recovered = true;
+          fs.unlinkSync(runtime);
+          fs.mkdirSync(path.dirname(logPath), { recursive: true });
+        });
+        const denySpy = denyTailProbe(
+          Object.assign(new Error('read denied'), { code: 'EACCES' }),
+        );
+
+        try {
+          await append(file, { stage: 'blocked' });
+          await vi.waitFor(() => {
+            expect(debugLogger.isDebugLoggingDegraded()).toBe(true);
+            expect(attempts).toHaveLength(1);
+          });
+          expect(await settleDelivery(attempts[0])).toBe(true);
+          expect(tailWarnings(logPath, file)).toHaveLength(1);
+
+          await append(file, { stage: 'deduplicated' });
+          await flushDebugSink(logPath, `dir-recovery-${name}`);
+          expect(attempts).toHaveLength(2);
+          expect(tailWarnings(logPath, file)).toHaveLength(1);
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"partial":\n{"stage":"blocked"}\n\n' +
+              '{"stage":"deduplicated"}\n',
           );
         } finally {
           appendSpy.mockRestore();

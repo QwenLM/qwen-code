@@ -39,7 +39,7 @@ export interface DebugLogger {
   ) => void;
 }
 
-let ensureDebugDirPromise: Promise<boolean> | null = null;
+let ensureDebugDirPromise: Promise<void> | null = null;
 let ensuredDebugDirPath: string | null = null;
 let hasWriteFailure = false;
 let globalSession: DebugLogSession | null = null;
@@ -81,21 +81,20 @@ export function getActiveDebugSessionLogPath(): string | null {
     : Storage.getDebugLogPath(activeSessionId);
 }
 
-function ensureDebugDirExists(): Promise<boolean> {
+function ensureDebugDirExists(): Promise<void> {
   const debugDirPath = Storage.getGlobalDebugDir();
   if (!ensureDebugDirPromise || ensuredDebugDirPath !== debugDirPath) {
     ensuredDebugDirPath = debugDirPath;
     ensureDebugDirPromise = fs
       .mkdir(debugDirPath, { recursive: true })
-      .then(() => true)
+      .then(() => undefined)
       .catch(() => {
         hasWriteFailure = true;
         ensureDebugDirPromise = null;
         ensuredDebugDirPath = null;
-        return false;
       });
   }
-  return ensureDebugDirPromise ?? Promise.resolve(true);
+  return ensureDebugDirPromise ?? Promise.resolve();
 }
 
 function formatArgs(args: unknown[]): string {
@@ -169,22 +168,17 @@ function writeLog(
     // degraded-mode UI. Kernel page-cache flush is sufficient here.
     // (JSONL session writes via writeLine/writeLineSync DO use
     // flush:true — those are the actual closure target.)
-    .then((dirReady) => {
-      // A failed mkdir means this line cannot reach the debug log. Report
-      // that before the doomed append so retry state is not held in flight.
-      if (!dirReady) reportDelivery(false);
-      return fs.appendFile(logFilePath, line, 'utf8').then(
-        () => {
-          if (dirReady) reportDelivery(true);
-        },
-        () => {
-          hasWriteFailure = true;
-          if (dirReady) reportDelivery(false);
-        },
-      );
-    })
+    .then(() => fs.appendFile(logFilePath, line, 'utf8'))
+    .then(
+      () => reportDelivery(true),
+      () => {
+        hasWriteFailure = true;
+        reportDelivery(false);
+      },
+    )
     .catch(() => {
       hasWriteFailure = true;
+      reportDelivery(false);
     });
 }
 
