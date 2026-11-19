@@ -966,6 +966,9 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.disconnect();
   });
 
+  // Same per-frame fsync fill as R3-4 and R2-1 above, so the disk latency that
+  // broke their flat 30s ceiling breaks this one too (#17834). No timer or
+  // network wait here, so a generous ceiling costs no fail-fast.
   it('evicts the least-recently-seen webhook, not the first-inserted (R1-20)', async (ctx) => {
     // Pin the ceiling: a dropped third argument must fail here, not in CI.
     expect(ctx.task.timeout).toBe(120_000);
