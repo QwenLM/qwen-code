@@ -153,21 +153,30 @@ clicked, using the list data the sidebar already holds.
   and never calls `loadSession`. For a defined projection with an empty
   apiHistory it counts exactly the set that projection delivers —
   `runtime.artifactSnapshot.artifacts` filtered by the shared restorable
-  predicate — and heals an existing sidecar to that count. Count and
-  delivery share one source: the projection's snapshot is built from the
-  active-segment side-record selection, which can be narrower than a
-  whole-transcript rebuild (an event parented to a non-tail metadata
-  record — the recorder writes titles and re-anchored sources with
-  `updateActiveTail: false` — is counted by a rebuild but delivered by
-  nobody), so counting the rebuild here would advertise artifacts the
-  cold open cannot show. A missing projection is not a restore candidate
-  (nothing downstream carries an artifactSnapshot for it). The projection
-  funnel pays no auxiliary read at all — the reader already indexed the
-  transcript. The load funnel's conversation-less seed goes through the
-  shared helper that owns the size probe, the auxiliary read, ownership,
-  the shape gate and the seed: the read is capped at the same 64 MiB as
-  the library mutation read with the same inclusive boundary (exactly
-  64 MiB seeds, above skips, a failed size probe skips). Sessions with a
+  predicate — and heals an existing sidecar to that count, subject to the
+  same authority gates as the load seed: a partial read
+  (`sourcesUnavailable`), a broken history chain (`historyGaps`), or a
+  damaged artifact journal (`artifactJournalWarnings`, which the reader
+  threads out of the rebuild even when no snapshot survives) must not
+  overwrite a correct count. One delivered-set definition spans all three
+  writers: the side-record selector includes every artifact record when
+  the transcript never held a conversation turn (every record is system
+  metadata), so the projection delivery, the load funnel's whole-
+  transcript rebuild and the recorder's registration stamp agree — a
+  non-tail-parented event (the recorder writes titles and re-anchored
+  sources with `updateActiveTail: false`) is delivered by every path, not
+  counted by one and delivered by nobody. A file holding conversation
+  records anywhere — even rewound off the active chain — keeps the
+  active-segment selection, which excludes the abandoned branch. A missing projection is not a restore
+  candidate (nothing downstream carries an artifactSnapshot for it). The
+  projection funnel pays no auxiliary read at all — the reader already
+  indexed the transcript. The load funnel's conversation-less seed goes
+  through the shared helper that owns the size probe, the auxiliary read,
+  ownership, the shape gate and the seed: the read is capped at the same
+  64 MiB as the library mutation read with the same inclusive boundary
+  (exactly 64 MiB seeds, above skips, a failed size probe skips); a
+  refusal withholds both the count and the restore payload's snapshot
+  (never deliver from a non-authoritative read). Sessions with a
   conversation keep the selective read's zero-extra-I/O contract (pinned
   by a read spy). Both funnels and the
   library guard share one seed method and one record-composition helper. The
@@ -362,11 +371,15 @@ clicked, using the list data the sidebar already holds.
   without a sidecar by both funnels, a missing projection paying no
   auxiliary read, the helper's empty-records and foreign-project guards, a
   partial read through the projection funnel refused via the threaded
-  incomplete-read flag (load funnel), the projection funnel counting its
-  own delivery (a non-tail-parented event counted by a whole-transcript
-  rebuild but delivered by nobody writes no sidecar; a stale sidecar heals
-  to the delivery; the restorable subset of the delivery is counted), the
-  projection funnel paying no auxiliary read on either branch, a
+  incomplete-read flag (both funnels), the projection funnel counting its
+  own delivery under the same authority gates (a damaged or refused
+  journal keeps the correct count; a partial read keeps it; a stale
+  sidecar heals to the delivery; the restorable subset is counted; an
+  equal count skips the write), one delivered-set definition across the
+  projection, the load rebuild and the removal recount for a non-tail-
+  parented journal (both funnels yield the same sidecar value; the
+  removal survivor count equals the projection delivery), the projection
+  funnel paying no auxiliary read on either branch, a
   generated_ui_state-only journal accepted as a legal library removal
   target, conversation sessions untouched by the projection read), in both
   active and archived states, from

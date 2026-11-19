@@ -124,17 +124,22 @@
   daemon/ACP 恢复漏斗经 `readRestoreProjection` 选择性读取、从不调用
   `loadSession`。对「投影定义且 apiHistory 为空」，它计数该投影实际交付的
   集合——`runtime.artifactSnapshot.artifacts` 经共享可恢复谓词过滤——并把
-  已有 sidecar 治愈到该计数。计数与交付同源：投影快照按活跃段侧记录选择
-  构建，可能比整份重建更窄（挂在非尾元数据记录下的事件——recorder 以
-  `updateActiveTail: false` 写标题与重锚 source——整份重建会计入、却没有
-  任何路径交付），在此计数整份重建等于展示冷打开拿不到的产物。投影缺失不是
-  恢复候选（下游没有任何路径为它携带 artifactSnapshot）。投影漏斗完全不
-  付出辅助读取——reader 已经索引过 transcript。load 漏斗的无对话播种走
-  共享助手，由它持有尺寸探测、辅助读取、归属校验、形状门与播种：读取与库
-  变更读取同样以 64 MiB 为上限、同样的包含边界（正好 64 MiB 播种、超过跳过、
-  尺寸探测失败跳过）。有对话的会话保持选择性读取的零额外 I/O 契约（由读取
-  spy 钉住）。两个漏斗与库守卫共用同一个播种方法和同一个记录组合助手。
-  播种还要求 journal
+  已有 sidecar 治愈到该计数，且受与 load 播种相同的权威门约束：部分读取
+  （`sourcesUnavailable`）、历史链断裂（`historyGaps`）、损坏的产物 journal
+  （`artifactJournalWarnings`——reader 从重建中穿出，即使没有快照存活）都
+  不得覆盖正确计数。三个写者共用一个交付集合定义：transcript 从未有过对话
+  轮次（每条记录都是 system 元数据）时，侧记录选择器纳入全部 artifact 记录，
+  于是投影交付、load 漏斗的整份重建、recorder 的注册盖章三者一致——挂非尾
+  元数据的事件（recorder 以 `updateActiveTail: false` 写标题与重锚 source）
+  被每条路径交付，而非一处计入、无人交付。文件中任何位置存在对话记录（即使
+  已 rewind 出活跃链）都保持活跃段选择，排除被弃分支。
+  投影缺失不是恢复候选（下游没有任何路径为它携带 artifactSnapshot）。投影
+  漏斗完全不付出辅助读取——reader 已经索引过 transcript。load 漏斗的无对话
+  播种走共享助手，由它持有尺寸探测、辅助读取、归属校验、形状门与播种：读取
+  与库变更读取同样以 64 MiB 为上限、同样的包含边界（正好 64 MiB 播种、超过
+  跳过、尺寸探测失败跳过）；拒绝同时扣住计数与恢复载荷的快照（绝不从非权威
+  读取交付）。有对话的会话保持选择性读取的零额外 I/O 契约（由读取 spy 钉住）。
+  两个漏斗与库守卫共用同一个播种方法和同一个记录组合助手。播种还要求 journal
   具备权威性：无历史链缺口（断链会把 artifact 事件孤儿化出活跃分支而少计），
   且无记录级损坏警告——与库变更守卫同一判定
   （`hasDisqualifyingArtifactJournalWarning`）；单产物级跳过仍被容忍。两处
@@ -285,10 +290,12 @@
   在被丢弃记录旁重建出消息的变体（分派按真正对话轮次）、没有任何恢复路径能
   打开的 artifact-only transcript 被两个漏斗都不写 sidecar、投影缺失不付出
   辅助读取、助手的空记录与外项目守卫、投影漏斗的部分读取经穿线的未完整读
-  标记被拒绝（load 漏斗）、投影漏斗计数自身交付（整份重建计入但无人交付的
-  非尾父事件不写 sidecar；陈旧 sidecar 治愈到交付；计数交付的可恢复子集）、
-  投影漏斗两个分支都不付出辅助读取、generated_ui_state-only journal 是合法
-  库删除目标、有对话会话不被投影读取触碰），active
+  标记被拒绝（两个漏斗）、投影漏斗在相同权威门下计数自身交付（损坏/拒绝
+  journal 保持正确计数；部分读取保持；陈旧 sidecar 治愈到交付；计数可恢复
+  子集；等计数跳写）、非尾父 journal 的投影/load 重建/删除重计共用一个交付
+  集合定义（两漏斗得到同一 sidecar 值；删除幸存者计数等于投影交付）、投影
+  漏斗两个分支都不付出辅助读取、generated_ui_state-only journal 是合法库
+  删除目标、有对话会话不被投影读取触碰），active
   与 archived 两态、event 与 snapshot（fork）记录、按冷启动可恢复集合计数
   （无快照 published file 定位符经 bridge/core 共享谓词排除、真正预览快照
   保留）；库删除更新（可恢复
