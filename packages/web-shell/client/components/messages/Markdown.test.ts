@@ -462,6 +462,35 @@ describe('markdown image fallback', () => {
     }
   });
 
+  it('carries the raw src for selection markdown copy outside document mode', () => {
+    const view = renderMd('![screenshot](/Users/foo/shot.png)');
+    try {
+      expect(
+        view
+          .querySelector('[class*="imageFallback"]')
+          ?.getAttribute('data-markdown-image-src'),
+      ).toBe('/Users/foo/shot.png');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('keeps percent-escapes in a failed remote URL', () => {
+    // Escapes are part of the URL's resource identity; only local paths decode.
+    const view = renderMd('![](https://example.invalid/a%2Fb.png)');
+    try {
+      const img = view.querySelector('img')!;
+      act(() => {
+        img.dispatchEvent(new Event('error'));
+      });
+      expect(view.querySelector('[class*="imageFallback"]')?.textContent).toBe(
+        'https://example.invalid/a%2Fb.png',
+      );
+    } finally {
+      cleanup(view);
+    }
+  });
+
   it('renders gate-failing local paths as text chips', () => {
     const view = renderMd('![shot](~/shots/shot.png)');
     try {
@@ -632,6 +661,11 @@ describe('markdown image fallback', () => {
     expect(container.querySelector('img')).toBeNull();
     expect(container.innerHTML).not.toContain('https://example.com');
     expect(container.textContent).toContain('Failed to load');
+    expect(
+      container
+        .querySelector('[class*="imageFallback"]')
+        ?.hasAttribute('data-markdown-image-src'),
+    ).toBe(false);
 
     act(() => root.unmount());
     container.remove();

@@ -1007,19 +1007,28 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
     // The export builder rewrites remote images upstream, but urlTransform
     // passes https through and hidden copy sources render raw markdown in
     // document mode, so the chip itself must never echo src there. data:
-    // URIs would dump a base64 blob into the chat in any mode.
+    // URIs would dump a base64 blob into the chat in any mode. Only local
+    // paths are decoded: percent-escapes in a URL are part of the resource
+    // identity, so decoding them would display a different resource.
     const displaySrc =
-      !documentMode && src && !/^data:/i.test(src) ? safeDecodePath(src) : '';
+      !documentMode && src && !/^data:/i.test(src)
+        ? localPath
+          ? safeDecodePath(src)
+          : src
+        : '';
     const text =
       (localPath ? displaySrc || alt : alt || displaySrc) ||
       t('common.failedToLoad');
-    // plainText reads this attribute the way it reads img.alt, so reply-copy
-    // extraction keeps its pre-fallback semantics (empty alt stays empty and
-    // the raw-markdown fallback still fires).
+    // plainText reads the alt attribute the way it reads img.alt, so reply
+    // copy extraction keeps its pre-fallback semantics (empty alt stays empty
+    // and the raw-markdown fallback still fires); the turndown rule reads the
+    // src attribute to rebuild the image reference for selection markdown
+    // copy. The src attribute is document-mode-gated like displaySrc.
     return (
       <span
         className={styles.imageFallback}
         data-markdown-image-alt={alt || ''}
+        data-markdown-image-src={documentMode ? undefined : src}
       >
         {text}
       </span>
