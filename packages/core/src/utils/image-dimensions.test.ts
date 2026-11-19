@@ -77,6 +77,14 @@ describe('parseImageDimensions', () => {
     expect(parseImageDimensions(png(1, 1))).toEqual({ width: 1, height: 1 });
   });
 
+  it('rejects dimensions beyond the plausibility cap (#17321 F5)', () => {
+    // MAX_PLAUSIBLE_DIMENSION (100 000) is a sanity bound on hostile or
+    // corrupt headers: a PNG claiming a 2 000 000 000-pixel column must not
+    // reach the token formula even though the 32-bit IHDR field holds it.
+    expect(parseImageDimensions(png(2_000_000_000, 1080))).toBeUndefined();
+    expect(parseImageDimensions(png(1920, 2_000_000_000))).toBeUndefined();
+  });
+
   it('reads GIF logical-screen dimensions', () => {
     expect(parseImageDimensions(gif(800, 600))).toEqual({
       width: 800,

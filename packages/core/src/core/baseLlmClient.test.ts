@@ -1914,6 +1914,65 @@ describe('BaseLlmClient', () => {
       expect(sentBudget()).toBe(32_768 - 3_000);
     });
 
+    it('never prices a kept image below the flat estimate on the default path (#17321 F2)', async () => {
+      // Resolution-derived pricing can fall below what the provider
+      // actually transports (a 1920×1080 PNG bills ceil(2 073 600 / 2 048)
+      // = 1 013 < 1 600); under-subtracting over-states the room and grants
+      // a max_tokens the window cannot hold — the non-retryable 400 this
+      // budget exists to prevent. The transport guard floors each kept
+      // image at the resolved flat estimate.
+      mockConfig.getModel.mockReturnValue('deepseek-r1');
+      mockConfig.getContentGeneratorConfig.mockReturnValue({
+        model: 'deepseek-r1',
+        authType: AuthType.USE_GEMINI,
+        contextWindowSize: 32_768,
+        // `slimCompactionInput` keeps an `inlineData` part only for a target
+        // that declares the modality.
+        modalities: { image: true },
+      });
+      mockGenerateContent.mockResolvedValue(createMockTextResponse('ok'));
+
+      // Hand-built minimal PNG: signature + IHDR carrying 1920×1080. The
+      // dimension parser reads IHDR only, so no further chunks are needed.
+      const ihdr = Buffer.alloc(13);
+      ihdr.writeUInt32BE(1_920, 0);
+      ihdr.writeUInt32BE(1_080, 4);
+      ihdr[8] = 8; // bit depth
+      ihdr[9] = 2; // color type
+      const length = Buffer.alloc(4);
+      length.writeUInt32BE(13, 0);
+      const png = Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        length,
+        Buffer.from('IHDR'),
+        ihdr,
+        Buffer.alloc(4), // CRC — the parser does not validate it
+      ]);
+
+      await client.generateText({
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  mimeType: 'image/png',
+                  data: png.toString('base64'),
+                },
+              },
+            ],
+          },
+        ],
+        model: 'deepseek-r1',
+        abortSignal: abortController.signal,
+        promptId: 'p',
+      });
+
+      // The floor, not the resolution charge: 32 768 − 1 600, matching the
+      // flat-estimate arm. Without the floor this emits 32 768 − 1 013.
+      expect(sentBudget()).toBe(32_768 - 1_600);
+    });
+
     it('measures the room on the slimmed payload, not the caller-supplied one', async () => {
       // The budget runs after `slimCompactionInput`, and this target declares
       // no `image` modality, so the request actually carries the 18-char

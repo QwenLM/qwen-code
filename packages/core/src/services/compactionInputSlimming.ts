@@ -207,16 +207,28 @@ function resolveBoolean(
  * `estimateContentChars` and by the slimming module's own budget
  * accounting. Binary parts get a fixed budget (in chars) derived from
  * the configured token estimate; this keeps base64 payloads from
- * skewing compression size estimation or token-budget math.
+ * skewing compression size estimation or token-budget math. Binary parts
+ * carry the configured flat estimate when the header does not parse (or a
+ * `imageTokenFloor` is supplied, as the transport guard does), and the
+ * resolution-derived charge when it does.
  */
 export function estimatePartChars(
   part: Part,
   imageTokenEstimate: number,
+  imageTokenFloor?: number,
 ): number {
   if (part.inlineData || part.fileData) {
-    return (
-      estimateInlineImageTokens(part, imageTokenEstimate) * TOKEN_TO_CHAR_RATIO
-    );
+    let tokens = estimateInlineImageTokens(part, imageTokenEstimate);
+    // The transport guard prices kept images at no less than the resolved
+    // flat estimate: the resolution charge can be LOWER than what the
+    // provider actually transports, and under-subtracting there is the
+    // non-retryable 400 this budget exists to prevent (#17321 F2). The
+    // compression estimators pass no floor — for them the resolution
+    // charge is the whole point.
+    if (imageTokenFloor !== undefined) {
+      tokens = Math.max(tokens, imageTokenFloor);
+    }
+    return tokens * TOKEN_TO_CHAR_RATIO;
   }
   if (typeof part.text === 'string') {
     return part.text.length;
@@ -238,7 +250,7 @@ export function estimatePartChars(
     const nested = getFunctionResponseParts(part);
     if (nested) {
       for (const inner of nested) {
-        total += estimatePartChars(inner, imageTokenEstimate);
+        total += estimatePartChars(inner, imageTokenEstimate, imageTokenFloor);
       }
     }
     // Add a small fixed floor for the wrapper metadata (id, name) so a
@@ -312,9 +324,10 @@ function estimateInlineImageTokens(
 }
 
 /**
- * Conservative animation check: a GIF with more than one image descriptor
- * or a WebP with the ANIM flag or ANMF chunks is potentially animated.
- * Static forms continue on the resolution path.
+ * Conservative animation check: every GIF (frame counting needs a real
+ * parser), a PNG carrying an acTL chunk (APNG), and a WebP with the VP8X
+ * ANIM flag. Anything else — static PNG/WebP included — continues on the
+ * resolution path. Keyed on magic bytes, never the mime label.
  */
 function isPotentiallyAnimated(bytes: Uint8Array, mime: string): boolean {
   // Keyed on magic bytes, not the mime label (#17321 F3): a text file
@@ -329,8 +342,11 @@ function isPotentiallyAnimated(bytes: Uint8Array, mime: string): boolean {
   if (isPngBytes(bytes)) {
     // APNG has an acTL (animation control) chunk before IDAT — a
     // structural marker, not a heuristic. Without it, a PNG is static
-    // and takes the resolution path (#17321 F1).
-    const limit = Math.min(bytes.length, 1024);
+    // and takes the resolution path (#17321 F1). Metadata chunks before
+    // acTL are legal and unbounded, so the scan covers the whole
+    // pre-IDAT region — a 1 KiB window would miss acTL behind a large
+    // tEXt chunk (#17321 F1 residual).
+    const limit = bytes.length;
     for (let i = 8; i < limit - 4; i++) {
       if (
         bytes[i] === 0x61 &&
@@ -352,12 +368,21 @@ function isPotentiallyAnimated(bytes: Uint8Array, mime: string): boolean {
     }
     return false;
   }
-  if (mime === 'image/webp' && bytes.length > 16) {
+  if (isWebPBytes(bytes)) {
     // VP8X flags byte at payload offset 0: bit 1 (value 2) is ANIM —
-    // a real bit in the header, not a heuristic.
-    const tag = String.fromCharCode(bytes[12], bytes[13], bytes[14], bytes[15]);
-    if (tag === 'VP8X' && bytes.length > 20) {
-      return (bytes[20] & 0x02) !== 0;
+    // a real bit in the header, not a heuristic. Keyed on the RIFF/WEBP
+    // magic, not the mime label, so a mislabeled animated WebP is still
+    // billed flat (#17321 F1 residual).
+    if (bytes.length > 20) {
+      const tag = String.fromCharCode(
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+      );
+      if (tag === 'VP8X') {
+        return (bytes[20] & 0x02) !== 0;
+      }
     }
     return false;
   }
@@ -387,14 +412,29 @@ function isPngBytes(b: Uint8Array): boolean {
   );
 }
 
+function isWebPBytes(b: Uint8Array): boolean {
+  return (
+    b.length > 12 &&
+    b[0] === 0x52 &&
+    b[1] === 0x49 &&
+    b[2] === 0x46 &&
+    b[3] === 0x46 && // 'RIFF'
+    b[8] === 0x57 &&
+    b[9] === 0x45 &&
+    b[10] === 0x42 &&
+    b[11] === 0x50 // 'WEBP'
+  );
+}
+
 export function estimateContentChars(
   content: Content,
   imageTokenEstimate: number,
+  imageTokenFloor?: number,
 ): number {
   if (!content.parts) return 0;
   let total = 0;
   for (const part of content.parts) {
-    total += estimatePartChars(part, imageTokenEstimate);
+    total += estimatePartChars(part, imageTokenEstimate, imageTokenFloor);
   }
   return total;
 }
