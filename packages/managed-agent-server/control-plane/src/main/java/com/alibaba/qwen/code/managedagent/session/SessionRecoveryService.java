@@ -13,6 +13,8 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.SessionRecoveryRepository;
 import com.alibaba.qwen.code.managedagent.repository.SessionRecoveryRepository.HeadRecovery;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -20,6 +22,7 @@ import java.util.Set;
 
 @Service
 public class SessionRecoveryService {
+    private static final Logger LOG = LoggerFactory.getLogger(SessionRecoveryService.class);
     private static final Set<String> ACTIVE = Set.of("ACCEPTED", "RUNNING", "CANCELLING");
     private static final Set<String> TERMINAL = Set.of("COMPLETED", "FAILED", "CANCELLED");
     private static final Set<String> STATES = Set.of("recovering", "awaiting_evidence",
@@ -70,7 +73,7 @@ public class SessionRecoveryService {
         }
         boolean rechecked;
         if (TERMINAL.contains(turn.status())) {
-            rechecked = harness.recheckRecoveryCleanup(tenantId, sessionId, turn.promptId());
+            rechecked = recheckCleanup(tenantId, sessionId, turn.promptId());
         } else {
             rechecked = coordinator.recheckRecovery(tenantId, sessionId, turnId);
             if (!rechecked) {
@@ -81,7 +84,7 @@ public class SessionRecoveryService {
                 RecoveryStatus evidence = recovery.actions().recheck() ? evidence(session, turn) : null;
                 rechecked = evidence != null && evidence.inputSettled()
                         && "cleanup_pending".equals(evidence.state())
-                        && harness.recheckRecoveryCleanup(tenantId, sessionId, turn.promptId());
+                        && recheckCleanup(tenantId, sessionId, turn.promptId());
             }
         }
         recovery = targetRecovery(session, actorId, turnId);
@@ -90,6 +93,23 @@ public class SessionRecoveryService {
                     "recovery_recheck_unavailable", "The original recovery work is not available.");
         }
         return recovery;
+    }
+
+    // #17543: a cleanup recheck needs a Harness that can open the Session.
+    // When none can, say so, instead of failing with an uncoded error or the
+    // ineligible-work refusal that never changes.
+    private boolean recheckCleanup(String tenantId, String sessionId, String promptId) {
+        try {
+            return harness.recheckRecoveryCleanup(tenantId, sessionId, promptId);
+        } catch (ManagedAgentException refusal) {
+            throw refusal;
+        } catch (RuntimeException unavailable) {
+            // The API maps a ManagedAgentException without logging its cause.
+            LOG.warn("Managed recovery cleanup recheck unavailable tenant={} session={}",
+                    tenantId, sessionId, unavailable);
+            throw new ManagedAgentException(503, "recovery_runtime_unavailable",
+                    "No Hosted Harness can open this Session to recheck its recovery.", unavailable);
+        }
     }
 
     private SessionRecovery targetRecovery(SessionRecord session, String actorId, String turnId) {
@@ -153,6 +173,17 @@ public class SessionRecoveryService {
             }
         }
         RecoveryStatus evidence = evidence(session, turn);
+        // #17538: the Harness answers status only to the client that loaded
+        // the Session, so a replica without that attachment reads nothing,
+        // and that absence proves nothing. A live head whose latest Turn
+        // carries the Harness's own journaled terminal and owes no durable
+        // work is ready from every replica.
+        if (evidence == null && !active && turn != null && head != null
+                && "ACTIVE".equals(head.journalState())
+                && recovery.hasNativeTerminal(session.tenantId(), session.sessionId(), turn.turnId())
+                && !recovery.hasUnsettledWork(session.tenantId(), session.sessionId())) {
+            return view("ready", "ready", turn, true, false, false);
+        }
         if (evidence == null || "recovery_evidence_unavailable".equals(evidence.reasonCode())) {
             return view(active ? "awaiting_evidence" : "operator_required",
                     "recovery_evidence_unavailable", turn, false,
