@@ -413,7 +413,17 @@ function findTokenLimit(
   type: TokenLimitType = 'input',
 ): TokenCount | undefined {
   const norm = normalize(model);
-  const catalog = lookupModelCatalog(norm);
+  let catalog = lookupModelCatalog(norm);
+  if (!catalog) {
+    // A terminal dotted version may be stripped as a suffix (deepseek-v3.1 ->
+    // deepseek). Retry its original spelling's alias before normalizing so the
+    // catalog's dashed entry remains reachable without changing normalization.
+    const alias = versionSpellingAlias(model);
+    const rawNorm = model.toLowerCase().replace(/^.*\//, '');
+    if (alias && (norm !== rawNorm || rawNorm.endsWith('-exp'))) {
+      catalog = lookupModelCatalog(normalize(alias));
+    }
+  }
   const fromCatalog = type === 'output' ? catalog?.output : catalog?.context;
   const usableCatalogContext =
     type === 'input' &&
