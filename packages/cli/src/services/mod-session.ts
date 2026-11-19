@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { OutputFormat } from '@qwen-code/qwen-code-core/output/types.js';
@@ -114,9 +114,23 @@ export interface ModTerminalHost {
   draw?(tree: ModRenderElement, owner: string): void;
 }
 
+/**
+ * An ACP session: it reports each log line itself and raises neither prompts
+ * nor tool middleware. Its stdout carries the protocol, so nothing is printed.
+ * Its surface is `desktop` where its client draws the rows `sites` names, and
+ * none otherwise.
+ */
+export interface ModAcpHost {
+  surface: 'desktop' | null;
+  log(entry: ModLog, plugin: string, sessionId: string): void;
+  /** The row sites the client draws, read once at load. */
+  sites?(): readonly ModRenderSite[];
+}
+
 type ModOutput =
   | Pick<JsonOutputAdapterInterface, 'emitSystemMessage'>
-  | ModTerminalHost;
+  | ModTerminalHost
+  | ModAcpHost;
 
 /**
  * A main-loop turn the Mods hear: `turn.start` once its prompt is admitted,
@@ -132,6 +146,12 @@ export interface ModTurn {
    */
   complete(ending?: 'aborted' | 'error'): Promise<void>;
 }
+
+/** A remote client's row, as `askRow` answers it. */
+export type ModRowAnswer =
+  | { status: 'unhooked' }
+  | { status: 'unanswered' }
+  | { status: 'answered'; props?: Record<string, unknown> };
 
 interface RunningTurn {
   id: string;
@@ -200,7 +220,12 @@ export class ModSession implements ICommandLoader {
       if (this.config.getSessionId() !== this.sessionId) return;
       this.recorder = this.config.getChatRecordingService();
       this.context = {
-        tokens: uiTelemetryService.getLastPromptTokenCount(),
+        // One ACP process serves many sessions, so the process-wide count is
+        // whichever answered last; the session's own chat keeps its own.
+        // Use a passive read because route adoption can emit another update.
+        tokens: this.acp
+          ? this.chatTokens()
+          : uiTelemetryService.getLastPromptTokenCount(),
         window: this.config.getContentGeneratorConfig()?.contextWindowSize || 0,
       };
       // A turn reports the model of its last main-conversation response.
@@ -256,14 +281,11 @@ export class ModSession implements ICommandLoader {
     private readonly optionScopes: readonly unknown[] = [],
   ) {
     this.sessionId = config.getSessionId();
+    allowTelemetryListener(1);
     uiTelemetryService.on('update', this.observe);
     this.unregisterCleanup = registerCleanup(
-      () => {
-        // Exit cleanup iterates its registry; do not splice its current item.
-        this.unregisterCleanup = () => {};
-        // No result follows an exit, so a note of the turn it ended is due.
-        return this.close().then(() => this.flushOutput());
-      },
+      // No result follows an exit, so a note of the turn it ended is due.
+      () => this.close().then(() => this.flushOutput()),
       { first: Boolean(this.terminal) },
     );
   }
@@ -282,14 +304,29 @@ export class ModSession implements ICommandLoader {
       : undefined;
   }
 
-  private get terminal(): ModTerminalHost | undefined {
+  private get host(): ModTerminalHost | ModAcpHost | undefined {
     return 'surface' in this.output ? this.output : undefined;
+  }
+
+  private get terminal(): ModTerminalHost | undefined {
+    return this.host?.surface === 'terminal' ? this.host : undefined;
+  }
+
+  private get acp(): boolean {
+    return this.host !== undefined && this.host.surface !== 'terminal';
+  }
+
+  private chatTokens(): number {
+    const client = this.config.getLlmClient();
+    return client?.isInitialized()
+      ? client.getChat().peekLastPromptTokenCount()
+      : 0;
   }
 
   private allowed(): boolean {
     return (
       this.config.isInteractive() === Boolean(this.terminal) &&
-      !this.config.getExperimentalZedIntegration() &&
+      this.config.getExperimentalZedIntegration() === this.acp &&
       this.config.isTrustedFolder() &&
       !this.config.getDisableAllHooks() &&
       !this.config.getBareMode() &&
@@ -318,7 +355,7 @@ export class ModSession implements ICommandLoader {
   }
 
   private async load(signal: AbortSignal): Promise<void> {
-    const sites = (this.sites = this.terminal?.sites?.() ?? []);
+    const sites = (this.sites = this.host?.sites?.() ?? []);
     try {
       const candidates = [];
       for (const extension of this.config
@@ -436,16 +473,16 @@ export class ModSession implements ICommandLoader {
           },
           signal,
           (name) => this.config.getToolRegistry().ensureTool(name),
-          this.terminal?.surface ?? null,
+          this.host?.surface ?? null,
           this.config.getCliVersion() || 'unknown',
           () => this.facts(),
           (turnId) => this.abortTurn(turnId),
           sites.length
             ? { sites, invalidate: (plugin) => this.invalidateRenders(plugin) }
             : undefined,
-          this.terminal ? this.terminal.prompts?.() === true : true,
+          this.terminal ? this.terminal.prompts?.() === true : !this.acp,
           // A terminal runs a Mod's own prompts only once it says so.
-          this.terminal && this.terminal.runsPrompts?.() !== true
+          this.acp || (this.terminal && this.terminal.runsPrompts?.() !== true)
             ? undefined
             : (prompt) => this.queuePrompt(prompt),
           (input, modelSignal) =>
@@ -459,6 +496,7 @@ export class ModSession implements ICommandLoader {
                 : AbortSignal.abort(),
             ),
           new ModStore(path.join(Storage.getGlobalQwenDir(), 'mods', 'store')),
+          !this.acp,
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({
@@ -745,6 +783,45 @@ export class ModSession implements ICommandLoader {
     return this.rows.watch(input, listener);
   }
 
+  /**
+   * Asks once for a row a remote client draws: `unhooked` where no hook hears
+   * its site, `unanswered` when the ask ended first, and otherwise the props
+   * its hooks rewrote, if they did. The same props are the same row, so a
+   * reload or a second client is answered from the first answer.
+   */
+  async askRow(
+    component: ModRenderSite,
+    props: ModRenderInput['props'],
+    signal: AbortSignal,
+  ): Promise<ModRowAnswer> {
+    const surface = this.host?.surface;
+    if (
+      surface !== 'desktop' ||
+      !this.sites.includes(component) ||
+      !this.runtime?.renderHooksFor(component).length
+    )
+      return { status: 'unhooked' };
+    if (this.closing) return { status: 'unanswered' };
+    const input = {
+      surface,
+      component,
+      requestId: createHash('sha256')
+        .update(stableJson({ component, props }))
+        .digest('hex')
+        .slice(0, 32),
+      props,
+    } as ModRenderInput;
+    // Too large to hand the hooks whole: drawn as it is.
+    if (Buffer.byteLength(JSON.stringify(input)) > MOD_MAX_BYTES / 2)
+      return { status: 'answered' };
+    const answer = await this.rows.ask(input, signal);
+    return !answer
+      ? { status: 'unanswered' }
+      : answer.props
+        ? { status: 'answered', props: { ...answer.props } }
+        : { status: 'answered' };
+  }
+
   /** The props a row draws with once its hooks answered, if they rewrote it. */
   rowProps(
     sessionId: string,
@@ -769,10 +846,9 @@ export class ModSession implements ICommandLoader {
     }
   }
 
-  // A row's answer: the props its hooks rewrote, or none to draw its own.
   private async renderRow(
     input: ModRenderInput,
-  ): Promise<ModRenderInput['props'] | undefined> {
+  ): Promise<ModRenderInput['props'] | undefined | null> {
     const runtime = this.runtime;
     const generation = this.toolGeneration.signal;
     if (
@@ -783,7 +859,7 @@ export class ModSession implements ICommandLoader {
       !this.allowed() ||
       !this.active()
     )
-      return undefined;
+      return null;
     const signal = AbortSignal.any([
       this.lifetime.signal,
       generation,
@@ -1163,7 +1239,7 @@ export class ModSession implements ICommandLoader {
         sessionId: turn.sessionId,
         isTurnNote: true as const,
       };
-      if (!this.terminal && this.config.getOutputFormat() === OutputFormat.TEXT)
+      if (!this.host && this.config.getOutputFormat() === OutputFormat.TEXT)
         this.notes.push(
           `[Mod ${note.plugin}] ${stripAnsiAndControl(note.text)}`,
         );
@@ -1251,14 +1327,14 @@ export class ModSession implements ICommandLoader {
 
   async flushOutput(): Promise<void> {
     // The answer on stdout drains first, so a note lands beneath it.
-    if (this.notes.length && !this.terminal)
+    if (this.notes.length && !this.host)
       await flushOutput(process.stdout, AbortSignal.timeout(1_500));
     for (const note of this.notes.splice(0)) process.stderr.write(`${note}\n`);
     await this.flushStreams();
   }
 
   private async flushStreams(): Promise<void> {
-    if (this.terminal) return;
+    if (this.host) return;
     const signal = AbortSignal.timeout(1_500);
     await Promise.allSettled([
       flushOutput(process.stdout, signal),
@@ -1332,6 +1408,7 @@ export class ModSession implements ICommandLoader {
     this.closing ??= (async () => {
       this.unregisterCleanup();
       uiTelemetryService.off('update', this.observe);
+      allowTelemetryListener(-1);
       clearTimeout(this.band.settle);
       clearTimeout(this.band.wait);
       // A turn the close cuts short ends as aborted. Its end and every end
@@ -1358,6 +1435,14 @@ export class ModSession implements ICommandLoader {
     })();
     return this.closing;
   }
+}
+
+// An ACP process holds a Mod session for each of its sessions, each listening
+// to the process's telemetry, so one more listener is no sign of a leak. An
+// unlimited count stays unlimited.
+function allowTelemetryListener(change: 1 | -1): void {
+  const max = uiTelemetryService.getMaxListeners();
+  if (max > 0) uiTelemetryService.setMaxListeners(max + change);
 }
 
 // A provider's count as the Mods take it: a whole number, or 0 when it is

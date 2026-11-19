@@ -16,13 +16,16 @@ import generatedUiConfig from '../../integrations/generated-ui/vitest.config.js'
 import acpBridgeConfig from '../../packages/acp-bridge/vitest.config.js';
 import audioCaptureConfig from '../../packages/audio-capture/vitest.config.js';
 import browserUseConfig from '../../packages/browser-use/vitest.config.js';
+import aoneConfig from '../../packages/channels/aone/vitest.config.js';
 import channelsBaseConfig from '../../packages/channels/base/vitest.config.js';
 import dingtalkConfig from '../../packages/channels/dingtalk/vitest.config.js';
 import dwsConfig from '../../packages/channels/dws/vitest.config.js';
 import emailConfig from '../../packages/channels/email/vitest.config.js';
 import feishuConfig from '../../packages/channels/feishu/vitest.config.js';
+import genericWebhookConfig from '../../packages/channels/generic-webhook/vitest.config.js';
 import githubConfig from '../../packages/channels/github/vitest.config.js';
 import gitlabConfig from '../../packages/channels/gitlab/vitest.config.js';
+import msteamsConfig from '../../packages/channels/msteams/vitest.config.js';
 import qqbotConfig from '../../packages/channels/qqbot/vitest.config.js';
 import telegramConfig from '../../packages/channels/telegram/vitest.config.js';
 import wecomConfig from '../../packages/channels/wecom/vitest.config.js';
@@ -30,6 +33,7 @@ import weixinConfig from '../../packages/channels/weixin/vitest.config.js';
 import chromeExtensionConfig from '../../packages/chrome-extension/vitest.config.js';
 import cliConfig from '../../packages/cli/vitest.config.js';
 import coreConfig from '../../packages/core/vitest.config.js';
+import networkPolicyConfig from '../../packages/network-policy/vitest.config.js';
 import nodeReplConfig from '../../packages/node-repl/vitest.config.js';
 import sdkTypescriptConfig from '../../packages/sdk-typescript/vitest.config.js';
 import vscodeCompanionConfig from '../../packages/vscode-ide-companion/vitest.config.js';
@@ -104,13 +108,16 @@ const configs: Record<string, ExemptionConfig> = {
   'packages/acp-bridge': acpBridgeConfig,
   'packages/audio-capture': audioCaptureConfig,
   'packages/browser-use': browserUseConfig,
+  'packages/channels/aone': aoneConfig,
   'packages/channels/base': channelsBaseConfig,
   'packages/channels/dingtalk': dingtalkConfig,
   'packages/channels/dws': dwsConfig,
   'packages/channels/email': emailConfig,
   'packages/channels/feishu': feishuConfig,
+  'packages/channels/generic-webhook': genericWebhookConfig,
   'packages/channels/github': githubConfig,
   'packages/channels/gitlab': gitlabConfig,
+  'packages/channels/msteams': msteamsConfig,
   'packages/channels/qqbot': qqbotConfig,
   'packages/channels/telegram': telegramConfig,
   'packages/channels/wecom': wecomConfig,
@@ -118,6 +125,7 @@ const configs: Record<string, ExemptionConfig> = {
   'packages/chrome-extension': chromeExtensionConfig,
   'packages/cli': cliConfig,
   'packages/core': coreConfig,
+  'packages/network-policy': networkPolicyConfig,
   'packages/node-repl': nodeReplConfig,
   'packages/sdk-typescript': sdkTypescriptConfig,
   'packages/vscode-ide-companion': vscodeCompanionConfig,
@@ -296,6 +304,8 @@ const configModules: Record<
     import('../../packages/audio-capture/vitest.config.js'),
   'packages/browser-use': () =>
     import('../../packages/browser-use/vitest.config.js'),
+  'packages/channels/aone': () =>
+    import('../../packages/channels/aone/vitest.config.js'),
   'packages/channels/base': () =>
     import('../../packages/channels/base/vitest.config.js'),
   'packages/channels/dingtalk': () =>
@@ -306,10 +316,14 @@ const configModules: Record<
     import('../../packages/channels/email/vitest.config.js'),
   'packages/channels/feishu': () =>
     import('../../packages/channels/feishu/vitest.config.js'),
+  'packages/channels/generic-webhook': () =>
+    import('../../packages/channels/generic-webhook/vitest.config.js'),
   'packages/channels/github': () =>
     import('../../packages/channels/github/vitest.config.js'),
   'packages/channels/gitlab': () =>
     import('../../packages/channels/gitlab/vitest.config.js'),
+  'packages/channels/msteams': () =>
+    import('../../packages/channels/msteams/vitest.config.js'),
   'packages/channels/qqbot': () =>
     import('../../packages/channels/qqbot/vitest.config.js'),
   'packages/channels/telegram': () =>
@@ -322,6 +336,8 @@ const configModules: Record<
     import('../../packages/chrome-extension/vitest.config.js'),
   'packages/cli': () => import('../../packages/cli/vitest.config.js'),
   'packages/core': () => import('../../packages/core/vitest.config.js'),
+  'packages/network-policy': () =>
+    import('../../packages/network-policy/vitest.config.js'),
   'packages/node-repl': () =>
     import('../../packages/node-repl/vitest.config.js'),
   // qwen-live's ceiling is unconditional (its config carries a flat 60s), so
@@ -388,13 +404,17 @@ describe('shared-pool test timeout', () => {
     'packages/acp-bridge',
     'packages/audio-capture',
     'packages/browser-use',
+    'packages/channels/aone',
     'packages/channels/base',
     'packages/channels/dingtalk',
     'packages/channels/dws',
     'packages/channels/email',
     'packages/channels/feishu',
+    'packages/channels/generic-webhook',
+    'packages/network-policy',
     'packages/channels/github',
     'packages/channels/gitlab',
+    'packages/channels/msteams',
     'packages/channels/qqbot',
     'packages/channels/telegram',
     'packages/channels/wecom',
@@ -776,6 +796,7 @@ describe('autofix-gate per-file ceiling floor', () => {
   const guarded = [
     'packages/cli/src/ui/auth/SubscriptionDialog.test.tsx',
     'packages/cli/src/serve/server/session-pr-refresh.test.ts',
+    'packages/cli/src/serve/managed-runtime-terminal.test.ts',
     'packages/core/src/hooks/file-changed-watcher.test.ts',
   ];
   it('keeps the tuned suites from overriding the granted testTimeout', () => {
@@ -790,11 +811,20 @@ describe('autofix-gate per-file ceiling floor', () => {
       // so the floor must cover that spelling too (R5-1). Check every ceiling
       // constant's FAST arm — the one in force inside the gate, where env -i
       // drops RUNNER_NAME/RUNNER_OS and the worker clamp keeps loadavg under
-      // the slow-host threshold: it must inherit (undefined) or sit at/above
-      // the 60000 the gate grants, never below it.
-      for (const [, name, expr] of src.matchAll(
-        /const\s+(\w*CEILING\w*)\s*=\s*([^;]+);/g,
-      )) {
+      // the slow-host threshold: it must inherit (undefined) or equal the
+      // 60000 the gate grants. Below it the suite is cut before the gate's own
+      // budget (R4-1); above it the file outranks the grant and a hang runs to
+      // the file's figure instead of the lane's (R10-1).
+      const ceilings = [
+        ...src.matchAll(/const\s+(\w*CEILING\w*)\s*=\s*([^;]+);/g),
+      ];
+      // Without this the entry is decorative: a file that renames its ceiling
+      // constant matches nothing, and the loop below asserts nothing at all.
+      expect(
+        ceilings.length,
+        `${file} declares no *CEILING* constant for this guard to read`,
+      ).toBeGreaterThan(0);
+      for (const [, name, expr] of ceilings) {
         let fast = expr.trim();
         const q = fast.indexOf('?');
         if (q >= 0) fast = fast.slice(fast.indexOf(':', q) + 1).trim();
@@ -806,8 +836,8 @@ describe('autofix-gate per-file ceiling floor', () => {
         ).toBe(true);
         expect(
           n,
-          `${file}: ${name} fast arm ${n} sits below the gate's 60000 grant`,
-        ).toBeGreaterThanOrEqual(60_000);
+          `${file}: ${name} fast arm ${n} must equal the gate's 60000 grant, or inherit it (undefined)`,
+        ).toBe(60_000);
       }
     }
   });

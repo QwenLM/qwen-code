@@ -56,6 +56,21 @@
   height: 13px;
 }
 
+.chip[data-waiting] {
+  border-color: var(--warning-border, var(--border));
+  background: var(--warning-bg, var(--background));
+}
+
+.chip[data-waiting] .state,
+.waitingTag {
+  color: var(--warning-color, var(--foreground));
+}
+
+.waitingTag {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
 .chipLabel {
   overflow: hidden;
   white-space: nowrap;
@@ -103,10 +118,29 @@
   min-height: 30px;
   box-sizing: border-box;
   align-items: center;
-  gap: 8px;
-  padding: 4px 8px;
-  border: 0;
+  gap: 0;
+  padding: 0;
   border-radius: 8px;
+}
+
+/* Every painted point of the row belongs to one of its two buttons: the
+   open button owns the row padding and its hover fill, the stretched "?"
+   covers the full row height, and the row keeps the accent only as the
+   ancestor focus cue. No handler-less strip is left lit. */
+.listRowMain:hover,
+.listRow:focus-within {
+  background: var(--accent);
+}
+
+.listRowMain {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  align-self: stretch;
+  gap: 8px;
+  padding: 4px 4px 4px 8px;
+  border: 0;
   background: transparent;
   color: var(--foreground);
   font: inherit;
@@ -115,10 +149,67 @@
   cursor: pointer;
 }
 
-.listRow:hover,
-.listRow:focus-visible {
-  background: var(--accent);
+.listRowMain:focus-visible {
   outline: none;
+}
+
+.explainButton {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  box-sizing: border-box;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.explainButton:hover {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+/* Keyboard focus gets the same ring as the sibling chip; a fill alone is
+   indistinguishable from hover in the light theme. */
+.explainButton:focus-visible,
+.chipExplain:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--ring, var(--border)) 70%, transparent);
+}
+
+.explainButton svg {
+  width: 14px;
+  height: 14px;
+}
+
+.rowExplain {
+  align-self: stretch;
+  width: 30px;
+  height: auto;
+}
+
+.chipWrap {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 2px;
+}
+
+.chipExplain {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border);
+  background: var(--background);
+}
+
+.chipExplain:hover {
+  background: var(--accent);
 }
 
 .rowIcon {

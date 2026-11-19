@@ -26,10 +26,7 @@ import {
 } from './workspace-registry.js';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import type { ConversationRuntimeActivityGate } from './conversations/conversation-runtime-activity.js';
-import {
-  WorkspaceSkillNotFoundError,
-  type DaemonWorkspaceService,
-} from './workspace-service/types.js';
+import type { DaemonWorkspaceService } from './workspace-service/types.js';
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -2082,7 +2079,7 @@ describe('workspace-qualified core REST', () => {
     try {
       const res = await request(h.app)
         .post(
-          `/workspaces/${encodeURIComponent(h.secondaryId)}/skills/review/enable`,
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/skills/not-installed/enable`,
         )
         .set('Authorization', 'Bearer secret')
         .set('X-Qwen-Client-Id', 'client-1')
@@ -2090,13 +2087,26 @@ describe('workspace-qualified core REST', () => {
         .send({ enabled: false });
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
-        skillName: 'review',
+        skillName: 'not-installed',
         enabled: false,
         changed: true,
         activation: 'deferred',
         sessionsRefreshed: 0,
         sessionsFailed: 0,
       });
+      expect(
+        h.secondaryWorkspaceService.getWorkspaceSkillsStatus,
+      ).not.toHaveBeenCalled();
+      expect(
+        h.secondaryWorkspaceService.setWorkspaceSkillEnabled,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceCwd: h.secondaryCwd,
+          originatorClientId: 'client-1',
+        }),
+        'not-installed',
+        false,
+      );
 
       const batch = await request(h.app)
         .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/skills/enable`)
@@ -2137,16 +2147,16 @@ describe('workspace-qualified core REST', () => {
 
       vi.mocked(
         h.secondaryWorkspaceService.setWorkspaceSkillEnabled,
-      ).mockRejectedValueOnce(new WorkspaceSkillNotFoundError('missing'));
-      const missing = await request(h.app)
+      ).mockRejectedValueOnce(new Error('settings write failed'));
+      const failedWrite = await request(h.app)
         .post(
-          `/workspaces/${encodeURIComponent(h.secondaryId)}/skills/missing/enable`,
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/skills/not-installed/enable`,
         )
         .set('Authorization', 'Bearer secret')
         .set('Host', host())
         .send({ enabled: false });
-      expect(missing.status).toBe(404);
-      expect(missing.body.code).toBe('skill_not_found');
+      expect(failedWrite.status).toBe(500);
+      expect(failedWrite.body.error).toBe('settings write failed');
 
       const invalidClient = await request(h.app)
         .post(
