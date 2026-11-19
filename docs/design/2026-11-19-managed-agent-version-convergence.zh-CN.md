@@ -1,8 +1,10 @@
-# Managed Agent 版本收敛（storage 阶梯、action options、pack reader、CSI handle）
+# Managed Agent 版本收敛（storage 阶梯、action options、pack reader）
 
 [English](2026-11-19-managed-agent-version-convergence.md) | [简体中文](2026-11-19-managed-agent-version-convergence.zh-CN.md)
 
-状态：proposed。服务尚未上线，因此仅为保护既有部署或为滚动升级协商而存在的版本机制可以删除。本设计覆盖 2026-11-19 版本兼容盘点中标记为「A 类」的四项：Session storage 版本阶梯与 reader 版本头（A1）、`managed-action-options` 格式族（A5）、journal pack 的 `minimumReader` 声明（A2）、CSI resource-handle 版本阶梯（A4）。源码级核实修正了若干初判分类；下文记录修正后的范围，使变更集保持有界且诚实。
+状态：proposed。服务尚未上线，因此仅为保护既有部署或为滚动升级协商而存在的版本机制可以删除。本设计覆盖 2026-11-19 版本兼容盘点中标记为「A 类」的各项：Session storage 版本阶梯与 reader 版本头（A1）、`managed-action-options` 格式族（A5）、journal pack 的 `minimumReader` 声明（A2）。CSI resource-handle 版本阶梯（A4）已被下文所述的冷归档丢弃。源码级核实修正了若干初判分类；下文记录修正后的范围，使变更集保持有界且诚实。
+
+修订（2026-11-19）—— CSI 冷归档 #17415（`0c2458a3ca0f`，2026-11-16；设计记录：`2026-11-13-managed-kubernetes-java-archive.md`）。该归档把 Kubernetes runtime、Resident Workspace / Workspace CSI 后端、Kubernetes Harness pool discovery 的 Java 源码移入 `packages/sdk-java/managed-kubernetes-archive/`（构建之外的冷源码归档），并从 live server 删除 CSI 专属的 schema 列、配置、端点与维护入口。对本设计的后果：A4 整体丢弃；A1 的 CSI 专属部分（profile 能力围栏，职责 3，以及 CSI 维护调用点）与 A2 的 `CsiNativeActivationProof` 头检查在 live server 中已不复存在。A 批现为 A2 / A5 / A1（非 CSI）。描述已归档机制的章节作为历史记录保留并标注作废。归档未触碰 TypeScript，因此 worker 侧 CSI session 代码仍在，但其 server 侧准入对应物已归档。
 
 ## 问题
 
@@ -17,16 +19,17 @@ managed server 携带多套独立的「版本」机制。它们外观相似但�
 1. **滚动升级 reader 围栏（纯兼容）。**
    - `ManagedStorageVersions.SUPPORTED = 5`（contracts）是天花板。
    - `ManagedSessionReaderVersion`（server config）在 `/internal/managed-session-store/` 与 `/internal/managed-tool-publications/` 上读取 `X-Qwen-Managed-Max-Readable-Storage-Version` 请求头，按 `[12345]` 校验，**头缺省时天花板按 1 处理**。它在 `ManagedAgentConfiguration:101` 被装配为 `StorageReadPolicy` bean。
-   - `StorageReadPolicy.requireReadable(floor)` 拒绝 floor 超过 reader 天花板的提交（`JournalCommit:96`、`JournalStoreRows:587`、`JournalWriterLifecycle:210`）。`StorageReadPolicy.inProcess()`（天花板 5）用于嵌入/维护路径：`JdbcManagedSessionStore:67`、`ManagedSideQueryStore:57`、`WorkspaceCsiRuntimeMain:163`、`WorkspaceCsiWorkerAckMain:63`。
+   - `StorageReadPolicy.requireReadable(floor)` 拒绝 floor 超过 reader 天花板的提交（`JournalCommit:96`、`JournalStoreRows:587`、`JournalWriterLifecycle:210`）。`StorageReadPolicy.inProcess()`（天花板 5）用于嵌入路径：`JdbcManagedSessionStore:67`、`ManagedSideQueryStore:57`。（CSI 维护调用点 `WorkspaceCsiRuntimeMain:163` 与 `WorkspaceCsiWorkerAckMain:63` 已被 #17415 归档。）
    - 范围读者接受 1..5 内任意版本：`ToolPublicationStore:244`、`ToolPublicationAdmissionStore:147`、`WorkspaceRecoveryStore:616`（`List.of(1,2,3,4,5)`）、`ManagedSideQueryStore:576`、`JournalStoreRows:583`。
    - worker 通过发送该头声明自己的 reader 天花板：`http-managed-session-store.ts:2457,3301` 发 `'5'`；`hosted-side-query.ts:186` 发 `'4'`。
 
 2. **writer 能力协商（滚动升级护栏）。**
-   - server 在 writer grant 中返回 `supportedStorageVersion`：`JournalWriterLifecycle.supportedStorage()`（`:654`）对非 CSI Session 返回 5，对 CSI Session 按 profile 推导（`csi-files-retirement/1`→1、`/2`→3、`/3`→4）。
-   - worker 按该 grant 门控诊断产出：`http-managed-session-store.ts:936-940`（`supportsExecutionDiagnostics() = grant >= 4`、`supportsModelDiagnostics() = grant >= 3`），并在所分配 profile 需要的档位 server 不支持时拒绝 CSI 准入（`hosted-csi-session.ts:273-284`，`csi_activity_storage_unavailable` / `csi_diagnostics_storage_unavailable`）。
+   - server 在 writer grant 中返回 `supportedStorageVersion`：`JournalWriterLifecycle.supportedStorage()`（`:654`）返回 5。（CSI-profile 推导已被 #17415 归档。）
+   - worker 按该 grant 门控诊断产出：`http-managed-session-store.ts:936-940`（`supportsExecutionDiagnostics() = grant >= 4`、`supportsModelDiagnostics() = grant >= 3`），并在所分配 profile 需要的档位 server 不支持时拒绝 CSI 准入（`hosted-csi-session.ts:273-284`，`csi_activity_storage_unavailable` / `csi_diagnostics_storage_unavailable`；分配这些 profile 的 server 侧 CSI 准入已被 #17415 归档）。
    - worker 对每次提交按 grant 预检（`http-managed-session-store.ts:2149-2177`，needsVersionTwo/Three/Four/Five），并拒绝接管比 grant 更新的 head（`:3087-3088`，`head.storageVersion > grant.supportedStorageVersion`；head 校验 `[1,2,3,4,5]` 在 `:356`）。
 
-3. **CSI profile 能力围栏（活不变量）。**
+3. **CSI profile 能力围栏（已被 #17415 归档——作废）。**
+   已取代：`CsiFilesRetirementProfile` 及所有 CSI 准入路径现位于 `packages/sdk-java/managed-kubernetes-archive/`；live server 没有 CSI 围栏。下文为归档前的历史记录。
    - `CsiFilesRetirementProfile.supportsStorage(scope, version)`（`:96`）接受版本 1、或带 diagnostics 的 3、或带 activity diagnostics 的 4。它在提交时（`JournalCommit:104-105`，对 `max(csiHead.storageVersion(), storageFloor)`）、writer 接管时（`JournalWriterLifecycle:305-306`）、CSI 激活时（`JdbcCsiActivationAdmission:506`）被检查。它防止 `/1`（无 diagnostics）Session 累积其 pinned worker 读不了的 storage。
 
 4. **activity 投影重建标记（活不变量）。**
@@ -35,7 +38,7 @@ managed server 携带多套独立的「版本」机制。它们外观相似但�
 
 floor 本身由 `ManagedModelDiagnosticProjection.storageFloor()`（`:42-72`）逐提交计算：`tool.measured` 记录→5、activity diagnostics 资源→4、model diagnostics 资源（或 `managed-history_maintenance` schemaVersion 2）→3、Hosted recovery 记录 / `managed-action-options` v3/v4→2、否则 1。head 存 `max(existing, floor)`（`JournalCommit:415`）；新 head 从 `JournalStoreRows.STORAGE_VERSION = 1` 起（`JournalWriterLifecycle:227,249`）。原生 journal 快照把版本绑入 descriptor 并要求 `descriptor.storageVersion <= frozen.storageVersion`（`ManagedNativeJournalSnapshots:80,188,253`）；worker 在 restore 与快照检查时按版本复核功能存在性（`http-managed-session-store.ts:519-553,1600-1736`）。
 
-**结论。** 职责 1、2 是 pre-production 没有保护对象的滚动升级限制；职责 3、4 是恰好用版本号表达的活不变量。直接删列必须重新表达职责 3、4；只删协商（职责 1+2）则二者原样保留。
+**结论。** 职责 1、2 是 pre-production 没有保护对象的滚动升级限制；职责 3 已被 #17415 归档，职责 4 是仅存的、用版本号表达的活不变量。直接删列必须重新表达职责 4；只删协商（职责 1+2）则其原样保留。
 
 ### A5 — `managed-action-options` v1/v2/v3/v4 是活的 writer 形状
 
@@ -52,13 +55,15 @@ floor 本身由 `ManagedModelDiagnosticProjection.storageFloor()`（`:42-72`）�
 
 ### A2 — pack `minimumReader` 有服务器与本地方言
 
-journal 头携带 `formatVersion` 与 `minimumReader`。共享 TS 解析器 `parseManagedSessionHeader`（`managed-session-records.ts:1788-1822`）拒绝 `minimumReader` 超过 reader 自身能力的头：`MANAGED_SESSION_FORMAT_VERSION = 1`（`:31`）、`MANAGED_SESSION_MINIMUM_READER = 'managed-session/1'`（`:38`，服务器 authority 所写，`managed-session-authority.ts:721`）、`MANAGED_SESSION_READER_CAPABILITY = 'managed-session/3'`（`:39`）。Java 服务器只接受 `managed-session/1`：`CsiNativeActivationProof:235-238`（头闭集、`formatVersion == 1`、`minimumReader == "managed-session/1"`）与 `JournalHistoryQueries:311-312`（pack value），事件信封 `"v"` 与 head 版本在 `:333`、`:268` 按 `JournalStoreRows.STORAGE_VERSION` 校验。
+journal 头携带 `formatVersion` 与 `minimumReader`。共享 TS 解析器 `parseManagedSessionHeader`（`managed-session-records.ts:1788-1822`）拒绝 `minimumReader` 超过 reader 自身能力的头：`MANAGED_SESSION_FORMAT_VERSION = 1`（`:31`）、`MANAGED_SESSION_MINIMUM_READER = 'managed-session/1'`（`:38`，服务器 authority 所写，`managed-session-authority.ts:721`）、`MANAGED_SESSION_READER_CAPABILITY = 'managed-session/3'`（`:39`）。Java 服务器只接受 `managed-session/1`：`JournalHistoryQueries:311-312`（pack value），事件信封 `"v"` 与 head 版本在 `:333`、`:268` 按 `JournalStoreRows.STORAGE_VERSION` 校验。（`CsiNativeActivationProof:235-238` 头闭集是 CSI 专属的，已被 #17415 归档；其通用 JSON helper 移到了 `ManagedCheckpointHistory` 与 `RuntimeToolMeasurements`。）
 
 另有独立的**本地**（standalone daemon）journal 路径写并要求 `managed-session/2`：`local-managed-journal-snapshot.ts:232,266,273,541` 与 `sessionStorageUtils.ts:1190`。这是同一记录格式族，但属不同部署面。
 
 **结论。** `formatVersion == 1` 与事件 `"v" == 1` 是单版本完整性门（保留）。`minimumReader` 是前向兼容声明；服务器侧取值恒为 `/1`，故服务器侧协商可删。共享解析器须继续容忍本地 `/2` 方言（或把本地路径也纳入范围）；让 `minimumReader` 在共享解析器中可选、并让服务器 authority 不再写它，是有界的服务器侧变更。
 
-### A4 — CSI handle 版本 1/4 是活形状；2 和 3 是死写路径
+### A4 — CSI handle 版本 1/4 是活形状；2 和 3 是死写路径（已被 #17415 取代）
+
+已取代——从本批丢弃。#17415 冷归档把 `WorkspaceCsiRuntimeIdentity`、CSI provisioner 及所有 CSI 准入类移入 `packages/sdk-java/managed-kubernetes-archive/`，并从 live server 删除 CSI 专属的 schema、配置与端点。本项已无 live 目标。下文分析作为历史记录保留。
 
 `WorkspaceCsiRuntimeIdentity` 定义 `VERSION=1`、`FILES_VERSION=2`、`FILES_AUTHORITY_VERSION=3`、`FILES_FINALIZATION_VERSION=4`（`:22-25`），各有自己的 handle-value 键集（`KEYS`、`FILES_KEYS`、`FILES_AUTHORITY_KEYS`、`FILES_FINALIZATION_KEYS`）。`validate()`（`:88-92`）要求版本与 boot 形状匹配，`boot(request, seed, handle)`（`:71-79`）按 handle 版本重建 boot。provisioner 按 boot 内容选版本（`WorkspaceCsiRuntimeProvisioner:228`）：
 
@@ -75,13 +80,13 @@ journal 头携带 `formatVersion` 与 `minimumReader`。共享 TS 解析器 `par
 - 删除 Session storage 的滚动升级 reader 围栏与 writer 能力协商（A1 职责 1+2），Java 与 TS 同步。
 - 把 `managed-action-options` 统一为 worker 产出、server 按字段存在性校验的单一超集形状（A5）。
 - 删除服务器侧 `minimumReader` 协商，同时保持本地 journal 方言可用（A2）。
-- 退役死的 CSI handle v2、v3 读容忍，保留 v1 + v4（A4，有界）。
-- 在本批中原样保留 CSI profile 能力围栏与 activity 投影重建不变量（A1 职责 3+4）。
+- A4（丢弃）：CSI handle v2/v3 读容忍退役在 #17415 冷归档后已无 live 目标。
+- 在本批中原样保留 activity 投影重建不变量（A1 职责 4）。（CSI profile 能力围栏，职责 3，已被 #17415 归档。）
 
 ## 非目标
 
-- 彻底删除 `storage_version` 列。那需要用非版本号重新表达 CSI 围栏（职责 3）与 activity 重建标记（职责 4）；后者有一个开放问题（见下）。推迟到 follow-up（A1 Layer 2）。
-- 统一 CSI boot 形状 / 退役非 files CSI（A4 完全塌缩）。这是产品/架构决策（盘点中的 B 类）。
+- 彻底删除 `storage_version` 列。那需要用非版本号重新表达 activity 重建标记（职责 4）；它有一个开放问题（见下）。推迟到 follow-up（A1 Layer 2）。（CSI 围栏，职责 3，已被 #17415 归档。）
+- 统一 CSI boot 形状 / 退役非 files CSI（A4 完全塌缩）。#17415 后作废：CSI 后端已归档。
 - 触碰本地 standalone journal 的 `managed-session/2` 方言，仅保持共享解析器对其容忍。
 - 删除单版本完整性门：资源 `schema_version == 1`、事件 `EventIdentity.SCHEMA_VERSION/PROJECTION_VERSION`、pack `formatVersion`、事件 `"v"`、manifest/bundle `formatVersion`、`managed-action-decision` kind 判别器，以及 `qwenCodeVersion` / `expectedQwenVersion` 一致性 pin。这些不是兼容产物。
 - tool 执行协议 v2/v3/v4 共存（A3）。它需要先统一编码，是独立的更大批次。
@@ -90,21 +95,21 @@ journal 头携带 `formatVersion` 与 `minimumReader`。共享 TS 解析器 `par
 
 ### 阶段 1 — A1：剥离 storage 版本协商（建议先行）
 
-原样保留 `storage_version`、`storageFloor()`、CSI 围栏、activity 重建标记、快照 descriptor 绑定。只删协商/限制层：
+原样保留 `storage_version`、`storageFloor()`、activity 重建标记、快照 descriptor 绑定（CSI 围栏已不复存在——被 #17415 归档）。只删协商/限制层：
 
 Server（Java）：
 
-- 删除 `ManagedSessionReaderVersion` 及其 bean（`ManagedAgentConfiguration:101`）；删除 `StorageReadPolicy` 接口与 `inProcess()`。从 `JournalStoreRows`、`JournalWriterLifecycle`、`JournalCommit` 与 `JdbcManagedSessionStore` 构造器移除 `readerVersion` 参数与字段；去掉 `requireReadable(...)` 调用（`JournalCommit:96`、`JournalStoreRows:587`、`JournalWriterLifecycle:210`）。移除四个嵌入/维护调用点的 `StorageReadPolicy.inProcess()` 实参。
+- 删除 `ManagedSessionReaderVersion` 及其 bean（`ManagedAgentConfiguration:101`）；删除 `StorageReadPolicy` 接口与 `inProcess()`。从 `JournalStoreRows`、`JournalWriterLifecycle`、`JournalCommit` 与 `JdbcManagedSessionStore` 构造器移除 `readerVersion` 参数与字段；去掉 `requireReadable(...)` 调用（`JournalCommit:96`、`JournalStoreRows:587`、`JournalWriterLifecycle:210`）。移除两个 live 嵌入调用点的 `StorageReadPolicy.inProcess()` 实参（CSI 维护入口已归档）。
 - 把 1..5 范围读者改为单版本完整性检查（`== JournalStoreRows.STORAGE_VERSION` 是错的——head 合法地携带 2..5；应去掉上界拒绝，仅保留 schema 已有的 `head_kind`/可空性 CHECK）。具体：移除 `ToolPublicationStore`、`ToolPublicationAdmissionStore`、`WorkspaceRecoveryStore`、`ManagedSideQueryStore`、`JournalStoreRows:583` 中的 `<= SUPPORTED` / `List.of(1..5)` 拒绝；该列仍是由 `storageFloor()` 写入的合法功能档位标记。
 - 从 `WriterGrant`（`ManagedSessionStoreModels:153-163`）与 `JournalWriterLifecycle.grant()` / `supportedStorage()` 移除 `supportedStorageVersion`；grant 不再携带 storage 天花板。
 
 Worker（TS）：
 
 - 停止发送 `X-Qwen-Managed-Max-Readable-Storage-Version`（`http-managed-session-store.ts:2457,3301`、`hosted-side-query.ts:186`）。
-- 从 grant 类型与解析器移除 `supportedStorageVersion`（`:875,:3637-3642`）；令 `supportsModelDiagnostics()` / `supportsExecutionDiagnostics()` 返回 true（pre-production server 恒为当前），并删除 profile-vs-grant 准入拒绝（`hosted-csi-session.ts:273-284`）。server 侧 CSI 围栏（`supportsStorage`）作为纵深防御保留。
+- 从 grant 类型与解析器移除 `supportedStorageVersion`（`:875,:3637-3642`）；令 `supportsModelDiagnostics()` / `supportsExecutionDiagnostics()` 返回 true（pre-production server 恒为当前），并删除 profile-vs-grant 准入拒绝（`hosted-csi-session.ts:273-284`）。server 侧 CSI 围栏（`supportsStorage`）已不复存在、无法作为纵深防御——它已被 #17415 归档。
 - 删除按 grant 的提交预检（`:2149-2177`）与 `head.storageVersion > grant.supportedStorageVersion` 拒绝（`:3088`）。保留 restore/快照的功能存在性完整性检查（`:519-553,1600-1736`），但把 `[1,2,3,4,5]` 枚举改为仅凭存在性检查（携带 measurements 的 head 必须有 measurements 资源，等等）；版本号仍作为这些检查已在使用的标记保留。
 
-本阶段删除所有滚动升级限制，同时原样保留两个活不变量。它以删除为主，是满足「pre-production 不做版本限制」的最低风险路径。
+本阶段删除所有滚动升级限制，同时原样保留 activity 重建不变量（CSI 围栏已被 #17415 归档）。它以删除为主，是满足「pre-production 不做版本限制」的最低风险路径。
 
 ### 阶段 2 — A5：把 action options 统一为单一形状
 
@@ -117,10 +122,12 @@ Worker（TS）：
 ### 阶段 3 — A2：删除服务器侧 minimumReader 协商
 
 - 让 `minimumReader` 在共享解析器（`parseManagedSessionHeader`）中可选：缺省→接受；存在→仍按 reader 能力校验，使本地 `/2` 方言继续可用。
-- 服务器 authority 不再写 `minimumReader`（`managed-session-authority.ts:721`）；Java 从头闭集移除 `minimumReader` 成员及 `== "managed-session/1"` 检查（`CsiNativeActivationProof:235-238`、`JournalHistoryQueries:311-312`）。
+- 服务器 authority 不再写 `minimumReader`（`managed-session-authority.ts:721`）；Java 从头闭集移除 `minimumReader` 成员及 `== "managed-session/1"` 检查（`JournalHistoryQueries:311-312`；`CsiNativeActivationProof` 头检查已被 #17415 归档）。
 - 保留 `formatVersion == 1` 与事件 `"v" == 1` 完整性门。
 
-### 阶段 4 — A4：退役死的 CSI handle 变体（有界）
+### 阶段 4 — A4：退役死的 CSI handle 变体（丢弃——已被 #17415 取代）
+
+丢弃。本阶段编辑的每个类（`WorkspaceCsiRuntimeIdentity`、`JdbcCsiExecutionAdmission`、CSI provisioner 与准入测试）都已被 #17415 冷归档移入 `packages/sdk-java/managed-kubernetes-archive/`；live server 中无可改之物。下文步骤作为历史记录保留。
 
 - 移除 v2（`FILES_VERSION`）与 v3（`FILES_AUTHORITY_VERSION`）读容忍：`fileHistoryBoot` 与 `JdbcCsiExecutionAdmission` 仅要求 v4；删除 `WorkspaceCsiRuntimeIdentity` 中的 v2/v3 键集与 boot 重建分支。二者都是死写路径（上文已核实），故这是纯兼容删除——无需任何 `authorityOrigin` 配置变更。
 - 保留 v1（非 files resident CSI）与 v4（files + finalization）。把 v1、v4 统一为单一形状不在范围内（架构决策）。
@@ -128,36 +135,36 @@ Worker（TS）：
 
 ## 设计决策与理由
 
-- **先剥协商再删列（A1）。** 版本号对 CSI 能力围栏与 activity 重建标记是 load-bearing 的。删协商以有界、以删除为主的变更删除真正的滚动升级限制，且零不变量风险；删列是更深的重构，必须先重新表达这些不变量。
-- **A1 Layer 2（删列）的开放问题。** activity 重建标记必须在「activity summary 行缺失但 journal 中存在 activity 数据」（restore 后投影被清）的情形下存活。今天 `storage_version >= 4` 是驱动 `rebuildBatch` 重建 `clearing` summary 的持久信号。无版本替代需要一个等价的持久信号——例如首次 activity 提交时置位的 boolean head 列，或对 activity 资源引用的有界 EXISTS 探测——并且必须在删列前对 restore 路径证明。CSI 围栏可重新表达为逐提交的「资源 kind vs profile」检查（因为每次提交都检查，故充分），比持久档位更简单。
+- **先剥协商再删列（A1）。** 版本号对 activity 重建标记是 load-bearing 的（CSI 能力围栏已被 #17415 归档）。删协商以有界、以删除为主的变更删除真正的滚动升级限制，且零不变量风险；删列是更深的重构，必须先重新表达该不变量。
+- **A1 Layer 2（删列）的开放问题。** activity 重建标记必须在「activity summary 行缺失但 journal 中存在 activity 数据」（restore 后投影被清）的情形下存活。今天 `storage_version >= 4` 是驱动 `rebuildBatch` 重建 `clearing` summary 的持久信号。无版本替代需要一个等价的持久信号——例如首次 activity 提交时置位的 boolean head 列，或对 activity 资源引用的有界 EXISTS 探测——并且必须在删列前对 restore 路径证明。（重新表达 CSI 围栏已作废：围栏已被 #17415 归档。）
 - **A5 是统一而非删除。** v1/v2 是活 fallback；设计把 writer 改为单一超集形状、reader 改为按字段存在性校验，保留 question/command 不变量。
 - **A2 保留本地方言。** 共享记录解析器同时服务服务器与 standalone 本地 journal；让 `minimumReader` 可选即可删除服务器协商而不破坏本地 `/2`。
-- **A4 只退役死变体。** v1（非 files resident）与 v4（files 维护）是活形状判别器；v2、v3 可证明在生产中从不被写入（authority=null 的 provisioner 仅 resident/非 files；有 authority 必加 finalization）。塌缩 v1、v4 是架构工作，不在范围内。
+- **A4 只退役死变体（已取代——被 #17415 归档）。** v1（非 files resident）与 v4（files 维护）曾是活形状判别器；v2、v3 可证明在生产中从不被写入（authority=null 的 provisioner 仅 resident/非 files；有 authority 必加 finalization）。整个 CSI 后端现已归档，故此决策已无 live 目标。
 
 ## 约束
 
 - 模块 AGENTS.md：任何 schema 触碰原地编辑 V1 基线；禁止 V2+ 迁移。阶段 1 无 schema 变更（列保留）。A1 Layer 2 若推进，原地编辑 V1。
-- 保留租户隔离、writer-lease/generation 围栏、双 SQL fencer 参数化，以及 CSI 锁序（`lockSessionFirst → lockCsiContinuation → requireHeadAfterCsiCheck`）。
-- 阶段 1 中 CSI profile 能力围栏与 activity 重建不变量行为保持一致。
+- 保留租户隔离、writer-lease/generation 围栏、双 SQL fencer 参数化。（CSI 锁序 `lockSessionFirst → lockCsiContinuation → requireHeadAfterCsiCheck` 已被 #17415 归档。）
+- 阶段 1 中 activity 重建不变量行为保持一致（CSI profile 能力围栏已被 #17415 归档）。
 - Java + TS 线变更（grant 字段、头、options 形状、pack 头）必须同步落地；pre-production worker 与 server 作为一个单元部署。
 - 文档变更保持两个语言版本完整且同步。
 
 ## 风险
 
-- 阶段 1 触碰 writer-grant 线形状与 store 请求头；Java 与 TS 必须同步变更，否则准入中断。focused store 测试与 CSI 激活门测试是回归网。
-- 移除 grant 天花板意味着不匹配的 worker 可能尝试提交、随后被 CSI 围栏拒绝；围栏本就 fail-closed，故失败模式从「worker 拒绝准入」变为「server 拒绝提交」——两者都是 409 级且安全，但错误面变化，断言 worker 侧拒绝码的测试须移到 server 侧围栏。
+- 阶段 1 触碰 writer-grant 线形状与 store 请求头；Java 与 TS 必须同步变更，否则准入中断。focused store 测试是回归网（CSI 激活门测试已归档）。
+- 移除 grant 天花板会改变错误面：worker 侧拒绝码随协商一并消失。本风险原先依赖的 server 侧 CSI 围栏已被 #17415 归档，故已无 CSI 提交拒绝可供迁移测试；余下的按版本门控的 server 检查是 activity 重建门与快照/history 完整性检查。
 - A5 writer/reader 统一必须保留命令交叉校验与 question continuation 要求；丢失不变量会让不可恢复的审批被提交。action store 测试钉住这些。
 - A2 解析器变更不得拒绝本地 `/2` 头；本地快照测试是护栏。
-- A4 v2/v3 移除是纯读容忍删除（二者皆死写路径）；唯一风险是测试或仓外 provisioner 构造 v2/v3 handle。生产构造点已核实（resident 非 files → v1；维护 files → v4）；用包私有构造器的测试须改用 v1/v4。
+- A4（丢弃——已被 #17415 取代）：v2/v3 读容忍移除已无 live 目标；归档源码保留其 handle 形状。
 
 ## 验证计划
 
 按模块 AGENTS.md，在共享 10 分钟预算内跑 focused 回归（JDK 21、Maven 3.8.9+、从 checkout 安装 sibling SDK）；完整门在 CI。
 
-- A1：`ManagedSessionReaderVersionTest`（删除/改用途）、`ManagedSessionStoreIntegrationTest`（`:387,424,440,486` 头/天花板用例）、`ManagedActivityDiagnosticsTest`（`:98,143` floor 断言保留）、`ManagedSideQueryStoreTest`（`:83` version-999 拒绝改用途）、`HostedSideQueryProcessIT:196`、`HostedCleanupRetentionMySqlIT:53`、`WorkspaceCsiNativeActivationGateTest`（`:933,958`），以及注入 `StorageReadPolicy` 的 wiring 测试（`VerificationFixtures:73`、`ToolPublicationStorageConfigurationTest:51`、`ManagedSessionStoreWiringTest:54`、`ToolPublicationAsyncVerificationTest:320`）。TS：`http-managed-session-store.test.ts` grant/头/restore 用例（`:2528,2558,2623,2771,7083,9166`）、`hosted-csi-session` 准入测试。
+- A1：`ManagedSessionReaderVersionTest`（删除/改用途）、`ManagedSessionStoreIntegrationTest`（`:387,424,440,486` 头/天花板用例）、`ManagedActivityDiagnosticsTest`（`:98,143` floor 断言保留）、`ManagedSideQueryStoreTest`（`:83` version-999 拒绝改用途）、`HostedSideQueryProcessIT:196`、`HostedCleanupRetentionMySqlIT:53`，以及注入 `StorageReadPolicy` 的 wiring 测试（`VerificationFixtures:73`、`ToolPublicationStorageConfigurationTest:51`、`ManagedSessionStoreWiringTest:54`、`ToolPublicationAsyncVerificationTest:320`）。（`WorkspaceCsiNativeActivationGateTest` 已被 #17415 归档。）TS：`http-managed-session-store.test.ts` grant/头/restore 用例（`:2528,2558,2623,2771,7083,9166`）、`hosted-csi-session` 准入测试。
 - A5：`ManagedActionsTest`（`:171`）、`JdbcManagedActionStore` action 校验测试、`hosted-workspace-tool-turn.test.ts`（`:6160,6176`）与 `hosted-approval-fallback.test.ts`（`:320`）。
-- A2：`CsiPackRecordsTest`、`JournalPackTransactionRegressionTest`、`managed-session-records.test.ts` 头用例（`:1003-1067`）、`local-managed-journal-snapshot` 测试（本地 `/2` 保持绿）。
-- A4：`WorkspaceCsiNativeActivationGateTest`、CSI 执行/激活准入测试、`WorkspaceCsiRuntimeProvisioner` 测试。
+- A2：`JournalPackTransactionRegressionTest`、`managed-session-records.test.ts` 头用例（`:1003-1067`）、`local-managed-journal-snapshot` 测试（本地 `/2` 保持绿）。（`CsiPackRecordsTest` 已被 #17415 归档。）
+- A4：丢弃——所列套件（`WorkspaceCsiNativeActivationGateTest`、CSI 执行/激活准入测试、`WorkspaceCsiRuntimeProvisioner` 测试）均已被 #17415 归档。
 - MySQL 集成：`ManagedSessionStoreIntegrationTest`、`HostedHarnessMySqlIT:240`、`ManagedSchemaMySqlIT`（head 列）。
 - 线变更后对 `packages/core` 与 `packages/cli` 做 TS typecheck/build。
 
@@ -165,6 +172,6 @@ Worker（TS）：
 
 1. 阶段 1（A1 剥协商）——建议先行，风险最低。
 2. 阶段 2（A5 统一）与阶段 3（A2 minimumReader）——独立，阶段 1 后可以任意顺序落地。
-3. 阶段 4（A4 v2 + v3 读容忍移除）——独立。
-4. Follow-up A1 Layer 2：在重新表达 CSI 围栏与 activity 重建标记后删除 `storage_version`（先解决开放问题）。
-5. Follow-up A4 完全塌缩与 A3 tool 协议统一：独立的架构批次（盘点中的 B 类 / A3）。
+3. 阶段 4（A4 v2 + v3 读容忍移除）——丢弃，已被 #17415 冷归档取代。
+4. Follow-up A1 Layer 2：在重新表达 activity 重建标记后删除 `storage_version`（先解决开放问题；CSI 围栏已归档）。
+5. Follow-up A3 tool 协议统一：独立的更大批次（盘点中的 A3）。A4 完全塌缩已作废——CSI 后端已归档。

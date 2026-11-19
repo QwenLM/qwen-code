@@ -1,16 +1,31 @@
-# Managed Agent Version Convergence (storage ladder, action options, pack reader, CSI handles)
+# Managed Agent Version Convergence (storage ladder, action options, pack reader)
 
 [English](2026-11-19-managed-agent-version-convergence.md) | [简体中文](2026-11-19-managed-agent-version-convergence.zh-CN.md)
 
 Status: proposed. The service is pre-production, so version machinery that only
 exists to protect existing deployments or to negotiate rolling upgrades can be
-removed. This design covers the four items flagged as "A class" in the
-2026-11-19 version-compatibility inventory: the Session storage-version ladder
-and reader-version header (A1), the `managed-action-options` format family (A5),
-the journal pack `minimumReader` declaration (A2), and the CSI resource-handle
-version ladder (A4). Source-level verification corrected several first-pass
-classifications; the corrected scope is recorded below so the change set stays
-bounded and honest.
+removed. This design covers the items flagged as "A class" in the 2026-11-19
+version-compatibility inventory: the Session storage-version ladder and
+reader-version header (A1), the `managed-action-options` format family (A5),
+and the journal pack `minimumReader` declaration (A2). The CSI resource-handle
+version ladder (A4) was dropped by the cold archive described below.
+Source-level verification corrected several first-pass classifications; the
+corrected scope is recorded below so the change set stays bounded and honest.
+
+Revision (2026-11-19) — CSI cold archive #17415 (`0c2458a3ca0f`, 2026-11-16;
+design record: `2026-11-13-managed-kubernetes-java-archive.md`). The archive
+moved the Kubernetes runtime, Resident Workspace / Workspace CSI backend, and
+Kubernetes Harness pool discovery Java sources into
+`packages/sdk-java/managed-kubernetes-archive/` (a cold source archive outside
+the build) and removed the CSI-only schema columns, configuration, endpoints,
+and maintenance entry points from the live server. Consequences for this
+design: A4 is dropped entirely; the CSI-specific parts of A1 (the profile
+capability fence, job 3, and the CSI maintenance call sites) and A2 (the
+`CsiNativeActivationProof` header check) no longer exist in the live server.
+The A batch is now A2 / A5 / A1 (non-CSI). Sections describing archived
+mechanisms are kept as the historical record and marked superseded. The
+archive did not touch TypeScript, so worker-side CSI session code still
+exists, but its server-side admission counterparts are archived.
 
 ## Problem
 
@@ -43,9 +58,10 @@ read and written by code that does four distinct jobs:
    - `StorageReadPolicy.requireReadable(floor)` rejects a commit whose floor
      exceeds the reader ceiling (`JournalCommit:96`, `JournalStoreRows:587`,
      `JournalWriterLifecycle:210`). `StorageReadPolicy.inProcess()` (ceiling 5)
-     is used by the embedded/maintenance paths: `JdbcManagedSessionStore:67`,
-     `ManagedSideQueryStore:57`, `WorkspaceCsiRuntimeMain:163`,
-     `WorkspaceCsiWorkerAckMain:63`.
+     is used by the embedded paths: `JdbcManagedSessionStore:67`,
+     `ManagedSideQueryStore:57`. (The CSI maintenance call sites
+     `WorkspaceCsiRuntimeMain:163` and `WorkspaceCsiWorkerAckMain:63` were
+     archived by #17415.)
    - Range readers accept any version in 1..5: `ToolPublicationStore:244`,
      `ToolPublicationAdmissionStore:147`, `WorkspaceRecoveryStore:616`
      (`List.of(1,2,3,4,5)`), `ManagedSideQueryStore:576`, `JournalStoreRows:583`.
@@ -55,23 +71,26 @@ read and written by code that does four distinct jobs:
 
 2. **Writer capability negotiation (rolling-upgrade guard).**
    - The server returns `supportedStorageVersion` in the writer grant:
-     `JournalWriterLifecycle.supportedStorage()` (`:654`) returns 5 for non-CSI
-     Sessions, and for CSI Sessions derives it from the profile
-     (`csi-files-retirement/1`→1, `/2`→3, `/3`→4).
+     `JournalWriterLifecycle.supportedStorage()` (`:654`) returns 5. (The
+     CSI-profile derivation was archived by #17415.)
    - The worker gates diagnostics production on that grant:
      `http-managed-session-store.ts:936-940`
      (`supportsExecutionDiagnostics() = grant >= 4`,
      `supportsModelDiagnostics() = grant >= 3`), and refuses CSI admission when
      the assigned profile needs a tier the server does not support
      (`hosted-csi-session.ts:273-284`, `csi_activity_storage_unavailable` /
-     `csi_diagnostics_storage_unavailable`).
+     `csi_diagnostics_storage_unavailable`; the server-side CSI admission that
+     assigned those profiles was archived by #17415).
    - The worker pre-checks each commit against the grant
      (`http-managed-session-store.ts:2149-2177`, needsVersionTwo/Three/Four/Five)
      and refuses to take over a head newer than the grant
      (`:3087-3088`, `head.storageVersion > grant.supportedStorageVersion`;
      head validation `[1,2,3,4,5]` at `:356`).
 
-3. **CSI profile capability fence (live invariant).**
+3. **CSI profile capability fence (archived by #17415 — moot).**
+   Superseded: `CsiFilesRetirementProfile` and every CSI admission path now
+   live in `packages/sdk-java/managed-kubernetes-archive/`; the live server has
+   no CSI fence. The description below is the pre-archive record.
    - `CsiFilesRetirementProfile.supportsStorage(scope, version)` (`:96`) admits
      version 1, or 3 with diagnostics, or 4 with activity diagnostics. It is
      checked at commit (`JournalCommit:104-105` against
@@ -105,10 +124,10 @@ presence against the version on restore and snapshot inspection
 (`http-managed-session-store.ts:519-553,1600-1736`).
 
 **Consequence.** Jobs 1 and 2 are the rolling-upgrade restrictions with no
-protected object pre-production. Jobs 3 and 4 are live invariants that happen
-to be expressed through the version number. Deleting the column outright must
-re-express jobs 3 and 4; deleting only the negotiation (jobs 1+2) leaves them
-working unchanged.
+protected object pre-production. Job 3 was archived by #17415; job 4 is the
+one remaining live invariant expressed through the version number. Deleting
+the column outright must re-express job 4; deleting only the negotiation
+(jobs 1+2) leaves it working unchanged.
 
 ### A5 — `managed-action-options` v1/v2/v3/v4 are live writer shapes
 
@@ -146,11 +165,12 @@ rejects a header whose `minimumReader` exceeds the reader's own capability:
 `MANAGED_SESSION_MINIMUM_READER = 'managed-session/1'` (`:38`, what the server
 authority writes, `managed-session-authority.ts:721`),
 `MANAGED_SESSION_READER_CAPABILITY = 'managed-session/3'` (`:39`). The Java
-server accepts only `managed-session/1`: `CsiNativeActivationProof:235-238`
-(header closed set, `formatVersion == 1`, `minimumReader == "managed-session/1"`)
-and `JournalHistoryQueries:311-312` (pack value), with the event envelope `"v"`
-and head version checked against `JournalStoreRows.STORAGE_VERSION` at
-`:333` and `:268`.
+server accepts only `managed-session/1`: `JournalHistoryQueries:311-312`
+(pack value), with the event envelope `"v"` and head version checked against
+`JournalStoreRows.STORAGE_VERSION` at `:333` and `:268`. (The
+`CsiNativeActivationProof:235-238` header closed set was CSI-only and was
+archived by #17415; its generic JSON helpers moved to `ManagedCheckpointHistory`
+and `RuntimeToolMeasurements`.)
 
 A separate **local** (standalone daemon) journal path writes and requires
 `managed-session/2`: `local-managed-journal-snapshot.ts:232,266,273,541` and
@@ -165,7 +185,14 @@ local path must be in scope too); making `minimumReader` optional in the shared
 parser and omitting it from the server authority is the bounded server-side
 change.
 
-### A4 — CSI handle versions 1/4 are live shapes; 2 and 3 are dead write paths
+### A4 — CSI handle versions 1/4 are live shapes; 2 and 3 are dead write paths (superseded by #17415)
+
+Superseded — dropped from the batch. The #17415 cold archive moved
+`WorkspaceCsiRuntimeIdentity`, the CSI provisioners, and all CSI admission
+classes into `packages/sdk-java/managed-kubernetes-archive/` and removed the
+CSI-only schema, configuration, and endpoints from the live server. There is
+no live target for this item. The analysis below is kept as the historical
+record.
 
 `WorkspaceCsiRuntimeIdentity` defines `VERSION=1`, `FILES_VERSION=2`,
 `FILES_AUTHORITY_VERSION=3`, `FILES_FINALIZATION_VERSION=4` (`:22-25`), each with
@@ -220,19 +247,20 @@ files shape) remains a separate architecture decision, out of scope.
   worker and validated by field presence on the server (A5).
 - Remove the server-side `minimumReader` negotiation while keeping the local
   journal dialect working (A2).
-- Retire the dead CSI handle v2 and v3 read tolerance, keeping v1 + v4 (A4,
-  bounded).
-- Preserve the CSI profile capability fence and the activity-projection rebuild
-  invariant (A1 jobs 3+4) unchanged in this batch.
+- A4 (dropped): the CSI handle v2/v3 read-tolerance retirement has no live
+  target after the #17415 cold archive.
+- Preserve the activity-projection rebuild invariant (A1 job 4) unchanged in
+  this batch. (The CSI profile capability fence, job 3, was archived by
+  #17415.)
 
 ## Non-goals
 
 - Dropping the `storage_version` column entirely. That requires re-expressing
-  the CSI fence (job 3) and the activity rebuild marker (job 4) without a
-  version number; the latter has an open question (below). Deferred to a
-  follow-up (A1 Layer 2).
-- Unifying CSI boot shapes / retiring non-files CSI (A4 full collapse). This is
-  a product/architecture decision (B class in the inventory).
+  the activity rebuild marker (job 4) without a version number; it has an open
+  question (below). Deferred to a follow-up (A1 Layer 2). (The CSI fence,
+  job 3, was archived by #17415.)
+- Unifying CSI boot shapes / retiring non-files CSI (A4 full collapse). Moot
+  after #17415: the CSI backend is archived.
 - Touching the local standalone journal `managed-session/2` dialect beyond
   keeping the shared parser tolerant of it.
 - Removing single-version integrity gates: resource `schema_version == 1`,
@@ -247,9 +275,9 @@ files shape) remains a separate architecture decision, out of scope.
 
 ### Phase 1 — A1: strip storage-version negotiation (recommended first)
 
-Keep `storage_version`, `storageFloor()`, the CSI fence, the activity rebuild
-marker, and the snapshot descriptor binding exactly as they are. Delete only the
-negotiation/restriction layer:
+Keep `storage_version`, `storageFloor()`, the activity rebuild marker, and the
+snapshot descriptor binding exactly as they are (the CSI fence no longer
+exists — archived by #17415). Delete only the negotiation/restriction layer:
 
 Server (Java):
 
@@ -259,8 +287,8 @@ Server (Java):
   `JournalStoreRows`, `JournalWriterLifecycle`, `JournalCommit`, and the
   `JdbcManagedSessionStore` constructors; drop the `requireReadable(...)` calls
   (`JournalCommit:96`, `JournalStoreRows:587`, `JournalWriterLifecycle:210`).
-  Remove the `StorageReadPolicy.inProcess()` arguments at the four embedded /
-  maintenance call sites.
+  Remove the `StorageReadPolicy.inProcess()` arguments at the two live embedded
+  call sites (the CSI maintenance entry points are archived).
 - Replace the 1..5 range readers with a single-version integrity check
   (`== JournalStoreRows.STORAGE_VERSION` is wrong — heads legitimately carry
   2..5; instead drop the upper-bound rejection and keep only the
@@ -282,7 +310,8 @@ Worker (TS):
   `supportsExecutionDiagnostics()` return true (the server is always current
   pre-production), and delete the profile-vs-grant admission refusals
   (`hosted-csi-session.ts:273-284`). The server-side CSI fence
-  (`supportsStorage`) remains as defense-in-depth.
+  (`supportsStorage`) no longer exists as defense-in-depth — it was archived
+  by #17415.
 - Delete the commit pre-checks against the grant (`:2149-2177`) and the
   `head.storageVersion > grant.supportedStorageVersion` rejection (`:3088`).
   Keep the feature-presence integrity checks on restore/snapshot
@@ -291,9 +320,10 @@ Worker (TS):
   measurements resource, etc.); the version number stays as the marker those
   checks already use.
 
-This phase removes every rolling-upgrade restriction while leaving the two live
-invariants intact. It is mostly deletion and is the lowest-risk way to satisfy
-"no version restrictions pre-production".
+This phase removes every rolling-upgrade restriction while leaving the activity
+rebuild invariant intact (the CSI fence was archived by #17415). It is mostly
+deletion and is the lowest-risk way to satisfy "no version restrictions
+pre-production".
 
 ### Phase 2 — A5: unify action options to one shape
 
@@ -329,10 +359,17 @@ them to commit-time closure validation. The floor promotion keys on
 - Server authority stops writing `minimumReader`
   (`managed-session-authority.ts:721`); Java drops the `minimumReader` member
   from the header closed set and the `== "managed-session/1"` check
-  (`CsiNativeActivationProof:235-238`, `JournalHistoryQueries:311-312`).
+  (`JournalHistoryQueries:311-312`; the `CsiNativeActivationProof` header check
+  was archived by #17415).
 - Keep `formatVersion == 1` and event `"v" == 1` integrity gates.
 
-### Phase 4 — A4: retire dead CSI handle variants (bounded)
+### Phase 4 — A4: retire dead CSI handle variants (dropped — superseded by #17415)
+
+Dropped. Every class this phase edits (`WorkspaceCsiRuntimeIdentity`,
+`JdbcCsiExecutionAdmission`, the CSI provisioners and admission tests) was
+moved to `packages/sdk-java/managed-kubernetes-archive/` by the #17415 cold
+archive; there is nothing to change in the live server. The steps below are
+kept as the historical record.
 
 - Remove the v2 (`FILES_VERSION`) and v3 (`FILES_AUTHORITY_VERSION`) read
   tolerance: `fileHistoryBoot` and `JdbcCsiExecutionAdmission` require v4 only;
@@ -348,10 +385,11 @@ them to commit-time closure validation. The floor promotion keys on
 ## Design decisions and rationale
 
 - **Strip negotiation before dropping the column (A1).** The version number is
-  load-bearing for the CSI capability fence and the activity rebuild marker.
-  Removing the negotiation deletes the actual rolling-upgrade restrictions with
-  bounded, mostly-deletion changes and zero invariant risk; dropping the column
-  is a deeper refactor that must first re-express those invariants.
+  load-bearing for the activity rebuild marker (the CSI capability fence was
+  archived by #17415). Removing the negotiation deletes the actual
+  rolling-upgrade restrictions with bounded, mostly-deletion changes and zero
+  invariant risk; dropping the column is a deeper refactor that must first
+  re-express that invariant.
 - **Open question for A1 Layer 2 (column removal).** The activity rebuild marker
   must survive the case where the activity summary row is absent but activity
   data exists in the journal (post-restore projection wipe). Today
@@ -359,31 +397,32 @@ them to commit-time closure validation. The floor promotion keys on
   recreate a `clearing` summary. A version-free replacement needs an equivalent
   durable signal — e.g. a boolean head column set on the first activity commit,
   or a bounded EXISTS probe over activity resource references — and must be
-  proven against the restore paths before the column can go. The CSI fence can
-  be re-expressed as a per-commit resource-kind-vs-profile check (sufficient
-  because every commit is checked), which is simpler than the persisted tier.
+  proven against the restore paths before the column can go. (Re-expressing
+  the CSI fence is moot: the fence was archived by #17415.)
 - **A5 is unification, not deletion.** v1/v2 are live fallbacks; the design
   changes the writer to one superset shape and the reader to field-presence
   validation, preserving the question/command invariants.
 - **A2 keeps the local dialect.** The shared record parser feeds both the server
   and the standalone local journal; making `minimumReader` optional removes the
   server negotiation without breaking local `/2`.
-- **A4 only retires dead variants.** v1 (non-files resident) and v4 (files
-  maintenance) are the live shape discriminators; v2 and v3 are provably never
-  written in production (the authority-null provisioner is resident/non-files
-  only; authority present always adds finalization). Collapsing v1 and v4 is
-  architecture work, out of scope.
+- **A4 only retires dead variants (superseded — archived by #17415).** v1
+  (non-files resident) and v4 (files maintenance) were the live shape
+  discriminators; v2 and v3 were provably never written in production (the
+  authority-null provisioner is resident/non-files only; authority present
+  always adds finalization). The whole CSI backend is now archived, so this
+  decision has no live target.
 
 ## Constraints
 
 - Module AGENTS.md: any schema touch edits the V1 baseline in place; no V2+
   migrations. Phase 1 adds no schema change (the column stays). A1 Layer 2, if
   pursued, edits V1 in place.
-- Preserve tenant isolation, writer-lease/generation fencing, the dual SQL
-  fencer parameterization, and the CSI lock order
-  (`lockSessionFirst → lockCsiContinuation → requireHeadAfterCsiCheck`).
-- Keep the CSI profile capability fence and the activity rebuild invariant
-  behaviorally identical in Phase 1.
+- Preserve tenant isolation, writer-lease/generation fencing, and the dual SQL
+  fencer parameterization. (The CSI lock order
+  `lockSessionFirst → lockCsiContinuation → requireHeadAfterCsiCheck` was
+  archived by #17415.)
+- Keep the activity rebuild invariant behaviorally identical in Phase 1 (the
+  CSI profile capability fence was archived by #17415).
 - Java + TS wire changes (grant field, header, options shape, pack header) must
   land together; the worker and server are deployed as one unit pre-production.
 - Documentation changes keep both language versions complete and synchronized.
@@ -392,22 +431,19 @@ them to commit-time closure validation. The floor promotion keys on
 
 - Phase 1 touches the writer-grant wire shape and the store request headers;
   Java and TS must change in lockstep or admission breaks. The focused store
-  tests and the CSI activation gate tests are the regression net.
-- Removing the grant ceiling means a mismatched worker could attempt a commit
-  the CSI fence then rejects; the fence already fails closed, so the failure
-  mode shifts from "worker refuses admission" to "server rejects commit" — both
-  are 409-class and safe, but the error surface changes and tests asserting the
-  worker-side refusal codes must move to the server-side fence.
+  tests are the regression net (the CSI activation gate tests are archived).
+- Removing the grant ceiling changes the error surface: the worker-side refusal
+  codes disappear with the negotiation. The server-side CSI fence this risk
+  originally relied on was archived by #17415, so there is no CSI commit
+  rejection left to move tests to; the remaining version-gated server checks
+  are the activity-rebuild gate and the snapshot/history integrity checks.
 - A5 writer/reader unification must keep the command cross-check and question
   continuation requirement; a dropped invariant would let an unresumable
   approval commit. The action store tests pin these.
 - A2 parser change must not reject local `/2` headers; the local snapshot tests
   are the guard.
-- A4 v2/v3 removal is pure read-tolerance deletion (both are dead write paths);
-  the only risk is a test or out-of-tree provisioner constructing v2/v3 handles.
-  The production construction sites are verified (resident non-files → v1;
-  maintenance files → v4); tests using the package-private constructor must move
-  to v1/v4.
+- A4 (dropped — superseded by #17415): the v2/v3 read-tolerance removal has no
+  live target; the archived sources keep their handle shapes.
 
 ## Validation plan
 
@@ -418,21 +454,23 @@ Per module AGENTS.md, run focused regressions within the shared 10-minute budget
   `ManagedSessionStoreIntegrationTest` (header/ceiling cases at `:387,424,440,486`),
   `ManagedActivityDiagnosticsTest` (`:98,143` floor assertions stay),
   `ManagedSideQueryStoreTest` (`:83` version-999 rejection repurposed),
-  `HostedSideQueryProcessIT:196`, `HostedCleanupRetentionMySqlIT:53`,
-  `WorkspaceCsiNativeActivationGateTest` (`:933,958`), and the wiring tests that
-  inject `StorageReadPolicy` (`VerificationFixtures:73`,
+  `HostedSideQueryProcessIT:196`, `HostedCleanupRetentionMySqlIT:53`, and the
+  wiring tests that inject `StorageReadPolicy` (`VerificationFixtures:73`,
   `ToolPublicationStorageConfigurationTest:51`,
   `ManagedSessionStoreWiringTest:54`, `ToolPublicationAsyncVerificationTest:320`).
+  (`WorkspaceCsiNativeActivationGateTest` was archived by #17415.)
   TS: `http-managed-session-store.test.ts` grant/header/restore cases
   (`:2528,2558,2623,2771,7083,9166`), `hosted-csi-session` admission tests.
 - A5: `ManagedActionsTest` (`:171`), `JdbcManagedActionStore` action validation
   tests, `hosted-workspace-tool-turn.test.ts` (`:6160,6176`) and
   `hosted-approval-fallback.test.ts` (`:320`).
-- A2: `CsiPackRecordsTest`, `JournalPackTransactionRegressionTest`,
+- A2: `JournalPackTransactionRegressionTest`,
   `managed-session-records.test.ts` header cases (`:1003-1067`),
   `local-managed-journal-snapshot` tests (local `/2` stays green).
-- A4: `WorkspaceCsiNativeActivationGateTest`, CSI execution/activation admission
-  tests, `WorkspaceCsiRuntimeProvisioner` tests.
+  (`CsiPackRecordsTest` was archived by #17415.)
+- A4: dropped — all listed suites (`WorkspaceCsiNativeActivationGateTest`, CSI
+  execution/activation admission tests, `WorkspaceCsiRuntimeProvisioner` tests)
+  were archived by #17415.
 - MySQL integration: `ManagedSessionStoreIntegrationTest`,
   `HostedHarnessMySqlIT:240`, `ManagedSchemaMySqlIT` for the head column.
 - TS typecheck/build for `packages/core` and `packages/cli` after the wire changes.
@@ -442,8 +480,9 @@ Per module AGENTS.md, run focused regressions within the shared 10-minute budget
 1. Phase 1 (A1 negotiation strip) — recommended first, lowest risk.
 2. Phase 2 (A5 unification) and Phase 3 (A2 minimumReader) — independent, can
    land in either order after Phase 1.
-3. Phase 4 (A4 v2 + v3 read-tolerance removal) — independent.
-4. Follow-up A1 Layer 2: drop `storage_version` after re-expressing the CSI fence
-   and the activity rebuild marker (resolve the open question first).
-5. Follow-up A4 full collapse and A3 tool-protocol unification: separate
-   architecture batches (B class / A3 in the inventory).
+3. Phase 4 (A4 v2 + v3 read-tolerance removal) — dropped, superseded by the
+   #17415 cold archive.
+4. Follow-up A1 Layer 2: drop `storage_version` after re-expressing the activity
+   rebuild marker (resolve the open question first; the CSI fence is archived).
+5. Follow-up A3 tool-protocol unification: a separate, larger batch (A3 in the
+   inventory). The A4 full collapse is moot — the CSI backend is archived.
