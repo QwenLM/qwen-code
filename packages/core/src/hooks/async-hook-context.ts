@@ -38,6 +38,14 @@ export const MAX_ASYNC_HOOK_CONTEXT_LENGTH =
 export const ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE =
   '\n[async hook context truncated]';
 
+/**
+ * Marks a message half that was cut to fit the bound. Distinct from the context
+ * notice so a message-only block does not announce a context truncation that
+ * never happened, and a squeezed message cut is not left unmarked.
+ */
+export const ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE =
+  '\n[async hook message truncated]';
+
 export function wrapAsyncHookContext(context: string): string {
   return `${ASYNC_HOOK_CONTEXT_OPEN}\n${context}\n${ASYNC_HOOK_CONTEXT_CLOSE}`;
 }
@@ -86,10 +94,13 @@ function safeCut(text: string, length: number): string {
  * budget for the truncation notice when the half is cut (mirroring
  * `boundToolHookContext`).
  */
-function boundHalf(text: string, budget: number): string {
+function boundHalf(
+  text: string,
+  budget: number,
+  notice: string = ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE,
+): string {
   if (!text || budget <= 0) return '';
   if (text.length <= budget) return text;
-  const notice = ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE;
   if (budget <= notice.length) {
     return safeCut(text, budget);
   }
@@ -129,11 +140,16 @@ export function formatAsyncHookOutput(
   }
   const joinedContext = contextBlocks.join('\n\n');
   const messageText = messageBlocks.join('\n\n');
-  // A message-only block past the cap is bounded on its own; with a context
-  // present, fall through so the squeeze branch below keeps the displaced
-  // context marked rather than dropping it unmarked.
+  // A message-only block past the cap is bounded on its own and marked with the
+  // message notice (there is no context half to name); with a context present,
+  // fall through so the squeeze branch below keeps the displaced context marked
+  // rather than dropping it unmarked.
   if (messageText.length >= MAX_ASYNC_HOOK_CONTEXT_LENGTH && !joinedContext) {
-    return boundHalf(messageText, MAX_ASYNC_HOOK_CONTEXT_LENGTH);
+    return boundHalf(
+      messageText,
+      MAX_ASYNC_HOOK_CONTEXT_LENGTH,
+      ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE,
+    );
   }
   const separator = messageText && joinedContext ? '\n\n' : '';
   const contextBudget =
@@ -146,16 +162,19 @@ export function formatAsyncHookOutput(
   ) {
     // The context must be cut, but its budget cannot fit the truncation
     // notice; an unmarked fragment would read as complete. Keep the cut marked
-    // by reserving the notice's room from the message side. (Diverges from
+    // by reserving the notice's room from the message side. The message half is
+    // itself cut to make that room, so it is bounded with the message notice —
+    // otherwise its tail would drop unmarked. (Diverges from
     // boundToolHookContext, whose budget is caller-chosen rather than squeezed
     // by a sibling half.)
     const keepContext = Math.max(contextBudget, 0);
-    messages = safeCut(
+    messages = boundHalf(
       messageText,
       MAX_ASYNC_HOOK_CONTEXT_LENGTH -
         separator.length -
         ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE.length -
         keepContext,
+      ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE,
     );
     contextText =
       safeCut(joinedContext, keepContext) +

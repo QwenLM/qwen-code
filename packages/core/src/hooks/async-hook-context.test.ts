@@ -12,6 +12,7 @@ import {
   ASYNC_HOOK_CONTEXT_CLOSE,
   MAX_ASYNC_HOOK_CONTEXT_LENGTH,
   ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE,
+  ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE,
   wrapAsyncHookContext,
   isAsyncHookContextPartText,
   formatAsyncHookOutput,
@@ -207,6 +208,9 @@ describe('async-hook-context', () => {
         ],
       });
       expect(rendered).toContain(ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE);
+      // The message half is itself cut to reserve the context notice's room, so
+      // its cut must be marked too rather than dropping its tail unmarked.
+      expect(rendered).toContain(ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE);
       expect(rendered).toContain('[warning]');
       expect((rendered ?? '').length).toBeLessThanOrEqual(
         MAX_ASYNC_HOOK_CONTEXT_LENGTH,
@@ -233,7 +237,10 @@ describe('async-hook-context', () => {
       expect((rendered ?? '').length).toBeLessThanOrEqual(
         MAX_ASYNC_HOOK_CONTEXT_LENGTH,
       );
-      expect(rendered).toContain(ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE);
+      // The cut half is the message, so it carries the message notice — not the
+      // context notice, which would name a context truncation that never happened.
+      expect(rendered).toContain(ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE);
+      expect(rendered).not.toContain(ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE);
     });
 
     it('marks a displaced context when a message fills the cap', () => {
@@ -260,6 +267,123 @@ describe('async-hook-context', () => {
       expect((rendered ?? '').length).toBeLessThanOrEqual(
         MAX_ASYNC_HOOK_CONTEXT_LENGTH,
       );
+    });
+
+    it('strips a partial entity left by the message-only cut', () => {
+      // The message is escaped before the cut, so a '<' whose '&lt;' straddles
+      // the message-only cut must not leave a broken '&l' tail before the
+      // message notice.
+      const prefix = '[info] H: ';
+      const cut =
+        MAX_ASYNC_HOOK_CONTEXT_LENGTH -
+        ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE.length;
+      const rendered = formatAsyncHookOutput({
+        contexts: [],
+        messages: [
+          {
+            type: 'info',
+            message:
+              'x'.repeat(cut - 2 - prefix.length) + '<' + 'y'.repeat(200),
+            hookName: 'H',
+            hookId: 'h1',
+            timestamp: 0,
+          },
+        ],
+      });
+      expect(rendered).toContain(ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE);
+      const before = (rendered ?? '').slice(
+        0,
+        (rendered ?? '').indexOf(ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE),
+      );
+      expect(/&(?:lt?|gt?)?$/.test(before)).toBe(false);
+    });
+
+    it('backs the message-only cut off an astral character', () => {
+      const prefix = '[info] H: ';
+      const cut =
+        MAX_ASYNC_HOOK_CONTEXT_LENGTH -
+        ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE.length;
+      const rendered = formatAsyncHookOutput({
+        contexts: [],
+        messages: [
+          {
+            type: 'info',
+            message:
+              'x'.repeat(cut - 1 - prefix.length) +
+              '\u{1F600}' +
+              'y'.repeat(200),
+            hookName: 'H',
+            hookId: 'h1',
+            timestamp: 0,
+          },
+        ],
+      });
+      expect(rendered).toContain(ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE);
+      const before = (rendered ?? '').slice(
+        0,
+        (rendered ?? '').indexOf(ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE),
+      );
+      expect(/[\uD800-\uDBFF]$/.test(before)).toBe(false);
+    });
+
+    it('strips a partial entity left by the squeezed message cut', () => {
+      // A context present forces the squeeze branch; the message is cut to
+      // reserve the context notice's room, and its own cut must stay clean.
+      const prefix = '[warning] H: ';
+      const msgCut =
+        MAX_ASYNC_HOOK_CONTEXT_LENGTH -
+        2 -
+        ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE.length -
+        ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE.length;
+      const rendered = formatAsyncHookOutput({
+        contexts: ['LINT: 3 errors'],
+        messages: [
+          {
+            type: 'warning',
+            message:
+              'x'.repeat(msgCut - 2 - prefix.length) + '<' + 'y'.repeat(5000),
+            hookName: 'H',
+            hookId: 'h1',
+            timestamp: 0,
+          },
+        ],
+      });
+      expect(rendered).toContain(ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE);
+      const before = (rendered ?? '').slice(
+        0,
+        (rendered ?? '').indexOf(ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE),
+      );
+      expect(/&(?:lt?|gt?)?$/.test(before)).toBe(false);
+    });
+
+    it('backs the squeezed message cut off an astral character', () => {
+      const prefix = '[warning] H: ';
+      const msgCut =
+        MAX_ASYNC_HOOK_CONTEXT_LENGTH -
+        2 -
+        ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE.length -
+        ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE.length;
+      const rendered = formatAsyncHookOutput({
+        contexts: ['LINT: 3 errors'],
+        messages: [
+          {
+            type: 'warning',
+            message:
+              'x'.repeat(msgCut - 1 - prefix.length) +
+              '\u{1F600}' +
+              'y'.repeat(5000),
+            hookName: 'H',
+            hookId: 'h1',
+            timestamp: 0,
+          },
+        ],
+      });
+      expect(rendered).toContain(ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE);
+      const before = (rendered ?? '').slice(
+        0,
+        (rendered ?? '').indexOf(ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE),
+      );
+      expect(/[\uD800-\uDBFF]$/.test(before)).toBe(false);
     });
   });
 
