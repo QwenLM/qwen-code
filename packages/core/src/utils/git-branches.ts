@@ -2107,7 +2107,13 @@ function refuseOccupiedPreImage(
     newStat !== null &&
     oldStat.dev === newStat.dev &&
     oldStat.ino === newStat.ino;
-  if (sameIdentity) return;
+  // A case-folding filesystem resolves the old spelling to the post-image
+  // through one directory entry, so it carries one link. A second link means
+  // the same inode was published at the old name too (`cp -al`, `rsync -H`, a
+  // package store), and `commit -- <oldPath>` would take its bytes from the
+  // worktree as a modification — publishing the occupant and dropping the
+  // deletion the user selected.
+  if (sameIdentity && oldStat.nlink <= 1) return;
   throw new Error(
     `cannot commit: ${oldPath} was renamed to ${newPath}, but a file now sits at the old path`,
   );

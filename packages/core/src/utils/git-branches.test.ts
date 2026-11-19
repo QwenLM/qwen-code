@@ -2930,6 +2930,28 @@ describe('gitCommit', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'refuses a hardlink left at a rename pre-image',
+    async () => {
+      // `cp -al`, `rsync -H` and hardlinking package stores leave the same
+      // inode under both names. The identity check alone reads that as a
+      // case-folding alias, commits the hardlink's bytes as a modification of
+      // the old path, and drops the deletion the caller selected.
+      const dir = makeRepo();
+      commitFile(dir, 'old.txt', 'ORIGINAL\n', 'add old');
+      git(dir, 'mv', 'old.txt', 'new.txt');
+      fs.writeFileSync(path.join(dir, 'new.txt'), 'REWRITTEN\n');
+      fs.linkSync(path.join(dir, 'new.txt'), path.join(dir, 'old.txt'));
+      const before = git(dir, 'rev-parse', 'HEAD').trim();
+
+      await expect(
+        gitCommit(dir, 'rename', { paths: ['new.txt', 'old.txt'] }),
+      ).rejects.toThrow(/a file now sits at the old path/);
+      expect(git(dir, 'rev-parse', 'HEAD').trim()).toBe(before);
+      expect(git(dir, 'show', 'HEAD:old.txt').trim()).toBe('ORIGINAL');
+    },
+  );
+
   it('records both halves when the status pair is selected through both rows', async () => {
     // A staged rename whose post-image was rewritten past git's rename
     // threshold: the checklist lists two independent rows and the user ticks
