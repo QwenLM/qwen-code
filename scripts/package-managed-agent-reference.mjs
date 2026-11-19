@@ -62,6 +62,11 @@ export const ADMIN_COMMANDS = Object.freeze([
     'Retire, prepare, promote, abort or inspect a Workspace migration.',
   ],
   [
+    'workspace-identity-reattest',
+    `${PERSISTENCE}.WorkspaceIdentityReattestationMain`,
+    'Plan, fence, retire or complete an offline macOS storage identity upgrade.',
+  ],
+  [
     'maintenance-recovery',
     `${PERSISTENCE}.WorkspaceMaintenanceRecoveryMain`,
     'Inspect or reconcile a Workspace held by maintenance.',
@@ -70,41 +75,6 @@ export const ADMIN_COMMANDS = Object.freeze([
     'operator-recovery',
     `${WORKSPACE_RUNTIME}.WorkspaceRecoveryCommand`,
     'Prepare, complete or inspect a Hosted Shell lease recovery.',
-  ],
-  [
-    'csi-registration',
-    `${PERSISTENCE}.WorkspaceCsiRegistrationMain`,
-    'Register or inspect a reviewed CSI Workspace registration.',
-  ],
-  [
-    'csi-protection',
-    `${WORKSPACE_RUNTIME}.WorkspaceCsiProtectionMain`,
-    'Render the protection policy for a CSI registration.',
-  ],
-  [
-    'csi-session',
-    `${PERSISTENCE}.WorkspaceCsiSessionMain`,
-    'Create a reviewed CSI Session offline.',
-  ],
-  [
-    'csi-runtime',
-    `${PERSISTENCE}.WorkspaceCsiRuntimeMain`,
-    'Serve, prompt or retire one reviewed CSI Session Runtime.',
-  ],
-  [
-    'csi-retirement',
-    `${PERSISTENCE}.WorkspaceCsiRetirementMain`,
-    'Inspect or begin a CSI Workspace retirement.',
-  ],
-  [
-    'csi-worker-ack',
-    `${PERSISTENCE}.WorkspaceCsiWorkerAckMain`,
-    'Acknowledge or inspect a CSI worker publication.',
-  ],
-  [
-    'resident-retirement',
-    `${PERSISTENCE}.ResidentWorkspaceRetirementMain`,
-    'Inspect, begin or delete the pod of a resident Workspace retirement.',
   ],
   [
     'resolved-configuration',
@@ -444,7 +414,7 @@ export async function createReferenceDistribution({
     throw new Error(`${CONTRACT_DOCUMENT} ${publicApi.error}.`);
   }
   const capabilities = await readFile(
-    path.join(root, 'packages/cli/src/serve/capabilities.ts'),
+    path.join(root, 'packages/sdk-typescript/src/daemon/capabilities.ts'),
     'utf8',
   );
   const brokerClient = await readFile(

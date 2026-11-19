@@ -4,8 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
-import { parse, stringify } from './yaml-parser.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { parse, sanitizeValue, stringify } from './yaml-parser.js';
+
+const { warn } = vi.hoisted(() => ({ warn: vi.fn() }));
+vi.mock('./debugLogger.js', () => ({
+  createDebugLogger: () => ({ warn }),
+}));
+vi.mock('yaml', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('yaml')>();
+  return { ...actual, parseDocument: vi.fn(actual.parseDocument) };
+});
 
 describe('yaml-parser', () => {
   describe('parse', () => {
@@ -154,6 +163,245 @@ describe('yaml-parser', () => {
       expect(metadata['note']).toBe('hello');
       expect(Object.getPrototypeOf(metadata)).toBeNull();
     });
+  });
+
+  describe('positive raw cache', () => {
+    let parseCached: typeof parse;
+    let documentCalls: () => number;
+    let conversionCalls: () => number;
+
+    beforeEach(async () => {
+      vi.resetModules();
+      vi.clearAllMocks();
+      vi.stubEnv('LOG_TOKENS', '');
+      vi.stubEnv('LOG_STREAM', '');
+      const yaml = await import('yaml');
+      const documents = vi.spyOn(yaml, 'parseDocument');
+      const conversions = vi.spyOn(yaml.Document.prototype, 'toJS');
+      documentCalls = () => documents.mock.calls.length;
+      conversionCalls = () => conversions.mock.calls.length;
+      ({ parse: parseCached } = await import('./yaml-parser.js'));
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    });
+
+    it('reuses parsing while returning independent sanitized records and arrays', () => {
+      const input =
+        'source: &source {items: [one, null, two]}\ncopy: *source\n' +
+        'hooks: {pre: [{command: original}]}\n__proto__: {marker: safe}';
+      const first = parseCached(input);
+      const source = first['source'] as Record<string, unknown>;
+      (source['items'] as string[]).push('changed');
+      const hooks = first['hooks'] as Record<string, unknown>;
+      (hooks['pre'] as Array<Record<string, unknown>>)[0]!['command'] =
+        'changed';
+      (first['__proto__'] as Record<string, unknown>)['marker'] = 'changed';
+
+      const second = parseCached(input);
+      expect(second).toEqual({
+        source: { items: ['one', 'two'] },
+        copy: { items: ['one', 'two'] },
+        hooks: { pre: [{ command: 'original' }] },
+        ['__proto__']: { marker: 'safe' },
+      });
+      expect(first).not.toBe(second);
+      for (const key of ['source', 'copy', 'hooks', '__proto__']) {
+        expect(first[key]).not.toBe(second[key]);
+        expect(Object.getPrototypeOf(second[key])).toBeNull();
+      }
+      expect(Object.getPrototypeOf(second)).toBeNull();
+      expect((first['copy'] as Record<string, unknown>)['items']).toEqual([
+        'one',
+        'two',
+      ]);
+      expect(documentCalls()).toBe(1);
+      expect(conversionCalls()).toBe(1);
+    });
+
+    it('keeps typed value coercion on cache hits', () => {
+      const input =
+        'date: !!timestamp 2024-01-01\nbytes: !!binary aGVsbG8=\n' +
+        'set: !!set {one: null, two: null}\n' +
+        'pairs: !!omap [{one: 1}, {two: 2}]';
+      const first = parseCached(input);
+      const second = parseCached(input);
+      expect(second).toEqual({
+        date: '2024-01-01T00:00:00.000Z',
+        bytes: 'hello',
+        set: {},
+        pairs: {},
+      });
+      expect(second['set']).not.toBe(first['set']);
+      expect(Object.getPrototypeOf(second['set'])).toBeNull();
+      expect(documentCalls()).toBe(1);
+      expect(conversionCalls()).toBe(1);
+    });
+
+    it('keys entries by the complete input text', () => {
+      const inputs = [
+        'name: exact\n',
+        'name: exact\r\n',
+        '# comment\nname: exact\n',
+        'name: "exact"\n',
+        '\uFEFFname: exact\n',
+      ];
+      for (const input of inputs) {
+        expect(parseCached(input)).toEqual({ name: 'exact' });
+        expect(parseCached(input)).toEqual({ name: 'exact' });
+      }
+      expect(documentCalls()).toBe(inputs.length);
+      expect(conversionCalls()).toBe(inputs.length);
+    });
+
+    it('bounds input length in UTF-16 code units and bypasses oversized input', () => {
+      const prefix = 'name: ';
+      const input = prefix + '😀'.repeat((16_384 - prefix.length) / 2);
+      expect(input.length).toBe(16_384);
+      expect(parseCached(input)).toEqual(parseCached(input));
+      expect(documentCalls()).toBe(1);
+      expect(conversionCalls()).toBe(1);
+      const oversized = input + 'x';
+      expect(parseCached(oversized)).toEqual(parseCached(oversized));
+      expect(documentCalls()).toBe(1);
+      expect(conversionCalls()).toBe(3);
+    });
+
+    it('evicts the oldest of 256 entries without refreshing hits', () => {
+      const inputs = Array.from({ length: 256 }, (_, i) => `name: fifo-${i}`);
+      for (const input of inputs) parseCached(input);
+      parseCached(inputs[0]!);
+      parseCached('name: fifo-256');
+      expect(documentCalls()).toBe(257);
+      parseCached(inputs[0]!);
+      expect(documentCalls()).toBe(258);
+      parseCached(inputs[255]!);
+      expect(documentCalls()).toBe(258);
+    });
+
+    it.each([
+      ['collection', '? [one, two]\n: value'],
+      ['alias', 'source: &key [one, two]\n? *key\n: value'],
+      ['timestamp', '? !!timestamp 2024-01-01\n: value'],
+      ['binary', '? !!binary aGVsbG8=\n: value'],
+    ])(
+      'preserves the conversion warning for %s keys on every call',
+      (_, input) => {
+        const warnings = vi
+          .spyOn(process, 'emitWarning')
+          .mockImplementation(() => {});
+        expect(parseCached(input)).toEqual(parseCached(input));
+        expect(warnings).toHaveBeenCalledTimes(2);
+        for (const [warning] of warnings.mock.calls) {
+          expect(String(warning)).toContain('Keys with collection values');
+        }
+        expect(warn).not.toHaveBeenCalled();
+        expect(documentCalls()).toBe(2);
+        expect(conversionCalls()).toBe(2);
+      },
+    );
+
+    it('preserves document warnings on every call', () => {
+      const warnings = vi
+        .spyOn(process, 'emitWarning')
+        .mockImplementation(() => {});
+      const input = 'name: !unknown value';
+      expect(parseCached(input)).toEqual(parseCached(input));
+      expect(warnings).toHaveBeenCalledTimes(2);
+      for (const [warning] of warnings.mock.calls) {
+        expect(warning).toMatchObject({ code: 'TAG_RESOLVE_FAILED' });
+      }
+      expect(warn).not.toHaveBeenCalled();
+      expect(documentCalls()).toBe(2);
+    });
+
+    it.each([
+      ['syntax', 'name: fallback\nbroken: [unclosed'],
+      ['duplicate key', 'name: first\nname: second'],
+      ['multiple documents', 'name: first\n---\nname: second'],
+      ['cycle', 'name: cycle\nloop: &loop {self: *loop}'],
+      [
+        'excessive aliases',
+        'a: &a [x,x,x,x,x,x,x,x,x,x]\n' +
+          'b: &b [*a,*a,*a,*a,*a,*a,*a,*a,*a,*a]\n' +
+          'c: [*b,*b,*b,*b,*b,*b,*b,*b,*b,*b]',
+      ],
+      ['scalar', 'plain'],
+      ['array', '[one, two]'],
+      ['null', 'null'],
+      ['empty', ''],
+    ])('does not cache %s fallback results', (_, input) => {
+      const first = parseCached(input);
+      const second = parseCached(input);
+      expect(second).toEqual(first);
+      expect(second).not.toBe(first);
+      expect(Object.getPrototypeOf(second)).toBeNull();
+      expect(warn).toHaveBeenCalledTimes(2);
+      expect(documentCalls()).toBe(2);
+    });
+
+    it.each([
+      ['LOG_TOKENS', '1', 'log'],
+      ['LOG_TOKENS', '0', 'log'],
+      ['LOG_STREAM', '1', 'dir'],
+      ['LOG_STREAM', '0', 'dir'],
+    ] as const)(
+      'preserves one original parse for %s=%s',
+      async (flag, value, method) => {
+        const yaml = await import('yaml');
+        const output = vi.spyOn(console, method).mockImplementation(() => {});
+        const warnings = vi
+          .spyOn(process, 'emitWarning')
+          .mockImplementation(() => {});
+        const input = 'name: debug\nmetadata: {items: [one, null]}';
+        const expected = parseCached(input);
+        parseCached(input);
+        expect(documentCalls()).toBe(1);
+        expect(conversionCalls()).toBe(1);
+        vi.stubEnv(flag, value);
+        for (const text of [input, '? [one, two]\n: value']) {
+          output.mockClear();
+          warnings.mockClear();
+          const original = sanitizeValue(
+            yaml.parse(text, {
+              schema: 'core',
+              customTags: (tags) =>
+                tags.filter((tag) => {
+                  const uri = typeof tag === 'string' ? tag : tag.tag;
+                  return ![
+                    'tag:yaml.org,2002:timestamp',
+                    'tag:yaml.org,2002:binary',
+                    'timestamp',
+                    'binary',
+                  ].includes(uri);
+                }),
+            }),
+          );
+          const originalOutput = output.mock.calls.slice();
+          const originalWarnings = warnings.mock.calls.slice();
+          expect(originalOutput.length).toBeGreaterThan(0);
+          const convertedBefore = conversionCalls();
+          for (let i = 0; i < 2; i++) {
+            output.mockClear();
+            warnings.mockClear();
+            expect(parseCached(text)).toEqual(original);
+            expect(output.mock.calls).toEqual(originalOutput);
+            expect(warnings.mock.calls).toEqual(originalWarnings);
+          }
+          expect(documentCalls()).toBe(1);
+          expect(conversionCalls()).toBe(convertedBefore + 2);
+        }
+        vi.stubEnv(flag, '');
+        output.mockClear();
+        const convertedBefore = conversionCalls();
+        expect(parseCached(input)).toEqual(expected);
+        expect(output).not.toHaveBeenCalled();
+        expect(documentCalls()).toBe(1);
+        expect(conversionCalls()).toBe(convertedBefore);
+      },
+    );
   });
 
   describe('stringify', () => {

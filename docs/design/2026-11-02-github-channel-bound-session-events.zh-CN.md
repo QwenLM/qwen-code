@@ -2,7 +2,7 @@
 
 [English](2026-11-02-github-channel-bound-session-events.md) | [简体中文](2026-11-02-github-channel-bound-session-events.zh-CN.md)
 
-状态：提案（维护者已于 2026-11-02 确认决策：prompt 注入投递、channel 内状态监视、事件范围 = CI 失败 + 合并冲突 + 新评论 + head 前进 / merged / closed）。
+状态：已实现（#16117；维护者已于 2026-11-02 确认决策：prompt 注入投递、channel 内状态监视、事件范围 = CI 失败 + 合并冲突 + 新评论 + head 前进 / merged / closed）。下文按当时的设计描述。其中 PR 状态监视部分已被[由 daemon PR 刷新产生 PR 状态转换事件](2026-11-04-daemon-pr-state-transitions.zh-CN.md)取代，且该设计已落地：daemon 拥有检测与投递，`prWatchEvents` 与 `watch:*` 键是一个 minor 版本内的弃用别名，`prWatchLimit` / `prWatchBudgetReserve` 被忽略。下文的评论投递部分仍然在用。
 
 修订 2026-11-04：第 1 层改为直接读取 PR sidecar（每个 workspace 一次目录列表），不再按活动序分页会话列表，因此 `partial` 只表示目录的一部分读不到（没有 runtime 的 registry 条目、无法列出的 chats 目录、无法读取的 sidecar 或 transcript、无法获取的 live 会话列表）；会话数量不再让快照变成 partial。
 
@@ -136,7 +136,7 @@ boundSessions?: {
 1. **prompt 注入，而非 channel 接管。** `activateManagedSession` 会把跟进会话的出站目标绑到 GitHub 线程，交互式会话的每条最终回复都会被发布为公开 PR 评论（publication contract）。注入让回复留在会话内，GitHub 动作交给会话自己的判断与工具。
 2. **channel 内状态监视，而非 webhook。** 监视复用 channel 既有轮询循环与凭据；判定发生在 API 层，真实迁移出现前零模型 token。Webhook 推送需要公网隧道加在仓库建 webhook（需操作者同意），还要改造静态 webhook targets。监视本质仍是轮询，但它是维护者接受的 gate 探针形状：模型之外做廉价判定，有变化才动模型。
 3. **反查放在 daemon。** 绑定跨 workspace；worker 是 workspace 作用域且已经通过鉴权 HTTP 与 daemon 通信。只读进程级路由复用刷新定时器的扫描模式，避免在 worker 里重复 sidecar 访问。
-4. **单候选，取最近更新。** 广播到所有绑定会话会成倍放大模型成本并产生重复的 GitHub 动作；最新的非归档、非 channel 会话最可能持有工作上下文。提案中的[绑定会话动作模板](2026-11-04-github-channel-bound-session-action-templates.zh-CN.md)设计在配置 `boundSessionActions` 时将本决策泛化为每角色一个 winner；字段缺省时，本决策逐字成立。
+4. **单候选，取最近更新。** 广播到所有绑定会话会成倍放大模型成本并产生重复的 GitHub 动作；最新的非归档、非 channel 会话最可能持有工作上下文。[绑定会话动作模板](2026-11-04-github-channel-bound-session-action-templates.zh-CN.md)设计（#16258）在配置 `boundSessionActions` 时将本决策泛化为每角色一个 winner；字段缺省时，本决策逐字成立。
 5. **候选排除 channel 会话。** 经 `/review` 回填绑定的 channel 自建会话必须保持公开回复契约；正常 channel 路径已经服务它。
 6. **默认 opt-in。** 公开仓库事件驱动交互式会话是新的信任面；操作者显式开启，且评论的 sender gate 在投递前照常生效（对已绑定 PR 上名单内发送者的评论，mention 要求不适用，operators 除外；关键决策 12）。
 7. **唤醒休眠会话，而非回退。** E2E 发现 daemon 重启后绑定会话处于休眠态、prompt 路由 404；若把这当作「会话已消失」，重启后的所有事件都会静默改走公开 channel 投递——违背功能的核心私密投递承诺。因此访问器先恢复会话（channel bridge 已在用的同款 resume 路径）再重试一次；只有无法恢复的会话才回退。恢复铸造的 client 注册由访问器在重试 prompt 落定后显式 detach：非空注册会挡住 daemon 的 prompt-settled idle close，不 detach 就会把被唤醒的会话钉在 live 态直到 TTL reaper（reaper 禁用时则永久）。

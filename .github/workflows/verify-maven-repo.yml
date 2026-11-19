@@ -117,7 +117,6 @@ jobs:
             qwen-managed-agent-runtime-host
             qwen-managed-agent-runtime-http
             qwen-managed-agent-runtime-local
-            qwen-managed-agent-runtime-kubernetes
             qwen-managed-agent-runtime-ssh
             qwen-managed-agent-runtime-static
             qwen-managed-agent-server

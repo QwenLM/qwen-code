@@ -549,6 +549,7 @@ export const TranscriptViewport = forwardRef<
               key={viewport.viewKey}
               ref={list}
               messages={viewport.messages}
+              hookStatisticsSessionId={props.sourceSessionId}
               deletion={historical ? undefined : deletion}
               mcpAppSessionId={props.mcpAppSessionId ?? props.sourceSessionId}
               timelineAction={

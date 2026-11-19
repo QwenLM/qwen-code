@@ -41,7 +41,7 @@ describe('ManagedDiagnosticsPanel', () => {
     vi.restoreAllMocks();
     vi.useRealTimers();
   });
-  async function render(language: 'en' | 'zh-CN' = 'en') {
+  async function render(language: 'en' | 'zh-CN' | 'zh-TW' = 'en') {
     await act(async () =>
       root.render(
         <I18nProvider language={language}>
@@ -119,6 +119,14 @@ describe('ManagedDiagnosticsPanel', () => {
     expect(document.body.textContent).toContain('历史发现结果');
     expect(document.body.textContent).toContain('不代表服务器当前在线');
     expect(provider.getResources).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads the zh-TW diagnostics cells, not the Simplified ones', async () => {
+    await render('zh-TW');
+    expect(document.body.textContent).toContain('系統提示詞');
+    await selectTab('資源');
+    expect(document.body.textContent).toContain('提示詞');
+    expect(document.body.textContent).not.toContain('提示模板');
   });
 
   it('labels token totals that cover only some model calls', async () => {
