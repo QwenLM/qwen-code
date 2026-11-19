@@ -9073,6 +9073,7 @@ export class Session implements SessionContext {
                     rejectOnLoopDetected,
                     goalTurn,
                     channelTurn,
+                    true,
                     (reason) => {
                       continuationFinishReason = reason;
                     },
@@ -9868,8 +9869,8 @@ export class Session implements SessionContext {
     rejectOnLoopDetected = false,
     goalTurn?: AcpGoalTurn,
     channelTurn = false,
-    onFinishReason?: (reason: string | undefined) => void,
     isSessionTurn = true,
+    onFinishReason?: (reason: string | undefined) => void,
   ): Promise<{
     stopReason: PromptResponse['stopReason'];
     loopProtectionStopped?: boolean;
