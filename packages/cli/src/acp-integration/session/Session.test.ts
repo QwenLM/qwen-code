@@ -5242,6 +5242,57 @@ describe('Session', () => {
         )
         .filter((value) => value.length > 0);
 
+    it.each(['during execution', 'after settlement'] as const)(
+      'handles Send now %s of a shared tool batch',
+      async (stage) => {
+        const call = { id: 'call-shared', name: 'read_file', args: {} };
+        useSharedRounds([toolCall(call), finished()]);
+        let finishBatch!: () => void;
+        const releaseBatch = new Promise<void>((resolve) => {
+          finishBatch = resolve;
+        });
+        let batchSignal: AbortSignal | undefined;
+        const toolResponse = {
+          functionResponse: {
+            id: call.id,
+            name: call.name,
+            response: { output: 'done' },
+          },
+        };
+        runAcpToolBatchSpy.mockImplementationOnce(
+          async (_host, { signal }: { signal: AbortSignal }) => {
+            batchSignal = signal;
+            await releaseBatch;
+            return {
+              stop: 'tool_ended_turn',
+              parts: [toolResponse],
+              results: [],
+              stopAfterPermissionCancel: false,
+            };
+          },
+        );
+        if (stage === 'after settlement') {
+          vi.mocked(mockChat.addHistory).mockImplementation((message) => {
+            if (message.parts?.some((part) => part.functionResponse)) {
+              session.sendMidTurnInputNow();
+            }
+          });
+        }
+        const done = prompt();
+        await vi.waitFor(() => expect(batchSignal).toBeDefined());
+        if (stage === 'during execution') session.sendMidTurnInputNow();
+        finishBatch();
+        await expect(done).resolves.toEqual({
+          stopReason: stage === 'during execution' ? 'cancelled' : 'end_turn',
+        });
+        expect(batchSignal?.aborted).toBe(stage === 'during execution');
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [toolResponse],
+        });
+      },
+    );
+
     it('sends a fresh prompt as a UserQuery whose user turn it recorded', async () => {
       const send = useSharedRounds([text('Hello'), finished()]);
       mockConfig.prepareWorkflowMode = vi.fn();
@@ -12424,6 +12475,49 @@ describe('Session', () => {
         ).not.toHaveBeenCalled();
       },
     );
+
+    it('cancels the restored question approval on Send now without persisting a late answer', async () => {
+      mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());
+      const execute = vi.fn();
+      mockToolRegistry.getTool.mockReturnValue(
+        mockConfirmingTool('ask_user_question', execute),
+      );
+      let answer!: (response: RequestPermissionResponse) => void;
+      const permission = new Promise<RequestPermissionResponse>((resolve) => {
+        answer = resolve;
+      });
+      vi.mocked(mockClient.requestPermission).mockReturnValue(permission);
+
+      const done = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [],
+        _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+      } as unknown as Parameters<typeof session.prompt>[0]);
+      try {
+        await vi.waitFor(() =>
+          expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+        );
+        const { signal } = (
+          session as unknown as { pendingPrompt: AbortController }
+        ).pendingPrompt;
+        session.sendMidTurnInputNow();
+        expect(signal.reason).toBe('qwen:mid-turn-send-now');
+        await expect(done).resolves.toEqual({ stopReason: 'cancelled' });
+      } finally {
+        answer({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          answers: { '0': 'Polling' },
+        } as RequestPermissionResponse);
+        await done;
+      }
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(mockClient.extMethod).not.toHaveBeenCalledWith(
+        'craft/drainMidTurnQueue',
+        expect.anything(),
+      );
+      expect(mockChatRecordingService.recordToolResult).not.toHaveBeenCalled();
+    });
 
     it('carries a pending recovered-agents notice on the post-answer message', async () => {
       mockChat.getHistory = vi.fn().mockReturnValue(danglingAuqHistory());
@@ -34176,12 +34270,20 @@ describe('Session', () => {
           await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
           const nextMessage = vi.mocked(mockChat.sendMessageStream).mock
             .calls[1]?.[1].message as Part[];
+          expect(nextMessage).toContainEqual(
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'c',
+                name: 'read_file',
+              }),
+            }),
+          );
           expect(nextMessage).toContainEqual({
             text: '\n[User message received during tool execution]: also check tests',
           });
         });
 
-        it('hands off a Goal turn waiting for approval when the user sends input now', async () => {
+        async function verifyGoalHandoff(origin: 'runtime' | 'user') {
           const permit: core.GoalTurnPermit = {
             goalId: 'goal-1',
             revision: 1,
@@ -34204,10 +34306,15 @@ describe('Session', () => {
             },
           });
           const nextPermit = { ...permit, turnId: 'next-goal-turn' };
-          mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
-            [permit, nextPermit].find(
-              ({ turnId }) => turnKey === `goal-runtime:${turnId}`,
-            ),
+          mockGoalRuntime.permitForTurn.mockImplementation(
+            (turnKey: string) => {
+              if (origin === 'user' && turnKey.startsWith('goal-user:')) {
+                return permit;
+              }
+              return [permit, nextPermit].find(
+                ({ turnId }) => turnKey === `goal-runtime:${turnId}`,
+              );
+            },
           );
           let finishHandoff!: (result: Record<string, unknown>) => void;
           const handoff = new Promise<Record<string, unknown>>((resolve) => {
@@ -34233,16 +34340,28 @@ describe('Session', () => {
             .mockResolvedValueOnce(createStreamWithChunks([readFileCall]))
             .mockResolvedValue(createEmptyStream());
 
-          await boundGoalHost!.startGoalTurn({
-            permit,
-            continuationContext: 'check weather',
-          });
+          mockGoalRuntime.beginTurn.mockReturnValue(permit);
+          const userTurn = origin === 'user' ? startPrompt() : undefined;
+          if (!userTurn) {
+            await boundGoalHost!.startGoalTurn({
+              permit,
+              continuationContext: 'check weather',
+            });
+          }
           await vi.waitFor(() =>
+            expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+          );
+          if (origin === 'runtime') {
             expect(mockClient.requestPermission).toHaveBeenCalledWith(
               expect.objectContaining({ _meta: { goalTurnId: permit.turnId } }),
-            ),
-          );
+            );
+          }
           session.sendMidTurnInputNow();
+          if (userTurn) {
+            await expect(userTurn).resolves.toEqual({
+              stopReason: 'cancelled',
+            });
+          }
 
           // A handoff to the input, as when a new prompt preempts the turn.
           await vi.waitFor(() =>
@@ -34256,16 +34375,18 @@ describe('Session', () => {
           );
           expect(drainCalls()).toHaveLength(0);
           // The host promotes the input once it learns the Goal turn ended.
-          await vi.waitFor(() =>
-            expect(mockClient.extNotification).toHaveBeenCalledWith(
-              '_qwencode/end_turn',
-              expect.objectContaining({
-                source: 'goal',
-                reason: 'cancelled',
-                turnId: permit.turnId,
-              }),
-            ),
-          );
+          if (origin === 'runtime') {
+            await vi.waitFor(() =>
+              expect(mockClient.extNotification).toHaveBeenCalledWith(
+                '_qwencode/end_turn',
+                expect.objectContaining({
+                  source: 'goal',
+                  reason: 'cancelled',
+                  turnId: permit.turnId,
+                }),
+              ),
+            );
+          }
           expect(mockClient.extMethod).toHaveBeenCalledWith(
             MID_TURN_GOAL_HANDOFF_METHOD,
             { sessionId: 'test-session-id' },
@@ -34280,7 +34401,12 @@ describe('Session', () => {
           await vi.waitFor(() =>
             expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(nextPermit),
           );
-        });
+        }
+
+        it.each(['runtime', 'user'] as const)(
+          'hands off a %s Goal turn waiting for approval on Send now',
+          verifyGoalHandoff,
+        );
 
         it('answers input whose drain returns after the response ended', async () => {
           let answerDrain: ((value: unknown) => void) | undefined;
@@ -55649,6 +55775,41 @@ describe('Session', () => {
           'The user interrupted this tool call to send you a message, which follows. Read it before deciding whether to run the tool again.\n\npartial',
       });
     });
+
+    it.each(['execution', 'PostToolUse'] as const)(
+      'reports the discarded result when Send now interrupts after %s',
+      async (stage) => {
+        const controller = new AbortController();
+        const abort = () => controller.abort('qwen:mid-turn-send-now');
+        mockConfig.getDisableAllHooks = vi
+          .fn()
+          .mockReturnValue(stage === 'execution');
+        mockConfig.getMessageBus = vi.fn().mockReturnValue({
+          request: vi.fn(async (request: { eventName?: string }) => {
+            if (request.eventName === 'PostToolUse') abort();
+            return { success: true, output: { decision: 'allow' } };
+          }),
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const execute = vi.fn(async () => {
+          if (stage === 'execution') abort();
+          return { llmContent: 'completed', returnDisplay: 'completed' };
+        });
+        mockToolRegistry.getTool.mockReturnValue(
+          mockAllowedTool('completed_tool', execute),
+        );
+        const result = await (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(controller.signal, 'prompt-discarded', [
+          { id: 'discarded-call', name: 'completed_tool', args: {} },
+        ]);
+        expect(execute).toHaveBeenCalledOnce();
+        expect(result.parts[0]?.functionResponse?.response).toEqual({
+          error:
+            'The tool had already completed, but its output was discarded when the user interrupted to send you a message, which follows. Read it before deciding whether to run the tool again.',
+        });
+      },
+    );
 
     it('does not execute after cancellation settles during PreToolUse', async () => {
       const logToolCallSpy = vi

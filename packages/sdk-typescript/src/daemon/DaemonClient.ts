@@ -5653,7 +5653,9 @@ export class DaemonClient {
    * instead of at the agent's next tool boundary: a model response that a
    * foreground turn is streaming is cut short, and once that response has
    * started a tool call, or while its tools run, the turn ends as `cancelled`
-   * and the messages start the next prompt. Otherwise, as in a channel,
+   * and the daemon promotes the messages when the prompt FIFO permits it.
+   * An earlier queued prompt can take the messages at a tool boundary, or
+   * they can be promoted when that prompt settles. Otherwise, as in a channel,
    * cron or background turn, the messages are delivered as without the
    * request, at a tool boundary or by promotion when the turn ends; the
    * protocol reference lists the narrow windows where neither happens.

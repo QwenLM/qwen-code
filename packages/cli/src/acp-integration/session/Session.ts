@@ -8458,6 +8458,7 @@ export class Session implements SessionContext {
                 // cover the run itself — the durable record is written on
                 // runToolCalls' return path.
                 let toolRun: RunToolResult;
+                this.midTurnToolPhaseFor = pendingSend.signal;
                 try {
                   toolRun = await this.#runWithFullTurnModel(
                     fullTurnModelOverride,
@@ -8471,6 +8472,9 @@ export class Session implements SessionContext {
                       ),
                   );
                 } finally {
+                  if (this.midTurnToolPhaseFor === pendingSend.signal) {
+                    this.midTurnToolPhaseFor = undefined;
+                  }
                   this.restoringAskUserQuestionCallIds = undefined;
                   this.restoredAskUserQuestionSkipPersistence = false;
                 }
@@ -16406,7 +16410,9 @@ export class Session implements SessionContext {
     try {
       return await this.runSharedToolBatchUntracked(...args);
     } finally {
-      this.midTurnToolPhaseFor = undefined;
+      if (this.midTurnToolPhaseFor === args[0]) {
+        this.midTurnToolPhaseFor = undefined;
+      }
     }
   }
 
@@ -16599,7 +16605,9 @@ export class Session implements SessionContext {
     try {
       return await this.runToolCallsUntracked(...args);
     } finally {
-      this.midTurnToolPhaseFor = undefined;
+      if (this.midTurnToolPhaseFor === args[0]) {
+        this.midTurnToolPhaseFor = undefined;
+      }
     }
   }
 

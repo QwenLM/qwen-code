@@ -3220,11 +3220,11 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   /**
    * Ask the agent to deliver the session's queued mid-turn messages now: a
    * model response that a foreground turn is streaming is cut short so they
-   * reach the model in this round trip, unless it has started a tool call;
-   * running tools still finish first. Otherwise, as in a channel, cron or
-   * background turn, the messages are delivered as without the request, at a
-   * tool boundary or by promotion when the turn ends; the protocol reference
-   * lists the narrow windows where neither happens. `requested` is true
+   * reach the model in this round trip. During tool calls, the agent ends the
+   * foreground turn and the messages follow the prompt FIFO. When another
+   * prompt is already queued, it can drain the messages at a tool boundary or
+   * promote them on settlement. Channel, cron and background turns keep
+   * tool-boundary delivery. `requested` is true
    * when user messages were waiting and the agent was asked, not that a
    * response was cut; it is false when none were waiting. Authorized like
    * the sibling mid-turn methods.

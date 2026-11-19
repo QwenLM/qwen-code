@@ -95,10 +95,6 @@ import {
   parseSessionSource,
   SCHEDULED_TASK_RUN_SOURCE_TYPE,
 } from './session-source.js';
-// Narrowed from the concrete `MultiClientPermissionMediator` to the
-// sub-interface this class actually uses (`request` only). Structural
-// typing lets the bridge factory pass the full mediator instance
-// without a cast; test stubs only need to fake the `request` method.
 import type { PermissionMediator } from './permission.js';
 import type {
   PermissionRequestRecord,
@@ -869,6 +865,19 @@ function takeUserMidTurnMessages(
     );
   }
   return taken;
+}
+
+export function clearGoalTurn(
+  entry: Pick<
+    BridgeClientSessionEntry,
+    'sessionId' | 'goalTurnActive' | 'goalTurnId'
+  >,
+  mediator: Pick<PermissionMediator, 'cancelForPrompt'>,
+): void {
+  const turnId = entry.goalTurnId;
+  entry.goalTurnActive = false;
+  delete entry.goalTurnId;
+  if (turnId) mediator.cancelForPrompt(entry.sessionId, turnId);
 }
 
 /**
@@ -2865,11 +2874,13 @@ export class BridgeClient implements Client {
       const entry = this.resolveEntry(sessionId);
       if (!entry || !this.ownsSession(sessionId)) return;
       const turnId = params['turnId'];
-      entry.goalTurnActive = true;
-      entry.goalTurnId =
+      const goalTurnId =
         typeof turnId === 'string' && turnId.length > 0 && turnId.length <= 256
           ? turnId
           : undefined;
+      if (entry.goalTurnId !== goalTurnId) clearGoalTurn(entry, this.mediator);
+      entry.goalTurnActive = true;
+      entry.goalTurnId = goalTurnId;
       this.onGoalTurnStart?.(sessionId);
       return;
     }
@@ -2884,11 +2895,8 @@ export class BridgeClient implements Client {
       // A malformed Goal terminal must not pin future loads to live replay
       // or strand the queue when its turn_complete cannot be published.
       if (source === 'goal') {
-        const goalTurnId = entry.goalTurnId;
-        if (turnId !== goalTurnId) return;
-        entry.goalTurnActive = false;
-        delete entry.goalTurnId;
-        if (goalTurnId) this.mediator.cancelForPrompt(sessionId, goalTurnId);
+        if (turnId !== entry.goalTurnId) return;
+        clearGoalTurn(entry, this.mediator);
         this.onAutomaticTurnEnded?.(sessionId);
       }
       if (

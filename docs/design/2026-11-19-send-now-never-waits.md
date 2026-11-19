@@ -37,10 +37,9 @@ user cannot see, so the user can only read it as a click that did nothing.
 
 - Mid-turn messages live in the daemon's `midTurnMessageQueue`. The agent
   drains it after each tool batch (`#buildNextMessageAfterToolRun`); whatever
-  is left when the turn ends, the daemon promotes to the next prompt through
-  `settleUndrainedMidTurnMessages`. After a Goal turn,
-  `settleMidTurnQueueAfterAutomaticTurn` promotes it, and the promoted prompt
-  runs as the next Goal turn.
+  is left when the turn ends can be promoted through
+  `settleUndrainedMidTurnMessages` when the prompt FIFO allows it. The daemon
+  uses `settleMidTurnQueueAfterAutomaticTurn` for autonomous Goal turns.
 - Send now: `Session.sendMidTurnInputNow()` records the request, and the `pull`
   in `#openResponseInterrupt` drains and then cuts only while the response has
   no tool call (`hasFunctionCalls()` is false).
@@ -74,8 +73,8 @@ reasons are under "Decisions and rationale".
 
 ## Goals and scope
 
-- Send now hands the queued user messages to the model within one round trip,
-  whatever the turn is doing.
+- Send now targets delivery within one round trip when earlier prompts and
+  an in-flight drain do not already control delivery.
 - A running shell command that can move to the background is not killed.
 - The interrupt ends only the current turn: cron keeps running, background
   notifications are not paused, and the Goal is not paused.
@@ -88,7 +87,8 @@ the tool boundary); a TUI shortcut for Send now; telling "preparing" from
 
 ## Design
 
-When the agent receives a Send now request, it acts on what the turn is doing:
+When the agent receives a Send now request, it acts on what the turn is doing.
+The table assumes no ordinary prompt is already queued ahead of the message.
 
 | What the turn is doing                                                       | Action                                                                                          | Turn that answers  |
 | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ------------------ |
@@ -115,17 +115,18 @@ background first and then the other tools are interrupted.
    notifications are not paused.
 3. Goal: an interrupted Goal turn (including a user turn while a Goal is
    active) is a handoff, the same as being preempted by a new prompt. The turn
-   ends and the Goal is not paused. The daemon promotes the message, which runs
-   as the next Goal turn. The agent holds automatic Goal work while the
-   daemon settles the prompt queue, including attachment resolution. If the
+   ends and the Goal stays active. If the FIFO allows promotion at settlement,
+   the promoted prompt runs as the next Goal turn. Earlier ordinary prompts
+   keep their place and can drain the message at a tool boundary. The agent
+   holds automatic Goal work while the daemon settles the prompt queue,
+   including attachment resolution. If the
    message is removed before dispatch, automatic Goal work can resume when
    the queue settles.
    The interrupted turn still counts toward usage. Its work is exempt from
    adding to the no-progress streak, since the host can submit the queued
    message only after settlement.
-4. The interrupt does not drain first. The messages stay with the daemon and
-   are promoted when the turn ends, so a message is never taken and then left
-   unanswered.
+4. The interrupt leaves messages with the daemon for draining or promotion
+   in FIFO order, so it cannot consume a message and leave it unanswered.
 5. Race: the daemon sends the request only while the queue holds user
    messages. While a drain that took messages is still resolving attachments
    and has not answered, the daemon holds the request, and forwards it after
@@ -253,8 +254,9 @@ in that phase.
 
 ## Acceptance criteria
 
-- In every case below, the model request carrying the message starts within
-  1 s of the click:
+- With no earlier ordinary prompt queued and no drain controlling delivery,
+  the model request carrying the message starts within 1 s of the click in
+  the cases below:
 
 | State at the click        | Today              | Target                                            |
 | ------------------------- | ------------------ | ------------------------------------------------- |

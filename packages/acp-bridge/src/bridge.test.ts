@@ -42801,6 +42801,86 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     }
   });
 
+  it.each(['RPC dispatch', 'a newer Goal start'] as const)(
+    'clears the lost Goal approval on %s',
+    async (replacement) => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      try {
+        const { sessionId } = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+        });
+        const startGoal = (turnId: string) =>
+          handle.agentConnection.extNotification('_qwencode/start_turn', {
+            sessionId,
+            source: 'goal',
+            turnId,
+          });
+        const ask = (turnId: string, callId: string) =>
+          handle.agentConnection.requestPermission({
+            sessionId,
+            toolCall: { toolCallId: callId, title: 'write' },
+            options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+            _meta: { goalTurnId: turnId },
+          });
+        await startGoal('lost-goal');
+        const oldApproval = ask('lost-goal', 'old-write');
+        const pendingIds = () =>
+          bridge.getSessionPendingPermissionIds(sessionId);
+        await vi.waitFor(() => expect(pendingIds()).toHaveLength(1));
+
+        if (replacement === 'RPC dispatch') {
+          await bridge.sendPrompt(sessionId, {
+            sessionId,
+            prompt: [{ type: 'text', text: 'continue' }],
+          });
+        } else {
+          await startGoal('new-goal');
+        }
+        expect(pendingIds()).toEqual([]);
+        await expect(oldApproval).resolves.toMatchObject({
+          outcome: { outcome: 'cancelled' },
+        });
+
+        const lateApproval = vi.fn();
+        void ask('lost-goal', 'late-write').then(lateApproval);
+        await vi.waitFor(() =>
+          expect(lateApproval).toHaveBeenCalledWith(
+            expect.objectContaining({ outcome: { outcome: 'cancelled' } }),
+          ),
+        );
+        expect(pendingIds()).toEqual([]);
+
+        if (replacement === 'a newer Goal start') {
+          const newApproval = ask('new-goal', 'new-write');
+          await vi.waitFor(() => expect(pendingIds()).toHaveLength(1));
+          const activeIds = pendingIds();
+          await startGoal('new-goal');
+          await handle.agentConnection.extNotification('_qwencode/end_turn', {
+            sessionId,
+            source: 'goal',
+            reason: 'cancelled',
+            promptId: 'old-prompt',
+            turnId: 'lost-goal',
+          });
+          expect(pendingIds()).toEqual(activeIds);
+          await handle.agentConnection.extNotification('_qwencode/end_turn', {
+            sessionId,
+            source: 'goal',
+            reason: 'cancelled',
+            promptId: 'new-prompt',
+            turnId: 'new-goal',
+          });
+          await expect(newApproval).resolves.toMatchObject({
+            outcome: { outcome: 'cancelled' },
+          });
+        }
+      } finally {
+        await bridge.shutdown();
+      }
+    },
+  );
+
   it('rejects a whitespace-only message even while busy', async () => {
     const { factory, release } = hangingPromptFactory();
     const bridge = makeBridge({ channelFactory: factory });

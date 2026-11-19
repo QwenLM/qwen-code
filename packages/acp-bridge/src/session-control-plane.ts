@@ -293,6 +293,7 @@ import { defaultSpawnChannelFactory } from './spawnChannel.js';
 import { writeStderrLine } from './internal/stderrLine.js';
 import {
   BridgeClient,
+  clearGoalTurn,
   hasAvailableWorkflowApprovalClient,
   KNOWN_APPROVAL_MODES,
   type BridgeClientDeferredArtifactBatch,
@@ -12267,7 +12268,7 @@ export function createSessionControlPlane(
                 // The child serializes Goal turns against RPC prompts, so a
                 // still-set flag here means the goal end_turn signal was
                 // lost; self-heal rather than pin the session active.
-                entry.goalTurnActive = false;
+                clearGoalTurn(entry, permissionMediator);
                 entry.activePromptId = pendingEntry.promptId;
                 delete entry.cancelBroadcastWithoutPrompt;
                 delete entry.turnError;
