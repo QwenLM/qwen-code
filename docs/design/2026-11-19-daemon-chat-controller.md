@@ -52,54 +52,72 @@ only**; authoritative outcome evidence arrives through separate subscriptions.
 ## Correlation: evidence must name the attempt it establishes
 
 The engine settles by operation id; the daemon's events name a `promptId` or
-`requestId`. The adapter bridges the two:
+`requestId`. The adapter bridges the two, and the engine exposes a
+`settleDecisionRequest(requestId, witness, attemptId?)` seam so decision evidence
+can be applied to the request's active attempt even while that attempt's POST is
+in flight (its operation id is not bound yet).
 
-- On submit admission the adapter records `promptId -> operationId`; on an
-  approval/question dispatch it records `requestId -> operationId`. A terminal
+Prompts (submit / cancel):
+
+- On submit admission the adapter records `promptId -> operationId`. A terminal
   event settles only the attempts bound to its identity, never a match on the
-  visible session/turn target. A late event for a finished attempt therefore
-  cannot establish a retry that shares the same visible target.
+  visible session/turn target, so a late event for a finished attempt cannot
+  establish a retry that shares the same visible target.
 - A turn's terminal event closes **both** the submit that started it and any
-  cancel that targeted it: `promptId -> Set<operationId>`. The cancel targets the
-  **active turn** — the head of the live-turn FIFO (the oldest admitted prompt
-  whose terminal event has not arrived), captured at dispatch time — never the
-  newest admitted id, which may be a queued prompt or a turn that already ended.
-  A prompt leaves the queue when its terminal event arrives or its submit is
-  rejected. With no live turn to bind, the cancel is settled `failed` so the
-  phase does not latch on a permanent non-terminal row.
-- The engine returns the operation id only after the transport resolves, but a
-  terminal event can arrive while the POST is still in flight. The adapter
-  retains the terminal witness keyed by the backend identity and applies it when
-  the attempt is bound, so in-flight evidence is not dropped. The intent method
-  returns the outcome the attempt actually reached (post-bind), not the
-  pre-evidence dispatch snapshot.
-- A prompt has exactly one terminal event; retaining it also lets a cancel
-  dispatched while the turn was ending still settle. Prompts get a fresh id per
-  turn, so retention cannot leak one turn's verdict onto another.
-- A **decision** witness is different: `requestId` is stable across attempts, so
-  the witness is retained only for the window between the event and its
-  attempt's bind, then **consumed**. A retry on the same request must earn its
-  own evidence; a failed decision keeps the request live (non-supersession) and
-  the retry can still establish.
-- A **rejected** dispatch is never bound: its dropped operation id would
-  reference nothing retainable, and binding it would let the prune destroy a
-  retained in-flight witness belonging to another attempt. Only a submit's bind
-  clears its prompt from the in-flight set.
-- A request has **at most one non-terminal decision attempt**: a second
-  `respondApproval`/`respondQuestion` while one is live is refused, because the
-  decision event names the request, not the option, so a sibling could never be
-  settled distinctly and would leak a permanent non-terminal row.
+  cancel that targeted it (`promptId -> Set<operationId>`). The terminal outcome
+  is projected **per bound operation kind**: a cancel is established only by a
+  `cancelled` turn — a turn that completed on its own proves the cancel did not
+  take effect, so it is `failed`; a submit is settled by any terminal outcome and
+  failed only by a failed turn.
+- The cancel targets the **active turn** — the head of the live-turn FIFO (the
+  oldest admitted prompt whose terminal event has not arrived), captured at
+  dispatch time — never the newest admitted id. A prompt leaves the queue when
+  its terminal event arrives or its submit is rejected. A rejected prompt is
+  tombstoned so a cancel targeting it (in either resolution order) takes the
+  `failed` terminal exit instead of binding a never-settling row; with an empty
+  queue the cancel also settles `failed` so the phase does not latch.
+- A terminal event can arrive while the POST is in flight, or even before
+  `onAdmitted` runs. The adapter retains the terminal outcome keyed by `promptId`
+  and applies it when the attempt binds; the intent returns the post-bind outcome,
+  not the pre-evidence dispatch snapshot. While a submit dispatch is unbound, a
+  cancel bind is pending, or the prompt is in flight, the retained outcome is not
+  pruned, so row-retention churn cannot strand a pending bind. A prompt whose
+  terminal outcome already arrived is not enqueued as a live cancel target.
+
+Decisions (approval / question):
+
+- `requestId` is stable across attempts and the daemon decision event names only
+  the request, so correlation is **request-level**: the engine routes the evidence
+  to the request's single active (non-terminal) attempt and freezes approval
+  currency **when the evidence arrives**, not when the POST resolves. An optional
+  `attemptId` discriminator on the event tightens this to attempt-level when the
+  backend supplies one; a replayed event for a finished attempt then cannot
+  establish a retry.
+- A request has **at most one non-terminal decision attempt**: a second dispatch
+  while one is live (bound or in flight) is refused, so no sibling is orphaned and
+  the request cannot become permanently unanswerable.
+- A retry after a failed decision earns its own evidence (a failed decision keeps
+  the request live). Because the engine applies evidence to the active attempt, a
+  rejected or retried dispatch never inherits a previous attempt's verdict.
+- A dispatch whose admission is not confirmed (`rejected`, or a thrown transport
+  leaving `unknown`) is not bound as if accepted: it is given the engine's
+  `abandon` exit so it cannot hold the request permanently unanswerable or latch
+  the phase.
 
 ### Bounded correlation state
 
 The correlation maps are bounded by the engine's retention: once an attempt is
 no longer among the retained operations (acknowledged or superseded), its
-backend identity stops being tracked. In addition, the settlement subscriptions
+backend identity stops being tracked. A retained prompt outcome is kept while a
+dispatch still needs it — an in-flight prompt, a pending cancel bind, or an
+unbound submit dispatch — and dropped otherwise, so the witness lifetime is
+decoupled from the presentation row lifetime. The settlement subscriptions also
 deliver terminal events for identities this controller never dispatched
-(replayed history, another client's decision). Those **orphan** witnesses are
-dropped unless the identity is an in-flight attempt awaiting its bind, so they
-neither accumulate nor certify a future attempt. An in-flight attempt's early
-terminal event is kept (it is in the in-flight set) until the bind applies it.
+(replayed history, another client's decision). Those **orphan** outcomes are
+dropped unless a dispatch is outstanding, so they neither accumulate nor certify
+a future attempt. Rejected-prompt tombstones are cleared once no cancel bind is
+pending. Decision evidence is not buffered in the controller at all — the engine
+seam applies it to the active attempt — so there is no decision witness to leak.
 
 ## Invariant preserved
 
@@ -125,21 +143,36 @@ request establishes while a superseded one never does; an accepted decision
 without evidence stays unsettled; a retry after a failed decision earns its own
 evidence; a rejected decision dispatch does not corrupt the correlation; a second
 decision dispatch while one is live is refused; a question answer establishes;
-pass-through facts are exposed and read live; the settled `failed` phase is
-reported when no operation holds it open; and the signal releases the
-subscriptions. Each fix is mutation-discriminating: reverting the active-turn
-target reds the queued-cancel case; restoring the never-consumed decision witness
-reds the retry case; binding a rejected cancel reds the overlapping-submit case;
-hard-coding the settled phase reds the `failed` case; removing the refusal reds the
-double-dispatch case; removing the orphan-prune reds the orphan case while the
-in-flight case stays green.
+pass-through facts are exposed distinctly and read live, and `loadOlder` keeps its
+deps binding; the settled `failed` phase is reported when no operation holds it
+open; and the signal releases all three subscriptions. The racing-correlation
+cases additionally pin: a second decision dispatch while the first POST is in
+flight is refused; decision evidence during a retry POST settles the retry, not
+the previous attempt; a replayed decision for a finished attempt (attempt
+discriminator) does not establish a retry; a rejected decision dispatch leaves no
+evidence for the next attempt; currency is frozen at evidence time in both
+orderings (live-then-superseded still establishes; superseded-then-live cannot
+certify); decision evidence during the POST is applied once admission resolves; an
+orphan decision creates nothing; a cancel bound before / after its submit rejects
+is terminalized in both orders; a cancel still settles when a later submit
+supersedes its target rows; a submit in flight whose cancel row is superseded still
+settles; a terminal event before `onAdmitted` settles the submit and is not a
+cancel target; a cancel whose target turn completes on its own is `failed`; a
+rejected submit leaves no live cancel target; and a thrown permission / cancel /
+submit transport is given an exit (the approval stays answerable, the phase does
+not latch). Each fix is mutation-discriminating: the per-kind cancel projection,
+the pending-submit witness retention, and the not-confirmed `abandon` exit each
+red their own case when reverted while the neighbouring cases stay green.
 
 ## Follow-ups for the surface switch
 
-- The contract does not yet expose `acknowledge` / `abandon`; the surface must
-  release consumed terminal rows (otherwise they grow per distinct target) and
-  give a thrown transport an exit. These are added when the surface consumes the
-  controller.
+- The contract does not yet expose `acknowledge`; the surface must release
+  consumed terminal rows (otherwise they grow per distinct target). `abandon` is
+  already used internally to give an unconfirmed dispatch an exit.
+- Decision correlation is request-level because the daemon decision event names
+  only the request. The optional `attemptId` discriminator tightens it to
+  attempt-level; the binding hook must supply a backend attempt identity where
+  the daemon exposes one, and dedupe replayed decision events.
 - A cancel dispatched with no live turn settles `failed` (a terminal exit); the
   surface still enables cancel only while a turn is in flight.
 - `deps.settledPhase` is populated by the binding hook from the session's settled

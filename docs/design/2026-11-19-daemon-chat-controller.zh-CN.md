@@ -41,40 +41,52 @@ provider 事实与动作包装成后端中立的 `SessionChatController`，并�
 
 ## 关联：证据必须点名它所建立的尝试
 
-引擎按操作 id 结算；daemon 事件点名 `promptId` 或 `requestId`。适配器桥接两者：
+引擎按操作 id 结算；daemon 事件点名 `promptId` 或 `requestId`。适配器桥接两者，
+且引擎暴露 `settleDecisionRequest(requestId, witness, attemptId?)` seam，使决策
+证据即便在该尝试的 POST 仍在飞（操作 id 尚未绑定）时，也能作用于该请求的存活尝试。
 
-- submit admission 时记录 `promptId -> operationId`；approval/question 派发时记录
-  `requestId -> operationId`。终态事件只结算绑定到其身份的尝试，绝不按可见的
-  session/turn target 匹配。故已结束尝试的迟到事件无法建立共享同一可见 target 的
-  重试。
-- 一个 turn 的终态事件同时关闭启动它的 submit 与指向它的 cancel：
-  `promptId -> Set<operationId>`。cancel 指向**存活 turn**——存活 turn FIFO 的队首
-  （终态事件尚未到达的最旧准入 prompt），在派发时捕获——绝不用最新被准入的 id
-  （那可能是排队中的 prompt、或已结束的 turn）。prompt 在其终态事件到达或 submit
-  被拒时出队。无可绑定的存活 turn 时，cancel 结算为 `failed`，使 phase 不至于被一条
-  永久非终态行钉死。
-- 引擎只在 transport resolve 后才返回操作 id，但终态事件可能在 POST 仍在飞时到达。
-  适配器按后端身份保留终态见证，并在尝试被绑定时应用，故在飞证据不被丢弃。意图方法
-  返回尝试实际到达的 outcome（绑定后），而非证据前的 dispatch 快照。
-- 一个 prompt 恰有一个终态事件；保留它也让「turn 正在结束时才派发的 cancel」仍能
-  结算。prompt 每个 turn 都是全新 id，故保留不会把一个 turn 的判决泄漏到另一个。
-- **决策**见证不同：`requestId` 在多次尝试间稳定，故见证只在「事件到达至该尝试绑定」
-  这段窗口内保留，随后即**消费**。同一请求的重试必须赢得自己的证据；失败决策保持请求
-  存活（非取代），重试仍可建立。
-- **rejected** 的 dispatch 绝不绑定：其被丢弃的操作 id 指向任何不可保留之物，绑定它
-  会让裁剪毁掉属于另一条尝试的、被保留的在飞见证。只有 submit 的绑定才把其 prompt
-  清出在飞集合。
-- 一个请求**至多一条非终态决策尝试**：已有在飞决策时，第二次
-  `respondApproval`/`respondQuestion` 被拒绝——因为决策事件点名请求而非选项，兄弟
-  尝试无法被独立结算，会泄漏一条永久非终态行。
+Prompt（submit / cancel）：
+
+- submit admission 时记录 `promptId -> operationId`。终态事件只结算绑定到其身份的
+  尝试，绝不按可见的 session/turn target 匹配，故已结束尝试的迟到事件无法建立共享
+  同一可见 target 的重试。
+- 一个 turn 的终态事件同时关闭启动它的 submit 与指向它的 cancel
+  （`promptId -> Set<operationId>`）。终态结果**按绑定操作的 kind 投影**：cancel
+  仅由 `cancelled` 的 turn 建立——自行完成的 turn 恰证明取消未生效，故为 `failed`；
+  submit 由任何终态结果结算，仅失败 turn 使其 failed。
+- cancel 指向**存活 turn**——存活 turn FIFO 的队首（终态事件尚未到达的最旧准入
+  prompt），在派发时捕获——绝不用最新被准入的 id。prompt 在终态事件到达或 submit
+  被拒时出队。被拒的 prompt 记入墓碑，使指向它的 cancel（两种解析顺序皆然）走
+  `failed` 终态出口，而非绑定一条永不结算的行；队列为空时 cancel 同样结算 `failed`，
+  phase 不钉死。
+- 终态事件可能在 POST 在飞时、甚至在 `onAdmitted` 之前到达。适配器按 `promptId`
+  保留终态结果并在尝试绑定时应用；意图返回绑定后的 outcome，而非证据前的 dispatch
+  快照。只要 submit 派发未绑定、或者 cancel 绑定待定、或者 prompt 在飞，保留的结果
+  就不被裁剪，故行保留期的更替不会搁死待定绑定。终态结果已到达的 prompt 不再入队
+  作为存活 cancel 目标。
+
+决策（approval / question）：
+
+- `requestId` 在多次尝试间稳定，且 daemon 决策事件只点名请求，故关联是**请求级**：
+  引擎把证据路由到该请求唯一的存活（非终态）尝试，并在**证据到达时**冻结 approval
+  时效，而非 POST 解析时。事件上可选的 `attemptId` 判别符在后端提供时把关联收紧到
+  尝试级；此时已结束尝试的重放事件无法建立重试。
+- 一个请求**至多一条非终态决策尝试**：已有在飞决策（已绑定或在飞）时第二次派发被
+  拒绝，故不会孤儿化兄弟尝试、请求也不会变得永久无法回答。
+- 失败决策后的重试赢得自己的证据（失败决策保持请求存活）。由于引擎把证据作用于
+  存活尝试，被拒或重试的派发绝不继承上一次尝试的判决。
+- admission 未获确认的派发（`rejected`、或抛错留下 `unknown`）不会像已接受那样被
+  绑定：给予引擎的 `abandon` 出口，使其不至于让请求永久无法回答、或钉死 phase。
 
 ### 关联状态有界
 
 关联 map 以引擎的保留为上界：一旦尝试不再属于保留的操作（被确认或被取代），其
-后端身份即停止被跟踪。此外，结算订阅会送达本控制器从未派发过的身份的终态事件
-（回放的历史、其他客户端的决定）。这些**孤儿**见证除非该身份是正等待绑定的在飞
-尝试，否则被丢弃，故既不累积、也不会认证未来的尝试。在飞尝试的早到终态事件被保留
-（它在在飞集合里）直到绑定应用它。
+后端身份即停止被跟踪。只要仍有派发需要它——在飞 prompt、待定 cancel 绑定、或未绑定
+的 submit 派发——保留的 prompt 结果就被保留，否则丢弃，故见证生命周期与展示行生命
+周期解耦。结算订阅也会送达本控制器从未派发过的身份的终态事件（回放的历史、其他客户
+端的决定）。这些**孤儿**结果除非有派发在飞，否则被丢弃，故既不累积、也不会认证未来
+的尝试。被拒 prompt 的墓碑在无待定 cancel 绑定时清除。决策证据完全不在控制器缓冲
+——引擎 seam 直接作用于存活尝试——故没有可泄漏的决策见证。
 
 ## 保留的不变量
 
@@ -93,16 +105,25 @@ admission 不等于 establishment。仅 transport resolve 使 outcome 保持 `un
 cancel 绑定存活（FIFO 队首）turn 而非排队 prompt；在飞的 rejected cancel 不搁死与之
 重叠的 submit；作用于存活请求的决定建立而被取代者绝不；无证据的已准入决定保持
 unsettled；失败决策后的重试赢得自己的证据；rejected 决策派发不破坏关联；已有在飞决策
-时第二次派发被拒绝；question 应答建立；透传事实被暴露且活读；无操作持有时报告结算
-`failed` phase；signal 释放订阅。每条修复均可经变异判别：还原最新准入定向会红排队
-cancel 用例；恢复从不消费的决策见证会红重试用例；绑定 rejected cancel 会红重叠
-submit 用例；写死结算 phase 会红 `failed` 用例；去掉拒绝会红双派发用例；去掉孤儿裁剪
-会红孤儿用例、在飞用例仍绿。
+时第二次派发被拒绝；question 应答建立；透传事实被逐一区分暴露且活读、`loadOlder`
+保持 deps 绑定；无操作持有时报告结算 `failed` phase；signal 释放全部三个订阅。竞速
+关联用例另钉住：首个 POST 在飞时第二次决策派发被拒绝；重试 POST 期间的决策证据结算
+重试而非上一次尝试；已结束尝试的重放决策（attempt 判别符）不建立重试；rejected 决策
+派发不给下一次尝试留证据；时效在证据时冻结的两个顺序（存活后被取代仍建立；被取代后
+存活不能认证）；POST 期间的决策证据在 admission 解析后应用；孤儿决策不产生任何操作；
+cancel 先于/后于其 submit 被拒的两种顺序都被终态化；后续 submit 挤掉目标行时 cancel
+仍能结算；cancel 行被挤掉时在飞 submit 仍能结算；`onAdmitted` 之前的终态事件结算
+submit 且不作为 cancel 目标；目标 turn 自行完成的 cancel 为 `failed`；rejected
+submit 不留存活 cancel 目标；抛错的 permission/cancel/submit transport 获得出口
+（审批仍可回答、phase 不钉死）。每条修复均可经变异判别：按 kind 的 cancel 投影、
+待定 submit 的见证保留、未确认的 `abandon` 出口，还原各自即红其对应用例、相邻用例仍绿。
 
 ## 留给表面切换的后续
 
-- 契约尚未暴露 `acknowledge` / `abandon`；表面必须释放已消费的终态行（否则按不同
-  target 增长）、并给抛错的 transport 一条出路。这些在表面消费控制器时加入。
+- 契约尚未暴露 `acknowledge`；表面必须释放已消费的终态行（否则按不同 target 增长）。
+  `abandon` 已在内部用于给未确认的派发一条出路。
+- 决策关联是请求级，因为 daemon 决策事件只点名请求。可选的 `attemptId` 判别符把
+  其收紧到尝试级；绑定 hook 须在后端暴露尝试身份处提供它，并对重放的决策事件去重。
 - 无存活 turn 时派发的 cancel 结算为 `failed`（终态出口）；表面仍仅在 turn 在飞时
   启用 cancel。
 - `deps.settledPhase` 由绑定 hook 从会话的结算态填充；其 `failed` 读取在此已有测试
