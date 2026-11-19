@@ -18,6 +18,7 @@ import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
   computeResumedPromptCountSeed,
+  computeResumedUserTurnCount,
 } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
@@ -44,7 +45,7 @@ export interface UseResumeCommandOptions {
    */
   loadHistory?: UseHistoryManagerReturn['loadHistory'];
   startNewSession: (sessionId: string) => void;
-  seedPromptCount: (count: number) => void;
+  seedPromptCount: (count: number, userPromptCountSeed?: number) => void;
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
@@ -251,6 +252,7 @@ export function useResumeCommand(
             sessionData.conversation.messages,
             sessionId,
           ),
+          computeResumedUserTurnCount(sessionData.conversation.messages),
         );
         uiSwapped = true;
         config.getLlmClient()?.commitTelemetrySwap?.();

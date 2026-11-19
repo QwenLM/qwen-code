@@ -269,6 +269,8 @@ export function useStatusLineState(
   useThemeColors: boolean;
   respectUserColors: boolean;
   hideContextIndicator: boolean;
+  /** Command output is opaque and may refresh on a timer, unlike a preset. */
+  commandSourced?: boolean;
   reasoningSegment?: { text: string; effort: ReasoningEffort };
 } {
   const settingsStatusLineConfig = getStatusLineConfig(settings);
@@ -823,6 +825,7 @@ export function useStatusLineState(
 
   return {
     lines: output,
+    commandSourced: statusLineConfig?.type === 'command',
     reasoningSegment,
     useThemeColors: statusLinePreset?.useThemeColors === true,
     respectUserColors:

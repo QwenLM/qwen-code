@@ -5,16 +5,19 @@
  */
 
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  CHANNEL_INBOUND_TRUNCATION_NOTICE,
   MANAGED_OUTBOUND_LIMIT,
   type ManagedChannelControlPlane,
   type ManagedClaimedDelivery,
@@ -54,7 +57,7 @@ function messageData(overrides: Record<string, unknown> = {}): string {
   });
 }
 
-function fakeControlPlane() {
+function fakeControlPlane(destinationKey = 'cp|tenant-a|chan-1') {
   const register: unknown[] = [];
   const submit: ManagedInboundEvent[] = [];
   const receipts: Array<{ deliveryId: string; receipt: unknown }> = [];
@@ -62,6 +65,7 @@ function fakeControlPlane() {
   let queue: ManagedClaimedDelivery[] = [];
   let disconnectCalls = 0;
   let submitError: (Error & { status?: number; code?: string }) | undefined;
+  let registerError: (Error & { status?: number; code?: string }) | undefined;
   let refuseSubmit: { status: number; code?: string } | undefined;
   let submitErrorFor:
     | ((
@@ -75,7 +79,13 @@ function fakeControlPlane() {
       ) => (Error & { status?: number; code?: string }) | undefined)
     | undefined;
   const controlPlane: ManagedChannelControlPlane = {
+    destinationKey,
     register: async (request) => {
+      if (registerError) {
+        const error = registerError;
+        registerError = undefined;
+        throw error;
+      }
       register.push(request);
     },
     disconnect: async () => {
@@ -122,6 +132,9 @@ function fakeControlPlane() {
     },
     failNextSubmit: (error: Error & { status?: number; code?: string }) => {
       submitError = error;
+    },
+    failNextRegister: (error: Error & { status?: number; code?: string }) => {
+      registerError = error;
     },
     submitAttempts: () => submitAttempts,
     // Simulate an admission the server committed but whose answer was lost:
@@ -575,16 +588,23 @@ describe('managed DingTalk adapter inbound', () => {
     );
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
-    expect(plane.submit[0]!.text).toHaveLength(32_000);
+    const text = plane.submit[0]!.text;
+    // The notice is reserved inside the char cap, so the marked result still
+    // fits the 32,000-unit bound and ends with the notice.
+    expect(text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
+    expect(text).toBe(
+      'x'.repeat(32_000 - CHANNEL_INBOUND_TRUNCATION_NOTICE.length) +
+        CHANNEL_INBOUND_TRUNCATION_NOTICE,
+    );
+    expect(text).toHaveLength(32_000);
     await adapter.disconnect();
   });
 
   it('clamps a CJK text to the byte envelope even under the character bound', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
-    // The leading ASCII byte makes the 61,440-byte budget land MID-code-point
-    // for the 3-byte CJK char (61,439 is not divisible by 3), so the
-    // code-point walk must actually reject a partial character instead of
-    // landing on an exact boundary (#17173 R2-6).
+    // The leading ASCII byte makes the reduced byte budget land MID-code-point
+    // for the 3-byte CJK char, so the code-point walk must actually reject a
+    // partial character instead of landing on an exact boundary (#17173 R2-6).
     fake.push(
       'msg-cjk',
       messageData({
@@ -598,15 +618,20 @@ describe('managed DingTalk adapter inbound', () => {
     expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(
       64 * 1024 - 4096,
     );
-    expect(text).toBe('a' + '中'.repeat(20_479));
+    // The notice's escaped bytes (73) are reserved from the 61,440-byte budget,
+    // leaving 61,367 for the core: 'a' + floor((61367-1)/3) = 20,455 CJK chars.
+    expect(text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
+    expect(text).toBe(
+      'a' + '中'.repeat(20_455) + CHANNEL_INBOUND_TRUNCATION_NOTICE,
+    );
     await adapter.disconnect();
   });
 
   it('the byte cut keeps astral code points whole at a mid-pair budget', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
-    // 4-byte astral chars at a budget with a 3-byte remainder: the exact
-    // expected string pins the maximal whole-code-point fit, so an off-by-one
-    // in the walk or a miscomputed byte budget reds it (#17173 R2-6).
+    // 4-byte astral chars at a budget with a remainder: the exact expected
+    // string pins the maximal whole-code-point fit, so an off-by-one in the
+    // walk or a miscomputed byte budget reds it (#17173 R2-6).
     fake.push(
       'msg-astral',
       messageData({
@@ -616,7 +641,12 @@ describe('managed DingTalk adapter inbound', () => {
     );
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
-    expect(plane.submit[0]!.text).toBe('a' + '😀'.repeat(15_359));
+    const text = plane.submit[0]!.text;
+    // Core budget 61,367 bytes: 'a' + floor((61367-1)/4) = 15,341 astral chars.
+    expect(text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
+    expect(text).toBe(
+      'a' + '😀'.repeat(15_341) + CHANNEL_INBOUND_TRUNCATION_NOTICE,
+    );
     await adapter.disconnect();
   });
 
@@ -1296,6 +1326,7 @@ describe('managed DingTalk adapter review fixes', () => {
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
     const text = plane.submit[0]!.text;
+    expect(text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
     expect(Buffer.byteLength(JSON.stringify(text), 'utf8')).toBeLessThanOrEqual(
       64 * 1024,
     );
@@ -1305,8 +1336,8 @@ describe('managed DingTalk adapter review fixes', () => {
 
   it('does not admit a lone surrogate at the character-cap boundary (F1)', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
-    // 31,001 ASCII + 1,000 emoji: the 32,000-UTF-16-unit cap lands inside a
-    // surrogate pair; the admitted text must stay well-formed.
+    // 31,001 ASCII + 1,000 emoji: the reduced core char cap lands inside a
+    // surrogate pair; the admitted text must stay well-formed and marked.
     fake.push(
       'msg-astral',
       messageData({
@@ -1317,6 +1348,9 @@ describe('managed DingTalk adapter review fixes', () => {
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
     expect(plane.submit[0]!.text.isWellFormed()).toBe(true);
+    expect(
+      plane.submit[0]!.text.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE),
+    ).toBe(true);
     await adapter.disconnect();
   });
 
@@ -2483,5 +2517,461 @@ describe('managed DingTalk persist-failure guards (#17173 R10)', () => {
     expect(lines.some((line) => line.includes('tick failed'))).toBe(false);
     spy.mockRestore();
     await adapter.disconnect();
+  });
+});
+
+describe('managed DingTalk adapter registration-identity isolation', () => {
+  function pendingOf(adapter: ManagedDingtalkAdapter): string[] {
+    const state = (
+      adapter as unknown as { state: { pending: Array<{ eventId: string }> } }
+    ).state;
+    return state.pending.map((entry) => entry.eventId);
+  }
+
+  function adapterFor(
+    cwd: string,
+    plane: ReturnType<typeof fakeControlPlane>,
+    fake: ReturnType<typeof fakeDeps>,
+    lock?: ManagedDingtalkAdapterDeps['lock'],
+  ) {
+    return new ManagedDingtalkAdapter({
+      name: 'ding-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: lock ? { ...fake.deps, lock } : fake.deps,
+      pollLoop: false,
+    });
+  }
+
+  it('a destination change never replays one tenant pending into another', async () => {
+    const cwd = tempCwd();
+    // Tenant A stages a pending claim (its admission answer has not landed).
+    const planeA = fakeControlPlane('cp|tenant-a|chan-1');
+    const fakeA = fakeDeps();
+    const adapterA = adapterFor(cwd, planeA, fakeA);
+    await adapterA.connect();
+    fakeA.push('m1', messageData({ msgId: 'm1' }));
+    expect(pendingOf(adapterA)).toEqual(['dingtalk:m1']);
+    const stateFileA = adapterA.stateFile;
+    await adapterA.disconnect();
+
+    // Restart the SAME configured entry against tenant B: a different
+    // destination keys a different ledger FILE beneath the SAME entry directory
+    // (the directory is the per-entry connection lock, not per-destination), so
+    // A's pending claim is never loaded into B nor submitted under B's tenant
+    // header.
+    const planeB = fakeControlPlane('cp|tenant-b|chan-1');
+    const fakeB = fakeDeps();
+    const adapterB = adapterFor(cwd, planeB, fakeB);
+    await adapterB.connect();
+    expect(adapterB.stateFile).not.toBe(stateFileA);
+    expect(dirname(adapterB.stateFile)).toBe(dirname(stateFileA));
+    expect(pendingOf(adapterB)).toEqual([]);
+    await adapterB.tick();
+    expect(planeB.submit).toHaveLength(0);
+    await adapterB.disconnect();
+
+    // A's pending claim is still available to A on its own restart.
+    const planeA2 = fakeControlPlane('cp|tenant-a|chan-1');
+    const fakeA2 = fakeDeps();
+    const adapterA2 = adapterFor(cwd, planeA2, fakeA2);
+    await adapterA2.connect();
+    expect(adapterA2.stateFile).toBe(stateFileA);
+    expect(pendingOf(adapterA2)).toEqual(['dingtalk:m1']);
+    await adapterA2.disconnect();
+  });
+
+  it('a workspace change within one tenant never replays the prior owner pending', async () => {
+    const cwd = tempCwd();
+    const planeA = fakeControlPlane('cp|tenant-a|chan-1|actor|ws-a|.');
+    const fakeA = fakeDeps();
+    const adapterA = adapterFor(cwd, planeA, fakeA);
+    await adapterA.connect();
+    fakeA.push('m1', messageData({ msgId: 'm1' }));
+    expect(pendingOf(adapterA)).toEqual(['dingtalk:m1']);
+    const stateFileA = adapterA.stateFile;
+    await adapterA.disconnect();
+
+    // Same tenant/channel, different workspace: the ledger follows the owning
+    // workspace, so B loads nothing and submits nothing of A's.
+    const planeB = fakeControlPlane('cp|tenant-a|chan-1|actor|ws-b|.');
+    const fakeB = fakeDeps();
+    const adapterB = adapterFor(cwd, planeB, fakeB);
+    await adapterB.connect();
+    expect(adapterB.stateFile).not.toBe(stateFileA);
+    expect(dirname(adapterB.stateFile)).toBe(dirname(stateFileA));
+    expect(pendingOf(adapterB)).toEqual([]);
+    await adapterB.tick();
+    expect(planeB.submit).toHaveLength(0);
+    await adapterB.disconnect();
+  });
+
+  it('a second destination of the same robot app is refused the connection lock', async () => {
+    const cwd = tempCwd();
+    const locked = new Set<string>();
+    const lockFake: ManagedDingtalkAdapterDeps['lock'] = async (directory) => {
+      if (locked.has(directory)) throw new Error('ELOCKED');
+      locked.add(directory);
+      return async () => {
+        locked.delete(directory);
+      };
+    };
+    const planeA = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fakeA = fakeDeps();
+    const adapterA = adapterFor(cwd, planeA, fakeA, lockFake);
+    await adapterA.connect();
+    // Same robot app, different destination: the connection lock is per entry,
+    // so the second instance is refused before it can run concurrently and
+    // duplicate inbound processing.
+    const planeB = fakeControlPlane('cp|tenant-b|chan-1|actor|ws|.');
+    const fakeB = fakeDeps();
+    const adapterB = adapterFor(cwd, planeB, fakeB, lockFake);
+    await expect(adapterB.connect()).rejects.toThrow(
+      /owned by another process/,
+    );
+    await adapterA.disconnect();
+  });
+
+  it('logs the stranded legacy ledger on upgrade rather than dropping it silently', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    // Seed the pre-upgrade single ledger in the entry directory before connect.
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        // Asymmetric counts (2 pending, 3 outbound) so swapping the two count
+        // assignments or the two interpolations reds this test (R2-2).
+        pending: [
+          {
+            eventId: 'dingtalk:legacy',
+            event: { platformEventId: 'dingtalk:legacy' },
+          },
+          {
+            eventId: 'dingtalk:legacy2',
+            event: { platformEventId: 'dingtalk:legacy2' },
+          },
+        ],
+        outbound: [
+          { deliveryId: 'd-1', ordinal: 0, messageId: 'm-1' },
+          { deliveryId: 'd-2', ordinal: 1, messageId: 'm-2' },
+          { deliveryId: 'd-3', ordinal: 2, messageId: 'm-3' },
+        ],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    // The notice names the legacy path and both consequences separately:
+    // inbound claims lost AND outbound segments dropped (R2-1 split clauses).
+    expect(stranded[0]).toContain(join(dir, 'managed-state.json'));
+    expect(stranded[0]).toContain('2 pending');
+    expect(stranded[0]).toContain('3 outbound');
+    expect(stranded[0]).toContain('are lost');
+    expect(stranded[0]).toContain(
+      'un-receipted outbound segments were dropped',
+    );
+    // Not adopted: the legacy pending never enters this registration's state.
+    // Assert the state itself, not plane.submit — connect() never drives
+    // resubmitPending(), so an empty submit list could not discriminate an
+    // adoption mutant (R2-3).
+    expect(pendingOf(adapter)).toEqual([]);
+    // Archive contract (R3-3): after a successful start the legacy file is
+    // renamed — not deleted — to a .stranded- sibling that still holds the
+    // seeded claims, and a second start does not re-announce it. Assert the
+    // effects, not a shared path prefix that both names satisfy.
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(false);
+    const archived = readdirSync(dir).filter((f) =>
+      f.startsWith('managed-state.json.stranded-'),
+    );
+    expect(archived).toHaveLength(1);
+    const archivedState = JSON.parse(
+      readFileSync(join(dir, archived[0]), 'utf8'),
+    );
+    expect(archivedState.pending).toHaveLength(2);
+    expect(archivedState.outbound).toHaveLength(3);
+    // A log line names the archived path, so an operator following the notice
+    // (which names the pre-rename path) can still find the claims (R4-1).
+    expect(lines.some((l) => l.includes(join(dir, archived[0])))).toBe(true);
+    await adapter.disconnect();
+    lines.length = 0;
+    const adapter2 = adapterFor(cwd, plane, fake);
+    await adapter2.connect();
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(0);
+    await adapter2.disconnect();
+  });
+
+  it('a quiescent legacy ledger (0/0) is reported without a loss alarm', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [],
+        outbound: [],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    // The design doc requires one line naming the path and counts even for a
+    // quiescent upgrade, but nothing was lost, so no loss alarm (R2-1).
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 pending');
+    expect(stranded[0]).toContain('0 outbound');
+    expect(stranded[0]).not.toContain('are lost');
+    await adapter.disconnect();
+  });
+
+  it('a legacy ledger staged after a rollback is still reported (keyed ledger exists)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    // The entry already upgraded once: a keyed ledger exists.
+    await adapter.connect();
+    await adapter.disconnect();
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(0);
+    // A rollback stages fresh legacy claims; the next upgrade must report them
+    // even though the keyed ledger exists (R2-6).
+    lines.length = 0;
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [
+          {
+            eventId: 'dingtalk:rollback',
+            event: { platformEventId: 'dingtalk:rollback' },
+          },
+        ],
+        outbound: [],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    const adapter2 = adapterFor(cwd, plane, fake);
+    await adapter2.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('1 pending');
+    expect(stranded[0]).toContain('are lost');
+    // A pending-only strand staged no outbound segment, so the outbound
+    // consequence must be absent — the symmetric negative of the outbound-only
+    // case, killing an `if (true)` outbound guard (R4-2).
+    expect(stranded[0]).not.toContain(
+      'un-receipted outbound segments were dropped',
+    );
+    expect(pendingOf(adapter2)).toEqual([]);
+    await adapter2.disconnect();
+  });
+
+  it('an unreadable legacy ledger reports unknown counts and a possible loss, not an empty one', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    // A crash-truncated legacy: the parse fails, so the counts are unknown.
+    writeFileSync(join(dir, 'managed-state.json'), '{not json');
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    // Not rendered as a quiescent "0 pending / 0 outbound, nothing lost"
+    // (R3-1): the counts are unknown and a possible loss is named.
+    expect(stranded[0]).toContain('unknown pending');
+    expect(stranded[0]).toContain('unknown outbound');
+    expect(stranded[0]).toContain('could not be read');
+    expect(stranded[0]).not.toContain('0 pending');
+    await adapter.disconnect();
+  });
+
+  it('an outbound-only legacy strand names the outbound consequence, not lost inbound claims', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [],
+        outbound: [
+          { deliveryId: 'd-1', ordinal: 0, messageId: 'm-1' },
+          { deliveryId: 'd-2', ordinal: 1, messageId: 'm-2' },
+          { deliveryId: 'd-3', ordinal: 2, messageId: 'm-3' },
+        ],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 pending');
+    expect(stranded[0]).toContain('3 outbound');
+    // The outbound consequence is named; no inbound "claims … are lost" is
+    // claimed for a ledger that staged no inbound claims (R2-1 fix-induced).
+    expect(stranded[0]).toContain(
+      'un-receipted outbound segments were dropped',
+    );
+    expect(stranded[0]).not.toContain('are lost');
+    await adapter.disconnect();
+  });
+
+  it('a failed first start leaves the legacy ledger unarchived for a rollback to recover', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    // The stream cannot connect: the ordinary failed-first-start shape.
+    fake.deps.createStreamClient = () => ({
+      connect: async () => {
+        throw new Error('stream unreachable');
+      },
+      disconnect: () => {},
+    });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [
+          {
+            eventId: 'dingtalk:legacy',
+            event: { platformEventId: 'dingtalk:legacy' },
+          },
+        ],
+        outbound: [],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    await expect(adapter.connect()).rejects.toThrow('stream unreachable');
+    // The strand was reported, but the archive is deferred until the start
+    // succeeds (R3-2): the legacy file is still present so a rollback to the
+    // pre-upgrade build can recover it.
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(1);
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+    expect(
+      readdirSync(dir).filter((f) =>
+        f.startsWith('managed-state.json.stranded-'),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('a register-refused first start also leaves the legacy ledger unarchived', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const plane = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fake = fakeDeps({ log: (l) => lines.push(l) });
+    const adapter = adapterFor(cwd, plane, fake);
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [
+          {
+            eventId: 'dingtalk:legacy',
+            event: { platformEventId: 'dingtalk:legacy' },
+          },
+        ],
+        outbound: [],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    // The stream connects, but the control plane refuses registration. The
+    // archive must stay deferred past ensureRegistered, not just past
+    // stream.connect — hoisting it above registration would red this (R4-3).
+    plane.failNextRegister(
+      Object.assign(new Error('channel_disconnected'), {
+        status: 409,
+        code: 'channel_disconnected',
+      }),
+    );
+    await expect(adapter.connect()).rejects.toThrow('channel_disconnected');
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+    expect(
+      readdirSync(dir).filter((f) =>
+        f.startsWith('managed-state.json.stranded-'),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('a webhook-less frame after an identity change is dropped (cache is identity-scoped)', async () => {
+    const cwd = tempCwd();
+    // Identity A admits a frame carrying a sessionWebhook, caching it for conv-1.
+    const planeA = fakeControlPlane('cp|tenant-a|chan-1|actor|ws|.');
+    const fakeA = fakeDeps();
+    const adapterA = adapterFor(cwd, planeA, fakeA);
+    await adapterA.connect();
+    fakeA.push('a1', messageData({ msgId: 'a1' }));
+    await adapterA.tick();
+    expect(planeA.submit).toHaveLength(1);
+    await adapterA.disconnect();
+
+    // Identity B (same entry, different registration) starts with an empty
+    // webhook cache: a webhook-less frame for the known conversation conv-1 has
+    // no reply target and is dropped (acked + deduped), not admitted. This pins
+    // the identity-scoped partition of the webhook cache (R1-5): hoisting the
+    // cache to entry scope would admit this frame and red this test.
+    const planeB = fakeControlPlane('cp|tenant-b|chan-1|actor|ws|.');
+    const fakeB = fakeDeps();
+    const adapterB = adapterFor(cwd, planeB, fakeB);
+    await adapterB.connect();
+    fakeB.push('b1', messageData({ msgId: 'b1', sessionWebhook: '' }));
+    await adapterB.tick();
+    expect(planeB.submit).toHaveLength(0);
+    await adapterB.disconnect();
   });
 });

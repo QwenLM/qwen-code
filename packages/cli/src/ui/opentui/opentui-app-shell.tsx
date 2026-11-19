@@ -114,7 +114,11 @@ import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
-import type { KeyEvent, BoxRenderable } from '@opentui/core';
+import type {
+  KeyEvent,
+  BoxRenderable,
+  ScrollBoxRenderable,
+} from '@opentui/core';
 import { Command, matchesCommand, toOriginalKey } from './key-map.js';
 import { keyToAnsi } from '../hooks/keyToAnsi.js';
 import {
@@ -161,6 +165,7 @@ import {
 const debugLogger = createDebugLogger('OPEN_TUI_APP');
 
 export interface OpenTuiAppProps {
+  screenReader?: boolean;
   config: Config;
   settings: LoadedSettings;
   logger: Logger | null;
@@ -222,7 +227,10 @@ export interface OpenTuiAppProps {
   onRetryPrompt?: () => void;
   onInputProcessed?: () => void;
   /** Reaches the entry after `/quit`; receives the closing history rows. */
-  onQuit?: (messages: readonly HistoryItem[]) => void;
+  onQuit?: (
+    messages: readonly HistoryItem[],
+    invocationItemId?: number,
+  ) => void;
   /** Replays a transcript batch (session switch / resume). */
   onTranscriptReset?: (events: OpenTuiStreamEvent[]) => void;
   /**
@@ -798,6 +806,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   }, [shellFocused]);
 
   const controlsRef = useRef<BoxRenderable | null>(null);
+  const historyScrollRef = useRef<ScrollBoxRenderable | null>(null);
   const [controlsHeight, setControlsHeight] = useState(0);
   const shellColumns = Math.max(1, Math.floor(terminalWidth * 0.89));
   const shellRows = Math.max(1, terminalHeight - controlsHeight - 10);
@@ -878,6 +887,37 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // keeps only the Windows bare-Tab fallback — the one route that has to know
   // whether Tab was already spent on a completion.
   useKeyboard((key: KeyEvent) => {
+    const historyScroll = historyScrollRef.current;
+    if (
+      props.screenReader &&
+      historyScroll &&
+      key.eventType !== 'release' &&
+      !shellFocused &&
+      !dialog &&
+      !activeModal &&
+      !activeToolCall &&
+      !mcpApproval.isMcpApprovalDialogOpen &&
+      !hooksApproval.isProjectHooksApprovalDialogOpen
+    ) {
+      let consumed = true;
+      if (matchesCommand(Command.SCROLL_UP, key)) historyScroll.scrollBy(-1);
+      else if (matchesCommand(Command.SCROLL_DOWN, key))
+        historyScroll.scrollBy(1);
+      else if (matchesCommand(Command.PAGE_UP, key))
+        historyScroll.scrollBy(-Math.max(1, historyScroll.viewport.height));
+      else if (matchesCommand(Command.PAGE_DOWN, key))
+        historyScroll.scrollBy(Math.max(1, historyScroll.viewport.height));
+      else if (matchesCommand(Command.SCROLL_HOME, key))
+        historyScroll.scrollTo(0);
+      else if (matchesCommand(Command.SCROLL_END, key))
+        historyScroll.scrollTo(historyScroll.scrollHeight);
+      else consumed = false;
+      if (consumed) {
+        key.preventDefault();
+        key.stopPropagation();
+        return;
+      }
+    }
     if (shellFocused && handleShellKey(key)) {
       key.preventDefault();
       key.stopPropagation();
@@ -1314,7 +1354,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           // cleanup chain (recording flush, config.shutdown) against a turn
           // that is still writing. A no-op when nothing is in flight.
           onInterrupt?.();
-          onQuit?.(outcome.messages);
+          if (outcome.invocationItemId === undefined) {
+            onQuit?.(outcome.messages);
+          } else {
+            onQuit?.(outcome.messages, outcome.invocationItemId);
+          }
           return true;
         default: {
           const exhaustive: never = outcome;
@@ -1793,6 +1837,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             of them can write the composer's focus — that is a React prop — so
             a click there changes nothing. */}
         <scrollbox
+          ref={(el) => {
+            historyScrollRef.current = el as ScrollBoxRenderable | null;
+          }}
           flexGrow={1}
           flexShrink={1}
           minHeight={0}
@@ -1822,6 +1869,17 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             column and squeezes the composer's three border rows into one row
             painted three times. */}
         <box
+          id={
+            dialog ||
+            activeModal ||
+            activeToolCall ||
+            (mcpApproval.isMcpApprovalDialogOpen &&
+              mcpApproval.currentMcpApproval) ||
+            (hooksApproval.isProjectHooksApprovalDialogOpen &&
+              hooksApproval.pendingProjectHooks)
+              ? 'screen-reader-dialog'
+              : 'screen-reader-composer'
+          }
           flexDirection="column"
           flexShrink={0}
           ref={(el) => {
@@ -1862,6 +1920,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 own bottom padding and the waiting row. */}
               <box marginTop={1}>
                 <OpenTuiLoadingIndicator
+                  screenReader={props.screenReader}
                   streaming={Boolean(streaming)}
                   waiting
                   showPhrase={showLoadingPhrases}
@@ -1956,6 +2015,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           ) : (
             <box key="composer" flexDirection="column" marginTop={1}>
               <OpenTuiLoadingIndicator
+                screenReader={props.screenReader}
                 streaming={Boolean(streaming) && !shellFocused}
                 streamingCharsRef={streamingCharsRef}
                 isReceivingContent={isReceivingContent}
@@ -1967,6 +2027,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 maxRows={modBandMaxRows(terminalHeight)}
               />
               <OpenTuiInputPrompt
+                screenReader={props.screenReader}
                 placeholder={
                   subscriptionActive
                     ? '  ' + t('Type your request, or /usage')
@@ -2040,6 +2101,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             !hooksApproval.isProjectHooksApprovalDialogOpen &&
             !showSuggestions) ? (
             <OpenTuiFooter
+              screenReader={props.screenReader}
               config={config}
               settings={settings}
               statusLine={statusLine}
