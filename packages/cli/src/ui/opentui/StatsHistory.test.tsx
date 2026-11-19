@@ -562,17 +562,22 @@ describe('native historical statistics', () => {
 
   it('pages months with the arrow keys the hint advertises', () => {
     const view = render(<OpenTuiStatsDialog config={null} onClose={vi.fn()} />);
+    const trend = () =>
+      /Token Trend {2}(?:← )?\w+ \d{4}(?: →)?/.exec(
+        view.container.textContent ?? '',
+      )![0];
     act(() => {
       press('tab');
       press('left');
       press('left');
     });
-    expect(view.container.textContent).toContain('Token Trend  Sep 2026 →');
+    expect(view.container.textContent).toContain('←→ month');
+    expect(trend()).toBe('Token Trend  Sep 2026 →');
     act(() => {
       press('right');
       press('right');
     });
-    expect(view.container.textContent).toContain('Token Trend  ← Nov 2026');
+    expect(trend()).toBe('Token Trend  ← Nov 2026');
   });
 
   it('localizes the chart peak and the project overflow counter', async () => {
