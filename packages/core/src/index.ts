@@ -415,6 +415,8 @@ export * from './services/visionBridge/image-part-utils.js';
 export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
+export * from './services/session-artifact-summary-sidecar.js';
+export * from './services/generated-ui-state.js';
 export * from './services/session-reference-service.js';
 export * from './ipc/inbound-gate.js';
 export * from './ipc/peer-admission.js';
@@ -503,6 +505,7 @@ export type {
 } from './services/tokenUsageService.js';
 export * from './services/worktreeSessionService.js';
 export * from './services/session-pr-service.js';
+export * from './services/session-goal-sidecar.js';
 export {
   stripTerminalControlSequences,
   stripDisplayControlChars,

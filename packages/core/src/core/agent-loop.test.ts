@@ -852,6 +852,82 @@ describe('runToolBatch', () => {
     expect(recordToolResult).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps only the calls a cancelled batch started for a surface that asks', async () => {
+    const controller = new AbortController();
+    const { client } = fakeClient([]);
+    const { config, recordToolResult } = fakeConfig();
+    const onToolResult = vi.fn();
+
+    const result = await runToolBatch([toolRequest('c1'), toolRequest('c2')], {
+      config,
+      client,
+      signal: controller.signal,
+      duplicates: duplicates(),
+      host: {
+        beforeToolLaunch: () => !controller.signal.aborted,
+        onToolResult,
+      },
+      executor: fakeExecutor((request) => {
+        controller.abort();
+        return okResponse(request);
+      }).executor,
+      keepCancelledResults: 'launched',
+    });
+
+    expect(result.stop).toBe('cancelled');
+    expect(ids(result.parts)).toEqual(['c1']);
+    expect(recordToolResult).toHaveBeenCalledTimes(1);
+    expect(onToolResult).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not keep replay or duplicate results from a cancelled batch in launched mode', async () => {
+    const controller = new AbortController();
+    const { client } = fakeClient([]);
+    const { config, recordToolResult } = fakeConfig();
+    const state = duplicates();
+    const onToolResult = vi.fn<NonNullable<AgentLoopHost['onToolResult']>>();
+    const launched = toolRequest('c1');
+    const replay = {
+      ...toolRequest('previous__qwen_dup_2'),
+      providerCallId: 'previous',
+    };
+    recordHandledToolCall(
+      state.handled,
+      replay.providerCallId,
+      getCachedToolCallFingerprint(replay, replay.name, replay.args),
+    );
+    const { executor, batches } = fakeExecutor((request) => {
+      controller.abort();
+      return okResponse(request);
+    });
+
+    const result = await runToolBatch([replay, launched, toolRequest('c1')], {
+      config,
+      client,
+      signal: controller.signal,
+      duplicates: state,
+      host: {
+        beforeToolLaunch: () => !controller.signal.aborted,
+        onToolResult,
+      },
+      executor,
+      keepCancelledResults: 'launched',
+    });
+
+    expect(batches).toEqual([[launched]]);
+    expect(result.stop).toBe('cancelled');
+    expect(ids(result.parts)).toEqual(['c1']);
+    expect(result.responses?.map(({ callId }) => callId)).toEqual(['c1']);
+    expect(recordToolResult.mock.calls.map(([, data]) => data.callId)).toEqual([
+      'c1',
+    ]);
+    expect(onToolResult.mock.calls.map(([outcome]) => outcome.origin)).toEqual([
+      'replayed',
+      'executed',
+    ]);
+    expect(state.responded).toEqual(new Set(['previous']));
+  });
+
   it('runs one batch with the scheduler executor a surface passes', async () => {
     const { client } = fakeClient([]);
     const { config } = fakeConfig();
@@ -1095,7 +1171,8 @@ describe('runModelRound on a round source', () => {
       },
       'agent-prompt',
       undefined,
-      undefined,
+      // turnModelRound is a background round: no session-turn ledger flag.
+      {},
     );
     expect(result.turn).toBeInstanceOf(Turn);
     // The attempt the retry replaced is dropped.

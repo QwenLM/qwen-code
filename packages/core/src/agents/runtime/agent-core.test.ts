@@ -91,6 +91,7 @@ import {
 import { markToolCallArgumentsIncomplete } from '../../core/incomplete-tool-call-args.js';
 import { ToolConfirmationOutcome } from '../../tools/tools.js';
 import { runAgentLoop } from '../../core/agent-loop.js';
+import * as agentLoopRollout from '../../config/agent-loop-rollout.js';
 import { LoopDetectionService } from '../../services/loopDetectionService.js';
 import { streamOf } from '../../test-utils/model-fixtures.js';
 import {
@@ -215,6 +216,7 @@ async function runToolStep(
       .spyOn(LoopDetectionService.prototype, 'recordToolResult')
       .mockReturnValue(false),
   ];
+  const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
   try {
     await core.runReasoningLoop(
       chat,
@@ -226,6 +228,9 @@ async function runToolStep(
     for (const spy of detector) spy.mockRestore();
   }
   expect(vi.mocked(runAgentLoop).mock.calls.length).toBeGreaterThan(rounds);
+  // The agent-core loop entry marker must be logged for this surface.
+  expect(entrySpy).toHaveBeenCalledWith(expect.anything(), 'agent-core');
+  entrySpy.mockRestore();
   return step ?? { messages: [{ role: 'user', parts: [] }], results: [] };
 }
 

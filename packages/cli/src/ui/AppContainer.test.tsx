@@ -8592,6 +8592,65 @@ describe('AppContainer State Management', () => {
       expect(mockHandleSlashCommand).not.toHaveBeenCalledWith('/quit');
     });
 
+    it.each([
+      { name: 'c', sequence: '\x03', elapsed: 750, shouldQuit: true },
+      { name: 'd', sequence: '\x04', elapsed: 750, shouldQuit: true },
+      { name: 'c', sequence: '\x03', elapsed: 1001, shouldQuit: false },
+      { name: 'd', sequence: '\x04', elapsed: 1001, shouldQuit: false },
+    ])(
+      'uses the normal auth-dialog exit window for Ctrl+$name at $elapsed ms',
+      async ({ name, sequence, elapsed, shouldQuit }) => {
+        vi.useFakeTimers();
+        const auth = mockedUseAuthCommand();
+        mockedUseAuthCommand.mockReturnValue({
+          ...auth,
+          isAuthDialogOpen: true,
+          state: { ...auth.state, isAuthDialogOpen: true },
+        });
+        const handleSlashCommand = vi.fn();
+        mockedUseSlashCommandProcessor.mockReturnValue({
+          ...mockedUseSlashCommandProcessor(),
+          handleSlashCommand,
+        });
+        mockedUseTextBuffer.mockReturnValue({ text: '', setText: vi.fn() });
+        const key: Key = {
+          name,
+          sequence,
+          ctrl: true,
+          meta: false,
+          shift: false,
+          paste: false,
+        };
+
+        try {
+          await act(async () => {
+            render(
+              <AppContainer
+                config={mockConfig}
+                settings={mockSettings}
+                version="1.0.0"
+                initializationResult={mockInitResult}
+              />,
+            );
+          });
+          await act(async () => getGlobalKeypress()!(key));
+          expect(handleSlashCommand).not.toHaveBeenCalledWith('/quit');
+          await act(async () => {
+            vi.advanceTimersByTime(elapsed);
+          });
+          await act(async () => getGlobalKeypress()!(key));
+          expect(
+            handleSlashCommand.mock.calls.filter(
+              ([command]) => command === '/quit',
+            ),
+          ).toHaveLength(shouldQuit ? 1 : 0);
+        } finally {
+          vi.clearAllTimers();
+          vi.useRealTimers();
+        }
+      },
+    );
+
     it('should require double Ctrl+C to exit when dialogs are open', () => {
       vi.useFakeTimers();
 
@@ -10507,8 +10566,10 @@ describe('AppContainer State Management', () => {
 
       // Seed 4, not the record count 3: the next pre-increment mint is
       // then `${sessionId}########4`, above every id the transcript wears.
+      // The visible Prompts statistic seeds from the user-turn count (3), not
+      // the mint seed (S1).
       await vi.waitFor(() => {
-        expect(seedPromptCount).toHaveBeenCalledWith(4);
+        expect(seedPromptCount).toHaveBeenCalledWith(4, 3);
       });
     });
 

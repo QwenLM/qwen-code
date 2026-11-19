@@ -2915,6 +2915,7 @@ export async function loadCliConfig(
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     unifiedAgentLoopEnabled: settings.experimental?.unifiedAgentLoop,
     eventBusAgentLoopEnabled: settings.experimental?.eventBusAgentLoop,
+    modelAvailabilityTracking: settings.experimental?.modelAvailabilityTracking,
     agentCollaborationEnabled:
       settings.experimental?.agentCollaboration ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,

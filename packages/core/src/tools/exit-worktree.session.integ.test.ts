@@ -168,6 +168,90 @@ describe('ExitWorktreeTool — WorktreeSession sidecar cleanup', () => {
     expect(await readWorktreeSession(sessionPath)).toBeNull();
   });
 
+  it('reports the branch kept when the checkout switched away from it', async () => {
+    await enterWorktree('switched-branch');
+    const wtPath = new GitWorktreeService(repoRoot).getUserWorktreePath(
+      'switched-branch',
+    );
+    execFileSync('git', ['checkout', '-q', '-b', 'fix'], { cwd: wtPath });
+
+    const result = await exit(removeParams('switched-branch'));
+
+    expect(result.error).toBeUndefined();
+    // A named creation owns its slug ref even after the checkout moved
+    // away: the ref is deleted (no leak blocking a later enter_worktree),
+    // and the checkout's own branch is reported as kept.
+    const output = JSON.parse(String(result.llmContent)) as {
+      message: string;
+    };
+    expect(output.message).toContain('deleted branch worktree-switched-branch');
+    expect(output.message).toContain('Kept branch fix');
+    expect(
+      execFileSync('git', ['branch', '--list', 'worktree-switched-branch'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      }).trim(),
+    ).toBe('');
+    expect(
+      execFileSync(
+        'git',
+        ['branch', '--list', 'fix', '--format=%(refname:short)'],
+        {
+          cwd: repoRoot,
+          encoding: 'utf8',
+        },
+      ).trim(),
+    ).toBe('fix');
+  });
+
+  it('reports the kept branch when exiting an in-place-branched worktree', async () => {
+    // A detached session worktree branched in place never created the slug
+    // ref: the removal deletes no branch and must name the one that
+    // survives (the only handle to the work once the directory is gone).
+    const service = new GitWorktreeService(repoRoot);
+    const base = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    }).trim();
+    const created = await service.createUserWorktree('inplace-exit', 'main', {
+      detached: true,
+    });
+    expect(created.success).toBe(true);
+    const wtPath = created.worktree!.path;
+    await service.createWorktreeBranch(wtPath, 'feat/x');
+    await writeWorktreeSession(
+      sessionService.getWorktreeSessionPath(sessionId),
+      {
+        slug: 'inplace-exit',
+        worktreePath: wtPath,
+        worktreeBranch: 'feat/x',
+        originalCwd: repoRoot,
+        workspaceCwd: repoRoot,
+        originalBranch: 'main',
+        originalHeadCommit: base,
+      },
+    );
+
+    const result = await exit(removeParams('inplace-exit'));
+
+    expect(result.error).toBeUndefined();
+    const output = JSON.parse(String(result.llmContent)) as {
+      message: string;
+    };
+    expect(output.message).toContain('kept branch feat/x');
+    expect(output.message).not.toContain('deleted branch');
+    expect(
+      execFileSync(
+        'git',
+        ['branch', '--list', 'feat/x', '--format=%(refname:short)'],
+        {
+          cwd: repoRoot,
+          encoding: 'utf8',
+        },
+      ).trim(),
+    ).toBe('feat/x');
+  });
+
   it('does not clear the sidecar when slug does not match', async () => {
     await enterWorktree('tracked-slug');
     const sessionPath = sessionService.getWorktreeSessionPath(sessionId);

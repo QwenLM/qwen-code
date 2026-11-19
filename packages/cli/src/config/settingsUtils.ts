@@ -428,7 +428,10 @@ export function getDialogSettingKeys(options?: {
     .filter(
       (key) =>
         !options?.excludeWorkspaceRestricted ||
-        !WORKSPACE_RESTRICTED_SETTING_KEYS.includes(key),
+        (!WORKSPACE_RESTRICTED_SETTING_KEYS.includes(key) &&
+          !WORKSPACE_RESTRICTED_ROOT_SETTINGS.some(
+            (restrictedKey) => restrictedKey === key,
+          )),
     );
 
   // Sort by explicit order; settings not in the order array appear at the end
@@ -709,9 +712,10 @@ export function getDisplayValue(
 export function nextBooleanSettingValue(
   currentValue: unknown,
   defaultValue?: unknown,
+  unsetToggleValue = false,
 ): boolean {
   if (currentValue !== undefined) return !currentValue;
-  return defaultValue === undefined ? false : !defaultValue;
+  return defaultValue === undefined ? unsetToggleValue : !defaultValue;
 }
 
 /**

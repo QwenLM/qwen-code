@@ -151,6 +151,9 @@ const HIDDEN_SETTING_KEYS = new Set([
   'ui.compactMode',
   'mcpServers',
   'model.reasoningEffort',
+  // Read by the composer to default new sessions to worktree mode; the
+  // configuration surface is settings.json, not a panel row.
+  'worktree.defaultForNewSessions',
 ]);
 const LIVE_SETTING_KEYS = new Set([
   'experimental.liveVoice.enabled',
@@ -1362,13 +1365,13 @@ export function SettingsMessage({
                           }
 
                           if (
-                            item.setting.key === LANGUAGE_SETTING_KEY &&
+                            (item.setting.key === LANGUAGE_SETTING_KEY ||
+                              item.setting.key === 'visionBridgeTimeoutMs') &&
                             scope === 'workspace' &&
                             !workspaceSettingsWritable
                           ) {
-                            // `/language ui --project` is refused in a
-                            // standalone session, so a workspace row here
-                            // could only fail after the user picked a value.
+                            // Standalone sessions can edit these settings at
+                            // user scope only.
                             return null;
                           }
 

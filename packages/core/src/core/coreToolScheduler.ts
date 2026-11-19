@@ -50,6 +50,7 @@ import type { EditorType } from '../utils/editor.js';
 import type { Config } from '../config/config.js';
 import type { ModToolCheck } from '../mods/tool-events.js';
 import type { ChatRecordingService } from '../services/chatRecordingService.js';
+import { ManagedRuntimeOutcomeUnknownError } from '../services/execution-environment.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { evaluateMediaPolicyToolCall } from '../omni/policy/model-access.js';
 import { sanitizeToolNameForProvider } from '../utils/tool-name-utils.js';
@@ -1269,7 +1270,7 @@ const createErrorResponse = (
   };
 };
 
-const createCancelledResponse = (
+export const createCancelledResponse = (
   request: ToolCallRequestInfo,
   reason: string,
   executionStatus: ToolExecutionStatus,
@@ -1544,12 +1545,20 @@ function withPostToolBatchStop(
 }
 
 interface CoreToolSchedulerOptions {
+  onManagedRuntimeOutcomeUnknown?: (
+    error: ManagedRuntimeOutcomeUnknownError,
+    callId: string,
+  ) => void;
+  onManagedRuntimeBatchFailed?: (
+    error: ManagedRuntimeOutcomeUnknownError,
+  ) => void;
   onToolExecutionStarted?: (callId: string, startedAt: number) => void;
   onToolExecutionSettled?: (
     callId: string,
     status: ToolExecutionStatus,
     durationMs: number,
   ) => void;
+  onManagedToolExecutionSettled?: (callId: string) => void;
   config: Config;
   outputUpdateHandler?: OutputUpdateHandler;
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
@@ -1618,6 +1627,14 @@ interface CoreToolSchedulerOptions {
    * fails the call as execution-denied.
    */
   refuseToolCall?: (request: ToolCallRequestInfo) => string | undefined;
+  /** Whether a resolved tool instance is trusted by the host without permission checks. */
+  isTrustedTool?: (tool: AnyDeclarativeTool) => boolean;
+  /**
+   * Refuses any call that reaches interactive approval with this message
+   * (`__name__` is replaced with the request's tool name) instead of entering
+   * `awaiting_approval`.
+   */
+  readOnlyRefusalMessage?: string;
   /** The terminal sequence a permission prompt's Notification hook returned. */
   onPermissionPromptTerminalSequence?: (terminalSequence: string) => void;
 }
@@ -3420,6 +3437,10 @@ export class CoreToolScheduler {
 
           // Check if the tool is excluded due to permissions/environment restrictions
           // This check should happen before registry lookup to provide a clear permission error
+          const eagerTool = this.toolRegistry.getTool?.(canonicalName);
+          const isTrustedEagerTool =
+            eagerTool !== undefined &&
+            this.schedulerOptions.isTrustedTool?.(eagerTool) === true;
           const pm = this.config.getPermissionManager?.();
           const toolAliases = this.config
             .getToolRegistry?.()
@@ -3427,9 +3448,10 @@ export class CoreToolScheduler {
           const mcpIdentity = this.config
             .getToolRegistry?.()
             ?.getMcpToolIdentity?.(canonicalName);
-          const permissionEnabled = pm
-            ? await pm.isToolEnabled(canonicalName, toolAliases, mcpIdentity)
-            : true;
+          const permissionEnabled =
+            pm && !isTrustedEagerTool
+              ? await pm.isToolEnabled(canonicalName, toolAliases, mcpIdentity)
+              : true;
           if (recordPrevalidationCancellation()) continue;
           if (pm && !permissionEnabled) {
             const matchingRule = pm.findMatchingDenyRule({
@@ -3478,7 +3500,7 @@ export class CoreToolScheduler {
           }
 
           // Legacy fallback: check getPermissionsDeny() when PM is not available
-          if (!pm) {
+          if (!pm && !isTrustedEagerTool) {
             const excludeTools =
               this.config.getPermissionsDeny?.() ?? undefined;
             if (excludeTools && excludeTools.length > 0) {
@@ -3551,6 +3573,30 @@ export class CoreToolScheduler {
               reqInfo.name,
               rejectionMessage,
             );
+            // The budget note is appended after the rejectionMessage key was
+            // recorded, for the same reason as the directive below: the
+            // numbers vary call-to-call, so folding them into the key would
+            // reset the retry count at every truncation (#16417).
+            // The "size each part" guidance is emitted only when the usage
+            // corroborates the cut (used ≥ half the limit) — a provider can
+            // cut far below the configured ceiling (#16417's own DeepSeek
+            // case: cut near 3K against a 64K ceiling), and telling the
+            // model to size parts "well under 64K" when 95% of that budget
+            // was never spent licenses a retry an order of magnitude too
+            // large (#16417 R1-2).
+            const budget = reqInfo.outputBudgetAtTruncation;
+            const usageCorroboratesCut =
+              budget !== undefined &&
+              budget.usedTokens >= budget.limitTokens / 2;
+            const budgetNote =
+              truncated && budget
+                ? ` This response used ${budget.usedTokens} of the ` +
+                  `${budget.limitTokens}-token output limit.` +
+                  (usageCorroboratesCut
+                    ? ` No single response can carry the whole file — size ` +
+                      `each part well under that limit.`
+                    : '')
+                : '';
             // The directive is appended after the rejectionMessage key was
             // recorded: recordRetryableToolError prunes the tool's other keys,
             // so folding the directive into the key would reset the count at
@@ -3565,7 +3611,7 @@ export class CoreToolScheduler {
                       ? TRUNCATION_RETRY_LOOP_DIRECTIVE
                       : INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE
                   }`
-                : rejectionMessage,
+                : `${rejectionMessage}${budgetNote}`,
             );
             newToolCalls.push({
               status: 'error',
@@ -3834,7 +3880,15 @@ export class CoreToolScheduler {
           // origin/descriptor pairing was enforced before buildInvocation,
           // and PreToolUse hooks fired (a hook deny or ask failed the call
           // closed) before validation.
-          if (reqInfo.executionOrigin?.kind === 'fixed_policy') {
+          //
+          // A host-trusted tool instance takes the same bypass, except when a
+          // PreToolUse hook asked for confirmation: that ask is the user's and
+          // still needs an answer.
+          if (
+            reqInfo.executionOrigin?.kind === 'fixed_policy' ||
+            (this.schedulerOptions.isTrustedTool?.(toolCall.tool) === true &&
+              !preToolUseAsk)
+          ) {
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,
@@ -4773,6 +4827,31 @@ export class CoreToolScheduler {
               continue;
             }
 
+            if (this.schedulerOptions.readOnlyRefusalMessage !== undefined) {
+              const refusalMessage =
+                this.schedulerOptions.readOnlyRefusalMessage.replaceAll(
+                  '__name__',
+                  reqInfo.name,
+                );
+              this.setStatusInternal(
+                reqInfo.callId,
+                'error',
+                createErrorResponse(
+                  reqInfo,
+                  new Error(refusalMessage),
+                  ToolErrorType.EXECUTION_DENIED,
+                  'not_started',
+                ),
+              );
+              setToolSpanFailure(
+                toolSpan,
+                TOOL_FAILURE_KIND_PERMISSION_DENIED,
+                TOOL_SPAN_STATUS_PERMISSION_DENIED,
+              );
+              this.finalizeToolSpan(reqInfo.callId);
+              continue;
+            }
+
             // Re-check signal.aborted between the for-loop entry guard and
             // here: `evaluatePermissionFlow`, `getConfirmationDetails`, and
             // `firePermissionRequestHook` are all `await` points that can
@@ -5528,6 +5607,23 @@ export class CoreToolScheduler {
   private async attemptExecutionOfScheduledCalls(
     signal: AbortSignal,
   ): Promise<void> {
+    try {
+      await this.executeScheduledCalls(signal);
+    } catch (error) {
+      if (
+        error instanceof ManagedRuntimeOutcomeUnknownError &&
+        this.schedulerOptions.onManagedRuntimeOutcomeUnknown
+      ) {
+        if (this.postToolBatchSpanCallId !== undefined) {
+          this.finalizeToolSpan(this.postToolBatchSpanCallId, true);
+        }
+        this.schedulerOptions.onManagedRuntimeBatchFailed?.(error);
+      }
+      throw error;
+    }
+  }
+
+  private async executeScheduledCalls(signal: AbortSignal): Promise<void> {
     // Re-check after each pass for a call that became 'scheduled' meanwhile.
     // Each iteration either drains ≥1 'scheduled' call or returns, so this
     // cannot spin.
@@ -5625,30 +5721,36 @@ export class CoreToolScheduler {
     );
     const executing = new Set<Promise<void>>();
     const admitted: ScheduledToolCall[] = [];
+    let failure: { error: unknown } | undefined;
     const launchAdmitted = () => {
       for (const call of admitted.splice(0)) {
-        const p = this.executeSingleToolCall(call, signal).finally(() => {
-          executing.delete(p);
-        });
-        executing.add(p);
+        const execution = this.executeSingleToolCall(call, signal)
+          .catch((error: unknown) => {
+            failure ??= { error };
+          })
+          .finally(() => {
+            executing.delete(execution);
+          });
+        executing.add(execution);
       }
     };
 
     for (const call of calls) {
-      if (
+      if (failure) break;
+      const refused =
         this.schedulerOptions.beforeToolLaunch &&
-        (await this.launchRefused(call))
-      ) {
-        continue;
-      }
+        (await this.launchRefused(call));
+      if (failure) break;
+      if (refused) continue;
       admitted.push(call);
       if (executing.size + admitted.length >= maxConcurrency) {
         launchAdmitted();
         await Promise.race(executing);
       }
     }
-    launchAdmitted();
+    if (!failure) launchAdmitted();
     await Promise.all(executing);
+    if (failure) throw failure.error;
   }
 
   private async executeSingleToolCall(
@@ -5735,6 +5837,14 @@ export class CoreToolScheduler {
         TOOL_FAILURE_KIND_TOOL_EXCEPTION,
         errorMessage,
       );
+      if (
+        error instanceof ManagedRuntimeOutcomeUnknownError &&
+        this.schedulerOptions.onManagedRuntimeOutcomeUnknown
+      ) {
+        this.finalizeToolSpan(callId, true);
+        this.schedulerOptions.onManagedRuntimeOutcomeUnknown(error, callId);
+        throw error;
+      }
       this.setStatusInternal(
         callId,
         'error',
@@ -6438,27 +6548,33 @@ export class CoreToolScheduler {
       let schedulerTimeoutResultSelected = false;
       let schedulerTimeoutWon = false;
       if (timeoutController) {
+        const waitForManagedSettlement =
+          this.schedulerOptions.onManagedRuntimeOutcomeUnknown !== undefined &&
+          this.config
+            .getManagedRuntimeEnvironment?.()
+            ?.toolNames?.has(canonicalName) === true;
         let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
         try {
           toolResult = await new Promise<ToolResult>((resolve, reject) => {
             timeoutTimer = setTimeout(() => {
-              schedulerTimeoutResultSelected = true;
-              schedulerTimeoutWon = !signal.aborted;
+              schedulerTimeoutResultSelected = !waitForManagedSettlement;
+              schedulerTimeoutWon =
+                schedulerTimeoutResultSelected && !signal.aborted;
               debugLogger.warn(
                 `Tool ${canonicalName} (${callId}) timed out after ` +
                   `${toolExecutionTimeoutMs}ms — aborting`,
               );
-              // Cancel the in-flight tool via the derived signal, then resolve
-              // with a timeout error so the scheduler is unblocked even if the
-              // tool ignores the abort. A later settle from `promise` is a
-              // no-op once this wrapper Promise has already resolved.
+              // Cancel via the derived signal. Only non-Managed tools may
+              // resolve with a synthetic timeout before their actual outcome.
               timeoutController?.abort(
                 new DOMException(
                   `Tool execution timed out after ${toolExecutionTimeoutMs}ms`,
                   'TimeoutError',
                 ),
               );
-              resolve(createToolTimeoutResult(toolExecutionTimeoutMs));
+              if (!waitForManagedSettlement) {
+                resolve(createToolTimeoutResult(toolExecutionTimeoutMs));
+              }
             }, toolExecutionTimeoutMs);
             timeoutTimer.unref?.();
             promise.then(resolve, reject);
@@ -6639,6 +6755,7 @@ export class CoreToolScheduler {
       } catch (error) {
         debugLogger.warn('Tool lifecycle end observer failed:', error);
       }
+      this.schedulerOptions.onManagedToolExecutionSettled?.(callId);
       if (execSpan) {
         const completedExecSpan = execSpan;
         execSpan = undefined;
@@ -7710,6 +7827,16 @@ export class CoreToolScheduler {
           errorType:
             executionStatus === 'error' ? exceptionErrorType : undefined,
         });
+      }
+
+      if (
+        executionError instanceof ManagedRuntimeOutcomeUnknownError &&
+        this.schedulerOptions.onManagedRuntimeOutcomeUnknown
+      ) {
+        throw executionError;
+      }
+      if (executionThrew) {
+        this.schedulerOptions.onManagedToolExecutionSettled?.(callId);
       }
 
       const cancelMessage = executionThrew

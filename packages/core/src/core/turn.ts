@@ -232,6 +232,13 @@ export interface ToolCallRequestInfo {
   /** Set to true when the LLM response was truncated due to max_tokens. */
   wasOutputTruncated?: boolean;
   /**
+   * The output-token budget at the moment a max_tokens cut truncated this
+   * call's arguments; present only when `wasOutputTruncated` is true and both
+   * numbers were knowable. Lets the scheduler's rejection name the budget so
+   * the model can size each part of a split write (#16417).
+   */
+  outputBudgetAtTruncation?: { usedTokens: number; limitTokens: number };
+  /**
    * Set to true when this call's arguments arrived unterminated and were
    * repaired into shape, but the output token limit was *not* what cut them.
    * The data-loss guard needs this fact; the user-visible wording needs the
@@ -564,6 +571,8 @@ export type CompactionTriggerReason =
   | 'manual';
 
 export interface ChatCompressionInfo {
+  /** Synthetic prefix length; retained original operations follow it. */
+  summaryPrefixLength?: number;
   originalTokenCount: number;
   newTokenCount: number;
   /**
@@ -794,6 +803,9 @@ export class Turn {
     private readonly yieldsToolCallPreparations?: boolean,
     private readonly suppressedHookContext?: string,
     private readonly onModelRequestDispatched?: () => void,
+    private readonly isExplicitRetry?: boolean,
+    private readonly isSessionTurn?: boolean,
+    private readonly ledgerTurnKey?: string,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -808,30 +820,28 @@ export class Turn {
     try {
       // Note: This assumes `sendMessageStream` yields events like
       // { type: StreamEventType.RETRY } or { type: StreamEventType.CHUNK, value: GenerateContentResponse }
-      // Keep the no-options call shape: callers without either flag pass
-      // `undefined`, as before either option existed.
-      const sendOptions =
-        this.promptIdentity !== undefined ||
-        this.retractDeliveredOutputOnRetry === true ||
-        this.onPreparedRequest !== undefined ||
-        this.onModelRequestDispatched !== undefined ||
-        this.suppressedHookContext !== undefined
-          ? {
-              ...(this.onPreparedRequest
-                ? { onPreparedRequest: this.onPreparedRequest }
-                : {}),
-              ...(this.onModelRequestDispatched
-                ? { onModelRequestDispatched: this.onModelRequestDispatched }
-                : {}),
-              ...(this.suppressedHookContext
-                ? { suppressedHookContext: this.suppressedHookContext }
-                : {}),
-              ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
-              ...(this.retractDeliveredOutputOnRetry
-                ? { retractDeliveredOutputOnRetry: true }
-                : {}),
-            }
-          : undefined;
+      // Membership in the model-availability ledger is decided by the sender
+      // (LlmClient sets isSessionTurn for the live turn's own sends), not
+      // inferred from "went through Turn": background rounds built on Turn
+      // (turnModelRound) leave it unset. The remaining fields stay conditional.
+      const sendOptions = {
+        ...(this.isSessionTurn ? { isSessionTurn: true } : {}),
+        ...(this.onPreparedRequest
+          ? { onPreparedRequest: this.onPreparedRequest }
+          : {}),
+        ...(this.onModelRequestDispatched
+          ? { onModelRequestDispatched: this.onModelRequestDispatched }
+          : {}),
+        ...(this.suppressedHookContext
+          ? { suppressedHookContext: this.suppressedHookContext }
+          : {}),
+        ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
+        ...(this.retractDeliveredOutputOnRetry
+          ? { retractDeliveredOutputOnRetry: true }
+          : {}),
+        ...(this.isExplicitRetry ? { isExplicitRetry: true } : {}),
+        ...(this.ledgerTurnKey ? { ledgerTurnKey: this.ledgerTurnKey } : {}),
+      };
       const responseStream = prepared
         ? await this.chat.sendPreparedMessageStream(
             prepared,
@@ -981,6 +991,42 @@ export class Turn {
           if (finishReason === FinishReason.MAX_TOKENS) {
             for (const tc of this.pendingToolCalls) {
               tc.wasOutputTruncated = true;
+              // Record the budget numbers alongside the truncation mark so
+              // the rejection can tell the model how large each part of a
+              // split write should be (#16417). The limit is whatever the
+              // send layer actually used — clamp, escalation, or user
+              // override.
+              // Prefer total − prompt: Gemini-family providers report
+              // reasoning tokens separately in thoughtsTokenCount, and the
+              // output-limit consumption includes them. A bare
+              // candidatesTokenCount under-reports there and the model would
+              // size its retry too large. Fall back to candidatesTokenCount
+              // when total or prompt is missing, zero-coerced (OpenAI
+              // converters stamp totalTokenCount unconditionally with
+              // `|| 0`), or non-finite. A MAX_TOKENS cut always consumed
+              // output tokens, so both arms refuse to certify a budget
+              // nothing was taken from — a zero or non-finite count is a
+              // coerced/missing value, not a measurement (#16417 R1-1/R4-1).
+              const usage = resp.usageMetadata;
+              const total = usage?.totalTokenCount;
+              const prompt = usage?.promptTokenCount;
+              const candidates = usage?.candidatesTokenCount;
+              const usedTokens =
+                total !== undefined &&
+                prompt !== undefined &&
+                Number.isFinite(total) &&
+                Number.isFinite(prompt) &&
+                total > prompt
+                  ? total - prompt
+                  : candidates !== undefined &&
+                      Number.isFinite(candidates) &&
+                      candidates > 0
+                    ? candidates
+                    : undefined;
+              const limitTokens = this.chat.getLastRequestMaxOutputTokens?.();
+              if (usedTokens !== undefined && limitTokens !== undefined) {
+                tc.outputBudgetAtTruncation = { usedTokens, limitTokens };
+              }
             }
           }
 

@@ -22,6 +22,11 @@ import {
 import { applyReadHeaders } from './workspace-file-read.js';
 
 const MAX_SEARCH_CHARS = 200;
+// Bound the exclusion list at the transport: an unbounded ref count would
+// spawn git with an unbounded `--not` argv (a client could exhaust argv space
+// or fan out probes). The hook sends bound PR heads plus two base-branch refs,
+// far below this ceiling.
+const MAX_EXCLUDE_REFS = 256;
 
 function buildLogList(
   workspaceCwd: string,
@@ -121,12 +126,50 @@ async function handleLogList(
       typeof rawSearch === 'string' && rawSearch.trim()
         ? rawSearch.trim().slice(0, MAX_SEARCH_CHARS)
         : undefined;
+    const rawExclude = req.query['exclude'];
+    let excludeRefs: string[] | undefined;
+    if (rawExclude !== undefined) {
+      // Fail closed: a repeated key (an array) or an empty value must not
+      // silently drop the exclusion and run the walk unfiltered, re-listing
+      // the very commits the exclusion exists to remove. Absent stays unset.
+      if (typeof rawExclude !== 'string' || !rawExclude.trim()) {
+        res.status(400).json({
+          errorKind: 'parse_error',
+          error: 'exclude must be a non-empty comma-separated ref list',
+          status: 400,
+        });
+        return;
+      }
+      excludeRefs = rawExclude
+        .split(',')
+        .map((ref) => ref.trim())
+        .filter((ref) => ref.length > 0);
+      // A separator-only value (`,,,`) filters to nothing; treating that as
+      // "no exclusion" would run the walk unfiltered, so refuse it too.
+      if (excludeRefs.length === 0) {
+        res.status(400).json({
+          errorKind: 'parse_error',
+          error: 'exclude must be a non-empty comma-separated ref list',
+          status: 400,
+        });
+        return;
+      }
+      if (excludeRefs.length > MAX_EXCLUDE_REFS) {
+        res.status(400).json({
+          errorKind: 'parse_error',
+          error: `exclude accepts at most ${MAX_EXCLUDE_REFS} refs`,
+          status: 400,
+        });
+        return;
+      }
+    }
     const result = await fetchGitLog(workspaceCwd, {
       limit,
       skip,
       range,
       all: req.query['all'] === '1',
       search,
+      excludeRefs,
     });
     res.status(200).json(buildLogList(workspaceCwd, result));
   } catch (err) {

@@ -299,6 +299,18 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('should keep model availability tracking opt-in', () => {
+      expect(
+        getSettingsSchema().experimental.properties.modelAvailabilityTracking,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        category: 'Experimental',
+        requiresRestart: true,
+        showInDialog: true,
+      });
+    });
+
     // requiresRestart is load-bearing, not decorative: the Workflow tool is
     // registered once while the tool registry is built, so a mid-session
     // toggle would leave the dialog claiming the feature is on while the

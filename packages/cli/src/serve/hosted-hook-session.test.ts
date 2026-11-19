@@ -4213,3 +4213,32 @@ it('keeps a shared Hook+MCP deterministic owner re-acquirable on a non-terminal 
   );
   await reloaded.acquire();
 });
+
+it.each([
+  ['hands the mount back when it owns its broker', true],
+  ['leaves a mount shared with MCP alone', false],
+])('on a non-terminal close %s', async (_name, ownsBroker) => {
+  const owner = `extensions-components-${'b'.repeat(64)}`;
+  const shared = new HostedWorkspaceBroker(
+    options,
+    session.authority.sessionHeader.sessionKey,
+    owner,
+  );
+  const closing = new HostedHookSession(
+    options,
+    session,
+    pin,
+    ownsBroker ? undefined : shared,
+    () => false,
+    owner,
+  );
+  await closing.acquire();
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'close-claim',
+  );
+  const releaseMount = vi
+    .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+    .mockResolvedValue();
+  await closing.close({ terminal: false });
+  expect(releaseMount).toHaveBeenCalledTimes(ownsBroker ? 1 : 0);
+});

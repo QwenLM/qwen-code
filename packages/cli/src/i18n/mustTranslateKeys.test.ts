@@ -123,6 +123,30 @@ describe('must-translate locale coverage', () => {
     expect(missingKeys).toEqual([]);
   });
 
+  it('covers every English locale key in ru', async () => {
+    const enTranslations = await loadEnglishBaselineTranslations();
+    const localePath = path.join(
+      path.dirname(fileURLToPath(import.meta.url)),
+      'locales',
+      'ru.js',
+    );
+    const ruTranslations =
+      (
+        (await import(pathToFileURL(localePath).href)) as {
+          default?: TranslationDict;
+        }
+      ).default ?? {};
+    const missingKeys = Object.keys(enTranslations).filter(
+      (key) => !(key in ruTranslations),
+    );
+
+    expect(missingKeys).toEqual([]);
+    expect(ruTranslations['Copied to clipboard']).toBe(
+      'Скопировано в буфер обмена',
+    );
+    expect(ruTranslations['{{count}} extensions']).toBe('{{count}} расширений');
+  });
+
   it('requires translation coverage for /fork user-facing strings', () => {
     expect(MUST_TRANSLATE_KEYS).toEqual(
       expect.arrayContaining([...FORK_COMMAND_REQUIRED_KEYS]),

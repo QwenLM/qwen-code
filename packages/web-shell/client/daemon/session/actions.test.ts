@@ -878,6 +878,24 @@ describe('getConnectionAfterSessionClear', () => {
         titleSource: 'manual',
         tokenCount: 42,
         goalState: { v: 2, goal: null, activity: 'idle' },
+        restoredArtifacts: [
+          {
+            id: 'a1',
+            kind: 'link',
+            storage: 'external_url',
+            source: 'client',
+            status: 'available',
+            title: 'Stale artifact',
+            url: 'https://example.com/stale',
+            retention: 'restorable',
+            clientRetained: true,
+            createdAt: '2026-09-07T00:00:00.000Z',
+            updatedAt: '2026-09-07T00:00:00.000Z',
+          },
+        ],
+        restoredArtifactsSessionId: 'session-a',
+        artifactCountHint: 3,
+        artifactCountHintSessionId: 'session-a',
         backgroundTurn: {
           turnId: 'background-a',
           taskId: 'task-a',
@@ -913,6 +931,10 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('titleSource');
     expect(next).not.toHaveProperty('tokenCount');
     expect(next).not.toHaveProperty('goalState');
+    expect(next).not.toHaveProperty('restoredArtifacts');
+    expect(next).not.toHaveProperty('restoredArtifactsSessionId');
+    expect(next).not.toHaveProperty('artifactCountHint');
+    expect(next).not.toHaveProperty('artifactCountHintSessionId');
     expect(next).not.toHaveProperty('backgroundTurn');
     expect(next).not.toHaveProperty('finishedBackgroundTurnId');
     expect(next).not.toHaveProperty('supportedCommands');
@@ -3623,6 +3645,84 @@ describe('createDaemonSessionActions', () => {
       requestTimeoutMs: 70_000,
     });
     expect(getConnection().goalState).toBeUndefined();
+  });
+
+  it('commits the click-time artifact count hint keyed to the target session', () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        artifactCountHint: 9,
+        artifactCountHintSessionId: 'session-a',
+      },
+      session: existingSession,
+    });
+
+    void actions
+      .loadSession('session-b', { artifactCountHint: 4 })
+      .catch(() => undefined);
+
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'session-b',
+      artifactCountHint: 4,
+      artifactCountHintSessionId: 'session-b',
+    });
+  });
+
+  it('clears a stale artifact count hint when the target has none', () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        artifactCountHint: 9,
+        artifactCountHintSessionId: 'session-a',
+      },
+      session: existingSession,
+    });
+
+    void actions.loadSession('session-b').catch(() => undefined);
+
+    expect(getConnection().artifactCountHint).toBeUndefined();
+    expect(getConnection().artifactCountHintSessionId).toBeUndefined();
+  });
+
+  it('retires the click-time artifact count hint when the load fails', async () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection, pendingSessionLoadRef } =
+      createActionsHarness({
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+        },
+        session: existingSession,
+      });
+
+    const load = actions.loadSession('session-b', { artifactCountHint: 4 });
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'session-b',
+      artifactCountHint: 4,
+      artifactCountHintSessionId: 'session-b',
+    });
+
+    const pendingLoad = pendingSessionLoadRef.current;
+    pendingSessionLoadRef.current = undefined;
+    clearTimeout(pendingLoad?.timeout);
+    pendingLoad?.reject(new Error('load failed'));
+
+    await expect(load).rejects.toThrow('load failed');
+    // The failed target stays visible for the error state, but its count
+    // must not outlive the load: no snapshot or cache entry will ever
+    // retire the hint on the failure path.
+    expect(getConnection()).toMatchObject({
+      sessionId: 'session-b',
+      error: 'load failed',
+    });
+    expect(getConnection().artifactCountHint).toBeUndefined();
+    expect(getConnection().artifactCountHintSessionId).toBeUndefined();
   });
 
   it('drops workspace previews when switching to a standalone target', () => {
