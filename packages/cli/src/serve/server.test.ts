@@ -51778,10 +51778,12 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       lanBase: `http://${lanStatus.address}:${lanStatus.port}`,
       lanAuth: { Authorization: `Bearer ${pairingSecret}` },
       restore: async () => {
-        await service.disable().catch(() => {});
+        // Restore spies before awaiting disable: a wedged disable() must not
+        // keep the module-level mocks installed for the rest of the file.
         selectSpy.mockRestore();
         listSpy.mockRestore();
         sleepSpy.mockRestore();
+        await service.disable().catch(() => {});
       },
     };
   }
@@ -52143,12 +52145,13 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
     const { lanBase, lanAuth } = pair;
     const lanPort = Number(new URL(lanBase).port);
     const before = getSseOccupancy();
-    const ws = await openInitializedWs(
-      lanPort,
-      `${lanBase.replace('http:', 'ws:')}/acp`,
-      lanAuth,
-    );
+    let ws: WebSocket | undefined;
     try {
+      ws = await openInitializedWs(
+        lanPort,
+        `${lanBase.replace('http:', 'ws:')}/acp`,
+        lanAuth,
+      );
       await vi.waitFor(
         () => {
           expect(getSseOccupancy().byListener['local-control']).toBe(
@@ -52180,8 +52183,13 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
         { timeout: 5_000 },
       );
     } finally {
-      ws.close();
-      pair.restore();
+      ws?.close();
+      // Bounded: on a mutant that wedges disable(), an unbounded await here
+      // would mask the explicit race rejection with a test timeout.
+      await Promise.race([
+        pair.restore(),
+        new Promise<void>((resolve) => setTimeout(resolve, 1_000)),
+      ]).catch(() => undefined);
       await handle?.close();
       handle = undefined;
     }
