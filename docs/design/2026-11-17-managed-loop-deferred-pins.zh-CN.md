@@ -260,6 +260,8 @@ core 邻近面是整面跑而非抽样：`src/managed-runtime` 加 `src/skills/b
 
 本 head：全量构建 rc=0 且 core 与 cli 的 dist 按构建起点时间戳断言已刷新，jar 重建，`ManagedLoopSkillTest` **19/19**，bundle 重建并断言已刷新，重建 jar 内四个 sidecar 与已提交契约逐字节相等。臂：`--loop-skill` success（session `7a23c06a-5fe7-4a0c-8f84-3b78794d10f1`、modelRounds 6、cron create/list/delete 均见证）；`--loop-fire` success（session `ec5bc39a-2fb2-45e5-95c5-91e3264b2528`、schedule `asch_916ccb2d42000efe6c0fdc9ca225506d`、fireTrigger=scheduled、fireOutcome=fired、fireState=completed、occurrenceKey `schedule:2026-11-19T08:41:00Z`、modelRounds 5）。快速套件：core **35/35**、scripts 元 **184/184**；core `tsc --build`、eslint 与 prettier 净。
 
+第八次合并（`42be95703d`）带入 `457656e0ab`（#17799），纯文档（两份用户指南）、不碰任何代码，故上面全部证据原样承接；在该 head 复跑了快速套件，均绿。
+
 ## 开放问题
 
 无阻塞项。
