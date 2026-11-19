@@ -88,6 +88,7 @@ export type {
   DaemonInputAnnotation,
   DaemonInputReference,
   DaemonInputReferenceAnnotation,
+  DaemonInputSourceAnnotation,
   DaemonResourceLink,
   DaemonTextTranscriptBlock,
   DaemonTextDeltaMeta,
@@ -130,6 +131,7 @@ export type {
   // Session-meta events
   DaemonUiSessionMetadataChangedEvent,
   DaemonUiSessionSourceChangedEvent,
+  DaemonUiSessionSubSessionTaskChangedEvent,
   DaemonUiSessionApprovalModeChangedEvent,
   DaemonUiSessionAvailableCommandsEvent,
   DaemonUiStateResyncRequiredEvent,
@@ -159,6 +161,24 @@ export type {
   DaemonUiAuthDeviceFlowCancelledEvent,
   NormalizeDaemonEventOptions,
 } from './types.js';
+
+export {
+  parseHookLifecycle,
+  extractHookLifecycle,
+  createHookLifecycleState,
+  reduceHookLifecycle,
+  summarizeHookExecutions,
+} from './hook-lifecycle.js';
+export type {
+  HookLifecycleOutcome,
+  HookLifecycleSource,
+  HookLifecycleBase,
+  HookLifecycleEvent,
+  HookExecutionEntry,
+  HookLifecycleState,
+  HookLifecycleSummary,
+  HookTurnPage,
+} from './hook-lifecycle.js';
 
 export {
   createExecutionLifecycleState,

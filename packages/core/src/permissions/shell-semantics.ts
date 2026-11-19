@@ -430,10 +430,18 @@ function isNetworkPseudoDevice(target: string): boolean {
 /**
  * Index where bash ends the word and starts an unquoted redirection operator.
  *
- * A quoted or escaped `<`, `>` or `&` stays inside the word, so `'>'>file`
+ * A quoted or escaped `<`, `>`, `&` or `|` stays inside the word, so `'>'>file`
  * is the word `>` followed by the redirect `>file`, and `'&'>file` is the
  * word `&` followed by the same redirect. The tokenizer keeps both in one
  * token, and the masked spelling alone would hide the real operator.
+ *
+ * The character set is the mask's, and has to stay in step with it: `|` joined
+ * that set when a quoted `|` stopped being read as the clobber operator, and
+ * leaving it out here kept the opposite hole open. `"|" >file` (spaced) was
+ * seen while `"|">file` was not, so bash wrote the file and no rule saw a
+ * write at all — `echo '{}' "|">.qwen/settings.json` overwrites the settings
+ * file under a `Write(.qwen/settings.json)` deny, measured on base as well as
+ * here. `&`, `>` and `<` never had the gap.
  */
 function operatorAfterMaskedOperator(
   token: string,
@@ -443,7 +451,7 @@ function operatorAfterMaskedOperator(
   for (let index = 1; index < token.length; index++) {
     if (bare[index] !== '1') continue;
     const previous = token[index - 1]!;
-    if (bare[index - 1] === '1' || !'<>&'.includes(previous)) continue;
+    if (bare[index - 1] === '1' || !'<>&|'.includes(previous)) continue;
     if (!/^(?:&>>|&>|>>|>|<<|<)/.test(token.slice(index))) continue;
     return index;
   }
@@ -477,8 +485,9 @@ function fdRedirectFile(word: string): string | undefined {
  *
  * Handles:
  *   `> file`   `>> file`  `< file`   (with or without space)
+ *   `>| file`  `N>| file`            (the clobber override: same write as `>`)
  *   `2> file`  `2>> file` `&> file`  `&>> file`
- *   Combined forms: `>file`, `>>file`, `1>file`, `2>/dev/null`
+ *   Combined forms: `>file`, `>>file`, `1>file`, `2>/dev/null`, `>|file`
  *
  * `fdRedirects` holds the indices that `tokenize` found to start with an
  * unquoted `>&`, `N>&` or `<&`, and `fdCloses` those of them that close the
@@ -504,7 +513,15 @@ function extractRedirects(
         : tok
             .split('')
             .map((character, index) =>
-              '<>&'.includes(character) && tokBare[index] !== '1'
+              // `|` belongs here: `>"|"file` and `>\|file` are plain writes to
+              // a file whose name starts with `|`, not shell pipes. Leaving it
+              // un-masked made the quoted form read as the `>|` clobber, and the
+              // reported target lost its leading `|` — `>"|/../".qwen/settings.json`
+              // normalised to `.qwen/settings.json`, which bypassed the deny.
+              // Masking keeps the pipe visible to bash but out of the syntax
+              // match, so the quoted forms fall back to the existing `>` branch
+              // and the target is sliced from the original token, as on base.
+              '<>&|'.includes(character) && tokBare[index] !== '1'
                 ? '\0'
                 : character,
             )
@@ -534,7 +551,15 @@ function extractRedirects(
     }
 
     // ── Separate-token redirect operators ─────────────────────────────────
-    if (syntax === '>' || syntax === '1>') {
+    // `>|` and `N>|` are bash's clobber override: the same write as `>` / `N>`,
+    // spelled to defeat `noclobber`. Reading them as anything else loses a
+    // write to a protected path.
+    if (
+      syntax === '>' ||
+      syntax === '1>' ||
+      syntax === '>|' ||
+      syntax === '1>|'
+    ) {
       const target = tokens[i + 1];
       if (target && looksLikePath(target)) {
         if (!isNetworkPseudoDevice(target)) {
@@ -574,7 +599,8 @@ function extractRedirects(
       syntax === '2>' ||
       syntax === '2>>' ||
       syntax === '&>' ||
-      syntax === '&>>'
+      syntax === '&>>' ||
+      syntax === '2>|'
     ) {
       // stderr / combined redirect — consume target
       const target = tokens[i + 1];
@@ -608,9 +634,13 @@ function extractRedirects(
         if (bares !== undefined) bares[i] = tokBare!.slice(0, split);
         continue;
       }
-      const matchText = split > 0 ? redirectText : syntax;
+      // Match the operator on the masked spelling after the quoted word too:
+      // in `'>'>"|"file` the redirect is a plain `>` and the quoted `|` starts
+      // the file name, so `>|` must not claim the target's first character.
+      // The length is unchanged, so the target is still sliced from `tok`.
+      const matchText = split > 0 ? syntax.slice(split) : syntax;
       const m = matchText.match(
-        /^(<<-?|1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
+        /^(<<-?|1>\||2>\||>\||1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
       );
       if (m) {
         const op = m[1]!;
@@ -2710,7 +2740,11 @@ function hasAbsolutePathTokenForOperation(
     // relative `&/tmp/x`) can't match by mistake: the resolved path must
     // equal the operation's path.
     const redirectTarget = token.match(
-      /^(?:1>>|[12]?>&|<&|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
+      // `>|` / `N>|` are the clobber spellings and must be tried before the
+      // bare `>` alternatives, or `>|/abs/p.txt` yields `|/abs/p.txt` — not a
+      // shell-absolute path, so a `cd $D && … >|/abs/p.txt` was flagged
+      // `pathMayDependOnCwd` while the `>` form was not.
+      /^(?:1>>|[12]?>\||[12]?>&|<&|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
     )?.[1];
     const candidate = redirectTarget ?? token;
     if (

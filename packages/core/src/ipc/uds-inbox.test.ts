@@ -808,7 +808,12 @@ describe.skipIf(isWindows)('client errors', () => {
       await expect(
         send(peer.socketPath, 'hi', { timeoutMs: 1000 }),
       ).rejects.toMatchObject({ name: 'PeerSendError', code: 'EBUSY' });
-      await Promise.all(pending);
+      const receiver = await listen('correction.sock');
+      const correction = send(receiver.socketPath, 'correction', {
+        waitForCapacity: true,
+      });
+      await Promise.all([...pending, correction]);
+      expect(contents()).toEqual(['correction']);
     } finally {
       await peer.stop();
     }

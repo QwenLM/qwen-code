@@ -21,6 +21,9 @@
   "dependencies": {
     "ws": "^8.19.0"
   },
+  "overrides": {
+    "minimatch@9 || 10": "11.0.8"
+  },
   "devDependencies": {
     "@electron/asar": "3.4.1",
     "@types/jsdom": "28.0.3",

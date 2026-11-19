@@ -1,12 +1,19 @@
 package com.alibaba.qwen.code.managedagent.api;
 
 import com.alibaba.qwen.code.managedagent.channel.ManagedChannelService;
+import com.alibaba.qwen.code.managedagent.channel.ManagedPrWatchService;
 import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.ChannelInstanceView;
 import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.ClaimRequest;
 import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.ClaimResponse;
 import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.DeliveryView;
 import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.InboundAdmission;
 import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.InboundEventRequest;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.PrWatchAdmission;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.PrWatchBindingList;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.PrWatchBindingView;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.PrWatchCreateRequest;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.PrWatchInjectRequest;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.PrWatchRetireRequest;
 import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.ReceiptRequest;
 import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.RegisterChannelRequest;
 import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.ResendResponse;
@@ -33,9 +40,12 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/internal/managed-channels/v1/channels/{channelId}")
 public class ManagedChannelAdapterController {
     private final ManagedChannelService service;
+    private final ManagedPrWatchService prWatch;
 
-    public ManagedChannelAdapterController(ManagedChannelService service) {
+    public ManagedChannelAdapterController(ManagedChannelService service,
+            ManagedPrWatchService prWatch) {
         this.service = service;
+        this.prWatch = prWatch;
     }
 
     @PutMapping
@@ -80,5 +90,32 @@ public class ManagedChannelAdapterController {
             @PathVariable String channelId,
             @PathVariable String deliveryId) {
         return service.resend(tenant.tenantId(), channelId, deliveryId);
+    }
+
+    @PostMapping("/pr-watch:create")
+    public PrWatchBindingView prWatchCreate(TenantContext tenant,
+            @PathVariable String channelId,
+            @Valid @RequestBody PrWatchCreateRequest request) {
+        return prWatch.create(tenant.tenantId(), channelId, request);
+    }
+
+    @PostMapping("/pr-watch:list")
+    public PrWatchBindingList prWatchList(TenantContext tenant,
+            @PathVariable String channelId) {
+        return prWatch.list(tenant.tenantId(), channelId);
+    }
+
+    @PostMapping("/pr-watch:retire")
+    public PrWatchBindingView prWatchRetire(TenantContext tenant,
+            @PathVariable String channelId,
+            @Valid @RequestBody PrWatchRetireRequest request) {
+        return prWatch.retire(tenant.tenantId(), channelId, request);
+    }
+
+    @PostMapping("/pr-watch:inject")
+    public PrWatchAdmission prWatchInject(TenantContext tenant,
+            @PathVariable String channelId,
+            @Valid @RequestBody PrWatchInjectRequest request) {
+        return prWatch.inject(tenant.tenantId(), channelId, request);
     }
 }

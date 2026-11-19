@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
+  CARD_ID,
   createShowResult,
   documentSchema,
   hashDocument,
@@ -34,6 +35,7 @@ describe('immutable generated view contract', () => {
     expect(document).toEqual({
       schemaVersion: 1,
       documentId: hashDocument(input),
+      cardId: expect.stringMatching(CARD_ID),
       ...input,
     });
     expect(result.structuredContent).toEqual({
@@ -67,7 +69,38 @@ describe('immutable generated view contract', () => {
     expect(hashDocument(reordered)).toBe(
       `g1_${createHash('sha256').update(expected).digest('hex')}`,
     );
-    expect(createShowResult(reordered)).toEqual(createShowResult(input));
+    const withoutCard = (value: unknown) => {
+      const { cardId: _cardId, ...document } = parseToolResult(value);
+      return document;
+    };
+    expect(withoutCard(createShowResult(reordered))).toEqual(
+      withoutCard(createShowResult(input)),
+    );
+  });
+
+  it('mints a separate card id for every result, outside the document hash', () => {
+    const first = parseToolResult(createShowResult(input));
+    const second = parseToolResult(createShowResult(input));
+    expect(first.documentId).toBe(second.documentId);
+    expect(first.cardId).toMatch(CARD_ID);
+    expect(second.cardId).toMatch(CARD_ID);
+    expect(first.cardId).not.toBe(second.cardId);
+  });
+
+  it('accepts a recorded result without a card id and rejects a malformed one', () => {
+    const result = createShowResult(input);
+    const document = result._meta![META_KEY] as Record<string, unknown>;
+    const { cardId: _cardId, ...recorded } = document;
+    expect(
+      parseToolResult({ ...result, _meta: { [META_KEY]: recorded } }).cardId,
+    ).toBeUndefined();
+    for (const cardId of ['gc_short', 'card_aaaaaaaaaaaaaaaaaaaa', 7])
+      expect(() =>
+        parseToolResult({
+          ...result,
+          _meta: { [META_KEY]: { ...document, cardId } },
+        }),
+      ).toThrow();
   });
 
   it('keeps terminal control characters out of the readable fallback', () => {

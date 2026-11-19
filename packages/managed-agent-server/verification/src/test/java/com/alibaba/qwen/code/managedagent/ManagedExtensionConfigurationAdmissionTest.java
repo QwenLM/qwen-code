@@ -50,11 +50,14 @@ class ManagedExtensionConfigurationAdmissionTest {
     }
 
     @Test
-    void canApplyMatchesTheDefaultAndReadProfilesButRejectsFilesV3() {
+    void canApplyMatchesTheDefaultReadAndPublicShellProfilesButRejectsFilesV3() {
         String workspace = registerWorkspace();
         String id = UUID.randomUUID().toString();
         publicJournal(id, workspace);
-        for (String profile : List.of(WorkspaceToolProfiles.FILES, WorkspaceToolProfiles.READ)) {
+        // Every public Shell revision creation admits must also apply: shell/3
+        // dropped from this set is admitted at creation and refused at apply.
+        for (String profile : List.of(WorkspaceToolProfiles.FILES, WorkspaceToolProfiles.READ,
+                WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.SHELL_V3)) {
             jdbc.update("UPDATE ma_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?", profile, "tenant",
                     id.getBytes(StandardCharsets.UTF_8));
             assertThat(sessions.canApplyExtensions(sessions.findSessionById(id).orElseThrow())).isTrue();

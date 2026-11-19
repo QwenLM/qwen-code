@@ -116,6 +116,32 @@ test('unmatched saved history keeps its specific listing explanation @smoke', as
   ).toContainText('cannot be safely matched');
 });
 
+test('deletion toolbar follows the responsive transcript width @smoke', async ({
+  page,
+}, info) => {
+  await page.setViewportSize({ width: 1116, height: 743 });
+  await setup(page, String(info.project.use.baseURL));
+  await page
+    .getByRole('complementary', { name: 'Workspace sidebar' })
+    .evaluate((element) => {
+      element.style.setProperty('--web-shell-sidebar-width', '276px');
+    });
+  await startDeletion(
+    page,
+    page
+      .getByRole('button', { name: 'More message actions', exact: true })
+      .last(),
+  );
+  const row = page
+    .locator('[data-web-shell-message-row]')
+    .filter({ has: page.locator('[data-web-shell-user-bubble]') })
+    .first();
+  await expect
+    .poll(async () => (await row.boundingBox())?.width ?? 0)
+    .toBeCloseTo(712, 0);
+  await expectSelectionLayout(page);
+});
+
 test('confirmation disables if a peer starts streaming after it opens @smoke', async ({
   page,
 }, info) => {

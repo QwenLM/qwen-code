@@ -2,7 +2,7 @@
 
 [English](2026-11-09-bound-delivery-active-watch-gate.md) | [简体中文](2026-11-09-bound-delivery-active-watch-gate.zh-CN.md)
 
-状态：提案（2026-11-09）
+状态：已实现（#16772；2026-11-09 提案）。下文按当时的设计描述。其中 PR 状态监视部分已被[由 daemon PR 刷新产生 PR 状态转换事件](2026-11-04-daemon-pr-state-transitions.zh-CN.md)取代，且该设计已落地：daemon 拥有状态检测与投递，其 drain 从不读取 `requireBoundWatch`，因此下文的门只过滤 channel 的评论投递。该评论投递部分仍然在用。
 
 ## 问题陈述
 
@@ -251,7 +251,8 @@ watch 能在下一轮投递该评论；第二轮跳过并推进。两种情形�
 - **D5 — opt-in。** `requireBoundWatch` 默认关闭；既有部署行为字节级不变。
   要求 `deliverToBoundSessions`。
 - **D6 — 轮询集合不变。** 不合格绑定保留 watch 基线与终态观察；事件在 drain
-  退役。成本受 `prWatchLimit` 约束；优化轮询集合是后续工作。
+  退役。成本受该 pass 的内建预算约束——`prWatchLimit` 已弃用且被忽略；
+  优化轮询集合是后续工作。
 - **D7 — 退役要呈现，且点名门。** 每条新退役路径都写既有的 stderr 行 +
   channel-event 日志行（带 reason 的 skip/retire），被门控掉的事件绝不静默。
   凡排除来自 `watchGateExcludes`——两种模式的 dispatch 退役、评论监视跳过、
@@ -285,9 +286,11 @@ watch 能在下一轮投递该评论；第二轮跳过并推进。两种情形�
   （10s 超时）+ cron 文件读取，verify-pr watch 需要建键时再加一次
   `git remote get-url origin`。与 Web Shell watches 页面按需使用的机制相同。
   绑定扫描还有第二个消费者 `runPrWatchObservationTick`，每 5 分钟 tick 付出
-  同样的每 workspace 成本却不读 `watching`；它目前是惰性的
-  （`SESSION_PR_WATCH_OBSERVATION_ENABLED` 为 false），该开关翻开前需要先加
-  守卫。
+  同样的每 workspace 成本却不读 `watching`；它已不再惰性。该常量在 #17214 中
+  移除、启用即 deps 存在性，因此只要生效的订阅带有事件，该 tick 就会跑：订阅取
+  `serve.sessionPrWatch`、其环境变量覆盖，两者都未配置时取弃用的 per-host
+  channel 别名。这里要求的守卫改由实测回答——[配置与渠道迁移](2026-11-14-daemon-pr-watch-config-migration.zh-CN.md)
+  §9 实测整次扫描后定案保留三次扫描。
 - **partial 快照下 `watching` 陈旧。** 保留行上次盖上的 `watching` 是陈旧
   证据——能刷新它的那次扫描读不到该会话的 sidecar——因此保留时**剥掉**该
   标志（行仍命名其 PR、仍按新旧竞争）。门随后对保留行 fail-open：永久

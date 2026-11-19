@@ -5,9 +5,9 @@
  */
 
 import { stripTerminalControlSequences } from '@qwen-code/qwen-code-core';
-import { SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX } from '@qwen-code/acp-bridge';
+import { SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX } from '@qwen-code/acp-bridge/sessionSource';
 
-export { SCHEDULED_TASK_RUN_SOURCE_TYPE } from '@qwen-code/acp-bridge';
+export { SCHEDULED_TASK_RUN_SOURCE_TYPE } from '@qwen-code/acp-bridge/sessionSource';
 
 export function scheduledTaskRunSourceId(taskId: string): string {
   return `${SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX}${taskId}`;

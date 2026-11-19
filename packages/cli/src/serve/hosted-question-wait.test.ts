@@ -285,6 +285,14 @@ describe('persisted question admission', () => {
       }),
     ).toBe(true);
     expect(questionWaitDefinitionAdmitted(child)).toBe(true);
+    // The loop revision shell/3 is a public shell too: its direct public
+    // children are admitted exactly like shell/1's (M7).
+    expect(
+      questionWaitDefinitionAdmitted({
+        ...child,
+        toolProfile: 'hosted-workspace-shell/3',
+      }),
+    ).toBe(true);
   });
   it.each([
     { ...child, publicChildAgentsVersion: 0 },
