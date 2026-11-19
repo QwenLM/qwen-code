@@ -284,6 +284,31 @@ function isDisposableIgnoredEntry(entry: string): boolean {
 }
 
 /**
+ * Longest prefix of `paths` whose serialized form fits `maxBytes`, or every
+ * path when no bound applies. A journal record holding the whole set would be
+ * refused by its reader (64 KiB), stranding the worktree on the next phase
+ * transition, so the overflow is dropped rather than the entire set.
+ */
+function trimToJournalBudget(
+  paths: readonly string[],
+  maxBytes: number | undefined,
+): string[] {
+  if (maxBytes === undefined) return [...paths];
+  // JSON overhead for an empty array; each included element adds its quoted
+  // form plus a separator.
+  let used = 2;
+  let count = 0;
+  for (const path of paths) {
+    const cost =
+      Buffer.byteLength(JSON.stringify(path), 'utf8') + (count > 0 ? 1 : 0);
+    if (used + cost > maxBytes) break;
+    used += cost;
+    count++;
+  }
+  return paths.slice(0, count);
+}
+
+/**
  * Parses the content of a `.worktreeinclude` file into gitignore patterns.
  *
  * The rules mirror git's own `.gitignore` parsing so the file can be
@@ -3366,34 +3391,24 @@ export class GitWorktreeService {
       // They land after the dirty capture, so they are the caller's session
       // checkout's values, not the service checkout's; the rollback has to
       // exempt them or it refuses the removal forever.
+      // The copies are exempted from the rollback only through this journaled
+      // list, so the set is trimmed to what the caller's journal can still
+      // hold. Trimming rather than refusing keeps the documented fail-open
+      // contract: the entries that fit are carried and the worktree still
+      // comes back.
+      const carriedBound = options?.maxCarriedPathsBytes;
+      const includeBudget =
+        carriedBound === undefined
+          ? undefined
+          : carriedBound -
+            Buffer.byteLength(JSON.stringify(carriedPaths ?? []), 'utf8');
       const includedPaths = await this.copyIncludedPathsFromRepo(
         worktreePath,
         options?.dirtyStateSource ?? this.sourceRepoPath,
+        includeBudget,
       );
       if (includedPaths.length > 0) {
-        // The copies are exempted from the rollback only through this
-        // journaled list, so a bound applies to their sum: appending an
-        // included set past the journal cap would strand the worktree on
-        // the next phase transition. Nothing is recorded (fail-open to
-        // committed state) and the rolled-back copies make room.
-        const merged = [...(carriedPaths ?? []), ...includedPaths];
-        const bound = options?.maxCarriedPathsBytes;
-        if (
-          bound !== undefined &&
-          Buffer.byteLength(JSON.stringify(merged), 'utf8') > bound
-        ) {
-          debugLogger.warn(
-            `createUserWorktree: carried overlay too large to record for ${slug} ` +
-              `(${merged.length} paths); starting from committed state`,
-          );
-          await this.removeWorktree(worktreePath).catch(() => undefined);
-          return {
-            success: false,
-            error:
-              'The carried overlay is too large to record in the preparation journal.',
-          };
-        }
-        carriedPaths = merged;
+        carriedPaths = [...(carriedPaths ?? []), ...includedPaths];
       }
 
       const worktree: WorktreeInfo = {
@@ -4217,8 +4232,12 @@ export class GitWorktreeService {
   private async copyIncludedPathsFromRepo(
     worktreePath: string,
     sourceRoot = this.sourceRepoPath,
+    maxCarriedBytes?: number,
   ): Promise<string[]> {
-    const includedPaths = await this.resolveWorktreeIncludePaths(sourceRoot);
+    const includedPaths = await this.resolveWorktreeIncludePaths(
+      sourceRoot,
+      maxCarriedBytes,
+    );
     return this.copyWorktreeIncludePaths(
       worktreePath,
       includedPaths.paths,
@@ -4247,10 +4266,13 @@ export class GitWorktreeService {
    *
    * Every failure here is non-fatal: a missing file, unreadable file, or a
    * failing `ls-files` yields an empty set and the worktree is created
-   * without the copies.
+   * without the copies. A selected set larger than the caller's journal
+   * budget (`maxCarriedBytes`) is trimmed to the prefix that fits, so the
+   * worktree keeps the entries it can record instead of losing them all.
    */
   private async resolveWorktreeIncludePaths(
     sourceRoot = this.sourceRepoPath,
+    maxCarriedBytes?: number,
   ): Promise<{
     paths: string[];
     root: string;
@@ -4323,15 +4345,20 @@ export class GitWorktreeService {
         ignorecase: await this.destinationFoldsCase(repoRoot),
       });
       matcher.add(patterns);
-      return {
-        paths: ignored
-          .filter(
-            (candidate) =>
-              !candidate.endsWith('/') && matcher.ignores(candidate),
-          )
-          .sort(),
-        root: repoRoot,
-      };
+      const selected = ignored
+        .filter(
+          (candidate) => !candidate.endsWith('/') && matcher.ignores(candidate),
+        )
+        .sort();
+      const bounded = trimToJournalBudget(selected, maxCarriedBytes);
+      if (bounded.length < selected.length) {
+        debugLogger.warn(
+          `resolveWorktreeIncludePaths: included set too large to record ` +
+            `(${selected.length} paths, carrying ${bounded.length}); ` +
+            `the rest keeps committed state`,
+        );
+      }
+      return { paths: bounded, root: repoRoot };
     } catch (error) {
       debugLogger.warn(
         `resolveWorktreeIncludePaths: cannot apply ${includePath}: ${error}`,

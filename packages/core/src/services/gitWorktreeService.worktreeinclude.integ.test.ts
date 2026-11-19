@@ -609,8 +609,7 @@ describe('GitWorktreeService.setupWorktrees() — .worktreeinclude', () => {
     // The copies are exempted from the rollback only through carriedPaths,
     // so an included set appended without its own bound pushes the record
     // past the journal cap and strands the worktree on the next phase
-    // transition. The merged list has to be measured, not just the overlay.
-    // The dirty overlay alone stays well under the bound here.
+    // transition. The included set has to be measured against that cap.
     const filler = 'x'.repeat(60);
     const fillerCount = 500;
     for (let i = 0; i < fillerCount; i++) {
@@ -633,10 +632,18 @@ describe('GitWorktreeService.setupWorktrees() — .worktreeinclude', () => {
       maxCarriedPathsBytes: CARRIED_PATHS_MAX_BYTES,
     });
 
-    // Refused and cleaned up rather than handed back with a record no
-    // journal phase transition can write or read.
-    expect(created.success).toBe(false);
-    expect(created.error).toMatch(/too large to record/);
-    expect(await exists(path.join(baseDir, 'bulk'))).toBe(false);
+    // Fail-open, as the contract documents: the worktree is created and gets
+    // the entries that still fit in the journal, rather than failing the
+    // whole creation over a set the caller could never record.
+    expect(created.success).toBe(true);
+    const carried = created.carriedPaths ?? [];
+    expect(carried.length).toBeGreaterThan(0);
+    expect(carried.length).toBeLessThan(fillerCount);
+    expect(
+      Buffer.byteLength(JSON.stringify(carried), 'utf8'),
+    ).toBeLessThanOrEqual(CARRIED_PATHS_MAX_BYTES);
+    expect(await exists(path.join(created.worktree!.path, 'one.txt'))).toBe(
+      true,
+    );
   });
 });
