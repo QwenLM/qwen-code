@@ -374,6 +374,36 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(data.update.content.text).toBe('Hello world');
     });
 
+    it('keeps slash-command output separate from model replies in compacted turns', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      const commandChunk = (id: number, text: string): BridgeEvent => {
+        const event = makeTextChunk(id, text);
+        (event.data as { update: Record<string, unknown> }).update['_meta'] = {
+          source: 'slash_command',
+        };
+        return event;
+      };
+      engine.ingest(makeTextChunk(1, 'Earlier reply.'));
+      engine.ingest(commandChunk(2, 'Skill notice. '));
+      engine.ingest(commandChunk(3, 'Some skills omitted.'));
+      engine.ingest(makeTextChunk(4, 'Model '));
+      engine.ingest(makeTextChunk(5, 'reply.'));
+      engine.ingest(makeTurnComplete(6));
+
+      const events = engine.snapshot().compactedTurns;
+      expect(extractTexts(events)).toEqual([
+        'Earlier reply.',
+        'Skill notice. Some skills omitted.',
+        'Model reply.',
+      ]);
+      expect(events[0]).not.toHaveProperty('data.update._meta.source');
+      expect(events[1]).toHaveProperty(
+        'data.update._meta.source',
+        'slash_command',
+      );
+      expect(events[2]).not.toHaveProperty('data.update._meta.source');
+    });
+
     it('merges consecutive thought chunks', () => {
       const engine = new TurnBoundaryCompactionEngine();
       engine.ingest(makeThoughtChunk(1, 'Let me '));

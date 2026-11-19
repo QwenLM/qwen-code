@@ -822,6 +822,8 @@ const EXPECTED_STAGE1_FEATURES = [
   // #4175 follow-up. Daemon hosts `POST /session/:id/recap` (wraps
   // core's `generateSessionRecap` for one-sentence session summaries).
   'session_recap',
+  // `POST /session/:id/mod-row` asks the session's Mods for a row.
+  'session_mod_rows',
   // Side question (/btw) against the session's conversation context.
   'session_btw',
   // Issue #4175 PR 21 — auth device-flow surface advertised unconditionally.
@@ -946,6 +948,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_trust' &&
       f !== 'workspace_mcp_restart' &&
       f !== 'session_recap' &&
+      f !== 'session_mod_rows' &&
       f !== 'session_generation' &&
       f !== 'workspace_generation' &&
       f !== 'session_btw' &&
@@ -1001,6 +1004,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_git_check_ignore',
   'workspace_mcp_restart',
   'session_recap',
+  'session_mod_rows',
   'session_generation',
   'workspace_generation',
   'session_btw',
@@ -1299,6 +1303,7 @@ interface FakeBridgeOpts {
     sessionId: string,
     context?: BridgeClientRequestContext,
   ) => Promise<{ sessionId: string; recap: string | null }>;
+  askSessionModRowImpl?: AcpSessionBridge['askSessionModRow'];
   generateSessionContentImpl?: NonNullable<
     AcpSessionBridge['generateSessionContent']
   >;
@@ -1630,6 +1635,11 @@ interface FakeBridge extends AcpSessionBridge {
   }>;
   generateSessionRecapCalls: Array<{
     sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  askSessionModRowCalls: Array<{
+    sessionId: string;
+    row: { component: string; props: Record<string, unknown> };
     context?: BridgeClientRequestContext;
   }>;
   generateSessionContentCalls: Array<{
@@ -2300,6 +2310,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionId,
       recap: 'Default fake recap.',
     }));
+  const askSessionModRowCalls: FakeBridge['askSessionModRowCalls'] = [];
+  const askSessionModRowImpl: AcpSessionBridge['askSessionModRow'] =
+    opts.askSessionModRowImpl ?? (async () => ({ status: 'unhooked' }));
   const generateSessionContentCalls: FakeBridge['generateSessionContentCalls'] =
     [];
   const generateSessionContentImpl =
@@ -2522,6 +2535,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     setApprovalModeCalls,
     shellCalls,
     generateSessionRecapCalls,
+    askSessionModRowCalls,
     generateSessionContentCalls,
     generateSessionBtwCalls,
     forkCalls,
@@ -2962,6 +2976,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return generateSessionRecapImpl(sessionId, context);
+    },
+    async askSessionModRow(sessionId, row, context) {
+      askSessionModRowCalls.push({
+        sessionId,
+        row,
+        ...(context ? { context } : {}),
+      });
+      return askSessionModRowImpl(sessionId, row, context);
     },
     generateSessionContent(sessionId, prompt, signal, context) {
       generateSessionContentCalls.push({
@@ -28978,6 +29000,68 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('POST /session/:id/mod-row', () => {
+    const row = {
+      component: 'AssistantMessage',
+      props: { text: 'Hello', isFirstOfReply: true },
+    };
+
+    it("answers with the session's Mods and passes the client on", async () => {
+      const bridge = fakeBridge({
+        askSessionModRowImpl: async () => ({
+          status: 'answered',
+          props: { text: '你好', isFirstOfReply: true },
+        }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/mod-row')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send(row);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        status: 'answered',
+        props: { text: '你好', isFirstOfReply: true },
+      });
+      expect(bridge.askSessionModRowCalls).toEqual([
+        { sessionId: 'session-A', row, context: { clientId: 'client-1' } },
+      ]);
+    });
+
+    it.each([
+      {},
+      { component: '', props: {} },
+      { component: 'AssistantMessage' },
+      { component: 'AssistantMessage', props: 'text' },
+    ])('400 for a row without a component and props: %j', async (body) => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/mod-row')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_mod_row');
+      expect(bridge.askSessionModRowCalls).toHaveLength(0);
+    });
+
+    it('404 for a session that is not live', async () => {
+      const bridge = fakeBridge({
+        askSessionModRowImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/missing/mod-row')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send(row);
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
   describe('POST /session/:id/recap (#4175 follow-up)', () => {
     it('200 with the recap on success and forwards no body', async () => {
       const bridge = fakeBridge({
@@ -51850,27 +51934,37 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
     }
   }
 
-  it('clamps the remote-access listener independently of the primary listener (issue #17712)', async () => {
-    const logDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sse-ra-log-'));
-    const pair = await enableRemoteAccessListener(
+  async function expectPairingListenerClamp(
+    kind: 'local-control' | 'remote-access',
+  ): Promise<void> {
+    // runQwenServe always boots its own logger, so access-log attribution is
+    // asserted against the real log file for both listener kinds.
+    const logDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sse-clamp-log-'));
+    const enableListener =
+      kind === 'local-control'
+        ? enablePairingListener
+        : enableRemoteAccessListener;
+    const pair = await enableListener(
       { maxConnections: 256 },
       { daemonLogBaseDir: logDir },
     );
     handle = pair.handle;
-    const { lanBase, lanAuth, primaryPort } = pair;
+    const { lanBase, lanAuth } = pair;
     try {
+      const primaryPort = (handle.server.address() as AddressInfo).port;
       const before = getSseOccupancy();
-      // 51 = floor(64 × 0.8): the remote-access listener's own clamp.
+
+      // 51 = floor(64 × 0.8): the pairing listener's own headroom clamp.
       const lanStreams: Response[] = [];
       for (let i = 0; i < 51; i++) {
-        const res = await fetch(`${lanBase}/session/sess-ra-${i}/events`, {
+        const res = await fetch(`${lanBase}/session/sess-${kind}-${i}/events`, {
           headers: lanAuth,
         });
         expect(res.status).toBe(200);
         lanStreams.push(res);
       }
       const overflow = await fetch(
-        `${lanBase}/session/sess-ra-overflow/events`,
+        `${lanBase}/session/sess-${kind}-overflow/events`,
         { headers: lanAuth },
       );
       expect(overflow.status).toBe(503);
@@ -51883,7 +51977,7 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
         limit: 51,
         active: 51,
         scope: 'listener',
-        listener: 'remote-access',
+        listener: kind,
       });
       await vi.waitFor(
         async () => {
@@ -51897,15 +51991,30 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
         },
         { timeout: 5_000 },
       );
-      // The primary listener still admits: its clamp is independent.
+
+      // The primary listener and LAN short requests retain their headroom.
       const primaryStream = await fetch(
-        `http://127.0.0.1:${primaryPort}/session/sess-ra-primary/events`,
+        `http://127.0.0.1:${primaryPort}/session/sess-${kind}-primary/events`,
       );
       expect(primaryStream.status).toBe(200);
-      const status = await statusOf(primaryPort);
       expect(
-        status.runtime.transport.streamOccupancy.byListener['remote-access'],
-      ).toBe(before.byListener['remote-access'] + 51);
+        (await fetch(`${lanBase}/health`, { headers: lanAuth })).status,
+      ).toBe(200);
+      const status = await statusOf(primaryPort);
+      expect(status.limits.maxSseConnectionsPerListener).toEqual({
+        primary: 204,
+        'local-control': 51,
+        'remote-access': 51,
+      });
+      expect(status.runtime.transport.streamOccupancy.byListener).toEqual({
+        primary: before.byListener.primary + 1,
+        'local-control':
+          before.byListener['local-control'] +
+          (kind === 'local-control' ? 51 : 0),
+        'remote-access':
+          before.byListener['remote-access'] +
+          (kind === 'remote-access' ? 51 : 0),
+      });
       const deep = (await (
         await fetch(`${lanBase}/health?deep=1`, { headers: lanAuth })
       ).json()) as {
@@ -51924,9 +52033,9 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
         { timeout: 5_000 },
       );
     } finally {
-      pair.restore();
-      // The daemon's block-buffered logger keeps writing until close; rm
-      // racing a live flush dies with ENOTEMPTY on loaded hosts.
+      await pair.restore();
+      // The logger appends by path, so removing its log dir while the daemon
+      // still drains recreates daemon.log and the parent rmdir hits ENOTEMPTY.
       await handle?.close();
       handle = undefined;
       await fsp.rm(logDir, {
@@ -51936,6 +52045,10 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
         retryDelay: 100,
       });
     }
+  }
+
+  it('clamps the remote-access listener independently of the primary listener (issue #17712)', async () => {
+    await expectPairingListenerClamp('remote-access');
   }, 30_000);
 
   it('shutdown force-closes counted non-REST streams and releases their slots (issue #17712)', async () => {
@@ -52035,103 +52148,7 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
   }, 20_000);
 
   it('clamps the pairing listener independently of the primary listener', async () => {
-    // runQwenServe always boots its own logger, so the access-log
-    // attribution is asserted against the real log file (review R3-5).
-    const logDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'sse-clamp-log-'));
-    const pair = await enablePairingListener(
-      { maxConnections: 256 },
-      { daemonLogBaseDir: logDir },
-    );
-    handle = pair.handle;
-    const { lanBase, lanAuth } = pair;
-    try {
-      const primaryPort = (handle.server.address() as AddressInfo).port;
-      const before = getSseOccupancy();
-
-      // 51 = floor(64 × 0.8): the pairing listener's own headroom clamp.
-      const lanStreams: Response[] = [];
-      for (let i = 0; i < 51; i++) {
-        const res = await fetch(`${lanBase}/session/sess-lan-${i}/events`, {
-          headers: lanAuth,
-        });
-        expect(res.status).toBe(200);
-        lanStreams.push(res);
-      }
-      const overflow = await fetch(
-        `${lanBase}/session/sess-lan-overflow/events`,
-        { headers: lanAuth },
-      );
-      expect(overflow.status).toBe(503);
-      expect(overflow.headers.get('retry-after')).toBe('5');
-      expect(await overflow.json()).toEqual({
-        error:
-          'Daemon SSE connection limit reached (51/51). ' +
-          'Retry after the Retry-After interval.',
-        code: 'sse_connection_limit_exceeded',
-        limit: 51,
-        active: 51,
-        scope: 'listener',
-        listener: 'local-control',
-      });
-      // The listener-scope refusal must attribute its own scope in the
-      // access log, not the daemon's (review R3-5).
-      await vi.waitFor(
-        async () => {
-          const entries = await fsp.readdir(logDir, { recursive: true });
-          const logFile = entries.find((e) => e.endsWith('daemon.log'));
-          expect(logFile).toBeDefined();
-          const log = await fsp.readFile(path.join(logDir, logFile!), 'utf8');
-          expect(log).toMatch(
-            /code=sse_connection_limit_exceeded[^\n]*reason=listener[^\n]*status=503/,
-          );
-        },
-        { timeout: 5_000 },
-      );
-
-      // The primary listener still admits: its clamp is independent and the
-      // aggregate (204) is far from reached.
-      const primaryStream = await fetch(
-        `http://127.0.0.1:${primaryPort}/session/sess-primary/events`,
-      );
-      expect(primaryStream.status).toBe(200);
-
-      const status = await statusOf(primaryPort);
-      expect(status.limits.maxSseConnectionsPerListener).toEqual({
-        primary: 204,
-        'local-control': 51,
-        'remote-access': 51,
-      });
-      expect(status.runtime.transport.streamOccupancy.byListener).toEqual({
-        primary: before.byListener.primary + 1,
-        'local-control': before.byListener['local-control'] + 51,
-        'remote-access': before.byListener['remote-access'],
-      });
-      // LAN short requests keep their headroom while the SSE fleet is clamped.
-      expect(
-        (await fetch(`${lanBase}/health`, { headers: lanAuth })).status,
-      ).toBe(200);
-
-      for (const stream of lanStreams) await stream.body!.cancel();
-      await primaryStream.body!.cancel();
-      await vi.waitFor(
-        () => {
-          expect(getSseOccupancy().total).toBe(before.total);
-        },
-        { timeout: 5_000 },
-      );
-    } finally {
-      await pair.restore();
-      // The logger appends by path, so removing its log dir while the daemon
-      // still drains recreates daemon.log and the parent rmdir hits ENOTEMPTY.
-      await handle?.close();
-      handle = undefined;
-      await fsp.rm(logDir, {
-        recursive: true,
-        force: true,
-        maxRetries: 3,
-        retryDelay: 100,
-      });
-    }
+    await expectPairingListenerClamp('local-control');
   }, 30_000);
 
   it('disable releases pairing-listener slots over a non-answering upgraded peer (issue #17712)', async () => {

@@ -351,9 +351,9 @@ the terminal or Web Shell.
 
 #### visionBridgeTimeoutMs
 
-| Setting                 | Type    | Description                                                                                                                                                                                                                                                        | Default |
-| ----------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| `visionBridgeTimeoutMs` | integer | Per-attempt timeout in milliseconds for the vision bridge image transcription call (positive integer up to 2147483647; the bridge retries a timed-out attempt once with a fresh timeout). Unset uses the built-in 30s. Raise for slow or proxied vision endpoints. | unset   |
+| Setting                 | Type    | Description                                                                                                                                                                                                                                                                                                                   | Default |
+| ----------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `visionBridgeTimeoutMs` | integer | Per-attempt timeout in milliseconds for the vision bridge image transcription call (positive integer up to 2147483647; the bridge retries a timed-out attempt once with a fresh timeout). Unset uses the built-in 30s. Raise for slow or proxied vision endpoints. Can also be set via `/model --vision --timeout <seconds>`. | unset   |
 
 #### voiceModel
 
@@ -555,6 +555,9 @@ Some rule names automatically cover multiple tools:
 | `/`    | Relative to project root              | `/src/**/*.ts`      |
 | `./`   | Relative to current working directory | `./secrets/**`      |
 | (none) | Same as `./`                          | `secrets/**`        |
+
+> [!note]
+> On Windows, an absolute path keeps its drive letter: `"Read(//D:/keys/**)"` and `"Read(D:/keys/**)"` both work, and either separator is accepted (`D:/keys/**` or `D:\keys/**`). A leading `/` on its own still means "relative to project root", as on every other platform.
 
 **Shell command bypass prevention:**
 

@@ -54,6 +54,8 @@ import type {
   DaemonSessionLspStatus,
   DaemonSessionResourcesStatus,
   DaemonSessionRecapResult,
+  DaemonModRow,
+  DaemonModRowAnswer,
   DaemonSessionSummary,
   DaemonShellCommandResult,
   DaemonSessionArtifactInput,
@@ -1122,6 +1124,17 @@ export class DaemonSessionClient {
    */
   recap(opts?: { signal?: AbortSignal }): Promise<DaemonSessionRecapResult> {
     return this.client.recapSession(this.sessionId, {
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  /** Ask this session's Mods for a row; see `DaemonClient.askSessionModRow`. */
+  askModRow(
+    row: DaemonModRow,
+    opts?: { signal?: AbortSignal },
+  ): Promise<DaemonModRowAnswer> {
+    return this.client.askSessionModRow(this.sessionId, row, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
