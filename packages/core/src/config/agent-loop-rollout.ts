@@ -34,14 +34,15 @@ export const AGENT_LOOP_SURFACES: readonly AgentLoopSurface[] = [
 
 // Each switch has its own default table so a rollout flip of the unified
 // default for one surface cannot also flip the event-bus default. A rollout
-// PR flips one entry of one table at a time; until then every surface stays
-// on its legacy loop unless the setting or the environment says otherwise.
+// PR flips one entry of one table at a time; a surface whose entry is still
+// false stays on its legacy loop unless the setting or the environment says
+// otherwise.
 export const UNIFIED_SURFACE_DEFAULTS: Record<AgentLoopSurface, boolean> = {
-  headless: false,
-  acp: false,
-  ink: false,
+  headless: true,
+  acp: true,
+  ink: true,
   opentui: false,
-  'agent-core': false,
+  'agent-core': true,
   speculation: false,
   hosted: false,
 };

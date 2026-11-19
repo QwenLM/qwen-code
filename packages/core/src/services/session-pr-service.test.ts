@@ -20,6 +20,7 @@ import {
   readSessionPrs,
   readSessionPrsDetailed,
   replaceSessionPrs,
+  toSessionPrInfo,
   updateSessionPrStates,
   upsertSessionPr,
   upsertSessionPrs,
@@ -56,6 +57,32 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await fs.rm(tmpDir, { recursive: true, force: true });
+});
+
+describe('toSessionPrInfo', () => {
+  const base: SessionPr = {
+    number: 7,
+    url: 'https://github.com/o/r/pull/7',
+    createdAt: '2026-08-20T00:00:00.000Z',
+  };
+
+  it('forwards the binding provenance so consumers can exclude review bindings', () => {
+    const review: SessionPr = { ...base, source: 'review' };
+    expect(toSessionPrInfo(review)).toEqual({
+      number: 7,
+      url: 'https://github.com/o/r/pull/7',
+      source: 'review',
+    });
+    const created: SessionPr = { ...base, source: 'create' };
+    expect(toSessionPrInfo(created).source).toBe('create');
+  });
+
+  it('projects only wire fields, dropping createdAt and absent optionals', () => {
+    expect(toSessionPrInfo(base)).toEqual({
+      number: 7,
+      url: 'https://github.com/o/r/pull/7',
+    });
+  });
 });
 
 type StateUpdate =

@@ -19,6 +19,7 @@ import {
   type DaemonWorkspaceContextValue,
 } from './DaemonWorkspaceProvider.js';
 import { useDaemonSessions } from './hooks/useDaemonSessions.js';
+import { useOptionalComposerWorkspace } from '../../hooks/useComposerWorkspace.js';
 
 const sdkMocks = vi.hoisted(() => {
   const capabilities = vi.fn();
@@ -322,6 +323,54 @@ describe('DaemonWorkspaceProvider', () => {
     expect(context).toBeDefined();
     expect(context?.baseUrl).toBe('http://127.0.0.1:4170');
     expect(context?.workspaceCwd).toBe('/mock-workspace');
+  });
+
+  it('bridges the identical workspace value into the composer context', async () => {
+    let daemonContext: DaemonWorkspaceContextValue | undefined;
+    let composerContext: DaemonWorkspaceContextValue | undefined;
+
+    function Harness() {
+      daemonContext = useOptionalDaemonWorkspace();
+      composerContext = useOptionalComposerWorkspace();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(daemonContext).toBeDefined();
+    // The bridge's whole contract is passing the memoized value unchanged.
+    expect(composerContext).toBe(daemonContext);
+  });
+
+  it('leaves the composer context undefined without a client', async () => {
+    let composerContext: DaemonWorkspaceContextValue | undefined;
+    let seen = false;
+
+    function Harness() {
+      composerContext = useOptionalComposerWorkspace();
+      seen = true;
+      return null;
+    }
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(
+        <DaemonWorkspaceProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect={false}
+        >
+          <Harness />
+        </DaemonWorkspaceProvider>,
+      );
+    });
+
+    expect(seen).toBe(true);
+    expect(composerContext).toBeUndefined();
   });
 
   it('exposes the daemon-resolved brand on the workspace context', async () => {

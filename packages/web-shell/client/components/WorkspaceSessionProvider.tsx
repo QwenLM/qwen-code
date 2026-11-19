@@ -24,8 +24,8 @@ import {
   WEB_SHELL_MAX_TRANSCRIPT_BLOCKS,
 } from '../constants/sessions';
 import {
-  getTranslator,
   normalizeLanguage,
+  useTranslator,
   type WebShellLanguage,
 } from '../i18n';
 import { WebShellThemeId, type WebShellTheme } from '../themeContext';
@@ -154,7 +154,7 @@ function ResolvedWorkspaceSessionProvider(
   ) {
     standaloneGateActiveRef.current = true;
   }
-  const t = getTranslator(surfaceLanguage(webShellProps.language));
+  const t = useTranslator(surfaceLanguage(webShellProps.language));
   const contextConflictsWithWorkspace =
     sessionContext?.kind !== undefined &&
     sessionContext.kind !== 'workspace' &&
@@ -265,10 +265,7 @@ function WorkspaceSessionProviderWorkspace({
     : workspace.capabilities?.workspaces?.find(
         (entry) => entry.id === effectiveWorkspaceId,
       );
-  const t = useMemo(
-    () => getTranslator(surfaceLanguage(webShellProps.language)),
-    [webShellProps.language],
-  );
+  const t = useTranslator(surfaceLanguage(webShellProps.language));
 
   useEffect(() => {
     if (!lockWorkspaceCwd || !workspace.capabilities || pathWorkspace) return;
@@ -520,10 +517,7 @@ function StandaloneSessionGate({
   );
   const [resolutionSessionId, setResolutionSessionId] = useState(sessionId);
   const resolutionGenerationRef = useRef(0);
-  const t = useMemo(
-    () => getTranslator(surfaceLanguage(webShellProps.language)),
-    [webShellProps.language],
-  );
+  const t = useTranslator(surfaceLanguage(webShellProps.language));
 
   const standaloneSupported =
     workspace.capabilities?.features?.includes(

@@ -11,6 +11,7 @@ import { beforeEach, describe, it, expect, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import {
+  getAllowedKeys,
   registerWorkspaceQualifiedSettingsRoutes,
   registerWorkspaceSettingsRoutes,
 } from './workspace-settings.js';
@@ -290,7 +291,7 @@ function makeQualifiedApp(
   };
 }
 
-describe('terminal-only Mods settings', () => {
+describe('Mods settings', () => {
   it.each([
     { route: '/workspace/settings', scope: 'user', qualified: false },
     {
@@ -299,7 +300,7 @@ describe('terminal-only Mods settings', () => {
       qualified: true,
     },
   ])(
-    'keeps terminal-only Mods out of $route',
+    'serves Mods in $route, whose sessions the Web Shell draws',
     async ({ route, scope, qualified }) => {
       const { app, persistSetting } = qualified
         ? makeQualifiedApp()
@@ -309,16 +310,15 @@ describe('terminal-only Mods settings', () => {
       expect(read.status).toBe(200);
       expect(
         read.body.settings.map((setting: { key: string }) => setting.key),
-      ).not.toContain('experimental.mods');
+      ).toContain('experimental.mods');
 
       const write = await request(app).post(route).send({
         scope,
         key: 'experimental.mods',
         value: true,
       });
-      expect(write.status).toBe(400);
-      expect(write.body).toMatchObject({ code: 'disallowed_key' });
-      expect(persistSetting).not.toHaveBeenCalled();
+      expect(write.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalledTimes(1);
     },
   );
 });
@@ -1597,5 +1597,74 @@ describe('Web Shell approval mode allowlist settings', () => {
         (setting: { key: string }) => setting.key === 'advisorMaxUses',
       )?.values,
     ).toMatchObject({ effective: 3, user: 3, workspace: 9 });
+  });
+});
+
+describe('Web Shell worktree default setting', () => {
+  it('is served to Web Shell clients with its default', async () => {
+    expect(getAllowedKeys().has('worktree.defaultForNewSessions')).toBe(true);
+    const { app } = makeApp();
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    expect(response.body.settings).toContainEqual(
+      expect.objectContaining({
+        key: 'worktree.defaultForNewSessions',
+        type: 'boolean',
+        default: true,
+        values: { effective: true },
+      }),
+    );
+  });
+
+  it('serves user/workspace overrides with workspace precedence', async () => {
+    const { app } = makeApp({
+      userSettings: { worktree: { defaultForNewSessions: true } },
+      workspaceSettings: { worktree: { defaultForNewSessions: false } },
+    });
+    const response = await request(app).get('/workspace/settings');
+    expect(response.status).toBe(200);
+    expect(response.body.settings).toContainEqual(
+      expect.objectContaining({
+        key: 'worktree.defaultForNewSessions',
+        values: { effective: false, user: true, workspace: false },
+      }),
+    );
+  });
+
+  it.each(['user', 'workspace'] as const)(
+    'accepts a %s override',
+    async (scope) => {
+      const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+      const response = await request(app).post('/workspace/settings').send({
+        scope,
+        key: 'worktree.defaultForNewSessions',
+        value: false,
+      });
+      expect(response.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalledWith(
+        '/workspace',
+        scope === 'user' ? SettingScope.User : SettingScope.Workspace,
+        'worktree.defaultForNewSessions',
+        false,
+      );
+      expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+        'worktree.defaultForNewSessions',
+        false,
+        scope,
+        undefined,
+      );
+    },
+  );
+
+  it('rejects a non-boolean value', async () => {
+    const { app, persistSetting } = makeApp();
+    const response = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'worktree.defaultForNewSessions',
+      value: 'yes',
+    });
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ code: 'invalid_value' });
+    expect(persistSetting).not.toHaveBeenCalled();
   });
 });
