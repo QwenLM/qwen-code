@@ -2162,7 +2162,7 @@ export async function loadCliConfig(
           .join(', ')}). ` +
           `The allowlist stays active with ${eagerTools.length} entr${
             eagerTools.length === 1 ? 'y' : 'ies'
-          }, so every other non-exempt tool is deferred to tool_search.`,
+          }, so every other non-exempt tool is omitted from the model's initial tool list.`,
       );
     }
   }

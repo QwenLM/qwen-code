@@ -2626,7 +2626,9 @@ describe('PermissionManager', () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       pm = makePm({ eagerTools: ['ReadFile', '', 'Bash(unbalanced'] });
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('tools.eager: ignoring 2 unusable entries'),
+        expect.stringMatching(
+          /tools\.eager: ignoring 2 unusable entries.*omitted from the model's initial tool list/,
+        ),
       );
       // The valid entry survives — dropping is per-entry, not all-or-nothing.
       expect(await registration('read_file')).toBe('registered');

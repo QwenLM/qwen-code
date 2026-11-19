@@ -354,7 +354,7 @@ export class PermissionManager {
           } (${droppedEntries.join(', ')}). ` +
             `The allowlist stays active with ${canonicalNames.length} entr${
               canonicalNames.length === 1 ? 'y' : 'ies'
-            }, so every other non-exempt tool is deferred to tool_search.`,
+            }, so every other non-exempt tool is omitted from the model's initial tool list.`,
         );
       }
       this.eagerToolAllowList = canonicalNames;
@@ -827,10 +827,9 @@ export class PermissionManager {
   /**
    * Determine whether a tool is callable in this session.
    *
-   * Returns `true` for `registered` AND `deferred` tools: a deferred tool
-   * is still registered — it is merely hidden from the eager model request
-   * and reachable via ToolSearch + ToolCall — so a call to it must flow
-   * through the normal approval evaluation, not a permission error (#10075). Only
+   * Returns `true` for `registered` and `deferred` tools. A deferred tool
+   * stays registered even when the discovery bridge is unavailable.
+   * Calls by name still go through normal approval evaluation (#10075). Only
    * `disabled` tools (whole-tool deny rule, or unlisted in the legacy
    * `coreTools` allowlist) return `false`.
    *
