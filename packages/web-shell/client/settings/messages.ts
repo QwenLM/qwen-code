@@ -500,6 +500,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.experimental.generatedUi': 'Generated UI',
   'settings.description.experimental.generatedUi':
     'Показывать интерактивные виды из встроенного Generated UI в поддерживаемых локальных сессиях, например Web Shell. Включено по умолчанию. Перезапустите владеющую сессию, чтобы применить изменения.',
+  'settings.label.experimental.mods': 'Mods (экспериментально)',
+  'settings.description.experimental.mods':
+    'Включить экспериментальные Mods из включённых расширений в доверенных локальных терминальных, headless и ACP сессиях. Требуется перезапуск.',
 
   'settings.models.editWindow': 'Изменить окно контекста',
   'settings.models.windowHint':
@@ -715,9 +718,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.fastModel': 'Быстрая модель',
   'settings.description.fastModel':
     'Модель для подсказок ввода и спекулятивного исполнения. Оставьте пустым, чтобы использовать основную. Более маленькая/быстрая модель (например qwen3-coder-flash) снижает задержку и стоимость.',
-  'settings.label.visionBridgeTimeoutMs': 'Таймаут визуального моста (мс)',
+  'settings.label.visionBridgeTimeoutMs': 'Тайм-аут Vision Bridge (мс)',
   'settings.description.visionBridgeTimeoutMs':
-    'Таймаут одной попытки вызова транскрипции изображения визуальным мостом в миллисекундах (положительное целое до 2147483647). Если не задано, используется встроенный 30 с. Увеличьте для медленных или проксируемых визуальных эндпоинтов. Также задаётся через /model --vision --timeout <секунды>.',
+    'Тайм-аут одной попытки в миллисекундах для вызова транскрипции изображений vision bridge (положительное целое до 2147483647). Без значения используются встроенные 30 с. Увеличьте для медленных или проксируемых vision-эндпоинтов. Задаётся через /model --vision --timeout <секунды>.',
   'settings.label.modelFallbacks': 'Резервные модели',
   'settings.description.modelFallbacks':
     'Список ID резервных моделей (через запятую, до 3), которые пробуются по порядку при ошибках ёмкости основной (429/503/529). Например «qwen-plus,qwen-turbo». Можно задать CLI --fallback-model.',
@@ -837,9 +840,6 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
     'Включить сотрудничество агентов',
   'settings.description.experimental.agentCollaboration':
     'Включить сотрудничество устойчивых агентов рабочей области в общих потоках задач (экспериментально). Независимо от Agent Team: ни один переключатель не подразумевает другой. Включение только разрешает сотрудничество; открытие агента внешним вызывающим, доверие к соединению и регистрация host по-прежнему требуют явной настройки. Также включается QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.',
-  'settings.label.experimental.mods': 'Mods (экспериментально)',
-  'settings.description.experimental.mods':
-    'Включает экспериментальные Mods из включённых расширений в доверенном локальном терминале, сессиях без интерфейса и ACP. Требуется перезапуск.',
   'settings.label.experimental.unifiedAgentLoop': 'Единый Agent Loop',
   'settings.description.experimental.unifiedAgentLoop':
     'Запускать сессии на общем agent loop. Если не задано, у каждого входа своё умолчание: headless (`-p` и stream-json), Ink TUI и субагенты идут на общем loop, ACP (Zed, VS Code, Web Shell, channel), OpenTUI и Hosted Harness — на своих (для этих входов это экспериментально). `true` переводит всех на общий loop (раунд модели Hosted Harness тоже на нём, с сохранением journal-диспетчеризации инструментов), `false` — всех на свои loop, включая headless, Ink TUI и субагентов. QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP перекрывает по входам: `1` включает все, `0` выключает все, список через запятую (например `headless,acp=0`) принуждает названные входы (headless, acp, ink, opentui, agent-core, speculation, hosted). Голые `1`/`0` распознаются только как целое значение, не внутри списка; неназванные входы откатываются к этой настройке. Проектные `.env` и `settings.env` переменную задать не могут.',
