@@ -42,7 +42,7 @@ Java 投影有效且已批准的公开 Plan Action 时，验证其输入与 Turn
 
 文件归一为带生成的非宿主 URI 的内联 ACP 文本资源，图片归一为 ACP image。语义摘要和 payload 摘要覆盖每个附件字节及名称、MIME。带附件请求的整份 canonical JSON 含文字最多 8 MiB，Java 与 Hosted 使用同一上限。Hosted 精确检查带附件的真实用户消息是否满足 9 MiB 预算，并使用既有消息分片保存。[附件容量设计](2026-10-18-managed-attachment-budget.zh-CN.md)定义专用输入、模型资源和浏览器持久化预算。普通资源保留既有上限，不增加上传服务或存储表，不自动截断或省略内容。
 
-声明 `input-attachments/1`；非文本派发必须具备该能力，纯文本兼容旧 Harness。已接收的不可变输入转换为同一组模型 parts，用于用户消息、首次生成、Hook 和恢复。文本资源带明确文件名边界，图片转为 `inlineData`。Hook 修改用户文字时保留附件 parts。应用最终定义 pin/会话模型选择后检查图片支持，包括保留的图片历史；纯文本模型明确失败，不能收到“图片不支持”的占位内容。
+声明 `input-attachments/1`；非文本派发必须具备该能力，纯文本兼容旧 Harness。WebShell 会话能力 `inputAttachments` 对 Harness 支持该能力的可见会话广告：绑定会话要求新的 Workspace Turn 准入，未绑定会话要求 ACTIVE 且非 public child——与「仅绑定会话执行 Workspace 准入合取项」的 Turn 准入规则一致。已接收的不可变输入转换为同一组模型 parts，用于用户消息、首次生成、Hook 和恢复。文本资源带明确文件名边界，图片转为 `inlineData`。Hook 修改用户文字时保留附件 parts。应用最终定义 pin/会话模型选择后检查图片支持，包括保留的图片历史；纯文本模型明确失败，不能收到“图片不支持”的占位内容。
 
 用户 Item 通过既有 JSON attributes 和资源引用保留 canonical 附件元数据及内容。实时事件、记录分页、snapshot/resync 和刷新重建相同的文件/图片展示。添加附件不写入 Workspace；之后模型发起的工具调用仍受 Plan 与执行权限约束。
 
