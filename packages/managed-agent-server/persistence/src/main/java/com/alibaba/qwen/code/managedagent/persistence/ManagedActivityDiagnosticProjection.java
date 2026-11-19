@@ -17,7 +17,10 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.function.Function;
 
@@ -404,15 +407,19 @@ final class ManagedActivityDiagnosticProjection {
         var transactions = jdbc.query("SELECT journal_revision, first_sequence, last_sequence, byte_length, event_count, previous_commit_digest, commit_digest FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ? AND journal_revision > ? ORDER BY journal_revision LIMIT 512",
                 (row, index) -> new RebuildTransaction(row.getLong(1), row.getLong(2), row.getLong(3), row.getLong(4), row.getInt(5), row.getString(6), row.getString(7)), tenant, session, afterRevision);
+        Map<Long, Long> resourceSizes = Map.of();
+        int transactionIndex = 0;
         for (RebuildTransaction transaction : transactions) {
             require(transaction.revision() == afterRevision + 1 && transaction.revision() <= headRevision
                     && transaction.sequence() <= headSequence && Objects.equals(previousDigest, transaction.previousDigest())
                     && transaction.first() == completedSequence + (transaction.events() == 0 ? 0 : 1)
                     && transaction.sequence() == completedSequence + transaction.events(), "Diagnostic recovery source chain is incomplete.");
-            Long resourceBytes = jdbc.queryForObject("SELECT COALESCE(SUM(r.byte_length), 0) FROM ma_resource_ref f JOIN ma_resource r"
-                            + " ON r.resource_key = f.resource_key WHERE f.session_scope_key = ? AND f.owner_kind = 'JOURNAL'"
-                            + " AND f.owner_key = ? AND f.owner_revision = ?", Long.class, scope, scope, transaction.revision());
-            long cost = Math.addExact(transaction.bytes(), resourceBytes == null ? 0 : resourceBytes);
+            // Bound lookahead when an early transaction exhausts the byte or event budget.
+            if (transactionIndex % 32 == 0) {
+                resourceSizes = rebuildResourceSizes(scope, transactions.subList(transactionIndex, Math.min(transactionIndex + 32, transactions.size())));
+            }
+            transactionIndex++;
+            long cost = Math.addExact(transaction.bytes(), resourceSizes.getOrDefault(transaction.revision(), 0L));
             if (cost > 8L * 1024 * 1024) {
                 throw JournalStoreRows.conflict("managed_activity_rebuild_source_too_large", "Diagnostic recovery source exceeds its bounded batch.");
             }
@@ -501,6 +508,18 @@ final class ManagedActivityDiagnosticProjection {
     }
 
     private record RebuildTransaction(long revision, long first, long sequence, long bytes, int events, String previousDigest, String digest) { }
+
+    private Map<Long, Long> rebuildResourceSizes(String scope, List<RebuildTransaction> transactions) {
+        List<Object> args = new ArrayList<>(List.of(scope, scope));
+        transactions.forEach(transaction -> args.add(transaction.revision()));
+        Map<Long, Long> sizes = new HashMap<>();
+        jdbc.query("SELECT f.owner_revision, SUM(r.byte_length) FROM ma_resource_ref f JOIN ma_resource r"
+                        + " ON r.resource_key = f.resource_key WHERE f.session_scope_key = ? AND f.owner_kind = 'JOURNAL'"
+                        + " AND f.owner_key = ? AND f.owner_revision IN (" + String.join(", ", Collections.nCopies(transactions.size(), "?"))
+                        + ") GROUP BY f.owner_revision",
+                row -> { sizes.put(row.getLong(1), row.getLong(2)); }, args.toArray());
+        return sizes;
+    }
 
     private void put(String tenant, String workspace, String session, String domain, String id, JsonNode body, long sequence, long at) {
         point(tenant, workspace, session, domain, id, immutable(tenant, workspace, session, body), sequence, at);

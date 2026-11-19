@@ -228,7 +228,7 @@ public class ManagedNativeJournalSnapshots {
         }
         var candidates = jdbc.query("SELECT owner_key, owner_revision FROM ma_resource_ref"
                 + " WHERE session_scope_key = ? AND owner_kind = 'NATIVE_SNAPSHOT' AND owner_revision <= ?"
-                + " GROUP BY owner_key, owner_revision ORDER BY owner_revision DESC, owner_key LIMIT 1",
+                + " ORDER BY owner_revision DESC, owner_key LIMIT 1",
                 (row, index) -> new Candidate(row.getString(1), row.getLong(2)),
                 ManagedSessionStore.sessionScopeKey(tenant, session), frozen.journalRevision());
         if (candidates.isEmpty()) {

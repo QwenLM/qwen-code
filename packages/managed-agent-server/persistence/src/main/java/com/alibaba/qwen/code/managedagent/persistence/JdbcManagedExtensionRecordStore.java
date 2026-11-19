@@ -1568,6 +1568,15 @@ public class JdbcManagedExtensionRecordStore
                     deliveryState, projection.startedAt(),
                     projection.settledAt(), scopeKey, recordKey);
         }
+        if (domain.equals("automation_run")) {
+            boolean terminal = taskKind != null
+                    && Set.of("completed", "failed", "cancelled").contains(projection.state());
+            jdbc.update("UPDATE ma_schedule_occurrence SET is_run_terminal = ?"
+                            + " WHERE tenant_id = ? AND schedule_id = ? AND occurrence_key = ?"
+                            + " AND session_id = ? AND run_id = ?",
+                    terminal ? 1 : 0, tenantId, record.get("scheduleId").textValue(),
+                    record.get("occurrenceKey").textValue(), sessionId, recordId);
+        }
         if (domain.equals("schedule")) {
             new JdbcAutomationLedgerStore(jdbc).projectSchedule(tenantId, workspaceId,
                     sessionId, revision, record, committedAt);

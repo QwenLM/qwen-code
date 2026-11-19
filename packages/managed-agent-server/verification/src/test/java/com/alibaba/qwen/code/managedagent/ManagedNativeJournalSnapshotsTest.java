@@ -74,6 +74,8 @@ class ManagedNativeJournalSnapshotsTest {
         assertThat(snapshots.select(TENANT, WORKSPACE, SESSION, TOKEN,
                 sessions.restore(TENANT, WORKSPACE, SESSION, TOKEN)).snapshot()).isEqualTo(latest.snapshot());
         assertThat(snapshots.select(TENANT, WORKSPACE, SESSION, TOKEN, firstHead).snapshot().snapshotId()).isEqualTo(expected);
+        assertThat(jdbc.snapshotSelectionSql).doesNotContain("GROUP BY")
+                .contains("ORDER BY owner_revision DESC, owner_key LIMIT 1");
         assertThatThrownBy(() -> snapshots.select(TENANT, WORKSPACE, SESSION, "wrong-token", firstHead))
                 .isInstanceOf(ManagedAgentException.class);
     }
@@ -376,6 +378,7 @@ class ManagedNativeJournalSnapshotsTest {
     protected static final class SimulatedCrash extends RuntimeException { }
 
     protected static class FaultJdbc extends ManagedSchemaJdbcTemplate {
+        String snapshotSelectionSql;
         String boundary;
         boolean expireOnManifest;
         boolean injected;
@@ -395,6 +398,15 @@ class ManagedNativeJournalSnapshotsTest {
 
         FaultJdbc(DataSource source) {
             super(source);
+        }
+
+        @Override
+        public <T> java.util.List<T> query(String sql, org.springframework.jdbc.core.RowMapper<T> mapper,
+                Object... arguments) {
+            if (sql.startsWith("SELECT owner_key, owner_revision FROM ma_resource_ref")) {
+                snapshotSelectionSql = sql;
+            }
+            return super.query(sql, mapper, arguments);
         }
 
         @Override

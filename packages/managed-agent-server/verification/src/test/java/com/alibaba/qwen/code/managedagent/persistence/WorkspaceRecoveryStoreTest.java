@@ -211,10 +211,8 @@ class WorkspaceRecoveryStoreTest {
         String id = "session-resources-" + scope;
         String key = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.operationKey(
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.SESSION_RESOURCE_GC, scope, scope, id);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id,"
-                + " target_kind, target_key, request_digest, request_json, phase, state, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, ?, 'SESSION_RESOURCE_GC', ?, 'tenant', ?, 'SESSION', ?, 'digest', '{}', 'COLLECTING', 'UNKNOWN', 1, 1)",
-                key, scope, scope, id, session, scope);
+        assertThat(jdbc.update("UPDATE ma_operation SET state = 'UNKNOWN' WHERE operation_key = ?"
+                + " AND operation_kind = 'SESSION_RESOURCE_GC'", key)).isEqualTo(1);
         assertThatThrownBy(this::capture).hasMessageContaining("source_drift");
         jdbc.update("UPDATE ma_operation SET state = 'SUCCEEDED' WHERE operation_key = ?", key);
         jdbc.update("UPDATE ma_session_head SET journal_revision = journal_revision + 1 WHERE session_id = ?", session);
