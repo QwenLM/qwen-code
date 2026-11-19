@@ -205,6 +205,14 @@ export interface ManagedSession {
    * refused by the fence.
    */
   releaseActivation(): Promise<void>;
+  /**
+   * Stops the activation renewal and resolves once the in-flight renewal
+   * settles. Await it OUTSIDE the authority's serial queue: the renewal
+   * itself runs inside that queue, so waiting from within would deadlock.
+   * Suspension uses this to end renewal before releasing the activation
+   * and sealing, without `close()`'s all-or-nothing error aggregation.
+   */
+  stopRenewal(): Promise<void>;
   prepareOwnershipRelease(): Promise<ManagedSessionCommitProof>;
   /**
    * Releases the current activation and installs a successor. The next Harness
@@ -326,6 +334,7 @@ export async function openManagedSession(
       return activation;
     },
     releaseActivation: () => authority.releaseActivation(),
+    stopRenewal: () => renewal.stop(),
     prepareOwnershipRelease: async () => {
       if (adopted)
         throw new ManagedSessionRecordError(

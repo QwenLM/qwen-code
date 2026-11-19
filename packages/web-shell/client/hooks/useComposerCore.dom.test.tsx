@@ -2734,6 +2734,83 @@ describe('useComposerCore paste', () => {
     expect(latest!.pastedImages).toEqual([]);
     expect(onImageIngestionNotice).not.toHaveBeenCalled();
   });
+
+  it('stops queued image reads once the batch is cancelled', async () => {
+    class PendingFileReader {
+      static calls = 0;
+      result: string | ArrayBuffer | null = null;
+      onload: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      onerror: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      onabort: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      abort = vi.fn(() => this.onabort?.({} as ProgressEvent<FileReader>));
+
+      readAsDataURL() {
+        PendingFileReader.calls += 1;
+      }
+    }
+    vi.stubGlobal('FileReader', PendingFileReader);
+    await mount();
+    const files = Array.from(
+      { length: 10 },
+      (_, index) =>
+        new File(['png'], `photo-${index}.png`, { type: 'image/png' }),
+    );
+    const event = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'dataTransfer', {
+      value: { files, items: [], types: ['Files'], dropEffect: 'none' },
+    });
+
+    act(() => {
+      container!
+        .querySelector('[data-web-shell-composer-surface]')!
+        .dispatchEvent(event);
+    });
+    await act(async () => Promise.resolve());
+    expect(latest!.pendingImageBatchCount).toBe(1);
+    expect(PendingFileReader.calls).toBe(4);
+
+    act(() => latest!.handle.clear());
+    await act(async () => Promise.resolve());
+
+    expect(PendingFileReader.calls).toBe(4);
+    expect(latest!.pendingImageBatchCount).toBe(0);
+    expect(latest!.pastedImages).toEqual([]);
+  });
+
+  it('still reads the whole batch when it is not cancelled', async () => {
+    class CompletingFileReader {
+      static calls = 0;
+      result: string | ArrayBuffer | null = null;
+      onload: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      onerror: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      onabort: ((event: ProgressEvent<FileReader>) => void) | null = null;
+      abort = vi.fn(() => this.onabort?.({} as ProgressEvent<FileReader>));
+
+      readAsDataURL() {
+        CompletingFileReader.calls += 1;
+        setTimeout(() => {
+          this.result = 'data:image/png;base64,AAAA';
+          this.onload?.({} as ProgressEvent<FileReader>);
+        }, 0);
+      }
+    }
+    vi.stubGlobal('FileReader', CompletingFileReader);
+    await mount();
+    const files = Array.from(
+      { length: 10 },
+      (_, index) =>
+        new File(['png'], `photo-${index}.png`, { type: 'image/png' }),
+    );
+
+    await act(async () => {
+      expect(latest!.ingestFiles(files)).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(CompletingFileReader.calls).toBe(10);
+    expect(latest!.pastedImages).toHaveLength(10);
+    expect(latest!.pendingImageBatchCount).toBe(0);
+  });
 });
 
 describe('useComposerCore tags', () => {
