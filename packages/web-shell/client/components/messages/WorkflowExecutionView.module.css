@@ -481,6 +481,23 @@
   white-space: nowrap;
 }
 
+.lane[data-planned='true'] .laneHeading {
+  border-bottom-style: dashed;
+}
+
+.lane[data-planned='true'] .laneHeading strong {
+  color: var(--secondary-foreground);
+  font-weight: 500;
+}
+
+.plannedDetail {
+  margin: 0;
+  padding: 12px 14px;
+  color: var(--secondary-foreground);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .lane[data-active='true'] .laneHeading {
   box-shadow: inset 0 -2px 0 var(--agent-blue-500);
 }

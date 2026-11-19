@@ -590,7 +590,9 @@ export class WorkflowRunner {
         parentSessionId: config.getSessionId?.(),
         ...(workflowName ? { workflowName } : {}),
         ...(sourceRef ? { sourceRef } : {}),
-        meta: null,
+        // Parsed by the pre-launch gate, so clients can show the declared
+        // phases before the script reaches them.
+        meta: scriptMeta,
         status: 'running',
         startTime: Date.now(),
         outputFile: '',

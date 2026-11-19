@@ -18,6 +18,9 @@ public enum ManagedSchemaProjection {
     CHANNEL_INSTANCE(
             "tenant_id, channel_id, platform, account_id, account_generation, state, actor_id, "
                     + "workspace_id, cwd_relative, policy_json, gmt_create, gmt_modified"),
+    PR_WATCH_BINDING(
+            "tenant_id, channel_id, binding_id, owner, repo, pr_number, session_id, "
+                    + "events_json, gmt_create"),
     DELIVERY(
             "delivery_key, delivery_kind, tenant_id, channel_id, delivery_id, source_session_id, "
                     + "target_session_id, source_scope_key, source_record_key, source_revision, "

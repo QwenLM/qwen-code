@@ -709,6 +709,7 @@ export type {
   DaemonWorkflowCallTrace,
   DaemonWorkflowEvent,
   DaemonWorkflowPhaseVisit,
+  DaemonWorkflowPlannedPhase,
   DaemonSessionProcessTaskLifecycleStatus,
   DaemonSessionContextUsage,
   DaemonSessionContextUsageStatus,
