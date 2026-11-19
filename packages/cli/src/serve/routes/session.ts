@@ -11442,22 +11442,26 @@ export function registerSessionRoutes(
       const buffer = Buffer.alloc(Math.min(size, 64 * 1024));
       const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, readStart);
       const lines = buffer.toString('utf8', 0, bytesRead).split('\n');
+      let continuation = false;
       if (readStart > 0) {
         const peek = Buffer.alloc(1);
         fs.readSync(fd, peek, 0, 1, readStart - 1);
         if (peek[0] !== 0x0a) {
-          // Dropping the only clipped record would erase all torn-tail evidence.
-          if (lines.length === 1) return false;
           lines.shift();
+          continuation = true;
         }
       }
+      let sawRecord = false;
       for (const line of lines) {
         const trimmed = line.trim();
         if (trimmed === '') continue;
         if (!parseLineTolerantWithIntegrity(trimmed, filePath).complete) {
           return false;
         }
+        sawRecord = true;
       }
+      // A clipped fragment alone cannot establish an intact tail.
+      if (continuation && !sawRecord) return false;
       return true;
     } catch {
       return false;

@@ -118,9 +118,10 @@ reader. Complete `}{`-glued object records therefore remain recoverable. An
 invalid or torn record, including one truncated before the `session_source`
 subtype, is indeterminate metadata rather than evidence of an ordinary
 source-less session.
-If the window contains no newline and consists solely of a clipped record
-fragment, discarding that fragment would leave no evidence to inspect; the
-fallback treats this case as indeterminate too.
+If the window starts inside a record and dropping its first fragment leaves no
+complete record, including a fragment followed only by a trailing empty line,
+the fallback treats the tail as indeterminate. This includes a window consisting
+solely of a clipped record fragment with no newline.
 
 Before emitting an item, the route checks the runtime's in-memory session
 summary and omits a session whose prompt is active or queued. That check does
