@@ -91,6 +91,12 @@ export interface ToolInvocation<
   canAutoApproveOnAllow?(): boolean;
 
   /**
+   * Whether an allow decision must still be reviewed by AUTO mode.
+   * This is independent of host interaction-payload forwarding.
+   */
+  requiresAutoReviewOnAllow?(): boolean;
+
+  /**
    * Constructs the confirmation dialog details for this invocation.
    * Only called when the final permission decision is `'ask'` and the user
    * needs to be prompted interactively.
@@ -148,6 +154,10 @@ export abstract class BaseToolInvocation<
 
   canAutoApproveOnAllow(): boolean {
     return true;
+  }
+
+  requiresAutoReviewOnAllow(): boolean {
+    return false;
   }
 
   /**

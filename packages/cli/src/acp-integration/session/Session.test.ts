@@ -23443,6 +23443,7 @@ describe('Session', () => {
           workspaceId: 'b-id',
           workspaceCwd: '/repos/b',
           workspaceGeneration: 'generation-b',
+          sameWorkspace: false,
         })
         .mockResolvedValueOnce({
           sessionId: 'child-id',
@@ -23453,6 +23454,7 @@ describe('Session', () => {
         workspaceId: 'b-id',
         workspaceCwd: '/repos/b',
         workspaceGeneration: 'generation-b',
+        sameWorkspace: false,
       });
       expect(mockClient.extMethod).toHaveBeenLastCalledWith(
         SERVE_CONTROL_EXT_METHODS.resolveSubSessionWorkspace,
@@ -23468,6 +23470,23 @@ describe('Session', () => {
       ).resolves.toEqual({ sessionId: 'child-id', workspaceCwd: '/repos/b' });
     });
 
+    it.each([undefined, 'false', 0])(
+      'rejects a non-boolean sameWorkspace binding (%s)',
+      async (sameWorkspace) => {
+        const resolveWorkspace = vi.mocked(mockConfig.setSubSessionSpawner).mock
+          .calls[0]?.[1];
+        vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+          workspaceId: 'b-id',
+          workspaceCwd: '/repos/b',
+          workspaceGeneration: 'generation-b',
+          sameWorkspace,
+        });
+        await expect(resolveWorkspace?.('b-id')).rejects.toThrow(
+          'create_sub_session: invalid workspace binding',
+        );
+      },
+    );
+
     it.each([
       {
         label: 'Default',
@@ -23481,8 +23500,57 @@ describe('Session', () => {
         asks: true,
         launches: true,
       },
-      { label: 'Auto', mode: ApprovalMode.AUTO, asks: true, launches: true },
+      {
+        label: 'Auto classifier approval despite legacy allow',
+        mode: ApprovalMode.AUTO,
+        classify: true,
+        asks: false,
+        launches: true,
+      },
+      {
+        label: 'Auto classifier block despite legacy allow',
+        mode: ApprovalMode.AUTO,
+        classify: true,
+        block: true,
+        asks: false,
+        launches: false,
+      },
       { label: 'YOLO', mode: ApprovalMode.YOLO, asks: false, launches: true },
+      {
+        label: 'same workspace Default',
+        mode: ApprovalMode.DEFAULT,
+        selector: 'repo-a-id',
+        sameWorkspace: true,
+        asks: false,
+        launches: true,
+      },
+      {
+        label: 'same workspace Auto Edit',
+        mode: ApprovalMode.AUTO_EDIT,
+        selector: 'repo-a-id',
+        sameWorkspace: true,
+        asks: false,
+        launches: true,
+      },
+      {
+        label: 'same workspace resolved ask',
+        mode: ApprovalMode.DEFAULT,
+        selector: 'repo-a-id',
+        sameWorkspace: true,
+        askRule: '/repo-a',
+        noAllow: true,
+        asks: true,
+        launches: true,
+      },
+      {
+        label: 'same workspace Plan',
+        mode: ApprovalMode.PLAN,
+        selector: 'repo-a-id',
+        sameWorkspace: true,
+        noAllow: true,
+        asks: false,
+        launches: false,
+      },
       { label: 'Plan', mode: ApprovalMode.PLAN, asks: false, launches: false },
       {
         label: 'deny rule on requested selector',
@@ -23508,10 +23576,18 @@ describe('Session', () => {
       },
       {
         label: 'unoffered persistent selection',
-        mode: ApprovalMode.AUTO,
+        mode: ApprovalMode.DEFAULT,
         persist: true,
         asks: true,
         launches: false,
+      },
+      {
+        label: 'ask rule on resolved path in YOLO',
+        mode: ApprovalMode.YOLO,
+        askRule: '/repo-b',
+        noAllow: true,
+        asks: true,
+        launches: true,
       },
       {
         label: 'omitted workspace',
@@ -23522,20 +23598,38 @@ describe('Session', () => {
       },
     ])(
       'honors sub-session approval for $label',
-      async ({ mode, deny, selector, local, persist, asks, launches }) => {
+      async ({
+        mode,
+        deny,
+        selector,
+        local,
+        persist,
+        asks,
+        launches,
+        sameWorkspace = false,
+        classify = false,
+        block = false,
+        askRule,
+        noAllow = false,
+      }) => {
         const workspace = selector ?? 'repo-b-id';
+        const workspaceGeneration = sameWorkspace
+          ? 'generation-a'
+          : 'generation-b';
         const resolveWorkspace = vi.fn().mockResolvedValue({
-          workspaceId: 'repo-b-id',
-          workspaceCwd: '/repo-b',
-          workspaceGeneration: 'generation-b',
+          workspaceId: sameWorkspace ? 'repo-a-id' : 'repo-b-id',
+          workspaceCwd: sameWorkspace ? '/repo-a' : '/repo-b',
+          workspaceGeneration,
+          sameWorkspace,
         });
         const toolName = core.ToolNames.CREATE_SUB_SESSION;
         const args = { prompt: 'summarize', ...(local ? {} : { workspace }) };
         const spawn = vi.fn().mockResolvedValue({ sessionId: 'child-id' });
         const persistRule = vi.fn();
         const pm = new core.PermissionManager({
-          getPermissionsAllow: () => [toolName],
-          getPermissionsAsk: () => [],
+          getPermissionsAllow: () => (noAllow ? [] : [toolName]),
+          getPermissionsAsk: () =>
+            askRule ? [`${toolName}(workspace:${askRule})`] : [],
           getPermissionsDeny: () =>
             deny ? [`${toolName}(workspace:${deny})`] : [],
           getApprovalMode: () => mode,
@@ -23551,6 +23645,28 @@ describe('Session', () => {
         );
         mockConfig.getDisableAllHooks = vi.fn(() => false);
         mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+        mockConfig.getAutoModeSettings = vi.fn().mockReturnValue({});
+        mockConfig.getAutoModeDenialState = vi.fn().mockReturnValue({
+          consecutiveBlock: 0,
+          consecutiveUnavailable: 0,
+          totalBlock: 0,
+          totalUnavailable: 0,
+        });
+        mockConfig.setAutoModeDenialState = vi.fn();
+        mockConfig.getLlmClient = vi.fn().mockReturnValue({
+          ...mockLlmClient,
+          getHistoryTail: () => [],
+        });
+        const classifyAuto = classify
+          ? vi.spyOn(core, 'evaluateAutoMode').mockResolvedValue({
+              via: 'classifier',
+              shouldBlock: block,
+              reason: block ? 'test block' : 'test approval',
+              unavailable: false,
+              stage: 'fast',
+              durationMs: 0,
+            })
+          : undefined;
         vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
           shouldProceed: true,
         });
@@ -23587,6 +23703,13 @@ describe('Session', () => {
           prompt: [{ type: 'text', text: 'Delegate' }],
         });
 
+        if (classifyAuto) {
+          expect(classifyAuto).toHaveBeenCalledOnce();
+          expect(classifyAuto.mock.calls[0]?.[0]).toMatchObject({
+            toolParams: args,
+            pmForcedAsk: false,
+          });
+        }
         expect(permissionHook).toHaveBeenCalledTimes(asks ? 1 : 0);
         expect(request).toHaveBeenCalledTimes(asks ? 1 : 0);
         if (deny && deny !== workspace) {
@@ -23594,15 +23717,22 @@ describe('Session', () => {
         }
         if (asks) {
           const { options, toolCall } = request.mock.calls[0]![0];
+          const expectedWorkspaceCwd = sameWorkspace ? '/repo-a' : '/repo-b';
           expect(toolCall.rawInput).toEqual(args);
-          expect(toolCall.title).toBe('[first-turn] in "/repo-b": summarize');
-          expect(toolCall.content).toContainEqual({
-            type: 'content',
-            content: {
-              type: 'text',
-              text: 'Workspace: "/repo-b"\n\nsummarize',
-            },
-          });
+          expect(toolCall.title).toBe(
+            `[first-turn] in "${expectedWorkspaceCwd}": summarize`,
+          );
+          if (sameWorkspace) {
+            expect(toolCall.content).toEqual([]);
+          } else {
+            expect(toolCall.content).toContainEqual({
+              type: 'content',
+              content: {
+                type: 'text',
+                text: `Workspace: "${expectedWorkspaceCwd}"\n\nsummarize`,
+              },
+            });
+          }
           expect(resolveWorkspace).toHaveBeenCalledExactlyOnceWith(workspace);
           expect(resolveWorkspace.mock.invocationCallOrder[0]).toBeLessThan(
             request.mock.invocationCallOrder[0],
@@ -23617,8 +23747,8 @@ describe('Session', () => {
         if (launches) {
           expect(spawn).toHaveBeenCalledExactlyOnceWith({
             ...args,
-            ...(local ? {} : { workspaceGeneration: 'generation-b' }),
-            ...(!local && mode === ApprovalMode.YOLO
+            ...(local ? {} : { workspaceGeneration }),
+            ...(!local && mode === ApprovalMode.YOLO && !asks
               ? { requiresYolo: true }
               : {}),
             completion: 'first-turn',
@@ -23632,6 +23762,170 @@ describe('Session', () => {
           expect(spawn).not.toHaveBeenCalled();
         }
         expect(persistRule).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      {
+        label: 'direct call follows the completed AUTO decision',
+        replacement: false,
+        initialMode: ApprovalMode.YOLO,
+        shouldBlock: false,
+        launches: true,
+      },
+      {
+        label: 'replacement cannot use a stale DEFAULT decision',
+        replacement: true,
+        initialMode: ApprovalMode.DEFAULT,
+        shouldBlock: true,
+        launches: false,
+      },
+      {
+        label:
+          'replacement cannot inherit AUTO after switching back to DEFAULT',
+        replacement: true,
+        initialMode: ApprovalMode.DEFAULT,
+        shouldBlock: false,
+        launches: false,
+        modeAfterClassification: ApprovalMode.DEFAULT,
+      },
+    ])(
+      '$label',
+      async ({
+        replacement,
+        initialMode,
+        shouldBlock,
+        launches,
+        modeAfterClassification,
+      }) => {
+        const toolName = core.ToolNames.CREATE_SUB_SESSION;
+        const args = {
+          prompt: 'summarize',
+          ...(replacement ? {} : { workspace: 'repo-b-id' }),
+        };
+        const updatedInput = { prompt: 'summarize', workspace: 'repo-b-id' };
+        let approvalMode = initialMode;
+        let releaseDestination!: (
+          value: core.SubSessionWorkspaceBinding,
+        ) => void;
+        const destination = new Promise<core.SubSessionWorkspaceBinding>(
+          (resolve) => {
+            releaseDestination = resolve;
+          },
+        );
+        const resolveWorkspace = vi.fn().mockReturnValue(destination);
+        const spawn = vi.fn().mockResolvedValue({ sessionId: 'child-id' });
+        const pm = new core.PermissionManager({
+          getPermissionsAllow: () =>
+            replacement ? [`${toolName}(workspace:repo-b-id)`] : [toolName],
+          getPermissionsAsk: () => [],
+          getPermissionsDeny: () => [],
+          getApprovalMode: () => approvalMode,
+        });
+        pm.initialize();
+        mockConfig.getCwd = vi.fn(() => '/repo-a');
+        mockConfig.getApprovalMode = vi.fn(() => approvalMode);
+        mockConfig.getPermissionManager = vi.fn(() => pm);
+        mockConfig.getSubSessionSpawner = vi.fn(() => spawn);
+        mockConfig.getSubSessionWorkspaceResolver = vi.fn(
+          () => resolveWorkspace,
+        );
+        mockConfig.getDisableAllHooks = vi.fn(() => false);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+        mockConfig.getAutoModeSettings = vi.fn().mockReturnValue({});
+        mockConfig.getAutoModeDenialState = vi.fn().mockReturnValue({
+          consecutiveBlock: 0,
+          consecutiveUnavailable: 0,
+          totalBlock: 0,
+          totalUnavailable: 0,
+        });
+        mockConfig.setAutoModeDenialState = vi.fn();
+        mockConfig.getLlmClient = vi.fn().mockReturnValue({
+          ...mockLlmClient,
+          getHistoryTail: () => [],
+        });
+        let finishClassification!: () => void;
+        const classificationGate = new Promise<void>((resolve) => {
+          finishClassification = resolve;
+        });
+        const classify = vi
+          .spyOn(core, 'evaluateAutoMode')
+          .mockImplementation(async () => {
+            if (modeAfterClassification) await classificationGate;
+            return {
+              via: 'classifier' as const,
+              shouldBlock,
+              reason: shouldBlock ? 'test replacement block' : 'test approval',
+              unavailable: false,
+              stage: 'fast' as const,
+              durationMs: 0,
+            };
+          });
+        vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
+          shouldProceed: true,
+        });
+        vi.spyOn(core, 'firePermissionRequestHook').mockResolvedValue({
+          hasDecision: true,
+          shouldAllow: true,
+          ...(replacement ? { updatedInput } : {}),
+        });
+        mockToolRegistry.getTool.mockReturnValue(
+          new core.CreateSubSessionTool(mockConfig),
+        );
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  { id: 'call-sub-session', name: toolName, args },
+                ],
+              },
+            },
+          ]),
+        );
+
+        const prompting = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'Delegate' }],
+        });
+        await vi.waitFor(
+          () =>
+            expect(resolveWorkspace).toHaveBeenCalledExactlyOnceWith(
+              'repo-b-id',
+            ),
+          { timeout: 1_000 },
+        );
+        approvalMode = ApprovalMode.AUTO;
+        releaseDestination({
+          workspaceId: 'repo-b-id',
+          workspaceCwd: '/repo-b',
+          workspaceGeneration: 'generation-b',
+          sameWorkspace: false,
+        });
+        if (modeAfterClassification) {
+          await vi.waitFor(() => expect(classify).toHaveBeenCalledOnce(), {
+            timeout: 1_000,
+          });
+          approvalMode = modeAfterClassification;
+          finishClassification();
+        }
+        await prompting;
+
+        expect(classify).toHaveBeenCalledOnce();
+        expect(classify.mock.calls[0]?.[0]).toMatchObject({
+          toolParams: replacement ? updatedInput : args,
+        });
+        if (launches) {
+          expect(spawn).toHaveBeenCalledExactlyOnceWith({
+            ...args,
+            workspaceGeneration: 'generation-b',
+            completion: 'first-turn',
+          });
+        } else {
+          expect(spawn).not.toHaveBeenCalled();
+        }
+        expect(mockClient.requestPermission).not.toHaveBeenCalled();
       },
     );
 

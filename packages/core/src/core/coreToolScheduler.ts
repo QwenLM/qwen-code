@@ -3988,7 +3988,8 @@ export class CoreToolScheduler {
 
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
-            (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
+            (invocation.requiresAutoReviewOnAllow?.() === true ||
+              shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
               shouldClassifyAllShellForAutoMode(canonicalName, this.config));
           const confirmationPermission = getEffectivePermissionForConfirmation(
             finalPermission,
@@ -8553,7 +8554,8 @@ export class CoreToolScheduler {
 
         const forceAutoReviewForAllow =
           this.config.getApprovalMode() === ApprovalMode.AUTO &&
-          (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
+          (pendingTool.invocation.requiresAutoReviewOnAllow?.() === true ||
+            shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
             shouldClassifyAllShellForAutoMode(
               pendingTool.request.name,
               this.config,

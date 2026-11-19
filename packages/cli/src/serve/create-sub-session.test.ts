@@ -3450,6 +3450,14 @@ describe('sub-sessions in another workspace', () => {
 
   it('runs locally when the named workspace is the caller own', async () => {
     const { a, b, launcherA } = twoWorkspaces();
+    expect(launcherA.resolveDestination('caller', WS_A)).toMatchObject({
+      workspaceGeneration: 'generation-a',
+      sameWorkspace: true,
+    });
+    expect(launcherA.resolveDestination('caller', WS_B)).toMatchObject({
+      workspaceGeneration: 'generation-b',
+      sameWorkspace: false,
+    });
     await launcherA.launch({
       prompt: 'p',
       completion: 'sent',

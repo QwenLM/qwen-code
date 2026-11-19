@@ -2523,6 +2523,8 @@ export interface SubSessionWorkspaceBinding {
   workspaceId: string;
   workspaceCwd: string;
   workspaceGeneration: string;
+  /** Derived from launcher identity; used for approval, not launch authorization. */
+  sameWorkspace: boolean;
 }
 
 export type SubSessionWorkspaceResolver = (

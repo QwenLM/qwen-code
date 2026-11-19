@@ -2268,6 +2268,7 @@ export function createSubSessionLauncher(
       workspaceId: target.workspaceId,
       workspaceCwd: target.workspaceCwd,
       workspaceGeneration: target.workspaceGeneration,
+      sameWorkspace: target.launcher === launcher,
     };
   };
 

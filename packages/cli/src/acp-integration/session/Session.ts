@@ -4455,18 +4455,29 @@ export class Session implements SessionContext {
           SERVE_CONTROL_EXT_METHODS.resolveSubSessionWorkspace,
           { workspace },
         );
-        const { workspaceId, workspaceCwd, workspaceGeneration } = resp;
+        const {
+          workspaceId,
+          workspaceCwd,
+          workspaceGeneration,
+          sameWorkspace,
+        } = resp;
         if (
           typeof workspaceId !== 'string' ||
           !workspaceId ||
           typeof workspaceCwd !== 'string' ||
           !workspaceCwd ||
           typeof workspaceGeneration !== 'string' ||
-          !workspaceGeneration
+          !workspaceGeneration ||
+          typeof sameWorkspace !== 'boolean'
         ) {
           throw new Error('create_sub_session: invalid workspace binding');
         }
-        return { workspaceId, workspaceCwd, workspaceGeneration };
+        return {
+          workspaceId,
+          workspaceCwd,
+          workspaceGeneration,
+          sameWorkspace,
+        };
       },
     );
   }
@@ -18459,7 +18470,8 @@ export class Session implements SessionContext {
           // prompt right after an allow-rule call just worked.
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
-            (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
+            (invocation.requiresAutoReviewOnAllow?.() === true ||
+              shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
               shouldClassifyAllShellForAutoMode(policyToolName, this.config));
           const confirmationPermission = getEffectivePermissionForConfirmation(
             finalPermission,
@@ -18913,6 +18925,7 @@ export class Session implements SessionContext {
                     }
                     recordAutoModeFallbackResolution(approval.outcome);
                   } else {
+                    let confirmationApprovalMode = approvalMode;
                     if (hookResult.updatedInput) {
                       // The replacement is checked like the input before it:
                       // its gates, schema and permission rules. This hook's
@@ -19030,14 +19043,18 @@ export class Session implements SessionContext {
                         string,
                         unknown
                       >;
+                      const replacementApprovalMode =
+                        this.config.getApprovalMode();
+                      confirmationApprovalMode = replacementApprovalMode;
                       const replacementAllowed =
                         replacementFlow.finalPermission === 'allow' &&
                         !(
-                          approvalMode === ApprovalMode.AUTO &&
-                          (shouldForceAutoModeReviewForAllow(
-                            replacementFlow.pmCtx,
-                            this.config.getCwd(),
-                          ) ||
+                          replacementApprovalMode === ApprovalMode.AUTO &&
+                          (replacement.requiresAutoReviewOnAllow?.() === true ||
+                            shouldForceAutoModeReviewForAllow(
+                              replacementFlow.pmCtx,
+                              this.config.getCwd(),
+                            ) ||
                             shouldClassifyAllShellForAutoMode(
                               policyToolName,
                               this.config,
@@ -19045,13 +19062,16 @@ export class Session implements SessionContext {
                         );
                       if (
                         replacementAllowed &&
-                        approvalMode === ApprovalMode.AUTO
+                        replacementApprovalMode === ApprovalMode.AUTO
                       ) {
                         recordAutoModeAllow(replacementParams);
                         updateAutoModeFallback();
                       } else if (
                         !replacementAllowed &&
-                        shouldRunAutoModeForCall(approvalMode, policyToolName)
+                        shouldRunAutoModeForCall(
+                          replacementApprovalMode,
+                          policyToolName,
+                        )
                       ) {
                         const classified = await classifyForAutoMode(
                           replacementParams,
@@ -19087,6 +19107,23 @@ export class Session implements SessionContext {
                       }
                       hookHandled = false;
                     } else {
+                      if (
+                        invocation.requiresAutoReviewOnAllow?.() === true &&
+                        this.config.getApprovalMode() !==
+                          confirmationApprovalMode
+                      ) {
+                        return earlyErrorResponse(
+                          new Error(
+                            'Approval mode changed before confirmation. Please retry.',
+                          ),
+                          toolName,
+                          {
+                            status: 'error',
+                            errorType: ToolErrorType.EXECUTION_DENIED,
+                            executionStatus: 'not_started',
+                          },
+                        );
+                      }
                       await confirmationDetails.onConfirm(
                         ToolConfirmationOutcome.ProceedOnce,
                       );
@@ -19181,7 +19218,7 @@ export class Session implements SessionContext {
 
               const permissionOptions = toPermissionOptions(
                 confirmationDetails,
-                pmForcedAsk,
+                pmForcedAsk || requiresUserInteraction,
                 this.requiresManagedConversationBinding
                   ? STANDALONE_PERMISSION_PERSISTENCE_POLICY
                   : undefined,
