@@ -243,7 +243,7 @@ Witness: reverting both messages to the old `non-expanding sentinel` wording red
 
 Main was merged a fifth time (merge commit `50a39ddbc8`, zero overlap with this PR's files measured against the merge base), which changed 217 Java/cli/core files, so the whole stack was rebuilt rather than reused: full build rc=0 with core and cli dist asserted refreshed, jar rebuilt, `ManagedLoopSkillTest` **19/19**, bundle rebuilt and asserted refreshed, and the rebuilt jar's four sidecars byte-equal to the committed contracts. Arms: `--loop-skill` success (session `4b05a9ad-2f7a-4323-9154-6e63895b5caf`, modelRounds 6, cron create/list/delete all witnessed); `--loop-fire` success (session `229ac023-e0fe-4b59-9593-19848279e71f`, schedule `asch_5d9999101c86d3d0578238c5e0faa8e9`, `fireTrigger=scheduled`, `fireOutcome=fired`, `fireState=completed`, occurrenceKey `schedule:2026-11-19T05:53:00Z`, modelRounds 5).
 
-The scripts meta count grew from 183 to **184** because main added one case to `hosted-process-ci.test.js` (95 → 96); the changed file is still 88. Core is 35/35 and core `tsc --build` is clean at this head.
+A sixth merge (`114ebcc1a1`) then brought in `c5247e9727` (#17733), which touches only web-shell client files and docs — no cli, core, Java or scripts — so the harness, jar and arm evidence above carry over unchanged; the fast suites and core `tsc --build` were re-run at that head and are green (core 35/35, scripts meta 184/184). The scripts meta count grew from 183 to **184** because main added one case to `hosted-process-ci.test.js` (95 → 96); the changed file is still 88. Core is 35/35 and core `tsc --build` is clean at this head.
 
 ## Open questions
 

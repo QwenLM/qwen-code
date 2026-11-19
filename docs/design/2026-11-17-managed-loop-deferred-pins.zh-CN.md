@@ -243,7 +243,7 @@ core 邻近面是整面跑而非抽样：`src/managed-runtime` 加 `src/skills/b
 
 第五次合入 main（合并提交 `50a39ddbc8`，以 merge base 判定与本 PR 文件零重叠），改了 217 个 Java/cli/core 文件，故整栈重建而非复用：全量构建 rc=0 且 core 与 cli 的 dist 断言已刷新，jar 重建，`ManagedLoopSkillTest` **19/19**，bundle 重建并断言已刷新，重建 jar 内四个 sidecar 与已提交契约逐字节相等。臂：`--loop-skill` success（session `4b05a9ad-2f7a-4323-9154-6e63895b5caf`、modelRounds 6、cron create/list/delete 均见证）；`--loop-fire` success（session `229ac023-e0fe-4b59-9593-19848279e71f`、schedule `asch_5d9999101c86d3d0578238c5e0faa8e9`、fireTrigger=scheduled、fireOutcome=fired、fireState=completed、occurrenceKey `schedule:2026-11-19T05:53:00Z`、modelRounds 5）。
 
-scripts 元计数从 183 增至 **184**，因为 main 给 `hosted-process-ci.test.js` 新增了一条用例（95 → 96）；改动文件仍是 88。本 head 上 core 35/35、core `tsc --build` 净。
+第六次合并（`114ebcc1a1`）随后带入 `c5247e9727`（#17733），它只碰 web-shell 客户端文件与 docs——未碰 cli、core、Java 或 scripts——故上面的 harness、jar 与臂证据原样承接；在该 head 复跑了快速套件与 core `tsc --build`，均绿（core 35/35、scripts 元 184/184）。 scripts 元计数从 183 增至 **184**，因为 main 给 `hosted-process-ci.test.js` 新增了一条用例（95 → 96）；改动文件仍是 88。本 head 上 core 35/35、core `tsc --build` 净。
 
 ## 开放问题
 
