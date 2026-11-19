@@ -38,9 +38,18 @@ The current source, rather than an earlier review intermediate, establishes this
 - A non-regular path does not acquire a temporary read-only tail-probe reader,
   which could consume external payload. The implementation opens the real `a`
   writer, validates the opened handle's type, and appends through that writer.
-- The async path performs the real append, calls `sync()`, and closes the writer;
-  the sync path uses `flush: true` and closes its append descriptor. Append,
-  synchronization, and close failures are not converted into success.
+- The lifecycle depends on how the path was inspected. An existing readable
+  regular file uses a tail probe that is closed after inspection; the real
+  append then uses the pathname with `flush: true`. Its `openAppender` is
+  `undefined`, so the optional `openAppender?.sync()` and
+  `openAppender?.close()` calls do not execute. The allowlisted tail-read
+  fallbacks likewise append by pathname and do not acquire a writer.
+- Only an append handle actually opened for `ENOENT` or a non-regular path,
+  and validated by `FileHandle.stat`/`fstat`, stays open for the real append.
+  Async then explicitly calls `sync()` and closes that handle; sync appends
+  through its validated descriptor with `flush: true` and closes that
+  descriptor. Append, synchronization, and close failures are not converted
+  into success.
 - Debug warning delivery is reported only by the actual debug `fs.appendFile`
   outcome, not by a prerequisite directory operation. A throwing delivery
   observer is handled separately and is not a filesystem write failure.
@@ -52,11 +61,15 @@ This is not a claim of universal behavior across platforms or special files, gen
 The recorded passing gates were exactly:
 
 ```bash
-cd packages/core && npx vitest run src/utils/jsonl-utils.test.ts src/utils/debugLogger.test.ts
+(cd packages/core && npx vitest run src/utils/jsonl-utils.test.ts src/utils/debugLogger.test.ts)
 npm run build
 npm run typecheck
 npm run bundle
 ```
+
+The subshell keeps the focused Vitest invocation inside `packages/core` while
+leaving the repository root as the working directory for the three root-level
+commands.
 
 - Focused result: **150/150 tests**, comprising **107** in `jsonl-utils.test.ts`
   and **43** in `debugLogger.test.ts`.
@@ -101,8 +114,11 @@ Vitest RPC timeout. Its failures were attributed rather than hidden:
 - **42** came from the host-global pre-push hook rejecting temporary `/tmp`
   remotes.
 - **2** were host-load latency failures.
-- The remaining four suites were rerun on an independently installed parent-commit
-  tree and reproduced the same **21 failed / 255 passed**.
+- The remaining four **core** suites were rerun on an independently installed
+  tree at the earlier PR head/A/B control
+  `4b2dc8a350fa7057a56c4512e0dc038802f2fce2`. They reproduced the same
+  **21 failed / 255 passed**. This specified control is not the documentation
+  working tree's direct parent (`HEAD^`).
 
 No test or CI check was weakened or disabled to obtain a green result. The broad
 run therefore remains attribution evidence, not a whole-repository pass claim.
@@ -120,9 +136,13 @@ run therefore remains attribution evidence, not a whole-repository pass claim.
   for `sync`/`close` lifecycle, stale completion, FIFO targets, and failed append
   combined with a throwing observer. It also tracks native Windows and
   current-head macOS validation.
-- `R3-1` is not declared fixed. In particular, the attempt counter must not simply
+- The two `R3-1` entries are distinct. After one failed delivery, sink recovery
+  was verified through a real debug append at the same path to deliver exactly
+  one warning. After three failed deliveries exhaust the lifetime cap, later
+  sink recovery leaves subsequent warnings suppressed by that cap. Budget
+  reset/cooldown is
+  deferred to #17852, not claimed as fixed; the attempt counter must not simply
   be cleared after the cap without a valid cooldown and failure-budget design.
-  These topics can proceed independently.
 
 This ledger records a documentation relationship only; it makes no claim to close
 the broader original #17747 work.

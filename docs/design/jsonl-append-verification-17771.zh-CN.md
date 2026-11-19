@@ -38,8 +38,15 @@ packages/core/src/utils/debugLogger.test.ts
   错误（包括 `EIO` 和非读取权限拒绝）直接传播，不执行该回退追加。
 - non-regular 路径不会获得临时的只读 tail-probe reader，以免消耗外部 payload。
   实现打开真正的 `a` writer，检查已打开 handle 的类型，并通过该 writer 追加。
-- async 路径执行真正的 append，调用 `sync()` 并关闭 writer；sync 路径使用
-  `flush: true` 并关闭 append descriptor。append、同步和关闭失败不会被转成成功。
+- 生命周期取决于路径的检查方式。已存在且可读取的 regular file 使用 tail probe，
+  检查后关闭探测句柄；真正的 append 再通过 pathname 并使用 `flush: true` 执行。
+  此时 `openAppender` 为 `undefined`，可选的 `openAppender?.sync()` 与
+  `openAppender?.close()` 不会执行。允许列表中的 tail-read fallback 同样通过
+  pathname 追加，不获取 writer。
+- 只有因 `ENOENT` 或 non-regular 路径而实际打开、并经 `FileHandle.stat`/`fstat`
+  校验的 append handle 才保持打开，供真正的 append 使用。随后 async 显式调用
+  `sync()` 并关闭该 handle；sync 通过已校验的 descriptor 以 `flush: true` 追加，
+  再关闭该 descriptor。append、同步和关闭失败不会被转成成功。
 - debug 告警的交付只由真实的 debug `fs.appendFile` 结果报告，不由前置目录操作
   决定。抛错的 delivery observer 被单独处理，不等同于文件系统写入失败。
 
@@ -51,11 +58,14 @@ packages/core/src/utils/debugLogger.test.ts
 已记录为通过的 gate 精确如下：
 
 ```bash
-cd packages/core && npx vitest run src/utils/jsonl-utils.test.ts src/utils/debugLogger.test.ts
+(cd packages/core && npx vitest run src/utils/jsonl-utils.test.ts src/utils/debugLogger.test.ts)
 npm run build
 npm run typecheck
 npm run bundle
 ```
+
+子 shell 仅在 `packages/core` 内运行聚焦 Vitest，随后三条根级命令仍在仓库根目录
+执行。
 
 - 聚焦结果：**150/150 tests**，其中 `jsonl-utils.test.ts` 为 **107** 项，
   `debugLogger.test.ts` 为 **43** 项。
@@ -96,7 +106,10 @@ timeout。对这些失败进行了归因，没有将其隐藏：
 
 - **42** 个来自宿主全局 pre-push hook 拒绝临时 `/tmp` remote。
 - **2** 个是宿主负载导致的时延失败。
-- 余下四个套件在独立安装的父提交树上重跑，复现了相同的 **21 failed / 255 passed**。
+- 余下四个 **core** 套件在独立安装的树上重跑，该树使用先前 PR head/A/B
+  control 的完整基线 `4b2dc8a350fa7057a56c4512e0dc038802f2fce2`，复现了相同的
+  **21 failed / 255 passed**。这里是指定对照基线，不是本文档工作树的直接父提交
+  （`HEAD^`）。
 
 没有为了得到绿色结果而弱化或禁用测试、CI 检查。因此，大范围运行仍只是归因证据，
 不是全仓通过的声明。
@@ -111,8 +124,10 @@ timeout。对这些失败进行了归因，没有将其隐藏：
   错误文件上下文，以及精确 `sync`/`close` 生命周期、stale completion、FIFO 目标和
   失败 append 叠加 throwing observer 的测试见证；也跟踪 Windows 与 current-head
   macOS 原生验证。
-- `R3-1` 没有宣告 fixed。尤其不能在缺少有效 cooldown 与 failure-budget 设计时，
-  简单地在达到上限后清零 attempt counter。这些主题可以独立推进。
+- 两个 `R3-1` 条目并不相同。一次投递失败后，已通过同一路径的真实 debug append
+  验证 sink 恢复后能投递一次告警。三次失败投递耗尽终身上限后，即使 sink 随后恢复，
+  后续告警仍被终身上限抑制。预算重置/cooldown 由 #17852 延期跟踪，并未宣称修复；尤其不能在
+  缺少有效 cooldown 与 failure-budget 设计时，简单地在达到上限后清零 attempt counter。
 
 本文只记录文档关系，不声称关闭范围更大的原始 #17747 工作。
 
