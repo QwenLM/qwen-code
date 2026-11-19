@@ -100,7 +100,9 @@ Reuse the existing trailing busy marker instead of adding a new indicator:
   rather than the click: it names whichever rule blocks the row now, goes away
   once the row is deletable again, and stays quiet while a delete is running or
   a live error or a delete outcome holds the slot — the dialog renders those nowhere
-  else, so a refusal must not take the slot from them.
+  else, so a refusal must not take the slot from them. The load error and the
+  delete outcome keep separate slots: sharing one let a recovering list clear
+  a failure the user had not been told about yet.
 - Three staleness holes close with it. Selection mode keeps its own copy of
   each ticked session, so its refresh contract now carries the background flag
   too — otherwise bulk Archive would judge a session by the value it had when

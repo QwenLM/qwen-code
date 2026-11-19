@@ -72,7 +72,10 @@ export function DeleteSessionDialog({
     setSelectedIdx(-1);
     setSelectedIds(new Set());
   });
+  // One owner per slot: `message` mirrors the load error, `outcome` holds what
+  // a delete reported. Sharing them let error recovery wipe a delete failure.
   const [message, setMessage] = useState<string | null>(null);
+  const [outcome, setOutcome] = useState<string | null>(null);
   // An id, not rendered text and not a remembered reason: the refusal is about
   // a row's live state, so it has to expire with that state, and the reason has
   // to be re-read from the row instead of frozen at click time.
@@ -116,10 +119,11 @@ export function DeleteSessionDialog({
     (session: DaemonSessionSummary) => {
       if (blocksDelete(session)) {
         // The danger button is disabled in this state, so this click is the
-        // only place the user can be told why the row will not tick. It stays
-        // quiet while a delete is running and while an outcome or error holds
-        // the hint: those are the only statement of what happened, and this
-        // dialog renders them nowhere else.
+        // only place the user can be told why the row will not tick. Arming is
+        // skipped while a delete runs or a load error holds the hint, so the
+        // refusal cannot resurface once they clear; a delete outcome outranks
+        // it in the hint and is only cleared by the next confirm, which drops
+        // the refusal too.
         if (!deleting && !message) setRefusalId(session.sessionId);
         return;
       }
@@ -205,9 +209,10 @@ export function DeleteSessionDialog({
 
   const handleDelete = useCallback(() => {
     if (deleting) return;
-    // Confirming supersedes the refusal: the hint now belongs to this delete's
-    // progress and outcome, which must not be shadowed by an older row's rule.
+    // Confirming supersedes both: the hint now belongs to this delete's
+    // progress and outcome, not an older row's rule or an earlier result.
     setRefusalId(null);
+    setOutcome(null);
     // Captured before the request: the daemon's terminal `session_closed`
     // frame clears `connection.sessionId` before the delete resolves, so this
     // is the last point where the attachment is still readable (#12619).
@@ -237,7 +242,7 @@ export function DeleteSessionDialog({
           }
 
           if (failed > 0) {
-            setMessage(
+            setOutcome(
               t('delete.allFailed', {
                 count: failed,
                 reason: res.errors[0].error,
@@ -249,7 +254,7 @@ export function DeleteSessionDialog({
           }
 
           if (succeeded === 0) {
-            setMessage(t('delete.nonRemoved'));
+            setOutcome(t('delete.nonRemoved'));
             setDeleting(false);
             setSelectedIds(new Set());
             return;
@@ -278,7 +283,7 @@ export function DeleteSessionDialog({
     deleteSession(session.sessionId)
       .then((removed) => {
         if (!removed) {
-          setMessage(t('delete.notFound'));
+          setOutcome(t('delete.notFound'));
           setDeleting(false);
           return;
         }
@@ -348,8 +353,9 @@ export function DeleteSessionDialog({
         />
         <span className={dp('picker-search-hint')}>
           {outageMessage ||
-            refusalText ||
+            outcome ||
             message ||
+            refusalText ||
             (deleting
               ? t('delete.deleting')
               : loading

@@ -622,11 +622,12 @@ describe('DeleteSessionDialog selection', () => {
   });
 
   it('shows a delete outcome ahead of an outstanding refusal', async () => {
-    deleteSessionsMock.mockResolvedValue({
-      removed: [],
-      notFound: [],
-      errors: [{ sessionId: 's1', error: 'locked' }],
-    });
+    let settle: (v: unknown) => void = () => {};
+    deleteSessionsMock.mockReturnValue(
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    );
     sessions = [
       {
         ...initialSessions[0],
@@ -644,9 +645,41 @@ describe('DeleteSessionDialog selection', () => {
     await act(async () => {
       dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
+    // Confirming supersedes the refusal for the whole request, not just for
+    // the outcome at the end of it.
+    expect(hint()).toBe('Deleting...');
 
+    await act(async () => {
+      settle({
+        removed: [],
+        notFound: [],
+        errors: [{ sessionId: 's1', error: 'locked' }],
+      });
+    });
     expect(hint()).toContain('Failed to delete 1 session(s): locked');
     expect(hint()).not.toContain('background work');
+  });
+
+  it('does not arm a refusal while an error holds the hint', () => {
+    // Arming is refused, not just out-ranked: once the error clears, a click
+    // from that earlier state must not resurface as a refusal.
+    scopedSessionsError = new Error('load boom');
+    sessions = [
+      {
+        ...initialSessions[0],
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      },
+      initialSessions[1],
+      initialSessions[2],
+    ];
+    mount();
+    clickRow(0);
+    expect(hint()).toContain('load boom');
+
+    scopedSessionsError = undefined;
+    rerender();
+    expect(hint()).toBe('');
   });
 
   it('keeps a refusal armed mid-delete from hiding that delete outcome', async () => {
@@ -686,6 +719,59 @@ describe('DeleteSessionDialog selection', () => {
     });
     expect(hint()).toContain('Failed to delete 1 session(s): locked');
     expect(hint()).not.toContain('background work');
+  });
+
+  it('lets a second delete report progress instead of the first outcome', async () => {
+    deleteSessionsMock.mockResolvedValueOnce({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId: 's1', error: 'locked' }],
+    });
+    let settle: (v: unknown) => void = () => {};
+    deleteSessionsMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    );
+    sessions = initialSessions.slice();
+    mount();
+    clickRow(1);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+
+    clickRow(2);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(hint()).toBe('Deleting...');
+    await act(async () => {
+      settle({ removed: ['me'], notFound: [], errors: [] });
+    });
+  });
+
+  it('keeps a delete outcome when a load error present at confirm time clears', async () => {
+    // The outcome and the load error used to share one slot, so the mirror
+    // wiped the failure on the next successful poll.
+    scopedSessionsError = new Error('load boom');
+    deleteSessionsMock.mockResolvedValue({
+      removed: [],
+      notFound: [],
+      errors: [{ sessionId: 's1', error: 'locked' }],
+    });
+    sessions = initialSessions.slice();
+    mount();
+    clickRow(1);
+    await act(async () => {
+      dangerButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+
+    scopedSessionsError = undefined;
+    rerender();
+    expect(hint()).toContain('Failed to delete 1 session(s): locked');
+    expect(rows().length).toBe(3);
   });
 
   it('keeps a delete outcome across a refresh that carries no load error', async () => {
