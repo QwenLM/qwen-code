@@ -72,6 +72,7 @@ import {
   classifyRetryError,
   isFallbackEligible,
   isRetryableUpstreamError,
+  isTerminalQuotaError,
   toRetryDiagnostics,
   type RetryDiagnostics,
   type RetryErrorClassificationContext,
@@ -6096,12 +6097,26 @@ export class LlmChat {
                   );
                   // Record the unhealthy fallback even when it emitted output
                   // before failing: the chain stops below to avoid duplicating
-                  // output, but the model must still be skipped for the rest of
-                  // the turn. Gated on fallback-eligibility so a post-output
+                  // output, but the model must still be skipped. A permanent
+                  // quota exhaustion is terminal (skipped for the rest of the
+                  // session, surviving resetTurn); a transient capacity error
+                  // is sticky_retry (skipped this turn, re-probed next turn).
+                  // Terminal wins: a reset-time quota that classifies retryable
+                  // must not be downgraded to a per-turn re-probe. The sticky
+                  // arm stays gated on fallback-eligibility so a post-output
                   // auth/client error is not recorded as turn-unavailable.
-                  if (availability && canTryNextFallback) {
-                    availability.markRetryOncePerTurn(fallbackRouteKey);
-                    availability.consumeStickyAttempt(fallbackRouteKey);
+                  if (availability) {
+                    if (
+                      isTerminalQuotaError(
+                        fallbackError,
+                        fallbackClassification,
+                      )
+                    ) {
+                      availability.markTerminal(fallbackRouteKey, 'quota');
+                    } else if (canTryNextFallback) {
+                      availability.markRetryOncePerTurn(fallbackRouteKey);
+                      availability.consumeStickyAttempt(fallbackRouteKey);
+                    }
                   }
 
                   if (currentFallbackYieldedAnyChunk) {

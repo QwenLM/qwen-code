@@ -87,6 +87,6 @@ main 的模型 fallback（`core/llm-chat.ts`「Model fallback chain」）是**�
 ## 范围外（follow-up）
 
 - 在链入口跳过不健康的 **primary**（本移植只跳过 fallback；primary 仍每请求被尝试）。
-- terminal/quota 标记与 `modelPolicy` 动作映射（prompt vs silent）。`markHealthy` 刻意保留——尽管在 terminal 标记落地前它无可观测效果。
+- terminal/quota 标记：永久配额 fallback 标记在 [2026-11-19-model-availability-terminal-quota.zh-CN.md](./2026-11-19-model-availability-terminal-quota.zh-CN.md) 落地。`modelPolicy` 动作映射（prompt vs silent）仍范围外。`markHealthy` 是 terminal 标记落地后的恢复 API。
 - 跨会话 / 账号级健康共享。
 - 翻设置默认值。

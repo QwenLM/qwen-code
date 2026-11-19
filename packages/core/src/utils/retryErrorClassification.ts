@@ -6,7 +6,10 @@
 
 import { AuthType } from './auth-type.js';
 import { isAbortError } from './errors.js';
-import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
+import {
+  isQwenQuotaExceededError,
+  isQuotaExhaustedError,
+} from './quotaErrorDetection.js';
 import { getRateLimitErrorDetails, isRateLimitError } from './rateLimit.js';
 import { ResponsesHttpError } from './responses-http-error.js';
 
@@ -637,6 +640,31 @@ export function isFallbackEligible(
     FALLBACK_ELIGIBLE_STATUS_CODES.has(classification.statusCode) &&
     classification.diagnosis !== 'fail-fast' &&
     classification.diagnosis !== 'unknown'
+  );
+}
+
+/**
+ * Whether a failed request signals a permanent quota exhaustion that cannot
+ * succeed until the quota resets, so the model should be skipped for the rest
+ * of the session rather than re-probed each turn.
+ *
+ * The two fail-fast quota reasons and the `insufficient_quota` permanent
+ * provider code come off the vetted classification; the reset-time signal
+ * ("…quota…exhausted…will reset at…") is message-based and must be caught
+ * independent of classification, whether the error arrives raw or as the
+ * formatted mid-stream fast-fail Error. Non-quota permanent errors (moderation,
+ * auth, other billing) and transient capacity do not match.
+ */
+export function isTerminalQuotaError(
+  error: unknown,
+  classification: RetryErrorClassification,
+): boolean {
+  return (
+    classification.reason === 'qwen-oauth-free-tier-quota' ||
+    classification.reason === 'allocated-quota-exceeded' ||
+    (classification.reason === 'permanent-provider-code' &&
+      /insufficient[_-]?quota/i.test(classification.providerCode ?? '')) ||
+    isQuotaExhaustedError(error)
   );
 }
 

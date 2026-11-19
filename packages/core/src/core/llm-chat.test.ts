@@ -9367,6 +9367,191 @@ describe('LlmChat', async () => {
       }
     });
 
+    it('real HTTP: a quota-exhausted fallback stays skipped across a new turn (terminal)', async () => {
+      // Real-scenario witness for terminal quota marking: a real local
+      // OpenAI-compatible server answers transient 429 for the primary, a
+      // permanent reset-time quota 429 for fallback-a, and streams a completion
+      // for fallback-b. Unlike the sticky case above, the quota-exhausted
+      // fallback-a must stay skipped even after a fresh ledger turn key
+      // (resetTurn), because terminal health survives the turn boundary.
+      const { preloadRuntimeFetchModule } = await import(
+        '../utils/runtimeFetchOptions.js'
+      );
+      await preloadRuntimeFetchModule();
+      const requests: string[] = [];
+      const server: Server = createServer((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', () => {
+          const model = (
+            JSON.parse(Buffer.concat(chunks).toString()) as { model: string }
+          ).model;
+          requests.push(model);
+          if (model === 'fallback-b') {
+            res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+            res.write(
+              `data: ${JSON.stringify({
+                id: 'chunk-1',
+                object: 'chat.completion.chunk',
+                model,
+                choices: [
+                  {
+                    index: 0,
+                    delta: { role: 'assistant', content: 'real-ok' },
+                    finish_reason: null,
+                  },
+                ],
+              })}\n\n`,
+            );
+            res.write(
+              `data: ${JSON.stringify({
+                id: 'chunk-1',
+                object: 'chat.completion.chunk',
+                model,
+                choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+              })}\n\n`,
+            );
+            res.write('data: [DONE]\n\n');
+            res.end();
+            return;
+          }
+          res.writeHead(429, { 'Content-Type': 'application/json' });
+          if (model === 'fallback-a') {
+            res.end(
+              JSON.stringify({
+                error: {
+                  message:
+                    'Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC.',
+                  code: '429',
+                },
+              }),
+            );
+            return;
+          }
+          res.end(
+            JSON.stringify({
+              error: { message: 'Throttling: TPM(1/1)', code: '429' },
+            }),
+          );
+        });
+      });
+      await new Promise<void>((resolve) => {
+        server.listen(0, '127.0.0.1', resolve);
+      });
+      const { port } = server.address() as AddressInfo;
+      const baseUrl = `http://127.0.0.1:${port}/v1`;
+      const generatorCliConfig = {
+        getCliVersion: () => '0.0.0-test',
+        getProxy: () => undefined,
+        getSessionId: () => 'test-session-id',
+      } as unknown as Config;
+      const realGenerator = (model: string): OpenAIContentGenerator => {
+        const contentGeneratorConfig: ContentGeneratorConfig = {
+          model,
+          apiKey: 'test-key',
+          baseUrl,
+          authType: AuthType.USE_OPENAI,
+          maxRetries: 0,
+        };
+        return new OpenAIContentGenerator(
+          contentGeneratorConfig,
+          generatorCliConfig,
+          new DefaultOpenAICompatibleProvider(
+            contentGeneratorConfig,
+            generatorCliConfig,
+          ),
+        );
+      };
+      try {
+        const service = new ModelAvailabilityService();
+        vi.mocked(
+          mockConfig.isModelAvailabilityTrackingEnabled,
+        ).mockReturnValue(true);
+        vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+          service,
+        );
+        vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
+          (model?: string) => (model ? `${model}@real` : 'gemini-pro@test0001'),
+        );
+        vi.mocked(mockConfig.getContentGenerator).mockReturnValue(
+          realGenerator('test-model'),
+        );
+        mockGeneratorConfig({
+          model: 'test-model',
+          authType: AuthType.USE_OPENAI,
+          apiKey: 'test-key',
+          baseUrl,
+          maxRetries: 0,
+        });
+        vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+          'fallback-a',
+          'fallback-b',
+        ]);
+        mockResolver(
+          vi.fn().mockImplementation(async (modelId: string) => ({
+            contentGenerator: realGenerator(modelId),
+            contentGeneratorConfig: {
+              model: modelId,
+              authType: AuthType.USE_OPENAI,
+              apiKey: 'test-key',
+              baseUrl,
+              maxRetries: 0,
+            },
+            retryAuthType: AuthType.USE_OPENAI,
+            model: modelId,
+          })),
+        );
+
+        // Request 1: primary 429 -> fallback-a quota-exhausted (terminal) -> b.
+        const events1 = await sendSessionCollect(
+          'test',
+          'real-http-terminal-turn',
+        );
+        expect(hasChunkText(events1, 'real-ok')).toBe(true);
+        expect(requests).toContain('fallback-a');
+        expect(service.snapshot('fallback-a@real')).toEqual({
+          available: false,
+          reason: 'quota',
+        });
+
+        // Request 2, same turn: the ledger skips the quota-exhausted fallback-a.
+        requests.length = 0;
+        const events2 = await sendSessionCollect(
+          'test',
+          'real-http-terminal-turn',
+        );
+        expect(hasChunkText(events2, 'real-ok')).toBe(true);
+        expect(requests).toContain('test-model');
+        expect(requests).toContain('fallback-b');
+        expect(requests).not.toContain('fallback-a');
+
+        // Request 3, a fresh ledger turn key (resetTurn): terminal survives the
+        // turn boundary, so fallback-a is STILL skipped over the real socket —
+        // the discrimination from the sticky case, which re-probes here.
+        requests.length = 0;
+        const events3 = await collect(
+          await chat.sendMessageStream(
+            'test-model',
+            { message: 'test' },
+            'real-http-terminal-turn',
+            undefined,
+            {
+              isSessionTurn: true,
+              ledgerTurnKey: 'real-http-terminal-turn/goal/goal-runtime:g1',
+            },
+          ),
+        );
+        expect(hasChunkText(events3, 'real-ok')).toBe(true);
+        expect(requests).toContain('test-model');
+        expect(requests).toContain('fallback-b');
+        expect(requests).not.toContain('fallback-a');
+      } finally {
+        await new Promise<void>((resolve, reject) => {
+          server.close((err) => (err ? reject(err) : resolve()));
+        });
+      }
+    });
+
     it('skips by the resolved model id when resolution rewrites the entry', async () => {
       const service = new ModelAvailabilityService();
       vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
@@ -9508,6 +9693,204 @@ describe('LlmChat', async () => {
       expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
       expect(fallbackA).toHaveBeenCalledTimes(1);
       expect(fallbackB).toHaveBeenCalledTimes(2);
+    });
+
+    it('marks a reset-time quota fallback terminal and skips it for the rest of the session', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      // A reset-time quota error carrying HTTP 429 classifies retryable
+      // (rate-limit), so it is fallback-eligible; terminal must still win over
+      // sticky_retry (the terminal-first else-if).
+      const quotaError = Object.assign(
+        new StreamContentError(
+          '{"error":{"code":"429","message":"Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC."}}',
+        ),
+        { status: 429 },
+      );
+      streamMock().mockRejectedValue(tpmCapacityError());
+      fallbackA.mockRejectedValue(quotaError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: primary 429 -> fallback-a quota-exhausted (terminal) -> b.
+      const events1 = await sendSessionCollect('test', 'terminal-quota-turn');
+      expect(hasChunkText(events1, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(service.snapshot('fallback-a@test0001')).toEqual({
+        available: false,
+        reason: 'quota',
+      });
+
+      // Request 2, same turn: terminal fallback-a is skipped.
+      const events2 = await sendSessionCollect('test', 'terminal-quota-turn');
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(2);
+
+      // Request 3, a fresh turn (resetTurn): terminal survives the turn
+      // boundary, so fallback-a is STILL skipped, unlike a sticky mark.
+      const events3 = await sendSessionCollect(
+        'test',
+        'terminal-quota-new-turn',
+      );
+      expect(hasChunkText(events3, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(3);
+      expect(service.snapshot('fallback-a@test0001').available).toBe(false);
+    });
+
+    it('marks a fail-fast quota fallback terminal even though the chain stops', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      // A statusless insufficient_quota body classifies permanent-provider-code
+      // (fail-fast): not fallback-eligible, so the chain stops after A and B is
+      // never tried this request. A must still be recorded terminal.
+      const quotaError = Object.assign(new Error('insufficient quota'), {
+        code: 'insufficient_quota',
+      });
+      streamMock().mockRejectedValue(tpmCapacityError());
+      fallbackA.mockRejectedValue(quotaError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: primary 429 -> fallback-a fail-fast quota -> chain stops.
+      await expect(
+        sendSessionCollect('test', 'terminal-failfast-turn'),
+      ).rejects.toBe(quotaError);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).not.toHaveBeenCalled();
+      expect(service.snapshot('fallback-a@test0001')).toEqual({
+        available: false,
+        reason: 'quota',
+      });
+
+      // Request 2, a fresh turn: terminal fallback-a is skipped at entry, so the
+      // chain reaches fallback-b directly and serves (no re-probe of A).
+      const events2 = await sendSessionCollect(
+        'test',
+        'terminal-failfast-new-turn',
+      );
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(1);
+    });
+
+    it('still re-probes a transient-capacity fallback next turn (sticky unchanged)', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: fallback-a transient capacity -> sticky_retry (consumed).
+      await sendSessionCollect('test', 'sticky-quota-turn');
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(service.snapshot('fallback-a@test0001')).toEqual({
+        available: false,
+        reason: 'retry_once_per_turn',
+      });
+
+      // Request 2, same turn: skipped.
+      await sendSessionCollect('test', 'sticky-quota-turn');
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // Request 3, a fresh turn: sticky consumed reset -> re-probed (NOT
+      // terminal). This pins that terminal marking did not widen to capacity.
+      await sendSessionCollect('test', 'sticky-quota-new-turn');
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not mark terminal quota when the tracking gate is off', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        false,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+      const markTerminalSpy = vi.spyOn(service, 'markTerminal');
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const quotaError = Object.assign(
+        new StreamContentError(
+          '{"error":{"code":"429","message":"Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC."}}',
+        ),
+        { status: 429 },
+      );
+      streamMock().mockRejectedValue(tpmCapacityError());
+      fallbackA.mockRejectedValue(quotaError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Gate off: fallback still runs, but the ledger is never bound, so no
+      // terminal mark is written and the next turn re-probes fallback-a.
+      const events1 = await sendSessionCollect('test', 'gate-off-quota-turn');
+      expect(hasChunkText(events1, 'fallback-b ok')).toBe(true);
+      expect(markTerminalSpy).not.toHaveBeenCalled();
+      expect(service.snapshot('fallback-a@test0001').available).toBe(true);
+
+      await sendSessionCollect('test', 'gate-off-quota-new-turn');
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+      expect(markTerminalSpy).not.toHaveBeenCalled();
     });
 
     it('does not try the next fallback after a fallback emits output', async () => {

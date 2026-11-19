@@ -12,8 +12,10 @@ import {
   classifyRetryError,
   isFallbackEligible,
   isRetryableUpstreamError,
+  isTerminalQuotaError,
   RETRY_DIAGNOSTIC_REASONS,
   toRetryDiagnostics,
+  type RetryErrorClassification,
   type RetryErrorClassificationContext,
   type RetryErrorDiagnosis,
 } from './retryErrorClassification.js';
@@ -1110,5 +1112,127 @@ describe('toRetryDiagnostics', () => {
         statusCode: 400,
       }).reason,
     ).toBe('empty-body-4xx');
+  });
+});
+
+describe('isTerminalQuotaError', () => {
+  const cls = (
+    reason: string,
+    providerCode?: string,
+    diagnosis: RetryErrorDiagnosis = 'fail-fast',
+  ): RetryErrorClassification => ({
+    kind: 'http',
+    diagnosis,
+    reason,
+    ...(providerCode !== undefined ? { providerCode } : {}),
+  });
+
+  const resetTimeQuotaMessage =
+    '429 Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC.';
+
+  it('matches the qwen-oauth free-tier quota reason', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error('free allocated quota exceeded'),
+        cls('qwen-oauth-free-tier-quota'),
+      ),
+    ).toBe(true);
+  });
+
+  it('matches the allocated-quota-exceeded reason', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error('Throttling.AllocationQuota'),
+        cls('allocated-quota-exceeded'),
+      ),
+    ).toBe(true);
+  });
+
+  it('matches a permanent insufficient_quota provider code', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error('insufficient quota'),
+        cls('permanent-provider-code', 'insufficient_quota'),
+      ),
+    ).toBe(true);
+  });
+
+  it('matches insufficient_quota regardless of case and separator', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error('insufficient quota'),
+        cls('permanent-provider-code', 'Insufficient-Quota'),
+      ),
+    ).toBe(true);
+  });
+
+  it('matches a reset-time quota message even when classified retryable', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error(resetTimeQuotaMessage),
+        cls('rate-limit', undefined, 'retryable'),
+      ),
+    ).toBe(true);
+  });
+
+  it('matches the formatted mid-stream fast-fail Error', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error(
+          'Quota exhausted: Your token-plan 1-week quota has been exhausted. ' +
+            'The quota will reset at 07-27 09:25:00 UTC.\n\nPlease retry after ' +
+            'the reset time, or switch to another API key / auth method.',
+        ),
+        cls('unclassified', undefined, 'unknown'),
+      ),
+    ).toBe(true);
+  });
+
+  it('does not match a non-quota permanent provider code (moderation)', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error('data_inspection_failed: content moderation'),
+        cls('permanent-provider-code', 'data_inspection_failed'),
+      ),
+    ).toBe(false);
+  });
+
+  it('does not match an auth error', () => {
+    expect(
+      isTerminalQuotaError(new Error('invalid api key'), cls('auth-error')),
+    ).toBe(false);
+  });
+
+  it('does not match transient rate-limiting without a quota signal', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error('Throttling: TPM(1/1)'),
+        cls('rate-limit', undefined, 'retryable'),
+      ),
+    ).toBe(false);
+  });
+
+  it('does not match capacity overload (529)', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error('overloaded'),
+        cls('capacity-overload', undefined, 'retryable'),
+      ),
+    ).toBe(false);
+  });
+
+  it('does not match a server error (503)', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error('service unavailable'),
+        cls('server-error', undefined, 'retryable'),
+      ),
+    ).toBe(false);
+  });
+
+  it('does not match a client error (400)', () => {
+    expect(
+      isTerminalQuotaError(new Error('bad request'), cls('client-error')),
+    ).toBe(false);
   });
 });

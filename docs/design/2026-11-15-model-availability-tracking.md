@@ -300,8 +300,9 @@ reversible; a later PR can flip the default once nightly evidence is in.
 
 - Skipping an unhealthy **primary** at the chain's entry point (this port only
   skips fallbacks; the primary is still attempted each request).
-- Terminal/quota marking and the `modelPolicy` action map (prompt vs silent).
-  `markHealthy` is kept deliberately even though it has no observable effect
-  until terminal marking lands.
+- Terminal/quota marking: permanent-quota fallback marking lands in
+  [2026-11-19-model-availability-terminal-quota.md](./2026-11-19-model-availability-terminal-quota.md).
+  The `modelPolicy` action map (prompt vs silent) remains out of scope.
+  `markHealthy` is the recovery API once terminal marking lands.
 - Cross-session / account-wide health sharing.
 - Flipping the setting default.
