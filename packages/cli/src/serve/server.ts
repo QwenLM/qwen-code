@@ -3491,6 +3491,7 @@ export function createServeApp(
       persistSetting: async (...args) => {
         await persistSetting(...args);
       },
+      persistSettings: deps.persistSettings,
       invalidateServeFeaturesCache,
     });
     // Experimental paired engines put managed sessions on a second ACP child
