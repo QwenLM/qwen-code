@@ -4784,9 +4784,13 @@ export function App({
   const workspaceContextActive = effectiveSessionContext?.kind === 'workspace';
   // The composer picker chooses the target of the next session, so a
   // projectless draft keeps it enabled: that is where "no workspace" is
-  // chosen. An attached projectless session hides it again.
+  // chosen. An attached projectless session hides it again. A live session
+  // keeps it too: choosing another workspace there starts the next session
+  // without leaving the one being watched.
   const composerWorkspaceSelectEnabled =
-    workspaceContextActive || connection.sessionId === undefined;
+    workspaceContextActive ||
+    connection.sessionId === undefined ||
+    effectiveSessionContext?.kind === 'live';
   const effectiveStandaloneSession =
     effectiveSessionContext?.kind === 'standalone'
       ? connection.standaloneSession

@@ -25489,6 +25489,40 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('offers the workspace picker in a live session', async () => {
+    mockConnection.sessionId = 'session-1';
+    mockConnection.sessionContext = { kind: 'live' };
+    mockWorkspace.capabilities = {
+      features: [],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        { id: 'other', cwd: '/workspace-other', primary: false, trusted: true },
+      ],
+    };
+    renderApp();
+    await flush();
+
+    expect(
+      testState.latestChatEditorProps?.workspaces?.map((entry) => entry.cwd),
+    ).toEqual(['/workspace', '/workspace-other']);
+  });
+
+  it('keeps the workspace picker hidden in an attached projectless session', async () => {
+    mockConnection.sessionId = 'session-1';
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockWorkspace.capabilities = {
+      features: [],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        { id: 'other', cwd: '/workspace-other', primary: false, trusted: true },
+      ],
+    };
+    renderApp();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.workspaces).toBeUndefined();
+  });
+
   it('reports a pending standalone context after the current session clears', async () => {
     mockConnection.sessionContext = { kind: 'workspace', cwd: '/tmp/project' };
     mockConnection.capabilities.features = ['standalone_sessions_v1'];
