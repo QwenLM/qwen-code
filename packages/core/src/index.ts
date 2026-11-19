@@ -511,6 +511,7 @@ export type {
 } from './services/tokenUsageService.js';
 export * from './services/worktreeSessionService.js';
 export * from './services/session-pr-service.js';
+export * from './services/session-goal-sidecar.js';
 export {
   stripTerminalControlSequences,
   stripDisplayControlChars,

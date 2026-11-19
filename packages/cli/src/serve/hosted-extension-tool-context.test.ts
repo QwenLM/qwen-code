@@ -3,9 +3,9 @@
  * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+import { extensionInstructionText } from '@qwen-code/qwen-code-core/extension/managed-skill-content.js';
 import { describe, expect, it } from 'vitest';
 import {
-  extensionInstructionText,
   extensionToolDeclaration,
   extensionToolInput,
 } from './hosted-extension-tool-context.js';

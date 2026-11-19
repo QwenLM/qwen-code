@@ -96,7 +96,7 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | 属性 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `claim-lease` | `QWEN_MANAGED_AGENT_CHANNELS_CLAIM_LEASE` | 时长 | `10m` | 渠道适配器对一条出站投递的认领在未收到回执时保持有效的时长。超时后，对账任务将该投递结果记为未知，且不会自动重发。不带单位的数字按秒计。 |
-| `enabled` | `QWEN_MANAGED_AGENT_CHANNELS_ENABLED` | 布尔 | `false` | 是否提供 `/internal/managed-channels/` 下的受信渠道适配器路由（注册、断开、入站事件、投递认领、回执与重发）。这些路由仅凭租户请求头鉴权，因此未通过 `qwen.managed-agent.internal-server.port` 配置独立的内部监听端口时，启动时拒绝。 |
+| `enabled` | `QWEN_MANAGED_AGENT_CHANNELS_ENABLED` | 布尔 | `false` | 是否提供 `/internal/managed-channels/` 下的受信渠道适配器路由（注册、断开、入站事件、投递认领、回执与重发，以及 PR-watch 绑定的创建/列表/退订与私有 PR 事件注入）。这些路由仅凭租户请求头鉴权，因此未通过 `qwen.managed-agent.internal-server.port` 配置独立的内部监听端口时，启动时拒绝。 |
 | `scan-delay` | — | 时长 | `30s` | 渠道对账任务两次运行之间的间隔；每次运行把认领时间超过 `qwen.managed-agent.channels.claim-lease` 的出站投递认领结算为未知，每次最多 50 条。接受 `30s` 这类时长；不带单位的数字按毫秒计。 |
 
 ## `qwen.managed-agent.client-files`

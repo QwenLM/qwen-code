@@ -232,10 +232,9 @@ import {
   type ComposerTaskChipsHandle,
 } from './components/ComposerTaskChips';
 import { ComposerUsageStats } from './components/ComposerUsageStats';
-import { GoalStatusStrip } from './components/GoalStatusStrip';
+import { ComposerStatusStack } from './components/ComposerStatusStack';
 import { SessionRecoveryBanner } from './components/SessionRecoveryBanner';
 import { SessionLimitBanner } from './components/SessionLimitBanner';
-import composerStatusStyles from './components/ComposerStatusStack.module.css';
 import { GoalEditDialog } from './components/dialogs/GoalEditDialog';
 import { StreamingStatus } from './components/StreamingStatus';
 import {
@@ -541,7 +540,6 @@ import {
   resolveFastModelForPicker,
 } from './utils/modelEncoding';
 import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
-import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
 import { useQueuedPrompts } from './hooks/useQueuedPrompts';
 import { useNewSessionSuggestion } from './hooks/useNewSessionSuggestion';
 import {
@@ -1522,7 +1520,21 @@ export interface WebShellProps {
    */
   onThemeResolved?: (theme: WebShellTheme) => void;
   /** UI language for the web-shell. Defaults to `?language=` or browser language. */
-  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn' | 'ru' | 'ru-ru';
+  language?:
+    | 'en'
+    | 'zh-CN'
+    | 'zh'
+    | 'zh-cn'
+    | 'zh-TW'
+    | 'zh-tw'
+    | 'zh-HK'
+    | 'zh-hk'
+    | 'zh-Hant'
+    | 'zh-hant'
+    | 'zh-MO'
+    | 'zh-mo'
+    | 'ru'
+    | 'ru-ru';
   /** Called when `/language ui` changes the web-shell UI language. */
   onLanguageChange?: (language: WebShellLanguage) => void;
   /**
@@ -2328,6 +2340,10 @@ type PersistedArtifactPanelTab =
   | Pick<
       Extract<ArtifactPanelTab, { kind: 'workflow' }>,
       'id' | 'kind' | 'title' | 'sessionId'
+    >
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'artifacts' }>,
+      'id' | 'kind' | 'title' | 'sessionId'
     >;
 
 function parsePersistedArtifactPanelTab(
@@ -2557,6 +2573,12 @@ function parsePersistedArtifactPanelTab(
         kind: 'workflow',
         sessionId: tab['sessionId'],
       } as PersistedArtifactPanelTab;
+    case 'artifacts':
+      return {
+        ...common,
+        kind: 'artifacts',
+        sessionId: tab['sessionId'],
+      } as PersistedArtifactPanelTab;
     default:
       return;
   }
@@ -2722,6 +2744,8 @@ function serializeArtifactPanelTabs(
             ]
           : [];
       case 'workflow':
+        return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
+      case 'artifacts':
         return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
       case 'change_overview':
         // Persist the identity like the neighbouring trajectory/workflow arms;
@@ -7040,6 +7064,28 @@ export function App({
       openContextUsagePanel(sessionId, actions, true),
     [openContextUsagePanel],
   );
+  const openArtifactsListPanel = useCallback(
+    (sourceSessionId: string) => {
+      rememberArtifactPanelTrigger();
+      const tab: ArtifactPanelTab = {
+        id: `artifacts:${sourceSessionId}`,
+        kind: 'artifacts',
+        title: t('environment.artifacts'),
+        sessionId: sourceSessionId,
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, rememberArtifactPanelTrigger, t],
+  );
   const openAttachmentPanel = useCallback(
     (
       file: AttachmentPreviewRequest,
@@ -8247,6 +8293,13 @@ export function App({
                       sessionAgentTraceSupported)
                     ? tab
                     : undefined;
+                case 'artifacts':
+                  // A stored tab outlives the host's opt-in, like the sibling
+                  // restore arms: a host that hides the artifacts header entry
+                  // must not get the list tab back through the browser profile.
+                  if (!artifactsHeaderItemVisible) return undefined;
+                  // Identity only; the list reads the live artifacts prop.
+                  return tab;
                 case 'change_overview':
                   // A stored tab outlives the host's opt-in, so a host that
                   // has stopped listing the item must not get the panel back
@@ -8356,6 +8409,7 @@ export function App({
       cancelled = true;
     };
   }, [
+    artifactsHeaderItemVisible,
     artifactsLoading,
     connection.sessionContext,
     connection.loadingTranscript,
@@ -23441,10 +23495,6 @@ export function App({
     sessionWorktree,
     gitStatusTarget,
   ]);
-  // Bumped when the header artifact entry opens the panel, so the panel
-  // expands its artifacts section even if the user had collapsed it (the
-  // panel hides rather than unmounts, so its local section state persists).
-  const [artifactsExpandSignal, setArtifactsExpandSignal] = useState(0);
   const handleEnvironmentPanelOpenChange = useCallback(
     (open: boolean) => {
       persistEnvironmentPanelOpen(open);
@@ -23461,20 +23511,25 @@ export function App({
   // The count and the opener are derived from one gate so an embedder never
   // receives a count it cannot act on: the built-in header additionally
   // requires both props, but the custom renderChatHeader contract does not.
+  // The entry toggles the right panel's artifacts list tab, independent of the
+  // environment panel.
+  const artifactsTabActive =
+    activeArtifactPanelTabId === `artifacts:${connection.sessionId}`;
   const artifactsHeaderEntry =
-    artifactsHeaderItemVisible &&
-    mainView === 'chat' &&
-    environmentPanelItems.includes('artifacts') &&
-    connection.sessionId
+    artifactsHeaderItemVisible && mainView === 'chat' && connection.sessionId
       ? {
           // The live list wins once present; before it lands, the click-time
           // hint from the session-list summary shows the count early. The
           // hook retires the hint when authoritative data arrives.
           artifactCount:
             artifacts.length > 0 ? artifacts.length : (artifactCountHint ?? 0),
+          artifactsTabActive,
           onOpenArtifacts: () => {
-            handleEnvironmentPanelOpenChange(true);
-            setArtifactsExpandSignal((value) => value + 1);
+            if (artifactPanelOpen) {
+              closeArtifactPanel();
+            } else {
+              openArtifactsListPanel(connection.sessionId!);
+            }
           },
         }
       : {};
@@ -23851,6 +23906,8 @@ export function App({
   const artifactPanelSharedProps = {
     onSelectTurnCallsPrompt: openTurnCalls,
     artifacts: artifactPanelArtifacts,
+    sessionArtifacts: artifacts,
+    onOpenArtifact: openArtifactPanel,
     tabs: lockedWorkspaceCwd
       ? artifactPanelTabs.filter(
           (tab) =>
@@ -26866,45 +26923,41 @@ export function App({
                         )}
                         {(queuedPrompts.length > 0 ||
                           liveGoalSnapshot?.goal) && (
-                          <div
-                            className={composerStatusStyles.root}
-                            data-testid="composer-status-stack"
-                          >
-                            <QueuedPromptDisplay
-                              prompts={queuedPrompts}
-                              t={t}
-                              canMutateMidTurn={canMutateMidTurn}
-                              canInsertMidTurn={
+                          <ComposerStatusStack
+                            queued={{
+                              prompts: queuedPrompts,
+                              t,
+                              canMutateMidTurn,
+                              canInsertMidTurn:
                                 streamingState !== 'idle' ||
-                                sessionHasActivePrompt
-                              }
-                              onDelete={removeQueuedPrompt}
-                              canSendMidTurnNow={canSendMidTurnNow}
-                              onInsert={insertQueuedPrompt}
-                              onSendNow={sendQueuedPromptNow}
-                              onEdit={editQueuedPrompt}
-                              onImagePreview={openImagePanel}
-                              onAttachmentPreview={openAttachmentPanel}
-                            />
-                            {liveGoalSnapshot?.goal && (
-                              <GoalStatusStrip
-                                snapshot={liveGoalSnapshot}
-                                busy={goalControlBusy}
-                                onEdit={() => {
-                                  setGoalEditError(null);
-                                  setGoalEditOpen(true);
-                                }}
-                                onPause={() => runGoalControl('pause')}
-                                onResume={() => runGoalControl('resume')}
-                                onClear={() => runGoalControl('clear')}
-                                onOpenGoals={
-                                  projectFeaturesAvailable
-                                    ? openGoals
-                                    : undefined
-                                }
-                              />
-                            )}
-                          </div>
+                                sessionHasActivePrompt,
+                              onDelete: removeQueuedPrompt,
+                              canSendMidTurnNow,
+                              onInsert: insertQueuedPrompt,
+                              onSendNow: sendQueuedPromptNow,
+                              onEdit: editQueuedPrompt,
+                              onImagePreview: openImagePanel,
+                              onAttachmentPreview: openAttachmentPanel,
+                            }}
+                            goal={
+                              liveGoalSnapshot?.goal
+                                ? {
+                                    snapshot: liveGoalSnapshot,
+                                    busy: goalControlBusy,
+                                    onEdit: () => {
+                                      setGoalEditError(null);
+                                      setGoalEditOpen(true);
+                                    },
+                                    onPause: () => runGoalControl('pause'),
+                                    onResume: () => runGoalControl('resume'),
+                                    onClear: () => runGoalControl('clear'),
+                                    onOpenGoals: projectFeaturesAvailable
+                                      ? openGoals
+                                      : undefined,
+                                  }
+                                : undefined
+                            }
+                          />
                         )}
                         {CustomComposerHeader && (
                           <div className={styles.composerHeader}>
@@ -27412,7 +27465,6 @@ export function App({
                 }
                 artifacts={artifacts}
                 artifactsLoading={artifactsLoading}
-                artifactsExpandSignal={artifactsExpandSignal}
                 items={environmentPanelItems}
                 onOpenGitDiff={
                   workspaceContextActive && gitDiffWorkspaceCwd

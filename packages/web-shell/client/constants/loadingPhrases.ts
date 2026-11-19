@@ -1,3 +1,5 @@
+import { normalizeLanguage } from '../i18n';
+
 export const PHRASE_CHANGE_INTERVAL_MS = 15_000;
 
 export const WITTY_LOADING_PHRASES_EN = [
@@ -79,11 +81,39 @@ export const WITTY_LOADING_PHRASES_ZH = [
   '加载的是字节，承载的是对技术的热爱...',
 ];
 
+const WITTY_LOADING_PHRASES_ZH_TW = [
+  '正在努力搬磚，請稍候...',
+  '老闆在身後，快載入啊！',
+  '頭髮掉光前，一定能載入完...',
+  '伺服器正在深呼吸，準備放大招...',
+  '正在向伺服器投餵咖啡...',
+  '正在賦能全鏈路，尋找關鍵抓手...',
+  '正在降本增效，最佳化載入路徑...',
+  '正在打破部門壁壘，沉澱方法論...',
+  '正在擁抱變化，迭代核心價值...',
+  '正在對齊顆粒度，打磨底層邏輯...',
+  '大力出奇跡，正在強行載入...',
+  '只要我不寫程式碼，程式碼就沒有 Bug...',
+  '正在把 Bug 轉化為 Feature...',
+  '只要我不尷尬，Bug 就追不上我...',
+  '正在試圖理解去年的自己寫了什麼...',
+  '正在猿力覺醒中，請耐心等待...',
+  '正在詢問產品經理：這需求是真的嗎？',
+  '正在給產品經理畫餅，請稍等...',
+  '每一行程式碼，都在努力讓世界變得更好一點點...',
+  '每一個偉大的想法，都值得這份耐心的等待...',
+  '別急，美好的事物總是需要一點時間去醞釀...',
+  '願你的程式碼永無 Bug，願你的夢想終將成真...',
+  '哪怕只有 0.1% 的進度，也是在向目標靠近...',
+  '載入的是位元組，承載的是對技術的熱愛...',
+];
+
 export function getLoadingPhrases(language?: string): string[] {
-  const resolvedLanguage =
-    language ??
-    (typeof navigator !== 'undefined' ? navigator.language.toLowerCase() : '');
-  return resolvedLanguage.toLowerCase().startsWith('zh')
+  const resolved = normalizeLanguage(
+    language ?? (typeof navigator !== 'undefined' ? navigator.language : ''),
+  );
+  if (resolved === 'zh-TW') return WITTY_LOADING_PHRASES_ZH_TW;
+  return resolved === 'zh-CN'
     ? WITTY_LOADING_PHRASES_ZH
     : WITTY_LOADING_PHRASES_EN;
 }

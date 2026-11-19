@@ -257,4 +257,21 @@ describe('settings reference schema sync', () => {
       default: true,
     });
   });
+
+  it('keeps experimental.modelAvailabilityTracking explicitly documented', () => {
+    const documented = documentedSettings().get(
+      'experimental.modelAvailabilityTracking',
+    );
+
+    expect(documented).toMatchObject({
+      type: 'boolean',
+      default: '`false`',
+    });
+    expect(
+      getSettingsSchema().experimental.properties.modelAvailabilityTracking,
+    ).toMatchObject({
+      type: 'boolean',
+      default: false,
+    });
+  });
 });
