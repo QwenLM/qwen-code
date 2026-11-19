@@ -316,6 +316,7 @@ vi.mock('./service/filesystem.js', () => ({
 vi.mock('../config/settings.js', () => ({
   getOperatorTrustSettings: vi.fn(() => ({})),
   SettingScope: {},
+  isAllowedBaseUrlsWorkspaceOnly: vi.fn(() => false),
   loadSettings: vi.fn(),
   reloadEnvironment: vi.fn(() => ({ updatedKeys: [], removedKeys: [] })),
 }));

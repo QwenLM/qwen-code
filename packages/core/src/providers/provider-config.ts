@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import { AuthType } from '../core/contentGenerator.js';
+import { normalizeOpenAiWireBaseUrl } from '../core/openaiContentGenerator/constants.js';
 import {
   resolveModelProtocol,
   tryResolveModelProtocol,
@@ -609,6 +610,23 @@ export function getDefaultBaseUrlForProtocol(
 ): string {
   if (protocol === undefined) return '';
   return DEFAULT_BASE_URLS[protocol] ?? '';
+}
+
+/**
+ * The protocol's default endpoint as the wire actually dials it. The
+ * Responses pipeline strips a trailing `/v1` from the base URL and appends
+ * `/v1/responses` itself, so for that protocol the table's bare origin is
+ * not the dialed URL. Allowlist gates judge the dialed endpoint, so they
+ * must use this, not the placeholder (issue #12805).
+ */
+export function getDialedProtocolDefaultBaseUrl(
+  protocol: AuthType | undefined,
+): string {
+  const tableValue = getDefaultBaseUrlForProtocol(protocol);
+  if (protocol === AuthType.USE_OPENAI_RESPONSES) {
+    return `${normalizeOpenAiWireBaseUrl(tableValue)}/v1/responses`;
+  }
+  return tableValue;
 }
 
 // ---------------------------------------------------------------------------

@@ -9,9 +9,113 @@ import {
   AUX_MODEL_SELECTOR_SETTING_KEYS,
   formatAuxModelSelectorForDisplay,
   formatSettingRowValue,
+  findUnregisteredAllowlistDrop,
   isAuxModelSelectorSettingKey,
   publicAuxModelSelectorValue,
 } from './aux-model-selector.js';
+
+describe('findUnregisteredAllowlistDrop (issue #12805)', () => {
+  const OFF = 'https://external-llm.example/v1';
+  const ON = 'https://corp.example/v1';
+  const models = (
+    registered: Array<{
+      id: string;
+      registryBaseUrl?: string;
+      isRuntimeModel?: boolean;
+    }>,
+  ) => ({
+    getAllConfiguredModels: () =>
+      registered.map((model) => ({
+        ...model,
+        label: model.id,
+        authType: 'openai',
+      })) as never,
+    getAllowlistDroppedModels: () => [
+      { id: 'gpt-4o', authType: 'openai' as never, baseUrl: OFF },
+    ],
+  });
+
+  it('matches only the dropped route when the selector names an endpoint', () => {
+    expect(
+      findUnregisteredAllowlistDrop(models([]), `gpt-4o\0${OFF}`),
+    ).toMatchObject({ id: 'gpt-4o' });
+    expect(
+      findUnregisteredAllowlistDrop(
+        models([]),
+        'gpt-4o\0https://other.example/v1',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('matches bare and auth-type-qualified ids, not other auth types', () => {
+    expect(findUnregisteredAllowlistDrop(models([]), 'gpt-4o')).toBeDefined();
+    expect(
+      findUnregisteredAllowlistDrop(models([]), 'openai:gpt-4o'),
+    ).toBeDefined();
+    expect(
+      findUnregisteredAllowlistDrop(models([]), 'anthropic:gpt-4o'),
+    ).toBeUndefined();
+  });
+
+  it('ignores a dropped id whose selected route is registered', () => {
+    const registered = models([{ id: 'gpt-4o', registryBaseUrl: ON }]);
+    expect(findUnregisteredAllowlistDrop(registered, 'gpt-4o')).toBeUndefined();
+    expect(
+      findUnregisteredAllowlistDrop(registered, `gpt-4o\0${ON}`),
+    ).toBeUndefined();
+    // The registered route does not cover the dropped endpoint itself.
+    expect(
+      findUnregisteredAllowlistDrop(registered, `gpt-4o\0${OFF}`),
+    ).toBeDefined();
+  });
+
+  it('does not let a runtime snapshot of a dropped id count as registered', () => {
+    // A runtime model is not a registry route: counting it would re-admit
+    // the dropped model the predicate exists to refuse.
+    expect(
+      findUnregisteredAllowlistDrop(
+        models([{ id: 'gpt-4o', isRuntimeModel: true }]),
+        'gpt-4o',
+      ),
+    ).toMatchObject({ id: 'gpt-4o' });
+  });
+
+  it('resolves the fast alias and trims around the colon like the consumers do (R3-12)', () => {
+    // Every consumer resolves the selector through resolveModelId before
+    // dialing: it trims whitespace around the colon and expands `fast` to
+    // the configured fast model. The predicate must use the same identity,
+    // or both forms slip past the gate while the runtime reaches the
+    // dropped route (issue #12805).
+    expect(
+      findUnregisteredAllowlistDrop(models([]), 'openai : gpt-4o'),
+    ).toMatchObject({ id: 'gpt-4o' });
+    expect(findUnregisteredAllowlistDrop(models([]), 'fast')).toBeUndefined();
+    expect(
+      findUnregisteredAllowlistDrop(models([]), 'fast', {
+        fastModel: 'openai:gpt-4o',
+      }),
+    ).toMatchObject({ id: 'gpt-4o' });
+    expect(
+      findUnregisteredAllowlistDrop(models([]), 'fast', {
+        fastModel: `openai:gpt-4o\0${OFF}`,
+      }),
+    ).toMatchObject({ id: 'gpt-4o' });
+    // A fast model whose selected route is registered is not a drop.
+    expect(
+      findUnregisteredAllowlistDrop(
+        models([{ id: 'gpt-4o', registryBaseUrl: ON }]),
+        'fast',
+        { fastModel: `openai:gpt-4o\0${ON}` },
+      ),
+    ).toBeUndefined();
+    // The alias expands to the fast model's endpoint when it carries one.
+    expect(
+      findUnregisteredAllowlistDrop(models([]), 'fast', {
+        fastModel: `openai:gpt-4o\0https://other.example/v1`,
+      }),
+    ).toBeUndefined();
+  });
+});
 
 describe('AUX_MODEL_SELECTOR_SETTING_KEYS', () => {
   it('covers the five aux-model selector settings', () => {

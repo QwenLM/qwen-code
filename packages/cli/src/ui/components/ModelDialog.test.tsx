@@ -457,6 +457,58 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).not.toHaveBeenCalled();
   });
 
+  it('refuses a runtime Advisor model the managed allowlist dropped (R5-3)', async () => {
+    // The registry dropped the endpoint, but a runtime snapshot of the same
+    // id is listed: selecting it must be refused, not dialed (issue #12805).
+    const setAdvisorModel = vi.fn().mockResolvedValue(undefined);
+    const { mockSettings, props, getByText } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        // The session dials the dropped model right now: its runtime
+        // snapshot is the active one the picker lists.
+        getModel: vi.fn(() => 'dropped-model'),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'dropped-model',
+        })),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'dropped-model',
+            label: 'Dropped Model',
+            authType: AuthType.USE_OPENAI,
+            isRuntimeModel: true,
+            runtimeSnapshotId: '$runtime|openai|dropped-model',
+          },
+        ]),
+        getAllowlistDroppedModels: vi.fn(() => [
+          {
+            id: 'dropped-model',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://off-list.example/v1',
+          },
+        ]),
+        setAdvisorModel,
+      },
+      { merged: {} },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+    // The dropped model's runtime row must be LISTED first: otherwise the
+    // refusal below could be the generic unknown-row branch, not the gate.
+    expect(select.items.map((item) => item.value)).toContain(
+      '$runtime|openai|dropped-model',
+    );
+
+    await act(async () => {
+      await select.onSelect('$runtime|openai|dropped-model');
+    });
+
+    expect(setAdvisorModel).not.toHaveBeenCalled();
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(getByText('✕ Selected Advisor model is unavailable.')).toBeDefined();
+  });
+
   it('does not default to Off when the configured Advisor model is unavailable', async () => {
     const setAdvisorModel = vi.fn().mockResolvedValue(undefined);
     const { mockSettings } = renderComponent(

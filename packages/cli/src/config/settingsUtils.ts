@@ -295,6 +295,10 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   // sessions across workspaces; the trust-gated channel alias is its path.
   { section: 'serve', key: 'sessionPrWatch' },
   { section: 'ui', key: 'allowedApprovalModes' },
+  // Disabling the built-in Qwen OAuth (personal Qwen login) models is an
+  // operator decision; a trusted workspace must not make it (issue #12805).
+  // The merge-time strip and the generic "ignored" warning follow from this.
+  { section: 'model', key: 'qwenOAuthBuiltinsDisabled' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;
@@ -391,6 +395,7 @@ export const WORKSPACE_RESTRICTED_SETTING_KEYS: readonly string[] =
  */
 export const WORKSPACE_NON_OVERRIDING_SETTINGS = [
   { section: 'security', key: 'allowedHttpHookUrls' },
+  { section: 'model', key: 'allowedBaseUrls' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;

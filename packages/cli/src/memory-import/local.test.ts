@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
   } as { merged: MockAuthSettings },
   currentAuthType: undefined as string | undefined,
   envAuthType: undefined as string | undefined,
+  workspaceOnly: false,
+  loadCliConfigArgs: [] as unknown[],
 }));
 vi.mock('../config/settings.js', () => ({
   loadSettings: () => ({
@@ -24,6 +26,7 @@ vi.mock('../config/settings.js', () => ({
     getProjectHooks: () => undefined,
     ...mocks.settings,
   }),
+  isAllowedBaseUrlsWorkspaceOnly: () => mocks.workspaceOnly,
 }));
 vi.mock('../config/config.js', () => ({
   loadCliConfig: mocks.loadCliConfig,
@@ -47,15 +50,20 @@ beforeEach(() => {
   };
   mocks.currentAuthType = undefined;
   mocks.envAuthType = undefined;
-  mocks.loadCliConfig.mockImplementation(async () => ({
-    isTrustedFolder: () => true,
-    isManagedMemoryAvailable: () => true,
-    getProjectRoot: () => '/project',
-    getModelsConfig: () => ({
-      getCurrentAuthType: () => mocks.currentAuthType,
-    }),
-    refreshAuth: mocks.refreshAuth,
-  }));
+  mocks.workspaceOnly = false;
+  mocks.loadCliConfigArgs = [];
+  mocks.loadCliConfig.mockImplementation(async (...args: unknown[]) => {
+    mocks.loadCliConfigArgs = args;
+    return {
+      isTrustedFolder: () => true,
+      isManagedMemoryAvailable: () => true,
+      getProjectRoot: () => '/project',
+      getModelsConfig: () => ({
+        getCurrentAuthType: () => mocks.currentAuthType,
+      }),
+      refreshAuth: mocks.refreshAuth,
+    };
+  });
 });
 
 it('refuses LSP for the import Config, which never uses it', async () => {
@@ -128,3 +136,14 @@ it('authenticates when the resolved auth type matches the enforced type', async 
   await createLocalMemoryImportService();
   expect(mocks.refreshAuth).toHaveBeenCalledWith('gemini', true);
 });
+
+it.each([true, false])(
+  'threads the workspace-only allowlist flag (%s) into loadCliConfig',
+  async (workspaceOnly) => {
+    mocks.workspaceOnly = workspaceOnly;
+    const { createLocalMemoryImportService } = await import('./local.js');
+    await createLocalMemoryImportService();
+    expect(mocks.loadCliConfigArgs).toHaveLength(13);
+    expect(mocks.loadCliConfigArgs[12]).toBe(workspaceOnly);
+  },
+);

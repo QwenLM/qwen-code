@@ -65,6 +65,7 @@ import {
   createMinimalSettings,
   getSettingsWarnings,
   getOperatorTrustSettings,
+  isAllowedBaseUrlsWorkspaceOnly,
   loadSettings,
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
@@ -763,6 +764,8 @@ export async function main() {
             : {}),
         },
         buildEnabledSkillNamesProvider(settings),
+        undefined,
+        isAllowedBaseUrlsWorkspaceOnly(settings),
       );
 
       if (!settings.merged.security?.auth?.useExternal) {
@@ -1122,6 +1125,7 @@ export async function main() {
       // Close over the live LoadedSettings: the YOLO-exit re-gate must see
       // blocks a `/hooks` reload replaced, not the startup snapshot.
       () => getProjectHooksForApproval(settings),
+      isAllowedBaseUrlsWorkspaceOnly(settings),
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');

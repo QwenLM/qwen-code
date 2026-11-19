@@ -12,6 +12,12 @@ import { commandMetadata } from './command-metadata.js';
 import type { Argv, CommandModule } from 'yargs';
 import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { isTlsVerificationDisabled } from '@qwen-code/qwen-code-core/utils/runtimeFetchOptions.js';
+import {
+  assertAllowedBaseUrlsSetting,
+  isBaseUrlAllowed,
+  scrubBaseUrlForMessage,
+} from '@qwen-code/qwen-code-core/models/modelRegistry.js';
+import { FatalConfigError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import { loadSettings } from '../config/settings.js';
 import {
   collectProviderModelsForProtocol,
@@ -76,10 +82,23 @@ export function resolveEndpoint(
     settings?: ReturnType<typeof loadSettings>['merged'];
     /** Where resolver warnings go; stderr would draw over a TUI. */
     warn?: (message: string) => void;
+    /** Skip the managed-allowlist gate (defaults to enforced, fail-closed).
+     * Recovery commands (collect, cancel, the auto-collector) opt out so a
+     * policy that stops allowing the endpoint after submit cannot strand
+     * an already-paid task (issue #12805). */
+    enforceAllowlist?: boolean;
   } = {},
 ): BatchEndpoint {
   let settings = options.settings ?? loadSettings().merged;
   const batch = settings.batch;
+  // The batch.model narrowing below replaces the whole model object; capture
+  // the managed allowlist first (same startup shape check as an interactive
+  // load), or the gate silently stops applying to the batch upload endpoint
+  // (issue #12805). Batch is OpenAI-key-only, so the Qwen OAuth builtins
+  // disable has nothing to act on here.
+  const allowedBaseUrls = assertAllowedBaseUrlsSetting(
+    settings.model?.allowedBaseUrls,
+  );
   if (batch?.model || batch?.authType || batch?.baseUrl) {
     if (!batch.model?.trim()) {
       throw new Error('Set batch.model to a modelProviders model ID.');
@@ -155,9 +174,23 @@ export function resolveEndpoint(
   for (const warning of warnings ?? []) {
     warn(warning);
   }
+  // Managed endpoint allowlist (issue #12805): judge the URL batch actually
+  // dials. Batch falls back to DashScope, not the resolver's OpenAI protocol
+  // default, so the resolver's gate would judge a different endpoint than
+  // the wire uses; the gate runs here, on the dialed endpoint, instead.
+  const dialedBaseUrl = (baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '');
+  if (
+    options.enforceAllowlist !== false &&
+    allowedBaseUrls !== undefined &&
+    !isBaseUrlAllowed(dialedBaseUrl, allowedBaseUrls)
+  ) {
+    throw new FatalConfigError(
+      `Batch endpoint '${scrubBaseUrlForMessage(dialedBaseUrl)}' is not in the managed allowlist 'model.allowedBaseUrls'. Ask the operator to add it to the allowlist, or select a batch model on an allowed endpoint.`,
+    );
+  }
   return {
     apiKey,
-    baseUrl: (baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, ''),
+    baseUrl: dialedBaseUrl,
     model,
     generationConfig,
   };
@@ -182,6 +215,7 @@ export interface BatchCliOptions {
 export async function prepareEndpoint(
   env: Record<string, string | undefined> = process.env,
   cliOptions: BatchCliOptions = {},
+  endpointOptions: { enforceAllowlist?: boolean } = {},
 ): Promise<BatchEndpoint> {
   // Same route loadCliConfig uses: --insecure surfaces as QWEN_TLS_INSECURE,
   // and either one disables verification for the global fetch used here.
@@ -200,7 +234,7 @@ export async function prepareEndpoint(
     cliOptions.proxy,
     loadSettings().merged.proxy as string | undefined,
   );
-  return resolveEndpoint(env);
+  return resolveEndpoint(env, endpointOptions);
 }
 
 /** Read the CLI-level options every subcommand handler forwards. */
@@ -240,7 +274,7 @@ const workflowDeps = (ep: BatchEndpoint): WorkflowDeps => ({
   lockWaitMs: LOCK_WAIT_MS,
 });
 
-const runWorkflowCommand: CommandModule = {
+export const runWorkflowCommand: CommandModule = {
   command: 'run <plan>',
   describe:
     'Run an agent-prepared batch plan: assemble requests, submit, record the task',
@@ -281,7 +315,7 @@ const runWorkflowCommand: CommandModule = {
     }),
 };
 
-const collectWorkflowCommand: CommandModule = {
+export const collectWorkflowCommand: CommandModule = {
   command: 'collect <task-id>',
   describe:
     'Collect a workflow task: reconcile, download, validate, and deliver results',
@@ -311,8 +345,14 @@ const collectWorkflowCommand: CommandModule = {
       ),
   handler: (argv) =>
     run(async () => {
+      // Recovery: the task was submitted (and billed) under an earlier
+      // policy; a now-off-list endpoint must not strand its results.
       await collectTask(
-        workflowDeps(await prepareEndpoint(process.env, cliOptionsOf(argv))),
+        workflowDeps(
+          await prepareEndpoint(process.env, cliOptionsOf(argv), {
+            enforceAllowlist: false,
+          }),
+        ),
         argv['task-id'] as string,
         {
           wait: argv['wait'] as boolean,
@@ -400,7 +440,7 @@ const checkWorkflowCommand: CommandModule = {
     }),
 };
 
-const cancelWorkflowCommand: CommandModule = {
+export const cancelWorkflowCommand: CommandModule = {
   command: 'cancel <task-id>',
   describe:
     "Cancel a workflow task's active batch (already-completed requests are still billed)",
@@ -412,8 +452,14 @@ const cancelWorkflowCommand: CommandModule = {
     }),
   handler: (argv) =>
     run(async () => {
+      // Recovery, like collect: reaching the running batch is what stops
+      // the rest of it from being billed.
       await cancelTask(
-        workflowDeps(await prepareEndpoint(process.env, cliOptionsOf(argv))),
+        workflowDeps(
+          await prepareEndpoint(process.env, cliOptionsOf(argv), {
+            enforceAllowlist: false,
+          }),
+        ),
         argv['task-id'] as string,
       );
     }),

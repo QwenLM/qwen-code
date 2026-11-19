@@ -26,7 +26,7 @@ import type {
   ServeWorkspaceProvidersStatus,
 } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
-import { loadSettings } from '../config/settings.js';
+import { loadSettings, readModelPolicyOptions } from '../config/settings.js';
 import { filterModelEntriesForDisplay } from '../utils/model-display-order.js';
 import type { Settings } from '../config/settings.js';
 import {
@@ -108,6 +108,12 @@ function buildWorkspaceProvidersStatus(
       initialAuthType: resolvedCliConfig.authType,
       modelProvidersConfig: settings.modelProviders,
       providerProtocolConfig: settings.providerProtocol,
+      // Managed model policy (issue #12805): the allowlist with its
+      // workspace-only exemption and the operator builtins disable.
+      ...readModelPolicyOptions(loaded),
+      // The same env snapshot the auth resolution above used, so the
+      // registry's allowlist judge sees the baseUrl layer a session sees.
+      env,
       generationConfig: resolvedCliConfig.generationConfig,
       generationConfigSources: resolvedCliConfig.sources,
     });
