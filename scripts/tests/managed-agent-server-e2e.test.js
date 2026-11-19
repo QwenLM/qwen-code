@@ -130,6 +130,20 @@ const IN_PLACE_WRITERS = new Map([
   ['Reflect', new Set(['set', 'defineProperty'])],
 ]);
 
+// Expression wrappers that leave an assignment target the same target:
+// `(blockProperties) = …` and `(blockProperties as any) = …` hid the binding
+// behind a node the direct resolver does not recognise. This is the set the
+// parser accepts on the left of an assignment, measured rather than assumed:
+// `blockProperties! = …` and `(blockProperties satisfies any) = …` parse too,
+// while `<any>blockProperties = …` is a parse error and cannot occur. All four
+// carry the wrapped expression on `.expression`.
+const TARGET_WRAPPERS = new Set([
+  SyntaxKind.ParenthesizedExpression,
+  SyntaxKind.AsExpression,
+  SyntaxKind.NonNullExpression,
+  SyntaxKind.SatisfiesExpression,
+]);
+
 // The literal text of a string or untagged template node, or undefined. One
 // extractor shared by both AST scanners below: a key, a tool name and a call id
 // all mean the same thing whether they are spelled as a string or a template,
@@ -231,6 +245,9 @@ const loopClassifierWiring = (text) => {
   // Kept separate from writtenBinding so an in-place writer's first argument
   // (a value, not a target) is never read as a pattern.
   const assignmentTarget = (node) => {
+    if (TARGET_WRAPPERS.has(node.kind)) {
+      return assignmentTarget(node.expression);
+    }
     const direct = writtenBinding(node);
     if (direct !== undefined) return direct;
     if (isSpreadElement(node)) {
@@ -325,6 +342,20 @@ const loopClassifierWiring = (text) => {
     if (
       isDeleteExpression(node) &&
       writtenBinding(node.expression) !== undefined
+    ) {
+      reassignments.push({
+        callback: fakeCallback(node),
+        text: node.getText(file),
+      });
+    }
+    // A for-of / for-in initializer is an assignment target too: the loop
+    // writes each element or key into it, so `for (blockProperties of …)`
+    // mutates the input without any assignment operator. A declaration
+    // initializer (`for (const x of …)`) resolves to no tracked binding.
+    if (
+      (node.kind === SyntaxKind.ForOfStatement ||
+        node.kind === SyntaxKind.ForInStatement) &&
+      assignmentTarget(node.initializer) !== undefined
     ) {
       reassignments.push({
         callback: fakeCallback(node),
@@ -4151,6 +4182,17 @@ describe('managed-agent-server e2e runner', () => {
       // a new one, in both pattern kinds.
       "[...blockProperties] = [{ shouldBlock: { type: 'boolean' } }];",
       "({ ...blockProperties } = { shouldBlock: { type: 'boolean' } });",
+      // A wrapper leaves the target the same target, and a for-of / for-in
+      // initializer is written by the loop without any assignment operator.
+      // The written value is schema-shaped, not `false`, so these isolate the
+      // write inventory without also constructing an inline allow.
+      "(blockProperties) = { shouldBlock: { type: 'boolean' } };",
+      "(blockProperties as any) = { shouldBlock: { type: 'boolean' } };",
+      "blockProperties! = { shouldBlock: { type: 'boolean' } };",
+      "(blockProperties satisfies any) = { shouldBlock: { type: 'boolean' } };",
+      "for (blockProperties of [{ shouldBlock: { type: 'boolean' } }]) {}",
+      "for (blockProperties in { shouldBlock: { type: 'boolean' } }) {}",
+      'for (blockProperties.shouldBlock of [false]) {}',
       "Object.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } });",
       "Reflect.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } });",
       // A receiver that resolves to a prototype function must not crash the
@@ -4249,8 +4291,9 @@ describe('managed-agent-server e2e runner', () => {
     ]);
     // Every write form is recorded: the member write, the in-place calls, the
     // delete, the alias write, every destructuring pattern (array, object
-    // property, object shorthand, and both rest forms) and the nullish
-    // assignment — none of them rebinds an identifier the direct way.
+    // property, object shorthand, and both rest forms), the nullish assignment,
+    // a parenthesized or cast target, and a for-of / for-in initializer — none
+    // of them rebinds an identifier the direct way.
     expect(scope.reassignments).toEqual([
       "blockProperties['shouldBlock'] = { type: 'boolean' }",
       "Object.assign(blockProperties, { shouldBlock: { type: 'boolean' } })",
@@ -4263,6 +4306,13 @@ describe('managed-agent-server e2e runner', () => {
       '{ blockProperties } = { blockProperties: undefined }',
       "[...blockProperties] = [{ shouldBlock: { type: 'boolean' } }]",
       "{ ...blockProperties } = { shouldBlock: { type: 'boolean' } }",
+      "(blockProperties) = { shouldBlock: { type: 'boolean' } }",
+      "(blockProperties as any) = { shouldBlock: { type: 'boolean' } }",
+      "blockProperties! = { shouldBlock: { type: 'boolean' } }",
+      "(blockProperties satisfies any) = { shouldBlock: { type: 'boolean' } }",
+      "for (blockProperties of [{ shouldBlock: { type: 'boolean' } }]) {}",
+      "for (blockProperties in { shouldBlock: { type: 'boolean' } }) {}",
+      'for (blockProperties.shouldBlock of [false]) {}',
       "Object.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } })",
       "Reflect.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } })",
       'blockAnswer ??= { shouldBlock: false }',
