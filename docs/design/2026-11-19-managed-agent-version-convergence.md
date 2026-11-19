@@ -256,9 +256,9 @@ files shape) remains a separate architecture decision, out of scope.
 ## Non-goals
 
 - Dropping the `storage_version` column entirely. That requires re-expressing
-  the activity rebuild marker (job 4) without a version number; it has an open
-  question (below). Deferred to a follow-up (A1 Layer 2). (The CSI fence,
-  job 3, was archived by #17415.)
+  the activity rebuild marker (job 4) without a version number; designed in the
+  [A1 Layer 2 follow-up](2026-11-19-managed-a1-layer2-storage-version-removal.md).
+  (The CSI fence, job 3, was archived by #17415.)
 - Unifying CSI boot shapes / retiring non-files CSI (A4 full collapse). Moot
   after #17415: the CSI backend is archived.
 - Touching the local standalone journal `managed-session/2` dialect beyond
@@ -390,15 +390,13 @@ kept as the historical record.
   rolling-upgrade restrictions with bounded, mostly-deletion changes and zero
   invariant risk; dropping the column is a deeper refactor that must first
   re-express that invariant.
-- **Open question for A1 Layer 2 (column removal).** The activity rebuild marker
-  must survive the case where the activity summary row is absent but activity
-  data exists in the journal (post-restore projection wipe). Today
-  `storage_version >= 4` is the durable signal that drives `rebuildBatch` to
-  recreate a `clearing` summary. A version-free replacement needs an equivalent
-  durable signal — e.g. a boolean head column set on the first activity commit,
-  or a bounded EXISTS probe over activity resource references — and must be
-  proven against the restore paths before the column can go. (Re-expressing
-  the CSI fence is moot: the fence was archived by #17415.)
+- **A1 Layer 2 (column removal) — resolved.** The activity rebuild marker's
+  version-free replacement is a boolean head column `has_activity_diagnostics`,
+  set on the first activity commit and durable across the projection wipe. The
+  full column-removal plan (head record, gate, rebuild, snapshot manifest,
+  feature-presence checks, pristine predicate) is designed in
+  [A1 Layer 2 — storage_version removal](2026-11-19-managed-a1-layer2-storage-version-removal.md).
+  (Re-expressing the CSI fence is moot: the fence was archived by #17415.)
 - **A5 is unification, not deletion.** v1/v2 are live fallbacks; the design
   changes the writer to one superset shape and the reader to field-presence
   validation, preserving the question/command invariants.

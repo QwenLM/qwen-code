@@ -85,7 +85,7 @@ journal 头携带 `formatVersion` 与 `minimumReader`。共享 TS 解析器 `par
 
 ## 非目标
 
-- 彻底删除 `storage_version` 列。那需要用非版本号重新表达 activity 重建标记（职责 4）；它有一个开放问题（见下）。推迟到 follow-up（A1 Layer 2）。（CSI 围栏，职责 3，已被 #17415 归档。）
+- 彻底删除 `storage_version` 列。那需要用非版本号重新表达 activity 重建标记（职责 4）；见 [A1 Layer 2 follow-up](2026-11-19-managed-a1-layer2-storage-version-removal.zh-CN.md) 的设计。（CSI 围栏，职责 3，已被 #17415 归档。）
 - 统一 CSI boot 形状 / 退役非 files CSI（A4 完全塌缩）。#17415 后作废：CSI 后端已归档。
 - 触碰本地 standalone journal 的 `managed-session/2` 方言，仅保持共享解析器对其容忍。
 - 删除单版本完整性门：资源 `schema_version == 1`、事件 `EventIdentity.SCHEMA_VERSION/PROJECTION_VERSION`、pack `formatVersion`、事件 `"v"`、manifest/bundle `formatVersion`、`managed-action-decision` kind 判别器，以及 `qwenCodeVersion` / `expectedQwenVersion` 一致性 pin。这些不是兼容产物。
@@ -136,7 +136,7 @@ Worker（TS）：
 ## 设计决策与理由
 
 - **先剥协商再删列（A1）。** 版本号对 activity 重建标记是 load-bearing 的（CSI 能力围栏已被 #17415 归档）。删协商以有界、以删除为主的变更删除真正的滚动升级限制，且零不变量风险；删列是更深的重构，必须先重新表达该不变量。
-- **A1 Layer 2（删列）的开放问题。** activity 重建标记必须在「activity summary 行缺失但 journal 中存在 activity 数据」（restore 后投影被清）的情形下存活。今天 `storage_version >= 4` 是驱动 `rebuildBatch` 重建 `clearing` summary 的持久信号。无版本替代需要一个等价的持久信号——例如首次 activity 提交时置位的 boolean head 列，或对 activity 资源引用的有界 EXISTS 探测——并且必须在删列前对 restore 路径证明。（重新表达 CSI 围栏已作废：围栏已被 #17415 归档。）
+- **A1 Layer 2（删列）——已解决。** activity 重建标记的无版本替代是 head 布尔列 `has_activity_diagnostics`，首次 activity 提交置位、在投影清除后仍持久。完整删列计划（head 记录、门、重建、快照 manifest、功能存在性检查、pristine 谓词）见 [A1 Layer 2 — storage_version 删除](2026-11-19-managed-a1-layer2-storage-version-removal.zh-CN.md) 的设计。（重新表达 CSI 围栏已作废：围栏已被 #17415 归档。）
 - **A5 是统一而非删除。** v1/v2 是活 fallback；设计把 writer 改为单一超集形状、reader 改为按字段存在性校验，保留 question/command 不变量。
 - **A2 保留本地方言。** 共享记录解析器同时服务服务器与 standalone 本地 journal；让 `minimumReader` 可选即可删除服务器协商而不破坏本地 `/2`。
 - **A4 只退役死变体（已取代——被 #17415 归档）。** v1（非 files resident）与 v4（files 维护）曾是活形状判别器；v2、v3 可证明在生产中从不被写入（authority=null 的 provisioner 仅 resident/非 files；有 authority 必加 finalization）。整个 CSI 后端现已归档，故此决策已无 live 目标。
