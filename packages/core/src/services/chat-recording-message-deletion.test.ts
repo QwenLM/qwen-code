@@ -306,6 +306,8 @@ describe('recorded message deletion', () => {
     const { transcriptPath, recorder } = await fixture();
     const before = await recorder.getMessageGroups();
     const unchanged = await fs.readFile(transcriptPath, 'utf8');
+    const notify = vi.fn();
+    recorder.setLastUserPromptRecordedCallback(notify);
     vi.spyOn(fs, 'rename').mockRejectedValueOnce(new Error('rename failed'));
     await expect(
       recorder.deleteMessageGroups({
@@ -313,6 +315,7 @@ describe('recorded message deletion', () => {
         groupIds: [before.groups[0]!.id],
       }),
     ).rejects.toThrow();
+    expect(notify).not.toHaveBeenCalled();
     expect(await fs.readFile(transcriptPath, 'utf8')).toBe(unchanged);
     expect(recorder.supportsMessageGroupDeletion()).toBe(true);
     expect(recorder.hasWriteOwnership()).toBe(true);
