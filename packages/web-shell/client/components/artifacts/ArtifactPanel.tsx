@@ -349,6 +349,7 @@ export type ArtifactPanelTab =
       workspaceCwd?: string;
       nameFromFirstPrompt?: boolean;
       initialPrompt?: string;
+      initialQuote?: string;
     }
   | {
       /** Another session, shown read-only: where a `/send` message runs. */
@@ -1840,6 +1841,7 @@ export function ArtifactPanel({
             title={activeTab.title}
             shouldNameFromFirstPrompt={activeTab.nameFromFirstPrompt}
             initialPrompt={activeTab.initialPrompt}
+            initialQuote={activeTab.initialQuote}
             createSession={
               onCreateSideTaskSession ?? rejectMissingSideTaskCreate
             }

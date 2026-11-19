@@ -3317,6 +3317,456 @@ describe('useComposerCore tags', () => {
     outside.remove();
   });
 
+  describe('insertQuote', () => {
+    const quoteTag = {
+      id: 'quote:test-1',
+      kind: 'quote',
+      value: 'fragment',
+      serialized: '<quoted-message>fragment</quoted-message>',
+    };
+
+    it('puts the quote where the next keystroke follows it', async () => {
+      await mount();
+      const view = latest!.viewRef.current!;
+      const dispatch = vi.spyOn(view, 'dispatch');
+
+      let inserted = false;
+      act(() => {
+        inserted = latest!.handle.insertQuote!(quoteTag);
+      });
+
+      expect(inserted).toBe(true);
+      expect(view.state.doc.toString()).toBe(
+        '<quoted-message>fragment</quoted-message>\n',
+      );
+      expect(view.state.selection.main.from).toBe(view.state.doc.length);
+      expect(dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({ scrollIntoView: true }),
+      );
+      expect(latest!.hasAttachments).toBe(true);
+      act(() => {
+        view.dispatch(view.state.replaceSelection('explain this'));
+      });
+      expect(view.state.doc.toString()).toBe(
+        '<quoted-message>fragment</quoted-message>\nexplain this',
+      );
+    });
+
+    it('still focuses the composer for a synchronous gesture (default)', async () => {
+      await mount();
+      const view = latest!.viewRef.current!;
+      const outside = container!.querySelector<HTMLInputElement>(
+        'input[data-testid="composer-surface-input"]',
+      )!;
+      outside.focus();
+      expect(document.activeElement).toBe(outside);
+
+      act(() => {
+        latest!.handle.insertQuote!(quoteTag);
+      });
+
+      expect(view.state.doc.toString()).toBe(
+        '<quoted-message>fragment</quoted-message>\n',
+      );
+      expect(document.activeElement).not.toBe(outside);
+    });
+
+    it("keeps the user's control focused for an asynchronous delivery ({ focus: false })", async () => {
+      await mount();
+      const view = latest!.viewRef.current!;
+      const dispatch = vi.spyOn(view, 'dispatch');
+      const outside = container!.querySelector<HTMLInputElement>(
+        'input[data-testid="composer-surface-input"]',
+      )!;
+      outside.focus();
+      expect(document.activeElement).toBe(outside);
+
+      // The ask-in-side-task handoff reaches insertQuote seconds after the
+      // click, once the child settles empty: nothing on that path is a
+      // user gesture, so it must not steal focus or the viewport from the
+      // control the user moved to while the child was provisioning.
+      let inserted = false;
+      act(() => {
+        inserted = latest!.handle.insertQuote!(quoteTag, { focus: false });
+      });
+
+      expect(inserted).toBe(true);
+      expect(view.state.doc.toString()).toBe(
+        '<quoted-message>fragment</quoted-message>\n',
+      );
+      expect(dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({ scrollIntoView: false }),
+      );
+      expect(document.activeElement).toBe(outside);
+    });
+
+    it('sends the follow-up on its own line after a click back onto the fence line', async () => {
+      const onSubmit = vi.fn();
+      await mount({ onSubmit });
+      const view = latest!.viewRef.current!;
+
+      act(() => {
+        latest!.handle.insertQuote!(quoteTag);
+      });
+      // A click in the composer lands at the end of the chip's line —
+      // before the trailing break, not after it.
+      act(() => {
+        view.dispatch({ selection: { anchor: view.state.doc.length - 1 } });
+      });
+      act(() => {
+        view.dispatch(view.state.replaceSelection('explain this'));
+      });
+      // The draft keeps the typed text where the caret put it...
+      expect(view.state.doc.toString()).toBe(
+        '<quoted-message>fragment</quoted-message>explain this\n',
+      );
+      // ...but the sent prompt breaks the follow-up onto its own line.
+      act(() => {
+        latest!.submitText();
+      });
+      expect(onSubmit.mock.calls[0]?.[0]).toBe(
+        '<quoted-message>fragment</quoted-message>\nexplain this',
+      );
+    });
+
+    it('starts the quote on its own line after an existing draft', async () => {
+      await mount();
+      act(() => {
+        latest!.insertText('What does this mean?');
+      });
+      const view = latest!.viewRef.current!;
+      act(() => {
+        view.dispatch({ selection: { anchor: 4 } });
+      });
+
+      act(() => {
+        latest!.handle.insertQuote!(quoteTag);
+      });
+
+      expect(view.state.doc.toString()).toBe(
+        'What does this mean?\n<quoted-message>fragment</quoted-message>\n',
+      );
+      expect(view.state.selection.main.from).toBe(view.state.doc.length);
+    });
+
+    it('declines in shell mode and says why', async () => {
+      const onImageIngestionNotice = vi.fn();
+      await mount({ onImageIngestionNotice });
+      act(() => {
+        latest!.insertText('git status');
+      });
+      act(() => latest!.toggleShellMode());
+      expect(latest!.shellMode).toBe(true);
+      const view = latest!.viewRef.current!;
+      const before = view.state.doc.toString();
+
+      let inserted = true;
+      act(() => {
+        inserted = latest!.handle.insertQuote!(quoteTag);
+      });
+
+      expect(inserted).toBe(false);
+      expect(view.state.doc.toString()).toBe(before);
+      expect(view.state.doc.toString()).not.toContain('>');
+      expect(onImageIngestionNotice).toHaveBeenCalledWith(
+        'warning',
+        'Leave shell mode to quote into the composer',
+      );
+    });
+
+    it('declines while the composer is disabled', async () => {
+      await mount({ disabled: true });
+      const view = latest!.viewRef.current!;
+
+      let inserted = true;
+      act(() => {
+        inserted = latest!.handle.insertQuote!(quoteTag);
+      });
+
+      expect(inserted).toBe(false);
+      expect(view.state.doc.toString()).toBe('');
+    });
+
+    // A shell reads the fence as redirections: `#` comments out the closing
+    // tag and truncates a file named after the first word; `; … #` also runs
+    // the message text as a command.
+    const shellHostileFragments = [
+      'see issue #123 for details',
+      'notes; echo INJECTED-FROM-MESSAGE #',
+    ];
+    const quoteOf = (fragment: string) => ({
+      id: `quote:${fragment}`,
+      kind: 'quote',
+      value: fragment,
+      serialized: `<quoted-message>${fragment}</quoted-message>`,
+    });
+    const blocksShellMode = 'Remove the quote from the draft to use shell mode';
+
+    it.each(shellHostileFragments)(
+      'keeps a draft holding a quote out of shell mode: %s',
+      async (fragment) => {
+        const onSubmit = vi.fn();
+        const onImageIngestionNotice = vi.fn();
+        await mount({ onSubmit, onImageIngestionNotice });
+        act(() => {
+          latest!.handle.insertQuote!(quoteOf(fragment));
+        });
+        const view = latest!.viewRef.current!;
+        const draft = view.state.doc.toString();
+
+        act(() => latest!.toggleShellMode());
+
+        expect(latest!.shellMode).toBe(false);
+        expect(view.state.doc.toString()).toBe(draft);
+        expect(onImageIngestionNotice).toHaveBeenCalledWith(
+          'warning',
+          blocksShellMode,
+        );
+        act(() => {
+          view.dispatch(view.state.replaceSelection('echo typed-command'));
+        });
+        act(() => latest!.submitText());
+        expect(onSubmit).toHaveBeenCalledTimes(1);
+        expect(onSubmit.mock.calls[0]![0]).not.toMatch(/^!/);
+      },
+    );
+
+    it.each(shellHostileFragments)(
+      'refuses to submit a quote chip from a shell-mode draft: %s',
+      async (fragment) => {
+        const onSubmit = vi.fn();
+        const onImageIngestionNotice = vi.fn();
+        await mount({ onSubmit, onImageIngestionNotice });
+        act(() => latest!.toggleShellMode());
+        expect(latest!.shellMode).toBe(true);
+        // A host can still place a quote chip through addTags.
+        act(() => {
+          latest!.addTags([quoteOf(fragment)], { placement: 'inline' });
+        });
+        const view = latest!.viewRef.current!;
+        act(() => {
+          view.dispatch(view.state.replaceSelection('echo typed-command'));
+        });
+        const draft = view.state.doc.toString();
+
+        act(() => latest!.submitText());
+
+        expect(onSubmit).not.toHaveBeenCalled();
+        expect(view.state.doc.toString()).toBe(draft);
+        expect(latest!.shellMode).toBe(true);
+        expect(onImageIngestionNotice).toHaveBeenCalledWith(
+          'warning',
+          blocksShellMode,
+        );
+      },
+    );
+
+    it.each(shellHostileFragments)(
+      'refuses a typed "!" command line that carries a quote chip: %s',
+      async (fragment) => {
+        const onSubmit = vi.fn();
+        const onImageIngestionNotice = vi.fn();
+        await mount({ onSubmit, onImageIngestionNotice });
+        act(() => {
+          latest!.handle.insertQuote!(quoteOf(fragment));
+        });
+        const view = latest!.viewRef.current!;
+        act(() => {
+          view.dispatch({ changes: { from: 0, insert: '!' } });
+          view.dispatch(view.state.replaceSelection('echo typed-command'));
+        });
+        const draft = view.state.doc.toString();
+        expect(latest!.shellMode).toBe(false);
+
+        act(() => latest!.submitText());
+
+        expect(onSubmit).not.toHaveBeenCalled();
+        expect(view.state.doc.toString()).toBe(draft);
+        expect(onImageIngestionNotice).toHaveBeenCalledWith(
+          'warning',
+          blocksShellMode,
+        );
+      },
+    );
+
+    it.each(shellHostileFragments)(
+      'refuses a shell command that holds the fence as plain text: %s',
+      async (fragment) => {
+        const onSubmit = vi.fn();
+        const onImageIngestionNotice = vi.fn();
+        await mount({ onSubmit, onImageIngestionNotice });
+        act(() => latest!.toggleShellMode());
+        expect(latest!.shellMode).toBe(true);
+        // Prompt-history recall and draft restore bring the fence back as
+        // text, without the chip.
+        act(() => {
+          latest!.insertText(
+            `${quoteOf(fragment).serialized}\necho typed-command`,
+          );
+        });
+        const draft = latest!.getText();
+
+        act(() => latest!.submitText());
+
+        expect(onSubmit).not.toHaveBeenCalled();
+        expect(latest!.getText()).toBe(draft);
+        expect(onImageIngestionNotice).toHaveBeenCalledWith(
+          'warning',
+          blocksShellMode,
+        );
+      },
+    );
+  });
+
+  describe('quote paste rehydration', () => {
+    const quoteTag = {
+      id: 'quote:paste-1',
+      kind: 'quote',
+      value: 'fragment',
+      serialized: '<quoted-message>fragment</quoted-message>',
+    };
+    const fence = quoteTag.serialized;
+
+    const pasteText = (text: string) => {
+      const event = new Event('paste', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'clipboardData', {
+        value: {
+          files: [],
+          items: [],
+          types: ['text/plain'],
+          getData: (type: string) => (type === 'text/plain' ? text : ''),
+        },
+      });
+      act(() => container!.querySelector('.cm-content')!.dispatchEvent(event));
+    };
+
+    it('rehydrates a cut quote chip when it is pasted back', async () => {
+      await mount();
+      const view = latest!.viewRef.current!;
+      act(() => {
+        latest!.handle.insertQuote!(quoteTag);
+      });
+      expect(view.state.doc.toString()).toBe(`${fence}\n`);
+      // Cut: the clipboard receives the chip's serialized fence and the
+      // chip text leaves the document, caret at the cut point.
+      act(() => {
+        view.dispatch({
+          changes: { from: 0, to: fence.length, insert: '' },
+          selection: { anchor: 0 },
+        });
+      });
+      expect(view.state.doc.toString()).toBe('\n');
+
+      pasteText(fence);
+
+      expect(view.state.doc.toString()).toBe(`${fence}\n`);
+      const tags = getInlineComposerTags(view);
+      expect(tags).toHaveLength(1);
+      expect(tags[0]).toMatchObject({ kind: 'quote', value: 'fragment' });
+      // A re-pasted chip gets a fresh id: it is an independent chip, so the
+      // draft-persistence filters and the remove button treat it on its own.
+      expect(tags[0]?.id).not.toBe(quoteTag.id);
+    });
+
+    it('rehydrates a fence embedded in surrounding pasted text', async () => {
+      await mount();
+      const view = latest!.viewRef.current!;
+      const text = `see ${fence} and more`;
+      pasteText(text);
+      expect(view.state.doc.toString()).toBe(text);
+      const tags = getInlineComposerTags(view);
+      expect(tags).toHaveLength(1);
+      expect(tags[0]).toMatchObject({ kind: 'quote', value: 'fragment' });
+    });
+
+    it('keeps a plain paste plain', async () => {
+      await mount();
+      const view = latest!.viewRef.current!;
+      pasteText('nothing to rehydrate');
+      expect(view.state.doc.toString()).toBe('nothing to rehydrate');
+      expect(getInlineComposerTags(view)).toHaveLength(0);
+    });
+
+    it('keeps an unclosed fence as literal text', async () => {
+      await mount();
+      const view = latest!.viewRef.current!;
+      const text = 'unclosed <quoted-message>half';
+      pasteText(text);
+      expect(view.state.doc.toString()).toBe(text);
+      expect(getInlineComposerTags(view)).toHaveLength(0);
+    });
+
+    it('keeps a pasted fence literal in shell mode', async () => {
+      await mount();
+      act(() => latest!.toggleShellMode());
+      expect(latest!.shellMode).toBe(true);
+      const view = latest!.viewRef.current!;
+      pasteText(fence);
+      expect(view.state.doc.toString()).toBe(fence);
+      expect(getInlineComposerTags(view)).toHaveLength(0);
+    });
+  });
+
+  describe('quote draft persistence on non-persistent hosts', () => {
+    const quoteTag = {
+      id: 'quote:draft-1',
+      kind: 'quote',
+      value: 'fragment',
+      serialized: '<quoted-message>fragment</quoted-message>',
+    };
+    const sessionKey = getSessionDraftKey('quote-draft-session');
+
+    it('keeps the quote chip when leaving and returning to the session', async () => {
+      vi.useFakeTimers();
+      const mounted = await mount({
+        sessionId: 'quote-draft-session',
+        atWorkspaceCwd: '/workspace/shared',
+      });
+      act(() => {
+        latest!.handle.insertQuote!(quoteTag);
+      });
+      act(() => vi.advanceTimersByTime(2000));
+      expect(localStorage.getItem(sessionKey)).toContain('"kind":"quote"');
+
+      // split -> overview -> split: leave the session and come back.
+      mounted.switchSession('other-session', '/workspace/shared');
+      mounted.switchSession('quote-draft-session', '/workspace/shared');
+
+      const view = latest!.viewRef.current!;
+      expect(view.state.doc.toString()).toContain(quoteTag.serialized);
+      expect(
+        getInlineComposerTags(view).some((tag) => tag.kind === 'quote'),
+      ).toBe(true);
+    });
+
+    it('restores the quote chip after a full remount', async () => {
+      vi.useFakeTimers();
+      await mount({
+        sessionId: 'quote-draft-session',
+        atWorkspaceCwd: '/workspace/shared',
+      });
+      act(() => {
+        latest!.handle.insertQuote!(quoteTag);
+      });
+      act(() => vi.advanceTimersByTime(2000));
+      act(() => root?.unmount());
+      container?.remove();
+      root = null;
+      container = null;
+      latest = null;
+
+      await mount({
+        sessionId: 'quote-draft-session',
+        atWorkspaceCwd: '/workspace/shared',
+      });
+      const view = latest!.viewRef.current!;
+      expect(view.state.doc.toString()).toContain(quoteTag.serialized);
+      expect(
+        getInlineComposerTags(view).some((tag) => tag.kind === 'quote'),
+      ).toBe(true);
+    });
+  });
+
   it('updates inline tag state when a document change removes the last tag', async () => {
     await mount();
 

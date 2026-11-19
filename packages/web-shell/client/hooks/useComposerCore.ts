@@ -84,6 +84,12 @@ import {
 import { getShadowAwareActiveElement, isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
 import {
+  QUOTE_FENCE_OPEN,
+  breakQuoteFenceFollowup,
+  buildQuoteReferenceTag,
+  findQuoteFenceRanges,
+} from '../utils/quoteReference';
+import {
   createInputAnnotationsFromComposerTags,
   getComposerTagDisplay,
   getComposerTagIconUrl,
@@ -981,6 +987,10 @@ export function getInlineComposerTags(view: EditorView): WebShellComposerTag[] {
   return tags;
 }
 
+function isQuoteComposerTag(tag: WebShellComposerTag): boolean {
+  return tag.kind === 'quote';
+}
+
 function hasInlineComposerTags(view: EditorView): boolean {
   const tags = view.state.field(inlineComposerTagField, false);
   if (!tags) return false;
@@ -1025,6 +1035,22 @@ export interface EditorHandle extends WebShellComposerApi {
   restoreInputAnnotations?(
     inputAnnotations: readonly DaemonInputAnnotation[],
   ): void;
+  /**
+   * Quote to composer: a synchronous user gesture, so unlike end-placed
+   * `addTags` it puts the chip on its own line at the document end, with
+   * the user's next command on its own line after it, moves the caret
+   * after it and scrolls it into view. Declines with `false` while the
+   * composer is disabled, and in shell mode, where the draft runs as a
+   * shell command and the fence's `<`/`>` would become redirects. The
+   * asynchronous ask-in-side-task delivery passes `{ focus: false }` so a
+   * quote arriving seconds after the click never steals focus or the
+   * viewport from the control the user moved to — the rule the end-placed
+   * `addTags` completions already follow.
+   */
+  insertQuote?(
+    tag: WebShellComposerTag,
+    options?: { focus?: boolean },
+  ): boolean;
 }
 
 // ---- Compartments (shared) ----
@@ -1294,7 +1320,7 @@ function validDraftReferences(draft: ComposerReferenceDraft) {
       start >= 0 &&
       end > start &&
       end <= draft.text.length &&
-      tag.kind === 'file' &&
+      (tag.kind === 'file' || tag.kind === 'quote') &&
       draft.text.slice(start, end) === getComposerTagSerialized(tag),
   );
 }
@@ -1995,14 +2021,6 @@ export function useComposerCore(
     resolveComposerTagIcon,
   ]);
 
-  const toggleShellMode = useCallback(() => {
-    if (!shellModeEnabledRef.current) return;
-    if (followupStateRef.current?.isVisible) {
-      onDismissFollowupRef.current?.();
-    }
-    setShellMode((value) => !value);
-    viewRef.current?.focus();
-  }, [setShellMode]);
   const [searchMode, setSearchMode] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMatches, setSearchMatches] = useState<string[]>([]);
@@ -2096,7 +2114,7 @@ export function useComposerCore(
               text: stored.text,
               inlineTags: persistFileReferencesRef.current
                 ? stored.inlineTags
-                : [],
+                : stored.inlineTags.filter(({ tag }) => tag.kind === 'quote'),
             }
           : content,
         draftAttachmentStore,
@@ -2592,22 +2610,55 @@ export function useComposerCore(
     setComposerTagsState(next);
     publishDraftContentRef.current();
   }, []);
+  // A quote chip shows its fragment but carries the `<quoted-message>` fence,
+  // which a shell reads as redirections and comments. A draft holding one
+  // must not become a shell command line, so shell mode waits for its removal.
+  const draftHasQuote = useCallback(() => {
+    if (composerTagsRef.current.some(isQuoteComposerTag)) return true;
+    const view = viewRef.current;
+    return !!view && getInlineComposerTags(view).some(isQuoteComposerTag);
+  }, []);
+  const toggleShellMode = useCallback(() => {
+    if (!shellModeEnabledRef.current) return;
+    if (!shellModeRef.current && draftHasQuote()) {
+      emitImageIngestionNotice('warning', t('composer.quote.blocksShellMode'));
+      return;
+    }
+    if (followupStateRef.current?.isVisible) {
+      onDismissFollowupRef.current?.();
+    }
+    setShellMode((value) => !value);
+    viewRef.current?.focus();
+  }, [draftHasQuote, emitImageIngestionNotice, setShellMode, t]);
   function referenceDraft(view: EditorView | null) {
-    if (!persistFileReferencesRef.current) return undefined;
+    const placements = view ? getInlineComposerTagPlacements(view) : [];
+    const quotePlacements = placements.filter(
+      ({ tag }) => tag.kind === 'quote',
+    );
+    if (!persistFileReferencesRef.current) {
+      return quotePlacements.length > 0
+        ? { inlineTags: quotePlacements, tags: [] }
+        : undefined;
+    }
     return {
-      inlineTags: view
-        ? getInlineComposerTagPlacements(view).filter(
-            ({ tag }) => tag.kind === 'file',
-          )
-        : [],
-      tags: composerTagsRef.current.filter((tag) => tag.kind === 'file'),
+      inlineTags: placements.filter(
+        ({ tag }) => tag.kind === 'file' || tag.kind === 'quote',
+      ),
+      // The textarea backend has no inline chips, so a quote chip lives only
+      // as a top tag and must ride this list to survive a reload.
+      tags: composerTagsRef.current.filter(
+        (tag) => tag.kind === 'file' || tag.kind === 'quote',
+      ),
     };
   }
   const referenceEffects = useCallback(
     (draft: ComposerReferenceDraft | null) => {
       return (
-        persistFileReferencesRef.current && draft
-          ? validDraftReferences(draft)
+        draft
+          ? validDraftReferences(draft).filter(
+              ({ tag }) =>
+                persistFileReferencesRef.current || tag.kind === 'quote',
+            )
           : []
       ).map(({ start, end, tag }) =>
         addInlineTagEffect.of({
@@ -3434,14 +3485,27 @@ export function useComposerCore(
     ) {
       return true;
     }
-    const textWithInlineTags =
+    const text = breakQuoteFenceFollowup(
       tagsOverride === undefined
         ? replaceInlineTagPlacements(rawText, normalizedInlineTags)
-        : rawText;
-    const text = textWithInlineTags;
+        : rawText,
+    );
     const prompt = buildComposerPrompt(text, tags);
     const isShellMode = shellModeRef.current;
     const promptText = isShellMode && prompt ? `!${prompt}` : prompt;
+    // A `!` prompt runs as a shell command. Whatever put a quote into it (a
+    // host's addTags, a typed leading `!`, a recalled prompt that holds the
+    // fence as plain text), the fence must not reach the shell; the draft
+    // stays as is for the user to edit.
+    if (
+      promptText.startsWith('!') &&
+      (promptText.includes(QUOTE_FENCE_OPEN) ||
+        tags.some(isQuoteComposerTag) ||
+        normalizedInlineTags.some(({ tag }) => isQuoteComposerTag(tag)))
+    ) {
+      emitImageIngestionNotice('warning', t('composer.quote.blocksShellMode'));
+      return true;
+    }
     // Inline chip placements are offsets into the pre-substitution editor
     // document; they stay valid for `text` only while substitution preserves
     // their length, and the annotation generator validates each range (with
@@ -4360,6 +4424,43 @@ export function useComposerCore(
           return false;
         }),
         EditorView.domEventHandlers({
+          paste(event, view) {
+            // A cut quote chip comes back as its serialized fence text;
+            // rehydrate it into a chip instead of leaving the raw tags as
+            // text. Extension handlers run before the built-in paste, so
+            // returning true keeps CodeMirror's plain insert off the fence.
+            const data = event.clipboardData;
+            if (
+              !data ||
+              view.state.readOnly ||
+              disabledRef.current ||
+              shellModeRef.current
+            )
+              return false;
+            const text = data.getData('text/plain');
+            if (!text) return false;
+            const fences = findQuoteFenceRanges(text);
+            if (fences.length === 0) return false;
+            const tags = fences.map((fence) =>
+              buildQuoteReferenceTag(fence.fragment),
+            );
+            if (tags.some((tag) => tag === null)) return false;
+            const { from, to } = view.state.selection.main;
+            view.dispatch({
+              changes: { from, to, insert: text },
+              effects: fences.map((fence, i) =>
+                addInlineTagEffect.of({
+                  from: from + fence.from,
+                  to: from + fence.to,
+                  tag: resolveComposerTagIcon(tags[i]!),
+                }),
+              ),
+              selection: { anchor: from + text.length },
+              userEvent: 'input.paste',
+              scrollIntoView: true,
+            });
+            return true;
+          },
           blur(event) {
             closeSlashMenu();
             if (
@@ -5152,6 +5253,61 @@ export function useComposerCore(
     [isTouchComposer, resolveComposerTagIcon, setComposerTags],
   );
 
+  const insertQuote = useCallback(
+    (tag: WebShellComposerTag, options?: { focus?: boolean }): boolean => {
+      if (disabledRef.current) return false;
+      if (shellModeRef.current) {
+        emitImageIngestionNotice('warning', t('composer.quote.shellMode'));
+        return false;
+      }
+      // The textarea backend has no inline chips: the quote rides as a top
+      // tag, like every other inline request there.
+      if (isTouchComposer) {
+        addTags([tag]);
+        return true;
+      }
+      const view = viewRef.current;
+      if (!view) return false;
+      // The synchronous gesture callers focus the composer; the
+      // asynchronous ask-in-side-task delivery opts out, so a quote that
+      // arrives seconds after the click never steals focus — or the
+      // viewport — from the control the user moved to (the rule the
+      // end-placed upload completions above already follow).
+      const focus = options?.focus !== false;
+      const { doc } = view.state;
+      const tagText = serializeComposerTag(tag);
+      // Line breaks stay document text outside the chip range: the chip's
+      // slice must equal its serialized form for the submit annotations,
+      // and the trailing break keeps the user's next command on its own
+      // line.
+      const lineBreak =
+        doc.length === 0 || doc.sliceString(doc.length - 1) === '\n'
+          ? ''
+          : '\n';
+      const from = doc.length + lineBreak.length;
+      const insert = `${lineBreak}${tagText}\n`;
+      view.dispatch({
+        changes: { from: doc.length, insert },
+        effects: addInlineTagEffect.of({
+          from,
+          to: from + tagText.length,
+          tag: resolveComposerTagIcon(tag),
+        }),
+        selection: { anchor: doc.length + insert.length },
+        scrollIntoView: focus,
+      });
+      if (focus) view.focus();
+      return true;
+    },
+    [
+      addTags,
+      emitImageIngestionNotice,
+      isTouchComposer,
+      resolveComposerTagIcon,
+      t,
+    ],
+  );
+
   const removeTopTag = useCallback(
     (id: string) => {
       setComposerTags((current) => {
@@ -5664,6 +5820,7 @@ export function useComposerCore(
       restoreImages,
       restoreFiles,
       restoreInputAnnotations,
+      insertQuote,
       submit,
     };
   }, [
@@ -5674,6 +5831,7 @@ export function useComposerCore(
     getText,
     hasAttachments,
     hasInput,
+    insertQuote,
     insertText,
     removeTopTag,
     restoreImages,

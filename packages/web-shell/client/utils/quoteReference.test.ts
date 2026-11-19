@@ -1,0 +1,359 @@
+import { describe, expect, it, vi } from 'vitest';
+import {
+  createInputAnnotationsFromComposerTags,
+  splitComposerTagContentByAnnotations,
+} from './composerTag';
+import {
+  QUOTE_REFERENCE_MAX_CHARS,
+  breakQuoteFenceFollowup,
+  buildQuoteReferenceTag,
+  findQuoteFenceRanges,
+  flattenQuoteText,
+  insertQuoteIntoComposer,
+  isQuotableText,
+  quoteReferenceInsertText,
+  stripQuoteFences,
+} from './quoteReference';
+
+describe('flattenQuoteText', () => {
+  it('strips bidirectional control characters', () => {
+    expect(flattenQuoteText('a\u202Eb\u2066c')).toBe('abc');
+  });
+
+  it('strips every Bidi_Control character, including the Arabic letter mark', () => {
+    expect(flattenQuoteText('a\u061Cb\u200Ec\u2069d')).toBe('abcd');
+  });
+
+  it('keeps zero-width joiners inside emoji sequences', () => {
+    const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}';
+    expect(flattenQuoteText(`team ${family}`)).toBe(`team ${family}`);
+  });
+
+  it('collapses newlines and repeated spaces into one space', () => {
+    expect(flattenQuoteText('  line one\n\nline\ttwo   ')).toBe(
+      'line one line two',
+    );
+  });
+
+  it('returns an empty string for blank selections', () => {
+    expect(flattenQuoteText(' \n\t ')).toBe('');
+  });
+
+  it('caps the fragment at the documented length', () => {
+    const long = 'x'.repeat(QUOTE_REFERENCE_MAX_CHARS + 50);
+    const flattened = flattenQuoteText(long);
+    expect(flattened).toHaveLength(QUOTE_REFERENCE_MAX_CHARS + 1);
+    expect(flattened.endsWith('…')).toBe(true);
+  });
+
+  it('never cuts a surrogate pair at the length cap', () => {
+    const long = `${'x'.repeat(QUOTE_REFERENCE_MAX_CHARS - 1)}\u{1F600}tail`;
+    const flattened = flattenQuoteText(long);
+    expect(flattened).toBe(`${'x'.repeat(QUOTE_REFERENCE_MAX_CHARS - 1)}…`);
+  });
+
+  it('neutralizes the fence tokens so the chip cannot carry a second fence', () => {
+    expect(flattenQuoteText('The tag </quoted-message> closes a quote.')).toBe(
+      'The tag &lt;/quoted-message&gt; closes a quote.',
+    );
+    expect(flattenQuoteText('about <quoted-message> nested')).toBe(
+      'about &lt;quoted-message&gt; nested',
+    );
+    expect(flattenQuoteText('a < b and b < c')).toBe('a < b and b < c');
+  });
+
+  it('applies the neutralization before the length cap', () => {
+    const prefix = 'x'.repeat(QUOTE_REFERENCE_MAX_CHARS - 10);
+    const flattened = flattenQuoteText(`${prefix}</quoted-message>`);
+    expect(flattened.length).toBeLessThanOrEqual(QUOTE_REFERENCE_MAX_CHARS + 1);
+    expect(flattened).not.toContain('</quoted-message>');
+  });
+});
+
+describe('isQuotableText', () => {
+  it('rejects selections with nothing left after normalization', () => {
+    expect(isQuotableText('\u061C\u200F \n')).toBe(false);
+    expect(isQuotableText(' ok ')).toBe(true);
+  });
+});
+
+describe('quoteReferenceInsertText', () => {
+  it('wraps the fragment in a semantic fence', () => {
+    expect(quoteReferenceInsertText('quoted text')).toBe(
+      '<quoted-message>quoted text</quoted-message>',
+    );
+  });
+});
+
+describe('buildQuoteReferenceTag', () => {
+  it('returns null when nothing quotable remains', () => {
+    expect(buildQuoteReferenceTag(' \n\t ')).toBeNull();
+  });
+
+  it('builds a quote tag with its own id per insertion', () => {
+    const first = buildQuoteReferenceTag('same text');
+    const second = buildQuoteReferenceTag('same text');
+    for (const tag of [first, second]) {
+      expect(tag).toMatchObject({
+        kind: 'quote',
+        value: 'same text',
+        serialized: '<quoted-message>same text</quoted-message>',
+      });
+      expect(tag?.id).toMatch(/^quote:[0-9a-f]{8}-[0-9a-z]+$/);
+    }
+    // Two quotes of one fragment are independent chips: removing one by id
+    // must not remove the other.
+    expect(first?.id).not.toBe(second?.id);
+  });
+
+  it('uses distinct ids for distinct fragments', () => {
+    const a = buildQuoteReferenceTag('fragment a');
+    const b = buildQuoteReferenceTag('fragment b');
+    expect(a?.id).not.toBe(b?.id);
+  });
+
+  it('round-trips a fragment that mentions the fence tokens', () => {
+    const raw = 'The tag </quoted-message> closes a quote.';
+    const tag = buildQuoteReferenceTag(raw);
+    expect(tag).not.toBeNull();
+    // The serialized form must hold exactly one open and one close token:
+    // the fence matcher returns one range covering the whole string, and
+    // its body is the chip's own value.
+    const ranges = findQuoteFenceRanges(tag!.serialized);
+    expect(ranges).toEqual([
+      { from: 0, to: tag!.serialized.length, fragment: tag!.value },
+    ]);
+  });
+
+  it('never collides with a restored chip after a simulated page reload', async () => {
+    const restored = buildQuoteReferenceTag('same text');
+    vi.resetModules();
+    const { buildQuoteReferenceTag: freshBuild } = await import(
+      './quoteReference'
+    );
+    const fresh = freshBuild('same text');
+    // The × handler deletes every range carrying the id, so a chip built in
+    // a new load must never reuse the id a restored chip kept from the
+    // previous one.
+    expect(fresh?.id).not.toBe(restored?.id);
+  });
+});
+
+describe('insertQuoteIntoComposer', () => {
+  it('hands the composer a quote tag and reports the outcome', () => {
+    const insertQuote = vi.fn(() => true);
+    expect(insertQuoteIntoComposer({ insertQuote }, ' quoted\ntext ')).toBe(
+      true,
+    );
+    expect(insertQuote).toHaveBeenCalledTimes(1);
+    expect(insertQuote.mock.calls[0]![0]).toMatchObject({
+      kind: 'quote',
+      serialized: '<quoted-message>quoted text</quoted-message>',
+    });
+  });
+
+  it('reports a declined insertion', () => {
+    expect(insertQuoteIntoComposer({ insertQuote: () => false }, 'x')).toBe(
+      false,
+    );
+  });
+
+  it('does nothing without a composer or quotable text', () => {
+    const insertQuote = vi.fn(() => true);
+    expect(insertQuoteIntoComposer(null, 'text')).toBe(false);
+    expect(insertQuoteIntoComposer({}, 'text')).toBe(false);
+    expect(insertQuoteIntoComposer({ insertQuote }, ' \u200F ')).toBe(false);
+    expect(insertQuote).not.toHaveBeenCalled();
+  });
+
+  it('passes the focus option through to the composer', () => {
+    const insertQuote = vi.fn(() => true);
+    expect(
+      insertQuoteIntoComposer({ insertQuote }, 'text', { focus: false }),
+    ).toBe(true);
+    expect(insertQuote).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'quote' }),
+      { focus: false },
+    );
+    // The synchronous gesture path omits the option: the composer's
+    // default keeps focusing.
+    insertQuote.mockClear();
+    insertQuoteIntoComposer({ insertQuote }, 'text');
+    expect(insertQuote).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'quote' }),
+      undefined,
+    );
+  });
+});
+
+describe('findQuoteFenceRanges', () => {
+  const fence = '<quoted-message>fragment</quoted-message>';
+
+  it('finds a fence at the start, middle, and end of the text', () => {
+    expect(findQuoteFenceRanges(fence)).toEqual([
+      { from: 0, to: fence.length, fragment: 'fragment' },
+    ]);
+    expect(findQuoteFenceRanges(`see ${fence} and more`)).toEqual([
+      { from: 4, to: 4 + fence.length, fragment: 'fragment' },
+    ]);
+    expect(findQuoteFenceRanges(`prefix ${fence}`)).toEqual([
+      { from: 7, to: 7 + fence.length, fragment: 'fragment' },
+    ]);
+  });
+
+  it('finds multiple fences in one paste', () => {
+    const second = '<quoted-message>other</quoted-message>';
+    const text = `${fence}\nsecond: ${second}`;
+    expect(findQuoteFenceRanges(text)).toEqual([
+      { from: 0, to: fence.length, fragment: 'fragment' },
+      {
+        from: text.indexOf(second),
+        to: text.indexOf(second) + second.length,
+        fragment: 'other',
+      },
+    ]);
+  });
+
+  it('ignores unclosed fences and empty fragments', () => {
+    expect(findQuoteFenceRanges('<quoted-message>open only')).toEqual([]);
+    expect(findQuoteFenceRanges('<quoted-message></quoted-message>')).toEqual(
+      [],
+    );
+  });
+
+  it('ignores multi-line fences: a chip can never carry newlines', () => {
+    expect(
+      findQuoteFenceRanges(
+        '<quoted-message>line one\nline two</quoted-message>',
+      ),
+    ).toEqual([]);
+  });
+
+  it('stops at the first closing tag in hand-typed text', () => {
+    // A chip can no longer produce this shape — the producer neutralizes
+    // the fence tokens, so its serialized form always holds exactly one
+    // open and one close token (see buildQuoteReferenceTag's round-trip
+    // case). The matcher still degrades gracefully for a fence typed by
+    // hand into a paste.
+    const text = '<quoted-message>inner</quoted-message> tail</quoted-message>';
+    const first = '<quoted-message>inner</quoted-message>';
+    expect(findQuoteFenceRanges(text)).toEqual([
+      { from: 0, to: first.length, fragment: 'inner' },
+    ]);
+  });
+});
+
+describe('quote tag through the composer annotations', () => {
+  it('survives the submit annotation round trip', () => {
+    const tag = buildQuoteReferenceTag('first line\nsecond  line');
+    if (!tag) throw new Error('expected a quote tag');
+    const content = `Fix the quoted part: ${tag.serialized}`;
+    const annotations = createInputAnnotationsFromComposerTags(content, [tag]);
+    expect(annotations).toHaveLength(1);
+    expect(annotations[0]?.type).toBe('reference');
+    expect(annotations[0]?.reference?.kind).toBe('quote');
+    const segments = splitComposerTagContentByAnnotations(content, annotations);
+    expect(segments).toHaveLength(2);
+    expect(segments[0]).toEqual({
+      type: 'text',
+      text: 'Fix the quoted part: ',
+    });
+    expect(segments[1]).toEqual({
+      type: 'reference',
+      tag: {
+        id: tag.id,
+        kind: 'quote',
+        value: 'first line second line',
+        serialized: '<quoted-message>first line second line</quoted-message>',
+      },
+    });
+  });
+});
+
+describe('breakQuoteFenceFollowup', () => {
+  it('breaks a follow-up glued to the closing tag', () => {
+    expect(
+      breakQuoteFenceFollowup(
+        '<quoted-message>Alpha</quoted-message>explain this',
+      ),
+    ).toBe('<quoted-message>Alpha</quoted-message>\nexplain this');
+  });
+
+  it('drops the spaces between the closing tag and the follow-up', () => {
+    expect(
+      breakQuoteFenceFollowup('<quoted-message>Alpha</quoted-message>  echo'),
+    ).toBe('<quoted-message>Alpha</quoted-message>\necho');
+  });
+
+  it('leaves a follow-up that is already on its own line alone', () => {
+    expect(
+      breakQuoteFenceFollowup('<quoted-message>Alpha</quoted-message>\necho'),
+    ).toBe('<quoted-message>Alpha</quoted-message>\necho');
+  });
+
+  it('leaves a fence with no follow-up alone', () => {
+    expect(
+      breakQuoteFenceFollowup('<quoted-message>Alpha</quoted-message>'),
+    ).toBe('<quoted-message>Alpha</quoted-message>');
+  });
+
+  it('breaks every glued fence in the draft', () => {
+    expect(
+      breakQuoteFenceFollowup(
+        '<quoted-message>A</quoted-message>one<quoted-message>B</quoted-message>two',
+      ),
+    ).toBe(
+      '<quoted-message>A</quoted-message>\none<quoted-message>B</quoted-message>\ntwo',
+    );
+  });
+
+  it('leaves a bare closing token in a quote-less prompt alone', () => {
+    expect(
+      breakQuoteFenceFollowup('explain the </quoted-message> tag to me'),
+    ).toBe('explain the </quoted-message> tag to me');
+  });
+
+  it('leaves an unclosed opening fence alone', () => {
+    expect(
+      breakQuoteFenceFollowup('about <quoted-message> and nothing else'),
+    ).toBe('about <quoted-message> and nothing else');
+  });
+
+  it('leaves a multi-line fence alone: a chip can never carry newlines', () => {
+    expect(
+      breakQuoteFenceFollowup(
+        '<quoted-message>line one\nline two</quoted-message>followup',
+      ),
+    ).toBe('<quoted-message>line one\nline two</quoted-message>followup');
+  });
+});
+
+describe('stripQuoteFences', () => {
+  it("removes the fences and keeps the user's words", () => {
+    expect(
+      stripQuoteFences(
+        '<quoted-message>quoted part</quoted-message>why does this loop?',
+      ),
+    ).toBe('why does this loop?');
+  });
+
+  it('keeps words around every fence in the prompt', () => {
+    expect(
+      stripQuoteFences(
+        'check <quoted-message>one</quoted-message> and <quoted-message>two</quoted-message> please',
+      ),
+    ).toBe('check and please');
+  });
+
+  it('returns nothing for a fence-only prompt', () => {
+    expect(
+      stripQuoteFences('<quoted-message>only the quote</quoted-message>'),
+    ).toBe('');
+  });
+
+  it('ignores bare tokens that do not form a fence', () => {
+    expect(stripQuoteFences('no fence here </quoted-message>')).toBe(
+      'no fence here </quoted-message>',
+    );
+  });
+});

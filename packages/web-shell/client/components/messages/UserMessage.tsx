@@ -31,6 +31,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from './Markdown';
 import { LinkifiedText } from './LinkifiedText';
+import { SelectionCopyMenu } from './SelectionCopyMenu';
 import { useWebShellCustomization } from '../../customization';
 import type {
   ComposerTagClickHandler,
@@ -277,7 +278,8 @@ export const UserMessage = memo(function UserMessage({
   sentTo,
 }: UserMessageProps) {
   const { t } = useI18n();
-  const documentMode = useTranscriptRenderMode() === 'document';
+  const transcriptRenderMode = useTranscriptRenderMode();
+  const documentMode = transcriptRenderMode === 'document';
   const {
     parseUserMessageContent,
     renderUserMessageContent,
@@ -566,7 +568,17 @@ export const UserMessage = memo(function UserMessage({
               }`}
               hidden={editing}
             >
-              {renderedContent}
+              <SelectionCopyMenu
+                className=""
+                content={content}
+                enabled={
+                  transcriptRenderMode === 'interactive' &&
+                  !editing &&
+                  !submittingEdit
+                }
+              >
+                {renderedContent}
+              </SelectionCopyMenu>
             </div>
             {editing && (
               <div className={styles.editArea}>
@@ -689,6 +701,7 @@ export function ReadonlyComposerTag({
     console.warn('[WebShell] user message tag tooltip render failed', error);
   }
   const clickable = Boolean(onComposerTagClick);
+  const quoteTag = tag.kind === 'quote';
   const viewModel = preserveCustomKindLabel
     ? getComposerTagViewModel(tag, composerTagIcons)
     : null;
@@ -708,7 +721,7 @@ export function ReadonlyComposerTag({
     <span
       className={`${styles.messageTag}${
         clickable ? ` ${styles.messageTagClickable}` : ''
-      }`}
+      }${quoteTag ? ` ${styles.messageTagQuote}` : ''}`}
       role={clickable ? 'button' : undefined}
       tabIndex={clickable ? 0 : undefined}
       title={title ?? getTagText(tag)}
@@ -759,7 +772,13 @@ export function ReadonlyComposerTag({
         </>
       )}
       {tooltip !== undefined && tooltip !== null && (
-        <span className={styles.messageTagTooltip} role="tooltip">
+        <span
+          className={styles.messageTagTooltip}
+          role="tooltip"
+          // Mounted but visually hidden: never part of a copied or quoted
+          // selection.
+          data-selection-copy-ignore
+        >
           {tooltip}
         </span>
       )}

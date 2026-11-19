@@ -1,11 +1,17 @@
 import {
   useCallback,
+  useContext,
   useEffect,
   useRef,
   useState,
   type ReactNode,
 } from 'react';
-import { CopyIcon, FileCodeIcon } from 'lucide-react';
+import {
+  CopyIcon,
+  FileCodeIcon,
+  MessageCirclePlusIcon,
+  QuoteIcon,
+} from 'lucide-react';
 import { Button } from '../ui/button';
 import { Popover, PopoverAnchor, PopoverContent } from '../ui/popover';
 import { useI18n } from '../../i18n';
@@ -17,6 +23,9 @@ import {
   getReplySelectionRange,
   getSelectedReplyContent,
 } from '../../utils/selectionClipboard';
+import { isQuotableText } from '../../utils/quoteReference';
+import { AskInSideTaskContext } from './askInSideTaskContext';
+import { QuoteToComposerContext } from './quoteToComposerContext';
 
 export interface SelectionCopyMenuProps {
   children: ReactNode;
@@ -32,6 +41,8 @@ export function SelectionCopyMenu({
   enabled,
 }: SelectionCopyMenuProps) {
   const { t } = useI18n();
+  const quoteToComposer = useContext(QuoteToComposerContext);
+  const askInSideTask = useContext(AskInSideTaskContext);
   const bodyRef = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState<{
     text: string;
@@ -199,6 +210,36 @@ export function SelectionCopyMenu({
               <FileCodeIcon strokeWidth={1.5} />
               {t('assistant.copyMarkdown')}
             </Button>
+            {quoteToComposer && (
+              <Button
+                variant="ghost"
+                className="justify-start font-normal"
+                disabled={!isQuotableText(selected.text)}
+                onClick={(event) => {
+                  event.preventDefault();
+                  quoteToComposer(selected.text);
+                  setSelected(null);
+                }}
+              >
+                <QuoteIcon strokeWidth={1.5} />
+                {t('assistant.quoteToComposer')}
+              </Button>
+            )}
+            {askInSideTask && (
+              <Button
+                variant="ghost"
+                className="justify-start font-normal"
+                disabled={!isQuotableText(selected.text)}
+                onClick={(event) => {
+                  event.preventDefault();
+                  askInSideTask(selected.text);
+                  setSelected(null);
+                }}
+              >
+                <MessageCirclePlusIcon strokeWidth={1.5} />
+                {t('assistant.askInSideTask')}
+              </Button>
+            )}
           </PopoverContent>
         )}
       </Popover>

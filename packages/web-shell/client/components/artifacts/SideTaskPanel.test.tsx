@@ -940,6 +940,76 @@ it('names a newly created side task from its first prompt', async () => {
   ).toBeUndefined();
 });
 
+it('names an ask-in-side-task after the question, not the quote fence', async () => {
+  connection.sessionId = 'side-session-1';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  const onTitleChange = vi.fn();
+  // A quote of 200+ characters: without the fence strip it alone would
+  // consume the whole 200-char name and drop the question.
+  const longQuote = 'x'.repeat(220);
+  act(() => {
+    root!.render(
+      <I18nProvider language="en">
+        <SideTaskPanel
+          tabId="side-task:draft:1"
+          sessionId="side-session-1"
+          parentSessionId="parent-session"
+          workspaceCwd="/work/project"
+          title="Side task"
+          shouldNameFromFirstPrompt
+          initialQuote={longQuote}
+          createSession={vi.fn()}
+          onCreated={vi.fn()}
+          onTitleChange={onTitleChange}
+        />
+      </I18nProvider>,
+    );
+  });
+
+  // The delivered chip sits at the front of the child composer's document,
+  // so the first prompt admitted by the pane starts with its fence.
+  await act(async () => {
+    (
+      latestChatPaneProps.current?.['onFirstPromptAdmitted'] as (
+        text: string,
+      ) => void
+    )(`<quoted-message>${longQuote}</quoted-message>why does this loop?`);
+    await Promise.resolve();
+  });
+
+  expect(onTitleChange).toHaveBeenCalledWith(
+    'side-task:draft:1',
+    'why does this loop?',
+    true,
+  );
+  expect(renameSession).toHaveBeenCalledWith('why does this loop?');
+
+  // A prompt that is only the fence leaves the session unnamed: no
+  // garbage title, no rename attempt.
+  await act(async () => {
+    (
+      latestChatPaneProps.current?.['onFirstPromptAdmitted'] as (
+        text: string,
+      ) => void
+    )(`<quoted-message>${longQuote}</quoted-message>`);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(renameSession).toHaveBeenCalledTimes(1);
+  expect(onTitleChange).not.toHaveBeenCalledWith(
+    'side-task:draft:1',
+    longQuote.slice(0, 200),
+    true,
+  );
+
+  act(() => {
+    root!.render(null);
+  });
+});
+
 it('retries the first-prompt title before marking it complete', async () => {
   connection.sessionId = 'side-session-1';
   connection.status = 'connected';

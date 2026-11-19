@@ -320,6 +320,47 @@ describe('useComposerCore mobile textarea backend', () => {
     });
   });
 
+  it('keeps a quote chip through a mobile draft remount', async () => {
+    mockTouchDevice();
+    const tag = {
+      id: 'quote:7a1e2b3c-1',
+      kind: 'quote' as const,
+      value: 'quoted fragment',
+      serialized: '<quoted-message>quoted fragment</quoted-message>',
+    };
+    await mount({ sessionId: 'session-a', persistFileReferences: true });
+    typeText('explain this');
+    // The textarea backend has no inline chips, so the quote rides as a
+    // top tag — the same shape the CodeMirror path's serialized draft
+    // carries.
+    act(() => latest!.addTags([tag], { placement: 'top' }));
+    act(() => window.dispatchEvent(new Event('pagehide')));
+    act(() => root!.unmount());
+    root = null;
+    container?.remove();
+    container = null;
+    const { onSubmit } = await mount({
+      sessionId: 'session-a',
+      persistFileReferences: true,
+    });
+    // The stored tag round-trips byte-identically: the restored chip must
+    // serialize to the same fence the annotation pins into the prompt.
+    expect(latest!.composerTags).toEqual([tag]);
+    act(() => latest!.submitText());
+    expect(onSubmit.mock.calls[0]?.[4]).toMatchObject({
+      inputAnnotations: [
+        expect.objectContaining({
+          text: tag.serialized,
+          reference: expect.objectContaining({
+            id: tag.id,
+            kind: 'quote',
+            value: tag.value,
+          }),
+        }),
+      ],
+    });
+  });
+
   it('keeps restored inline snapshots when mobile adds another top file', async () => {
     mockTouchDevice();
     const inline = {
@@ -438,6 +479,35 @@ describe('useComposerCore mobile textarea backend', () => {
     typeText('!ls');
     act(() => latest!.submitText());
     expect(onSubmit.mock.calls[0][0]).toBe('!ls');
+  });
+
+  it('keeps a quote top tag out of a shell command line', async () => {
+    mockTouchDevice();
+    const { onSubmit } = await mount();
+    const quote = {
+      id: 'quote:touch',
+      kind: 'quote',
+      value: 'see issue #123 for details',
+      serialized: '<quoted-message>see issue #123 for details</quoted-message>',
+    };
+    act(() => {
+      latest!.handle.insertQuote!(quote);
+    });
+    expect(latest!.composerTags).toEqual([quote]);
+
+    act(() => latest!.toggleShellMode());
+    expect(latest!.shellMode).toBe(false);
+
+    // A tag that reaches a shell-mode draft another way is not sent either.
+    act(() => latest!.removeTopTag(quote.id));
+    act(() => latest!.toggleShellMode());
+    expect(latest!.shellMode).toBe(true);
+    act(() => latest!.addTags([quote]));
+    typeText('echo typed-command');
+    act(() => latest!.submitText());
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.composerTags).toEqual([quote]);
+    expect(latest!.mobileComposer!.value).toBe('echo typed-command');
   });
 
   it('includes top tags in the submission and clears them after commit', async () => {

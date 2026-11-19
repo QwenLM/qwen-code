@@ -2,7 +2,7 @@ import TurndownService from 'turndown';
 
 const IGNORED =
   '[data-selection-copy-ignore], [hidden], .markdown-chart-data-notice, [data-footnote-backref], [data-markdown-chart-loading], .markdown-chart-error, [aria-hidden="true"]:not(.katex-html), .katex-mathml, button, select, input, textarea, svg, style, script';
-const BLOCKS = /^(P|H[1-6]|DIV|SECTION|BLOCKQUOTE|UL|OL|LI|PRE|TR)$/;
+const BLOCKS = /^(P|H[1-6]|DIV|SECTION|BLOCKQUOTE|UL|OL|LI|PRE|TR|DT|DD)$/;
 
 export function getReplySelectionRange(body: HTMLElement): Range | null {
   const root = body.getRootNode() as Document | ShadowRoot;

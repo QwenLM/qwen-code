@@ -39,6 +39,9 @@ vi.mock('./hooks/useApprovalModes', async () => {
 });
 
 const editorAddTags = vi.hoisted(() => vi.fn());
+const editorInsertQuote = vi.hoisted(() =>
+  vi.fn((_tag: { kind?: string; serialized?: string }) => true),
+);
 import type {
   ContextUsageControls,
   RegisterContextUsageControls,
@@ -998,6 +1001,14 @@ const {
       backgroundDetails: undefined as
         | ((turn: import('@qwen-code/sdk/daemon').DaemonBackgroundTurn) => void)
         | undefined,
+      latestQuoteToComposer: undefined as
+        | ((text: string) => void)
+        | null
+        | undefined,
+      latestAskInSideTask: undefined as
+        | ((text: string) => void)
+        | null
+        | undefined,
       capturedHostOwnsArtifactPreview: undefined as boolean | undefined,
       latestMessageListProps: null as {
         onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
@@ -1502,6 +1513,7 @@ vi.mock('./components/ChatEditor', async () => {
         ref: React.ForwardedRef<{
           clear: () => void;
           addTags: (tags: unknown, options?: unknown) => void;
+          insertQuote: (tag: { kind?: string; serialized?: string }) => boolean;
           hasAttachments: () => boolean;
           hasInput: () => boolean;
           insertText: (text: string) => void;
@@ -1554,6 +1566,7 @@ vi.mock('./components/ChatEditor', async () => {
             ),
           hasInput: () => testState.prompt.trim().length > 0,
           addTags: editorAddTags,
+          insertQuote: editorInsertQuote,
           insertText: editorInsertText,
           getText: () => testState.prompt,
           setText: (text) => {
@@ -1660,6 +1673,12 @@ vi.mock('./components/TranscriptViewport', async () => {
   const { useInteractionBlocker } = await import('./interactionBlockContext');
   const { useSubagentDetails } = await import('./subagentDetailsContext');
   const { useOpenTurnCalls } = await import('./turnCallsContext');
+  const { QuoteToComposerContext } = await import(
+    './components/messages/quoteToComposerContext'
+  );
+  const { AskInSideTaskContext } = await import(
+    './components/messages/askInSideTaskContext'
+  );
   const { useWebShellCustomization } = await import('./customization');
   function InteractionBlockerProbe() {
     const registerInteractionBlocker = useInteractionBlocker();
@@ -1709,6 +1728,10 @@ vi.mock('./components/TranscriptViewport', async () => {
       ref: React.ForwardedRef<{ scrollToBottom: () => void }>,
     ) {
       testState.latestMessageListProps = props;
+      testState.latestQuoteToComposer = React.useContext(
+        QuoteToComposerContext,
+      );
+      testState.latestAskInSideTask = React.useContext(AskInSideTaskContext);
       testState.backgroundDetails = useSubagentDetails()?.onOpenBackground;
       testState.openTurnCalls = useOpenTurnCalls();
       // The main transcript mounts inside mainChatCustomization, so this reads
@@ -13695,6 +13718,8 @@ beforeEach(() => {
   testState.latestTaskChipsOnSelectTask = null;
   testState.latestTaskChipsOnExplainTask = null;
   testState.latestMessageListProps = null;
+  testState.latestQuoteToComposer = undefined;
+  testState.latestAskInSideTask = undefined;
   testState.backgroundDetails = undefined;
   testState.openTurnCalls = undefined;
   testState.capturedHostOwnsArtifactPreview = undefined;
@@ -13743,6 +13768,7 @@ beforeEach(() => {
   editorRestoreFiles.mockClear();
   editorRestoreInputAnnotations.mockClear();
   editorInsertText.mockClear();
+  editorInsertQuote.mockClear();
   mockStore.appendLocalUserMessage.mockReset();
   settingsReload.mockClear();
   settingsReload.mockResolvedValue(undefined);
@@ -32501,6 +32527,43 @@ describe('App session callbacks', () => {
     expect(testState.latestToolApprovalKeyboardActive).toBe(true);
   });
 
+  it('quotes a transcript selection into the main composer', async () => {
+    renderApp();
+    await flush();
+    expect(testState.latestQuoteToComposer).toBeTypeOf('function');
+
+    act(() => testState.latestQuoteToComposer!('quoted\ntext'));
+
+    expect(editorInsertQuote).toHaveBeenCalledTimes(1);
+    expect(editorInsertQuote.mock.calls[0]![0]).toMatchObject({
+      kind: 'quote',
+      serialized: '<quoted-message>quoted text</quoted-message>',
+    });
+  });
+
+  it('offers no Quote action while a tool approval overlay owns the composer', async () => {
+    const { rerender } = renderApp();
+    await flush();
+    expect(testState.latestQuoteToComposer).toBeTypeOf('function');
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(testState.latestQuoteToComposer).toBeNull();
+
+    await act(async () => {
+      testState.blocks = [];
+      rerender();
+      await Promise.resolve();
+    });
+    expect(testState.latestQuoteToComposer).toBeTypeOf('function');
+  });
+
   it('hides the composer while a tool approval overlay is pending and restores it after resolution', async () => {
     const { container, rerender } = renderApp();
     await flush();
@@ -39260,6 +39323,46 @@ describe('App session callbacks', () => {
       expect(mockWorkspace.client.createSideTaskSession).toHaveBeenCalledOnce();
     },
   );
+
+  it('asks a new side task seeded with the selection as a composer quote', async () => {
+    mockConnection.capabilities.features = ['session_side_task'];
+    mockWorkspace.client.createSideTaskSession.mockResolvedValueOnce({
+      sessionId: 'ask-side-task-1',
+      clientId: 'ask-side-client',
+    });
+    renderApp();
+    await flush();
+    expect(testState.latestAskInSideTask).toBeTypeOf('function');
+
+    act(() => testState.latestAskInSideTask!('quoted\ntext'));
+    await flush();
+
+    expect(
+      mockWorkspace.client.createSideTaskSession,
+    ).toHaveBeenCalledExactlyOnceWith(
+      'session-1',
+      { name: 'Side task' },
+      'client-1',
+    );
+    expect(testState.latestArtifactPanelProps?.tabs).toEqual([
+      expect.objectContaining({
+        kind: 'side_task',
+        sessionId: 'ask-side-task-1',
+        parentSessionId: 'session-1',
+        nameFromFirstPrompt: true,
+        initialQuote: 'quoted\ntext',
+      }),
+    ]);
+    // The quote only seeds the composer; the user writes and sends the prompt.
+    expect(mockSessionActions.btwSessionStream).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('exposes no ask-in-side-task action while side tasks are unavailable', async () => {
+    renderApp();
+    await flush();
+    expect(testState.latestAskInSideTask).toBeNull();
+  });
 
   it('refuses a host-disabled model setup side task before provisioning', async () => {
     mockConnection.capabilities.features = ['session_side_task'];

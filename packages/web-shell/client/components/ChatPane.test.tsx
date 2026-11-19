@@ -7,7 +7,16 @@
 
 import * as messageDeletion from '../utils/message-deletion';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, forwardRef, useImperativeHandle } from 'react';
+import { act, forwardRef, useContext, useImperativeHandle } from 'react';
+import {
+  AskInSideTaskContext,
+  type AskInSideTaskAction,
+} from './messages/askInSideTaskContext';
+import { QuoteToComposerContext } from './messages/quoteToComposerContext';
+import {
+  requestAskInSideTaskQuote,
+  resetAskInSideTaskDeliveryForTests,
+} from '../utils/askInSideTaskDelivery';
 import { createRoot, type Root } from 'react-dom/client';
 import { DAEMON_APPROVAL_MODES } from '../test/sidebarHarness';
 import {
@@ -70,6 +79,11 @@ let latestMonitorDetailsOnOpen:
 let sendPromptAdmit: (() => void) | undefined;
 const clearFollowup = vi.fn();
 const insertText = vi.fn();
+const insertQuote = vi.fn(
+  (_tag: { kind?: string; serialized?: string }) => true,
+);
+let latestPaneQuoteToComposer: ((text: string) => void) | null | undefined;
+let latestPaneAskInSideTask: AskInSideTaskAction | null | undefined;
 const transcriptDispatch = vi.fn();
 const appendLocalUserMessage = vi.fn();
 const sendPrompt = vi.fn(async () => ({}) as any);
@@ -241,63 +255,67 @@ vi.mock('../monitorDetailsContext', async () => {
 });
 
 vi.mock('./TranscriptViewport', () => ({
-  TranscriptViewport: (props: any) => (
-    <div
-      data-testid="pane-messages"
-      data-approval={props.pendingApproval ? 'yes' : 'no'}
-      data-file-changes={JSON.stringify(
-        [...(props.turnFileChanges?.values() ?? [])].flat(),
-      )}
-    >
-      {props.messages.length}
-      <button
-        data-testid="pane-open-turn-output"
-        type="button"
-        onClick={() =>
-          props.onTurnOutputOpen?.({
-            id: 'artifact:turn-artifact',
-            kind: 'artifact',
-            title: 'Turn artifact',
-            turnId: 'turn-1',
-            artifactId: 'turn-artifact',
-            artifact: { id: 'turn-artifact', title: 'Turn artifact' },
-            workspaceCwd: '/w',
-          })
-        }
-      />
-      <button
-        data-testid="pane-open-attachment"
-        type="button"
-        onClick={() =>
-          props.onAttachmentPreview?.({
-            name: 'data.json',
-            attachmentId: 'attachment-1',
-          })
-        }
-      />
-      <button
-        data-testid="pane-open-review"
-        type="button"
-        onClick={() =>
-          props.onTurnOutputOpen?.({
-            id: 'review',
-            kind: 'review',
-            title: 'Turn review',
-            turnId: 'turn-1',
-            changes: [
-              {
-                path: '/w/source.ts',
-                status: 'modified',
-                toolCallId: 'write-0',
-                isArtifact: false,
-                diffs: [],
-              },
-            ],
-          })
-        }
-      />
-    </div>
-  ),
+  TranscriptViewport: function MockTranscriptViewport(props: any) {
+    latestPaneQuoteToComposer = useContext(QuoteToComposerContext);
+    latestPaneAskInSideTask = useContext(AskInSideTaskContext);
+    return (
+      <div
+        data-testid="pane-messages"
+        data-approval={props.pendingApproval ? 'yes' : 'no'}
+        data-file-changes={JSON.stringify(
+          [...(props.turnFileChanges?.values() ?? [])].flat(),
+        )}
+      >
+        {props.messages.length}
+        <button
+          data-testid="pane-open-turn-output"
+          type="button"
+          onClick={() =>
+            props.onTurnOutputOpen?.({
+              id: 'artifact:turn-artifact',
+              kind: 'artifact',
+              title: 'Turn artifact',
+              turnId: 'turn-1',
+              artifactId: 'turn-artifact',
+              artifact: { id: 'turn-artifact', title: 'Turn artifact' },
+              workspaceCwd: '/w',
+            })
+          }
+        />
+        <button
+          data-testid="pane-open-attachment"
+          type="button"
+          onClick={() =>
+            props.onAttachmentPreview?.({
+              name: 'data.json',
+              attachmentId: 'attachment-1',
+            })
+          }
+        />
+        <button
+          data-testid="pane-open-review"
+          type="button"
+          onClick={() =>
+            props.onTurnOutputOpen?.({
+              id: 'review',
+              kind: 'review',
+              title: 'Turn review',
+              turnId: 'turn-1',
+              changes: [
+                {
+                  path: '/w/source.ts',
+                  status: 'modified',
+                  toolCallId: 'write-0',
+                  isArtifact: false,
+                  diffs: [],
+                },
+              ],
+            })
+          }
+        />
+      </div>
+    );
+  },
 }));
 vi.mock('./StreamingStatus', () => ({
   StreamingStatus: (props: any) => (
@@ -368,6 +386,7 @@ vi.mock('./ChatEditor', () => ({
     latestChatEditorProps = props;
     useImperativeHandle(ref, () => ({
       insertText,
+      insertQuote,
     }));
     if (renderRealChatEditor) {
       return <RealChatEditor {...props} visibleToolbarActions={[]} />;
@@ -542,6 +561,10 @@ beforeEach(() => {
   });
   clearFollowup.mockClear();
   insertText.mockClear();
+  insertQuote.mockClear();
+  resetAskInSideTaskDeliveryForTests();
+  latestPaneQuoteToComposer = undefined;
+  latestPaneAskInSideTask = undefined;
   submitPermission.mockClear();
   respondToPermission.mockClear();
   cancel.mockClear();
@@ -1943,6 +1966,85 @@ describe('ChatPane', () => {
       container!.querySelector('[data-web-shell-composer]')?.parentElement
         ?.className,
     ).not.toContain('composerHidden');
+  });
+
+  it("quotes into this pane's own composer, not an outer chat's", () => {
+    const mainQuote = vi.fn();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() =>
+      root!.render(
+        <QuoteToComposerContext.Provider value={mainQuote}>
+          <WebShellCustomizationProvider value={EMPTY_CUSTOMIZATION}>
+            <I18nProvider language="en">
+              <ChatPane />
+            </I18nProvider>
+          </WebShellCustomizationProvider>
+        </QuoteToComposerContext.Provider>,
+      ),
+    );
+    expect(latestPaneQuoteToComposer).toBeTypeOf('function');
+    expect(latestPaneQuoteToComposer).not.toBe(mainQuote);
+
+    act(() => latestPaneQuoteToComposer!('quoted\ntext'));
+
+    expect(insertQuote).toHaveBeenCalledTimes(1);
+    expect(insertQuote.mock.calls[0]![0]).toMatchObject({
+      kind: 'quote',
+      serialized: '<quoted-message>quoted text</quoted-message>',
+    });
+    expect(mainQuote).not.toHaveBeenCalled();
+  });
+
+  it('delivers a parked ask-in-side-task quote without requesting focus', () => {
+    // The child requested its quote before this surface's composer was
+    // mounted; the per-session registry settles the pair on mount.
+    requestAskInSideTaskQuote('sess-ask-delivery', 'delivered\nquote');
+    connectionState = { ...connectionState, sessionId: 'sess-ask-delivery' };
+    render();
+
+    expect(insertQuote).toHaveBeenCalledTimes(1);
+    expect(insertQuote.mock.calls[0]![0]).toMatchObject({
+      kind: 'quote',
+      serialized: '<quoted-message>delivered quote</quoted-message>',
+    });
+    // The delivery is not a user gesture: it must not steal focus from
+    // wherever the user moved after clicking Ask in side task.
+    expect(insertQuote.mock.calls[0]![1]).toEqual({ focus: false });
+  });
+
+  it('offers no Ask-in-side-task action inherited from an outer chat', () => {
+    const mainAsk: AskInSideTaskAction = vi.fn();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() =>
+      root!.render(
+        <AskInSideTaskContext.Provider value={mainAsk}>
+          <WebShellCustomizationProvider value={EMPTY_CUSTOMIZATION}>
+            <I18nProvider language="en">
+              <ChatPane />
+            </I18nProvider>
+          </WebShellCustomizationProvider>
+        </AskInSideTaskContext.Provider>,
+      ),
+    );
+    // The pane publishes null over the context, so its transcript never
+    // sees the outer (main session's) creator.
+    expect(latestPaneAskInSideTask).toBeNull();
+    expect(mainAsk).not.toHaveBeenCalled();
+  });
+
+  it('offers no Quote action while an approval owns the pane composer', () => {
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    render();
+    expect(testid('pane-approval')).not.toBeNull();
+    expect(latestPaneQuoteToComposer).toBeNull();
+
+    pendingPermission = null;
+    rerender();
+    expect(latestPaneQuoteToComposer).toBeTypeOf('function');
   });
 
   it('adds no composer footer DOM when omitted or returning null', () => {
