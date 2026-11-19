@@ -2,7 +2,7 @@
 
 [English](2026-11-19-managed-control-plane-wake.md) | [简体中文](2026-11-19-managed-control-plane-wake.zh-CN.md)
 
-状态：提案，实现前设计。经一轮对抗式代码级评审后修订，再经 PR #17805 设计评审后修订（六项 P1 与两项 P2 全部采纳），再经一轮 Simplicity First 自审删去投机面（按输入投影表、并发 drain 屏障、独立 wake 标记列、grant 续期协议）。本文是[无状态 Hosted Harness 设计](2026-11-16-managed-stateless-harness.md)（#17527）的 Phase 3 设计，对照 `main` 的 `4ed278b37c` 核实，该提交包含已合并的 Phase 1（#17690，merge `7150c58a01`）与 Phase 2（#17749，merge `4ed278b37c`）。父设计的 Phase 3「仅定义边界；实现前先出独立设计」；本文把该边界展开为提案、成本模型、与 Phase 1/2 的交互、测量计划与可行性结论。下文所有成本占比都是**代码级分析估算，尚未实测**；测量是启用门槛，与父设计和 Phase 2 的要求一致。
+状态：提案，实现前设计。经一轮对抗式代码级评审后修订，再经 PR #17805 第一轮设计评审后修订（六项 P1 与两项 P2 全部采纳），再经一轮 Simplicity First 自审删去投机面，再经 PR #17805 第二轮复审后修订（五项 P1 与三项 P2 全部采纳；其 P1-1 纠正了作者回复中一处参数误读）。本文是[无状态 Hosted Harness 设计](2026-11-16-managed-stateless-harness.md)（#17527）的 Phase 3 设计，对照 `main` 的 `4ed278b37c` 核实，该提交包含已合并的 Phase 1（#17690，merge `7150c58a01`）与 Phase 2（#17749，merge `4ed278b37c`）。父设计的 Phase 3「仅定义边界；实现前先出独立设计」；本文把该边界展开为提案、成本模型、与 Phase 1/2 的交互、测量计划与可行性结论。下文所有成本占比都是**代码级分析估算，尚未实测**；测量是启用门槛，与父设计和 Phase 2 的要求一致。
 
 **交付建议。** 3a（wake 调度）小且可独立交付；3b（Runtime 持有观测）是捕获状态机重写加 staging 管线，应作为独立后续设计。先发 3a；下文 3b 视为它必须契合的边界，而非本阶段承诺的工作。
 
@@ -35,13 +35,14 @@ Phase 1 仅在 Session 不欠任何工作时挂起它：无 pending 输入（包
 
 跑在 Harness 里的是**观测**：
 
-- `HostedMonitorLoop`（`packages/cli/src/serve/hosted-monitor-loop.ts:100`）把 watch 的 stdout 行按 debounce 窗口聚合成一次观测。`flush()`（`:387-415`）经 `HostedMonitorSession.observe`（`hosted-monitor-session.ts:184-207`，提交在 `:398-410`）**在同一事务提交一个 `monitor_run` revision 加一个通知 `input.accepted`（source `monitor`）**，然后 kick wake 泵。通知策略是**每个被接受的观测一条通知**（`hosted-monitor-loop.ts:417-435`）；`notifiedThrough` 只是记账，不是门。watch 本身跑在 worker 里；Harness 侧的 `HostedMonitorRemoteExecutor`（`hosted-monitor-remote-executor.ts:25-67`）只在 publisher 上注册 `{onLine, onExit}` 并经 Broker 的 `monitor-stop` 请求 worker 停止（`managed-monitor-runtime.ts:89-135`）。
+- `HostedMonitorLoop`（`packages/cli/src/serve/hosted-monitor-loop.ts:100`）把 watch 的 stdout 行按 debounce 窗口聚合成一次观测。`flush()`（`:387-415`）经 `HostedMonitorSession.observe`（`hosted-monitor-session.ts:184-207`，提交在 `:398-410`）**在同一事务提交一个 `monitor_run` revision 加一个通知 `input.accepted`（source `monitor`）**，然后 kick wake 泵。通知策略是**每个被接受的观测一条通知**（`hosted-monitor-loop.ts:417-435`）；`notifiedThrough` 只是记账，不是门。通知的 `inputId`/`turnId` 由观测 sequence 派生（`hosted-monitor-notification.ts:77-83`），而 sequence 在提交时从上一条记录计算（`hosted-monitor-session.ts:194-205`）——所以重放的观测会铸出新通知身份，除非 staged 观测携带稳定身份。watch 本身跑在 worker 里；Harness 侧的 `HostedMonitorRemoteExecutor`（`hosted-monitor-remote-executor.ts:25-67`）只在 publisher 上注册 `{onLine, onExit}` 并经 Broker 的 `monitor-stop` 请求 worker 停止（`managed-monitor-runtime.ts:89-135`）。
 - 后台 Shell 没有独立的循环类；其观测是 `HostedShellPublisher` 的捕获转发（`fanMonitorLines`，`hosted-shell-publisher.ts:623-664`；`advanceBackgroundManifest` 把每个持久 manifest revision 转发到记录）。
-- 唯一的 worker→Harness 后台事件路径是 HTTP POST 到 Harness 拥有的**环回**服务器：`HostedShellPublisher` 监听 `127.0.0.1:0`，带随机 32 字节 bearer token（`hosted-shell-publisher.ts:102-193`）；worker 客户端 `rpc()` post 到 descriptor URL（`managed-shell-publisher.ts:72-133`）。该服务器随 Harness 死亡。它喂给的每个 journal 提交都经 Harness 的 writer 权威——今天没有 worker→Store 或 Broker→journal 的提交路径（`v3/hooks` 是 Java→worker 分发，不是 journal writer）。直连路径已按字节 offset 幂等：write handler 拒绝不匹配的 offset 并在成功时推进它（`hosted-shell-publisher.ts:333,348`）。
+- 唯一的 worker→Harness 后台事件路径是 HTTP POST 到 Harness 拥有的**环回**服务器：`HostedShellPublisher` 监听 `127.0.0.1:0`，带随机 32 字节 bearer token（`hosted-shell-publisher.ts:102-193`）；worker 客户端 `rpc()` post 到 descriptor URL（`managed-shell-publisher.ts:72-133`）。该服务器随 Harness 死亡。它喂给的每个 journal 提交都经 Harness 的 writer 权威——今天没有 worker→Store 或 Broker→journal 的提交路径（`v3/hooks` 是 Java→worker 分发，不是 journal writer）。直连路径按字节 offset 幂等：write handler 拒绝不匹配的 offset 并在成功时推进它（`hosted-shell-publisher.ts:333,348`）。
 
-worker 侧的三个事实界定了 3b 必须改什么：
+worker 侧的四个事实界定了 3b 必须改什么：
 
 - **worker 的捕获在 publisher 失联时是 fail-stop，不是重试或改道。** `RemoteShellCapture.append` 捕获任何 RPC 失败并调 `failCapture()`（`managed-shell-publisher.ts:258-280`）；一旦 `failed`，后续 write 被丢弃、`finish` 标记流不完整、`finalize` 产出 `captureStatus:'unavailable'`、`captureReason:'producer_lost'`、`deliveryStatus:'blocked'`（`:340-378`）。因此今天挂起时关闭环回 publisher 会**永久失败**一个在途捕获；它不会回退到任何东西。3b 必须重写这一语义，而非仅仅新增一个 staging 端点（§4.4）。
+- **直连写成功不等于字节已持久。** 捕获按 1 MiB 分段缓冲，段满才发布（`local-shell-stream-capture.ts:167-180`）；写 1 KiB 返回时 0 段发布（manifest 仍 revision 1、stdout 0 字节），但 publisher 在 `sink.write` 返回后即答 `accepted`（`hosted-shell-publisher.ts:348-362`）。若 worker 据该 ack 推进 offset，挂起或换代会丢掉已确认但未发布的前缀。3b 必须区分**已接收**位置与**已持久连续**位置（§4.4）。
 - **Broker 只在某操作触发其 sweep 时结算已结束的后台执行——没有周期结算者。** `ManagedBackgroundShellRegistry.complete()` 在进程结束被证明且 finalize/accept 链解决时 drop hold（`managed-background-shell-registry.ts:200-290`，hold drop 在 `:280-290`），并把已结束 receipt 保留在 worker 内存直到 worker 结束（`:64-70`）。Broker 的 `settleUnprovenBackgroundRows` sweep 经 worker 状态路由查询该保留 receipt（`managed-monitor-runtime.ts:113-127`）并结算执行行——但该 sweep 是**操作触发**的：Session 释放（`RuntimeSessionRelease.java:85`）、parked-MCP 回收（`RuntimeBrokerService.java:601`）、维护结算（`:1502`）或 drain（`RuntimeDrainCoordinator.java:639`）。它**不是定时任务**。因此挂起后退出的安静 Shell 没有主动结算者：唯一的周期路径是 incidental 的 parked-MCP 回收，而 §4.5 的后台执行拒绝会挡住它；无 MCP owner 的纯 shell-profile Session 则根本没有周期触发。3b 必须新增一个不重新加载 Session 的主动结算触发（§4.4）。
 - **cleanup 重试会为欠债重新加载 Session。** `HostedCleanupRetryCoordinator.retry` 调 `harness.recheckRecoveryCleanup`（`HostedCleanupRetryCoordinator.java:126-146`），这是一次加载/复查，节奏化以避免每 tick 都重载。对后台持有的 Session 这是一个击败挂起的 wake 源；3b 的 cleanup 扫描必须识别 Runtime 持有的后台工作而不重载它（§4.4、§4.5）。
 
@@ -55,9 +56,9 @@ worker 侧的三个事实界定了 3b 必须改什么：
 
 **目标。** 控制面决定挂起的 Session 何时有到期输入，并唤醒任意 pool member 去运行它；Harness 运行输入后再次挂起。后台工作的观测移到 Runtime worker 与控制面，使带后台 Shell 或 Monitor 的 Session 能在其进程持续运行、记录持续持久的同时挂起。
 
-**范围，第一增量（3a — wake 调度）。** 唯一欠的工作是未尝试 wake 输入（排队或延迟）的 Session 可以挂起。一个容忍陈旧的 **head 到期提示**加更快的到期优先分发器——二者都复用既有 journal proof——取代分钟级迟到的兜底成为主 wake 时钟；transport 快速路径与 SQL 兜底作为提示与正确性地板保留。资格与恢复视图守卫相应放宽。无新表，无后台工作变更。
+**范围，第一增量（3a — wake 调度）。** 唯一欠的工作是未尝试 wake 输入（排队或延迟）的 Session 可以挂起。一个容忍陈旧的 **head 到期提示**加更快的到期优先分发器——二者都复用既有 journal proof——取代分钟级迟到的兜底成为主 wake 时钟；transport 快速路径与 SQL 兜底作为提示与正确性地板保留。资格与恢复视图守卫相应放宽，并在 seal 时做逐输入未尝试证明。无新表，无后台工作变更。
 
-**范围，第二增量（3b — Runtime 持有观测，独立后续）。** worker 聚合并监督其后台进程；一个 Broker 侧 staging 账本在无 Harness 持有 writer 时持久持有观测**及其输出字节**；Harness 在 wake 时 drain staging（先发布资源再提交记录）并恢复直连投递。带活后台工作的 Session 可以挂起；Runtime hold 跨挂起存续并在重开时重新附着。3b 是捕获状态机重写加 staging 管线、主动结算触发、binding 范围 staging 授权、只探测/mount 交还 teardown 容忍（§4.4–4.5）。它重到值得独立设计，不承诺于本阶段。
+**范围，第二增量（3b — Runtime 持有观测，独立后续）。** worker 聚合并监督其后台进程；一个 Broker 侧 staging 账本在无 Harness 持有 writer 时持久持有观测**及其输出字节**；Harness 在 wake 时 drain staging（先发布资源再提交记录）并恢复直连投递。带活后台工作的 Session 可以挂起；Runtime hold 跨挂起存续并在重开时重新附着。3b 是捕获状态机重写加 staging 管线（带字节级持久性与稳定观测身份）、主动结算触发（带 exited-pending-commit 状态）、持久 binding 范围 staging 授权、只探测/mount 交还 teardown 容忍（§4.4–4.5）。它重到值得独立设计，不承诺于本阶段。
 
 **范围外（后续增量 / 其他阶段）。**
 
@@ -78,20 +79,20 @@ worker 侧的三个事实界定了 3b 必须改什么：
 
 消除：唯一欠的工作是未尝试 wake 输入的 Session 的常驻——它在空闲期后挂起，并保持挂起直到输入到期。wake 本身以到期分发（目标：秒级，受扫描周期与冷开准入限制）取代分钟级迟到的兜底。
 
-新增：每个被接受 wake 输入一次 head 列更新（到期提示的 `LEAST` 递减，§4.1）；对 head 提示的周期到期扫描加每个到期候选一次按需 proof 重放（§4.2）；每个到期批次一次 wake 驱动的冷开。冷开的 MCP 分量已被 Phase 2 parked 复用移除；剩余冷开成本是无 MCP 地板加 journal 恢复。陈旧偏早的提示导致一次浪费加载，由 proof 纠正并重新挂起——有界且无害。proof 重放是本设计为简单性付出的代价；测量（§7）门控按输入索引后续是否值得其面。
+新增：每个被接受 wake 输入一次 head 列更新（到期提示的 `LEAST` 递减，§4.1）；对 head 提示的周期到期扫描加每个到期候选一次按需 proof 重放（§4.2）；seal 时一次逐输入 transcript 证明（§4.3）；每个到期批次一次 wake 驱动的冷开。冷开的 MCP 分量已被 Phase 2 parked 复用移除；剩余冷开成本是无 MCP 地板加 journal 恢复。陈旧偏早的提示导致一次浪费加载，由 proof 纠正并重新挂起——有界且无害。proof 重放是本设计为简单性付出的代价；测量（§7）门控按输入索引后续是否值得其面。
 
 ### 3.3 3b 消除与新增什么
 
 消除：唯一欠的工作是活后台观测的 Session 的常驻。worker 已拥有进程；3b 移除挂起期间的 Harness 侧循环与环回依赖。
 
-新增：每个观测批次一次 Broker staging 写（debounce ≥1 s，受 10,000 观测记录界限制），**携带观测字节与输出段**；一次 drain-then-open 的 wake 交接，先发布 staged 资源再提交记录；一个主动执行结算触发；staged 活状态的任务视图读路径；以及把 worker 捕获管线从 fail-stop 一次性重写为 buffer-and-redirect（§4.4）。通知 turn 仍需要 Harness——3b 不消除 wake，它消除 wake 之间的常驻。持续吵闹的 Monitor 从不空闲因而从不挂起（空闲时钟让它常驻，与今天一致）：3b 的常驻收益针对突发或安静的后台工作，而非不间断流（§4.4）。
+新增：每个观测批次一次 Broker staging 写（debounce ≥1 s，受 10,000 观测记录界限制），**携带观测字节与输出段**并带稳定观测身份；一次 drain-then-open 的 wake 交接，先发布 staged 资源再提交记录并跟踪已接收/已持久字节位置；一个主动执行结算触发（带 exited-pending-commit 状态）；staged 活状态的任务视图读路径；以及把 worker 捕获管线从 fail-stop 一次性重写为 buffer-and-redirect（§4.4）。通知 turn 仍需要 Harness——3b 不消除 wake，它消除 wake 之间的常驻。持续吵闹的 Monitor 从不空闲因而从不挂起（空闲时钟让它常驻，与今天一致）：3b 的常驻收益针对突发或安静的后台工作，而非不间断流（§4.4）。
 
 ### 3.4 见证
 
 - **常驻见证**：N 个各持一个按最大延迟武装的 loop 输入的 Session 的 rig 上的 `attachedSessions`——Phase 1 保持 N 常驻；3a 在空闲期后挂起 N 并恰好唤醒到期的那些。
 - **到期延迟见证**：在 `now + T` 武装 loop 输入，挂起，测量 fire-to-turn-start 延迟，对比长 journal 上兜底的 ≥3 分钟。
 - **重连见证**：Phase 2 的 `mcp.start` 计数在 3a wake 跨保持 0（parked 复用）。
-- **后台见证**：挂起 Session 的 Monitor 持续 stage 观测且其通知在 wake 时触发 turn；`cgroup.kill` 证明的 Shell 退出在挂起期间经主动触发（§4.4）结算其 Broker 执行，且不重新加载 Session；捕获跨挂起存活，无 `producer_lost`。
+- **后台见证**：挂起 Session 的 Monitor 持续 stage 观测且其通知在 wake 时触发 turn；`cgroup.kill` 证明的 Shell 退出在挂起期间经主动触发（§4.4）结算其 Broker 执行，且不重新加载 Session；捕获跨挂起存活，无 `producer_lost` 且无丢失的已确认前缀。
 
 ## 4. 提案
 
@@ -106,6 +107,8 @@ worker 侧的三个事实界定了 3b 必须改什么：
 
 **失效是 proof 的职责，与今天一致。** 因父 run 终态被丢弃的 child 通知、或已停止 run 的 message，由既有 proof 处理：兜底不结算就清除 head 提示（`WakeRecovery.java:52-62`），泵跳过被策略跳过的输入（`stoppedMessage`，`hosted-harness-session.ts:7687-7691,7706-7710`）。因为没有投影行，就没有东西重新填满到期页并饿死有效 Session——被失效 Session 的提示由 proof 清除，它离开候选集。这正是 head 提示优于按输入表之处：表恰恰需要为这些跨 Session 失效另设持久行清理机制。
 
+**过滤不得丢弃仍欠 writer 结算的输入。** 「不可调模型」与「仍欠一次结算」是不同判断。已停止的 `session_message` 有 stop relay 作独立结算者，可离开候选集。但已受理却在执行前取消的 automation 或 child 通知，由 wake pump 写 `state:'cancelled'` 的 `turn_result` 结算（`hosted-monitor-wake-turn.ts:188-206`）——那需要 writer。因此分发器仅移除有独立结算者或可证已结算的输入；其余取消项仍分发给可写取消结果的路径（模型调用保持 0）。proof 的可投递性过滤（§4.2）应用此区分。
+
 ### 4.2 到期分发（3a）
 
 专用 `wakeDispatchScheduler` bean 上的新 `WakeDispatchJob` 遵循房屋调度器模式（命名单线程 `ThreadPoolTaskScheduler` + `@Scheduled` fixed delay；不存在也不需要 leader 选举——安全是逐行 CAS 加围栏，正如 wake 认领、transport 水位与 automation 账本已经是的那样）。候选周期 1 s，启用前实测。是否把这并入兜底扫描而非独立 job，是由测量门控的实现选择；下述契约两者相同。
@@ -113,7 +116,7 @@ worker 侧的三个事实界定了 3b 必须改什么：
 每个 tick：
 
 1. **扫描到期。** 选择 head `wake_due_at <= NOW`（或 `is_wake_pending` 置位）的无主、`ACTIVE` 公开、未退役 Session，按 `wake_due_at` 排序，有界页（候选 8）。稳定游标翻过剩余，而非重读队头同一批。
-2. **证明并认领。** 复用既有 journal proof 确认有到期 pending 输入并刷新提示（§4.1）；proof 的 child 终态/策略过滤在失效候选消耗 wake 前丢弃它们。按 Session 认领（lease + 单调 fence，automation 账本之形）防止两节点同时分发一个 Session；租约至少为冷开上界，使慢加载不会让自己的认领过期。兜底的 `wake_retry_at` 保持不动。
+2. **证明并认领。** 复用既有 journal proof 确认有到期 pending 输入并刷新提示（§4.1）；proof 的 child 终态/策略过滤在失效候选消耗 wake 前丢弃它们，应用 §4.1「仍欠结算」区分。按 Session 认领（lease + 单调 fence，automation 账本之形）防止两节点同时分发一个 Session；租约至少为冷开上界，使慢加载不会让自己的认领过期。兜底的 `wake_retry_at` 保持不动。
 3. **唤醒。** 调用现有 `activateForWake`：它驱逐陈旧附件、走新工作准入，Harness 的 writer 获取是 activation 围栏。加载重建泵，泵投递到期输入并为仍在未来的输入重新武装延迟定时器。3a 不需要新 Harness 动词。
 4. **失败节奏。** 瞬态拒绝（`hosted_session_open_busy`、`hosted_session_closing`、pool 所有权等待）以 backoff 重试，受 #17681 建立的同一 churn cap 限制（`WAIT_CHURN_BUDGET_FACTOR = 4`，`HarnessCoordinator.java:101`）；确定性拒绝记录其自身代码并停止分发该 Session 直到 journal 前进。
 
@@ -128,11 +131,11 @@ worker 侧的三个事实界定了 3b 必须改什么：
 
 ### 4.3 带 pending wake 输入的挂起（3a）
 
-`attemptSuspend` 中的 `pendingInputs` 门**对未尝试 wake 输入**移除。区分已由活跃工作守卫与泵自身强制执行：turn 已开始的 wake 输入是运行中 Turn（`session.active`）、恢复 Turn（`recoveredTurn`）或 blocked 善后。在崩溃于 wake-turn 中途后的 takeover 加载上，泵首趟检测到先前 transcript 尝试（`wakeHasPriorAttempt`）并返回 `'recovery'`，置 `session.blocked = true`（`hosted-monitor-wake-turn.ts:122-171`）；`suspensionLiveWork` 随即阻止于 `session.blocked`。所以已尝试输入绝不被变为可挂起——它归恢复舰队，与今天完全一致。未尝试 wake 输入没有 Turn 也没有善后；它是分发器拥有的可调度工作。非 wake 持有的 `unsettledInputs` 项（`:5002`）不变。
+`attemptSuspend` 中的 `pendingInputs` 门**对未尝试 wake 输入**移除，但「未尝试」必须**在 seal 时证明，而非从内存状态推断**。泵的先前尝试路径并不总置 `session.blocked`：takeover 加载时它调 `settleInterrupted`，可返回 `'held'`（持久审批等待）或 `'busy'`（channel 恢复暂态故障）而**不**置 `blocked`；仅 fallthrough 置 `blocked = true` 并返回 `'recovery'`（`hosted-monitor-wake-turn.ts:121-171`）。因此恢复持续返回 `busy` 的已尝试输入可能跨过空闲期而没有任何内存标记表明它已尝试。所以 seal writer 前的最后一次挂起检查在当前 revision 校验**每条 pending wake 输入都无 transcript 尝试**——与所有权释放流程已用的逐输入证明相同（`pending.some(!isWakeInputSource || wakeHasPriorAttempt) → throw`，`hosted-harness-session.ts:4874-4889`）。已尝试或证据不足的输入保留其现有恢复责任并阻止挂起。挂起入口与恢复视图 `ready`（§4.6）共用这一项未尝试证明。非 wake 持有的 `unsettledInputs` 项（`:5002`）与活跃工作守卫（`session.active`、`recoveredTurn`、`blocked`）不变。
 
 teardown 不变：`wake.close()` 已停止泵且**不结算任何输入**（`hosted-monitor-wake.ts` `close()`），所以输入在 journal 与 head 提示中保持 pending；`mcp.suspend()` park（Phase 2）；writer 最后 seal。空闲时钟与有界准入工作等待不变。被分发器唤醒的 Session 运行其到期输入，再次空闲时 Phase 1 重新挂起它——现在允许带 pending 输入。
 
-**发布控制。** 遵循 Phase 2 的 `mcpParkable` 先例（Phase 2 设计 §5.6），控制面广告 wake-dispatch 能力，由 `qwen.managed-agent.wake-dispatch.enabled`（默认关）门控。Harness 仅在能力被广告时放宽 `pendingInputs` 门；关闭时行为恰为 Phase 1。这使资格变更与分发器耦合，挂起 Session 绝不会在没有调度器的情况下被搁浅。
+**发布控制与回滚顺序。** 遵循 Phase 2 的 `mcpParkable` 先例（Phase 2 设计 §5.6），控制面广告 wake-dispatch 能力，由 `qwen.managed-agent.wake-dispatch.enabled`（默认关）门控。Harness 仅在能力被广告时放宽 `pendingInputs` 门；关闭时行为恰为 Phase 1。**新挂起准入绑定到实际消费 wake 标记的分发器**，使 Session 绝不被挂入无人唤醒的状态。回滚按序逆向：先停止准入新挂起，让已挂起生产者完成或交接，并继续消费它们可能仍产生的标记；仅在生产者已交接且积压排空后才停消费者。这覆盖「Session 在功能开启时挂起、却在功能关闭后才产出第一条输出」的窗口（§4.4 staging 标记）。
 
 ### 4.4 Runtime 持有观测（3b，独立后续）
 
@@ -140,23 +143,30 @@ teardown 不变：`wake.close()` 已停止泵且**不结算任何输入**（`hos
 
 **捕获重写（最大改动）。** 今天 worker 的 `RemoteShellCapture` 是 fail-stop：任何 publisher RPC 失败永久失败该捕获（`managed-shell-publisher.ts:258-280,340-378`），且 `ManagedBackgroundShellRegistry.complete()` 经 `sink.finish`/`finalize`/`publisher.accept` 投递终态信封（`managed-background-shell-registry.ts:200-290`）。3b 把**后台 lane** 改为 buffer-and-redirect：当环回 publisher 缺失或拒绝（无 Harness）时，捕获把其输出段与终态证据写入 Broker staging 路由而非失败，并在 wake 时恢复直连投递。`HostedMonitorLoop` 今天做的聚合与 debounce 移入 worker 的 `ManagedMonitorRuntime`。前台 lane 保持其 fail-stop 保证。这是对捕获状态机的重写，不是在其旁新增端点，需先有自己的特征化测试。
 
-**staging 携带字节；wake 时 drain-then-open。** 新 Broker 维护路由接受观测批次与终态证据并写入按 run 有界的 staging 账本，持有**观测字节与输出段/manifest 链**，不只是元数据：一次观测提交发布一个 `managed-monitor-observation` 资源（`hosted-monitor-session.ts:194-197`）并推进一条 lineage 被校验的 manifest 链（`isToolResultManifestChainLink`，`:215-240`）。wake 时 Harness **完全 drain staging——先发布 staged 资源，再提交 `monitor_run` revision 及其通知输入——然后才重开直连 publisher**，在 drained-to offset 交接。drain 先于 open 的顺序消除任何直连/staging 并发重叠，所以无需连续 drain 屏障；幂等复用直连路径既有的 offset 冲突检查（`hosted-shell-publisher.ts:333,348`）而非新 digest 键。资源先于记录的顺序很重要，因为加载的恢复趟对每个 `tool.receipt` manifest 向 publication owner 校验（`hosted-harness-session.ts:3196-3225`）。generation 切换保留前代已确认字节并拒绝旧代进一步追加。staging 界镜像 10,000 观测记录界。
+**已接收 vs 已持久字节位置。** 直连 `accepted` ack 不意味字节已持久：捕获缓冲 1 MiB 段才发布（§1.3），所以已确认前缀可能仍只在 Harness 内存。3b 按流跟踪两个位置——**已接收** offset（已向 worker ack）与**已持久连续** offset（已发布并提交）。worker 保留两者间字节供重传，或 Harness 在交接前持久化它们；worker 绝不丢弃尚未持久的已确认前缀。generation 变更时保留前代已确认字节并拒绝旧代进一步追加。清理在 §4.4/§4.5/§8 统一：staged 或缓冲副本仅在已提交或可证为已提交字节的重复时才删除——绝不只因 generation 变更而删。
 
-**staging 行即 wake 标记。** 第一条观测在 journal 尚无 `input.accepted` 时到达 staging，旧 journal 提示不能信号它——journal 无 pending 时兜底清除 `is_wake_pending`（`WakeRecovery.java:44-51`、`JdbcWakeRecoveryStore.java:249-262`）。所以分发器**直接扫描 staging 账本的未提交通知行**；提交一行即移除它，这就是清除。无需独立标记列或第二围栏——staging 行的未提交状态就是标记，独立于 journal 提示。策略是每个被接受观测一条通知（§1.3），所以每个 staged 批次都值得通知；一次 wake drain 整个积压，泵串行投递通知 turn。常驻时 worker 像今天一样 post 到重新建立的环回 publisher。持续吵闹的 Monitor 经空闲时钟保持常驻（无收益，无回归）；收益针对突发或安静工作。
+**staging 携带字节；wake 时 drain-then-open。** 新 Broker 维护路由接受观测批次与终态证据并写入按 run 有界的 staging 账本，持有**观测字节与输出段/manifest 链**，不只是元数据：一次观测提交发布一个 `managed-monitor-observation` 资源（`hosted-monitor-session.ts:194-197`）并推进一条 lineage 被校验的 manifest 链（`isToolResultManifestChainLink`，`:215-240`）。wake 时 Harness **完全 drain staging——先发布 staged 资源，再提交 `monitor_run` revision 及其通知输入——然后才重开直连 publisher**，在 drained-to 持久 offset 交接。drain 先于 open 的顺序消除任何直连/staging 并发重叠，所以无需连续 drain 屏障；幂等复用直连路径既有的 offset 冲突检查（`hosted-shell-publisher.ts:333,348`）。资源先于记录的顺序很重要，因为加载的恢复趟对每个 `tool.receipt` manifest 向 publication owner 校验（`hosted-harness-session.ts:3196-3225`）。staging 界镜像 10,000 观测记录界。
 
-**不重载的主动执行结算。** 挂起期间退出的安静 Shell 有保留的 worker receipt，但没有操作触发 Broker 的 sweep（§1.3）。3b 新增主动触发：终态 staging 写请求 Broker 核验退出证据并幂等结算执行行（复用 `settleUnprovenBackgroundRows` 的 observe-and-settle 逻辑，由 staging 而非 release 驱动），或一个专用后台任务发现已证明的退出。hold 在有界延迟内释放、任务视图更新，**且不加载 Session**。cleanup 重试扫描必须识别 Runtime 持有的后台 run 而不重载它（`HostedCleanupRetryCoordinator.java:126-146`）；仅后台 hold 不是恢复债务。终态记录 revision 仍在下次 wake 时提交，所以 journal 记录滞后于执行账本直到 wake。
+**稳定观测身份；staging 行即 wake 标记。** 第一条观测在 journal 尚无 `input.accepted` 时到达 staging，旧 journal 提示不能信号它——journal 无 pending 时兜底清除 `is_wake_pending`（`WakeRecovery.java:44-51`、`JdbcWakeRecoveryStore.java:249-262`）。所以分发器**直接扫描 staging 账本的未提交通知行**；提交一行即移除它，这就是清除。无需独立标记列或第二围栏。但 journal 提交与 staging 行移除是两步，其间崩溃不得重复投递：今天通知 `inputId`/`turnId` 由提交时计算的观测 sequence 派生（`hosted-monitor-notification.ts:77-83`、`hosted-monitor-session.ts:194-205`），所以重放会铸出字节 digest 去重抓不到的新身份。因此每条 staged 观测携带**稳定身份**，决定可重放的 journal `commandId` 与通知 `turnId`（等价地，已提交 staging 位置随 journal 事务持久化），使崩溃后的 re-drain 恰好结算同一观测与通知一次。策略是每个被接受观测一条通知（§1.3），所以每个 staged 批次都值得通知；一次 wake drain 整个积压，泵串行投递通知 turn。常驻时 worker 像今天一样 post 到重新建立的环回 publisher。持续吵闹的 Monitor 经空闲时钟保持常驻（无收益，无回归）；收益针对突发或安静工作。
 
-**binding 范围 staging 授权。** staging 路由必须围栏，但短寿命 per-operation `OperationGrant`（由 Harness 侧 authority 从已提交记录事实签发，`managed-session-authority.ts:2362-2399`；gate 拒绝过期，`managed-operation-grant-gate.ts:108-122`）对长寿命后台观测是错误形状——它会迫使挂起期续期协议。3b 改用 **binding 范围、持久的 staging 授权**（与 MCP owner 持久成员资格同形）： tied 到 Session 的 Runtime binding 与 generation，在后台 run 生命周期内有效，generation 变更时撤销。不变量：同代 worker 在静默期后无需续期往返总能 stage 并投递，而被撤销或被取代的 generation 不能追加。确切授权形状是命名设计决策（§10）。
+**不重载的主动执行结算。** 挂起期间退出的安静 Shell 有保留的 worker receipt，但没有操作触发 Broker 的 sweep（§1.3）。3b 新增主动触发：终态 staging 写请求 Broker 核验退出证据并幂等结算执行行（复用 `settleUnprovenBackgroundRows` 的 observe-and-settle 逻辑，由 staging 而非 release 驱动），或一个专用后台任务发现已证明的退出。hold 在有界延迟内释放、任务视图更新，**且不加载 Session**。cleanup 重试扫描必须识别 Runtime 持有的后台 run 而不重载它（`HostedCleanupRetryCoordinator.java:126-146`）；仅后台 hold 不是恢复债务。终态记录 revision 仍在下次 wake 时提交，所以 journal 记录滞后于执行账本直到 wake；该间隔由 Broker 退出回执证明的显式 **exited-pending-commit** 状态（§4.6）桥接，使任务视图显示退出、恢复视图不把陈旧非终态记录当活工作、cleanup 不重载——三者在有界延迟内收敛（或一次有界维护加载提交终态 revision）。
 
-**挂起期间的任务视图。** 执行账本已投影活 `runtime_state`；公开任务视图读它取活性，并从已提交 Artifact 加有界 staging 尾读输出。第一版接受 journal 记录状态滞后到 wake；活指示器来自执行账本。更完整的 staged 输出读路径是后续，若测量要求。
+**持久 binding 范围 staging 授权。** staging 路由必须围栏，但短寿命 per-operation `OperationGrant` 对长寿命后台观测是错误形状：其租期上限 300 s（`maxLeaseDurationMs = 300_000`，`managed-extension-record.ts:35-38`），同 revision 续签仅许增 `expiresAt`（`:617-622`），且 Runtime gate 的撤销态在进程内存、重启即失（`managed-operation-grant-gate.ts:45-54`）。静默超过租期的 Monitor 会被拒绝，重启的 Runtime 也无法核实撤销。3b 改用 **binding 范围、持久的 staging 授权**（与 MCP owner 持久成员资格同形）：tied 到 Session 的 Runtime binding 与 generation，在后台 run 生命周期内有效，generation 变更时撤销。它必须命名**无需完整 Session 加载**即可达的签发/续期主体，以及 Broker 校验租户/Session/operation/generation/撤销的**持久记录**（使重启从 SQL 而非内存重新核实）；还须说明跨续期谁保留尚未持久确认的字节。不变量：同代 worker 在静默期后无需续期往返总能 stage 并投递，而被撤销或被取代的 generation 不能追加。确切授权形状是命名设计决策（§10）。
 
-**发布控制。** 独立门 `qwen.managed-agent.runtime-observation.enabled`（默认关）加 worker 能力广告；Harness 仅在控制面与 worker 都广告观测时放宽 `suspensionLiveWork` 的后台项。关闭时，后台工作 Session 像今天一样常驻。
+**挂起期间的任务视图。** 执行账本已投影活 `runtime_state`；公开任务视图读它取活性，并从已提交 Artifact 加有界 staging 尾读输出。第一版接受 journal 记录状态滞后到 wake；活指示器来自执行账本（hold 释放后来自 exited-pending-commit 状态）。更完整的 staged 输出读路径是后续，若测量要求。
+
+**发布控制。** 独立门 `qwen.managed-agent.runtime-observation.enabled`（默认关）加 worker 能力广告；Harness 仅在控制面与 worker 都广告观测时放宽 `suspensionLiveWork` 的后台项。关闭时，后台工作 Session 像今天一样常驻。回滚遵循 §4.3 同一顺序：停止新后台挂起、让生产者完成/交接、继续消费其 staging 标记、排空、再停消费者。
 
 ### 4.5 后台 hold 跨挂起（3b）
 
 **完整资格项集合，带逐 run 证据。** 观测被广告时，3b 移除每一个仅为后台工作钉住 Session 的项：活 monitor 循环（`:5015-5020`）、非终态 `child_run`/`monitor_run` 记录（`:5021-5029`），**以及**后台 hold 项 `session.heldRuntimeTurns.size > 0`（`:5003`）与仅欠于后台 hold 的清理债务（`hasHostedCleanupDebt`，`:4999`）。豁免是**逐 run 而非逐 domain**：`child_run` 携带 `shell`、`child_agent`、`workflow` 三种 kind（`MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS`，`managed-session-records.ts:199-203`），且非终态记录可能是 `runtime_lost`。只有通过 cleanup 路径已用的同一证据检查——匹配 Runtime Session、binding 与 generation、start receipt、活 run 状态（`hasBackgroundHoldEvidence`，`hosted-turn-cleanup.ts:257-296`）——的 `child_run(kind=shell)` 或 `monitor_run` 才豁免。`child_agent`/`workflow` run、`runtime_lost` 记录、或绑定旧 generation 的 Shell 不是后台观测，仍阻止。挂起资格与恢复视图 `ready`（§4.6）共用这一套逐 run 条件。欠于真正未释放前台 owner 的清理债务仍阻止。每个活跃工作、恢复、流、client-files 与 lifecycle 项保留。
 
-**teardown 对后台 hold 必须只探测，而非 drain。** 进程是 Runtime 的，hold 是 Runtime 的；Harness 离开二者都不变，teardown 不得停止或 drain 后台工作。但现有挂起 teardown 主动 drain：`retryHostedCleanup(session, broker, true)` 传 `drain=true`（`hosted-harness-session.ts:5093-5098`），到达 `broker.release({drain:true})` 与 Broker 对活行的 stop 分支（`RuntimeExecutionRecovery.java:330-343`）；`releaseHeldRuntime` 同样转发 `drain` 标志（`hosted-harness-session.ts:11219-11283`）。即便 Hook 或 MCP owner 保住其 mount，这个 cleanup drain 仍会为仍欠清理的 Session 停止后台进程。因此 3b 为挂起定义**只探测的释放**：它观察并保留已核验属于本 Session binding 与 generation 的后台 hold，不停止任何东西，覆盖 cleanup-drain 路径与恢复 lease 释放路径两者。前台清理债务仍阻止挂起。（恢复 lease 调用 `releaseLeaseNow` 本身传 `drain=false`；必须改的 drain 点是挂起 teardown 的 `retryHostedCleanup(..., true)`。）
+**teardown 对后台 hold 必须只探测，而非 drain。** 进程是 Runtime 的，hold 是 Runtime 的；Harness 离开二者都不变，teardown 不得停止或 drain 后台工作。但现有挂起 teardown 在**两条**路径主动 drain：
+
+- `retryHostedCleanup(session, broker, true)` 传 `drain=true`（`hosted-harness-session.ts:5093-5098`），到达 `broker.release({drain:true})` 与 Broker 对活行的 stop 分支（`RuntimeExecutionRecovery.java:330-343`）。
+- `releaseLeaseNow(session, terminal, rethrowOnFailure)`——其第 2 参是 `terminal`，**不是** `drain`——内部调 `releaseHeldRuntime(session, {...}, lease, true, terminal)`，`drain=true`（`hosted-harness-session.ts:11332-11358`；`releaseHeldRuntime` 签名第 4 参为 `drain`，`:11219-11224`）。其返回值处理还对非 `released`/`deferred` 的结果 throw（`:11353-11355`），所以即便禁用 drain，后台 `held` 结果也会被当清理失败。
+
+因此 3b 为挂起定义覆盖两条路径的**只探测释放**：它观察并保留已核验属于本 Session 当前 binding、generation 与 run 的后台 hold，不停止任何东西，并**在（且仅在）Broker 确认该 hold 是此类后台 hold 时接受 `held` 结果为成功挂起**。前台清理债务仍阻止挂起；显式 close 仍走 terminate/drain 路径。（这更正了作者早先回复把 `releaseLeaseNow` 的 `false` 参误读为 `drain=false`；它是 `terminal=false`，该路径确实 drain。）
 
 **teardown 还须容忍 mount 交还。** owner close 主动交还 mount，而该交还在后台执行活时拒绝：
 
@@ -169,15 +179,16 @@ teardown 不变：`wake.close()` 已停止泵且**不结算任何输入**（`hos
 
 **重开。** 加载经 H3 的重放容忍 start 附着重新附着到活执行；`heldRuntimeTurns` 从 Broker 持久 hold 行恢复（`:959-970`），所以重开的 Harness 恰欠 hold 到 close，与今天一致。
 
-**挂起期间 worker 丢失。** Runtime generation 变更让 Session recovery-required，进程未证明且其 hold blocked；不铸造新持有者、不启动第二进程——与 Phase 2 的 `workerKillWhileIdleNeverMintsAFreshOwnerOnMySql` fault gate 对 parked MCP 钉住的契约相同。被丢失 generation 孤儿化的 staged 观测在下次加载时在 generation 围栏下被调和或丢弃，绝不作为重跑提交。
+**挂起期间 worker 丢失。** Runtime generation 变更让 Session recovery-required，进程未证明且其 hold blocked；不铸造新持有者、不启动第二进程——与 Phase 2 的 `workerKillWhileIdleNeverMintsAFreshOwnerOnMySql` fault gate 对 parked MCP 钉住的契约相同。被丢失 generation 孤儿化的 staged 观测在下次加载时在 generation 围栏下被调和或丢弃，绝不作为重跑提交；已确认且持久的字节按 §4.4 保留，仅可证重复或已提交的副本被移除。
 
 ### 4.6 恢复视图契约更新
 
-`ready` 臂的 wake-emptiness 守卫被**proof 当前性加未尝试输入证明**取代，并（3b）加逐 run 后台豁免：
+`ready` 臂的 wake-emptiness 守卫被**proof 当前性加未尝试输入证明**取代，并（3b）加逐 run 后台豁免与 exited-pending-commit 状态：
 
 - **当前性复用既有水位。** `wake_head_revision == journal_revision` 已意味「proof 已评估此 revision」（`JdbcWakeRecoveryStore.recordPending:311-319`）。3a 保留它作为当前性条件，但删去 `is_wake_pending = 0` 的 emptiness 要求：pending 未尝试 wake 输入是可调度工作，非 owed-uncertain。滞后或不完整的 proof 保持保守答案。不引入新水位。
-- **获准的 pending 输入必须可证明未尝试。** 现有所有权释放流程已逐输入证明此（`pending.some(!isWakeInputSource || wakeHasPriorAttempt) → throw`，`hosted-harness-session.ts:4874-4889`）。`ready` 守卫复用同一证明：每个 pending wake 输入都未尝试（无 transcript 尝试）。已尝试但未结算的输入保持保守答案。
+- **获准的 pending 输入必须可证明未尝试，与挂起入口同一证明。** 所有权释放流程已逐输入证明此（`pending.some(!isWakeInputSource || wakeHasPriorAttempt) → throw`，`hosted-harness-session.ts:4874-4889`）。seal 时挂起检查（§4.3）与 `ready` 守卫都复用它：每条 pending wake 输入都未尝试（无 transcript 尝试）。已尝试但未结算的输入保持保守答案。这是必要的，因为泵的内存 `blocked` 标志不是可靠的尝试标记（§4.3）。
 - **（3b）逐 run 后台豁免。** 通过共享逐 run 证据检查（§4.5）的后台 run 不再经其非 null `runtime_state` 阻止 `ready`，仅欠于此 hold 的清理债务不再经其 `REFERENCED` `HOSTED_CLEANUP` ref 阻止（`JdbcSessionRecoveryRepository.java:34-56`）。例外恰是豁免集，而非整个 domain。
+- **（3b）exited-pending-commit 状态。** 在 Broker 释放后台 hold（证明退出）与 journal 提交终态 revision 之间，数据库可能仍持有非终态 run 或 cleanup ref。由 Broker 退出回执证明的 **exited-pending-commit** 状态让任务视图显示退出、恢复视图不再把陈旧记录当活工作、cleanup 不再重载；旧 generation 回执不能改变当前 run 的状态。该状态在有界延迟内收敛（或一次有界维护加载提交终态 revision）。
 - 其他守卫不变：无活跃 Turn、无真正欠的清理债务、sealed writer、released activation、当前 activation 投影。不能证明这些的 sealed head 保持保守答案；不因缓存缺失而被重标为健康。
 
 这是[恢复视图附录](2026-11-18-managed-suspension-recovery-view.md) §3 命名为后续工作的拓宽。[有界恢复附录](2026-11-18-managed-suspension-bounded-recovery.md)的证明不受影响：它依赖 writer 围栏（lease 过期 → generation + 1），而非「sealed ⟹ 资源已释放」；3b 把后台资源留在 Runtime 照管下，与该证明已声明的崩溃恢复分支同形。
@@ -194,11 +205,11 @@ teardown 不变：`wake.close()` 已停止泵且**不结算任何输入**（`hos
 
 ### 5.3 staging，而非维护 writer
 
-单 writer 不变量是恢复证明起作用的原因：两个 Harness 推进一个 Session 会分叉并重复副作用。让 Broker 或 worker 直接向 journal 提交 `monitor_run` revision 的维护 writer 权威，需要针对 writer generation 的新围栏故事，并触及 H0c 权威规则与两个恢复证明。staging 让每个 journal 提交都在 Harness writer 下；Broker 账本是进行中观测的可重建缓存，恰如 automation 账本是 journal 事实的可重建索引。代价是真实且被命名的：有界提交滞后、复用既有 offset 幂等的携带字节 drain-then-open 交接、staging 行作 wake 标记、主动结算触发、binding 范围授权、任务视图读路径、一次性捕获管线重写（§4.4）。收益是 3b 不重开单 writer 安全项目。维护 writer 仅是滞后被证明不可接受时的后续增量。
+单 writer 不变量是恢复证明起作用的原因：两个 Harness 推进一个 Session 会分叉并重复副作用。让 Broker 或 worker 直接向 journal 提交 `monitor_run` revision 的维护 writer 权威，需要针对 writer generation 的新围栏故事，并触及 H0c 权威规则与两个恢复证明。staging 让每个 journal 提交都在 Harness writer 下；Broker 账本是进行中观测的可重建缓存，恰如 automation 账本是 journal 事实的可重建索引。代价是真实且被命名的：有界提交滞后、带已接收/已持久位置与稳定观测身份的携带字节 drain-then-open 交接、staging 行作 wake 标记、带 exited-pending-commit 状态的主动结算触发、持久 binding 范围授权、任务视图读路径、一次性捕获管线重写（§4.4）。收益是 3b 不重开单 writer 安全项目。维护 writer 仅是滞后被证明不可接受时的后续增量。
 
 ### 5.4 hold 存续；挂起不是 drain
 
-后台进程归 Runtime，不归 Harness。挂起时停止它们会取消用户的工作——与 Phase 1 挂起不复用 detach close 路径同一理由。hold 已持久于 Broker 并在加载时恢复；3b 让它跨挂起不变，使挂起 teardown 只探测并容忍 owner mount 交还（§4.5），并以它约束回收。
+后台进程归 Runtime，不归 Harness。挂起时停止它们会取消用户的工作——与 Phase 1 挂起不复用 detach close 路径同一理由。hold 已持久于 Broker 并在加载时恢复；3b 让它跨挂起不变，使挂起 teardown 只探测（接受已核验的后台 `held`）并容忍 owner mount 交还（§4.5），并以它约束回收。
 
 ### 5.5 无新 journal kind；契约是封闭的
 
@@ -206,12 +217,12 @@ journal kind 词汇在 TS 与 Java 两侧都冻结（`managed-event-envelope.ts`
 
 ### 5.6 能力门控发布
 
-Phase 1 选择无配置开关；Phase 2 引入 `mcpParkable` 作为发布控制，因为 parking 改变资源寿命。Phase 3 改变哪些 Session 可挂起、谁拥有其时钟与观测，所以遵循 Phase 2：wake dispatch 的控制面能力与观测的 worker 能力，都默认关，都在 Harness 放宽相应守卫前必需。无能力的部署行为恰如前一阶段。
+Phase 1 选择无配置开关；Phase 2 引入 `mcpParkable` 作为发布控制，因为 parking 改变资源寿命。Phase 3 改变哪些 Session 可挂起、谁拥有其时钟与观测，所以遵循 Phase 2：wake dispatch 的控制面能力与观测的 worker 能力，都默认关，都在 Harness 放宽相应守卫前必需。新挂起准入绑定到活消费者，回滚先排空生产者再停消费者（§4.3、§4.4）。无能力的部署行为恰如前一阶段。
 
 ## 6. 与 Phase 1 和 Phase 2 的交互
 
-- **资格谓词。** 3a 对未尝试 wake 输入移除 `pendingInputs` 门；3b 经共享逐 run 证据检查移除活循环、非终态后台记录、`heldRuntimeTurns` 与仅后台清理债务项（§4.5）。每个活跃工作、恢复、流、client-files 与 lifecycle 项保留，欠于真正前台 owner 的清理债务也保留。
-- **teardown 顺序。** 顺序不变：wake → owners（park）→ lease + cleanup → publishers → writer seal → stopLocal。3a 的 `wake.close()` 已不结算任何东西。3b 的 teardown 对后台 hold 只探测（无 drain stop），对仅后台 hold 容忍 owner mount 交还（§4.5），publisher close 只停 Harness 侧转发而 worker 捕获改道 staging（§4.4）。
+- **资格谓词。** 3a 对未尝试 wake 输入移除 `pendingInputs` 门，在 seal 时逐输入证明（§4.3）；3b 经共享逐 run 证据检查移除活循环、非终态后台记录、`heldRuntimeTurns` 与仅后台清理债务项（§4.5）。每个活跃工作、恢复、流、client-files 与 lifecycle 项保留，欠于真正前台 owner 的清理债务也保留。
+- **teardown 顺序。** 顺序不变：wake → owners（park）→ lease + cleanup → publishers → writer seal → stopLocal。3a 的 `wake.close()` 已不结算任何东西。3b 的 teardown 对后台 hold 只探测（无 drain stop，接受已核验 `held`），对仅后台 hold 容忍 owner mount 交还（§4.5），publisher close 只停 Harness 侧转发而 worker 捕获改道 staging（§4.4）。
 - **parked MCP owner。** 3a wake 走 Phase 2 复用路径（acquire → status → revalidate → replace-then-retire）；`mcp.start` 重连见证保持 0。同时有 parked MCP 与活后台工作的 Session park 其 MCP 并持有其后台；后台工作 pending 时 MCP owner 的回收被拒绝（§4.5）。MCP-owner Session 的 3b 依赖 Phase 2 parking 启用。
 - **有界恢复。** #8 证明成立：writer 围栏而非资源释放是其前提。失败的 3b teardown 走现有 drain 失败路径；后台 hold 作为 blocked 存续，绝不静默释放。
 - **恢复视图。** §4.6 拓宽 `ready`；滞后臂（偏斜 activation 投影上的 `awaiting_evidence`）与保守 fall-through 不变。
@@ -224,7 +235,7 @@ Phase 1 选择无配置开关；Phase 2 引入 `mcpParkable` 作为发布控制�
 2. **到期延迟**：1/40/200+ 事务 journal 上延迟输入的 fire-to-turn-start，分发器对比兜底；选择扫描周期与认领租约（租约 ≥ 冷开上界）。含饿死情形：8 个失效候选领先一个有效候选（proof 须清除它们，而非反复分页）。
 3. **proof 重放成本（简单性权衡）**：目录规模下每个到期候选的按需 proof 重放成本，及 head 提示的提交路径成本。这是决定按输入索引（§5.1）后续是否值得其面的测量；head 提示先发。
 4. **冷开突发**：同步到期批次对比 `HOSTED_COLD_OPEN_LIMIT`；选择分发器页/jitter 并确认 churn cap 让饱和调用者老化退出。
-5. **后台（3b）**：吵闹 Monitor 下的 staging 写率与字节量；drain-then-open 交接成本（资源发布 + 记录提交）；通知延迟与 wake 合并；吵闹 Monitor 常驻边界；挂起期间主动 Shell 退出结算延迟（无 Session 重载）；捕获跨挂起及跨 ack-loss/drain 交接存活（无 `producer_lost`，字节 digest 不变）；静默期后的 binding 范围授权；任务视图陈旧界。
+5. **后台（3b）**：吵闹 Monitor 下的 staging 写率与字节量；drain-then-open 交接成本（资源发布 + 记录提交）；通知延迟与 wake 合并；吵闹 Monitor 常驻边界；挂起期间主动 Shell 退出结算延迟（无 Session 重载）与 exited-pending-commit 收敛；捕获跨挂起及跨 ack-loss/drain 交接存活（带亚段 1 KiB 已确认前缀，无 `producer_lost`、无丢字节、digest 不变）；commit 与清标记之间崩溃后的稳定身份重放（恰好一条通知）；静默超过 300 s 后及 Runtime 重启后的持久 binding 范围授权；任务视图陈旧界。
 6. **重连见证**：`mcp.start` 在 3a/3b wake 跨保持 0（Phase 2 复用）。
 
 输出选择发布常量（扫描周期、认领租约、分发器页、staging 界、结算延迟界）并确认收益值得新增成本。
@@ -233,13 +244,17 @@ Phase 1 选择无配置开关；Phase 2 引入 `mcpParkable` 作为发布控制�
 
 - **head 提示陈旧。** 提示可能陈旧偏早（一次浪费加载，proof 纠正）但绝不陈旧偏晚（接受只递减它）。proof 刷新与兜底地板必须被演练，而非假设。因为没有投影行，跨 Session 失效无需独立清理——proof 清除提示。
 - **proof 重放成本。** head 提示以每个到期候选一次按需 proof 重放换取按输入索引。目录规模下这是测量（§7.3）门控的成本；按输入索引是不可接受时的退路，而非第一版。
+- **seal 时已尝试输入证明。** 泵的 `blocked` 标志不是可靠尝试标记（held/busy 分支）；挂起必须在 seal 时逐输入证明未尝试，与 `ready` 共用。缺失证明会让已尝试输入挂起并双跑。
+- **取消输入仍欠结算。** 过滤须区分「不调模型」与「不欠 writer 结算」；取消的 automation/child 通知仍需 writer 提交其取消结果。
 - **捕获管线重写（3b）。** worker 捕获今天是 fail-stop（§1.3）；把后台 lane 变为 buffer-and-redirect 同时保持前台 lane fail-stop，是 3b 最大改动也是最可能的输出丢失或重复投递回归源。它需要在接 staging 路由前有自己的特征化测试。
-- **drain-then-open 交接（3b）。** staging 持有输出字节与 manifest 链；wake drain 必须先发布资源再提交记录、在 drained-to offset 交接直连、围栏旧代追加（§4.4）。先提交记录、drain 前开直连、或丢失 manifest lineage 的 drain 会失败加载或重复/搁浅输出。幂等复用既有 offset 检查；staging 字节界与保留是开放项（§10）。
-- **staging wake 标记（3b）。** 旧 journal 提示不能信号 staged 观测——journal 无 pending 时兜底会清掉它（§4.4）。分发器必须扫 staging 未提交行； lingering 或过早清除的行会搁浅或重复投递第一条观测。
-- **主动结算（3b）。** Broker sweep 是操作触发而非周期（§1.3）；没有主动触发，安静退出的 hold 会 lingering 且 cleanup 重试重载 Session。触发必须不重载而幂等结算，cleanup 扫描不得把仅后台 hold 当恢复债务。
-- **mount 交还与 drain 容忍（3b）。** 挂起 teardown 的 `retryHostedCleanup(drain=true)` 与 owner mount 交还都在活后台执行时停止/拒绝（§4.5）；只探测释放与 keep-membership 容忍必须限定于仅后台 hold，使真正前台 owner 仍 drain/拒绝。MCP-owner Session 依赖 Phase 2 parking 启用。
-- **binding 范围授权（3b）。** 短寿命 per-operation grant 对长寿命观测是错误形状（§4.4）；binding 范围授权必须让同代 worker 静默后无需续期即可 stage，而被撤销/取代的 generation 不能追加。
-- **staging 滞后与孤儿（3b）。** 观测立即持久于 staging 但仅在 wake 时持久于 journal；任务视图读执行账本取活性。丢失的 worker generation 孤儿化 staged 观测；generation 围栏调和或丢弃它们，绝不提交重跑。10,000 观测界适用于 staging 一如适用于记录。
+- **ack ≠ 持久（3b）。** 亚段写在发布前即被 ack；已接收/已持久区分与重传保留是必需的，否则已确认前缀在挂起/换代时丢失。清理仅删已提交或可证重复副本。
+- **稳定观测身份（3b）。** journal 提交与 staging 行清除之间的崩溃不得铸新通知身份；staged 观测的稳定身份（或已提交位置持久化）使 re-drain 幂等。
+- **drain-then-open 交接（3b）。** wake drain 必须先发布资源再提交记录、在 drained-to 持久 offset 交接直连、围栏旧代追加（§4.4）。先提交记录、drain 前开直连、或丢失 manifest lineage 的 drain 会失败加载或重复/搁浅输出。
+- **staging wake 标记与回滚（3b）。** 旧 journal 提示不能信号 staged 观测；分发器扫 staging 未提交行。新挂起准入必须绑定活消费者，回滚必须先排空生产者再停消费者，否则已挂起生产者的第一条输出被搁浅。
+- **主动结算与 exited-pending-commit（3b）。** Broker sweep 是操作触发而非周期；没有主动触发，安静退出的 hold 会 lingering 且 cleanup 重试重载 Session。exited-pending-commit 状态必须桥接 hold 释放到 journal 提交，使任务视图、恢复视图、cleanup 不重载而收敛。
+- **mount 交还与 drain 容忍（3b）。** 两条挂起 drain 路径（`retryHostedCleanup(drain=true)` 与 `releaseLeaseNow`→`releaseHeldRuntime(drain=true)`）都停止活后台执行，后者还对 `held` throw；只探测释放必须接受已核验后台 `held`，keep-membership 容忍必须限定于仅后台 hold。MCP-owner Session 依赖 Phase 2 parking 启用。
+- **持久 binding 范围授权（3b）。** per-operation grant 的 300 s 上限、同 revision 续签约束与内存撤销态使其不适合长寿命观测；binding 范围授权需要免加载签发主体与 survives Runtime 重启的持久校验记录。
+- **staging 滞后与孤儿（3b）。** 观测立即持久于 staging 但仅在 wake 时持久于 journal；任务视图读执行账本取活性。丢失的 worker generation 孤儿化 staged 观测；generation 围栏调和或丢弃它们，绝不提交重跑，并保留已确认持久字节。10,000 观测界适用于 staging 一如适用于记录。
 - **后台约束 park（3b）。** 活后台工作拒绝 MCP 回收并持有存储成员资格；长寿命 Monitor 延迟维护直到它结束。
 - **冷开突发。** 同步 wake 即便每实例限制自身冷开也可能过载共享 Session Store；churn cap 与分发器节奏是缓解。
 - **close 路径耦合。** 挂起复用部分 detach close 路径；3b 的只探测 drain 与 mount 交还容忍必须钉住 close 路径审计的每一行，使后续 detach 变更不能在挂起时静默停止后台工作。
@@ -250,20 +265,22 @@ Phase 1 选择无配置开关；Phase 2 引入 `mcpParkable` 作为发布控制�
 - **3a 挂起**：唯一欠的工作是未尝试排队或延迟 wake 输入的 Session 在空闲期后挂起；其 writer seal、activation release、续约停止，恢复视图在 proof 当前性当前且输入可证明未尝试时报 `ready`。
 - **3a 到期分发**：延迟输入在其 `notBefore` 的实测延迟界内触发（非兜底的分钟级）；挂起期间提交的立即输入被分发；过期输入恰好迟到触发一次；无追赶计数。到可达 owner 的正常 wake 不受 writer lease 门控（§4.2）。
 - **3a 无双跑**：两个竞争分发器（或分发器 + transport + 兜底）每次 wake 加载一个 Session 一次；writer 获取围栏；输入在其 `turnId` 下结算一次。
-- **3a 已尝试工作仍常驻**：turn 已开始的 wake 输入绝不被变为可挂起；泵的先前尝试检测阻止 Session（`hosted-monitor-wake-turn.ts:122-171`）。
-- **3a 失效与无饿死**：父 run 终态的 child 通知、已停止 run 的 message 输入，其 head 提示由 proof 清除且不空转 wake–load–suspend 循环；8 个失效候选领先第 9 个有效到期 Session 时，第 9 个在分发器界内启动。
-- **3a 退路**：wake-dispatch 禁用时，行为恰为 Phase 1 + 兜底；无输入丢失。
-- **3b 只探测挂起**：各带一条 owed 清理记录的后台 Shell 与 Monitor 挂起；原进程持续运行、原 hold 仍在、stop 调用数为 0；随后显式 close 仍经正常 close drain 终止它们。
+- **3a 已尝试工作仍常驻**：有先前 transcript 尝试、恢复持续返回 `busy` 跨过空闲期的 channel 输入不 seal writer；它留在恢复路径，分发器不启动第二 turn。
+- **3a 失效与无饿死**：父 run 终态的 child 通知、已停止 run 的 message 输入，经 proof 离开候选集且不空转 wake–load–suspend 循环；8 个失效候选领先第 9 个有效到期 Session 时，第 9 个在分发器界内启动。
+- **3a 取消结算**：受理却在执行前取消的 automation 与 child 通知，transport 关闭时，模型调用为 0、各恰好一次取消结算，并在界内离开候选集。
+- **3a 退路 / 回滚**：wake-dispatch 禁用时行为恰为 Phase 1 + 兜底；Session 挂起后再禁用功能，其第一条输出仍在界内投递一次（消费者先排空再停）。
+- **3b 只探测挂起**：各带一条 owed 清理记录的后台 Shell 与 Monitor、以及带 `runtimeLeaseHeld` 的 Session 挂起；原进程持续运行、原 hold 仍在、stop 调用数为 0；随后显式 close 仍经正常 close drain 终止它们。
 - **3b 第一条观测**：transport 关闭且 journal 为空时，单条 staged 观测仍经 staging 行扫描唤醒 Session（即便旧兜底先扫描），并在界内恰好投递一次通知。
-- **3b drain 交接**：publisher 已持久写入某段后丢失 ack，worker 重 stage 该段且 wake drain 期间输出继续，产出不变的最终字节 digest、顺序、manifest 链与通知计数；generation 切换仍能读回已确认前缀。
+- **3b 已确认前缀持久性**：stdout 仍打开时 1 KiB 直连写被 ack，随即挂起并换代，重开后按序读回全部 1 KiB，manifest 与 digest 不变；旧代追加被拒绝。
+- **3b 稳定身份重放**：在观测与通知已提交、staging 标记未清时终止 Harness，重启并重扫，恰好一个观测与一个通知 turn，标记清除，下一条观测正常投递。
 - **3b 捕获存活**：Session 挂起时在途的后台捕获保持其输出（无 `producer_lost`），改道 staging 并在 wake 时恢复环回；前台 lane 保持 fail-stop。
 - **3b 后台挂起**：带活 Monitor 或后台 Shell 的 Session 挂起（包括经逐 run 证据移除 `heldRuntimeTurns`/清理债务钉子）；进程在其 cgroup 下持续运行；观测连同其字节持久 stage；通知在 wake 时触发 turn。
-- **3b 主动结算**：安静长任务运行期间不被 cleanup 扫描反复唤醒；其自然退出后，Broker 在界内释放 hold 且任务视图显示退出，全程无 Session 访问、无 release 请求。
-- **3b drain 顺序**：wake drain 先发布 staged 资源再提交记录，保持 manifest 链，通过加载的 receipt 校验；按既有 offset 检查幂等且不提交重跑。
+- **3b 主动结算 / exited-pending-commit**：安静长任务运行期间不被 cleanup 扫描反复唤醒；其自然退出后，Broker 在界内释放 hold 且任务视图显示退出，全程无 Session 访问、无 release 请求；hold 释放到 journal 提交间隔内任务视图、恢复视图、cleanup 收敛，旧 generation 回执不能改变当前 run 状态。
+- **3b drain 顺序**：wake drain 先发布 staged 资源再提交记录，保持 manifest 链，通过加载的 receipt 校验；按既有 offset 检查与稳定身份幂等且不提交重跑。
 - **3b mount 交还**：带仅后台 hold 的 Hook- 或 MCP-owner Session 挂起而无 `HostedHookRecoveryRequiredError`/`HostedMcpRecoveryRequiredError`；真正前台 owner 仍拒绝交还。
 - **3b 逐 run 豁免**：`child_agent`、`workflow`、`runtime_lost`、旧 generation Shell 不豁免；只有带当前 hold 与 receipt 的 `child_run(kind=shell)`/`monitor_run` 豁免，在挂起资格与 `ready` 两者中皆然。
-- **3b 授权**：静默超过短 grant 租期再发首行的 Monitor 在同代 worker 上 stage 并投递（无续期往返）；generation 切换或撤销后，旧 worker 的追加被拒绝而已确认字节仍可读。
-- **3b 重开 / worker 丢失 / 回收守卫**：加载重新附着并恢复 `heldRuntimeTurns`；挂起期间被杀的 worker 取 recovery-required，不铸造新持有者，不启动第二进程，调和或丢弃孤儿 staging；带活后台工作的挂起 Session 不被回收。
+- **3b 授权**：静默超过 300 s 再发首行的 Monitor 在同代 worker 上 stage 并投递（无续期往返）；generation 切换或撤销并 Runtime 重启后，旧 worker 的追加被拒绝而已确认字节仍可读。
+- **3b 重开 / worker 丢失 / 回收守卫**：加载重新附着并恢复 `heldRuntimeTurns`；挂起期间被杀的 worker 取 recovery-required，不铸造新持有者，不启动第二进程，调和或丢弃孤儿 staging 同时保留已确认持久字节；带活后台工作的挂起 Session 不被回收。
 - **恢复视图**：其余条件相同的三个 Session——(a) proof 当前、未尝试延迟输入，(b) 已尝试但未结算且加载被拒的输入，(c) proof 滞后——只有 (a) 返回 `nextTurnAllowed=true`；带被持有后台工作及其仅后台清理 ref 的 sealed head 报 `ready`；偏斜投影产生 `awaiting_evidence`。
 - **回归**：新范围外 Session 的 Phase 1 与 Phase 2 现有测试不变；非 wake 挂起路径与 parked-MCP 路径不变。
 - **真进程/MySQL IT**：镜像 Phase 1/2 验收——在所需 CI tier 跑真 Harness + worker + MySQL wake/dispatch/staging/fault 矩阵；跳过 Hosted/MySQL gate 不是验收。
@@ -273,20 +290,21 @@ Phase 1 选择无配置开关；Phase 2 引入 `mcpParkable` 作为发布控制�
 
 1. 扫描周期、认领租约、分发器页与 jitter（由测量选择）；分发器是独立 job 还是并入兜底扫描；以及 proof 重放成本（§7.3）后续是否证明按输入索引值得。
 2. staging 字节界与保留、drain 批处理，以及任务视图是否需要执行账本活性指示器之外的 staged 输出读路径。
-3. 确切 binding 范围 staging 授权形状（§4.4）：如何从已提交 binding/generation 事实无需 Harness 加载即签发与撤销，以及 generation 变更间未确认字节如何保留。
-4. 挂起期间结束的后台运行应 wake Session 以 promptly 提交其终态 revision，还是等下次加载（主动触发无论如何释放 hold；journal 记录滞后）。
-5. worker 捕获重写的确切形状：`RemoteShellCapture` 内部的 staging 回退 vs 独立后台 sink，以及如何保全前台 fail-stop 保证。
-6. 只探测释放与 mount 交还容忍的确切形状：owner close 上的挂起模式标志 vs 按逐 run 后台 hold 键控的 keep-membership 臂。
-7. 活压缩落地后的压缩感知 wake proof。
-8. Phase 4 停泊审批是否复用分发器认领与 proof 当前性守卫（被持有审批 Turn 是不同的欠工作类）。
+3. 确切持久 binding 范围 staging 授权形状（§4.4）：免加载签发/续期主体、携带租户/Session/operation/generation/撤销且 survives Runtime 重启的持久记录、跨续期谁保留尚未持久确认的字节。per-operation grant 的 300 s 上限与内存撤销态按其现状排除它。
+4. exited-pending-commit 状态的表示（§4.6）：Broker 回执-backed 投影 vs 提交终态 revision 的有界维护加载，及收敛延迟界。
+5. 确切稳定观测身份方案（§4.4）：决定 `commandId`/`turnId` 的 staged 稳定 id vs 在 journal 事务中持久化已提交 staging 位置。
+6. worker 捕获重写的确切形状：`RemoteShellCapture` 内部的 staging 回退 vs 独立后台 sink，以及如何保全前台 fail-stop 保证与已接收/已持久保留。
+7. 只探测释放与 mount 交还容忍的确切形状：owner close 上的挂起模式标志 vs 按逐 run 后台 hold 键控的 keep-membership 臂，以及两条 drain 路径如何接受 `held` 结果。
+8. 活压缩落地后的压缩感知 wake proof。
+9. Phase 4 停泊审批是否复用分发器认领与 proof 当前性守卫（被持有审批 Turn 是不同的欠工作类）。
 
 ## 11. 可行性结论
 
 **值得做；3a 先发，3b 是独立后续；测量是启用门槛。**
 
-- **3a 小且主要是组装。** 输入契约、journal 派生 pending 集、常驻泵、transport activator、SQL 兜底及其 proof、wake 动词、冷开上限、churn cap 与 head 提示模式都已存在。新增是一个容忍陈旧的 head 到期列（接受递减、proof 刷新）、一个复用 proof 的到期优先分发器、两处守卫放宽（资格与 proof 当前性恢复视图）。无新表。收益是移除每个仅被排队或延迟输入钉住的 Session 的常驻，并以秒级到期分发取代分钟级迟到的兜底。
-- **3b 的关键是无 Harness 持有 writer 时的持久提交路径。** Broker 账本 staging 加 drain-then-open wake 交接保全单 writer 不变量与恢复证明，代价是有界提交滞后、复用既有 offset 幂等的携带字节 drain、staging 行作 wake 标记、主动结算触发、binding 范围授权、任务视图读路径、捕获管线重写、只探测/mount 交还 teardown 容忍。worker 已拥有进程、cgroup 监督、hold 账本与重新附着路径；sweep 逻辑存在但是操作触发，所以 3b 新增主动驱动者而非结算本身。
-- **前提。** head 提示绝不偏晚陈旧与 proof 刷新的正确性证明；分发器无双跑围栏与无饿死分页；3b 捕获重写特征化、drain-then-open 交接、staging 行标记、不重载的主动结算、binding 范围授权、只探测 drain 与 mount 交还容忍限定、generation 围栏孤儿调和；恢复视图拓宽（proof 当前性 + 未尝试证明 + 逐 run 豁免）对照两个附录证明；真进程/MySQL fault 验收；以及 §7 测量。
+- **3a 小且主要是组装。** 输入契约、journal 派生 pending 集、常驻泵、transport activator、SQL 兜底及其 proof、wake 动词、冷开上限、churn cap、head 提示模式与逐输入未尝试证明都已存在。新增是一个容忍陈旧的 head 到期列（接受递减、proof 刷新）、一个复用 proof 的到期优先分发器、一个与 `ready` 共用的 seal 时逐输入未尝试证明、发布/回滚顺序。无新表。收益是移除每个仅被排队或延迟输入钉住的 Session 的常驻，并以秒级到期分发取代分钟级迟到的兜底。
+- **3b 的关键是无 Harness 持有 writer 时的持久提交路径。** Broker 账本 staging 加 drain-then-open wake 交接保全单 writer 不变量与恢复证明，代价是有界提交滞后、带已接收/已持久位置与稳定观测身份的携带字节 drain、staging 行作 wake 标记、带 exited-pending-commit 状态的主动结算触发、持久 binding 范围授权、任务视图读路径、捕获管线重写、只探测/mount 交还 teardown 容忍。worker 已拥有进程、cgroup 监督、hold 账本与重新附着路径；sweep 逻辑存在但是操作触发，所以 3b 新增主动驱动者而非结算本身。
+- **前提。** head 提示绝不偏晚陈旧与 proof 刷新的正确性证明；分发器无双跑围栏、无饿死分页与取消结算区分；seal 时未尝试证明；3b 捕获重写特征化、已接收/已持久保留、稳定身份重放、drain-then-open 交接、staging 行标记与回滚顺序、主动结算与 exited-pending-commit 收敛、持久 binding 范围授权、只探测 drain（接受已核验 `held`）与 mount 交还容忍限定、generation 围栏孤儿调和；恢复视图拓宽对照两个附录证明；真进程/MySQL fault 验收；以及 §7 测量。
 - **与 Phase 1 和 Phase 2 兼容。** 资格谓词的活跃工作项、teardown 顺序、parked-MCP 复用、有界恢复证明与恢复视图滞后臂都成立（§6）。无新 journal kind、journal 契约无 schema 变更、无第二 writer。MCP-owner Session 的 3b 依赖 Phase 2 parking 启用。
 
-**建议切片**：(1) head 到期提示 + proof 刷新 + 到期优先分发器 + 能力门 + 资格放宽 + proof 当前性恢复视图拓宽 + proof 重放成本测量（3a 启用）；(2) worker 捕获管线重写（fail-stop → buffer-and-redirect）+ 特征化测试；(3) 携带字节的 Broker staging 路由/账本 + staging 行 wake 标记 + drain-then-open 交接 + worker 侧聚合；(4) 主动执行结算 + binding 范围授权 + 只探测/mount 交还 teardown 容忍 + 完整逐 run 资格放宽 + 回收守卫 + 任务视图活性（3b 启用）；(5) 真进程/MySQL fault 矩阵 + 发布常量选择。按输入 wake 索引、维护 writer 权威、压缩感知 proof 是由测量门控的独立后续设计。
+**建议切片**：(1) head 到期提示 + proof 刷新 + 到期优先分发器 + seal 时未尝试证明 + 能力门 + 回滚顺序 + proof 当前性恢复视图拓宽 + proof 重放成本测量（3a 启用）；(2) worker 捕获管线重写（fail-stop → buffer-and-redirect，已接收/已持久保留）+ 特征化测试；(3) 携带字节的 Broker staging 路由/账本 + 稳定观测身份 + staging 行 wake 标记 + drain-then-open 交接 + worker 侧聚合；(4) 主动执行结算 + exited-pending-commit 状态 + 持久 binding 范围授权 + 只探测/mount 交还 teardown 容忍 + 完整逐 run 资格放宽 + 回收守卫 + 任务视图活性（3b 启用）；(5) 真进程/MySQL fault 矩阵 + 发布常量选择。按输入 wake 索引、维护 writer 权威、压缩感知 proof 是由测量门控的独立后续设计。
