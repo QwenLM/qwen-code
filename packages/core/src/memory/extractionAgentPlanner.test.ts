@@ -147,6 +147,21 @@ describe('runAutoMemoryExtractionByAgent', () => {
     expect(systemPrompt).toContain('Keep a blank line before and after lists.');
   });
 
+  it('instructs the extractor to preserve user-authored conditions', async () => {
+    await extract([]);
+
+    const systemPrompt = forkedCall()?.systemPrompt;
+    expect(systemPrompt).toContain(
+      "Keep the user's original scope, ordering, prerequisites, exceptions, and level of obligation",
+    );
+    expect(systemPrompt).toContain(
+      'Leave unsupported conditions and fallbacks out of every saved field',
+    );
+    expect(systemPrompt).toContain(
+      'Add a success requirement only when the user explicitly requires it',
+    );
+  });
+
   it('strips runtime reminders and hidden reasoning from inherited history', async () => {
     vi.mocked(getCacheSafeParams).mockReturnValue({
       generationConfig: {},
