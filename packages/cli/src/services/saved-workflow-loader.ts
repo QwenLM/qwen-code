@@ -52,9 +52,6 @@ export class SavedWorkflowLoader implements ICommandLoader {
 
   async loadCommands(signal: AbortSignal): Promise<SlashCommand[]> {
     if (!this.config) return [];
-    // Feature gate: the `workflow` tool is only registered when the feature
-    // flag is on, so without this guard the commands would dispatch a tool
-    // that doesn't exist.
     if (!this.config.isWorkflowsEnabled?.()) return [];
     // Mirror FileCommandLoader: saved workflows execute project-local code, so
     // skip discovery in bare mode and in untrusted folders.
@@ -62,6 +59,8 @@ export class SavedWorkflowLoader implements ICommandLoader {
     const folderTrustEnabled = !!this.config.getFolderTrustFeature?.();
     const folderTrust = !!this.config.getFolderTrust?.();
     if (folderTrustEnabled && !folderTrust) return [];
+    if (!this.config.getToolRegistry()?.hasRegisteredTool(ToolNames.WORKFLOW))
+      return [];
 
     let entries: SavedWorkflowEntry[];
     try {

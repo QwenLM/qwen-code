@@ -36,6 +36,7 @@ import {
 } from './hosted-harness-profile.js';
 import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from './hosted-harness-contract.js';
 import { isWithinRoot } from '../config/path-comparison.js';
+import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { readSshWorkspace } from './ssh-workspace-store.js';
 import {
   acquireInheritedLoaderEnvScrub,
@@ -5428,6 +5429,8 @@ async function runQwenServeImpl(
       resolvedCliVersion,
       trustPolicy,
       workflowTrust,
+      { matchesRule, parseRule },
+      { ToolNames },
     ] = await Promise.all([
       loadServeRuntimeModules(),
       loadCoreRuntime(),
@@ -5435,7 +5438,25 @@ async function runQwenServeImpl(
       cliVersionPromise,
       import('../config/daemon-trust-policy.js'),
       import('./workflow-ancestor-trust.js'),
+      import('@qwen-code/qwen-code-core/permissions/rule-parser.js'),
+      import('@qwen-code/qwen-code-core/tools/tool-names.js'),
     ]);
+    const readWorkflowSettings = (
+      settings: ReturnType<SettingsRuntime['loadSettings']> | undefined,
+    ) => {
+      const tools = settings?.merged.tools;
+      return {
+        workflowsEnabledBySettings: tools?.workflowsEnabled,
+        workflowToolDeniedBySettings:
+          normalizeDisabledToolList(tools?.disabled).includes(
+            ToolNames.WORKFLOW,
+          ) ||
+          [
+            ...normalizeDisabledToolList(settings?.merged.permissions?.deny),
+            ...normalizeDisabledToolList(tools?.exclude),
+          ].some((rule) => matchesRule(parseRule(rule), ToolNames.WORKFLOW)),
+      };
+    };
     getWorkspaceRuntimeCoordinatorIfSupported =
       runtime.getWorkspaceRuntimeCoordinatorIfSupported;
     cliVersion = resolvedCliVersion;
@@ -5618,21 +5639,20 @@ async function runQwenServeImpl(
       Object.assign(runtimeEffectiveEnv, nextEnv);
       runtimeEffectiveEnv['QWEN_RUNTIME_DIR'] = primarySessionRuntimeBaseDir;
     };
-    const primaryRuntimeEnv: {
+    type RuntimeEnvMetadata = ReturnType<typeof readWorkflowSettings> & {
       mode: 'runtime-overlay';
       overlayKeys: string[];
       envFilePaths: string[];
       effectiveEnv: NodeJS.ProcessEnv;
-      workflowsEnabledBySettings: boolean | undefined;
       envFileReadFailed: boolean;
       envFileReadFailures: Array<{ path: string; error: string }>;
       fallbackReason?: string;
-    } = {
+    };
+    const primaryRuntimeEnv: RuntimeEnvMetadata = {
       mode: 'runtime-overlay' as const,
       overlayKeys: [...runtimeEnvSnapshot.overlayKeys],
       effectiveEnv: runtimeEffectiveEnv,
-      workflowsEnabledBySettings:
-        runtimeBootSettings?.merged.tools?.workflowsEnabled,
+      ...readWorkflowSettings(runtimeBootSettings),
       envFilePaths: [...runtimeEnvSnapshot.envFilePaths],
       envFileReadFailed: runtimeEnvSnapshot.envFileReadFailed,
       envFileReadFailures: [...runtimeEnvSnapshot.envFileReadFailures],
@@ -6725,8 +6745,7 @@ async function runQwenServeImpl(
           };
         }
         replaceRuntimeEffectiveEnv(refreshedRuntimeEnv.effectiveEnv);
-        primaryRuntimeEnv.workflowsEnabledBySettings =
-          fresh.merged.tools?.workflowsEnabled;
+        Object.assign(primaryRuntimeEnv, readWorkflowSettings(fresh));
         delete primaryRuntimeEnv.fallbackReason;
         primaryRuntimeEnv.envFileReadFailed =
           refreshedRuntimeEnv.envFileReadFailed;
@@ -6839,16 +6858,7 @@ async function runQwenServeImpl(
       settings: ReturnType<SettingsRuntime['loadSettings']> | undefined,
       trusted: boolean,
     ): {
-      metadata: {
-        mode: 'runtime-overlay';
-        overlayKeys: string[];
-        envFilePaths: string[];
-        effectiveEnv: NodeJS.ProcessEnv;
-        workflowsEnabledBySettings: boolean | undefined;
-        envFileReadFailed: boolean;
-        envFileReadFailures: Array<{ path: string; error: string }>;
-        fallbackReason?: string;
-      };
+      metadata: RuntimeEnvMetadata;
       effectiveEnv: NodeJS.ProcessEnv;
       sessionRuntimeBaseDir: string;
       replace: (nextEnv: Readonly<NodeJS.ProcessEnv>) => void;
@@ -6877,20 +6887,11 @@ async function runQwenServeImpl(
         ...snapshot.effectiveEnv,
         QWEN_RUNTIME_DIR: sessionRuntimeBaseDir,
       };
-      const metadata: {
-        mode: 'runtime-overlay';
-        overlayKeys: string[];
-        envFilePaths: string[];
-        effectiveEnv: NodeJS.ProcessEnv;
-        workflowsEnabledBySettings: boolean | undefined;
-        envFileReadFailed: boolean;
-        envFileReadFailures: Array<{ path: string; error: string }>;
-        fallbackReason?: string;
-      } = {
+      const metadata: RuntimeEnvMetadata = {
         mode: 'runtime-overlay',
         overlayKeys: [...snapshot.overlayKeys],
         effectiveEnv,
-        workflowsEnabledBySettings: settings?.merged.tools?.workflowsEnabled,
+        ...readWorkflowSettings(settings),
         envFilePaths: [...snapshot.envFilePaths],
         envFileReadFailed: snapshot.envFileReadFailed,
         envFileReadFailures: [...snapshot.envFileReadFailures],
@@ -7400,8 +7401,7 @@ async function runQwenServeImpl(
             }
             try {
               secondaryEnv.replace(refreshedRuntimeEnv.effectiveEnv);
-              secondaryEnv.metadata.workflowsEnabledBySettings =
-                fresh.merged.tools?.workflowsEnabled;
+              Object.assign(secondaryEnv.metadata, readWorkflowSettings(fresh));
               secondaryEnv.metadata.envFileReadFailed =
                 refreshedRuntimeEnv.envFileReadFailed;
               secondaryEnv.metadata.envFileReadFailures.splice(
@@ -8469,8 +8469,7 @@ async function runQwenServeImpl(
               }
               try {
                 wsEnv.replace(refreshedRuntimeEnv.effectiveEnv);
-                wsEnv.metadata.workflowsEnabledBySettings =
-                  fresh.merged.tools?.workflowsEnabled;
+                Object.assign(wsEnv.metadata, readWorkflowSettings(fresh));
                 wsEnv.metadata.envFileReadFailed =
                   refreshedRuntimeEnv.envFileReadFailed;
                 wsEnv.metadata.envFileReadFailures.splice(

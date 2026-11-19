@@ -10212,7 +10212,10 @@ describe('runQwenServe runtime startup failures', () => {
       () =>
         ({
           merged: {
-            tools: { workflowsEnabled: !runtimeMounted },
+            tools: {
+              workflowsEnabled: !runtimeMounted,
+              disabled: runtimeMounted ? [' workflow '] : [],
+            },
             advanced: {
               runtimeOutputDir: runtimeMounted
                 ? '.runtime-reloaded'
@@ -10300,6 +10303,7 @@ describe('runQwenServe runtime startup failures', () => {
       expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
       expect(primaryRuntime?.env.workflowsEnabledBySettings).toBe(true);
+      expect(primaryRuntime?.env.workflowToolDeniedBySettings).toBe(false);
 
       vi.mocked(settingsRuntime.reloadEnvironment).mockClear();
       await workspace!.reloadModelProviders({
@@ -10327,6 +10331,7 @@ describe('runQwenServe runtime startup failures', () => {
       expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
       expect(primaryRuntime?.env.workflowsEnabledBySettings).toBe(false);
+      expect(primaryRuntime?.env.workflowToolDeniedBySettings).toBe(true);
 
       reloadedRuntimeValue = 'hot-synced';
       await expect(
@@ -10609,6 +10614,14 @@ describe('runQwenServe runtime startup failures', () => {
             tools: {
               workflowsEnabled:
                 workspace === dynamic ? !dynamicReloaded : !runtimeMounted,
+              ...(workspace === dynamic
+                ? { exclude: dynamicReloaded ? [] : ['Workflow'] }
+                : {}),
+            },
+            permissions: {
+              deny: isSecondary
+                ? [runtimeMounted ? 'Workflow' : 'Workflow(name:blocked)']
+                : [],
             },
             advanced: {
               runtimeOutputDir: isSecondary
@@ -10720,6 +10733,7 @@ describe('runQwenServe runtime startup failures', () => {
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
       expect(env.workflowsEnabledBySettings).toBe(true);
+      expect(env.workflowToolDeniedBySettings).toBe(false);
 
       await expect(
         secondaryRuntime!.workspaceService.reload({
@@ -10738,17 +10752,20 @@ describe('runQwenServe runtime startup failures', () => {
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
       expect(env.workflowsEnabledBySettings).toBe(false);
+      expect(env.workflowToolDeniedBySettings).toBe(true);
 
       const dynamicRuntime = await createWorkspaceRuntime!(dynamic, {
         provenance: 'existing',
       });
       expect(dynamicRuntime.env.workflowsEnabledBySettings).toBe(true);
+      expect(dynamicRuntime.env.workflowToolDeniedBySettings).toBe(true);
       dynamicReloaded = true;
       await dynamicRuntime.workspaceService.reload({
         route: 'POST /workspace/reload',
         workspaceCwd: dynamic,
       });
       expect(dynamicRuntime.env.workflowsEnabledBySettings).toBe(false);
+      expect(dynamicRuntime.env.workflowToolDeniedBySettings).toBe(false);
 
       providerRuntimeMutation = true;
       await expect(

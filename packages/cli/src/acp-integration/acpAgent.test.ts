@@ -5951,6 +5951,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getToolRegistry: vi.fn(() => ({
+        getTool: vi.fn((name: string) =>
+          name === ToolNames.WORKFLOW
+            ? { buildSessionOwnedBackground: vi.fn() }
+            : undefined,
+        ),
+      })),
       isWorkflowsEnabled: vi.fn().mockReturnValue(false),
       applyWorkflowsEnabledSetting: vi.fn(),
       setWorkflowKeywordTriggerEnabled: vi.fn(),
@@ -18974,9 +18981,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it.each([
-    ['workflows are disabled', false, false, false, true],
-    ['bare mode is active', true, true, false, true],
-    ['the workspace is untrusted', true, false, true, false],
+    ['workflows are disabled', false, false, false, true, true],
+    ['bare mode is active', true, true, false, true, true],
+    ['the workspace is untrusted', true, false, true, false, true],
+    ['the workflow tool is not registered', true, false, false, true, false],
   ])(
     'does not advertise or execute workflow controls when %s',
     async (
@@ -18985,6 +18993,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       bareMode,
       folderTrustFeature,
       folderTrust,
+      workflowToolRegistered,
     ) => {
       const sessionId = '11111111-1111-1111-1111-111111111111';
       const innerConfig = await setupSessionMocks(sessionId);
@@ -18992,6 +19001,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       innerConfig.getBareMode.mockReturnValue(bareMode);
       innerConfig.getFolderTrustFeature.mockReturnValue(folderTrustFeature);
       innerConfig.getFolderTrust.mockReturnValue(folderTrust);
+      if (!workflowToolRegistered) {
+        innerConfig.getToolRegistry.mockReturnValue({ getTool: vi.fn() });
+      }
       const get = vi.fn();
       const cancel = vi.fn();
       Object.assign(innerConfig, {
@@ -19037,17 +19049,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           sessionId,
         }),
       ).resolves.toMatchObject({
-        availableCommands: workflowsEnabled
-          ? [{ name: 'init', description: 'Initialize', input: null }]
-          : [
-              {
-                name: 'workflows',
-                description: 'Custom workflows command',
-                input: null,
-                _meta: { source: 'skill-dir-command' },
-              },
-              { name: 'init', description: 'Initialize', input: null },
-            ],
+        availableCommands:
+          workflowsEnabled && (bareMode || (folderTrustFeature && !folderTrust))
+            ? [{ name: 'init', description: 'Initialize', input: null }]
+            : [
+                {
+                  name: 'workflows',
+                  description: 'Custom workflows command',
+                  input: null,
+                  _meta: { source: 'skill-dir-command' },
+                },
+                { name: 'init', description: 'Initialize', input: null },
+              ],
         workflowsEnabled: false,
         savedWorkflows: [],
       });
@@ -38885,6 +38898,11 @@ describe('sessionLanguage multi-session propagation', () => {
     const cancelBackgroundRuns = vi.fn(() => ['wf_bg']);
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-wf-reload'),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi
+          .fn()
+          .mockReturnValue({ buildSessionOwnedBackground: vi.fn() }),
+      }),
       isWorkflowsEnabled: vi.fn(
         () => (workflowsEnabled ?? true) && !workflowDisabled,
       ),

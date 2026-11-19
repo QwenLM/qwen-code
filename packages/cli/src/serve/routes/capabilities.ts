@@ -67,11 +67,13 @@ function workflowsEnabledForRuntime(
     runtime.env.mode === 'runtime-overlay'
       ? (runtime.env.effectiveEnv ?? {})
       : (runtime.env.effectiveEnv ?? daemonEnv);
+  const safeMode = isSafeModeEnv(env);
+  if (!safeMode && runtime.env.workflowToolDeniedBySettings) return false;
   if (env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
   if (env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1') return true;
   const setting = runtime.env.workflowsEnabledBySettings;
   if (typeof setting === 'boolean') return setting;
-  return runtime.env.mode === 'runtime-overlay' && !isSafeModeEnv(env);
+  return runtime.env.mode === 'runtime-overlay' && !safeMode;
 }
 
 export function registerCapabilitiesRoutes(

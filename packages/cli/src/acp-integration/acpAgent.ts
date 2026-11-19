@@ -9562,9 +9562,10 @@ class QwenAgent implements Agent {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
       availableCommands:
-        workflowsEnabled || !config.isWorkflowsEnabled()
-          ? availableCommands
-          : availableCommands.filter((command) => command.name !== 'workflows'),
+        config.isWorkflowsEnabled() &&
+        !this.workflowControlsAllowedByWorkspace(config)
+          ? availableCommands.filter((command) => command.name !== 'workflows')
+          : availableCommands,
       availableSkills: availableSkills ?? [],
       workflowsEnabled,
       workflowToolFeatures: {
@@ -9583,6 +9584,15 @@ class QwenAgent implements Agent {
   private canUseWorkflowControls(config: Config): boolean {
     return (
       config.isWorkflowsEnabled() &&
+      this.workflowControlsAllowedByWorkspace(config) &&
+      isSessionOwnedWorkflowTool(
+        config.getToolRegistry()?.getTool(ToolNames.WORKFLOW),
+      )
+    );
+  }
+
+  private workflowControlsAllowedByWorkspace(config: Config): boolean {
+    return (
       !config.getBareMode() &&
       (!config.getFolderTrustFeature() || config.getFolderTrust())
     );

@@ -41,6 +41,7 @@ const listMock = vi.mocked(listSavedWorkflows);
 function makeConfig(overrides: Partial<Record<string, unknown>> = {}): Config {
   return {
     isWorkflowsEnabled: () => true,
+    getToolRegistry: () => ({ hasRegisteredTool: () => true }),
     getBareMode: () => false,
     getFolderTrustFeature: () => false,
     getFolderTrust: () => false,
@@ -393,6 +394,17 @@ describe('SavedWorkflowLoader', () => {
       makeConfig({ getBareMode: () => true }),
     ).loadCommands(signal);
     expect(cmds).toEqual([]);
+    expect(listMock).not.toHaveBeenCalled();
+  });
+
+  it('skips discovery when the workflow tool is not registered', async () => {
+    const hasRegisteredTool = vi.fn().mockReturnValue(false);
+    const loader = new SavedWorkflowLoader(
+      makeConfig({ getToolRegistry: () => ({ hasRegisteredTool }) }),
+    );
+
+    await expect(loader.loadCommands(signal)).resolves.toEqual([]);
+    expect(hasRegisteredTool).toHaveBeenCalledWith('workflow');
     expect(listMock).not.toHaveBeenCalled();
   });
 

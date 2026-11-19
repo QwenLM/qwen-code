@@ -5928,6 +5928,21 @@ describe('createServeApp', () => {
           overlayKeys: [],
           effectiveEnv: { QWEN_CODE_SAFE_MODE: '1' },
           workflowsEnabledBySettings: true,
+          workflowToolDeniedBySettings: true,
+        },
+      };
+      const toolDenied: WorkspaceRuntime = {
+        ...makeWorkspaceRuntimeForTest({
+          workspaceId: 'tool-denied-id',
+          workspaceCwd: '/workspace/tool-denied',
+          primary: false,
+          bridge: fakeBridge(),
+        }),
+        env: {
+          mode: 'runtime-overlay',
+          overlayKeys: ['QWEN_CODE_ENABLE_WORKFLOWS'],
+          effectiveEnv: { QWEN_CODE_ENABLE_WORKFLOWS: '1' },
+          workflowToolDeniedBySettings: true,
         },
       };
       const safeByDefault: WorkspaceRuntime = {
@@ -5956,6 +5971,7 @@ describe('createServeApp', () => {
           primary,
           secondary,
           settingsEnabled,
+          toolDenied,
           safeByDefault,
           untrusted,
         ]),
@@ -5979,6 +5995,10 @@ describe('createServeApp', () => {
         expect.objectContaining({
           id: 'settings-enabled-id',
           workflowsEnabled: true,
+        }),
+        expect.objectContaining({
+          id: 'tool-denied-id',
+          workflowsEnabled: false,
         }),
         expect.objectContaining({
           id: 'safe-default-id',
