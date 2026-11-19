@@ -46,7 +46,9 @@ class ClassSizeRatchetTest {
     // admission/fence extraction. #15512 lowers it again to 2483 after the
     // publication seal-manifest extraction; ToolPublicationDataStore remains
     // the current maximum and seeds the ceiling at its actual size.
-    private static final int GLOBAL_MAX_LINES = 2483;
+    // #17846 lowers it to 2476 after the guard extraction to
+    // ToolPublicationRequirements; the store is still the maximum.
+    private static final int GLOBAL_MAX_LINES = 2476;
     private static final String PIN_RESOURCE = "/class-size-ratchet.properties";
     private static final List<String> SOURCE_ROOTS =
             List.of("persistence/src/main/java", "runtime-broker/src/main/java");
