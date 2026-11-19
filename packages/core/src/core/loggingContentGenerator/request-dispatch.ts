@@ -11,10 +11,12 @@ import { AsyncLocalStorage } from 'node:async_hooks';
  * hands the built request to its SDK or fetch, so client-side request
  * building is not counted as time to first token.
  */
-const requestDispatchContext = new AsyncLocalStorage<() => void>();
+const requestDispatchContext = new AsyncLocalStorage<
+  (() => void) | undefined
+>();
 
 export function observeRequestDispatch<T>(
-  onDispatch: () => void,
+  onDispatch: (() => void) | undefined,
   fn: () => T,
 ): T {
   return requestDispatchContext.run(onDispatch, fn);

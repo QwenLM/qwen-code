@@ -267,6 +267,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     responseText?: string,
     ttftMs?: number,
     generationMs?: number,
+    firstVisibleOffsetMs?: number,
   ): void {
     const identity = subagentIdentityContext.getStore();
     logApiResponse(
@@ -283,6 +284,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         ttftMs,
         executionId,
         generationMs,
+        firstVisibleOffsetMs,
       ),
       sessionId,
       identity
@@ -383,6 +385,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     responseText?: string,
     ttftMs?: number,
     generationMs?: number,
+    firstVisibleOffsetMs?: number,
   ): void {
     try {
       this._logApiResponse(
@@ -396,6 +399,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         responseText,
         ttftMs,
         generationMs,
+        firstVisibleOffsetMs,
       );
     } catch (loggingError) {
       debugLogger.warn('Failed to log API response:', loggingError);
@@ -477,8 +481,11 @@ export class LoggingContentGenerator implements ContentGenerator {
             requestSessionId,
           );
         }
+        // A nested call must not report dispatch to the enclosing stream.
         const result = await session.wrap(() =>
-          this.wrapped.generateContent(req, userPromptId),
+          observeRequestDispatch(undefined, () =>
+            this.wrapped.generateContent(req, userPromptId),
+          ),
         );
         responseCompleted = true;
         observation?.update(result.usageMetadata, result.modelVersion);
@@ -1102,6 +1109,7 @@ export class LoggingContentGenerator implements ContentGenerator {
           streamResponseText,
           ttftMs,
           generationMs,
+          firstVisibleAt === undefined ? undefined : firstVisibleAt - startTime,
         );
         const openaiRequest = await openaiRequestPromise;
         await this.safelyLogOpenAIInteraction(

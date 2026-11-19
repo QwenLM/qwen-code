@@ -632,6 +632,7 @@ export class ContentGenerationPipeline {
           // Use withResponse() to access HTTP response headers — this allows
           // early detection of non-SSE responses (e.g. gateway block pages
           // returning text/html with HTTP 200).
+          markRequestDispatched();
           const createPromise = this.client.chat.completions.create(
             openaiRequest,
             {
@@ -1991,7 +1992,6 @@ export class ContentGenerationPipeline {
       runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest);
       const telemetryAttempt = reportOpenAiRequest(openaiRequest);
 
-      markRequestDispatched();
       return executor(openaiRequest, attemptContext, telemetryAttempt);
     };
 

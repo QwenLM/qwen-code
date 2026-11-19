@@ -1928,6 +1928,7 @@ describe('LoggingContentGenerator', () => {
         duration_ms: 1600,
         ttft_ms: 800,
         generation_ms: 500,
+        first_visible_offset_ms: 1000,
       });
       const spanRecord = llmSpan();
       expect(spanRecord.endMetadata).toMatchObject({
@@ -1939,6 +1940,42 @@ describe('LoggingContentGenerator', () => {
     } finally {
       dateNowSpy.mockRestore();
       performanceNowSpy.mockRestore();
+    }
+  });
+
+  it('ignores dispatches from a nested non-streaming request during stream setup', async () => {
+    let now = 0;
+    const dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const generator = makeGenerator({
+      generate: async () => {
+        now = 200;
+        markRequestDispatched();
+        return resp('inner');
+      },
+      stream: async () => {
+        await generator.generateContent(helloRequest(), 'nested');
+        now = 800;
+        markRequestDispatched();
+        return (async function* () {
+          now = 1000;
+          yield resp('outer');
+        })();
+      },
+    });
+
+    try {
+      await streamFrom(generator, 'outer');
+      const responses = vi
+        .mocked(logApiResponse)
+        .mock.calls.map((call) => call[1]);
+      expect(responses.map((response) => response.response_id)).toEqual([
+        'inner',
+        'outer',
+      ]);
+      expect(responses[0].ttft_ms).toBeUndefined();
+      expect(responses[1].ttft_ms).toBe(200);
+    } finally {
+      dateNowSpy.mockRestore();
     }
   });
 

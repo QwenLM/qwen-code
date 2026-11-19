@@ -35,7 +35,7 @@ TTFT 从 `LoggingContentGenerator.generateContentStream` 开头开始计时。�
 
 ### D2 — 以第一次发出为准
 
-一次 `generateContentStream` 调用内只取第一次上报。因此 provider 在这次调用内再次发出的请求，例如 SDK 重试或 pipeline 重试，仍计入 TTFT，与[按完整请求时间计算输出速度](output-speed-full-request.zh-CN.md)的描述一致。`retryWithBackoff` 的每次尝试都是独立的 `generateContentStream` 调用，各自从自己的发出时刻计时。读取流期间发出的请求（例如 Anthropic 在流为空时补发的非流式探测请求）不在被观察的调用内，不影响计时。
+一次 `generateContentStream` 调用内只取第一次上报。因此 provider 在这次调用内再次发出的请求，例如 SDK 重试或 pipeline 重试，仍计入 TTFT，与[按完整请求时间计算输出速度](output-speed-full-request.zh-CN.md)的描述一致。`retryWithBackoff` 的每次尝试都是独立的 `generateContentStream` 调用，各自从自己的发出时刻计时。非流式入口会清除继承来的 dispatch 监听，避免流式请求构建期间的嵌套调用启动外层计时。读取流期间发出的请求（例如 Anthropic 在流为空时补发的非流式探测请求）发生在观察范围之外。
 
 ### D3 — 由 TTFT 派生的时间
 
@@ -43,13 +43,14 @@ TTFT 从 `LoggingContentGenerator.generateContentStream` 开头开始计时。�
 - `endLLMRequestSpan` 以 `requestBuildMs` 接收从开始到发出的时间。`sampling_ms` 和 `RESPONSE_PROCESSING` 阶段减去它，仍覆盖从第一个可见块到流结束。它不写成 span 属性。`request_setup_ms` 含义不变，仍是本次尝试之前的重试开销。
 - `gen_ai.response.time_to_first_chunk` 在自己的单调时钟上从同一个发出时刻起算，所以首块时间不会比 TTFT 多出构建时间。
 - managed 诊断的计时计数器拿到同一个 `ttftMs`，所有界面使用同一个定义。
+- 本地响应记录用 `first_visible_offset_ms` 保存从请求开始到首个可见输出的时长。会话回放将它表示为可选的 `firstVisibleOffsetMs`。Web Shell 用该偏移定位首 token 标记并计算首个可见块之后的时长，显示的 TTFT 仍从请求发出起算。
 
 ## 兼容性
 
-- 不新增、删除或重命名任何事件、span 属性或 wire 字段。`ttft_ms`、`/stats` 的 TTFT、Web Shell 的首 token 平均值和 managed 计时计数器都会降低一个构建时间；输出速度略升。
+- 远端日志和 span 字段结构沿用现有定义。`ttft_ms`、`/stats` 的 TTFT、Web Shell 的首 token 平均值和 managed 计时计数器都会降低一个构建时间，输出速度略升。
 - `duration_ms`、平均延迟和 `request_setup_ms` 不变。`duration_ms` 不再等于 `ttft_ms + sampling_ms`：构建时间位于两者之间。
 - 已记录的会话保留原来存下的 `ttft_ms`。恢复的会话会混有新旧两种值。
-- Web Shell 轨迹瀑布图用 `duration_ms` 反推请求起点，并把首 token 标记画在起点加 `ttft_ms` 处。现在这个标记会比实际首 token 早一个构建时间：会话第一个请求约 200 ms，后续请求最多约 100 ms。图上显示的 TTFT 数值是新值。
+- Web Shell 遇到缺少首个可见块偏移的轨迹记录时，沿用已记录的 TTFT。
 
 ## 不在范围内
 
@@ -60,6 +61,7 @@ TTFT 从 `LoggingContentGenerator.generateContentStream` 开头开始计时。�
 ## 验证
 
 - **Core：** 一个流在构建 200 ms 后上报发出，随后在 1000 ms 和 1500 ms 发出可见块，并在 1600 ms 结束；它记录的 `ttft_ms` 为 800，`generation_ms` 为 500，`duration_ms` 为 1600，并传出 `requestBuildMs` 200。250 ms 时的第二次上报不改变结果。`sampling_ms` 和 `RESPONSE_PROCESSING` 不含构建时间。OpenAI 兼容 pipeline 在构建请求之后、调用 SDK 之前上报发出；Anthropic、Gemini 和 Responses 路径在调用 SDK 或 fetch 之前上报。未上报发出的流沿用原起点，现有测试已覆盖。
+- **回归覆盖：** 构建请求期间嵌套非流式请求并上报发出时，外层 TTFT 仍为 200 ms。回放上面的计时样例时，轨迹标记位于 1000 ms，显示的 TTFT 为 800 ms，首个可见块之后的时长为 600 ms。
 - **实测：** 在 Token Plan 上用 deepseek-v4.1-flash、qwen3.6-plus 和 glm-5.1，经透传代理跑同一个 headless 任务，分别在前一天的 main 构建和本次改动上运行。实测只覆盖 OpenAI 兼容路径。TTFT 减去代理测得的首个可见事件时间：
 
   | 请求           | 改动前     | 改动后   |

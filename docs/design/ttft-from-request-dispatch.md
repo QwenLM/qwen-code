@@ -35,7 +35,7 @@ A generator that never reports dispatch keeps the old start, the beginning of `g
 
 ### D2 — The first dispatch wins
 
-Only the first report within one `generateContentStream` call counts. A request the provider sends again inside that call, for example an SDK retry or a pipeline retry, therefore stays in TTFT, as [Output speed over the full request](output-speed-full-request.md) describes. Each attempt of `retryWithBackoff` is its own `generateContentStream` call and is timed from its own dispatch. A request sent while the stream is being read, such as the Anthropic non-streaming probe after an empty stream, runs outside the observed call and changes nothing.
+Only the first report within one `generateContentStream` call counts. A request the provider sends again inside that call, for example an SDK retry or a pipeline retry, therefore stays in TTFT, as [Output speed over the full request](output-speed-full-request.md) describes. Each attempt of `retryWithBackoff` is its own `generateContentStream` call and is timed from its own dispatch. The non-streaming entry point clears an inherited dispatch observer, so a nested request during stream setup cannot start the outer clock. A request sent while the stream is being read, such as the Anthropic non-streaming probe after an empty stream, runs outside the observed call.
 
 ### D3 — Times derived from TTFT
 
@@ -43,13 +43,14 @@ Only the first report within one `generateContentStream` call counts. A request 
 - `endLLMRequestSpan` receives the time from the start to dispatch as `requestBuildMs`. `sampling_ms` and the `RESPONSE_PROCESSING` phase subtract it, so they still cover the first visible chunk to stream end. It is not written as a span attribute. `request_setup_ms` keeps its meaning: retry overhead before the attempt.
 - `gen_ai.response.time_to_first_chunk` starts at the same dispatch, on its monotonic clock, so first-chunk time cannot exceed TTFT by the build time.
 - The managed diagnostics timing counters receive the same `ttftMs`, so every surface uses one definition.
+- Local response records carry `first_visible_offset_ms` from request start to first visible output. Transcript replay exposes it as optional `firstVisibleOffsetMs`. The Web Shell uses it to position the first-token marker and calculate the time after the first visible output. The displayed TTFT uses dispatch as its origin.
 
 ## Compatibility
 
-- No event, span attribute or wire field is added, removed or renamed. `ttft_ms`, `/stats` TTFT, Web Shell first-token averages and the managed timing counters read lower by the build time; output speeds read slightly higher.
+- Remote log and span fields keep their existing shape. `ttft_ms`, `/stats` TTFT, Web Shell first-token averages and managed timing counters read lower by the build time. Output speeds read slightly higher.
 - `duration_ms`, average latency and `request_setup_ms` are unchanged. `duration_ms` is no longer `ttft_ms + sampling_ms`: the build time sits between them.
 - Recorded sessions keep their stored `ttft_ms`. A resumed session mixes old and new values.
-- The Web Shell trajectory waterfall derives a request's start from `duration_ms` and draws the first-token mark at start plus `ttft_ms`. The mark now sits earlier than the first token by the build time, about 200 ms on the first request of a session and up to about 100 ms on later ones. The TTFT value it shows is the new one.
+- The Web Shell falls back to the recorded TTFT for trajectory records that lack a first-visible offset.
 
 ## Out of scope
 
@@ -60,6 +61,7 @@ Only the first report within one `generateContentStream` call counts. A request 
 ## Validation
 
 - **Core:** a stream that reports dispatch after 200 ms of building, then sends visible chunks at 1000 and 1500 ms and ends at 1600 ms, logs `ttft_ms` 800, `generation_ms` 500 and `duration_ms` 1600, and forwards `requestBuildMs` 200. A second dispatch at 250 ms does not change it. `sampling_ms` and `RESPONSE_PROCESSING` leave the build time out. The OpenAI-compatible pipeline reports dispatch after building the request and before the SDK call; the Anthropic, Gemini and Responses paths report it before the SDK call or fetch. Existing tests cover the fallback for streams without a dispatch report.
+- **Regression coverage:** a nested non-streaming dispatch during request setup leaves the outer TTFT at 200 ms. The transcript timing sample above places the marker at 1000 ms and shows TTFT of 800 ms with 600 ms after the first visible chunk.
 - **Live check:** the same headless task through the pass-through proxy on deepseek-v4.1-flash, qwen3.6-plus and glm-5.1 (Token Plan), run on a build of main from the day before and on this change. Only the OpenAI-compatible path was run live. TTFT minus the proxy's time to the first visible event:
 
   | Request                    | Before     | After    |

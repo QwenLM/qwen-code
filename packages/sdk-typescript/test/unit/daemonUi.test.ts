@@ -11281,6 +11281,21 @@ describe('transcript timing frames', () => {
     });
   });
 
+  it.each([2544, -1, 7000, '2544'])(
+    'validates the request first visible offset %s',
+    (firstVisibleOffsetMs) => {
+      const timing = extractTranscriptTiming({
+        _meta: {
+          timing: { ...TIMING_FRAME._meta.timing, firstVisibleOffsetMs },
+        },
+      });
+      expect(timing?.ttftMs).toBe(2344);
+      expect(timing?.firstVisibleOffsetMs).toBe(
+        firstVisibleOffsetMs === 2544 ? 2544 : undefined,
+      );
+    },
+  );
+
   it('reads a tool timing frame', () => {
     expect(
       extractTranscriptTiming({
