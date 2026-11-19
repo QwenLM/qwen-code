@@ -880,6 +880,7 @@ export class ManagedGithubAdapter {
     }
     const byKey = new Map<string, GithubPrWatchBinding>();
     let folded = 0;
+    let excluded = 0;
     for (const binding of bindings) {
       if (
         typeof binding.owner !== 'string' ||
@@ -899,6 +900,18 @@ export class ManagedGithubAdapter {
       // watch skipped pulls.get for a comment-only channel for the same reason).
       if (events.length === 0) continue;
       const key = prWatchKey(binding.owner, binding.repo, binding.prNumber);
+      // The allowlist gates the watch lane exactly like the inbound lane: a
+      // binding created while the filter was wider must not observe or drive a
+      // Session for a repository the operator has since excluded (the
+      // resubmitPending rule). Nothing prunes bindings when the config
+      // narrows, so without this gate every rotation window would spend
+      // GitHub/wake budget on the excluded PR and inject a pr_event into its
+      // bound Session. Compare on the lowercased owner/repo chat-id form, the
+      // same normalization repoAllowed and the folded key use.
+      if (!this.repoAllowed(`${binding.owner}/${binding.repo}`.toLowerCase())) {
+        excluded += 1;
+        continue;
+      }
       // This key lowercases owner/repo, so case-variant spellings of one PR
       // fold onto one observation. The control plane's binding identity hashes
       // the raw owner/repo, so those variants are two accepted rows and only
@@ -906,6 +919,11 @@ export class ManagedGithubAdapter {
       // punctuation) names a different PR to both.
       if (!byKey.has(key)) byKey.set(key, { ...binding, events });
       else folded += 1;
+    }
+    if (excluded > 0) {
+      this.log(
+        `Managed GitHub PR watch skipped ${excluded} listed binding(s) excluded by repoFilter; they are not observed and their Sessions receive no events.`,
+      );
     }
     if (folded > 0) {
       // The folded rows are inert: their Session never receives an event and
@@ -1269,7 +1287,22 @@ export class ManagedGithubAdapter {
     const watch = this.state!.watch;
     const plane = this.deps.prWatchControlPlane;
     if (!watch || !plane) return;
-    for (const entry of Object.values(watch.prs)) {
+    for (const [key, entry] of Object.entries(watch.prs)) {
+      // A pending event staged while the filter was wider must not drive a
+      // Session for a repository the operator has since excluded (the
+      // resubmitPending rule). Drop it visibly so the watch prune removes the
+      // baseline instead of re-injecting it every tick. The key is the
+      // lowercased owner/repo#prNumber; strip the PR suffix to the chat-id
+      // form repoAllowed compares.
+      if (!this.repoAllowed(key.slice(0, key.lastIndexOf('#')))) {
+        if (entry.pending && entry.pending.length > 0) {
+          this.log(
+            `Managed GitHub PR watch dropped ${entry.pending.length} pending event(s) for ${key}: the repository is excluded by repoFilter.`,
+          );
+          entry.pending = [];
+        }
+        continue;
+      }
       while (entry.pending && entry.pending.length > 0) {
         if (!this.running) return;
         const pending = entry.pending[0]!;

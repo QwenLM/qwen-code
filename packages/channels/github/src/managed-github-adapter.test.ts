@@ -418,6 +418,7 @@ function binding(
 async function watchAdapter(
   cwd = tempCwd(),
   hooks: { log?: (line: string) => void } = {},
+  config: Record<string, unknown> = CONFIG,
 ) {
   const journal: string[] = [];
   const plane = fakeControlPlane(journal);
@@ -426,7 +427,7 @@ async function watchAdapter(
   const adapter = new ManagedGithubAdapter({
     name: 'gh-1',
     cwd,
-    config: CONFIG,
+    config,
     controlPlane: plane.controlPlane,
     deps: { ...fake.deps, prWatchControlPlane: watch.plane },
     pollLoop: false,
@@ -2840,6 +2841,63 @@ describe('managed GitHub adapter PR watch', () => {
       true,
     );
     await adapter.disconnect();
+  });
+
+  it('never observes or injects a binding excluded by repoFilter (R7-1)', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(
+      tempCwd(),
+      { log: (line) => lines.push(line) },
+      { ...CONFIG, repoFilterMode: 'allowlist', repoFilter: ['other/repo'] },
+    );
+    // Owner/Repo#9 is excluded; the binding survives from when the filter was
+    // wider because nothing prunes bindings on a config narrowing.
+    watch.setBindings([binding()]);
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: ['build'] };
+    await adapter.tick();
+    await adapter.tick();
+    // No pulls.get, no checks read, no pr_event for the excluded repository.
+    expect(fake.pullsSeen).toHaveLength(0);
+    expect(fake.ciSeen).toHaveLength(0);
+    expect(watch.injected).toHaveLength(0);
+    expect(lines.some((l) => /excluded by repoFilter/.test(l))).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('drops an excluded repo’s durable pending instead of re-injecting it (R7-1)', async () => {
+    const cwd = tempCwd();
+    // Phase 1: a wide filter lets the transition fire, but a transient inject
+    // refusal leaves it durable-pending for the re-drive.
+    const first = await watchAdapter(cwd);
+    first.watch.setBindings([binding()]);
+    first.watch.setInjectError(
+      Object.assign(new Error('transient'), { status: 503 }),
+    );
+    await first.adapter.tick(); // baseline: passing
+    first.fake.knobs.ci = { aggregate: 'failing', failedChecks: ['build'] };
+    await first.adapter.tick(); // fires; inject refused 503 -> pending persists
+    expect(
+      readState(first.adapter).watch!.prs['owner/repo#9']!.pending,
+    ).toHaveLength(1);
+    await first.adapter.disconnect();
+    // Phase 2: the operator narrows the allowlist to another repository. The
+    // re-drive must not inject the excluded repo's pending into its Session.
+    const lines: string[] = [];
+    const second = await watchAdapter(
+      cwd,
+      { log: (line) => lines.push(line) },
+      { ...CONFIG, repoFilterMode: 'allowlist', repoFilter: ['other/repo'] },
+    );
+    second.watch.setBindings([binding()]);
+    await second.adapter.tick();
+    expect(second.watch.injected).toHaveLength(0);
+    expect(lines.some((l) => /dropped 1 pending event\(s\)/.test(l))).toBe(
+      true,
+    );
+    // The pending is dropped and the baseline pruned, not re-injected.
+    const entry = readState(second.adapter).watch?.prs['owner/repo#9'];
+    expect(entry?.pending ?? []).toHaveLength(0);
+    await second.adapter.disconnect();
   });
 
   it('rotates the capped observation window so every binding is observed', async () => {
