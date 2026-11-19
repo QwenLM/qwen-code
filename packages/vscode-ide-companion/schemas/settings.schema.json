@@ -837,7 +837,7 @@
       "default": ""
     },
     "visionBridgeTimeoutMs": {
-      "description": "Per-attempt timeout in milliseconds for the vision bridge image transcription call (a positive integer up to 2147483647). Unset uses the built-in 30s. Raise for slow or proxied vision endpoints.",
+      "description": "Per-attempt timeout in milliseconds for the vision bridge image transcription call (a positive integer up to 2147483647). Unset uses the built-in 30s. Raise for slow or proxied vision endpoints. Set with /model --vision --timeout <seconds>.",
       "type": "integer",
       "minimum": 1,
       "maximum": 2147483647
