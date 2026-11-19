@@ -191,3 +191,7 @@ terminal 优先于 sticky：恰好分类为可重试的重置时间配额被记�
 - terminal 标记在 post-output `break` 之前运行，故先流式输出部分 chunk 再因配额
   失败的 fallback 仍被记 terminal；专门测试钉住此点（把标记门控在
   `!currentFallbackYieldedAnyChunk` 后即红）。
+- 「gate-off 行为逐字节不变」对 fallback 标记/跳过行为成立，但有一例外：retry.ts
+  无条件挂载 QWEN_OAUTH 免费层替代错误的 cause（不受设置门控），而 getErrorMessage
+  会追加 `(cause: …)` 详情，故该条错误消息的文本即使在设置关闭时也会变长。这是无害
+  的额外诊断信息，非 fallback 链的行为变化；不为此改代码。

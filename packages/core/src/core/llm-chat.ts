@@ -6135,6 +6135,11 @@ export class LlmChat {
                       )
                     ) {
                       availability.markTerminal(fallbackRouteKey, 'quota');
+                      debugLogger.warn(
+                        `[FALLBACK] Marking fallback model "${resolvedFallbackModel}" ` +
+                          `terminal for the session (reason: quota); it is skipped on ` +
+                          `later requests until a new session.`,
+                      );
                     } else if (canTryNextFallback) {
                       availability.markRetryOncePerTurn(fallbackRouteKey);
                       availability.consumeStickyAttempt(fallbackRouteKey);

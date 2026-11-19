@@ -225,3 +225,9 @@ uses, so same-model-different-route health stays separate.
   streamed a partial chunk and then failed on quota is still recorded terminal;
   a dedicated test pins this (scoping the mark behind `!currentFallbackYieldedAnyChunk`
   turns it red).
+- The "gate-off behavior is byte-identical" claim holds for the fallback
+  marking/skip behavior, with one exception: `retry.ts` attaches the QWEN_OAUTH
+  free-tier replacement's `cause` unconditionally (not gated by the setting), and
+  `getErrorMessage` appends a `(cause: …)` detail, so that one error message's
+  text grows even when the setting is off. This is harmless extra diagnostics,
+  not a behavior change to the fallback chain; no code change is made for it.
