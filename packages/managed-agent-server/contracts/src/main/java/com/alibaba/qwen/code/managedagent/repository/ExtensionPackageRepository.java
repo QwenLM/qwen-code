@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionP
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.SettingsCommand;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.SourceImport;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.SourceOrigin;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.StandaloneSkill;
 
 import java.util.List;
 import java.util.Map;
@@ -20,10 +21,11 @@ public interface ExtensionPackageRepository {
     public boolean hasSettings(String tenant, String workspace, Pin pin);
     public default Operation preparePublish(String tenant, String actor, String workspace, String extensionId,
             String id, String digest, String operationId, String requestDigest, String encodedManifest, Access access) {
-        return preparePublish(tenant, actor, workspace, extensionId, id, digest, operationId, requestDigest, encodedManifest, null, access);
+        return preparePublish(tenant, actor, workspace, extensionId, id, digest, operationId, requestDigest, encodedManifest, null, null, false, access);
     }
     public Operation preparePublish(String tenant, String actor, String workspace, String extensionId,
-            String id, String digest, String operationId, String requestDigest, String encodedManifest, SourceOrigin source, Access access);
+            String id, String digest, String operationId, String requestDigest, String encodedManifest, SourceOrigin source, StandaloneSkill skill, boolean sessionDefault, Access access);
+    public StandaloneSkill standaloneSkill(String tenant, String workspace, Pin pin);
     public Operation findOperation(String tenant, String actor, String workspace, String operationId, String requestDigest, Access access);
     public Package publication(String tenant, String workspace, Operation operation);
     public void prepareSourceImport(String tenant, String actor, String workspace, String operationId, String requestDigest, SourceImport command, Access access);

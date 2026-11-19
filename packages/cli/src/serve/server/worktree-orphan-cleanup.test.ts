@@ -113,4 +113,55 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
 
     expect(fs.existsSync(plan.lockKey)).toBe(false);
   });
+
+  it('judges unmerged commits against worktreeBase, not originalHeadCommit (R5-4)', async () => {
+    // The branch-route shape: a detached worktree created at a sibling
+    // checkout's HEAD records originalHeadCommit = repo top HEAD. The
+    // reaper must pass the CREATION base to removeUserWorktree — with the
+    // repo top HEAD the clean checkout reads as unmerged and is preserved
+    // forever after the session record is already gone.
+    const service = new GitWorktreeService(repoRoot);
+    const rootHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    }).trim();
+    const sibling = await service.createUserWorktree('sibling', 'main', {
+      detached: true,
+    });
+    expect(sibling.success).toBe(true);
+    const siblingPath = sibling.worktree!.path;
+    fs.writeFileSync(path.join(siblingPath, 'ahead.txt'), 'ahead\n');
+    git(siblingPath, 'add', 'ahead.txt');
+    git(siblingPath, 'commit', '-qm', 'sibling work', '--no-verify');
+    const siblingHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: siblingPath,
+      encoding: 'utf8',
+    }).trim();
+    expect(siblingHead).not.toBe(rootHead);
+    const created = await service.createUserWorktree('task-base', siblingHead, {
+      detached: true,
+    });
+    expect(created.success).toBe(true);
+    const worktreePath = fs.realpathSync(created.worktree!.path);
+    const sessionId = 'session-task-base';
+    await writeWorktreeSessionMarker(worktreePath, sessionId);
+    const plan: WorktreeCleanupPlan = {
+      sessionId,
+      sidecar: {
+        slug: 'task-base',
+        worktreePath,
+        worktreeBranch: '',
+        originalCwd: repoRoot,
+        originalBranch: 'main',
+        originalHeadCommit: rootHead,
+        worktreeBase: siblingHead,
+      },
+      sidecarPath: path.join(repoParent, `${sessionId}.worktree.json`),
+      lockKey: worktreePath,
+    };
+
+    await executeWorktreeCleanup(plan);
+
+    expect(fs.existsSync(worktreePath)).toBe(false);
+  });
 });

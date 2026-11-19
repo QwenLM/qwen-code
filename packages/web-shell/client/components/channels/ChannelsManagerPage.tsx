@@ -361,9 +361,12 @@ export function ChannelsManagerPage({
   const channelTypeLabel = useCallback(
     (channel: DaemonChannelInstanceSnapshot) => {
       const type = String(channel.config.type);
+      if (type === 'generic-webhook') {
+        return t('channels.platform.name.generic-webhook');
+      }
       return catalog.find((item) => item.type === type)?.displayName ?? type;
     },
-    [catalog],
+    [catalog, t],
   );
 
   const descriptorFor = useCallback(

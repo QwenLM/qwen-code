@@ -45,7 +45,7 @@ const mocks = vi.hoisted(() => {
         // are surfaced as data-* for assertions to pin.
         const dom: Record<string, unknown> = key === undefined ? {} : { key };
         const source = (config ?? {}) as Record<string, unknown>;
-        for (const name of ['fg', 'bg', 'borderColor', 'attributes']) {
+        for (const name of ['fg', 'bg', 'borderColor', 'attributes', 'id']) {
           if (source[name] !== undefined) dom[`data-${name}`] = source[name];
         }
         return React.createElement(
@@ -217,6 +217,23 @@ describe('OpenTuiLoadingIndicator', () => {
       vi.advanceTimersByTime(SPINNER_INTERVAL_MS * 20);
     });
     expect(spinnerCell(container)).toBe(WAITING_SPINNER_FRAME);
+  });
+
+  it('installs no tick source in screen-reader mode, whose text cannot change', () => {
+    const chars = { current: 0 };
+    const view = render(
+      <OpenTuiLoadingIndicator
+        screenReader
+        streaming
+        streamingCharsRef={chars}
+      />,
+    );
+    expect(vi.getTimerCount()).toBe(0);
+    chars.current = 400;
+    act(() => {
+      vi.advanceTimersByTime(20000);
+    });
+    expect(view.container.textContent).toBe('Working. Escape to cancel.');
   });
 
   it('resumes the elapsed counter a parked call paused instead of restarting it', () => {
@@ -805,6 +822,251 @@ describe('OpenTuiFooter', () => {
     expect(text).not.toContain('Enter to steer');
   });
 
+  it('keeps screen-reader status and context under the normal visibility rules', () => {
+    mocks.state.promptTokens = 50_000;
+    const line = {
+      lines: ['model-x', 'git:(main)'],
+      useThemeColors: false,
+      respectUserColors: false,
+      hideContextIndicator: false,
+    };
+    const config = fakeConfig();
+    const { container, rerender } = render(
+      <Footer
+        config={config}
+        streaming={false}
+        screenReader
+        statusLine={line}
+      />,
+    );
+    expect(renderedSpans(container).map((row) => row.textContent)).toEqual([
+      'model-x',
+      'git:(main)',
+      '5.0% context used',
+    ]);
+    rerender(
+      <Footer
+        config={config}
+        streaming={false}
+        screenReader
+        statusLine={{ ...line, hideContextIndicator: true }}
+      />,
+    );
+    expect(container.textContent).toContain('model-x');
+    expect(container.textContent).not.toContain('context used');
+  });
+
+  it('announces every logical status line in screen-reader mode at a narrow width', () => {
+    mocks.state.dimensions = { width: 40, height: 40 };
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        screenReader
+        statusLine={{
+          lines: ['x'.repeat(120), 'git:(main)'],
+          useThemeColors: false,
+          respectUserColors: false,
+          hideContextIndicator: true,
+        }}
+      />,
+    );
+    const rows = renderedSpans(container).map((row) => row.textContent);
+    expect(rows).toContain('x'.repeat(120));
+    expect(rows).toContain('git:(main)');
+  });
+
+  it('speaks the approval mode and queue count without decorative glyphs', () => {
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        screenReader
+        approvalMode={ApprovalMode.DEFAULT}
+        queueLength={2}
+      />,
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('Ask permissions');
+    expect(text).toContain('2 queued');
+    expect(text).not.toContain('⏸');
+    expect(text).not.toContain('⏳');
+  });
+
+  it('keeps the queue beside a screen-reader exit hint while hiding normal status', () => {
+    mocks.state.promptTokens = 50_000;
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        screenReader
+        queueLength={2}
+        approvalMode={ApprovalMode.YOLO}
+        exitHint="Press Ctrl+C again to exit."
+      />,
+    );
+    expect(renderedSpans(container).map((row) => row.textContent)).toEqual([
+      'Press Ctrl+C again to exit.',
+      '2 queued',
+    ]);
+    expect(container.textContent).not.toContain('qwen3-coder-plus');
+    expect(container.textContent).not.toContain('context used');
+    expect(container.textContent).not.toContain('YOLO');
+  });
+
+  it('changes only the stable screen-reader mode row when approval mode changes', () => {
+    const config = fakeConfig();
+    const line = {
+      lines: ['model-x'],
+      useThemeColors: false,
+      respectUserColors: false,
+      hideContextIndicator: true,
+    };
+    const { container, rerender } = render(
+      <Footer
+        config={config}
+        streaming={false}
+        screenReader
+        statusLine={line}
+        approvalMode={ApprovalMode.AUTO}
+        queueLength={2}
+      />,
+    );
+    const before = new Map(
+      renderedSpans(container).map((row) => [row, row.textContent]),
+    );
+    const modelRow = renderedSpans(container).find(
+      (row) => row.textContent === 'model-x',
+    );
+    const queueRow = renderedSpans(container).find(
+      (row) => row.textContent === '2 queued',
+    );
+    expect(modelRow).toBeDefined();
+    expect(queueRow).toBeDefined();
+    rerender(
+      <Footer
+        config={config}
+        streaming={false}
+        screenReader
+        statusLine={line}
+        approvalMode={ApprovalMode.YOLO}
+        queueLength={2}
+      />,
+    );
+    const after = renderedSpans(container);
+    expect(after).toContain(modelRow);
+    expect(after).toContain(queueRow);
+    expect(
+      after
+        .filter((row) => before.get(row) !== row.textContent)
+        .map((row) => row.textContent),
+    ).toEqual([
+      `YOLO mode (${process.platform === 'win32' ? 'tab' : 'shift + tab'} to cycle)`,
+    ]);
+  });
+
+  it('tags screen-reader footer rows with stable ids and speaks a detached worktree', () => {
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        screenReader
+        activeWorktree={{
+          slug: 'issue-123',
+          branch: '',
+          path: '/worktree',
+          originalCwd: '/repo',
+          originalBranch: 'main',
+          originalHeadCommit: 'abc',
+        }}
+        statusLine={{
+          lines: ['model-x'],
+          useThemeColors: false,
+          respectUserColors: false,
+          hideContextIndicator: true,
+        }}
+      />,
+    );
+    expect(
+      container.querySelector('[data-id="screen-reader-footer-worktree"]')
+        ?.textContent,
+    ).toBe('Worktree: detached HEAD (issue-123)');
+    expect(
+      container.querySelector('[data-id="screen-reader-footer-status-0"]')
+        ?.textContent,
+    ).toBe('model-x');
+  });
+
+  it('localizes the screen-reader worktree and workflow rows', async () => {
+    const { setLanguageAsync } = await import('../../i18n/index.js');
+    await setLanguageAsync('zh');
+    try {
+      const { container } = render(
+        <Footer
+          config={fakeConfig({
+            getWorkflowMode: () => ({
+              requested: true,
+              available: false,
+              effective: false,
+            }),
+          })}
+          streaming={false}
+          screenReader
+          activeWorktree={{
+            slug: 'issue-123',
+            branch: '',
+            path: '/worktree',
+            originalCwd: '/repo',
+            originalBranch: 'main',
+            originalHeadCommit: 'abc',
+          }}
+          statusLine={{
+            lines: ['model-x'],
+            useThemeColors: false,
+            respectUserColors: false,
+            hideContextIndicator: true,
+          }}
+        />,
+      );
+      const worktree =
+        container.querySelector('[data-id="screen-reader-footer-worktree"]')
+          ?.textContent ?? '';
+      const workflow =
+        container.querySelector('[data-id="screen-reader-footer-workflow"]')
+          ?.textContent ?? '';
+      expect(worktree).toContain('issue-123');
+      expect(worktree).not.toContain('Worktree:');
+      expect(workflow).not.toBe('');
+      expect(workflow).not.toContain('Workflow mode:');
+    } finally {
+      await setLanguageAsync('en');
+    }
+  });
+
+  it('routes a command-sourced status line to the live lane, not the scrollback', () => {
+    const { container } = render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        screenReader
+        statusLine={{
+          lines: ['12:00:01'],
+          useThemeColors: false,
+          respectUserColors: false,
+          hideContextIndicator: true,
+          commandSourced: true,
+        }}
+      />,
+    );
+    expect(
+      container.querySelector('[data-id="screen-reader-live-status-0"]')
+        ?.textContent,
+    ).toBe('12:00:01');
+    expect(
+      container.querySelector('[data-id="screen-reader-footer-status-0"]'),
+    ).toBeNull();
+  });
+
   it('renders the user-selected session-id preset supplied by the shared state', () => {
     const { container } = render(
       <Footer
@@ -820,4 +1082,29 @@ describe('OpenTuiFooter', () => {
     );
     expect(container.textContent).toContain('my-session');
   });
+});
+
+it('exposes a stable working state without animating elapsed time in screen-reader mode', () => {
+  const view = render(<OpenTuiLoadingIndicator screenReader streaming />);
+  expect(view.container.textContent).toBe('Working. Escape to cancel.');
+  expect(
+    view.container.querySelector('[data-id="screen-reader-loading"]')
+      ?.textContent,
+  ).toBe('Working. Escape to cancel.');
+  view.rerender(<OpenTuiLoadingIndicator screenReader streaming waiting />);
+  expect(view.container.textContent).toBe('Waiting for confirmation');
+});
+
+it('localizes both screen-reader loading states through the active catalog', async () => {
+  const { setLanguageAsync } = await import('../../i18n/index.js');
+  await setLanguageAsync('zh');
+  const view = render(<OpenTuiLoadingIndicator screenReader streaming />);
+  try {
+    expect(view.container.textContent).toBe('处理中。按 Escape 取消。');
+    view.rerender(<OpenTuiLoadingIndicator screenReader streaming waiting />);
+    expect(view.container.textContent).toBe('等待确认');
+  } finally {
+    view.unmount();
+    await setLanguageAsync('en');
+  }
 });

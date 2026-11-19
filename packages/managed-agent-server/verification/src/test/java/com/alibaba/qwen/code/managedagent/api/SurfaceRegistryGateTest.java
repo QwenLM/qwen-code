@@ -178,6 +178,19 @@ class SurfaceRegistryGateTest {
                     mock(ToolPublicationAdmissionStore.class), properties);
         }
 
+        // The channel adapter controller is conditional on
+        // qwen.managed-agent.channels.enabled, which requires an isolated
+        // internal listener this boot does not provision; registering the
+        // controller mounts the same handler mapping without the deployment.
+        @Bean
+        ManagedChannelAdapterController surfaceGateChannelAdapter() {
+            return new ManagedChannelAdapterController(
+                    mock(com.alibaba.qwen.code.managedagent.channel
+                            .ManagedChannelService.class),
+                    mock(com.alibaba.qwen.code.managedagent.channel
+                            .ManagedPrWatchService.class));
+        }
+
         @Bean
         TerminalTicketController surfaceGateTerminalTicket() {
             return new TerminalTicketController(

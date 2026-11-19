@@ -278,6 +278,58 @@ describe('ChannelsManagerPage', () => {
     ],
   };
 
+  it.each([
+    {
+      language: 'en' as const,
+      name: 'Generic Webhook',
+      title: 'Configure Generic Webhook',
+      methodTitle: 'Choose a Generic Webhook connection',
+      url: 'Webhook URL',
+    },
+    {
+      language: 'zh-CN' as const,
+      name: '通用 Webhook',
+      title: '配置通用 Webhook',
+      methodTitle: '选择通用 Webhook的连接方式',
+      url: 'Webhook 地址',
+    },
+  ])(
+    'opens a standalone generic endpoint editor in $language',
+    async (copy) => {
+      channelState.current.catalog.push({
+        ...webhookType,
+        type: 'generic-webhook',
+        displayName: 'Generic Webhook',
+      });
+      channelState.current.channels = {
+        receiver: channel('receiver', 'generic-webhook', 'connected'),
+      };
+      await renderPage(copy.language);
+      const platform = container.querySelector<HTMLButtonElement>(
+        '[data-testid="channel-platform-generic-webhook"]',
+      )!;
+      expect(platform.textContent).toContain(copy.name);
+      expect(platform.querySelector('[aria-hidden="true"]')?.textContent).toBe(
+        'WH',
+      );
+      expect(platform.getAttribute('aria-label')).toBe(copy.title);
+      expect(
+        container.querySelector('[data-slot="card"]')?.textContent,
+      ).toContain(copy.name);
+      await act(async () => platform.click());
+      expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+      const dialog = document.querySelector('[role="dialog"]')!;
+      expect(dialog.textContent).toContain(copy.title);
+      expect(inputByLabel(copy.url)).not.toBeNull();
+      expect(
+        Array.from(
+          document.querySelectorAll('h2'),
+          (heading) => heading.textContent,
+        ),
+      ).not.toContain(copy.methodTitle);
+    },
+  );
+
   it('groups DingTalk methods and opens an outbound editor without receive policies', async () => {
     channelState.current.catalog.push(webhookType);
     await renderPage();

@@ -336,6 +336,7 @@ import {
   isInactiveExtensionSkill,
 } from './extension-skills.js';
 import { Session, registerCreateSubSessionTool } from './session/Session.js';
+import { acpModRowSites } from './session/acp-mod-session.js';
 import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
 import { applyRestoredSessionApprovalMode } from './session-approval-mode-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
@@ -407,7 +408,10 @@ import {
   writeOutputLanguageAndRegisterPath,
 } from '../i18n/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
-import { parseSessionExternalRecordParams } from './session-external-record-params.js';
+import {
+  MAX_EXTERNAL_RECORD_TEXT_LENGTH,
+  parseSessionExternalRecordParams,
+} from './session-external-record-params.js';
 import { ACP_ERROR_CODES } from './errorCodes.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
@@ -516,6 +520,7 @@ import {
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
+  DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
@@ -523,6 +528,7 @@ import {
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
+  DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_MAX_BYTES,
@@ -4775,6 +4781,12 @@ class QwenAgent implements Agent {
     } catch (error) {
       cleanupErrors.push(error);
     }
+    // The Mods' session.end runs while the Config still answers.
+    try {
+      await session.modsClosed;
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
     // Before the Config shuts down, which does not touch the registry:
     // a record left behind advertises a session that is gone, and peers
     // would keep addressing it until this process exits.
@@ -4962,6 +4974,23 @@ class QwenAgent implements Agent {
         [DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY]: true,
       },
     };
+  }
+
+  private deferAutomaticWorkForRestore(
+    meta: Record<string, unknown> | null | undefined,
+  ): boolean {
+    if (
+      meta?.[DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY] !== true
+    ) {
+      return false;
+    }
+    if (!this.isTrustedManagedParent()) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Deferred worktree restoration requires a trusted private ACP parent',
+      );
+    }
+    return true;
   }
 
   private async retryPendingConfigCleanup(
@@ -6258,6 +6287,9 @@ class QwenAgent implements Agent {
       (params._meta as Record<string, unknown> | null | undefined)?.[
         DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY
       ] === true;
+    const deferAutomaticWorkUntilCwdRestore = this.deferAutomaticWorkForRestore(
+      params._meta,
+    );
     const withRestoreHint = <
       T extends { _meta?: Record<string, unknown> | null },
     >(
@@ -6543,6 +6575,7 @@ class QwenAgent implements Agent {
         await profiler.time('session_register', () =>
           this.createAndStoreSession(config, settings, undefined, {
             deferWorkspaceActivation: provisionalStandalone,
+            deferAutomaticWorkUntilCwdRestore,
             configProviderRevision,
             fileDerivedApprovalMode,
             ...(provisionalStandalone
@@ -6844,6 +6877,9 @@ class QwenAgent implements Agent {
       (params._meta as Record<string, unknown> | null | undefined)?.[
         DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY
       ] === true;
+    const deferAutomaticWorkUntilCwdRestore = this.deferAutomaticWorkForRestore(
+      params._meta,
+    );
     const withRestoreHint = <
       T extends { _meta?: Record<string, unknown> | null },
     >(
@@ -6963,6 +6999,7 @@ class QwenAgent implements Agent {
         await profiler.time('session_register', () =>
           this.createAndStoreSession(config, settings, undefined, {
             deferWorkspaceActivation: provisionalStandalone,
+            deferAutomaticWorkUntilCwdRestore,
             configProviderRevision,
             fileDerivedApprovalMode,
             ...(provisionalStandalone
@@ -7380,6 +7417,8 @@ class QwenAgent implements Agent {
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
     const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
     const suppliedApprovalMode = meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
+    const suppliedModeBeforeStart =
+      meta[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY];
     const suppliedPromptDisplayText = meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
     const submittedPrompt =
       this.privateParentState === 'trusted'
@@ -7394,6 +7433,7 @@ class QwenAgent implements Agent {
     delete meta[INVOCATION_CONTEXT_META_KEY];
     delete meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY];
+    delete meta[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY];
     delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
     delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
     delete meta[SUBMITTED_PROMPT_META_KEY];
@@ -7461,6 +7501,21 @@ class QwenAgent implements Agent {
         );
       }
       meta[DAEMON_EXPECTED_APPROVAL_MODE_META_KEY] = expectedMode;
+    }
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedModeBeforeStart !== undefined
+    ) {
+      const modeBeforeStart = APPROVAL_MODES.find(
+        (mode) => mode === suppliedModeBeforeStart,
+      );
+      if (modeBeforeStart === undefined || suppliedApprovalMode === undefined) {
+        throw RequestError.invalidParams(
+          undefined,
+          'Invalid trusted ACP approval mode before turn start',
+        );
+      }
+      meta[DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY] = modeBeforeStart;
     }
     if (Object.keys(meta).length > 0) {
       sanitizedParams._meta = meta;
@@ -12829,6 +12884,14 @@ class QwenAgent implements Agent {
         const kind = params['kind'];
         const toolUseId = params['toolUseId'];
         const label = params['label'];
+        const fromSession = params['fromSession'];
+        const sourceSessionId = isObjectRecord(fromSession)
+          ? fromSession['sessionId']
+          : undefined;
+        const sourceWorkspaceCwd = isObjectRecord(fromSession)
+          ? fromSession['workspaceCwd']
+          : undefined;
+        const sentMessageContext = params['sentMessageContext'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           throw RequestError.invalidParams(
             undefined,
@@ -12903,15 +12966,57 @@ class QwenAgent implements Agent {
             'Invalid background notification label',
           );
         }
+        if (
+          fromSession !== undefined &&
+          (typeof sourceSessionId !== 'string' ||
+            !sourceSessionId ||
+            sourceSessionId.length > 256 ||
+            typeof sourceWorkspaceCwd !== 'string' ||
+            !sourceWorkspaceCwd ||
+            sourceWorkspaceCwd.length > 4_096)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid background notification source session',
+          );
+        }
+        const closingTag = '</task-notification>';
+        if (
+          sentMessageContext !== undefined &&
+          (fromSession === undefined ||
+            typeof sentMessageContext !== 'string' ||
+            sentMessageContext.length > MAX_EXTERNAL_RECORD_TEXT_LENGTH ||
+            !modelText.startsWith('<task-notification>') ||
+            !modelText.endsWith(closingTag))
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid background notification sent message context',
+          );
+        }
         const session = this.sessionOrThrow(sessionId);
         const result = await session.enqueueBackgroundNotification({
           displayText,
           modelText,
+          ...(typeof sentMessageContext === 'string'
+            ? { sentMessageContext }
+            : {}),
           taskId,
           status,
           kind,
           ...(typeof toolUseId === 'string' ? { toolUseId } : {}),
           ...(typeof label === 'string' ? { label } : {}),
+          ...(typeof sourceSessionId === 'string' &&
+          typeof sourceWorkspaceCwd === 'string'
+            ? {
+                structured: {
+                  fromSession: {
+                    sessionId: sourceSessionId,
+                    workspaceCwd: sourceWorkspaceCwd,
+                  },
+                },
+              }
+            : {}),
         });
         return { sessionId, accepted: result.accepted };
       }
@@ -13338,12 +13443,14 @@ class QwenAgent implements Agent {
         );
         const cwdEpoch = this.workflowAncestorTrustCwdEpochs.get(config) ?? 0;
         this.workflowAncestorTrustCwdEpochs.set(config, cwdEpoch + 1);
+        let cwdRestored = false;
         try {
           const settledPreviousCwd = config.getTargetDir();
           if (
             canonicalPath === settledPreviousCwd &&
             conversationDirectoryExpectation === undefined
           ) {
+            cwdRestored = true;
             return {
               previousCwd: settledPreviousCwd,
               newCwd: canonicalPath,
@@ -13426,6 +13533,7 @@ class QwenAgent implements Agent {
             );
           }
 
+          cwdRestored = true;
           return {
             previousCwd: settledPreviousCwd,
             newCwd: canonicalPath,
@@ -13434,6 +13542,7 @@ class QwenAgent implements Agent {
         } finally {
           this.workflowAncestorTrustCwdEpochs.set(config, cwdEpoch + 2);
           releaseGate();
+          if (cwdRestored) session.releaseAutomaticWorkAfterCwdRestore();
         }
       }
       case SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingCommit:
@@ -14013,6 +14122,19 @@ class QwenAgent implements Agent {
         }
 
         return { sessionId, description, launched: true };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionModRow: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return await this.sessionOrThrow(sessionId).askModRow(
+          params['component'],
+          params['props'],
+        );
       }
       case SERVE_CONTROL_EXT_METHODS.sessionShellHistory: {
         const sessionId = params['sessionId'];
@@ -17827,6 +17949,7 @@ class QwenAgent implements Agent {
       replayHistory?: boolean;
       enableLiveScreenContext?: boolean;
       deferWorkspaceActivation?: boolean;
+      deferAutomaticWorkUntilCwdRestore?: boolean;
       configProviderRevision?: number;
       fileDerivedApprovalMode?: ApprovalMode;
       beforeDeferredWorkspaceActivation?: () => Promise<void>;
@@ -17874,7 +17997,11 @@ class QwenAgent implements Agent {
       workflowHistory,
       (runId) => this.isWorkflowRunLiveOutsideSession(sessionId, runId),
       (deliveries) => this.expireHostedPeerDeliveries(deliveries),
+      acpModRowSites(this.clientCapabilities),
     );
+    if (options.deferAutomaticWorkUntilCwdRestore) {
+      session.deferAutomaticWorkUntilCwdRestore();
+    }
     const replaySessionHistory = async () => {
       if (
         options.replayHistory === false ||

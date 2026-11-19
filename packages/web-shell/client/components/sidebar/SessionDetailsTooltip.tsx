@@ -96,7 +96,8 @@ export function SessionDetailsTooltip({
       : resolveSessionDetailsCollisionBoundary(anchorRef.current)
     : null;
   const folderPath = session.workspaceCwd;
-  const branch = session.worktree?.branch ?? session.branch?.name;
+  const branch =
+    session.worktree?.branch || session.worktree?.slug || session.branch?.name;
   const prs = openableSessionPrs([...(session.prs ?? [])].reverse());
   // Stacked PRs can close the same issue; list it once, under its newest PR.
   const seenIssueUrls = new Set<string>();
@@ -108,12 +109,19 @@ export function SessionDetailsTooltip({
         !seenIssueUrls.has(issue.url) &&
         seenIssueUrls.add(issue.url),
     );
+  // A turn in flight hides the row's background dot and the blocked states
+  // outrank it, so this status is where background work still gets named.
+  // Appended, never reordered: blocked-state precedence is pinned. The
+  // background-only arm below already names it and must not repeat it.
+  const backgroundSuffix = session.hasRunningBackgroundTasks
+    ? ` · ${t('background.running')}`
+    : '';
   const status = session.isWaitingForPermission
-    ? t('sessionsOverview.status.needsApproval')
+    ? `${t('sessionsOverview.status.needsApproval')}${backgroundSuffix}`
     : session.isWaitingForUserQuestion
-      ? t('sessionsOverview.status.askUserQuestion')
+      ? `${t('sessionsOverview.status.askUserQuestion')}${backgroundSuffix}`
       : session.hasActivePrompt
-        ? t('sidebar.running')
+        ? `${t('sidebar.running')}${backgroundSuffix}`
         : session.hasRunningBackgroundTasks
           ? t('background.running')
           : session.activeWorkState === 'active'
