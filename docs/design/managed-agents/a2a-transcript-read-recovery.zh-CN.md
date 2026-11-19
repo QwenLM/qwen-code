@@ -1,7 +1,5 @@
 # 让 A2A 任务查询在 transcript 读取故障后恢复
 
-[English](a2a-transcript-read-recovery.md) | [简体中文](a2a-transcript-read-recovery.zh-CN.md)
-
 ## 问题与现状
 
 `GetTask` 遇到瞬时 transcript 读取错误时，已完成的 session-agent run 可能早已写入回复。目前 `jsonl.read` 会把读取失败作为空结果交给 `SessionService`。A2A session port 用 `fs.access(R_OK)` 检查活动路径，即使读取失败，权限检查也可能通过，并且该检查没有覆盖归档 transcript。`observeTask` 因此可能为标记为 `recorded: true` 的已完成 run 保存 `TASK_STATE_FAILED`。后续查询会持续返回已保存的失败。上游 main 的 `02dc72342b` 仍有这一行为，基于会话的 A2A 受 `experimental.agentCollaboration` 控制。
