@@ -140,6 +140,52 @@ class ClientFilesRelayStoreTest {
     }
 
     @Test
+    void settlementKeysIsolateRepeatedIdsAcrossTenantsSessionsAndGenerations() {
+        for (String[] scope : List.of(new String[] {tenant, session}, new String[] {"other-tenant", session},
+                new String[] {tenant, "other-session"})) {
+            tx(() -> store.register(scope[0], scope[1], actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
+            for (long generation : List.of(1L, 2L)) {
+                tx(() -> store.enqueue(scope[0], scope[1], generation, "0", "{}", 9_000L, 1_000L));
+            }
+        }
+        var trace = new StoreLockTrace(jdbc.getDataSource());
+        var writer = new ClientFilesRelayStore(new ManagedSchemaJdbcTemplate(trace));
+        assertThat(writer.answer(tenant, session, 1L, "conn", "0", "{\"ok\":true}", 2_000L)).isTrue();
+        assertThat(writer.fail(tenant, session, 2L, "conn", "0", ClientFilesModels.ERROR_OFFLINE, 2_000L)).isTrue();
+        assertThat(store.request(tenant, session, 1L, "0").responseJson()).isEqualTo("{\"ok\":true}");
+        assertThat(store.request(tenant, session, 2L, "0").errorCode()).isEqualTo(ClientFilesModels.ERROR_OFFLINE);
+        for (long generation : List.of(1L, 2L)) {
+            assertThat(store.request("other-tenant", session, generation, "0").state()).isEqualTo(ClientFilesModels.REQUEST_QUEUED);
+            assertThat(store.request(tenant, "other-session", generation, "0").state()).isEqualTo(ClientFilesModels.REQUEST_QUEUED);
+        }
+        assertThat(trace.events().stream().filter(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED)
+                .map(StoreLockTrace.Event::sql)).hasSize(2).allSatisfy(sql -> assertThat(sql)
+                        .contains("where request_key = ?", "session_scope_key = ?", "binding_generation = ?", "request_id = ?",
+                                "expires_at>?", "b.connection_id = ?", "b.state = ?"));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"request_key", "session_scope_key", "binding_generation", "request_id"})
+    void settlementRequiresBothCanonicalKeyAndOriginalRequestIdentity(String corruption) {
+        tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
+        tx(() -> store.register(tenant, "other-session", actor, "local-files", "b".repeat(64), 9_000L, 1_000L, "conn"));
+        tx(() -> store.enqueue(tenant, session, 1L, "0", "{}", 9_000L, 1_000L));
+        switch (corruption) {
+            case "request_key" -> jdbc.update("UPDATE ma_client_files_request SET request_key=?",
+                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("wrong-key"));
+            case "session_scope_key" -> jdbc.update("UPDATE ma_client_files_request SET session_scope_key=?",
+                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant, "other-session"));
+            case "binding_generation" -> jdbc.update("UPDATE ma_client_files_request SET binding_generation=2");
+            case "request_id" -> jdbc.update("UPDATE ma_client_files_request SET request_id='other-id'");
+            default -> throw new AssertionError(corruption);
+        }
+        assertThat(tx(() -> store.answer(tenant, session, 1L, "conn", "0", "{}", 2_000L))).isFalse();
+        assertThat(tx(() -> store.fail(tenant, session, 1L, "conn", "0", ClientFilesModels.ERROR_OFFLINE, 2_000L))).isFalse();
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_client_files_request", String.class))
+                .isEqualTo(ClientFilesModels.REQUEST_QUEUED);
+    }
+
+    @Test
     void failQueuedTearsDownOnlyTheOwnedGeneration() {
         tx(() -> store.register(tenant, session, actor, "local-files", "a".repeat(64), 9_000L, 1_000L, "conn"));
         tx(() -> store.enqueue(tenant, session, 1L, "req-1", "{}", 9_000L, 1_000L));
@@ -336,6 +382,8 @@ class ClientFilesRelayStoreTest {
         // connection's request even though the generation and request id match.
         assertThat(tx(() -> store.answer(tenant, session, fresh.binding().generation(), "conn-b",
                 "0", "{\"old\":true}", 5_000L))).isFalse();
+        assertThat(tx(() -> store.fail(tenant, session, fresh.binding().generation(), "conn-b",
+                "0", ClientFilesModels.ERROR_OFFLINE, 5_000L))).isFalse();
         assertThat(tx(() -> store.answer(tenant, session, fresh.binding().generation(), "conn-c",
                 "0", "{\"new\":true}", 5_000L))).isTrue();
         assertThat(tx(() -> store.request(tenant, session, fresh.binding().generation(), "0"))
