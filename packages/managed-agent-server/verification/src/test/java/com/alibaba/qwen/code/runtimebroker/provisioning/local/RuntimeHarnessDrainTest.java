@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.runtimebroker.provisioning.local;
 
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -25,9 +24,6 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
@@ -155,65 +151,10 @@ public class RuntimeHarnessDrainTest {
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void resourceDrainRefusesPrivateCsiBeforeCleanupOrObservation(boolean stoppedOnly) throws Exception {
-        String id = UUID.randomUUID().toString();
-        var privateRequest = CsiFilesRetirementProfile.request(
-                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
-                        "tenant", "workspace", 1, "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1),
-                "/workspace", id);
-        var registry = new InMemoryRuntimeBindingRepository();
-        var initial = registry.findOrCreate(privateRequest);
-        var claimed = registry.claimOperation(initial.getBindingId(), "setup", Duration.ofSeconds(10));
-        var seed = claimed.getProvisionSeed();
-        var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9999"),
-                seed.getToken(), seed.getLeaseId(), seed.getEpoch());
-        var handle = new RuntimeResourceHandle(privateRequest.getProvisionerKind(), 1, java.util.Map.of("resource", "original"));
-        var original = registry.compareAndSet(claimed, claimed.withAttestation(lease, handle, Instant.now(), Instant.now()));
-        original = registry.releaseOperation(original.getBindingId(), "setup", original.getOperationGeneration());
-        provisioner.original = original;
-        var sessionRepository = new InMemoryRuntimeSessionRepository();
-        var saved = sessionRepository.findOrCreate(new RuntimeSessionRecord(
-                new RuntimeSession(id, id, "bootstrap", privateRequest.getScope()), original.getBindingId(),
-                original.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
-        saved = sessionRepository.compareAndSet(saved, saved.withState(RuntimeSessionRecord.State.READY, Instant.now()));
-        registry.requestHarnessDrain("tenant", id);
-        var cleanupCalls = new AtomicInteger();
-        // An accepting cleanup SPI isolates the service's private refusal from JDBC admission.
-        var tracked = (RuntimeBindingRepository) Proxy.newProxyInstance(RuntimeBindingRepository.class.getClassLoader(),
-                new Class<?>[] {RuntimeBindingRepository.class}, (proxy, method, arguments) -> {
-                    if (method.getName().equals("requireHarnessCleanup")) {
-                        cleanupCalls.incrementAndGet();
-                        return null;
-                    }
-                    try {
-                        return method.invoke(registry, arguments);
-                    } catch (InvocationTargetException failure) {
-                        throw failure.getCause();
-                    }
-                });
-        try (var service = new RuntimeBrokerService(ignored -> {
-            throw new AssertionError("Resource drain must use persisted ownership");
-        }, provisioner, transport, tracked, sessionRepository, new InMemoryToolExecutionRepository(),
-                "private-drain-test", Duration.ofSeconds(2), Duration.ofSeconds(2))) {
-            var failure = assertThrows(ExecutionException.class, () -> service.drainHarnessResources("tenant", id,
-                    new RuntimeLifecycleAuthority("operation", 1), stoppedOnly).toCompletableFuture().get(5, TimeUnit.SECONDS));
-            assertEquals("csi_finalize_required", ((RuntimeBrokerException) failure.getCause()).getCode());
-        }
-        assertEquals(0, cleanupCalls.get());
-        assertEquals(0, provisioner.observations);
-        assertEquals(0, provisioner.stops);
-        assertEquals(0, transport.releases);
-        assertSame(original, registry.findById(original.getBindingId()));
-        assertSame(saved, sessionRepository.findById(privateRequest.getScope(), id));
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void storageFenceBlocksLateSessionAdmissionAfterBindingReady(boolean jdbc) {
-        RuntimeBindingRepository registry = jdbc ? bindings : new InMemoryRuntimeBindingRepository();
-        RuntimeSessionRepository sessionRepository = jdbc ? sessions : new InMemoryRuntimeSessionRepository();
+    @Test
+    void storageFenceBlocksLateSessionAdmissionAfterBindingReady() {
+        RuntimeBindingRepository registry = bindings;
+        RuntimeSessionRepository sessionRepository = sessions;
         var binding = ready(registry);
         var original = candidate(binding, "original");
         registry.admitSession(sessionRepository, original);
@@ -738,9 +679,9 @@ public class RuntimeHarnessDrainTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"false,RECOVERY_BLOCKED", "true,RECOVERY_BLOCKED", "false,LOST", "true,LOST"})
-    void drainingBlocksRivalStoragePlacementUntilStopIsProven(boolean jdbc, String state) throws Exception {
-        RuntimeBindingRepository registry = jdbc ? bindings : new InMemoryRuntimeBindingRepository();
+    @ValueSource(strings = {"RECOVERY_BLOCKED", "LOST"})
+    void drainingBlocksRivalStoragePlacementUntilStopIsProven(String state) throws Exception {
+        RuntimeBindingRepository registry = bindings;
         var ready = ready(registry);
         var claimed = registry.claimOperation(ready.getBindingId(), "block", Duration.ofSeconds(10));
         var blocked = registry.compareAndSet(claimed, claimed.withState(RuntimeBindingRecord.State.valueOf(state),

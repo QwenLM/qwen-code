@@ -14,11 +14,11 @@
 
 采用增量而非替换单数字段：资源仍是 `partial`，但保留单数字段避免破坏性形状变更，让消费者按自己的节奏迁移到 `segments`。数组必填且非空（`minItems: 1`、`maxItems: 64`），与记录契约的 1–64 分段计划一致；交付行可见前其分段必已规划。若 resend 铸出的 id 已对应一个首分段不同（id 或 ordinal）的存储交付，会在规划任何分段之前被拒绝，因此被拒的 resend 不留孤儿分段行；匹配 id 的重放 resend 则收敛而非冲突。首段检查之外还有完整链比对：存储链与 resend 计划在任一分段分歧即被拒——否则 INSERT IGNORE（唯一键在 `segment_id`、不在 ordinal）会把两条链拼进同一交付，出现单个 ordinal 两行。存储链仅为计划的匹配**前缀**时是合法的部分落库瞬态，予以收敛（由计划补全）。拒绝还在领取导入处做成持久：漏斗在 resend 守卫运行前已把 resent 记录提交为 planned，而领取清扫从日记账发现待处理工作，故 `claimOne` 施加同一完整链比对，并把冲突记录落定出待处理集合，而非每轮清扫反复重导入。
 
-契约版本从 1.108.0 升到 1.109.0。Java 记录与 OpenAPI 模式同步变更，由记录↔模式契约门强制；channel 路由门保持三条路由与模式为 `partial`。
+本切片把契约版本从 1.108.0 升到 1.109.0；后续切片继续推进（#16846 从 1.113.0 升到 1.114.0），本次后续不再升版本。Java 记录与 OpenAPI 模式同步变更，由记录↔模式契约门强制；channel 路由门保持三条路由与模式为 `partial`。
 
 ### 服务读路径
 
-`publicDelivery` 为每个交付行从分段台账（`ChannelSegmentRepository.list`）构建数组。`listDeliveries` 与 `getDelivery` 逐交付读台账。这是有界的逐行读（交付页至多 100 行）；若读路径需要，批量读分段是后续优化。
+`getDelivery` 的 `publicDelivery` 从分段台账（`ChannelSegmentRepository.list`）构建数组。`listDeliveries` 用一条 `listByDelivery` 查询读取整页（`WHERE delivery_key IN (...)`，按交付分组、按 ordinal 排序）；两条路径复用同一个 `RowMapper`，故不会对同一交付发布不同的 segments。
 
 ### WebShell
 
@@ -29,6 +29,9 @@ channel 路由标签是 `Public Resources` 而非 `WebShell`，故 WebShell 类�
 - `contracts/.../model/ApiModels.java` —— `PublicChannelDelivery` 的 `segments` 与新记录 `PublicChannelDeliverySegment`。
 - `contracts/.../openapi/managed-agent-public-api.openapi.json` —— `segments` 属性、`PublicChannelDeliverySegment` 模式与版本升级。
 - `control-plane/.../channel/ManagedChannelService.java` —— 公开读路径从分段台账构建数组；`resend` 拒绝存储链与应答分歧的 resent id（首段检查＋容忍部分落库前缀的完整链比对）。
+- `contracts/.../persistence/ChannelSegmentRepository.java` 与
+  `persistence/.../JdbcChannelSegmentRepository.java` —— `listDeliveries`
+  使用的批量 `listByDelivery` 页读取。
 - `verification/.../ManagedAgentApiContractTest.java` —— 新记录的模式映射与 channel 夹具的分段行。
 - `verification/.../ChannelContractTest.java` —— partial 模式门中的新模式。
 - `verification/.../channel/ManagedChannelServiceTest.java` —— 多分段交付的公开读断言，及 resend 链守卫用例（首段/仅 ordinal/后续段分歧被拒，前缀与带回执重放收敛）。
@@ -49,5 +52,4 @@ channel 路由标签是 `Public Resources` 而非 `WebShell`，故 WebShell 类�
 
 ## 未决问题
 
-1. 若读取量需要，列表路径上逐交付分段读的批量化。
-2. 后续切片是否在消费者使用 `segments` 后移除单数字段。
+1. 后续切片是否在消费者使用 `segments` 后移除单数字段。

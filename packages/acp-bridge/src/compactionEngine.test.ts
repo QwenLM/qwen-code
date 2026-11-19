@@ -331,6 +331,26 @@ describe('TurnBoundaryCompactionEngine', () => {
     },
   );
 
+  it('preserves hook metadata through text compaction', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const frame: BridgeEvent = {
+      v: 1,
+      id: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: { hookLifecycle: { executionId: 'hook', phase: 'started' } },
+        },
+      },
+    };
+    engine.ingest(frame);
+    engine.ingest(makeTextChunk(2, 'answer'));
+    engine.ingest(makeTurnComplete(3));
+    expect(engine.snapshot().compactedTurns[0]).toEqual(frame);
+  });
+
   describe('basic compaction', () => {
     it('merges consecutive text chunks into a single event on turn_complete', () => {
       const engine = new TurnBoundaryCompactionEngine();
@@ -352,6 +372,36 @@ describe('TurnBoundaryCompactionEngine', () => {
       };
       expect(data.update.sessionUpdate).toBe('agent_message_chunk');
       expect(data.update.content.text).toBe('Hello world');
+    });
+
+    it('keeps slash-command output separate from model replies in compacted turns', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      const commandChunk = (id: number, text: string): BridgeEvent => {
+        const event = makeTextChunk(id, text);
+        (event.data as { update: Record<string, unknown> }).update['_meta'] = {
+          source: 'slash_command',
+        };
+        return event;
+      };
+      engine.ingest(makeTextChunk(1, 'Earlier reply.'));
+      engine.ingest(commandChunk(2, 'Skill notice. '));
+      engine.ingest(commandChunk(3, 'Some skills omitted.'));
+      engine.ingest(makeTextChunk(4, 'Model '));
+      engine.ingest(makeTextChunk(5, 'reply.'));
+      engine.ingest(makeTurnComplete(6));
+
+      const events = engine.snapshot().compactedTurns;
+      expect(extractTexts(events)).toEqual([
+        'Earlier reply.',
+        'Skill notice. Some skills omitted.',
+        'Model reply.',
+      ]);
+      expect(events[0]).not.toHaveProperty('data.update._meta.source');
+      expect(events[1]).toHaveProperty(
+        'data.update._meta.source',
+        'slash_command',
+      );
+      expect(events[2]).not.toHaveProperty('data.update._meta.source');
     });
 
     it('merges consecutive thought chunks', () => {

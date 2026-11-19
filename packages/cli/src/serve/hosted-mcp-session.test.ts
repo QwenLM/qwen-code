@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   openManagedSession,
   type ManagedSession,
@@ -30,6 +30,8 @@ import {
 import {
   HostedMcpSession,
   HostedMcpRecoveryRequiredError,
+  hostedDurableMcpOwnerId,
+  isHostedDurableMcpOwner,
   parseHostedMcpServers,
 } from './hosted-mcp-session.js';
 import { parseManagedRuntimeProviderRequest } from './managed-runtime-provider-protocol.js';
@@ -220,6 +222,71 @@ afterEach(async () => {
   vi.restoreAllMocks();
   await session?.close();
   if (root) await rm(root, { recursive: true, force: true });
+});
+
+it('names its durable owner through the one builder the predicate recognises (R2-7)', () => {
+  const sessionKey = {
+    tenantId: 'tenant',
+    workspaceId: 'workspace',
+    sessionId: 'session',
+  };
+  // No configuration rows exist yet, so the constructor takes the durable
+  // `mcp-<digest>` arm. A reload of the same records recomputes this id, so a
+  // terminal release of it is the tombstone the detach guards refuse.
+  expect(mcp.broker.runtimeSessionId).toBe(
+    hostedDurableMcpOwnerId(
+      session.authority.sessionHeader.sessionKey,
+      undefined,
+    ),
+  );
+  expect(isHostedDurableMcpOwner(mcp.broker.runtimeSessionId)).toBe(true);
+  // The round trip moves builder and predicate together; only a literal sees
+  // a reordered tuple or a renamed prefix (R3-3).
+  expect(hostedDurableMcpOwnerId(sessionKey, undefined)).toBe(
+    'mcp-9aeabdf172eb0e06d87765245fa51542c67f148886b0592dbb747c167dbd28e0',
+  );
+  expect(isHostedDurableMcpOwner('hooks-activation-1')).toBe(false);
+  expect(isHostedDurableMcpOwner('extension-mcp-1')).toBe(false);
+});
+
+it('derives the durable owner from the released configuration ids (R4-3)', async () => {
+  // The arm a reload actually takes: rows exist but are all released, so
+  // `previous` is defined. The literal below is computed outside the repo, so
+  // it pins the id tuple and the 32-char slice that the undefined-arm literal
+  // above cannot see (R4-3). One row does not exercise the sort itself.
+  const configurationId = '11111111-1111-4111-8111-111111111111';
+  await (
+    mcp as unknown as {
+      install: (
+        server: typeof pin,
+        previous: undefined,
+        id: string,
+        revision: number,
+      ) => Promise<void>;
+    }
+  ).install(pin, undefined, configurationId, 1);
+  await mcp.close({ terminal: true });
+  const reloaded = new HostedMcpSession(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    [pin],
+  );
+  const rows = session.authority
+    .extensionRecordsInDomain('mcp_configuration')
+    .map((entry) => parseMcpConfiguration(entry.record));
+  // The arm control: rows exist and every one is released, so the constructor
+  // falls through to the durable builder with `previous` defined.
+  expect(rows.map((row) => row.configurationId)).toEqual([configurationId]);
+  expect(rows.map((row) => row.releaseState)).toEqual(['released']);
+  // sha256(JSON.stringify([configurationId])).slice(0, 32), computed outside
+  // the repo. The session key is a fresh UUID per run, so the literal pins
+  // `previous` — which is where the sorted-id tuple and the slice live.
+  expect(reloaded.broker.runtimeSessionId).toBe(
+    hostedDurableMcpOwnerId(
+      session.authority.sessionHeader.sessionKey,
+      'c2e1405db2f9b352ad9c28f5337c92b9',
+    ),
+  );
 });
 
 it('keeps a server send_message in the MCP namespace and its overflow fatal (#14062)', async () => {
@@ -2340,15 +2407,14 @@ it.each(['landed', 'absent'] as const)(
     );
     const command = managementCommand('add', 'demo', 0, pin);
     try {
-      await expect(manager.submit(command)).rejects.toThrow(
-        ManagedSessionAppendUnsettledError,
-      );
-      expect(requests).toEqual([]);
+      await manager.submit(command);
+      expect((await manager.snapshot(false)).revision).toBe(1);
+      expect(manager.status(command.operationId)?.state).toBe('settled');
+      expect(
+        requests.filter((entry) => entry.kind === 'mcp-configure'),
+      ).toHaveLength(1);
       await manager.open();
-      expect((await manager.snapshot(false)).revision).toBe(
-        outcome === 'landed' ? 1 : 0,
-      );
-      expect(requests).toEqual([]);
+      expect((await manager.snapshot(false)).revision).toBe(1);
       await manager.submit(command);
       await manager.submit(command);
       expect(await readHostedMcpSettings(session)).toHaveLength(1);
@@ -2362,3 +2428,183 @@ it.each(['landed', 'absent'] as const)(
     }
   },
 );
+
+describe('idle suspension', () => {
+  const rows = () =>
+    session.authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .map((entry) => parseMcpConfiguration(entry.record));
+  const reopen = () =>
+    new HostedMcpSession(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      [pin],
+    );
+  const advertiseParking = () =>
+    vi
+      .mocked(HostedWorkspaceBroker.prototype.acquire)
+      .mockImplementation(async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+        this.mcpParkable = true;
+      });
+  const answerDiscover = (code: string) => {
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
+    const original = control.getMockImplementation()!;
+    control.mockImplementation(async (operation) => {
+      if (operation.kind !== 'mcp-discover') return original(operation);
+      requests.push(operation);
+      return {
+        operationId: operation.operationId,
+        state: 'settled',
+        error: { code },
+      };
+    });
+    return () => control.mockImplementation(original);
+  };
+  const kinds = () => requests.map((request) => request.kind);
+
+  beforeEach(() => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'mcp-claim',
+    );
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'releaseMount',
+    ).mockResolvedValue();
+  });
+
+  it('parks settled connections and reuses them after revalidating once', async () => {
+    advertiseParking();
+    await mcp.refresh();
+    await mcp.suspend();
+    expect(rows().map((row) => row.releaseState)).toEqual(['active']);
+    expect(kinds()).not.toContain('mcp-release');
+    expect(HostedWorkspaceBroker.prototype.releaseMount).not.toHaveBeenCalled();
+
+    requests = [];
+    const reopened = reopen();
+    await reopened.refresh();
+    expect(kinds()).not.toContain('mcp-configure');
+    const discover = requests.find((r) => r.kind === 'mcp-discover');
+    expect(discover).toMatchObject({ revalidate: true });
+
+    requests = [];
+    await reopened.refresh();
+    expect(requests.find((r) => r.kind === 'mcp-discover')).not.toHaveProperty(
+      'revalidate',
+    );
+  });
+
+  it('claims the mount again before parking', async () => {
+    advertiseParking();
+    await mcp.refresh();
+    const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+    acquire.mockClear();
+    await mcp.suspend();
+    expect(acquire).toHaveBeenCalledOnce();
+  });
+
+  it('drains as before when the Broker does not advertise parking', async () => {
+    await mcp.refresh();
+    await mcp.suspend();
+    expect(rows().map((row) => row.releaseState)).toEqual(['drained']);
+    expect(kinds()).toContain('mcp-release');
+    expect(HostedWorkspaceBroker.prototype.releaseMount).toHaveBeenCalledOnce();
+  });
+
+  it('retires superseded rows and keeps only the latest active when parking', async () => {
+    advertiseParking();
+    await mcp.ensureReady();
+    await mcp.configure(randomUUID(), pin, 1);
+    await mcp.suspend();
+    expect(
+      rows()
+        .sort((a, b) => a.configRevision - b.configRevision)
+        .map((row) => row.releaseState),
+    ).toEqual(['released', 'active']);
+  });
+
+  it('replaces a reclaimed connection and retires its row', async () => {
+    advertiseParking();
+    await mcp.refresh();
+    await mcp.suspend();
+    const parked = rows()[0]!.configurationId;
+
+    answerDiscover('managed_mcp_binding_conflict');
+    requests = [];
+    await reopen().refresh();
+    expect(kinds()).toContain('mcp-configure');
+    expect(
+      rows().find((row) => row.configurationId === parked)?.releaseState,
+    ).toBe('released');
+    expect(rows().filter((row) => row.releaseState === 'active')).toHaveLength(
+      1,
+    );
+  });
+
+  it('replaces a connection whose revalidation failed', async () => {
+    advertiseParking();
+    await mcp.refresh();
+    await mcp.suspend();
+    const parked = rows()[0]!.configurationId;
+
+    answerDiscover('managed_mcp_retiring');
+    await reopen().refresh();
+    expect(
+      rows().find((row) => row.configurationId === parked)?.releaseState,
+    ).toBe('released');
+  });
+
+  it('keeps a retiring resident connection active until its work settles', async () => {
+    await mcp.refresh();
+    const resident = rows()[0]!.configurationId;
+
+    answerDiscover('managed_mcp_retiring');
+    await mcp.refresh();
+    expect(
+      rows().find((row) => row.configurationId === resident)?.releaseState,
+    ).toBe('active');
+  });
+
+  it('keeps the parked row active and retryable when its replacement is refused', async () => {
+    advertiseParking();
+    await mcp.refresh();
+    await mcp.suspend();
+    const parked = rows()[0]!.configurationId;
+
+    answerDiscover('managed_mcp_binding_conflict');
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.control);
+    const original = control.getMockImplementation()!;
+    control.mockImplementation(async (operation) =>
+      operation.kind === 'mcp-configure'
+        ? {
+            operationId: operation.operationId,
+            state: 'settled',
+            error: { code: 'managed_mcp_connection_failed' },
+          }
+        : original(operation),
+    );
+    const reopened = reopen();
+    await expect(reopened.refresh()).rejects.toThrow(
+      'Runtime MCP configuration failed.',
+    );
+    expect(
+      rows().find((row) => row.configurationId === parked)?.releaseState,
+    ).toBe('active');
+    expect(reopened.recoveryBlocked).toBe(false);
+  });
+
+  it('surfaces a retryable Broker refusal on reopen as itself', async () => {
+    advertiseParking();
+    await mcp.refresh();
+    await mcp.suspend();
+
+    const busy = new HostedWorkspaceBrokerRejection(409, 'workspace_busy');
+    vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockRejectedValue(busy);
+    await expect(reopen().ensureReady()).rejects.toBe(busy);
+  });
+});

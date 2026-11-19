@@ -15,6 +15,7 @@ import org.springframework.context.annotation.Import;
 })
 @Import({BrokerSecurity.class, WebConfiguration.class, ManagedSessionJsonConfiguration.class,
         InternalSurfaceConfiguration.class, InternalSurfaceConfiguration.RoutingFilter.class,
+        TerminalWebSocketConfig.class,
         ManagedAgentWebConfiguration.StandaloneExceptionHandler.class})
 public class ManagedAgentWebConfiguration {
     @org.springframework.web.bind.annotation.RestControllerAdvice

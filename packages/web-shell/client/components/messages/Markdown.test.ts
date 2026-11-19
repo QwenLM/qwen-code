@@ -242,7 +242,7 @@ describe('qwen-session:// links', () => {
     // Without `urlTransform`, react-markdown rewrites every non-http(s)/mailto
     // href to '' before `components.a` runs, so the interception branch never
     // fires and the link renders as an inert anchor.
-    const c = renderMd('[🧵 abc12345](qwen-session://abc12345-full-id)');
+    const c = renderMd('[abc12345](qwen-session://abc12345-full-id)');
     const a = c.querySelector('a')!;
     expect(a).toBeTruthy();
     expect(a.getAttribute('role')).toBe('button');
@@ -250,18 +250,28 @@ describe('qwen-session:// links', () => {
     c.remove();
   });
 
-  it('dispatches qwen:open-session with the session id on click', () => {
+  it.each([
+    { target: 'abc12345-full-id', detail: 'abc12345-full-id' },
+    {
+      target: 'abc12345-full-id?workspace=%2Fwork%2Fproject+%28copy%29',
+      detail: {
+        sessionId: 'abc12345-full-id',
+        workspaceCwd: '/work/project (copy)',
+        source: 'session-link',
+      },
+    },
+  ])('dispatches a session event for $target', ({ target, detail }) => {
     const seen: unknown[] = [];
     const handler = (e: Event) => seen.push((e as CustomEvent).detail);
     window.addEventListener('qwen:open-session', handler);
-    const c = renderMd('[🧵 abc12345](qwen-session://abc12345-full-id)');
+    const c = renderMd(`[abc12345](qwen-session://${target})`);
     act(() => {
       c.querySelector('a')!.dispatchEvent(
         new MouseEvent('click', { bubbles: true, cancelable: true }),
       );
     });
     window.removeEventListener('qwen:open-session', handler);
-    expect(seen).toEqual(['abc12345-full-id']);
+    expect(seen).toEqual([detail]);
     // The scheme is never written to the DOM: the anchor is a plain '#'.
     expect(c.querySelector('a')!.getAttribute('href')).toBe('#');
     (c as HTMLDivElement & { __unmount: () => void }).__unmount();

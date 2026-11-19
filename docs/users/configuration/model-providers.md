@@ -69,6 +69,9 @@ The selected route must declare an explicit HTTPS `baseUrl` and a non-empty
 if chat and image generation require different endpoints or credentials,
 configure two routes instead.
 
+See [Image Generation](../features/image-generation.md) for selecting the
+image model and generating images in the terminal or Web Shell.
+
 ### Live Voice routes
 
 Set `realtimeOnly: true` on a route that speaks the DashScope Realtime
@@ -129,6 +132,9 @@ elsewhere is rejected with `401`. The base URL is stored as entered and
 converted to `wss://<host>/api-ws/v1/realtime` when a call starts; the host must
 be a DashScope or `*.maas.aliyuncs.com` endpoint. While Live Voice is on, a new
 endpoint is checked with a Realtime handshake before it is saved.
+
+See [Qwen Live](../features/qwen-live.md) for enabling and using Live Voice in
+the Web Shell.
 
 ## Override reasoning capabilities
 
@@ -1057,6 +1063,43 @@ The optional `reasoning` field under `generationConfig` controls how aggressivel
 | **Anthropic** (real `api.anthropic.com`)      | `output_config: { effort }` plus the `effort-2025-11-24` beta header                     | Real Anthropic accepts `'low'`/`'medium'`/`'high'` only. `'max'` is **clamped to `'high'`** with a `debugLogger.warn` line (once per generator); if you want max effort, switch the baseURL to a DeepSeek-compatible endpoint that supports it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | **Anthropic** (`api.deepseek.com/anthropic`)  | Same `output_config: { effort }` + beta header                                           | `'low'`, `'high'` and `'max'` pass through unchanged; `'medium'`/`'xhigh'` are mapped to `'high'`, matching DeepSeek's server-side mapping.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | **Gemini** (`@google/genai`)                  | `thinkingConfig: { includeThoughts: true, thinkingLevel }`                               | `'low'` → `LOW`, `'high'`/`'max'` → `HIGH`, others → `THINKING_LEVEL_UNSPECIFIED` (Gemini has no `MAX` tier).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+
+### qwen4-max specifics
+
+`qwen4-max` (ModelStudio Standard, Token Plan, QwenCloud Standard, and Qwen
+Subscription) speaks the tiered `reasoning_effort` contract with its own native
+ladder and defaults. These behaviors are scoped to `qwen4-max` (and its dated /
+`-latest` aliases); other `qwen4*` routes and the invitation-only
+`qwen-latest-series-invite-*` previews keep the qwen3.8-max ladder and their
+shipped output limits.
+
+- **Effort ladder:** `low` / `high` / `xhigh`, **default `high`** (qwen3.8-max
+  defaults to `xhigh`). A configured `medium` is raised to `high` and `max` is
+  clamped to `xhigh` (matching the server's own mapping); `none` disables
+  thinking.
+- **Output budget:** `max_tokens` equals `max_completion_tokens` and caps
+  **thinking + answer together** (262,144 in thinking mode, 131,072 without).
+  The automatic output request is sized for that total rather than the flat 64K
+  ceiling, still bounded by the context window; with thinking disabled it is
+  clamped to the 131,072 non-thinking cap on both the DashScope channels and
+  Qwen Subscription.
+- **Media:** image and video input are accepted. On the DashScope-based
+  channels (ModelStudio Standard, Token Plan, QwenCloud Standard),
+  `generationConfig.imageDetail` (`low` / `high` / `auto`) stamps the OpenAI
+  `detail` field on each image part; unset leaves the server default (`high`,
+  ~16K image tokens). Set `low` to trade resolution for tokens (~2.5K). The
+  Qwen Subscription channel does not forward this setting.
+- **Cache TTL:** on the DashScope-based channels,
+  `generationConfig.cacheRetention: '1h'` stamps `ttl: '1h'` on the qwen4
+  cache breakpoints (2x input write cost); the default omits `ttl` (the
+  5-minute spec default). The Qwen Subscription provider injects no
+  `cache_control` breakpoints, so this setting has no effect there.
+- **Subscription wire shape:** the Qwen Subscription gateway maps the selected
+  effort to `thinking_budget` (`low → 4096`, `high → 131072`, `xhigh → 262144`)
+  plus `enable_thinking`, instead of a top-level `reasoning_effort`.
+
+CoT summary (`thinking_display`) and programmatic tool calling (ptc) are not yet
+wired up.
 
 ### `reasoning: false`
 

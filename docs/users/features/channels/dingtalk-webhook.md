@@ -46,6 +46,24 @@ One named instance represents one configured group. Create additional instances
 for other groups. Updating an instance's URL changes the destination for future
 deliveries that reference it.
 
+## Use Web Shell
+
+In Channels, choose DingTalk and its webhook sending method. Save the webhook
+URL and optional signing secret, then start the Channel. Receiving, pairing and
+agent-session settings do not apply to this method.
+
+A ready/connected status means local sending resources are ready;
+it does not verify remote credentials.
+
+In Scheduled Tasks, choose a persistent task and select this Channel as the
+delivery destination. Web Shell fills the configured destination automatically;
+no observed contacts or manual user/chat ID are needed. Existing per-run delivery
+restrictions remain in effect.
+
+The same controls are available in the shared Web Shell used by
+`WebShellWithProviders`, when the host enables Channels and Scheduled Tasks and
+provides an ordinary daemon workspace.
+
 ## Explicit API delivery
 
 Notify and explicit prompt/scheduled delivery use the existing Channel target

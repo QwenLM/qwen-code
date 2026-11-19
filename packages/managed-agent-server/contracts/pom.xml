@@ -54,6 +54,7 @@
                 <directory>${managed.module.root}/../core/src/managed-runtime/contracts</directory>
                 <includes>
                     <include>managed-tool-result-v1.schema.json</include>
+                    <include>managed-loop-skill-*.json</include>
                 </includes>
                 <targetPath>contracts</targetPath>
             </resource>

@@ -1312,8 +1312,12 @@ test('submits permission decisions through the fake daemon @smoke', async ({
 
   await gotoSession(page, scenario, daemon);
 
-  await expect(page.locator('[data-web-shell-permission-panel]')).toBeVisible();
-  await page
+  const panel = page.locator('[data-web-shell-permission-panel]');
+  await expect(panel).toBeVisible();
+  await expect(
+    panel.getByRole('button', { name: 'Approval options' }),
+  ).toHaveCount(0);
+  await panel
     .locator('[data-web-shell-permission-option][data-option-id="allow_once"]')
     .click();
 
@@ -1326,6 +1330,160 @@ test('submits permission decisions through the fake daemon @smoke', async ({
   expect(requestBodyRecord(permissionRequest)).toEqual({
     outcome: { outcome: 'selected', optionId: 'allow_once' },
   });
+});
+
+for (const width of [1280, 375]) {
+  test(`submits permission scopes from the approval menu at ${width}px @smoke`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width, height: 800 });
+    const scenario = createWebShellDaemonScenario({
+      events: [
+        {
+          id: 1,
+          v: 1,
+          type: 'permission_request',
+          data: {
+            requestId: 'perm-scopes',
+            toolCall: {
+              title: 'Shell',
+              kind: 'execute',
+              rawInput: {
+                command: 'printf web-shell-e2e',
+                description: 'Print a test message',
+              },
+            },
+            options: [
+              {
+                optionId: 'proceed_always_project',
+                label: 'Project',
+                kind: 'allow_always',
+              },
+              {
+                optionId: 'proceed_always_user',
+                label: 'User',
+                kind: 'allow_always',
+              },
+              { optionId: 'allow_once', label: 'Allow', kind: 'allow_once' },
+              { optionId: 'cancel', label: 'Reject', kind: 'reject_once' },
+            ],
+          },
+        },
+      ],
+    });
+    const daemon = await installScenario(page, scenario, testInfo);
+    await gotoSession(page, scenario, daemon);
+
+    const panel = page.locator('[data-web-shell-permission-panel]');
+    await expect(panel.getByText('Shell', { exact: true })).toHaveCSS(
+      'font-size',
+      '13px',
+    );
+    const icon = panel.getByText('?', { exact: true });
+    const description = panel.getByText('Print a test message', {
+      exact: true,
+    });
+    const commandBlock = panel.locator('div:has(> pre)').filter({
+      hasText: 'printf web-shell-e2e',
+    });
+    const iconLeft = (await icon.boundingBox())!.x;
+    expect((await description.boundingBox())!.x).toBeCloseTo(iconLeft, 0);
+    expect((await commandBlock.boundingBox())!.x).toBeCloseTo(iconLeft, 0);
+    const reject = panel.getByRole('button', { name: 'Reject', exact: true });
+    const allow = panel.getByRole('button', {
+      name: 'Yes, allow once',
+      exact: true,
+    });
+    const trigger = panel.getByRole('button', { name: 'Approval options' });
+    await expect(panel.locator('[data-option-id]')).toHaveCount(2);
+    await expect(reject).toHaveCSS('border-top-style', 'solid');
+    await expect(allow).toHaveCSS(
+      'background-color',
+      await trigger.evaluate(
+        (element) => getComputedStyle(element).backgroundColor,
+      ),
+    );
+    expect(
+      await reject.evaluate(
+        (element) => getComputedStyle(element).backgroundColor,
+      ),
+    ).not.toBe(
+      await allow.evaluate(
+        (element) => getComputedStyle(element).backgroundColor,
+      ),
+    );
+    const rejectBox = (await reject.boundingBox())!;
+    const allowBox = (await allow.boundingBox())!;
+    const triggerBox = (await trigger.boundingBox())!;
+    const panelBox = (await panel.boundingBox())!;
+    expect(rejectBox.x + rejectBox.width).toBeLessThan(allowBox.x);
+    expect(allowBox.x + allowBox.width).toBeCloseTo(triggerBox.x, 0);
+    expect(
+      panelBox.x + panelBox.width - triggerBox.x - triggerBox.width,
+    ).toBeLessThan(24);
+
+    await trigger.press('ArrowDown');
+    const menu = page.getByRole('menu', { name: 'Approval options' });
+    await expect(menu.getByRole('menuitem')).toHaveText([
+      'Yes, allow once',
+      'Always allow for this user',
+      'Always allow in this project',
+    ]);
+    await expect(menu).toBeInViewport({ ratio: 1 });
+    await page.keyboard.press('Escape');
+    await expect(menu).toBeHidden();
+    await expect(trigger).toBeFocused();
+    expect(daemon.permissionRequests()).toHaveLength(0);
+
+    if (width === 1280) {
+      await trigger.press('ArrowDown');
+      await page.keyboard.press('End');
+      await expect(
+        menu.getByRole('menuitem', { name: 'Always allow in this project' }),
+      ).toBeFocused();
+      await page.keyboard.press('Enter');
+    } else {
+      await trigger.click();
+      await menu
+        .getByRole('menuitem', { name: 'Always allow in this project' })
+        .click();
+    }
+    await expect
+      .poll(() => daemon.permissionRequests().map(requestBodyRecord))
+      .toEqual([
+        {
+          outcome: { outcome: 'selected', optionId: 'proceed_always_project' },
+        },
+      ]);
+  });
+}
+
+test('resets inline permission scopes when the request changes @smoke', async ({
+  page,
+}) => {
+  await page.goto('/e2e/fixtures/inline-approval.html');
+  const trigger = page.getByRole('button', { name: 'Approval options' });
+  const menu = page.locator('#portal').getByRole('menu');
+  const reject = page.getByRole('button', { name: 'Reject' });
+  const decision = page.getByRole('status', { name: 'Decision' });
+
+  await expect(reject).toBeFocused();
+  await trigger.press('Enter');
+  await expect(menu).toBeVisible();
+  await page
+    .getByRole('button', { name: 'Replace request' })
+    .evaluate((button: HTMLButtonElement) => button.click());
+  await expect(menu).toBeHidden();
+  await expect(reject).toBeFocused();
+  await expect(decision).toBeEmpty();
+
+  await trigger.press('Enter');
+  await expect(menu).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(trigger).toBeFocused();
+  await expect(decision).toBeEmpty();
+  await page.keyboard.press('Escape');
+  await expect(decision).toHaveText('second/reject');
 });
 
 test('aligns shell explanation and permission actions @smoke', async ({
@@ -1852,6 +2010,15 @@ test('keeps the permission picker compact and marks full access as dangerous @sm
   ]) {
     await expect(fullAccess.locator(selector)).toHaveCSS('color', dangerColor);
   }
+
+  await fullAccess.click();
+  await expect(modeDropdown).toHaveCount(0);
+  const modeTrigger = page.locator('[data-web-shell-mode-button]');
+  await expect(modeTrigger).toHaveClass(/modeToolBtnDanger/);
+  await expect(modeTrigger.locator('[class*="toolBtnText"]')).toHaveCSS(
+    'color',
+    dangerColor,
+  );
 });
 
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {

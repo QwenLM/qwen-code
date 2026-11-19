@@ -65,7 +65,6 @@ export type ChannelEditorValidationCode =
   | 'number'
   | 'outOfRange'
   | 'policy'
-  | 'requiresBoundDelivery'
   | 'requiresBoundDeliveryForWatchGate';
 
 export type ChannelEditorValidationErrors = Record<
@@ -504,11 +503,14 @@ export function createChannelEditorDraft(
     name: instance?.name ?? '',
     values,
     secrets,
-    privatePolicy: hasDescriptorPolicy
-      ? ''
-      : ['disabled', 'allowlist', 'pairing', 'open'].includes(configuredPolicy)
-        ? (configuredPolicy as ChannelPrivatePolicy)
-        : '',
+    privatePolicy:
+      descriptor.outboundOnly || hasDescriptorPolicy
+        ? ''
+        : ['disabled', 'allowlist', 'pairing', 'open'].includes(
+              configuredPolicy,
+            )
+          ? (configuredPolicy as ChannelPrivatePolicy)
+          : '',
     // Show repository IDs in the canonical lower-case form the editor writes,
     // so re-saving an older mixed-case allowlist migrates it instead of
     // rewriting the same spelling back.
@@ -588,7 +590,9 @@ export function validateChannelEditorDraft(
         errors[field.key] = 'outOfRange';
       }
     } else if (field.kind === 'string-list' && field.options) {
-      if (typeof draftValue === 'string') {
+      // prWatchEvents is deprecated: the daemon accepts any value and warns at
+      // connect, so the editor must not block a save the daemon will take.
+      if (field.key !== 'prWatchEvents' && typeof draftValue === 'string') {
         const allowed = new Set(field.options.map((option) => option.value));
         const invalid = draftValue
           .split(',')
@@ -607,22 +611,14 @@ export function validateChannelEditorDraft(
     if (!hasToken && draft.values['useLocalGh'] !== true) {
       errors['token'] = 'credential';
     }
-    // Mirror validateBoundSessionConfig so the dependency is named at the
-    // field instead of surfacing as a raw daemon rejection after submit.
-    // invalidOption wins, the same order the runtime validates in.
-    if (
-      !errors['prWatchEvents'] &&
-      toList(String(draft.values['prWatchEvents'] ?? '')).length > 0 &&
-      draft.values['deliverToBoundSessions'] !== true
-    ) {
-      errors['prWatchEvents'] = 'requiresBoundDelivery';
-    }
+    // Mirror validateBoundSessionConfig's remaining dependency. prWatchEvents
+    // is deprecated and accepted without bound delivery, so it has no check.
     if (
       draft.values['requireBoundWatch'] === true &&
       draft.values['deliverToBoundSessions'] !== true
     ) {
-      // Its own code: the shared requiresBoundDelivery message names "the
-      // selected watch events", a control this field's operator never touched.
+      // Own code: the copy names the watch gate, not the watch events, so a
+      // shared message would point at a control this operator never touched.
       errors['requireBoundWatch'] = 'requiresBoundDeliveryForWatchGate';
     }
     // Mirror validateRepoFilterConfig: an active mode needs a non-empty list
@@ -644,6 +640,7 @@ export function validateChannelEditorDraft(
     }
   }
   if (
+    !descriptor.outboundOnly &&
     !isRepositoryOnlyChannelType(descriptor.type) &&
     !draft.privatePolicy &&
     !hasDescriptorPrivatePolicy(descriptor)
@@ -1098,7 +1095,10 @@ export function buildChannelUpsertRequest(
     // then present the stale user list as an authoritative allowlist. Drop the
     // whole set on the next save; the effective list lives under `groups`.
     for (const key of PRIVATE_ONLY_FIELD_KEYS) delete config[key];
-  } else if (!hasDescriptorPrivatePolicy(descriptor)) {
+  } else if (
+    !descriptor.outboundOnly &&
+    !hasDescriptorPrivatePolicy(descriptor)
+  ) {
     config['privatePolicy'] = draft.privatePolicy;
   }
   if (!privateOnly && hasDescriptorGroupPolicy(descriptor)) {

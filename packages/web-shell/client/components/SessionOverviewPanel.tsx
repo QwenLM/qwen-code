@@ -36,6 +36,7 @@ import {
   ArrowUpDownIcon,
   CircleIcon,
   CircleHelpIcon,
+  GitPullRequestIcon,
   InfoIcon,
   ShieldQuestionIcon,
   DownloadIcon,
@@ -65,6 +66,7 @@ import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
 import { useScopedSessions } from '../hooks/useScopedSessions';
 import { useWorkspaceSessionLiveState } from '../session-catalog/workspace-session-live-state';
 import { useSessionCatalogController } from '../session-catalog/session-catalog-hooks';
+import { hasLiveWork } from '../session-catalog/session-live-work';
 import { getDaemonToken } from '../config/daemon';
 import {
   SESSION_ARCHIVE_BATCH_SIZE,
@@ -73,6 +75,10 @@ import {
   SESSION_ORGANIZATION_FEATURE,
 } from '../constants/sessions';
 import { ErrorBoundary } from './ErrorBoundary';
+import {
+  BindSessionPrDialog,
+  type BindSessionPrPayload,
+} from './dialogs/BindSessionPrDialog';
 import { SessionDetailsTooltip } from './sidebar/SessionDetailsTooltip';
 import { isAbsolutePath } from './sidebar/WorkspaceSection';
 import { Button } from './ui/button';
@@ -269,7 +275,10 @@ export function deriveSessionCards(
         currentContextKind,
       ),
       prs: session.prs,
-      gitBranch: session.worktree?.branch ?? session.branch?.name,
+      gitBranch:
+        session.worktree?.branch ||
+        session.worktree?.slug ||
+        session.branch?.name,
       workspaceCwd: session.workspaceCwd,
       sourceType: session.sourceType,
     };
@@ -624,6 +633,8 @@ function SessionOverviewPanelInner({
     null,
   );
   const [deleteTarget, setDeleteTarget] = useState<SessionCard[] | null>(null);
+  const [bindPrTarget, setBindPrTarget] = useState<SessionCard | null>(null);
+  const [bindPrError, setBindPrError] = useState<string | undefined>();
   const [batchBusy, setBatchBusy] = useState(false);
   const [footerSticky, setFooterSticky] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -782,22 +793,40 @@ function SessionOverviewPanelInner({
       isRegisteredTrustedCard(card),
     [currentWorkspaceCwd, isRegisteredTrustedCard],
   );
+  // The card's grade drives its sort and displayed status, so it stays as it
+  // is; the two destructive actions read the shared predicate as well, because
+  // a background-only session grades idle here and closing it kills that work.
+  // An unresolved session falls back to the grade alone rather than blocking.
+  const cardHasLiveWork = useCallback(
+    (card: SessionCard) => {
+      const session = sessionByIdentity.get(getSessionIdentity(card));
+      return session ? hasLiveWork(session) : false;
+    },
+    [sessionByIdentity],
+  );
   const canArchiveCard = useCallback(
     (card: SessionCard) =>
       sessionArchiveEnabled &&
       sessionByIdentity.get(getSessionIdentity(card))?.sourceType !==
         'qwen-live' &&
       card.status === 'idle' &&
+      !cardHasLiveWork(card) &&
       canUseSessionMutation(card),
-    [canUseSessionMutation, sessionArchiveEnabled, sessionByIdentity],
+    [
+      canUseSessionMutation,
+      cardHasLiveWork,
+      sessionArchiveEnabled,
+      sessionByIdentity,
+    ],
   );
   const canDeleteCard = useCallback(
     (card: SessionCard) =>
       sessionByIdentity.get(getSessionIdentity(card))?.sourceType !==
         'qwen-live' &&
       card.status === 'idle' &&
+      !cardHasLiveWork(card) &&
       canUseSessionMutation(card),
-    [canUseSessionMutation, sessionByIdentity],
+    [canUseSessionMutation, cardHasLiveWork, sessionByIdentity],
   );
   const canRenameCard = useCallback(
     (card: SessionCard) =>
@@ -1143,6 +1172,81 @@ function SessionOverviewPanelInner({
     t,
     workspace.client,
   ]);
+
+  const startBindPr = useCallback((card: SessionCard) => {
+    setActionError(null);
+    setBindPrError(undefined);
+    setBindPrTarget(card);
+  }, []);
+
+  // Supplementary PR registration — mirrors saveRename's workspace routing
+  // (current session → own session actions; other sessions → the owning
+  // workspace's metadata route; cwd-less cards → the global route). Standalone
+  // cards are excluded by the button gate (openSessionContext), not by
+  // canRenameCard — which is true for them — since their metadata route only
+  // accepts displayName.
+  const bindPrTargetRef = useRef(bindPrTarget);
+  bindPrTargetRef.current = bindPrTarget;
+  const submitBindPr = useCallback(
+    (pr: BindSessionPrPayload) => {
+      const card = bindPrTarget;
+      if (!card || batchBusy) return;
+      const ownerCwd = card.workspaceCwd || primaryCwd;
+      void runBusy(card, async () => {
+        setBindPrError(undefined);
+        try {
+          if (isCurrentCard(card)) {
+            await actions.bindSessionPr(pr);
+          } else if (card.workspaceCwd) {
+            await workspace.client
+              .workspaceByCwd(card.workspaceCwd)
+              .updateSessionMetadata(card.sessionId, { pr });
+          } else {
+            await workspace.client.updateSessionMetadata(card.sessionId, {
+              pr,
+            });
+          }
+          // A late completion must not close a dialog the user has since
+          // opened for another card.
+          if (bindPrTargetRef.current === card) {
+            setBindPrTarget(null);
+          }
+          if (ownerCwd) {
+            sessionCatalogController.refreshWorkspace(ownerCwd);
+          }
+          await reloadData();
+        } catch (err) {
+          if (ownerCwd) {
+            sessionCatalogController.refreshWorkspace(ownerCwd);
+          }
+          const message =
+            err instanceof Error
+              ? `${t('sessionsOverview.bindPrFailed')}: ${err.message}`
+              : t('sessionsOverview.bindPrFailed');
+          // Surface the failure on the still-open dialog, or on the panel's
+          // error row if the user already dismissed it.
+          if (bindPrTargetRef.current === card) {
+            setBindPrError(message);
+          } else {
+            setActionError(message);
+          }
+        }
+      });
+    },
+    [
+      actions,
+      batchBusy,
+      bindPrTarget,
+      isCurrentCard,
+      primaryCwd,
+      reloadData,
+      runBusy,
+      sessionCatalogController,
+      t,
+      workspace.client,
+    ],
+  );
+
   const editingNameRef = useRef(editingName);
   const saveRenameRef = useRef(saveRename);
   editingNameRef.current = editingName;
@@ -1620,6 +1724,25 @@ function SessionOverviewPanelInner({
                   <PenLineIcon className="size-4" />
                 </Button>
               )}
+              {(isCurrentCard(card) || sessionMetadataEnabled) &&
+                !openSessionContext(card) && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    className="shrink-0 text-muted-foreground hover:text-foreground"
+                    disabled={batchBusy || busy || !canRename}
+                    onClick={() => startBindPr(card)}
+                    aria-label={t('sessionsOverview.bindPr')}
+                    title={
+                      canRename
+                        ? t('sessionsOverview.bindPr')
+                        : t('sessionsOverview.actionUnavailable')
+                    }
+                  >
+                    <GitPullRequestIcon className="size-4" />
+                  </Button>
+                )}
               {(canExportSessions || canExportWorkspaceSessions) && (
                 <Button
                   type="button"
@@ -1676,7 +1799,7 @@ function SessionOverviewPanelInner({
         meta: {
           fixed: 'right',
           fixedEdge: true,
-          width: 156,
+          width: 180,
           fixedWidth: true,
           headerClassName: 'text-center',
           stopRowClick: true,
@@ -1700,6 +1823,7 @@ function SessionOverviewPanelInner({
       registeredWorkspaces,
       sessionMetadataEnabled,
       sessionDetailsProps,
+      startBindPr,
       startRename,
       t,
     ],
@@ -2187,6 +2311,16 @@ function SessionOverviewPanelInner({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {bindPrTarget && (
+        <BindSessionPrDialog
+          workspaceCwd={bindPrTarget.workspaceCwd ?? ''}
+          busy={busyIds.has(getSessionIdentity(bindPrTarget))}
+          error={bindPrError}
+          onSubmit={submitBindPr}
+          onClose={() => setBindPrTarget(null)}
+        />
+      )}
     </div>
   );
 }

@@ -55,6 +55,7 @@ export type {
   ManagedToolResult,
   ManagedToolResultReader,
   ManagedToolResultResponse,
+  ManagedWorkspaceArtifactReader,
 } from './components/managed/managed-tool-result-types';
 export {
   type ManagedAgentCommandOptions,
@@ -388,6 +389,12 @@ export type {
 } from './settings';
 
 export type { WebShellModelManagementOptions } from './modelManagement';
+export type {
+  WebShellModelPickerContext,
+  WebShellModelPickerItemContext,
+  WebShellModelPickerMount,
+  WebShellModelPickerOptions,
+} from './model-picker';
 export type {
   WebShellUnavailableModel,
   WebShellUnavailableModelTooltipHandle,

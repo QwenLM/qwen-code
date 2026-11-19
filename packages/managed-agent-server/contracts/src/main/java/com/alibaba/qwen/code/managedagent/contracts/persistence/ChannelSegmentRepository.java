@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.contracts.persistence;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * Persistence boundary for the per-segment ledger of a CHANNEL delivery
@@ -33,4 +34,13 @@ public interface ChannelSegmentRepository {
     /** The delivery's segments ordered by ordinal. */
     public List<SegmentLedger> list(String tenantId, String channelInstanceId,
             String deliveryId);
+
+    /**
+     * The segments of several deliveries in one query, keyed by deliveryId
+     * and each ordered by ordinal. Every requested deliveryId keeps an entry
+     * (empty when it holds no segments), so a list projection reads the whole
+     * page without a segment query per row.
+     */
+    public Map<String, List<SegmentLedger>> listByDelivery(String tenantId,
+            String channelInstanceId, List<String> deliveryIds);
 }

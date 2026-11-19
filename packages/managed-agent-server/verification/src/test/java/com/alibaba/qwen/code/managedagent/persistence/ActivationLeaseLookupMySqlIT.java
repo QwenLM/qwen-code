@@ -31,7 +31,7 @@ class ActivationLeaseLookupMySqlIT {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             ManagedSchema.initialize(database.source());
             var jdbc = new CapturingJdbc(database.source());
-            var rows = new JournalStoreRows(new ManagedSessionReaderVersion(), jdbc);
+            var rows = new JournalStoreRows(new ManagedSessionReaderVersion(), jdbc, null);
             // An earlier activation and its history, then the current one:
             // installed, renewed once by a later transaction, then history.
             var journal = new ArrayList<Object[]>();

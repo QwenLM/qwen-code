@@ -68,7 +68,13 @@ export interface WorkflowGraphLayout {
   height: number;
   laneWidth: number;
   nodeWidth: number;
-  lanes: Array<{ id: string | null; title: string; index: number }>;
+  lanes: Array<{
+    id: string | null;
+    title: string;
+    index: number;
+    /** Declared in `meta.phases` and not reached yet; it has no dispatches. */
+    planned?: { detail?: string };
+  }>;
   nodes: WorkflowGraphNode[];
   edges: WorkflowGraphEdge[];
   dispatchCountByLaneId: ReadonlyMap<string | null, number>;
@@ -77,6 +83,10 @@ export interface WorkflowGraphLayout {
   omittedNodes: number;
   omittedEdges: number;
 }
+
+const ACTIVE_RUN_STATUSES: ReadonlySet<
+  DaemonSessionWorkflowTaskStatus['status']
+> = new Set(['running', 'paused', 'pausing']);
 
 export function buildWorkflowGraphLayout(
   task: DaemonSessionWorkflowTaskStatus,
@@ -94,7 +104,16 @@ export function buildWorkflowGraphLayout(
     0,
     WORKFLOW_GRAPH_RENDER_LIMITS.lanes - (hasUnphased ? 1 : 0),
   );
-  const lanes = [
+  // Declared phases the script has not reached yet, while it can still reach
+  // them. A phase counts as reached once any visit carries its title.
+  const reachedTitles = new Set(task.phaseVisits.map((visit) => visit.title));
+  const plannedPhases =
+    !task.isHistorical && ACTIVE_RUN_STATUSES.has(task.status)
+      ? (task.plannedPhases ?? []).filter(
+          (phase) => !reachedTitles.has(phase.title),
+        )
+      : [];
+  const lanes: WorkflowGraphLayout['lanes'] = [
     ...(hasUnphased ? [{ id: null, title: 'No phase', index: 0 }] : []),
     ...task.phaseVisits.slice(0, phaseLaneLimit).map((visit, index) => ({
       id: visit.id,
@@ -102,6 +121,15 @@ export function buildWorkflowGraphLayout(
       index: index + (hasUnphased ? 1 : 0),
     })),
   ];
+  for (const [position, phase] of plannedPhases.entries()) {
+    if (lanes.length >= WORKFLOW_GRAPH_RENDER_LIMITS.lanes) break;
+    lanes.push({
+      id: `planned:${position}`,
+      title: phase.title,
+      index: lanes.length,
+      planned: phase.detail === undefined ? {} : { detail: phase.detail },
+    });
+  }
   if (lanes.length === 0) lanes.push({ id: null, title: 'No phase', index: 0 });
 
   const laneIndexById = new Map(lanes.map((lane) => [lane.id, lane.index]));
@@ -172,7 +200,10 @@ export function buildWorkflowGraphLayout(
     dispatchStatusById,
     omittedLanes: Math.max(
       0,
-      task.phaseVisits.length + (hasUnphased ? 1 : 0) - lanes.length,
+      task.phaseVisits.length +
+        (hasUnphased ? 1 : 0) +
+        plannedPhases.length -
+        lanes.length,
     ),
     omittedNodes: Math.max(0, task.dispatches.length - nodes.length),
     omittedEdges: Math.max(0, totalEdgeCount - edges.length),
@@ -736,7 +767,10 @@ export function WorkflowExecutionView({
     </>
   );
 
-  if (task.dispatches.length === 0) {
+  if (
+    task.dispatches.length === 0 &&
+    !layout.lanes.some((lane) => lane.planned)
+  ) {
     return (
       <div className={styles.root} data-plan-interactive>
         {history}
@@ -828,6 +862,7 @@ export function WorkflowExecutionView({
                   key={lane.id ?? 'no-phase'}
                   className={styles.lane}
                   data-workflow-lane={lane.id ?? 'no-phase'}
+                  data-planned={lane.planned ? true : undefined}
                   data-active={lane.id === activePhaseVisitId || undefined}
                   data-last={isLast || undefined}
                   style={{
@@ -847,9 +882,16 @@ export function WorkflowExecutionView({
                       {lane.id === null ? t('workflow.noPhase') : lane.title}
                     </strong>
                     <small>
-                      {t('workflow.dispatchCount', { count: dispatchCount })}
+                      {lane.planned
+                        ? t('workflow.phase.notStarted')
+                        : t('workflow.dispatchCount', { count: dispatchCount })}
                     </small>
                   </div>
+                  {lane.planned?.detail && (
+                    <p className={styles.plannedDetail}>
+                      {lane.planned.detail}
+                    </p>
+                  )}
                 </div>
               );
             })}

@@ -11,9 +11,9 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
@@ -163,7 +163,8 @@ class WorkspaceMigrationMySqlIT {
                 throw new IllegalStateException(error);
             }
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Long.class)).isZero();
-            new WorkspaceMigrationStore(jdbc, manager, guard, new InMemoryRuntimeBindingRepository(),
+            new WorkspaceMigrationStore(jdbc, manager, guard, new JdbcRuntimeBindingRepository(data,
+                    new AesGcmSecretProtector("test", new byte[32])),
                     request.toString().getBytes(StandardCharsets.UTF_8), true,
                     new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker());
         })).hasMessageContaining("migration_member_uninitialized");

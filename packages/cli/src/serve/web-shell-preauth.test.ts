@@ -54,6 +54,7 @@ describe('page deep links', () => {
     '/channels',
     '/live',
     '/scheduled-tasks',
+    '/pr-watches',
     '/goals',
     '/settings',
   ])('only exempts document GET/HEAD on exact %s', (path) => {

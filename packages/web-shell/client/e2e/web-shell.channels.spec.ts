@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import {
   createWebShellDaemonScenario,
   installMockDaemon,
@@ -1220,3 +1220,391 @@ test('lists a configured Email channel and hides its inert group controls @smoke
     editor.getByRole('combobox', { name: /Who can talk in groups/ }),
   ).toHaveCount(0);
 });
+
+async function configureWebhook(
+  page: Page,
+  testInfo: TestInfo,
+  platform: {
+    type: 'dingtalk' | 'feishu' | 'wecom' | 'generic';
+    displayName: string;
+  },
+) {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text());
+  });
+  const webhookType = `${platform.type}-webhook`;
+  const generic = platform.type === 'generic';
+  const platformName = generic ? 'Generic Webhook' : platform.displayName;
+  const webhookUrl = `$${platform.type.toUpperCase()}_WEBHOOK_URL`;
+  const signingSecret = `$${platform.type.toUpperCase()}_SIGNING_SECRET`;
+  const secretKey = generic ? 'bearerToken' : 'signingSecret';
+  const secretLabel = generic ? 'Bearer token' : 'Signing secret';
+  const config = {
+    type: webhookType,
+    ...(generic ? { allowPrivateNetwork: true } : {}),
+  };
+  const signed = platform.type !== 'wecom';
+  const primaryWorkspaceCwd = '/tmp/qwen-web-shell-e2e';
+  const workspaceCwd = '/tmp/qwen-outbound-webhook-secondary';
+  const scenario = createWebShellDaemonScenario({
+    channels: { revision: '7', instances: {} },
+    capabilities: {
+      features: [
+        'session_events',
+        'session_source_metadata',
+        'channel_management',
+        'channel_delivery',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: primaryWorkspaceCwd,
+          displayName: 'Main workspace',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: workspaceCwd,
+          displayName: 'Notification workspace',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    },
+    channelTypes: [
+      ...(!generic
+        ? [
+            {
+              type: platform.type,
+              displayName: platform.displayName,
+              manageable: true,
+              fields: [],
+            },
+          ]
+        : []),
+      {
+        type: webhookType,
+        displayName: `${platform.displayName} Webhook`,
+        manageable: true,
+        outboundOnly: true,
+        defaultDeliveryTarget: {
+          type: 'chat',
+          id: 'default',
+          label: generic ? 'Configured endpoint' : 'Configured group',
+        },
+        fields: [
+          {
+            key: 'webhookUrl',
+            label: 'Webhook URL',
+            kind: 'secret',
+            required: true,
+            envResolvable: true,
+          },
+          ...(signed
+            ? [
+                {
+                  key: secretKey,
+                  label: secretLabel,
+                  kind: 'secret' as const,
+                  envResolvable: true,
+                },
+              ]
+            : []),
+          ...(generic
+            ? [
+                {
+                  key: 'allowPrivateNetwork',
+                  label: 'Allow local and private endpoints',
+                  kind: 'boolean' as const,
+                },
+              ]
+            : []),
+        ],
+      },
+    ],
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  await page.route('**/workspace/models', (route) =>
+    route.fulfill({ json: { models: [] } }),
+  );
+  await page.addInitScript(() => {
+    window.sessionStorage.setItem('qwen-daemon-token', 'e2e-token');
+  });
+  let primarySnapshotRequests = 0;
+  await page.route(
+    (url) =>
+      url.pathname ===
+      `/workspaces/${encodeURIComponent(primaryWorkspaceCwd)}/channels`,
+    async (route) => {
+      if (route.request().method() !== 'GET') {
+        await route.fallback();
+        return;
+      }
+      primarySnapshotRequests += 1;
+      await route.fulfill({ json: { revision: '1', instances: {} } });
+    },
+  );
+  await page.route(
+    /\/workspaces\/[^/]+\/channels\/notices\/(start|stop)$/,
+    async (route) => {
+      const path = new URL(route.request().url()).pathname;
+      expect(path).toMatch(
+        new RegExp(
+          `^/workspaces/${encodeURIComponent(workspaceCwd)}/channels/notices/(start|stop)$`,
+        ),
+      );
+      const instance = scenario.channels.instances['notices'];
+      instance.runtime = {
+        state: path.endsWith('/start') ? 'connected' : 'stopped',
+      };
+      await route.fulfill({ json: { snapshot: scenario.channels, instance } });
+    },
+  );
+
+  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  await expect(page).toHaveTitle('Qwen Code Web chat');
+  await expect(page).toHaveURL(new RegExp(`/session/${scenario.sessionId}$`));
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
+  const connection = await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: connection.sessionId }),
+  );
+  await expect(page.getByText('Loading...')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Channels', exact: true }).click();
+  await expect(
+    page.getByTestId(
+      `channel-platform-${generic ? webhookType : platform.type}`,
+    ),
+  ).toBeVisible();
+  await expect.poll(() => primarySnapshotRequests).toBeGreaterThan(0);
+  if (!generic) {
+    await expect(
+      page.getByTestId(`channel-platform-${webhookType}`),
+    ).toHaveCount(0);
+  }
+  await page
+    .getByRole('button', {
+      name: `Configure ${platformName}`,
+      exact: true,
+    })
+    .click();
+  if (!generic) {
+    const methodDialog = page.getByRole('dialog');
+    const methodTitle = `Choose a ${platform.displayName} connection`;
+    await expect(methodDialog).toHaveAccessibleName(methodTitle);
+    await expect(methodDialog.getByRole('heading')).toHaveText(methodTitle);
+    await expect(methodDialog).toHaveAccessibleDescription(
+      `Choose how this Channel connects to ${platform.displayName}.`,
+    );
+    await expect(
+      methodDialog.getByRole('button', {
+        name:
+          platform.type === 'wecom' ? /^Intelligent bot/ : /^Application bot/,
+      }),
+    ).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath('outbound-channel-methods.png'),
+      animations: 'disabled',
+    });
+    await methodDialog
+      .getByRole('button', { name: /^Webhook \(send only\)/ })
+      .click();
+  }
+  const editor = page.getByRole('dialog');
+  await expect(
+    editor.getByRole('heading', {
+      name: `Configure ${platform.displayName} Webhook`,
+    }),
+  ).toBeVisible();
+  await expect(editor.getByText('Access control', { exact: true })).toHaveCount(
+    0,
+  );
+  await expect(
+    editor.getByText('Conversation management', { exact: true }),
+  ).toHaveCount(0);
+  await expect(editor.getByText('Pairing', { exact: true })).toHaveCount(0);
+  await editor.getByLabel('Workspace').click();
+  await page.getByRole('option', { name: 'Notification workspace' }).click();
+  await expect(editor.getByLabel('Workspace')).toContainText(
+    'Notification workspace',
+  );
+  await editor.getByLabel('Instance name').fill('notices');
+  await editor.getByLabel('Webhook URL', { exact: false }).fill(webhookUrl);
+  if (signed) {
+    await editor.getByLabel(secretLabel, { exact: false }).fill(signingSecret);
+  } else {
+    await expect(
+      editor.getByLabel('Signing secret', { exact: false }),
+    ).toHaveCount(0);
+    await expect(editor.getByLabel('Bot ID', { exact: false })).toHaveCount(0);
+    await expect(editor.getByLabel('Bot Secret', { exact: false })).toHaveCount(
+      0,
+    );
+  }
+  if (generic) {
+    await expect(
+      editor.getByRole('switch', { name: 'Allow local and private endpoints' }),
+    ).toHaveCount(0);
+    await editor.getByRole('button', { name: 'Advanced settings' }).click();
+    const privateNetwork = editor.getByRole('switch', {
+      name: 'Allow local and private endpoints',
+    });
+    await expect(privateNetwork).not.toBeChecked();
+    await privateNetwork.check();
+    await expect(editor).toContainText(
+      'Localhost refers to the Qwen Code daemon host or container.',
+    );
+    await expect(
+      editor.getByRole('button', { name: /send.*test/i }),
+    ).toHaveCount(0);
+  }
+  await page.screenshot({
+    path: testInfo.outputPath('outbound-channel-editor.png'),
+  });
+  await editor.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  const upsert = daemon.requests.find(
+    (request) =>
+      request.method === 'PUT' && request.path.endsWith('/channels/notices'),
+  );
+  expect(upsert?.path).toBe(
+    `/workspaces/${encodeURIComponent(workspaceCwd)}/channels/notices`,
+  );
+  expect(upsert?.body).toEqual({
+    expectedRevision: '7',
+    config,
+    secrets: {
+      webhookUrl: { operation: 'replace', value: webhookUrl },
+      ...(signed
+        ? { [secretKey]: { operation: 'replace', value: signingSecret } }
+        : {}),
+    },
+  });
+  const card = page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.getByText('notices', { exact: true }) });
+  await card.getByRole('button', { name: 'Edit notices', exact: true }).click();
+  await expect(editor.getByLabel('Webhook URL', { exact: false })).toHaveCount(
+    0,
+  );
+  await expect(editor.getByLabel(secretLabel, { exact: false })).toHaveCount(0);
+  await editor.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  const updates = () =>
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'PUT' && request.path.endsWith('/channels/notices'),
+    );
+  expect(updates().at(-1)?.body).toEqual({
+    expectedRevision: expect.any(String),
+    config,
+    secrets: {
+      webhookUrl: { operation: 'preserve' },
+      ...(signed ? { [secretKey]: { operation: 'preserve' } } : {}),
+    },
+  });
+  await card.getByRole('button', { name: 'Edit notices', exact: true }).click();
+  await editor
+    .getByRole('button', { name: 'Replace', exact: true })
+    .first()
+    .click();
+  await editor
+    .getByLabel('Webhook URL', { exact: false })
+    .fill(`${webhookUrl}_V2`);
+  if (signed) {
+    await editor.getByRole('button', { name: 'Clear', exact: true }).click();
+  } else {
+    await expect(
+      editor.getByRole('button', { name: 'Clear', exact: true }),
+    ).toHaveCount(0);
+  }
+  await editor.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  expect(updates().at(-1)?.body).toEqual({
+    expectedRevision: expect.any(String),
+    config,
+    secrets: {
+      webhookUrl: { operation: 'replace', value: `${webhookUrl}_V2` },
+      ...(signed ? { [secretKey]: { operation: 'clear' } } : {}),
+    },
+  });
+  await card.getByRole('button', { name: 'Start', exact: true }).click();
+  await expect(card.getByText('Ready to send', { exact: true })).toBeVisible();
+  expect(
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'POST' &&
+        /\/session$|\/standalone\/sessions$|\/prompt$/.test(request.path),
+    ),
+  ).toHaveLength(0);
+  await page.screenshot({
+    path: testInfo.outputPath('outbound-channel-ready.png'),
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await card.scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: testInfo.outputPath('outbound-channel-mobile.png'),
+  });
+  if (generic) {
+    await card
+      .getByRole('button', { name: 'Edit notices', exact: true })
+      .click();
+    const privateNetwork = editor.getByRole('switch', {
+      name: 'Allow local and private endpoints',
+    });
+    await expect(privateNetwork).toBeChecked();
+    await privateNetwork.uncheck();
+    const width = await editor.evaluate((element) => ({
+      client: element.clientWidth,
+      scroll: element.scrollWidth,
+    }));
+    expect(width.scroll).toBeLessThanOrEqual(width.client);
+    await page.screenshot({
+      path: testInfo.outputPath('generic-webhook-editor-mobile.png'),
+    });
+    await editor.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(editor).toHaveCount(0);
+    expect(updates().at(-1)?.body).toMatchObject({
+      config: { type: webhookType, allowPrivateNetwork: false },
+      secrets: {
+        webhookUrl: { operation: 'preserve' },
+        bearerToken: { operation: 'clear' },
+      },
+    });
+  }
+  await card.getByRole('button', { name: 'Stop', exact: true }).click();
+  await expect(
+    card.getByText('Not ready to send notifications.', { exact: true }),
+  ).toBeVisible();
+  await expect(card.getByText('Ready to send', { exact: true })).toHaveCount(0);
+  await expect(page.locator('vite-error-overlay')).toHaveCount(0);
+  expect(errors).toEqual([]);
+}
+
+test('configures a Generic Webhook endpoint and preserves secrets in the selected workspace @smoke', async ({
+  page,
+}, testInfo) => {
+  await configureWebhook(page, testInfo, {
+    type: 'generic',
+    displayName: 'Generic',
+  });
+});
+
+for (const platform of [
+  { type: 'dingtalk', displayName: 'DingTalk' },
+  { type: 'feishu', displayName: 'Feishu' },
+  { type: 'wecom', displayName: 'WeCom' },
+] as const) {
+  test(`configures and starts a ${platform.displayName} webhook method in the selected workspace`, async ({
+    page,
+  }, testInfo) => {
+    await configureWebhook(page, testInfo, platform);
+  });
+}

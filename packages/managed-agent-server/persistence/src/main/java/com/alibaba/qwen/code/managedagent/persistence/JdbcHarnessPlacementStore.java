@@ -231,11 +231,10 @@ public class JdbcHarnessPlacementStore
             case ARCHIVE -> "ARCHIVING";
             default -> "CLOSING";
         };
-        var admission = jdbc.query("SELECT status, session_kind, workspace_id, is_csi_guard FROM ma_session"
+        var admission = jdbc.query("SELECT status, session_kind, workspace_id FROM ma_session"
                 + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", (row, index) ->
                 pendingStatus.equals(row.getString(1))
-                        && ("PUBLIC".equals(row.getString(2)) || row.getString(3) != null)
-                        && !row.getBoolean(4), tenant, session);
+                        && ("PUBLIC".equals(row.getString(2)) || row.getString(3) != null), tenant, session);
         if (admission.isEmpty() || !admission.getFirst()) {
             throw blocked("harness_placement_not_admitted");
         }

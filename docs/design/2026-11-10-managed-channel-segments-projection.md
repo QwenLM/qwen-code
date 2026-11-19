@@ -49,18 +49,19 @@ and the claim sweep discovers pending work from the journal, so `claimOne`
 applies the same full-chain comparison and settles a conflicting record out
 of the pending set instead of re-importing it on every sweep.
 
-The contract version bumps from 1.108.0 to 1.109.0. The Java record and the
-OpenAPI schema change together, enforced by the record-to-schema contract
-gate; the channel route gate keeps the three routes and the schemas
-`partial`.
+The contract version bumped from 1.108.0 to 1.109.0 for this slice; later
+slices advanced it (1.113.0 to 1.114.0 in #16846), and this follow-up does not
+bump it. The Java record and the OpenAPI schema change together, enforced by
+the record-to-schema contract gate; the channel route gate keeps the three
+routes and the schemas `partial`.
 
 ### Service read path
 
 `publicDelivery` builds the array from the segment ledger
-(`ChannelSegmentRepository.list`) for each delivery row. `listDeliveries` and
-`getDelivery` read the ledger per delivery. This is a bounded per-row read
-(the delivery page is at most 100 rows); batching the segment reads is a
-later optimization if the read path needs it.
+(`ChannelSegmentRepository.list`) for `getDelivery`. `listDeliveries` reads the
+whole page in one `listByDelivery` query (`WHERE delivery_key IN (...)`,
+grouped by delivery and ordered by ordinal); both paths map rows through the
+same `RowMapper`, so they cannot publish different segments for one delivery.
 
 ### WebShell
 
@@ -79,6 +80,9 @@ WebShell types produces no channel change; no WebShell consumer is affected.
   path builds the array from the segment ledger; `resend` refuses a resent id
   whose stored chain diverges from the answer (first-segment check plus a
   full-chain comparison that tolerates a partly materialized prefix).
+- `contracts/.../persistence/ChannelSegmentRepository.java` and
+  `persistence/.../JdbcChannelSegmentRepository.java` — the batched
+  `listByDelivery` page read used by `listDeliveries`.
 - `verification/.../ManagedAgentApiContractTest.java` — the new record's
   schema mapping and the channel fixture's segment rows.
 - `verification/.../ChannelContractTest.java` — the new schema in the
@@ -115,7 +119,5 @@ WebShell types produces no channel change; no WebShell consumer is affected.
 
 ## Open questions
 
-1. Batching the per-delivery segment reads on the list path, if the read
-   volume warrants it.
-2. Whether a later slice removes the singular fields once consumers use
+1. Whether a later slice removes the singular fields once consumers use
    `segments`.

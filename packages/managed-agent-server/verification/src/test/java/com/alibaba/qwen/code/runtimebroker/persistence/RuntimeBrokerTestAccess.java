@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 
@@ -54,6 +55,53 @@ public final class RuntimeBrokerTestAccess {
 
     public static void setIdentity(PreparedStatement statement, int index, String value) throws SQLException {
         JdbcRepositorySupport.setIdentity(statement, index, value);
+    }
+
+    /**
+     * The execution-level authorizing CAS, without the binding-level dispatch
+     * admission: mints authorization evidence on a claimed execution whose
+     * fixture deliberately omits admission evidence.
+     */
+    public static ToolExecutionRecord authorizeDispatch(DataSource source, ToolExecutionRecord expected,
+            String owner, long generation, long bindingVersion) {
+        return JdbcRepositorySupport.transaction(source,
+                connection -> JdbcToolExecutionRepository.authorizeDispatch(connection, expected, owner,
+                        generation, bindingVersion));
+    }
+
+    /**
+     * Installs an execution row directly, bypassing the admission the public
+     * findOrCreate enforces.
+     */
+    public static ToolExecutionRecord insertExecution(DataSource source, ToolExecutionRecord record) {
+        return JdbcRepositorySupport.transaction(source, connection -> {
+            JdbcToolExecutionRepository.insertExecution(connection, record);
+            return record;
+        });
+    }
+
+    /** The owner dispatch CAS on the execution row alone, without binding-level admission. */
+    public static ToolExecutionRecord compareAndSet(DataSource source, ToolExecutionRecord expected,
+            ToolExecutionRecord replacement, String owner, long dispatchGeneration) {
+        return JdbcRepositorySupport.transaction(source, connection -> {
+            ToolExecutionRecord current = JdbcToolExecutionRepository.selectByExecutionId(
+                    connection, expected.getExecutionCallId(), true);
+            if (current == null
+                    || !current.sameIdentity(expected)
+                    || !current.sameAuthorization(expected)
+                    || current.getVersion() != expected.getVersion()
+                    || current.isTerminal()
+                    || current.getState() == ToolExecutionRecord.State.UNKNOWN
+                    || !current.sameDispatch(expected)
+                    || !current.hasLiveDispatchAt(JdbcRepositorySupport.databaseNowPrecise(connection))
+                    || !owner.equals(current.getDispatchOwner())
+                    || current.getDispatchGeneration() != dispatchGeneration) {
+                return null;
+            }
+            ToolExecutionRecord updated = replacement.withVersion(expected.getVersion() + 1);
+            JdbcToolExecutionRepository.updateExecution(connection, updated);
+            return updated;
+        });
     }
 
     public static RuntimeBrokerService service(HarnessSessionResolver sessions,
