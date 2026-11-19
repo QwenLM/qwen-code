@@ -4,6 +4,10 @@
 
 Status: implemented.
 
+[Send now never waits for tools](2026-11-19-send-now-never-waits.md) revises
+the decisions not to cut a response that started a tool call and not to
+interrupt running tools.
+
 ## Problem
 
 A message the user types while a turn is running goes to

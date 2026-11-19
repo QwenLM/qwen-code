@@ -71,6 +71,8 @@ import {
   extractToolFilePaths,
   getOptInToolNotFoundMessage,
   isToolCallConcurrencySafe,
+  TOOL_INTERRUPTED_FOR_USER_MESSAGE,
+  USER_MESSAGE_INTERRUPT_ABORT_REASON,
 } from './coreToolScheduler.js';
 import type { CallableTool, Part, PartListUnion } from '@google/genai';
 import {
@@ -11483,6 +11485,39 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(responseText).toContain(notice);
     expect(responseText).not.toContain(wrongNotice);
   });
+
+  it.each<[string, ToolResult | Error]>([
+    [
+      'a returned interruption',
+      {
+        llmContent: 'Command was cancelled by user before it could complete.',
+        returnDisplay: 'Command cancelled by user.',
+        interruptedBeforeCompletion: true,
+      },
+    ],
+    [
+      'an abort error',
+      Object.assign(new Error('Tool call aborted'), { name: 'AbortError' }),
+    ],
+  ])(
+    'tells the model to read the message a tool was interrupted for (%s)',
+    async (_title, outcome) => {
+      const abortController = new AbortController();
+      const { call } = await runSingleTool({
+        abortController,
+        execute: vi.fn().mockImplementation(async () => {
+          abortController.abort(USER_MESSAGE_INTERRUPT_ABORT_REASON);
+          if (outcome instanceof Error) throw outcome;
+          return outcome;
+        }),
+      });
+
+      const completedCall = expectSettled(call, 'cancelled', 'cancelled');
+      const responseText = JSON.stringify(completedCall.response.responseParts);
+      expect(responseText).toContain(TOOL_INTERRUPTED_FOR_USER_MESSAGE);
+      expect(responseText).not.toContain('User intentionally cancelled');
+    },
+  );
 
   // The notice says the call did not finish; the producer's own text says how
   // far it got. Replacing the whole payload with the notice loses the partial

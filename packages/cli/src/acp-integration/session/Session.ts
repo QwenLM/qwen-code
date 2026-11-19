@@ -28,8 +28,10 @@ import {
   INCOMPLETE_ARGS_EDIT_REJECTION,
   INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE,
   isToolCallConcurrencySafe,
+  TOOL_INTERRUPTED_FOR_USER_MESSAGE,
   TRUNCATION_EDIT_REJECTION,
   TRUNCATION_RETRY_LOOP_DIRECTIVE,
+  USER_MESSAGE_INTERRUPT_ABORT_REASON,
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
 import {
@@ -612,6 +614,11 @@ const MID_TURN_INPUT_ABORT_REASON = 'qwen:mid-turn-input';
 // the turn to the session, which goes on to answer the input the round took
 // (see `#openResponseInterrupt`).
 const MID_TURN_INPUT_KEPT_ABORT_REASON = 'qwen:mid-turn-input-kept';
+// Ends a turn whose tool calls keep queued user input the user asked to send
+// now from reaching the model; the host then sends the input as the next
+// prompt. Unlike a user cancel, it leaves cron jobs, background notifications
+// and the Goal running.
+const MID_TURN_SEND_NOW_ABORT_REASON = USER_MESSAGE_INTERRUPT_ABORT_REASON;
 /** The failure a Goal turn stopped by loop protection pauses with. */
 const GOAL_LOOP_STOP_FAILURE = 'loop detected';
 const GOAL_HELD_RECOVERY_COMMANDS =
@@ -761,7 +768,8 @@ function isControlledPromptAbortReason(reason: unknown): boolean {
     reason === USER_CANCEL_ABORT_REASON ||
     reason === MOD_TURN_ABORT_REASON ||
     reason === SESSION_DISPOSE_ABORT_REASON ||
-    reason === INTERRUPTED_PROMPT_ABORT_REASON
+    reason === INTERRUPTED_PROMPT_ABORT_REASON ||
+    reason === MID_TURN_SEND_NOW_ABORT_REASON
   );
 }
 
@@ -2805,6 +2813,13 @@ export class Session implements SessionContext {
   private midTurnSendNowFor: AbortSignal | undefined;
   // Pulls queued input for the model response currently open to interruption.
   private pullForOpenResponse: (() => void) | undefined;
+  // Whether that response has started a tool call.
+  private openResponseHasToolCall: (() => boolean) | undefined;
+  // The turn whose last response called tools that have not reached their
+  // tool-boundary drain yet.
+  private midTurnToolPhaseFor: AbortSignal | undefined;
+  // Drain requests awaiting the host's answer.
+  private midTurnDrainsInFlight = 0;
   // A drain started for an open response and still awaiting its answer. Later
   // drains wait for it, so the messages it takes are never stranded.
   private earlyMidTurnDrain: Promise<void> | undefined;
@@ -3651,7 +3666,8 @@ export class Session implements SessionContext {
       // either active-with-handoff or paused depending on where the abort
       // landed, and the paused branch silently stops the autonomous loop.
       const supersededByNewPrompt =
-        turn.controller.signal.reason === NEW_PROMPT_ABORT_REASON;
+        turn.controller.signal.reason === NEW_PROMPT_ABORT_REASON ||
+        turn.controller.signal.reason === MID_TURN_SEND_NOW_ABORT_REASON;
       // One list, not two: the cause that decides whether to pause is the same
       // cause that names the pause. Enumerating them separately means a fifth
       // cause can compile, pause correctly, and fall through to the failure
@@ -4020,13 +4036,27 @@ export class Session implements SessionContext {
 
   /**
    * Host request to deliver the queued mid-turn input now. A model response
-   * open to interruption takes it at once; otherwise the next drain does.
+   * open to interruption takes it at once. A response that started a tool
+   * call, or the tools it called, could only take it at the tool boundary, so
+   * the turn ends instead and the host sends the input as the next prompt.
    * Ignored between turns, where the host promotes the queue itself.
    */
   sendMidTurnInputNow(): void {
-    if (!this.pendingPrompt) return;
-    this.midTurnSendNowFor = this.pendingPrompt.signal;
+    const pending = this.pendingPrompt;
+    if (!pending) return;
+    this.midTurnSendNowFor = pending.signal;
     this.pullForOpenResponse?.();
+    // The host sends this request only while it holds user input, and answers
+    // drains on the same ordered connection: with no drain out, the input is
+    // still with the host and is promoted when the turn ends; a drain still
+    // out brings it into this turn.
+    if (
+      this.midTurnDrainsInFlight === 0 &&
+      (this.midTurnToolPhaseFor === pending.signal ||
+        this.openResponseHasToolCall?.() === true)
+    ) {
+      pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
+    }
   }
 
   releaseTodoStopGuardQueuedPromptWait(promptId: string): boolean {
@@ -8506,13 +8536,13 @@ export class Session implements SessionContext {
                 // The shared round's request reaches history inside the
                 // client; until then a cut would drop the message it carries.
                 let requestUnsent = () => false;
+                const hasToolCall = () =>
+                  functionCalls.length > 0 || preparationTracker.hasToolCall;
                 const responseInterrupt = this.#openResponseInterrupt(
                   pendingSend.signal,
-                  () =>
-                    functionCalls.length > 0 ||
-                    preparationTracker.hasToolCall ||
-                    requestUnsent(),
+                  () => hasToolCall() || requestUnsent(),
                   !channelTurn,
+                  hasToolCall,
                 );
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
@@ -12447,7 +12477,9 @@ export class Session implements SessionContext {
     // This request takes everything queued so far; a send-now request handled
     // after it goes out sets the request again.
     this.midTurnSendNowFor = undefined;
+    if (!sendNow) this.midTurnToolPhaseFor = undefined;
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
+    this.midTurnDrainsInFlight += 1;
     try {
       drainPromise = this.client.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
         sessionId: this.sessionId,
@@ -12530,6 +12562,8 @@ export class Session implements SessionContext {
         `Mid-turn queue drain ${isPermanentError ? 'permanently ' : ''}unavailable [session ${this.sessionId}]: ${errorMessage}`,
       );
       return undefined;
+    } finally {
+      this.midTurnDrainsInFlight -= 1;
     }
   }
 
@@ -12556,6 +12590,7 @@ export class Session implements SessionContext {
     turnSignal: AbortSignal,
     hasFunctionCalls: () => boolean,
     enabled: boolean,
+    hasToolCall: () => boolean = hasFunctionCalls,
   ): ResponseInterrupt {
     if (!enabled) {
       return {
@@ -12630,15 +12665,21 @@ export class Session implements SessionContext {
         this.pullForOpenResponse?.();
       });
     };
+    const openHasToolCall = () => open && hasToolCall();
     const begin = () => {
       open = true;
       this.pullForOpenResponse = pull;
+      this.openResponseHasToolCall = openHasToolCall;
       pull();
     };
     const end = () => {
+      if (open && hasToolCall()) this.midTurnToolPhaseFor = turnSignal;
       open = false;
       if (this.pullForOpenResponse === pull) {
         this.pullForOpenResponse = undefined;
+      }
+      if (this.openResponseHasToolCall === openHasToolCall) {
+        this.openResponseHasToolCall = undefined;
       }
     };
     const interrupted = () => controller.signal.aborted && !turnSignal.aborted;
@@ -20272,9 +20313,11 @@ export class Session implements SessionContext {
 
           const interruptedBeforeCompletion =
             toolResult.interruptedBeforeCompletion === true;
-          const cancelReason = interruptedBeforeCompletion
-            ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
-            : TOOL_POST_EXECUTION_CANCELLED_MESSAGE;
+          const cancelReason = !interruptedBeforeCompletion
+            ? TOOL_POST_EXECUTION_CANCELLED_MESSAGE
+            : activeToolAbortSignal.reason === MID_TURN_SEND_NOW_ABORT_REASON
+              ? TOOL_INTERRUPTED_FOR_USER_MESSAGE
+              : TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE;
           if (
             activeToolAbortSignal.aborted &&
             !(isExecutionTimeout && parentAbortedAtExecutionSettle)

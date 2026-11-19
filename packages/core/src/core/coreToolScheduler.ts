@@ -488,6 +488,19 @@ const TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE =
   'User intentionally cancelled this tool call. Stop and await further instructions; do not retry or work around it.';
 const TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE =
   'The tool had already completed; its output was discarded. User intentionally cancelled. Stop and await further instructions; do not retry.';
+/**
+ * The abort reason of a turn the user ended to send a message. A tool it
+ * interrupts is told to read that message, not to stop for good.
+ */
+export const USER_MESSAGE_INTERRUPT_ABORT_REASON = 'qwen:mid-turn-send-now';
+export const TOOL_INTERRUPTED_FOR_USER_MESSAGE =
+  'The user interrupted this tool call to send you a message, which follows. Read it before deciding whether to run the tool again.';
+
+function cancelledBeforeCompletionMessage(signal: AbortSignal): string {
+  return signal.reason === USER_MESSAGE_INTERRUPT_ABORT_REASON
+    ? TOOL_INTERRUPTED_FOR_USER_MESSAGE
+    : TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE;
+}
 
 /**
  * Builds the failure ToolResult surfaced when a tool call exceeds the
@@ -6694,7 +6707,7 @@ export class CoreToolScheduler {
         // finished: producers that signal interruption by returning (the shell
         // tool on user cancel) set `interruptedBeforeCompletion`.
         let cancelMessage = toolResult.interruptedBeforeCompletion
-          ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
+          ? cancelledBeforeCompletionMessage(signal)
           : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
         if (cancelIfFinished(cancelMessage)) return;
         let failureHookArtifacts: ToolArtifact[] | undefined;
@@ -7745,7 +7758,7 @@ export class CoreToolScheduler {
       }
 
       const cancelMessage = executionThrew
-        ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
+        ? cancelledBeforeCompletionMessage(signal)
         : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
       if (cancelIfFinished(cancelMessage)) return;
       if (aborted) {
@@ -7849,7 +7862,7 @@ export class CoreToolScheduler {
             // The abort landed while the failure hook was running; the
             // tool's own outcome is still what `executionThrew` says.
             executionThrew
-              ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
+              ? cancelledBeforeCompletionMessage(signal)
               : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
             executionStatus,
             failureHookArtifacts,

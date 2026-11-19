@@ -33226,7 +33226,13 @@ describe('Session', () => {
           });
 
           /** Streams `plan A`, then holds the response until it is cut. */
-          function openSharedResponse(endsWithError = false) {
+          function openSharedResponse(
+            endsWithError = false,
+            firstEvent: { type: unknown; value: unknown } = {
+              type: core.LlmEventType.Content,
+              value: 'plan A',
+            },
+          ) {
             let markStreaming!: () => void;
             const streaming = new Promise<void>((resolve) => {
               markStreaming = resolve;
@@ -33249,7 +33255,7 @@ describe('Session', () => {
                   sends.push([parts, signal, promptId, options]);
                   if (sends.length > 1) return createEmptyStream();
                   return (async function* () {
-                    yield { type: core.LlmEventType.Content, value: 'plan A' };
+                    yield firstEvent;
                     markStreaming();
                     await new Promise<void>((resolve) =>
                       signal.addEventListener('abort', () => resolve(), {
@@ -33268,6 +33274,25 @@ describe('Session', () => {
             });
             return { streaming, sends };
           }
+
+          it('ends the turn for input sent while a shared round streams a tool call', async () => {
+            mockClient.extMethod = vi
+              .fn()
+              .mockResolvedValue({ messages: ['use plan B instead'] });
+            const { streaming, sends } = openSharedResponse(false, {
+              type: core.LlmEventType.ToolCallPreparation,
+              value: { callId: 'call-write', toolName: 'write_file' },
+            });
+
+            const done = startPrompt();
+            await streaming;
+            session.sendMidTurnInputNow();
+
+            await expect(done).resolves.toEqual({ stopReason: 'cancelled' });
+            expect(sends[0][1].aborted).toBe(true);
+            expect(sends).toHaveLength(1);
+            expect(drainCalls()).toHaveLength(0);
+          });
 
           it.each([
             ['', false],
@@ -33953,7 +33978,136 @@ describe('Session', () => {
           expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
         });
 
-        it('leaves input to the tool boundary once the response called a tool', async () => {
+        it('ends the turn for input sent once the response called a tool', async () => {
+          const execute = vi
+            .fn()
+            .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' });
+          mockToolRegistry.getTool.mockReturnValue(readFileTool(execute));
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockClient.extMethod = vi
+            .fn()
+            .mockResolvedValue({ messages: ['also check tests'] });
+          const { streaming, state } = openResponse([readFileCall]);
+
+          const done = startPrompt();
+          await streaming;
+          session.sendMidTurnInputNow();
+
+          // Nothing is taken: the host sends the input as the next prompt.
+          await expect(done).resolves.toEqual({ stopReason: 'cancelled' });
+          expect(state.signal?.aborted).toBe(true);
+          expect(drainCalls()).toHaveLength(0);
+          expect(execute).not.toHaveBeenCalled();
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        });
+
+        it('ends the turn for input sent while its tools run', async () => {
+          let toolSignal: AbortSignal | undefined;
+          let markRunning!: () => void;
+          const running = new Promise<void>((resolve) => {
+            markRunning = resolve;
+          });
+          mockToolRegistry.getTool.mockReturnValue(
+            readFileTool(
+              vi.fn().mockImplementation(
+                (signal: AbortSignal) =>
+                  new Promise((resolve) => {
+                    toolSignal = signal;
+                    markRunning();
+                    signal.addEventListener(
+                      'abort',
+                      () =>
+                        resolve({ llmContent: 'stopped', returnDisplay: '' }),
+                      { once: true },
+                    );
+                  }),
+              ),
+            ),
+          );
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockClient.extMethod = vi
+            .fn()
+            .mockResolvedValue({ messages: ['also check tests'] });
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(createStreamWithChunks([readFileCall]))
+            .mockResolvedValue(createEmptyStream());
+
+          const done = startPrompt();
+          await running;
+          session.sendMidTurnInputNow();
+
+          await expect(done).resolves.toEqual({ stopReason: 'cancelled' });
+          expect(toolSignal?.aborted).toBe(true);
+          expect(drainCalls()).toHaveLength(0);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          // Only the turn ends: cron and background notifications go on.
+          expect(
+            (session as unknown as { notificationsPaused: boolean })
+              .notificationsPaused,
+          ).toBe(false);
+        });
+
+        it('ends the turn for input sent while a tool waits for approval', async () => {
+          const execute = vi.fn();
+          mockToolRegistry.getTool.mockReturnValue({
+            ...readFileTool(execute),
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+              getConfirmationDetails: vi.fn().mockResolvedValue({
+                type: 'info',
+                title: 'Read file',
+                prompt: 'Read /tmp/test.txt?',
+                onConfirm: vi.fn(),
+              }),
+              getDescription: vi.fn().mockReturnValue('Read file'),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute,
+            }),
+          });
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.DEFAULT);
+          mockClient.requestPermission = vi.fn(
+            () => new Promise<never>(() => {}),
+          );
+          mockClient.extMethod = vi
+            .fn()
+            .mockResolvedValue({ messages: ['also check tests'] });
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(createStreamWithChunks([readFileCall]))
+            .mockResolvedValue(createEmptyStream());
+
+          const done = startPrompt();
+          await vi.waitFor(() =>
+            expect(mockClient.requestPermission).toHaveBeenCalledOnce(),
+          );
+          session.sendMidTurnInputNow();
+
+          await expect(done).resolves.toEqual({ stopReason: 'cancelled' });
+          expect(execute).not.toHaveBeenCalled();
+          expect(drainCalls()).toHaveLength(0);
+          // Not the user turning the call down.
+          expect(
+            mockChatRecordingService.recordToolResult,
+          ).not.toHaveBeenCalledWith(
+            expect.anything(),
+            expect.objectContaining({ status: 'error' }),
+          );
+          for (const [, record] of vi.mocked(
+            mockChatRecordingService.recordToolResult,
+          ).mock.calls) {
+            expect(record).toMatchObject({ status: 'cancelled' });
+          }
+        });
+
+        it('lets a tool-boundary drain still out take the input into the turn', async () => {
           mockToolRegistry.getTool.mockReturnValue(
             readFileTool(
               vi
@@ -33964,29 +34118,87 @@ describe('Session', () => {
           mockConfig.getApprovalMode = vi
             .fn()
             .mockReturnValue(ApprovalMode.YOLO);
+          let answerDrain!: (value: unknown) => void;
           mockClient.extMethod = vi
             .fn()
-            .mockResolvedValueOnce({ messages: ['also check tests'] })
+            .mockImplementationOnce(
+              () =>
+                new Promise((resolve) => {
+                  answerDrain = resolve;
+                }),
+            )
             .mockResolvedValue({ messages: [] });
-          const { streaming, release, state } = openResponse([readFileCall]);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(createStreamWithChunks([readFileCall]))
+            .mockResolvedValue(createEmptyStream());
 
           const done = startPrompt();
-          await streaming;
+          await vi.waitFor(() => expect(drainCalls()).toHaveLength(1));
           session.sendMidTurnInputNow();
-          await nextTick();
-          expect(drainCalls()).toHaveLength(0);
-          release();
+          answerDrain({ messages: ['also check tests'] });
 
           await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
-          expect(state.signal?.aborted).toBe(false);
           const nextMessage = vi.mocked(mockChat.sendMessageStream).mock
             .calls[1]?.[1].message as Part[];
-          expect(
-            nextMessage.some((part) => part.functionResponse !== undefined),
-          ).toBe(true);
           expect(nextMessage).toContainEqual({
             text: '\n[User message received during tool execution]: also check tests',
           });
+        });
+
+        it('ends a Goal turn for input sent once it called a tool without pausing the Goal', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-send-now',
+          };
+          mockGoalRuntime.getSnapshot.mockReturnValue({
+            v: 2,
+            activity: 'running',
+            goal: {
+              goalId: 'goal-1',
+              revision: 1,
+              objective: 'check weather',
+              status: 'active',
+              evidenceCursor: { recordId: 'cursor-1' },
+              turnCount: 0,
+              activeTimeMs: 0,
+              tokensUsed: 0,
+              createdAt: 1234,
+              updatedAt: 1234,
+            },
+          });
+          mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+            turnKey === 'goal-runtime:turn-send-now' ? permit : undefined,
+          );
+          mockClient.extMethod = vi
+            .fn()
+            .mockResolvedValue({ messages: ['use plan B instead'] });
+          const { streaming, state } = openResponse([readFileCall]);
+
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'check weather',
+          });
+          await streaming;
+          session.sendMidTurnInputNow();
+
+          // A handoff to the input, as when a new prompt preempts the turn.
+          await vi.waitFor(() =>
+            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit),
+          );
+          expect(state.signal?.aborted).toBe(true);
+          expect(mockGoalRuntime.dispatch).not.toHaveBeenCalledWith(
+            expect.objectContaining({ action: 'pause' }),
+          );
+          expect(drainCalls()).toHaveLength(0);
+          // The host promotes the input once it learns the Goal turn ended.
+          await vi.waitFor(() =>
+            expect(mockClient.extNotification).toHaveBeenCalledWith(
+              '_qwencode/end_turn',
+              expect.objectContaining({ source: 'goal', reason: 'cancelled' }),
+            ),
+          );
         });
 
         it('answers input whose drain returns after the response ended', async () => {
@@ -34179,11 +34391,11 @@ describe('Session', () => {
           // The user's input replaced the turn that the hook had forced.
           expect(stopActiveFlags).toEqual([false, false]);
         });
-        it('leaves input with the host while a tool call is still streaming', async () => {
+        it('ends the turn for input sent while a tool call is still streaming', async () => {
           mockClient.extMethod = vi
             .fn()
             .mockResolvedValue({ messages: ['also check tests'] });
-          const { streaming, release, state } = openResponse([
+          const { streaming, state } = openResponse([
             {
               type: core.StreamEventType.CHUNK,
               value: createPreparationResponse('c', 'write_file'),
@@ -34193,16 +34405,14 @@ describe('Session', () => {
           const done = startPrompt();
           await streaming;
           session.sendMidTurnInputNow();
-          await nextTick();
-          release();
 
-          await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
-          expect(state.signal?.aborted).toBe(false);
+          await expect(done).resolves.toEqual({ stopReason: 'cancelled' });
+          expect(state.signal?.aborted).toBe(true);
           expect(drainCalls()).toHaveLength(0);
           expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
         });
 
-        it('leaves input with the host while a Stop-hook continuation streams a tool call', async () => {
+        it('ends the turn for input sent while a Stop-hook continuation streams a tool call', async () => {
           let stopCalls = 0;
           mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
           mockConfig.getMessageBus = vi.fn().mockReturnValue({
@@ -34225,7 +34435,7 @@ describe('Session', () => {
           mockClient.extMethod = vi
             .fn()
             .mockResolvedValue({ messages: ['also check tests'] });
-          const { streaming, release, state } = openResponse(
+          const { streaming, state } = openResponse(
             [
               {
                 type: core.StreamEventType.CHUNK,
@@ -34238,11 +34448,9 @@ describe('Session', () => {
           const done = startPrompt();
           await streaming;
           session.sendMidTurnInputNow();
-          await nextTick();
-          release();
 
-          await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
-          expect(state.signal?.aborted).toBe(false);
+          await expect(done).resolves.toEqual({ stopReason: 'cancelled' });
+          expect(state.signal?.aborted).toBe(true);
           expect(drainCalls()).toHaveLength(0);
         });
 
@@ -34266,7 +34474,7 @@ describe('Session', () => {
           expect(state.signal?.aborted).toBe(false);
         });
 
-        it('leaves input with the host when the tool it waits for ends the turn', async () => {
+        it('leaves input with the host when the turn it ends had a tool to end it', async () => {
           mockToolRegistry.getTool.mockReturnValue(
             readFileTool(
               vi.fn().mockResolvedValue({
@@ -34282,17 +34490,15 @@ describe('Session', () => {
           mockClient.extMethod = vi
             .fn()
             .mockResolvedValue({ messages: ['urgent: stop'] });
-          const { streaming, release } = openResponse([readFileCall]);
+          const { streaming } = openResponse([readFileCall]);
 
           const done = startPrompt();
           await streaming;
           session.sendMidTurnInputNow();
-          await nextTick();
-          release();
 
           // Nothing was taken from the host, so it promotes the message when
           // the turn ends instead of the turn swallowing it.
-          await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+          await expect(done).resolves.toEqual({ stopReason: 'cancelled' });
           expect(drainCalls()).toHaveLength(0);
           expect(
             mockChatRecordingService.recordMidTurnUserMessage,
@@ -34740,6 +34946,9 @@ describe('Session', () => {
           await vi.waitFor(() => expect(answerDrain).toBeDefined());
           announce();
           await prepared;
+          // The drain still out brings the input into this turn, so a second
+          // request does not end it.
+          session.sendMidTurnInputNow();
           answerDrain!({ messages: ['also check tests'] });
           await nextTick();
           expect(signal?.aborted).toBe(false);
@@ -55198,6 +55407,34 @@ describe('Session', () => {
       expect(result.parts[0].functionResponse?.response).toEqual({
         error:
           'User intentionally cancelled this tool call. Stop and await further instructions; do not retry or work around it.\n\nBelow is the output before it was cancelled.\npartial',
+      });
+    });
+
+    it('tells the model a tool interrupted for a message to read it first', async () => {
+      const abortController = new AbortController();
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockImplementation(async () => {
+        abortController.abort('qwen:mid-turn-send-now');
+        return {
+          llmContent: 'partial',
+          returnDisplay: 'partial',
+          interruptedBeforeCompletion: true,
+        };
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('cancel_tool', execute),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(abortController.signal, 'prompt-send-now-cancel', [
+        { id: 'send_now_cancel_call', name: 'cancel_tool', args: {} },
+      ]);
+
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error:
+          'The user interrupted this tool call to send you a message, which follows. Read it before deciding whether to run the tool again.\n\npartial',
       });
     });
 
