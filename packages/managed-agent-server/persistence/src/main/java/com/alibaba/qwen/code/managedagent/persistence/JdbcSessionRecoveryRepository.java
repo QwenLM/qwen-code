@@ -14,11 +14,37 @@ public class JdbcSessionRecoveryRepository implements SessionRecoveryRepository 
 
     @Override
     public List<HeadRecovery> heads(String tenantId, String sessionId) {
-        return jdbc.query("SELECT recovery_status, recovery_detail_code"
+        return jdbc.query("SELECT recovery_status, recovery_detail_code, state,"
+                        + " activation_phase, activation_head_revision, journal_revision,"
+                        + " is_wake_pending, wake_head_revision"
                         + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?"
                         + " AND head_kind = 'MANAGED_SESSION'",
                 (row, index) -> new HeadRecovery(row.getString("recovery_status"),
-                        row.getString("recovery_detail_code")), tenantId, sessionId);
+                        row.getString("recovery_detail_code"),
+                        row.getString("state"),
+                        row.getString("activation_phase"),
+                        row.getObject("activation_head_revision", Long.class),
+                        row.getObject("journal_revision", Long.class),
+                        row.getInt("is_wake_pending") != 0,
+                        row.getObject("wake_head_revision", Long.class)), tenantId, sessionId);
+    }
+
+    @Override
+    public boolean hasUnsettledWork(String tenantId, String sessionId) {
+        // The cleanup arm is the debt scanner's own predicate: a REFERENCED
+        // HOSTED_CLEANUP ref is an owed release whoever holds the writer.
+        // runtime_state is non-null only while a projected run's Runtime
+        // execution is live, so it names unsettled MCP, Hook, extension,
+        // child and Monitor work without reading a record body.
+        return Boolean.TRUE.equals(jdbc.queryForObject(
+                "SELECT EXISTS(SELECT 1 FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
+                        + " AND status IN ('ACCEPTED', 'RUNNING', 'CANCELLING'))"
+                        + " OR EXISTS(SELECT 1 FROM ma_session_record WHERE tenant_id = ?"
+                        + " AND session_id = ? AND record_kind = 'DOMAIN' AND runtime_state IS NOT NULL)"
+                        + " OR EXISTS(SELECT 1 FROM ma_resource_ref r JOIN ma_resource m"
+                        + " ON m.resource_key = r.resource_key WHERE r.tenant_id = ? AND r.session_id = ?"
+                        + " AND r.owner_kind = 'HOSTED_CLEANUP' AND m.state = 'REFERENCED')",
+                Boolean.class, tenantId, sessionId, tenantId, sessionId, tenantId, sessionId));
     }
 
     @Override
