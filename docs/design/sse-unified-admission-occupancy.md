@@ -305,7 +305,8 @@ documented as-is.
   after the close timeout on the primary listener, immediately on the
   pairing listeners — including upgraded sockets, which
   `closeAllConnections()` alone does not reach — releasing their slots
-  (pinned by the shutdown tests).
+  (pinned by the shutdown tests for the primary and local-control listeners;
+  the remote-access listener shares the same tracked-destroy release path).
 
 ## Files affected
 

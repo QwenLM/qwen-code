@@ -264,7 +264,8 @@ deps 下发。每个 deps 项均可选：省略 caps 的直嵌与单元夹具保
   断开或该表面自身生命周期结束；cap 约束此类槽位同时存在的数量。shutdown
   是兜底：listener close 强制关闭剩余连接——主 listener 在 close 超时后、
   配对 listener 立即——含 `closeAllConnections()` 单独触及不到的已升级
-  socket——并释放其槽位（由 shutdown 测试钉住）。
+  socket——并释放其槽位（主与 local-control listener 由 shutdown 测试钉住；
+  remote-access listener 共享同一跟踪销毁释放路径）。
 
 ## 受影响文件
 
