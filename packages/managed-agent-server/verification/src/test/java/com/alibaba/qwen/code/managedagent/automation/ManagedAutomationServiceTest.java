@@ -20,7 +20,7 @@ class ManagedAutomationServiceTest {
     @ParameterizedTest
     @ValueSource(strings = {"managed_session_writer_conflict",
             "workspace_busy", "workspace_unavailable",
-            "hosted_session_closing"})
+            "hosted_session_closing", "hosted_session_open_busy"})
     void crossesASelfHealingHarnessConflictAsRetryable(String code) {
         ManagedAgentException conflict = ManagedAutomationService
                 .translate(refusal(409, code));
@@ -47,6 +47,17 @@ class ManagedAutomationServiceTest {
                 refusal(409, "hosted_session_blocked"));
         assertThat(conflict.getStatus()).isEqualTo(409);
         assertThat(conflict.getCode()).isEqualTo("hosted_session_blocked");
+    }
+
+    // A wedged teardown only an operator reconciles is a refusal, not a
+    // wait: the route keeps it a conflict under its own code.
+    @Test
+    void keepsHostedSessionTeardownBlockedAsConflict() {
+        ManagedAgentException conflict = ManagedAutomationService.translate(
+                refusal(409, "hosted_session_teardown_blocked"));
+        assertThat(conflict.getStatus()).isEqualTo(409);
+        assertThat(conflict.getCode())
+                .isEqualTo("hosted_session_teardown_blocked");
     }
 
     // A 409 whose body names no code is not a self-healing conflict.

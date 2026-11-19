@@ -22,9 +22,12 @@ import {
 import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
+import { ModReplyRowsProvider } from './messages/ModAssistantMessage';
+import { ModRowAsker, ModRowAskerContext } from './messages/mod-rows';
 
 const virtualizerTestState = vi.hoisted(() => ({
   getItemKeys: [] as Array<(index: number) => string | number>,
+  overscan: vi.fn(),
   itemSizeCache: new Map<string | number, number>(),
   resizeItem: vi.fn(),
   scrollToIndex: vi.fn(),
@@ -55,6 +58,7 @@ vi.mock('./MessageItem', async () => {
       assistantTurnFooterInfo,
       sendFailed,
       onRetrySend,
+      onEditUserMessage,
       assistantFeedbackPromptId,
     }: {
       message: Message;
@@ -68,6 +72,7 @@ vi.mock('./MessageItem', async () => {
       assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
       sendFailed?: boolean;
       onRetrySend?: () => void;
+      onEditUserMessage?: () => void;
     }) => {
       if (message.role === 'tool_group') {
         messageItemTestState.toolArrays.push(message.tools);
@@ -114,6 +119,17 @@ vi.mock('./MessageItem', async () => {
               'retry',
             )
           : null,
+        onEditUserMessage
+          ? React.createElement(
+              'button',
+              {
+                'data-testid': `edit-${message.id}`,
+                onClick: onEditUserMessage,
+                type: 'button',
+              },
+              'edit',
+            )
+          : null,
         message.role === 'thinking'
           ? React.createElement('button', {
               'aria-expanded': 'false',
@@ -150,12 +166,15 @@ vi.mock('@tanstack/react-virtual', () => ({
     count,
     enabled,
     getItemKey,
+    overscan,
   }: {
     count: number;
     enabled: boolean;
     getItemKey: (index: number) => string | number;
+    overscan: number;
   }) => {
     virtualizerTestState.getItemKeys.push(getItemKey);
+    virtualizerTestState.overscan(overscan);
     const virtualItems =
       enabled && virtualizerTestState.renderItems
         ? Array.from({ length: Math.min(count, 5) }, (_, index) => ({
@@ -229,6 +248,7 @@ afterEach(() => {
   virtualizerTestState.resizeItem.mockClear();
   virtualizerTestState.renderItems = true;
   virtualizerTestState.getItemKeys.length = 0;
+  virtualizerTestState.overscan.mockClear();
   messageItemTestState.toolArrays.length = 0;
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -381,6 +401,7 @@ function mount(
     pendingApproval?: PermissionRequest | null;
     failedPromptMessageId?: string;
     onRetryFailedPrompt?: () => void;
+    onEditUserMessage?: (turnIndex: number, content: string) => void;
   } = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -422,6 +443,7 @@ function mount(
                 onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
                 failedPromptMessageId={opts.failedPromptMessageId}
                 onRetryFailedPrompt={opts.onRetryFailedPrompt}
+                onEditUserMessage={opts.onEditUserMessage}
               />
             </TranscriptRenderModeProvider>
           </CompactModeContext.Provider>
@@ -711,6 +733,28 @@ describe('MessageList — failed prompt retry', () => {
     );
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
+});
+
+it('keeps Edit on the latest ordinary prompt when send records follow it', () => {
+  const sendRecord = (id: string): UserMessage => ({
+    ...userMsg(id),
+    agentMessage: {
+      kind: 'agent_mention',
+      sentTo: { sessionId: 'target', workspaceCwd: '/work/b' },
+    },
+  });
+  const onEditUserMessage = vi.fn();
+  const container = mount(
+    [userMsg('u1'), sendRecord('s1'), userMsg('u2'), sendRecord('s2')],
+    undefined,
+    { onEditUserMessage },
+  );
+
+  expect(container.querySelector('[data-testid="edit-s2"]')).toBeNull();
+  const edit = container.querySelector('[data-testid="edit-u2"]');
+  expect(edit).not.toBeNull();
+  click(edit!);
+  expect(onEditUserMessage).toHaveBeenCalledWith(1, 'q');
 });
 
 describe('MessageList — compact mode', () => {
@@ -1069,6 +1113,49 @@ describe('MessageList — compact mode', () => {
 });
 
 describe('MessageList — turn collapse (DOM)', () => {
+  it('preserves an expanded turn and scroll container when the same session temporarily loses its Mod asker', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({
+      root,
+      container,
+      transcriptRenderMode: 'interactive',
+      compactMode: false,
+    });
+    const messages = [userMsg('u1'), toolMsg('g1'), asstMsg('a1')];
+    const render = (asker: ModRowAsker | undefined) =>
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <ModRowAskerContext.Provider value={asker}>
+              <ModReplyRowsProvider messages={messages}>
+                <MessageList
+                  key="session:live"
+                  messages={messages}
+                  pendingApproval={null}
+                />
+              </ModReplyRowsProvider>
+            </ModRowAskerContext.Provider>
+          </I18nProvider>,
+        );
+      });
+    const ask = async () => ({ status: 'unhooked' as const });
+    render(new ModRowAsker(ask));
+    expect(isCollapsed(container, 'g1')).toBe(true);
+    click(toggleRow(container, 'u1'));
+    const selector = '[data-web-shell-message-list]';
+    const scroll = container.querySelector<HTMLElement>(selector)!;
+    scroll.scrollTop = 240;
+
+    for (const asker of [undefined, new ModRowAsker(ask)]) {
+      render(asker);
+      expect(container.querySelector(selector)).toBe(scroll);
+      expect(scroll.scrollTop).toBe(240);
+      expect(isCollapsed(container, 'g1')).toBe(false);
+    }
+  });
+
   it.each([false, true])(
     'keeps completed questions outside a collapsed mixed tool group (compact=%s)',
     (compactMode) => {
@@ -4744,6 +4831,15 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(isCollapsed(c, 'g1')).toBe(true);
   });
 
+  it.each([
+    [undefined, 15],
+    [0, 0],
+    [6, 6],
+  ])('uses overscan %s as %s virtual rows', (overscan, expected) => {
+    mount(simpleTurns(110), undefined, { customization: { overscan } });
+    expect(virtualizerTestState.overscan).toHaveBeenLastCalledWith(expected);
+  });
+
   it('renders virtual scroll rows with sizer and row width classes', () => {
     const c = mount(simpleTurns(110));
 
@@ -6229,47 +6325,59 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(onLoadOlderHistory).toHaveBeenCalledWith({ force: true });
   });
 
-  it('does not scroll again for a content-only update in a virtual transcript', async () => {
-    let scrollTop = 0;
-    const getScrollHeight = vi.fn(() => 20_000);
-    const setScrollTop = vi.fn((value: number) => {
-      scrollTop = value;
-    });
-    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
-      configurable: true,
-      get: getScrollHeight,
-    });
-    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
-      configurable: true,
-      value: 600,
-    });
-    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
-      configurable: true,
-      get: () => scrollTop,
-      set: setScrollTop,
-    });
-    const messages = simpleTurns(101);
-    messages[messages.length - 1] = {
-      ...(messages[messages.length - 1] as AssistantMessage),
-      isStreaming: true,
-    };
-    const container = mount(messages, undefined, { isResponding: true });
-    await nextFrame();
-    await nextFrame();
-    getScrollHeight.mockClear();
-    setScrollTop.mockClear();
+  it.each([false, true])(
+    'does not scroll again for a content-only update in a virtual transcript (Mod log=%s)',
+    async (withModLog) => {
+      let scrollTop = 0;
+      const getScrollHeight = vi.fn(() => 20_000);
+      const setScrollTop = vi.fn((value: number) => {
+        scrollTop = value;
+      });
+      Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+        configurable: true,
+        get: getScrollHeight,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+        configurable: true,
+        value: 600,
+      });
+      Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+        configurable: true,
+        get: () => scrollTop,
+        set: setScrollTop,
+      });
+      const messages = simpleTurns(101);
+      const streamingIndex = messages.length - 1;
+      messages[streamingIndex] = {
+        ...(messages[streamingIndex] as AssistantMessage),
+        isStreaming: true,
+      };
+      if (withModLog)
+        messages.push({
+          id: 'log',
+          role: 'system',
+          variant: 'info',
+          source: 'mod_log',
+          content: '[Mod translator] finished',
+        });
+      const container = mount(messages, undefined, { isResponding: true });
+      await nextFrame();
+      await nextFrame();
+      getScrollHeight.mockClear();
+      setScrollTop.mockClear();
 
-    const updated = messages.slice();
-    updated[updated.length - 1] = {
-      ...(updated[updated.length - 1] as AssistantMessage),
-      content: 'answer with one more streamed token',
-    };
-    rerenderMessages(container, updated, { isResponding: true });
-    await nextFrame();
+      const updated = messages.slice();
+      updated[streamingIndex] = {
+        ...(updated[streamingIndex] as AssistantMessage),
+        content: 'answer with one more streamed token',
+      };
+      rerenderMessages(container, updated, { isResponding: true });
+      await nextFrame();
 
-    expect(getScrollHeight).not.toHaveBeenCalled();
-    expect(setScrollTop).not.toHaveBeenCalled();
-  });
+      expect(getScrollHeight).not.toHaveBeenCalled();
+      expect(setScrollTop).not.toHaveBeenCalled();
+    },
+  );
 
   it('does not smooth-scroll when existing session history loads after an empty render', () => {
     const scrollTo = vi.fn();
@@ -6842,6 +6950,111 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(has(c, 'agent')).toBe(true);
     expect(has(c, 'a1')).toBe(true);
     expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it.each([
+    [true, true],
+    [false, false],
+  ])(
+    'keeps the card of a turn another session started, and the answer before it, in view: from a session %s',
+    (fromSession, visible) => {
+      const backgroundTurn = {
+        turnId: 'turn-b',
+        taskId: 'kid',
+        kind: 'agent' as const,
+        label: 'projB · Kid',
+        startedAt: 10,
+      };
+      const card: SystemMessage = {
+        id: 'card',
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification_turn_started',
+        content: 'projB · Kid',
+        data: {
+          ...backgroundTurn,
+          backgroundTask: {
+            status: 'completed',
+            ...(fromSession ? { fromSession: { sessionId: 'kid' } } : {}),
+          },
+        },
+        backgroundTurn,
+      };
+      const c = mount([
+        userMsg('u1'),
+        asstMsg('a0'),
+        card,
+        toolMsg('g1'),
+        { ...asstMsg('a1'), backgroundTurn },
+      ]);
+      expect(isCollapsed(c, 'g1')).toBe(true);
+      expect(has(c, 'card')).toBe(visible);
+      expect(has(c, 'a0')).toBe(visible);
+      expect(has(c, 'a1')).toBe(true);
+    },
+  );
+
+  it.each(['none', 'before', 'between'])('keeps relays (%s)', (ordinary) => {
+    const replyCard = (id: string, crossSession = true): SystemMessage => {
+      const backgroundTurn = {
+        turnId: `turn-${id}`,
+        taskId: id,
+        kind: 'agent' as const,
+        label: `projB · ${id}`,
+        startedAt: 10,
+      };
+      return {
+        id: `card-${id}`,
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification_turn_started',
+        content: backgroundTurn.label,
+        data: {
+          ...backgroundTurn,
+          backgroundTask: {
+            status: 'completed',
+            ...(crossSession ? { fromSession: { sessionId: id } } : {}),
+          },
+        },
+        backgroundTurn,
+      };
+    };
+    const completed: SystemMessage = {
+      id: 'completed-b',
+      role: 'system',
+      variant: 'info',
+      source: 'background_task_completed',
+      content: 'b replied',
+    };
+    const c = mount([
+      userMsg('u1'),
+      asstMsg('initial-answer'),
+      ...(ordinary === 'before'
+        ? [replyCard('ordinary', false), toolMsg('ordinary-tool')]
+        : []),
+      replyCard('a'),
+      toolMsg('g1'),
+      asstMsg('a1'),
+      completed,
+      asstMsg('a1-rest'),
+      ...(ordinary === 'between'
+        ? [
+            replyCard('ordinary', false),
+            toolMsg('ordinary-tool'),
+            asstMsg('ordinary-summary'),
+          ]
+        : []),
+      replyCard('b'),
+      toolMsg('g2'),
+      asstMsg('a2'),
+    ]);
+    expect(isCollapsed(c, 'g1')).toBe(true);
+    expect(has(c, 'g2')).toBe(false);
+    expect(has(c, 'ordinary-summary')).toBe(false);
+    expect(has(c, 'initial-answer')).toBe(true);
+    for (const id of ['card-a', 'a1', 'a1-rest', 'card-b', 'a2']) {
+      expect(has(c, id)).toBe(true);
+    }
   });
 
   it('gives a turn of only an agent reply no final answer', () => {

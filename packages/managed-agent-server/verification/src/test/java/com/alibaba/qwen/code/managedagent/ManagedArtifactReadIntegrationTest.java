@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.artifact.ManagedArtifactService;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ManagedArtifactPolicy;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationArtifactReader;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -117,7 +118,8 @@ class ManagedArtifactReadIntegrationTest {
                                 fixture.results(),
                                 reader,
                                 fixture.policy(),
-                                fixture.properties()));
+                                fixture.properties(),
+                                new JdbcManagedWorkspaceRegistry(fixture.jdbc())));
         var route =
                 ROOT
                         + "/artifacts/"
@@ -184,7 +186,8 @@ class ManagedArtifactReadIntegrationTest {
                                 fixture.results(),
                                 fixture.reader(),
                                 policy,
-                                fixture.properties()));
+                                fixture.properties(),
+                                new JdbcManagedWorkspaceRegistry(fixture.jdbc())));
         var route =
                 ROOT
                         + "/artifacts/"
@@ -220,7 +223,8 @@ class ManagedArtifactReadIntegrationTest {
                                 fixture.results(),
                                 fixture.reader(),
                                 policy,
-                                fixture.properties()));
+                                fixture.properties(),
+                                new JdbcManagedWorkspaceRegistry(fixture.jdbc())));
         var route =
                 ROOT
                         + "/artifacts/"
@@ -261,7 +265,8 @@ class ManagedArtifactReadIntegrationTest {
                 .setReadRevalidationInterval(java.time.Duration.ZERO);
         var service =
                 new ManagedArtifactService(
-                        sessions, fixture.results(), reader, policy, fixture.properties());
+                        sessions, fixture.results(), reader, policy, fixture.properties(),
+                        new JdbcManagedWorkspaceRegistry(fixture.jdbc()));
         Throwable failure =
                 org.assertj.core.api.Assertions.catchThrowable(
                         () ->
@@ -310,7 +315,8 @@ class ManagedArtifactReadIntegrationTest {
                 .setReadRevalidationInterval(java.time.Duration.ofSeconds(60));
         var service =
                 new ManagedArtifactService(
-                        sessions, fixture.results(), reader, policy, fixture.properties());
+                        sessions, fixture.results(), reader, policy, fixture.properties(),
+                        new JdbcManagedWorkspaceRegistry(fixture.jdbc()));
         Throwable failure =
                 org.assertj.core.api.Assertions.catchThrowable(
                         () ->
@@ -352,7 +358,8 @@ class ManagedArtifactReadIntegrationTest {
                 .setReadRevalidationInterval(java.time.Duration.ofSeconds(60));
         var service =
                 new ManagedArtifactService(
-                        sessions, fixture.results(), reader, policy, fixture.properties());
+                        sessions, fixture.results(), reader, policy, fixture.properties(),
+                        new JdbcManagedWorkspaceRegistry(fixture.jdbc()));
         service.content(
                 new TenantContext("tenant-1", "reader"),
                 "session-1",
@@ -394,7 +401,8 @@ class ManagedArtifactReadIntegrationTest {
                 .setReadRevalidationInterval(java.time.Duration.ofMillis(3000));
         var service =
                 new ManagedArtifactService(
-                        sessions, fixture.results(), reader, policy, fixture.properties());
+                        sessions, fixture.results(), reader, policy, fixture.properties(),
+                        new JdbcManagedWorkspaceRegistry(fixture.jdbc()));
         Throwable failure =
                 org.assertj.core.api.Assertions.catchThrowable(
                         () ->
@@ -530,7 +538,8 @@ class ManagedArtifactReadIntegrationTest {
                 };
         var service =
                 new ManagedArtifactService(
-                        sessions, fixture.results(), reader, policy, fixture.properties());
+                        sessions, fixture.results(), reader, policy, fixture.properties(),
+                        new JdbcManagedWorkspaceRegistry(fixture.jdbc()));
         var first = service.page(new TenantContext("tenant-1", "reader"), "session-1", null, 100);
         assertThat(first.data()).hasSize(2);
         assertThat(decisions.get()).isEqualTo(1);

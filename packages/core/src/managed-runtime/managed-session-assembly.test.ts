@@ -385,6 +385,45 @@ describe('managed session assembly', () => {
     }
   });
 
+  it('stopRenewal awaits the in-flight renewal and ends the loop', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const workspace = await createWorkspace();
+    const session = await open(workspace);
+    let finishRenewal!: () => void;
+    const pendingRenewal = new Promise<void>((resolve) => {
+      finishRenewal = resolve;
+    });
+    const renew = vi
+      .spyOn(session.authority, 'renewActivation')
+      .mockImplementation(async () => {
+        await pendingRenewal;
+        return undefined;
+      });
+    try {
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(renew).toHaveBeenCalledTimes(1);
+      let settled = false;
+      const stopped = session.stopRenewal().then(() => {
+        settled = true;
+      });
+      // The stop waits for the renewal already in flight instead of
+      // returning while it can still append, and schedules no new one.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(settled).toBe(false);
+      expect(renew).toHaveBeenCalledTimes(1);
+      finishRenewal();
+      await stopped;
+      expect(settled).toBe(true);
+      await expect(session.stopRenewal()).resolves.toBeUndefined();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(renew).toHaveBeenCalledTimes(1);
+    } finally {
+      finishRenewal();
+      renew.mockRestore();
+      await session.close();
+    }
+  });
+
   it('stops renewal after three consecutive failures', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     const workspace = await createWorkspace();

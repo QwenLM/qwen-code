@@ -46,7 +46,6 @@ import {
 } from '../../utils/acpModelUtils.js';
 
 const TUI_ONLY_SETTINGS = new Set([
-  'experimental.mods',
   'general.vimMode',
   'general.terminalBell',
   'general.notificationMode',
@@ -95,6 +94,7 @@ const WEB_SHELL_SETTINGS = new Set([
   'imageModel',
   'advisorModel',
   'mcpServers',
+  'worktree.defaultForNewSessions',
 ]);
 
 const LIVE_WEB_SHELL_SETTINGS = [
