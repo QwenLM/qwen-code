@@ -42,6 +42,7 @@ function configFor(options: RouteOptions = {}): Config {
     disabledLevels = [],
   } = options;
   return {
+    isWorkflowsEnabled: () => true,
     getSkillManager: () => ({}),
     getToolRegistry: () => ({
       getAllToolNames: () => toolNames,

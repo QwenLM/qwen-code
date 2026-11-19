@@ -259,6 +259,7 @@ vi.mock('../tools/tool-registry', () => {
   ToolRegistryMock.prototype.discoverAllTools = vi.fn();
   ToolRegistryMock.prototype.getAllTools = vi.fn(() => []); // Mock methods if needed
   ToolRegistryMock.prototype.getAllToolNames = vi.fn(() => []);
+  ToolRegistryMock.prototype.hasRegisteredTool = vi.fn(() => false);
   ToolRegistryMock.prototype.getTool = vi.fn();
   ToolRegistryMock.prototype.getFunctionDeclarations = vi.fn(() => []);
   // PR 14b fix (codex round 4): per-instance manager stub so the
@@ -7737,12 +7738,15 @@ describe('Server Config (config.ts)', () => {
         vi.stubEnv('QWEN_CODE_DISABLE_WORKFLOWS', undefined);
       });
       afterEach(() => vi.unstubAllEnvs());
-      /** An initialized Config whose registry lists only the workflow tool. */
+      /** An initialized Config with a Workflow registration. */
       const workflowConfig = async (params: Partial<ConfigParameters> = {}) => {
         const config = await initConfig(params);
         vi.spyOn(config.getToolRegistry(), 'getAllToolNames').mockReturnValue([
           ToolNames.WORKFLOW,
         ]);
+        vi.spyOn(config.getToolRegistry(), 'hasRegisteredTool').mockReturnValue(
+          true,
+        );
         return config;
       };
 
@@ -7785,12 +7789,12 @@ describe('Server Config (config.ts)', () => {
         const config = await workflowConfig({ safeMode: true });
         await config.enableReviewWorkflow();
         await config.enableReviewWorkflow();
-        config.applyWorkflowsEnabledSetting(undefined);
+        await config.applyWorkflowsEnabledSetting(undefined);
         expect(config.isWorkflowsEnabled()).toBe(true);
         // A value the settings do give replaces the activation.
-        config.applyWorkflowsEnabledSetting(false);
+        await config.applyWorkflowsEnabledSetting(false);
         expect(config.isWorkflowsEnabled()).toBe(false);
-        config.applyWorkflowsEnabledSetting(undefined);
+        await config.applyWorkflowsEnabledSetting(undefined);
         expect(config.isWorkflowsEnabled()).toBe(false);
       });
 
@@ -7800,7 +7804,7 @@ describe('Server Config (config.ts)', () => {
           workflowsEnabled: true,
         });
         await config.enableReviewWorkflow();
-        config.applyWorkflowsEnabledSetting(undefined);
+        await config.applyWorkflowsEnabledSetting(undefined);
         expect(config.isWorkflowsEnabled()).toBe(false);
       });
 
@@ -7810,9 +7814,9 @@ describe('Server Config (config.ts)', () => {
           const config = await initConfig({ safeMode: true });
           const registry = config.getToolRegistry();
           const names = new Set<string>();
-          vi.spyOn(registry, 'getAllToolNames').mockImplementation(() => [
-            ...names,
-          ]);
+          vi.spyOn(registry, 'hasRegisteredTool').mockImplementation((name) =>
+            names.has(name),
+          );
           const record = (name: string) => {
             names.add(name);
           };
@@ -7849,9 +7853,9 @@ describe('Server Config (config.ts)', () => {
       it('waits for the live chat tool declarations to refresh', async () => {
         const config = makeConfig();
         await config.initialize();
-        vi.spyOn(config.getToolRegistry(), 'getAllToolNames').mockReturnValue([
-          ToolNames.WORKFLOW,
-        ]);
+        vi.spyOn(config.getToolRegistry(), 'hasRegisteredTool').mockReturnValue(
+          true,
+        );
         const refresh = deferred();
         const setTools = vi
           .spyOn(config.getLlmClient(), 'setTools')

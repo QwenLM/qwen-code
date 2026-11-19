@@ -35,12 +35,15 @@ trigger.
 ## Design
 
 - `tools.workflowsEnabled` defaults to `true`. An unset value means on in the
-  CLI, the TUI, ACP sessions and every daemon workspace runtime; only an
-  explicit `false` turns workflows off.
-- `--bare` and `--safe-mode` keep workflows off when the setting is unset, as
-  they do for other features that are on by default. An explicit `true`
-  still turns them on there, as it did before.
-- The env pair, the restricted scope and the hard-off cases are unchanged.
+  CLI, the TUI, ACP sessions and trusted local daemon workspace runtimes in
+  normal mode. An explicit `false` turns workflows off.
+- The CLI skips this setting under `--bare`, whose restricted toolset omits
+  Workflow. In `--safe-mode`, workflows default to off. An explicit `true`
+  or `QWEN_CODE_ENABLE_WORKFLOWS=1` enables them unless the disable override
+  is set.
+- Daemon capabilities use the selected runtime's settings and environment.
+  Workspace reload updates tool availability and model declarations for
+  existing ACP sessions.
 - The setting's description, the Web Shell description and the user docs say
   workflows are on by default and how to turn them off.
 
@@ -51,8 +54,8 @@ trigger.
   and the 30-minute wall-clock cap, and the approval mode in effect decides
   whether the run asks first. Those already apply to users who opted in, and
   they are what limits spend.
-- **Bare and safe mode stay as they were.** Both modes start without optional
-  features; turning workflows on there would change what those modes mean.
+- **Keep the restricted toolset in bare mode and opt in under safe mode.**
+  This preserves the behavior of both startup modes.
 - **Keep the keyword trigger on.** A message containing `workflow` or
   `ultracode` now adds a reminder for more users. The reminder only suggests
   the tool when the task fits, and `ui.disableWorkflowKeywordTrigger` turns
@@ -70,8 +73,10 @@ trigger.
 
 - Config: unset means on; `false` means off; unset in bare or safe mode means
   off; the env pair still overrides.
-- Daemon: an unset setting reports workflows enabled for the primary, dynamic
-  and secondary runtimes; `false` reports them disabled.
+- Daemon: primary, dynamic and secondary runtimes report their effective
+  workflow setting, including the safe-mode default and environment overrides.
+  Existing ACP sessions can run saved workflows after removing an opt-out and
+  stop offering the tool after reapplying it.
 - E2E: a fresh HOME with no workflow setting can load and run the Workflow
   tool in `qwen -p`; with `tools.workflowsEnabled: false`,
   `QWEN_CODE_DISABLE_WORKFLOWS=1` or `--bare` the tool is absent.
@@ -80,7 +85,9 @@ trigger.
 
 - A new install offers the Workflow tool, `/workflows` and saved workflows
   without any setting.
-- An explicit `false` or `QWEN_CODE_DISABLE_WORKFLOWS=1` hides all of them.
+- An explicit `false` or `QWEN_CODE_DISABLE_WORKFLOWS=1` disables the tool and
+  saved workflows. In sessions that support Workflow mode,
+  `/workflows mode status` and `/workflows mode off` stay available.
 
 ## Follow-up
 

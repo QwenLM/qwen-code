@@ -6000,7 +6000,7 @@ export const ZH_TW: Record<string, MessageValue> = {
     '啟用內建 todo_write 工具及其系統提示詞引導。',
   'settings.label.tools.workflowsEnabled': '動態 Workflow',
   'settings.description.tools.workflowsEnabled':
-    '啟用 Workflow 工具：模型可以編寫並執行一個編排多個子代理並行工作的指令碼。預設關閉；一次執行可能派發大量子代理並相應消耗 token。QWEN_CODE_ENABLE_WORKFLOWS=1 和 QWEN_CODE_DISABLE_WORKFLOWS=1 環境變數會覆蓋此設定（禁用時優先）。與 Session Workflow 的計劃並審閱檢視無關；要阻止“workflow”關鍵詞引導對話走向，見“禁用 Workflow 關鍵詞觸發”。',
+    '啟用 Workflow 工具：模型可以編寫並執行一個編排多個子代理並行工作的指令碼。預設開啟。`--bare` 的受限工具集不提供 Workflow。`--safe-mode` 下可設為 `true` 來啟用 Workflow。一次執行可能派發大量子代理並消耗相應的 token。設為 `false` 可關閉此工具。支援 Workflow 的工作階段可用 QWEN_CODE_ENABLE_WORKFLOWS=1 和 QWEN_CODE_DISABLE_WORKFLOWS=1 覆寫此設定（禁用時優先）。與 Session Workflow 的計劃並審閱檢視無關；要阻止“workflow”關鍵詞引導對話走向，見“禁用 Workflow 關鍵詞觸發”。',
   'settings.label.tools.lspEnabled': 'LSP 程式碼智慧',
   'settings.description.tools.lspEnabled':
     '實驗性。無需 `--experimental-lsp` 參數即可啟用 LSP 程式碼智慧服務：跳轉定義、查詢引用、懸浮提示、符號、診斷與程式碼操作。預設關閉。伺服器來自工作區 `.lsp.json` 或已啟用的擴充，並以你的權限執行；工作區宣告的伺服器要求資料夾被顯式信任——啟用 `security.folderTrust.enabled` 且該資料夾已受信任，或由 IDE 報告該工作區受信任——否則會被跳過。配置了 `tools.executionSandbox` 時會在啟動時拒絕；`--safe-mode`、`QWEN_CODE_SAFE_MODE=1` 與 `--bare` 可在不啟用 LSP 的情況下啟動。QWEN_CODE_ENABLE_LSP=1 / QWEN_CODE_DISABLE_LSP=1 會覆蓋該設定（禁用優先）；專案 `.env` 或 `settings.env` 無法設定它們。',

@@ -5926,8 +5926,21 @@ describe('createServeApp', () => {
         env: {
           mode: 'runtime-overlay' as const,
           overlayKeys: [],
-          effectiveEnv: {},
+          effectiveEnv: { QWEN_CODE_SAFE_MODE: '1' },
           workflowsEnabledBySettings: true,
+        },
+      };
+      const safeByDefault: WorkspaceRuntime = {
+        ...makeWorkspaceRuntimeForTest({
+          workspaceId: 'safe-default-id',
+          workspaceCwd: '/workspace/safe-default',
+          primary: false,
+          bridge: fakeBridge(),
+        }),
+        env: {
+          mode: 'runtime-overlay',
+          overlayKeys: [],
+          effectiveEnv: { QWEN_CODE_SAFE_MODE: '1' },
         },
       };
       const untrusted = makeWorkspaceRuntimeForTest({
@@ -5943,6 +5956,7 @@ describe('createServeApp', () => {
           primary,
           secondary,
           settingsEnabled,
+          safeByDefault,
           untrusted,
         ]),
         daemonEnv: { QWEN_CODE_ENABLE_WORKFLOWS: '1' },
@@ -5965,6 +5979,10 @@ describe('createServeApp', () => {
         expect.objectContaining({
           id: 'settings-enabled-id',
           workflowsEnabled: true,
+        }),
+        expect.objectContaining({
+          id: 'safe-default-id',
+          workflowsEnabled: false,
         }),
         expect.objectContaining({
           id: 'untrusted-id',

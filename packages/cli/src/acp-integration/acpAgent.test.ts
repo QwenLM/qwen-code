@@ -19536,6 +19536,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const registry = new WorkflowRunRegistry();
     registry.setCompletionCallback(vi.fn());
     const workflowTool = new WorkflowTool({
+      isWorkflowsEnabled: () => true,
       getWorkflowRunRegistry: () => registry,
     } as unknown as Config);
     const buildSessionOwnedBackground = vi.spyOn(
@@ -38882,7 +38883,7 @@ describe('sessionLanguage multi-session propagation', () => {
     const cancelBackgroundRuns = vi.fn(() => ['wf_bg']);
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-wf-reload'),
-      isWorkflowsEnabled: vi.fn(() => workflowsEnabled ?? false),
+      isWorkflowsEnabled: vi.fn(() => workflowsEnabled ?? true),
       applyWorkflowsEnabledSetting: vi.fn((enabled: boolean | undefined) => {
         workflowsEnabled = enabled;
       }),
@@ -38981,6 +38982,7 @@ describe('sessionLanguage multi-session propagation', () => {
       ).applyWorkflowsEnabledSetting,
     ).toHaveBeenLastCalledWith(undefined);
     expect(workflowsEnabled).toBeUndefined();
+    expect(sendAvailableCommandsUpdate).toHaveBeenCalledTimes(2);
     expect(cfg.setWorkflowKeywordTriggerEnabled.mock.calls).toEqual([
       [false],
       [true],

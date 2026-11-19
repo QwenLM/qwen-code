@@ -145,7 +145,9 @@ Commands for managing AI tools and models.
 
 > [!note]
 >
-> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — the user/system-scoped `tools.workflowsEnabled` setting (on unless set to `false`; `QWEN_CODE_ENABLE_WORKFLOWS=1` / `QWEN_CODE_DISABLE_WORKFLOWS=1` override it), the user/system-scoped `tools.lspEnabled` setting, its `QWEN_CODE_ENABLE_LSP=1` / `QWEN_CODE_DISABLE_LSP=1` env pair, or the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. Workspace values for `tools.workflowsEnabled` and `tools.lspEnabled` are ignored. When disabled these commands won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
+> `/workflows` offers run controls when dynamic workflows are enabled. Use the user- or system-scoped [`tools.workflowsEnabled`](../configuration/settings.md) setting or the `QWEN_CODE_ENABLE_WORKFLOWS=1` / `QWEN_CODE_DISABLE_WORKFLOWS=1` environment overrides. In sessions that support Workflow mode, `/workflows mode status` and `/workflows mode off` remain available when the tool is disabled.
+>
+> `/lsp` appears when LSP is enabled through the user- or system-scoped `tools.lspEnabled` setting, its environment overrides, or `--experimental-lsp`. `/trust` appears when `security.folderTrust.enabled` is set. `/dream` and `/forget` appear when managed auto-memory is available.
 
 > [!note]
 >

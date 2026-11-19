@@ -16047,10 +16047,16 @@ class QwenAgent implements Agent {
         const results = await Promise.allSettled(
           sessions.map(async ([id, session]) => {
             const config = session.getConfig();
+            if (changed.has('tools')) {
+              const disabled = normalizeDisabledToolList(
+                newMerged.tools?.disabled,
+              );
+              config.setDisabledTools(new Set(disabled));
+            }
             // Workflow admission and controls follow the live flag even
             // while a turn or a detached workflow is running.
             const workflowsWereEnabled = config.isWorkflowsEnabled();
-            config.applyWorkflowsEnabledSetting(
+            await config.applyWorkflowsEnabledSetting(
               newMerged.tools?.workflowsEnabled,
             );
             if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
@@ -16159,13 +16165,6 @@ class QwenAgent implements Agent {
               }
             } else if (changed.has('model')) {
               session.reloadReasoningSelection();
-            }
-
-            if (changed.has('tools')) {
-              const disabled = normalizeDisabledToolList(
-                newMerged.tools?.disabled,
-              );
-              config.setDisabledTools(new Set(disabled));
             }
 
             config.setWorkflowKeywordTriggerEnabled(

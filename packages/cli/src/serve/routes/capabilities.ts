@@ -5,6 +5,7 @@
  */
 
 import type { Application } from 'express';
+import { isSafeModeEnv } from '@qwen-code/qwen-code-core/utils/safe-mode.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
   getServeProtocolVersions,
@@ -67,10 +68,10 @@ function workflowsEnabledForRuntime(
       ? (runtime.env.effectiveEnv ?? {})
       : (runtime.env.effectiveEnv ?? daemonEnv);
   if (env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
-  return (
-    env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1' ||
-    runtime.env.workflowsEnabledBySettings === true
-  );
+  if (env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1') return true;
+  const setting = runtime.env.workflowsEnabledBySettings;
+  if (typeof setting === 'boolean') return setting;
+  return runtime.env.mode === 'runtime-overlay' && !isSafeModeEnv(env);
 }
 
 export function registerCapabilitiesRoutes(

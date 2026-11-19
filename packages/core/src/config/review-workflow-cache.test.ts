@@ -16,7 +16,7 @@ import { ToolNames } from '../tools/tool-names.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolSearchTool } from '../tools/tool-search.js';
 
-describe('review workflow cache continuity', () => {
+describe('Workflow registration and cache continuity', () => {
   let directory: string;
 
   beforeEach(() => {
@@ -77,5 +77,39 @@ describe('review workflow cache continuity', () => {
     });
     await client.setTools();
     expect(JSON.stringify(setTools.mock.lastCall?.[0])).toBe(before);
+  });
+
+  it('makes Workflow available only while enabled in a reloaded session', async () => {
+    const config = new Config({
+      cwd: directory,
+      targetDir: directory,
+      model: 'test-model',
+      debugMode: false,
+      workflowsEnabled: false,
+    });
+    await config.initialize({
+      skipLlmInitialization: true,
+      skipFileWatching: true,
+      skipMcpDiscovery: true,
+      skipHooks: true,
+    });
+    try {
+      const registry = config.getToolRegistry();
+      const refreshTools = vi.spyOn(config.getLlmClient(), 'setTools');
+      expect(registry.getTool(ToolNames.WORKFLOW)).toBeUndefined();
+
+      await config.applyWorkflowsEnabledSetting(undefined);
+      expect(registry.getTool(ToolNames.WORKFLOW)?.name).toBe(
+        ToolNames.WORKFLOW,
+      );
+
+      await config.applyWorkflowsEnabledSetting(false);
+      expect(registry.getAllToolNames()).not.toContain(ToolNames.WORKFLOW);
+      expect(await registry.ensureTool(ToolNames.WORKFLOW)).toBeUndefined();
+      expect(registry.getTool(ToolNames.WORKFLOW)).toBeUndefined();
+      expect(refreshTools).toHaveBeenCalledTimes(2);
+    } finally {
+      await config.shutdown();
+    }
   });
 });

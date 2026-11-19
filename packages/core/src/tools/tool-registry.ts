@@ -596,9 +596,18 @@ export class ToolRegistry {
   }
 
   private isToolAvailable(name: string): boolean {
-    return (
-      name !== ToolNames.IMAGE_GEN || this.config.isImageGenerationEnabled()
-    );
+    switch (name) {
+      case ToolNames.IMAGE_GEN:
+        return this.config.isImageGenerationEnabled();
+      case ToolNames.WORKFLOW:
+        return this.config.isWorkflowsEnabled();
+      default:
+        return true;
+    }
+  }
+
+  hasRegisteredTool(name: string): boolean {
+    return this.tools.has(name) || this.factories.has(name);
   }
 
   /**

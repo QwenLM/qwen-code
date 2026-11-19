@@ -59,6 +59,7 @@ function fakeConfig(): Config {
       getTool: () => undefined,
     }),
     isSkillEnabled: () => true,
+    isWorkflowsEnabled: () => true,
   } as unknown as Config;
 }
 
@@ -167,6 +168,7 @@ function paramDescription(tool: WorkflowTool, name: string): string {
 function configWithRegistry(extra: Record<string, unknown> = {}) {
   const registry = new WorkflowRunRegistry();
   const config = {
+    isWorkflowsEnabled: () => true,
     getWorkflowRunRegistry: () => registry,
     ...extra,
   } as unknown as Config;
@@ -1089,28 +1091,28 @@ await agent('scan package.json')
     expect(registry.list()).toHaveLength(0);
   });
 
-  it('rechecks the workflow controls before executing a detached invocation', async () => {
-    let enabled = true;
-    const { config, registry } = configWithRegistry({
-      ...ACP,
-      ...QUIET,
-      isWorkflowsEnabled: () => enabled,
-    });
-    registry.setCompletionCallback(vi.fn());
-    const invocation = new WorkflowTool(config).build({
-      script: 'return 1',
-      run_in_background: true,
-    });
+  it.each([false, true])(
+    'rechecks workflow availability before executing (background: %s)',
+    async (runInBackground) => {
+      let enabled = true;
+      const { config, registry } = configWithRegistry({
+        ...ACP,
+        ...QUIET,
+        isWorkflowsEnabled: () => enabled,
+      });
+      registry.setCompletionCallback(vi.fn());
+      const invocation = new WorkflowTool(config).build({
+        script: 'return 1',
+        run_in_background: runInBackground,
+      });
 
-    enabled = false;
-    await expect(invocation.execute(live())).resolves.toMatchObject({
-      error: {
-        message: expect.stringContaining('workflow controls are off'),
-        type: ToolErrorType.EXECUTION_DENIED,
-      },
-    });
-    expect(registry.list()).toHaveLength(0);
-  });
+      enabled = false;
+      await expect(invocation.execute(live())).resolves.toMatchObject({
+        error: { type: ToolErrorType.EXECUTION_DENIED },
+      });
+      expect(registry.list()).toHaveLength(0);
+    },
+  );
 
   // An ACP session (Web Shell, IDE clients) is spawned on pipes, so it reads
   // as non-interactive; its session registers the completion channel that
@@ -1397,14 +1399,12 @@ await agent('scan package.json')
   });
 
   it('keeps a client-started workflow in the foreground and reports its completion', async () => {
-    const registry = new WorkflowRunRegistry();
+    const { config, registry } = configWithRegistry({
+      isInteractive: () => true,
+      ...QUIET,
+    });
     const completion = vi.fn();
     registry.setCompletionCallback(completion);
-    const config = {
-      isInteractive: () => true,
-      getWorkflowRunRegistry: () => registry,
-      getSkipWorkflowUsageWarning: () => true,
-    } as unknown as Config;
     let resolveDispatch: ((value: string) => void) | undefined;
     const tool = new WorkflowTool(config, {
       dispatch: () =>
@@ -1495,15 +1495,13 @@ await agent('scan package.json')
   ])(
     'keeps completion routing unchanged outside the TUI: %j',
     async ({ interactive, acp }) => {
-      const registry = new WorkflowRunRegistry();
-      const completion = vi.fn();
-      registry.setCompletionCallback(completion);
-      const config = {
+      const { config, registry } = configWithRegistry({
         isInteractive: () => interactive,
         getExperimentalZedIntegration: () => acp,
-        getWorkflowRunRegistry: () => registry,
-        getSkipWorkflowUsageWarning: () => true,
-      } as unknown as Config;
+        ...QUIET,
+      });
+      const completion = vi.fn();
+      registry.setCompletionCallback(completion);
       const invocation = new WorkflowTool(config).build({
         script: 'return 42;',
       });

@@ -548,15 +548,18 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     if (runInBackground && signal.aborted) {
       return startCancelledResult();
     }
-    if (runInBackground && !this.sessionOwned) {
-      const error = getBackgroundWorkflowError(this.config);
-      if (error) {
-        return {
-          llmContent: error,
-          returnDisplay: error,
-          error: { message: error, type: ToolErrorType.EXECUTION_DENIED },
-        };
-      }
+    const backgroundError =
+      runInBackground && !this.sessionOwned
+        ? getBackgroundWorkflowError(this.config)
+        : null;
+    if (backgroundError || !this.config.isWorkflowsEnabled()) {
+      const message =
+        backgroundError ?? 'Workflows are disabled for this session.';
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message, type: ToolErrorType.EXECUTION_DENIED },
+      };
     }
     const load = this.loadReferencedScript();
     let handle: WorkflowRunHandle;

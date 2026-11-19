@@ -11233,15 +11233,26 @@ export class Config {
     return this.artifactAutoOpen && !this.isBrowserLaunchSuppressed();
   }
 
+  private supportsWorkflowTool(): boolean {
+    return !(
+      this.shellExecutionSandbox ||
+      this.provisionalWorkspace ||
+      this.executionEnvironment ||
+      this.sessionExecutionEngine === 'managed' ||
+      this.sessionSourceType === 'agent-host'
+    );
+  }
+
   isWorkflowsEnabled(): boolean {
-    if (this.shellExecutionSandbox) return false;
-    if (this.provisionalWorkspace) return false;
+    if (!this.supportsWorkflowTool()) return false;
     // On unless settings turn them off, except that bare and safe mode keep
     // them off unless settings turn them on. The env pair overrides
     // settings, and QWEN_CODE_DISABLE_WORKFLOWS=1 wins.
     if (process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
     if (process.env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1') return true;
-    return this.workflowsEnabled ?? !(this.bareMode || this.safeMode);
+    return typeof this.workflowsEnabled === 'boolean'
+      ? this.workflowsEnabled
+      : !(this.bareMode || this.safeMode);
   }
 
   setWorkflowsEnabled(enabled: boolean | undefined): void {
@@ -11256,10 +11267,23 @@ export class Config {
    * would end the review's background runs. A value the settings do give
    * replaces it.
    */
-  applyWorkflowsEnabledSetting(enabled: boolean | undefined): void {
+  async applyWorkflowsEnabledSetting(
+    enabled: boolean | undefined,
+  ): Promise<void> {
     if (enabled === undefined && this.workflowsEnabledByReviewSkill) return;
     this.workflowsEnabledByReviewSkill = false;
+    const wasEnabled = this.isWorkflowsEnabled();
     this.setWorkflowsEnabled(enabled);
+    const isEnabled = this.isWorkflowsEnabled();
+    if (!this.initialized || wasEnabled === isEnabled) return;
+
+    if (isEnabled) {
+      const registry = this.getToolRegistry();
+      await this.registerWorkflowTool(registry);
+      await registry.ensureTool(ToolNames.WORKFLOW);
+    }
+    await this.llmClient?.setTools();
+    this.refreshWorkflowMode();
   }
 
   isWorkflowModeSupported(): boolean {
@@ -11470,17 +11494,20 @@ export class Config {
 
   async enableReviewWorkflow(): Promise<void> {
     if (
-      this.shellExecutionSandbox ||
+      !this.supportsWorkflowTool() ||
       this.workflowsEnabled === false ||
       !isTopLevelSession() ||
       this.getBareMode() ||
-      this.provisionalWorkspace ||
       process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1'
     ) {
       return;
     }
-    if (await this.registerWorkflowTool(this.getToolRegistry())) {
-      this.workflowsEnabledByReviewSkill ||= this.workflowsEnabled !== true;
+    const configured = this.workflowsEnabled;
+    if (
+      (await this.registerWorkflowTool(this.getToolRegistry())) &&
+      this.workflowsEnabled === configured
+    ) {
+      this.workflowsEnabledByReviewSkill ||= configured !== true;
       this.setWorkflowsEnabled(true);
       await this.getLlmClient().setTools();
     }
@@ -13616,12 +13643,12 @@ export class Config {
   }
 
   private async registerWorkflowTool(registry: ToolRegistry): Promise<boolean> {
-    if (registry.getAllToolNames().includes(ToolNames.WORKFLOW)) return true;
+    if (registry.hasRegisteredTool(ToolNames.WORKFLOW)) return true;
     await this.registerLazyTool(registry, ToolNames.WORKFLOW, async () => {
       const { WorkflowTool } = await import('../tools/workflow/workflow.js');
       return new WorkflowTool(this);
     });
-    return registry.getAllToolNames().includes(ToolNames.WORKFLOW);
+    return registry.hasRegisteredTool(ToolNames.WORKFLOW);
   }
 
   private async registerImageGenerationTool(

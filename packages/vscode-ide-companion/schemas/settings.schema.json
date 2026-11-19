@@ -1762,7 +1762,7 @@
           "default": true
         },
         "workflowsEnabled": {
-          "description": "Enable the Workflow tool, which lets the model author and run a script that orchestrates subagents in parallel. On by default (off under `--bare` and `--safe-mode` unless set to `true`). A run can dispatch many subagents and spend tokens accordingly; set this to false to turn the tool off. The QWEN_CODE_ENABLE_WORKFLOWS=1 and QWEN_CODE_DISABLE_WORKFLOWS=1 environment variables override this setting (disable wins). Unrelated to the Session Workflow plan-and-review view; to stop the \"workflow\" keyword from steering a turn, see Disable Workflow Keyword Trigger.",
+          "description": "Enable the Workflow tool, which lets the model author and run a script that orchestrates subagents in parallel. On by default. Workflow is unavailable in the restricted `--bare` toolset. Under `--safe-mode`, set it to `true` to enable workflows. A run can dispatch many subagents and spend tokens accordingly. Set this to `false` to turn the tool off. Where Workflow is supported, QWEN_CODE_ENABLE_WORKFLOWS=1 and QWEN_CODE_DISABLE_WORKFLOWS=1 override this setting (disable wins). To stop the \"workflow\" keyword from steering a turn, see Disable Workflow Keyword Trigger. Session Workflow controls the separate plan-and-review view.",
           "type": "boolean",
           "default": true
         },
