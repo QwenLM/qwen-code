@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_046;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_735;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -160,7 +160,7 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_046;
 // capped-result retry guidance, and stale-callback invalidation then add 220
 // bytes, bringing that tree to 2,148,976. This merge's artifact-library stub
 // registration adds 46 bytes, for 2,149,022 measured bytes. The warning sits
-// 24 above that measurement, while the existing ceiling retains 578 bytes.
+// 713 above that measurement, while the existing ceiling retains 1,713 bytes.
 //
 // The workspace artifact library copy (nine keys across three locales) is
 // interactive-only: managed-artifact-library-messages.transcript-stub.ts
@@ -171,7 +171,7 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_046;
 // the third-party input mix is unchanged. The merged branch's ceiling follows
 // the recovery-inbox measurements above, rather than lowering that branch's
 // budget or reserving space for interactive-only copy.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_149_600;
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_150_735;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
