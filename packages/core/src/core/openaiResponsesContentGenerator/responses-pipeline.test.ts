@@ -35,6 +35,7 @@ import type { ResponsesApiRequest } from './types.js';
 import { preloadRuntimeFetchModule } from '../../utils/runtimeFetchOptions.js';
 import { classifyRetryError } from '../../utils/retryErrorClassification.js';
 import { retryContext } from '../../utils/retryContext.js';
+import { observeRequestDispatch } from '../loggingContentGenerator/request-dispatch.js';
 import { appendAutoMemoryContext } from '../../memory/request-context.js';
 import {
   collect,
@@ -383,6 +384,22 @@ describe('ResponsesPipeline', () => {
     ]);
 
     expect(partsOf(chunks)).toEqual([[{ text: 'hi' }], []]);
+  });
+
+  it('reports the request dispatch before fetch', async () => {
+    mockResponse([...deltaEvent('hi'), ...DONE_R1]);
+    const onDispatch = vi.fn();
+
+    await observeRequestDispatch(onDispatch, async () => {
+      await collect(
+        await pipe().connectStream(textRequest('hello'), 'prompt-1'),
+      );
+    });
+
+    expect(onDispatch).toHaveBeenCalledTimes(1);
+    expect(onDispatch.mock.invocationCallOrder[0]).toBeLessThan(
+      fetchMock.mock.invocationCallOrder[0],
+    );
   });
 
   it('logs only request metadata, never raw request-body bytes (issue #11667)', async () => {

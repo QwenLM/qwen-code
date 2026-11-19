@@ -368,8 +368,9 @@ nothing.
 
 Runs appear in the background-tasks view and the `/workflows` dialog (live
 phase tree, token usage, cooperative pause/resume, cancel);
-`run_in_background: true` returns a run handle immediately in the interactive
-TUI and ACP clients and delivers completion through the conversation.
+`run_in_background: true` returns a run handle immediately and delivers
+completion through the conversation; a headless run waits for it before
+exiting.
 
 Saved `/<name>` commands typed in the interactive TUI's ink renderer stay in the foreground:
 watch the live tool card; `/workflows <runId>` shows the run after it settles.

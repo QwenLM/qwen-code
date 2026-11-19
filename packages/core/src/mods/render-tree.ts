@@ -24,6 +24,9 @@ export const MOD_ROW_SITES: ReadonlySet<string> = new Set<ModRenderSite>([
   'Thinking',
 ]);
 
+/** The surfaces a host draws Mod renders on. */
+export type ModRenderSurface = 'terminal' | 'desktop';
+
 /** The terminal's element table, as Claude Code declares it. */
 export const TERMINAL_ELEMENTS = [
   'Box',
@@ -37,6 +40,19 @@ export const TERMINAL_ELEMENTS = [
   'Client',
   'Raster',
   'Image',
+] as const;
+/** The desktop's element table, as Claude Code declares it. */
+export const DESKTOP_ELEMENTS = [
+  'Box',
+  'Text',
+  'Button',
+  'Input',
+  'Select',
+  'Svg',
+  'Link',
+  'Code',
+  'Markdown',
+  'Client',
 ] as const;
 const DRAWN = new Set(['Box', 'Text']);
 
@@ -98,7 +114,7 @@ export interface ModThinkingProps {
 }
 
 interface ModRenderInputBase {
-  surface: 'terminal';
+  surface: ModRenderSurface;
   requestId: string;
   viewport?: { columns: number; rows: number; isFullscreen?: boolean };
 }

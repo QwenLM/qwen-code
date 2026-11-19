@@ -12,7 +12,11 @@ import type {
   DaemonSessionArtifactChange,
 } from '../types.js';
 import { DAEMON_ERROR_KINDS, parseDaemonBackgroundTurn } from '../types.js';
-import { asKnownDaemonEvent, isSettingsChangedData } from '../events.js';
+import {
+  asKnownDaemonEvent,
+  isModLogData,
+  isSettingsChangedData,
+} from '../events.js';
 import type {
   DaemonAgentIdentity,
   DaemonInputSourceAnnotation,
@@ -351,6 +355,23 @@ export function normalizeDaemonEvent(
         ? 'Shell command was aborted'
         : `Shell command exited with code ${exitCode ?? 'unknown'}`;
       return [{ ...base, type: 'status', text }];
+    }
+
+    case 'mod_log': {
+      if (!isModLogData(event.data))
+        return normalizeUnrecognizedEvent(event, base);
+      const { plugin, text } = event.data;
+      return [
+        {
+          ...base,
+          type: 'status',
+          source: 'mod_log',
+          text: `[Mod ${plugin}] ${text}`,
+          data: { plugin, text },
+          // A line a Mod writes mid-reply sits below it, not inside it.
+          clearActiveText: false,
+        },
+      ];
     }
 
     case 'replay_complete': {

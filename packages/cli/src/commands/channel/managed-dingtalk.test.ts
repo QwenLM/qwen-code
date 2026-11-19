@@ -46,9 +46,17 @@ vi.mock('@qwen-code/channel-dingtalk', () => ({
       };
     }),
   createManagedDingtalkDeps: vi.fn(() => ({})),
+  dingtalkSettings: vi.fn(() => ({
+    clientId: 'robot-app',
+    clientSecret: 'secret',
+    pollInterval: 2000,
+  })),
 }));
 
-import { createManagedDingtalkDeps } from '@qwen-code/channel-dingtalk';
+import {
+  createManagedDingtalkDeps,
+  dingtalkSettings,
+} from '@qwen-code/channel-dingtalk';
 import { loadSettings } from '../../config/settings.js';
 import { resolveProxyUrl } from './proxy.js';
 import { loadChannelsConfig, parseConfiguredChannels } from './runtime.js';
@@ -121,6 +129,44 @@ describe('managed-dingtalk command workspace resolution', () => {
     );
     expect(createManagedDingtalkDeps).toHaveBeenCalledWith(
       'http://proxy.internal:8080',
+      { clientId: 'robot-app', clientSecret: 'secret' },
+    );
+  });
+
+  it('hands the parsed robot credential to the deps so the card send exists (H5e)', async () => {
+    // The raw config is whitespace-padded; the parsed settings are trimmed.
+    // The deps must receive the PARSED credential, not the raw config, so a
+    // command that forwarded the raw values would red this (deferred round-2).
+    vi.mocked(parseConfiguredChannels).mockResolvedValueOnce([
+      {
+        name: 'ding',
+        config: {
+          type: 'dingtalk',
+          cwd: '/workspace',
+          clientId: '  app-key  ',
+          clientSecret: '  app-secret  ',
+          cardTemplateId: 'tpl.schema',
+        },
+      },
+    ] as never);
+    vi.mocked(dingtalkSettings).mockReturnValueOnce({
+      clientId: 'app-key',
+      clientSecret: 'app-secret',
+      pollInterval: 2000,
+    });
+    const running = handler(argv('/daemon/workspace'));
+    await new Promise((resolve) => setImmediate(resolve));
+    process.emit('SIGINT');
+    await running;
+    expect(dingtalkSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        clientId: '  app-key  ',
+        cardTemplateId: 'tpl.schema',
+      }),
+    );
+    expect(createManagedDingtalkDeps).toHaveBeenCalledWith(
+      'http://proxy.internal:8080',
+      { clientId: 'app-key', clientSecret: 'app-secret' },
     );
   });
 });
