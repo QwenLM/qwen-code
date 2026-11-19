@@ -3716,6 +3716,12 @@ function readScopedModelSetting(
   return scope === 'user' ? setting.values.user : setting.values.workspace;
 }
 
+function isVisionBridgeSetting(
+  key: string,
+): key is 'visionModel' | 'visionBridgeTimeoutMs' {
+  return key === 'visionModel' || key === 'visionBridgeTimeoutMs';
+}
+
 export function App({
   onRefreshModels,
   askUserFreeTextLabel,
@@ -15517,22 +15523,36 @@ export function App({
     }
     const settings = workspaceSettings.filter(
       (setting) =>
-        setting.key !== 'voiceModel' && setting.key !== 'visionBridgeTimeoutMs',
+        setting.key !== 'voiceModel' &&
+        (!isVisionBridgeSetting(setting.key) ||
+          (sessionIsStandalone && setting.key === 'visionModel')),
     );
     if (mainView === 'split') return settings;
+    if (sessionIsStandalone) {
+      const timeout = workspaceSettings.find(
+        (setting) => setting.key === 'visionBridgeTimeoutMs',
+      );
+      if (timeout) {
+        const { user } = timeout.values;
+        settings.push({ ...timeout, values: { user, effective: user } });
+      }
+      return settings;
+    }
     if (voiceModelSettingsSupported && qualifiedVoiceSetting) {
       settings.push(qualifiedVoiceSetting);
     }
-    const visionTimeout = qualifiedWorkspaceSettings?.settings.find(
-      (setting) => setting.key === 'visionBridgeTimeoutMs',
+    settings.push(
+      ...(qualifiedWorkspaceSettings?.settings.filter((setting) =>
+        isVisionBridgeSetting(setting.key),
+      ) ?? []),
     );
-    if (visionTimeout) settings.push(visionTimeout);
     return settings;
   }, [
     mainView,
     mainVoiceTarget?.route,
     qualifiedVoiceSetting,
     qualifiedWorkspaceSettings,
+    sessionIsStandalone,
     voiceModelSettingsSupported,
     workspaceSettings,
   ]);
@@ -15542,7 +15562,12 @@ export function App({
       key: 'visionModel' | 'visionBridgeTimeoutMs',
       value: unknown,
     ) => {
-      if (scope === 'user' || mainVoiceTarget?.route === 'legacy-primary') {
+      if (
+        scope === 'user' ||
+        mainVoiceTarget?.route === 'legacy-primary' ||
+        // Standalone Settings exposes the primary's workspace model picker.
+        (sessionIsStandalone && key === 'visionModel')
+      ) {
         return setWorkspaceSetting(scope, key, value);
       }
       const client =
@@ -15551,14 +15576,20 @@ export function App({
       if (!client) throw new Error(t('session.workspaceActionUnavailable'));
       return client.setWorkspaceSetting('workspace', key, value);
     },
-    [mainVoiceTarget, setWorkspaceSetting, t, workspace.client],
+    [
+      mainVoiceTarget,
+      sessionIsStandalone,
+      setWorkspaceSetting,
+      t,
+      workspace.client,
+    ],
   );
   const targetedWorkspaceSettingsState = {
     ...workspaceSettingsState,
     settings: targetedWorkspaceSettings,
     reload: reloadTargetedWorkspaceSettings,
     setValue: (scope: 'workspace' | 'user', key: string, value: unknown) =>
-      key === 'visionBridgeTimeoutMs'
+      isVisionBridgeSetting(key)
         ? writeVisionSetting(scope, key, value)
         : setWorkspaceSetting(scope, key, value),
     liveSetup: liveSidebarEnabled ? undefined : liveSetup,
@@ -15582,7 +15613,9 @@ export function App({
   })();
   const currentVisionModel = (() => {
     const value = readScopedModelSetting(
-      workspaceSettings,
+      modelSettingScope === 'user'
+        ? workspaceSettings
+        : targetedWorkspaceSettings,
       modelSettingScope,
       'visionModel',
     );
@@ -22865,9 +22898,9 @@ export function App({
       // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
       // Core's resolveVisionModelSelection() expects `authType:modelId`.
       const encoded = encodeVisionModelForSetting(modelId);
-      setWorkspaceSetting(modelSettingScope, 'visionModel', encoded)
+      writeVisionSetting(modelSettingScope, 'visionModel', encoded)
         .then(() => {
-          void reloadWorkspaceSettings().catch((error: unknown) => {
+          void reloadTargetedWorkspaceSettings().catch((error: unknown) => {
             console.warn(
               '[web-shell] failed to reload settings after vision-model save',
               error,
@@ -22879,8 +22912,8 @@ export function App({
     [
       modelSettingScope,
       reportError,
-      setWorkspaceSetting,
-      reloadWorkspaceSettings,
+      writeVisionSetting,
+      reloadTargetedWorkspaceSettings,
       t,
       projectFeaturesAvailable,
     ],

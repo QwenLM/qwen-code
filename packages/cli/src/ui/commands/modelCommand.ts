@@ -831,12 +831,34 @@ export const modelCommand: SlashCommand = {
           ),
         };
       }
-      const timeoutLine =
-        timeoutMs === undefined
-          ? ''
-          : t('Vision bridge timeout: {{timeout}}', {
-              timeout: formatVisionTimeout(timeoutMs),
-            });
+      const persistTimeout = (
+        settings: LoadedSettings,
+        timeoutMs: number,
+        visionModel?: string,
+      ): string => {
+        settings.setTopLevelValues(resolveScope(settings, scopeOverride), {
+          ...(visionModel === undefined ? {} : { visionModel }),
+          visionBridgeTimeoutMs: timeoutMs,
+        });
+        const effectiveTimeoutMs = settings.merged.visionBridgeTimeoutMs;
+        config.setVisionBridgeTimeoutMs(effectiveTimeoutMs);
+        const timeout = formatVisionTimeout(timeoutMs);
+        if (effectiveTimeoutMs === timeoutMs) {
+          return (
+            t('Vision bridge timeout: {{timeout}}', { timeout }) + scopeSuffix
+          );
+        }
+        return t(
+          'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.',
+          {
+            timeout,
+            scope: scopeSuffix,
+            effectiveTimeout: formatVisionTimeout(
+              config.getVisionBridgeTimeoutMs() ?? VISION_BRIDGE_TIMEOUT_MS,
+            ),
+          },
+        );
+      };
       if (!modelName && timeoutMs !== undefined) {
         if (!settings) {
           return {
@@ -845,17 +867,10 @@ export const modelCommand: SlashCommand = {
             content: t('Settings service not available.'),
           };
         }
-        persistSetting(
-          settings,
-          'visionBridgeTimeoutMs',
-          timeoutMs,
-          scopeOverride,
-        );
-        config.setVisionBridgeTimeoutMs(timeoutMs);
         return {
           type: 'message',
           messageType: 'info',
-          content: timeoutLine + scopeSuffix,
+          content: persistTimeout(settings, timeoutMs),
         };
       }
       if (!modelName) {
@@ -973,14 +988,11 @@ export const modelCommand: SlashCommand = {
       const visionModel = matched.baseUrl
         ? `${qualifiedModelName}\0${matched.baseUrl}`
         : qualifiedModelName;
+      let timeoutLine: string | undefined;
       if (timeoutMs === undefined) {
         persistSetting(settings, 'visionModel', visionModel, scopeOverride);
       } else {
-        settings.setTopLevelValues(resolveScope(settings, scopeOverride), {
-          visionModel,
-          visionBridgeTimeoutMs: timeoutMs,
-        });
-        config.setVisionBridgeTimeoutMs(timeoutMs);
+        timeoutLine = persistTimeout(settings, timeoutMs, visionModel);
       }
       // Sync runtime Config so the vision bridge picks it up without a restart.
       config.setVisionModel(visionModel);
@@ -996,8 +1008,7 @@ export const modelCommand: SlashCommand = {
           t('Vision Model') +
           ': ' +
           modelName +
-          (timeoutLine ? `\n${timeoutLine}` : '') +
-          scopeSuffix +
+          (timeoutLine === undefined ? scopeSuffix : `\n${timeoutLine}`) +
           visionWarning,
       };
     }

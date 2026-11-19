@@ -7,6 +7,7 @@
 import type { Application, Request, Response } from 'express';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
+import { resolveModelId } from '@qwen-code/qwen-code-core/utils/modelId.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   redactMcpServersSetting,
@@ -842,6 +843,16 @@ export function registerWorkspaceSettingsRoutes(
   );
 }
 
+function isVisionModelSelector(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  try {
+    const modelId = resolveModelId(value)?.modelId;
+    return modelId !== undefined && !/(?:^|\s)--/.test(modelId);
+  } catch {
+    return false;
+  }
+}
+
 export function registerWorkspaceQualifiedSettingsRoutes(
   app: Application,
   deps: Pick<
@@ -1138,12 +1149,9 @@ export function registerWorkspaceQualifiedSettingsRoutes(
       if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
       const { model, timeoutMs } = deps.safeBody(req);
       const schema = getSettingsSchema();
-      const modelError =
-        typeof model !== 'string' ||
-        !model.trim() ||
-        model.trimStart().startsWith('--')
-          ? 'Expected a vision model selector'
-          : validateSettingValue(schema.visionModel, model);
+      const modelError = isVisionModelSelector(model)
+        ? validateSettingValue(schema.visionModel, model)
+        : 'Expected a vision model selector';
       const validationError =
         modelError ??
         validateSettingValue(schema.visionBridgeTimeoutMs, timeoutMs);

@@ -2011,6 +2011,8 @@ export default {
   'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.':
     'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.',
   'Vision bridge timeout: {{timeout}}': 'Vision bridge timeout: {{timeout}}',
+  'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.':
+    'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.',
   'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.':
     'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.',
   '{{timeout}} (default)': '{{timeout}} (default)',

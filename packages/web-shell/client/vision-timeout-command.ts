@@ -25,7 +25,7 @@ export function extractVisionTimeout(modelArg: string): {
       ? { modelArg, invalidOption: '--timeout' }
       : { modelArg };
   }
-  const invalidOption = /\s(--\S+)/.exec(remaining)?.[1];
+  const invalidOption = /\s(--\S*)/.exec(remaining)?.[1];
   if (invalidOption) return { modelArg, invalidOption };
   return match
     ? { modelArg: remaining, timeout: match[1] ?? '' }

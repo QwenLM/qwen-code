@@ -30,6 +30,7 @@ describe('extractVisionTimeout', () => {
   it.each([
     ['--vision --timeout 60 --timeout abc', '--timeout'],
     ['--vision --timeout 60 --global', '--global'],
+    ['--vision qwen-vl --timeout 60 --', '--'],
     ['--vision --timeouts 60', '--timeouts'],
     ['--fast --timeout 60', '--timeout'],
   ])('rejects an invalid option in %j', (input, invalidOption) => {

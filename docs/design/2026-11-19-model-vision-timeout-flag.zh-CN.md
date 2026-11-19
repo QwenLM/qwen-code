@@ -8,7 +8,7 @@ vision bridge 为每次转写尝试设置超时，超时的尝试会以新的超
 
 ## 目标
 
-- `/model --vision --timeout <value>` 设置 vision bridge 超时。新值立即作用于当前会话，并像 vision 模型一样持久化。
+- `/model --vision --timeout <value>` 持久化指定的超时值，并立即将生效值应用到当前 CLI 会话。
 - `--timeout` 也可以和模型 id 一起传，一条命令同时设置模型和超时。
 - 不在范围内：配置重试次数，超时后仍固定重试一次。
 
@@ -29,9 +29,11 @@ vision bridge 为每次转写尝试设置超时，超时的尝试会以新的超
 
 **内联 prompt。** `/model <model-id> <prompt>` 会原样发送 prompt。只有剩余参数构成 `--vision` 调用时才提取 `--timeout`，所以包含 `--timeout` 的 prompt 不会被改动。
 
-**运行时。** `Config` 新增 `setVisionBridgeTimeoutMs`，与构造函数共用校验逻辑，构造函数会拒绝的值在两处都回退到内置默认值。bridge 每次调用都读取 getter，所以下一张图片就会使用新值。
+**运行时。** 保存成功后，CLI 通过 `Config.setVisionBridgeTimeoutMs` 应用合并后的超时值。如果更高优先级的作用域覆盖了写入值，命令会同时报告已保存的值和生效值。setter 与构造函数共用校验逻辑，无效值回退到内置默认值。bridge 每次调用都读取生效值。
 
 **Web Shell。** Web Shell 在客户端处理 `/model --vision`：它通过 daemon 写 workspace settings，而不是运行 CLI 命令，而且 daemon 会话本来就拒绝 `/model` 写 settings。不做修改的话，`/model --vision --timeout 60` 会把 `--timeout 60` 存成 vision 模型。因此 Web Shell 用同样的规则解析 `--timeout`，把 `visionBridgeTimeoutMs` 写到 workspace 作用域；带模型 id 时同时写 `visionModel`。值无效时弹出错误提示，不写入任何内容。与 Web Shell 现有的 `/model --vision <id>` 一样，写入对新会话生效。daemon 的 settings 路由把 `visionBridgeTimeoutMs` 加入向 Web Shell 提供的 key 列表。该设置是 `showInDialog: false`，只能通过这个列表提供，同时它也会在 Web Shell 设置面板中出现一行。
+
+命令和视觉模型选择器使用当前会话的工作区。同时修改模型和超时时，daemon 会先校验超时值和模型选择器，再一次写入两项。独立会话可以在 Settings 面板的 User 标签页编辑超时。
 
 **重启标记。** 该设置保留 `requiresRestart: true`。`/config`、Web Shell 设置和手动编辑只写文件、不调用 setter，这些途径仍需重启。只有本命令会更新当前会话。
 

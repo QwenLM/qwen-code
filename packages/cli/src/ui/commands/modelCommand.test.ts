@@ -1784,12 +1784,19 @@ describe('modelCommand', () => {
       overrides: {
         executionMode?: CommandContext['executionMode'];
         models?: Array<Record<string, unknown>>;
+        higherPriorityTimeoutMs?: number;
       } = {},
     ) {
       const setValue = vi.fn();
-      const setTopLevelValues = vi.fn();
+      const setTopLevelValues = vi.fn<LoadedSettings['setTopLevelValues']>();
       const setVisionModel = vi.fn();
-      const setVisionBridgeTimeoutMs = vi.fn();
+      let runtimeTimeoutMs: number | undefined =
+        overrides.higherPriorityTimeoutMs ?? 45_000;
+      const setVisionBridgeTimeoutMs = vi.fn(
+        (timeoutMs: number | undefined) => {
+          runtimeTimeoutMs = timeoutMs;
+        },
+      );
       const context = createMockCommandContext({
         executionMode: overrides.executionMode ?? 'interactive',
         services: {
@@ -1811,13 +1818,17 @@ describe('modelCommand', () => {
             isCurrentPrimaryModel: (m: { id: string }) => m.id === 'qwen-plus',
             setVisionModel,
             setVisionBridgeTimeoutMs,
-            getVisionBridgeTimeoutMs: vi.fn().mockReturnValue(45_000),
+            getVisionBridgeTimeoutMs: vi.fn(() => runtimeTimeoutMs),
             getAvailableModels: vi
               .fn()
               .mockReturnValue([{ id: 'qwen-vl-max' }, { id: 'qwen-plus' }]),
           },
           settings: { ...createMockSettings(setValue), setTopLevelValues },
         },
+      });
+      setTopLevelValues.mockImplementation((_scope, values) => {
+        context.services.settings.merged.visionBridgeTimeoutMs =
+          overrides.higherPriorityTimeoutMs ?? values.visionBridgeTimeoutMs;
       });
       return {
         context,
@@ -1837,16 +1848,18 @@ describe('modelCommand', () => {
     ])(
       '%j sets only the timeout without opening the picker',
       async (args, timeoutMs, shown) => {
-        const { context, setValue, setVisionModel, setVisionBridgeTimeoutMs } =
-          timeoutContext();
+        const {
+          context,
+          setTopLevelValues,
+          setVisionModel,
+          setVisionBridgeTimeoutMs,
+        } = timeoutContext();
 
         const result = await modelCommand.action!(context, args);
 
-        expect(setValue).toHaveBeenCalledTimes(1);
-        expect(setValue).toHaveBeenCalledWith(
-          expect.any(String),
-          'visionBridgeTimeoutMs',
-          timeoutMs,
+        expect(setTopLevelValues).toHaveBeenCalledExactlyOnceWith(
+          SettingScope.User,
+          { visionBridgeTimeoutMs: timeoutMs },
         );
         expect(setVisionBridgeTimeoutMs).toHaveBeenCalledWith(timeoutMs);
         expect(setVisionModel).not.toHaveBeenCalled();
@@ -1859,17 +1872,16 @@ describe('modelCommand', () => {
     );
 
     it('persists the timeout to the requested scope', async () => {
-      const { context, setValue } = timeoutContext();
+      const { context, setTopLevelValues } = timeoutContext();
 
       const result = await modelCommand.action!(
         context,
         '--global --vision --timeout 90',
       );
 
-      expect(setValue).toHaveBeenCalledWith(
+      expect(setTopLevelValues).toHaveBeenCalledExactlyOnceWith(
         SettingScope.User,
-        'visionBridgeTimeoutMs',
-        90_000,
+        { visionBridgeTimeoutMs: 90_000 },
       );
       expect(result).toMatchObject({
         content: 'Vision bridge timeout: 90s (global)',
@@ -1907,26 +1919,59 @@ describe('modelCommand', () => {
       });
     });
 
-    it('leaves the active model and timeout alone when the combined save fails', async () => {
-      const {
-        context,
-        setValue,
-        setTopLevelValues,
-        setVisionModel,
-        setVisionBridgeTimeoutMs,
-      } = timeoutContext();
-      setTopLevelValues.mockImplementation(() => {
-        throw new Error('settings write failed');
-      });
+    it.each([
+      ['--vision --timeout 60 --global', { visionBridgeTimeoutMs: 60_000 }, ''],
+      [
+        '--vision qwen-vl-max --timeout 60 --global',
+        { visionBridgeTimeoutMs: 60_000, visionModel: 'openai:qwen-vl-max' },
+        'Vision Model: qwen-vl-max\n',
+      ],
+    ])(
+      'keeps the effective higher-priority timeout for %j',
+      async (args, writes, prefix) => {
+        const { context, setTopLevelValues, setVisionBridgeTimeoutMs } =
+          timeoutContext({ higherPriorityTimeoutMs: 30_000 });
 
-      await expect(
-        modelCommand.action!(context, '--vision qwen-vl-max --timeout 45'),
-      ).rejects.toThrow('settings write failed');
+        const result = await modelCommand.action!(context, args);
 
-      expect(setValue).not.toHaveBeenCalled();
-      expect(setVisionModel).not.toHaveBeenCalled();
-      expect(setVisionBridgeTimeoutMs).not.toHaveBeenCalled();
-    });
+        expect(setTopLevelValues).toHaveBeenCalledExactlyOnceWith(
+          SettingScope.User,
+          writes,
+        );
+        expect(setVisionBridgeTimeoutMs).toHaveBeenCalledExactlyOnceWith(
+          30_000,
+        );
+        expect(result).toMatchObject({
+          content:
+            prefix +
+            'Saved vision bridge timeout 60s (global). A higher-priority setting keeps the effective timeout at 30s.',
+        });
+      },
+    );
+
+    it.each(['--vision --timeout 45', '--vision qwen-vl-max --timeout 45'])(
+      'leaves the active model and timeout alone when saving %j fails',
+      async (args) => {
+        const {
+          context,
+          setValue,
+          setTopLevelValues,
+          setVisionModel,
+          setVisionBridgeTimeoutMs,
+        } = timeoutContext();
+        setTopLevelValues.mockImplementation(() => {
+          throw new Error('settings write failed');
+        });
+
+        await expect(modelCommand.action!(context, args)).rejects.toThrow(
+          'settings write failed',
+        );
+
+        expect(setValue).not.toHaveBeenCalled();
+        expect(setVisionModel).not.toHaveBeenCalled();
+        expect(setVisionBridgeTimeoutMs).not.toHaveBeenCalled();
+      },
+    );
 
     it('does not write the timeout when the vision model is rejected', async () => {
       const { context, setValue, setTopLevelValues, setVisionBridgeTimeoutMs } =
@@ -1953,8 +1998,13 @@ describe('modelCommand', () => {
       ['--vision --timeout 2147484', '2147484'],
       ['--vision qwen-vl-max --timeout -5', '-5'],
     ])('rejects %j without writing anything', async (args, value) => {
-      const { context, setValue, setVisionModel, setVisionBridgeTimeoutMs } =
-        timeoutContext();
+      const {
+        context,
+        setValue,
+        setTopLevelValues,
+        setVisionModel,
+        setVisionBridgeTimeoutMs,
+      } = timeoutContext();
 
       const result = await modelCommand.action!(context, args);
 
@@ -1964,6 +2014,7 @@ describe('modelCommand', () => {
         content: `Invalid --timeout value "${value}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.`,
       });
       expect(setValue).not.toHaveBeenCalled();
+      expect(setTopLevelValues).not.toHaveBeenCalled();
       expect(setVisionModel).not.toHaveBeenCalled();
       expect(setVisionBridgeTimeoutMs).not.toHaveBeenCalled();
     });
@@ -1971,7 +2022,7 @@ describe('modelCommand', () => {
     it.each(['--timeout 60', '--fast --timeout 60', '--global --timeout 60'])(
       'rejects %j without --vision',
       async (args) => {
-        const { context, setValue } = timeoutContext();
+        const { context, setValue, setTopLevelValues } = timeoutContext();
 
         const result = await modelCommand.action!(context, args);
 
@@ -1981,6 +2032,7 @@ describe('modelCommand', () => {
           content: '--timeout can only be used with --vision.',
         });
         expect(setValue).not.toHaveBeenCalled();
+        expect(setTopLevelValues).not.toHaveBeenCalled();
       },
     );
 

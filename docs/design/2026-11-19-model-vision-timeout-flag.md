@@ -8,7 +8,7 @@ The vision bridge gives each transcription attempt a timeout, and a timed-out at
 
 ## Goals
 
-- `/model --vision --timeout <value>` sets the vision bridge timeout. The new value applies to the running session at once and is persisted like the vision model.
+- `/model --vision --timeout <value>` saves the requested timeout and immediately applies the effective timeout to the running CLI session.
 - `--timeout` can also be passed with a model id, so the model and the timeout are set in one command.
 - Out of scope: configuring the retry count, which stays fixed at one retry after a timeout.
 
@@ -29,9 +29,11 @@ The vision bridge gives each transcription attempt a timeout, and a timed-out at
 
 **Inline prompts.** `/model <model-id> <prompt>` sends the prompt verbatim. `--timeout` is extracted only when the remaining arguments form a `--vision` invocation, so a prompt that contains `--timeout` is not changed.
 
-**Runtime.** `Config` gains `setVisionBridgeTimeoutMs`. It shares validation with the constructor, so a value the constructor would reject falls back to the built-in default in both places. The bridge reads the getter on every call, so the next image uses the new value.
+**Runtime.** After saving, the CLI applies the merged timeout through `Config.setVisionBridgeTimeoutMs`. If a higher-priority scope takes precedence, the command reports both the saved value and the effective timeout. The setter and constructor use the same validation and fall back to the built-in default for invalid values. The bridge reads the effective timeout on each call.
 
 **Web Shell.** Web Shell handles `/model --vision` on the client: it writes workspace settings through the daemon instead of running the CLI command, and daemon sessions refuse settings writes from `/model` anyway. Without a change, `/model --vision --timeout 60` would store `--timeout 60` as the vision model. Web Shell therefore parses `--timeout` the same way and writes `visionBridgeTimeoutMs` to workspace scope, plus `visionModel` when a model id is given. An invalid value shows an error toast and writes nothing. Like the existing Web Shell `/model --vision <id>`, the write applies to new sessions. The daemon settings route adds `visionBridgeTimeoutMs` to the keys it serves to Web Shell. The setting is `showInDialog: false`, so this list is the only way it is served, and the key also gains a row in the Web Shell settings panel.
+
+The command and vision model picker use the session's workspace. For a combined update, the daemon validates the timeout and model selector before saving both in one write. A standalone session can edit the timeout on the Settings panel's User tab.
 
 **Restart flag.** The setting keeps `requiresRestart: true`. `/config`, Web Shell settings and hand edits write the file without calling the setter, so for those paths a restart is still needed. Only this command updates the running session.
 

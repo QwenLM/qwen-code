@@ -49796,7 +49796,7 @@ describe('App session callbacks', () => {
     expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
   });
 
-  it('uses the secondary workspace for the timeout command and settings panel', async () => {
+  it('uses the secondary workspace for the vision picker, timeout command and settings panel', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {
       features: ['workspace_qualified_rest_core', 'workspace_settings'],
@@ -49810,19 +49810,33 @@ describe('App session callbacks', () => {
         },
       ],
     };
-    const timeoutSetting = {
+    const timeoutSetting: DaemonSettingDescriptor = {
       key: 'visionBridgeTimeoutMs',
       type: 'integer',
       label: 'Vision Bridge Timeout (ms)',
       category: 'Model',
       requiresRestart: true,
+      default: undefined,
       values: { effective: 30_000, workspace: 30_000 },
     };
-    testState.settings = [timeoutSetting as DaemonSettingDescriptor];
+    const modelSetting: DaemonSettingDescriptor = {
+      key: 'visionModel',
+      type: 'string',
+      label: 'Vision Model',
+      category: 'Model',
+      requiresRestart: false,
+      default: '',
+      values: { effective: 'primary-vl', workspace: 'primary-vl' },
+    };
+    testState.settings = [timeoutSetting, modelSetting];
     qualifiedWorkspaceSettings.mockResolvedValue({
       v: 1,
       settings: [
         { ...timeoutSetting, values: { effective: 90_000, workspace: 90_000 } },
+        {
+          ...modelSetting,
+          values: { effective: 'secondary-vl', workspace: 'secondary-vl' },
+        },
       ],
     });
     const { container } = renderApp();
@@ -49839,6 +49853,20 @@ describe('App session callbacks', () => {
       60_000,
     );
 
+    testState.prompt = '/model --vision';
+    await clickSubmit(container);
+    await flush();
+    const picker = container.querySelector<HTMLButtonElement>(
+      '[data-testid="model-select"]',
+    );
+    expect(picker?.getAttribute('data-current-model-id')).toBe('secondary-vl');
+    await act(async () => picker?.click());
+    expect(qualifiedSetWorkspaceSetting).toHaveBeenCalledWith(
+      'workspace',
+      'visionModel',
+      'fast-model-x',
+    );
+
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
@@ -49847,6 +49875,11 @@ describe('App session callbacks', () => {
         (setting) => setting.key === 'visionBridgeTimeoutMs',
       )?.values.effective,
     ).toBe(90_000);
+    expect(
+      testState.latestSettingsState?.settings.find(
+        (setting) => setting.key === 'visionModel',
+      )?.values.workspace,
+    ).toBe('secondary-vl');
     await testState.latestSettingsState?.setValue(
       'workspace',
       'visionBridgeTimeoutMs',
@@ -49858,6 +49891,41 @@ describe('App session callbacks', () => {
       120_000,
     );
     expect(settingsSetValue).not.toHaveBeenCalled();
+  });
+
+  it('keeps the standalone User timeout editor without borrowing a workspace value', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    testState.settings = [
+      {
+        key: 'visionBridgeTimeoutMs',
+        type: 'integer',
+        label: 'Vision Bridge Timeout (ms)',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined,
+        values: { effective: 30_000, user: 45_000, workspace: 30_000 },
+      },
+    ];
+    const { container } = renderApp();
+    await flush();
+    const settingsButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="open-sidebar-settings"]',
+    );
+    expect(settingsButton).not.toBeNull();
+    await act(async () => settingsButton?.click());
+    await flush();
+    const state = testState.latestSettingsState;
+    expect(state).not.toBeNull();
+    expect(
+      state?.settings.find((setting) => setting.key === 'visionBridgeTimeoutMs')
+        ?.values,
+    ).toEqual({ effective: 45_000, user: 45_000 });
+    await state?.setValue('user', 'visionBridgeTimeoutMs', 60_000);
+    expect(settingsSetValue.mock.calls).toEqual([
+      ['user', 'visionBridgeTimeoutMs', 60_000],
+    ]);
+    expect(qualifiedSetWorkspaceSetting).not.toHaveBeenCalled();
   });
 
   it('sends a model and timeout together in one request without a fallback on failure', async () => {
@@ -49891,6 +49959,7 @@ describe('App session callbacks', () => {
     '/model --vision qwen-vl --timeout 1.5',
     '/model --vision --timeout 60 --timeout abc',
     '/model --vision --timeout 60 --global',
+    '/model --vision qwen-vl --timeout 60 --',
     '/model --vision --timeout=60',
     '/model --voice --timeout 60',
   ])('rejects %s without writing', async (prompt) => {

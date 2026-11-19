@@ -1735,6 +1735,8 @@ export default {
   'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.':
     '無效的 --timeout 值 "{{value}}"。請使用正整數秒數，例如 60、60s 或 90000ms。',
   'Vision bridge timeout: {{timeout}}': '視覺橋接逾時：{{timeout}}',
+  'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.':
+    '已儲存視覺橋接逾時 {{timeout}}{{scope}}。較高優先順序的設定使實際逾時為 {{effectiveTimeout}}。',
   'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.':
     '視覺橋接逾時：{{timeout}}\n使用 "/model --vision --timeout <seconds>" 修改。',
   '{{timeout}} (default)': '{{timeout}}（預設）',
