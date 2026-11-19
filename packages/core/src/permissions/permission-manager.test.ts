@@ -2627,7 +2627,7 @@ describe('PermissionManager', () => {
       pm = makePm({ eagerTools: ['ReadFile', '', 'Bash(unbalanced'] });
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringMatching(
-          /tools\.eager: ignoring 2 unusable entries.*omitted from the model's initial tool list/,
+          /tools\.eager: ignoring 2 unusable entries.*Other non-exempt tools are deferred\. tools\.visible can show deferred tools at startup/,
         ),
       );
       // The valid entry survives — dropping is per-entry, not all-or-nothing.

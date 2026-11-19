@@ -7248,7 +7248,7 @@ describe('loadCliConfig tools.eager wiring (#9827, #10075)', () => {
 
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringMatching(
-        /tools\.eager: ignoring 1 unusable entry.*omitted from the model's initial tool list/,
+        /tools\.eager: ignoring 1 unusable entry.*Other non-exempt tools are deferred\. tools\.visible can show deferred tools at startup/,
       ),
     );
     // The collapse to the active-but-empty allowlist is deliberate

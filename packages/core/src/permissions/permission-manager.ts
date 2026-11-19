@@ -354,7 +354,7 @@ export class PermissionManager {
           } (${droppedEntries.join(', ')}). ` +
             `The allowlist stays active with ${canonicalNames.length} entr${
               canonicalNames.length === 1 ? 'y' : 'ies'
-            }, so every other non-exempt tool is omitted from the model's initial tool list.`,
+            }. Other non-exempt tools are deferred. tools.visible can show deferred tools at startup.`,
         );
       }
       this.eagerToolAllowList = canonicalNames;
@@ -900,8 +900,8 @@ export class PermissionManager {
    *
    * While the `settings.tools.eager` allowlist is active (see
    * `isEagerToolAllowListActive`), a built-in tool not named in it is
-   * `deferred`: it stays registered and listed in `/tools`, but its schema
-   * is omitted from the eager model request (#9827). Call-time
+   * `deferred`: it stays registered and listed in `/tools`. The registry
+   * can still expose it at startup via `tools.visible` (#9827). Call-time
    * approval for such a tool falls back to the normal permission
    * evaluation (ask / approval-mode), so nothing loses capability
    * silently (#10075).

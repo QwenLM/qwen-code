@@ -13541,8 +13541,8 @@ export class Config {
     // the `tools.eager` allowlist in a single check. A tool the active
     // eager allowlist omits comes back `deferred`, not `disabled`: it is
     // still registered and listed in `/tools` (#10075), even when either
-    // bridge tool is unavailable. Its schema stays out of the eager model
-    // request (#9827).
+    // bridge tool is unavailable. Deferred tools listed in `tools.visible`
+    // can still be shown at startup (#9827).
     let status: ToolRegistrationStatus = 'registered';
     try {
       // Resolve through the getter, not the `permissionManager` field: on
