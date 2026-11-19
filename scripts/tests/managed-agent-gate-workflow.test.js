@@ -306,6 +306,7 @@ describe('Managed Agent gate required check', () => {
   it.each([
     ['pull_request', 'none', 'false', 'Managed Agent gate'],
     ['pull_request', 'fast', 'true', 'Managed Agent gate'],
+    ['pull_request', 'none', 'true', 'Managed Agent review (no full run)'],
     ['pull_request_review', 'full', 'true', 'Managed Agent gate'],
     [
       'pull_request_review',
@@ -314,6 +315,7 @@ describe('Managed Agent gate required check', () => {
       'Managed Agent review (no full run)',
     ],
     ['pull_request_review', 'none', 'false', 'Managed Agent gate'],
+    ['pull_request_review', '', 'true', 'Managed Agent review (no full run)'],
     ['push', 'fast', 'true', 'Managed Agent gate'],
     ['merge_group', 'fast', 'true', 'Managed Agent gate'],
     // A failed tier selection leaves the outputs empty and must still
@@ -495,6 +497,7 @@ describe('Managed Agent gate tier selection', () => {
     [
       '#!/usr/bin/env bash',
       'case "$2" in',
+      '  */check-runs*filter=all*) printf "%s" "${FAKE_ALL_URLS}" ;;',
       '  */check-runs*) printf "%s" "${FAKE_URLS}" ;;',
       '  */actions/runs/*/jobs*) id="${2%/jobs*}"; id="${id##*/}"; [[ " ${FAKE_FULL:-} " == *" ${id} "* ]] && echo true || echo false ;;',
       '  */actions/runs/*) id="${2##*/}"; for p in ${FAKE_EVENTS}; do if [[ "${p%%=*}" == "${id}" ]]; then rec="${p#*=}"; printf \'%s\\t%s\\n\' "${rec%%:*}" "${rec#*:}"; fi; done ;;',
@@ -518,6 +521,7 @@ describe('Managed Agent gate tier selection', () => {
         REVIEW_AUTHOR_ASSOCIATION: 'MEMBER',
         TOUCHED: 'true',
         FAKE_URLS: '',
+        FAKE_ALL_URLS: '',
         FAKE_EVENTS: '',
         FAKE_FULL: '',
         ...env,
@@ -537,6 +541,17 @@ describe('Managed Agent gate tier selection', () => {
       expect(tier({ EVENT_NAME: event, TOUCHED: 'false' })).toBe('tier=none');
     },
   );
+
+  it('does not let a rerun fast tier overwrite a full result on the same head', () => {
+    expect(
+      tier({
+        EVENT_NAME: 'pull_request',
+        FAKE_ALL_URLS: url(42),
+        FAKE_EVENTS: '42=pull_request_review:7',
+        FAKE_FULL: '42',
+      }),
+    ).toBe('tier=none');
+  });
 
   it('runs the full suite on the first approval of a touched head', () => {
     const approve = {

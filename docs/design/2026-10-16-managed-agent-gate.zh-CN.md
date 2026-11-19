@@ -75,15 +75,17 @@ helper 与配置、`sdk-java.yml` 运行的脚本，以及门禁自身文件。P
 `gate` job 对每个其结果能够决定合并的运行，都使用稳定的必需检查名
 `Managed Agent gate`。它的结论和 `SDK Java (<tier>)` job 用来区分所选层级：
 
-| 事件                  | 范围                     | 结果                                          |
-| --------------------- | ------------------------ | --------------------------------------------- |
-| 任意                  | 未改到                   | 不跑 Java，直接通过                           |
-| `pull_request`        | 改到                     | fast 层级结果                                 |
-| `pull_request_review` | 改到，跑了全量           | 全量层级结果                                  |
-| `pull_request_review` | 改到，未跑全量           | 非必需的 `Managed Agent review (no full run)` |
-| `pull_request_review` | 非 approve，或 PR 已关闭 | 所有 job 跳过，不生成必需名字的 check         |
-| `push`、`merge_group` | 改到                     | fast 层级结果                                 |
-| 任意                  | 层级选择失败             | 失败                                          |
+| 事件                  | 范围                     | 结果                                                     |
+| --------------------- | ------------------------ | -------------------------------------------------------- |
+| 任意                  | 未改到                   | 不跑 Java，直接通过                                      |
+| `pull_request`        | 改到，此前无全量报告     | fast 层级结果                                            |
+| `pull_request`        | 改到，此前已有全量报告   | 不跑 Java；非必需的 `Managed Agent review (no full run)` |
+| `pull_request_review` | 改到，跑了全量           | 全量层级结果                                             |
+| `pull_request_review` | 改到，未跑全量           | 非必需的 `Managed Agent review (no full run)`            |
+| `pull_request_review` | 非 approve，或 PR 已关闭 | 所有 job 跳过，不生成必需名字的 check                    |
+| `push`、`merge_group` | 改到                     | fast 层级结果                                            |
+| `pull_request_review` | 改到，层级选择失败       | 非必需的 `Managed Agent review (no full run)` 失败       |
+| 其他任意              | 层级选择失败             | `Managed Agent gate` 失败                                |
 
 非 approve 的 review，以及 PR 关闭后才提交的 review，都不启动任何 job：GitHub 仍会
 创建这次运行，但它永远选不到 `none` 以上的层级——或者它要报告的检查已经不再门禁任何
@@ -93,14 +95,16 @@ helper 与配置、`sdk-java.yml` 运行的脚本，以及门禁自身文件。P
 因此 ruleset 可以对每个 PR 要求同一个 context。改到路径的 PR 在首个 approve 前由
 fast 层级结果满足这项检查；approve 仍会启动全量套件，并以同一个名字报告结果。改到路径
 且未选择新全量运行的 review 仍使用非必需的 `Managed Agent review (no full run)` context，
-所以不会覆盖此前的 fast 或全量结果。GitHub
+所以不会覆盖此前的 fast 或全量结果。同一 head 已有全量报告时，重新运行或重新打开
+pull request 也不再跑套件，并让该全量结果留在必需 context 上。GitHub
 允许工作流运行后，check run 不需要写权限 token。首次贡献者的运行可能保持
 `action_required`，直到维护者批准；批准前不会生成门禁 check。
 
-被取代的 fast 层级是中性的、而非红色：当新的 push 取消 pull request 正在进行的运行时，
-门禁把 `Managed Agent gate` 报告为警告级通过。其他取消仍然失败——全量运行的取消
-如此，下一个 approve 才能重试套件，而不是对着一个绿色 check 去重；push 与 merge group
-臂上的取消也如此，因为那里不会取消正在进行的运行，取消意味着超时或人工停止。
+被取代的 fast 层级不会发布 check 结果：新的 push 取消 pull request 正在进行的运行时，
+gate job 会跳过，让计算出来的名字在一个 branch protection 已不再读取的 head 上保持未求值。
+其他取消仍然失败——全量运行的取消如此，下一个 approve 才能重试套件，而不是对着一个绿色
+check 去重；push 与 merge group 臂上的取消也如此，因为那里不会取消正在进行的运行，取消
+意味着超时或人工停止。
 
 ### 当前 head 的首个 approve
 
@@ -113,7 +117,7 @@ push 之后。只有维护者的 approve 才会启动全量层级：reviewer 的
 
 对这样的 approve，`scope` job 会运行全量层级，除非之前已有
 `pull_request_review` 运行为同一 head 报告了通过或运行中的 `Managed Agent gate`。
-本次运行自己的重跑不算，PR push 运行的通过（未改到的分类）也不算。被认定的运行还必须
+本次运行自己的重跑不算，PR push 运行的 fast 层级或未改到通过也不算。被认定的运行还必须
 属于同一个 pull request，且其 job 列表中存在 `SDK Java (full)` callee：同一 head 上
 另一个 PR 的 review 运行、或未跑套件就报告该名字的运行，都没有跑过任何 Java lane，
 不算数。全量失败后，下一个 approve 或 **Re-run failed jobs** 会重试。

@@ -88,15 +88,17 @@ The `gate` job reports under the stable required-check name `Managed Agent gate`
 for every run whose result can gate a merge. Its conclusion and the
 `SDK Java (<tier>)` job distinguish the selected tier:
 
-| Event                 | Scope                           | Result                                            |
-| --------------------- | ------------------------------- | ------------------------------------------------- |
-| any                   | untouched                       | pass without Java                                 |
-| `pull_request`        | touched                         | fast-tier result                                  |
-| `pull_request_review` | touched, full run               | full-tier result                                  |
-| `pull_request_review` | touched, no full run            | non-required `Managed Agent review (no full run)` |
-| `pull_request_review` | not an approval, or a closed PR | all jobs skip; no required-context check          |
-| `push`, `merge_group` | touched                         | fast-tier result                                  |
-| any                   | tier selection failed           | fail                                              |
+| Event                 | Scope                           | Result                                                     |
+| --------------------- | ------------------------------- | ---------------------------------------------------------- |
+| any                   | untouched                       | pass without Java                                          |
+| `pull_request`        | touched, no earlier full report | fast-tier result                                           |
+| `pull_request`        | touched, earlier full report    | no Java; non-required `Managed Agent review (no full run)` |
+| `pull_request_review` | touched, full run               | full-tier result                                           |
+| `pull_request_review` | touched, no full run            | non-required `Managed Agent review (no full run)`          |
+| `pull_request_review` | not an approval, or a closed PR | all jobs skip; no required-context check                   |
+| `push`, `merge_group` | touched                         | fast-tier result                                           |
+| `pull_request_review` | touched, tier selection failed  | non-required `Managed Agent review (no full run)` fail     |
+| any other             | tier selection failed           | `Managed Agent gate` fail                                  |
 
 A review that is not an approval, or one submitted after its pull request
 closed, starts no job: GitHub still creates the run, but it can never select a
@@ -110,17 +112,20 @@ fast-tier result satisfies that check before its first approval; approval still
 starts the full suite, which reports its result under the same name. A touched
 review that selects no new full run keeps the non-required
 `Managed Agent review (no full run)` context, so it cannot overwrite the prior
-fast or full result. Check runs
+fast or full result. A pull-request rerun or reopen on a head with an earlier
+full report also selects no suite and keeps that full result on the required
+context. Check runs
 need no write token after GitHub allows the workflow run. A first-time
 contributor's run can remain `action_required` until a maintainer approves it,
 so no gate check exists before that approval.
 
-A superseded fast tier is neutral, not red: when a newer push cancels a pull
-request's in-flight run, the gate reports `Managed Agent gate` as a
-warning-level pass. Every other cancellation stays failing — a cancelled full
-run, so the next approval retries the suite instead of deduping against a
-green check, and a push or merge-group cancellation, because nothing there
-cancels in progress, so it is a timeout or an operator stop.
+A superseded fast tier does not publish a check result: when a newer push
+cancels a pull request's in-flight run, the gate job skips, leaving its computed
+name unevaluated on a head branch protection no longer reads. Every other
+cancellation stays failing — a cancelled full run, so the next approval retries
+the suite instead of deduping against a green check, and a push or merge-group
+cancellation, because nothing there cancels in progress, so it is a timeout or
+an operator stop.
 
 ### First approval of the current head
 
@@ -136,8 +141,8 @@ involved.
 The `scope` job runs the full tier for such an approval unless an earlier
 `pull_request_review` run already reported a passing or running
 `Managed Agent gate` for the same head. A run's own reruns
-do not count, and a pass from the PR push run (an untouched classification)
-does not count. The covering run must also belong to the same pull request and
+do not count, and a fast-tier or untouched pass from the PR push run does not
+count. The covering run must also belong to the same pull request and
 show the `SDK Java (full)` callee in its jobs: a review run of another PR on
 the same head, or a run that reported the name without running the suite, ran
 no Java lane and does not count. After a failed full run, the next approval or
