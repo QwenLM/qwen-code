@@ -249,6 +249,43 @@ describe('terminalSerializer', () => {
         'abcdefghijklmnopqrstuvwxyz\n123456\ndone',
       );
     });
+
+    it('trims explicitly written trailing spaces from full-line repaints', async () => {
+      const terminal = new Terminal({
+        cols: 40,
+        rows: 4,
+        allowProposedApi: true,
+        scrollback: 100,
+        convertEol: true,
+      });
+
+      // ConPTY repaints write the padding spaces as real cells, so
+      // translateToString(true) keeps them; the serializer must still trim.
+      await writeToTerminal(
+        terminal,
+        'ComputerName : 192.168.0.14' +
+          ' '.repeat(14) +
+          '\r\nPingSucceeded : False',
+      );
+
+      expect(serializeTerminalToText(terminal)).toBe(
+        'ComputerName : 192.168.0.14\nPingSucceeded : False',
+      );
+    });
+
+    it('keeps the space at a wrapped segment join when trimming', async () => {
+      const terminal = new Terminal({
+        cols: 5,
+        rows: 4,
+        allowProposedApi: true,
+        scrollback: 100,
+        convertEol: true,
+      });
+
+      await writeToTerminal(terminal, 'aaaa bbbb\n');
+
+      expect(serializeTerminalToText(terminal)).toBe('aaaa bbbb');
+    });
   });
 
   describe('convertColorToHex', () => {
