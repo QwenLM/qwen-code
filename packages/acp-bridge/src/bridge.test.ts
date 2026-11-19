@@ -5,6 +5,7 @@
  */
 
 import { afterEach, describe, it, expect, onTestFinished, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { getEventListeners } from 'node:events';
 import { promises as fsp } from 'node:fs';
@@ -114,6 +115,7 @@ import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
+  DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY,
   DAEMON_EXPECTED_APPROVAL_MODE_META_KEY,
   DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
@@ -7130,6 +7132,7 @@ describe('createAcpSessionBridge', () => {
       sessionId: 'persisted-1',
       workspaceCwd: WS_A,
       suppressWorktreeContextRestore: true,
+      deferAutomaticWorkUntilCwdRestore: true,
     });
 
     expect(loaded).toEqual({
@@ -7150,6 +7153,7 @@ describe('createAcpSessionBridge', () => {
       {
         _meta: {
           [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+          [DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY]: true,
         },
         sessionId: 'persisted-1',
         cwd: WS_A,
@@ -7378,6 +7382,510 @@ describe('createAcpSessionBridge', () => {
       warnings: ['skipped artifact without id/title', 'kept warning'],
       artifacts: [],
     });
+
+    await bridge.shutdown();
+  });
+
+  it('carries the live artifact count in the session summary, omitting zero', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        expect(method).toBe('qwen/control/session/artifacts/persist');
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(
+      bridge.getSessionSummary(session.sessionId).artifactCount,
+    ).toBeUndefined();
+
+    await bridge.addSessionArtifact(
+      session.sessionId,
+      { title: 'Durable', url: 'https://example.com/summary-durable' },
+      { clientId: session.clientId },
+    );
+    await bridge.addSessionArtifact(
+      session.sessionId,
+      {
+        title: 'Ephemeral',
+        url: 'https://example.com/summary-ephemeral',
+        retention: 'ephemeral',
+      },
+      { clientId: session.clientId },
+    );
+
+    // The live summary count is the public list length (ephemeral included),
+    // matching what the header entry shows while the session is live.
+    expect(bridge.getSessionSummary(session.sessionId).artifactCount).toBe(2);
+    expect(
+      bridge
+        .listWorkspaceSessions(WS_A)
+        .find((s) => s.sessionId === session.sessionId)?.artifactCount,
+    ).toBe(2);
+
+    await bridge.shutdown();
+  });
+
+  it('keeps a restoring session visible with its artifact count withheld until the restore settles', async () => {
+    const sessionId = 'restore-window-summary';
+    const artifactUrl = 'https://example.com/restore-window';
+    const artifactId = stableSessionArtifactId(sessionId, `url:${artifactUrl}`);
+    let releaseRestore!: () => void;
+    const restoreGate = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    const originalRestore = SessionArtifactStore.prototype.restore;
+    const restoreSpy = vi
+      .spyOn(SessionArtifactStore.prototype, 'restore')
+      .mockImplementation(async function (this: SessionArtifactStore, ...args) {
+        await restoreGate;
+        return originalRestore.apply(this, args);
+      });
+    // Release the gate and restore the prototype even when an assertion
+    // fails — otherwise one red case hangs every later restore in the file.
+    onTestFinished(() => {
+      releaseRestore();
+      restoreSpy.mockRestore();
+    });
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          loadSessionImpl: () =>
+            ({
+              artifactSnapshot: {
+                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                sessionId,
+                sequence: 7,
+                artifacts: [
+                  {
+                    id: artifactId,
+                    kind: 'link',
+                    storage: 'external_url',
+                    source: 'client',
+                    status: 'available',
+                    title: 'Restore window link',
+                    url: artifactUrl,
+                    retention: 'restorable',
+                    clientRetained: true,
+                    createdAt: '2026-07-04T00:00:00.000Z',
+                    updatedAt: '2026-07-04T00:00:00.000Z',
+                  },
+                ],
+                warnings: [],
+              },
+            }) as LoadSessionResponse,
+        }).channel,
+    });
+
+    const loadPromise = bridge.loadSession({ sessionId, workspaceCwd: WS_A });
+    // session/load registers the entry in byId before it awaits
+    // artifacts.restore(); getSessionSummary stops throwing once that
+    // registration lands, while the gated restore keeps the store empty.
+    await vi.waitFor(() => {
+      expect(() => bridge.getSessionSummary(sessionId)).not.toThrow();
+    });
+    // Inside that window the row must STAY visible (the accessor's contract
+    // is "all live sessions" — occupancy gates and live-state consume it),
+    // with the count withheld and the ambiguity carried explicitly so the
+    // list merge keeps the sidecar-enriched count instead of reading the
+    // omission as zero.
+    const pendingRow = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === sessionId);
+    expect(pendingRow).toBeDefined();
+    expect(pendingRow?.artifactCount).toBeUndefined();
+    expect(pendingRow?.artifactCountPending).toBe(true);
+
+    releaseRestore();
+    const loaded = await loadPromise;
+    expect(loaded.artifacts).toMatchObject([{ id: artifactId }]);
+    const settledRow = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === sessionId);
+    expect(settledRow?.artifactCount).toBe(1);
+    expect(settledRow?.artifactCountPending).toBeUndefined();
+
+    await bridge.shutdown();
+  });
+
+  it('withholds the partial count while a restore is repopulating the store', async () => {
+    const sessionId = 'restore-partial-summary';
+    const urls = [
+      'https://example.com/partial-a',
+      'https://example.com/partial-b',
+      'https://example.com/partial-c',
+    ];
+    const artifacts = urls.map((url) => ({
+      id: stableSessionArtifactId(sessionId, `url:${url}`),
+      kind: 'link',
+      storage: 'external_url',
+      source: 'client',
+      status: 'available',
+      title: url,
+      url,
+      retention: 'restorable',
+      clientRetained: true,
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    }));
+    let releaseRestore!: () => void;
+    const restoreGate = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    const originalRestore = SessionArtifactStore.prototype.restore;
+    const restoreSpy = vi
+      .spyOn(SessionArtifactStore.prototype, 'restore')
+      .mockImplementation(async function (
+        this: SessionArtifactStore,
+        snapshot,
+        options,
+      ) {
+        if (!snapshot) return originalRestore.call(this, snapshot, options);
+        // Apply the first artifact, then hold the restore mid-flight: the
+        // store now holds 1 of 3, the exact partial window a concurrent
+        // list request can land in.
+        const first = await originalRestore.call(
+          this,
+          { ...snapshot, artifacts: snapshot.artifacts.slice(0, 1) },
+          options,
+        );
+        await restoreGate;
+        const rest = await originalRestore.call(this, snapshot, options);
+        return [...first, ...rest];
+      });
+    onTestFinished(() => {
+      releaseRestore();
+      restoreSpy.mockRestore();
+    });
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          loadSessionImpl: () =>
+            ({
+              artifactSnapshot: {
+                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                sessionId,
+                sequence: 7,
+                artifacts,
+                warnings: [],
+              },
+            }) as LoadSessionResponse,
+        }).channel,
+    });
+
+    const loadPromise = bridge.loadSession({ sessionId, workspaceCwd: WS_A });
+    // Wait until the store really holds 1 of 3 (count() is the synchronous
+    // value stamped into the row; list() would queue behind the restore).
+    // The spy records the store as the call's this context (vitest types
+    // instances loosely, hence the double cast).
+    const capturedStore = () =>
+      restoreSpy.mock.instances[0] as unknown as
+        | SessionArtifactStore
+        | undefined;
+    await vi.waitFor(() => {
+      expect(capturedStore()?.count()).toBe(1);
+    });
+    // Mid-repopulation the row must carry ONLY the marker — a partial
+    // count would overlay the sidecar-enriched one in the list merge.
+    const partialRow = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === sessionId);
+    expect(partialRow).toBeDefined();
+    expect(partialRow?.artifactCount).toBeUndefined();
+    expect(partialRow?.artifactCountPending).toBe(true);
+
+    releaseRestore();
+    await loadPromise;
+    const settledRow = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === sessionId);
+    expect(settledRow?.artifactCount).toBe(3);
+    expect(settledRow?.artifactCountPending).toBeUndefined();
+
+    await bridge.shutdown();
+  });
+
+  it('withholds the artifact count while a rewind restore is repopulating the store', async () => {
+    const urls = [
+      'https://example.com/rewind-partial-a',
+      'https://example.com/rewind-partial-b',
+      'https://example.com/rewind-partial-c',
+    ];
+    let releaseRestore!: () => void;
+    const restoreGate = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    const originalRestore = SessionArtifactStore.prototype.restore;
+    const restoreSpy = vi
+      .spyOn(SessionArtifactStore.prototype, 'restore')
+      .mockImplementation(async function (
+        this: SessionArtifactStore,
+        snapshot,
+        options,
+      ) {
+        if (!snapshot) return originalRestore.call(this, snapshot, options);
+        const first = await originalRestore.call(
+          this,
+          { ...snapshot, artifacts: snapshot.artifacts.slice(0, 1) },
+          options,
+        );
+        await restoreGate;
+        const rest = await originalRestore.call(this, snapshot, options);
+        return [...first, ...rest];
+      });
+    onTestFinished(() => {
+      releaseRestore();
+      restoreSpy.mockRestore();
+    });
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method === 'qwen/control/session/artifacts/persist') {
+          return {};
+        }
+        expect(method).toBe('qwen/control/session/rewind');
+        return {
+          targetTurnIndex: 0,
+          filesChanged: [],
+          filesFailed: [],
+          artifactSnapshot: {
+            v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+            sessionId: SESS_A,
+            sequence: 9,
+            artifacts: urls.map((url) => ({
+              id: stableSessionArtifactId(SESS_A, `url:${url}`),
+              kind: 'link',
+              storage: 'external_url',
+              source: 'client',
+              status: 'available',
+              title: url,
+              url,
+              retention: 'restorable',
+              clientRetained: true,
+              createdAt: '2026-07-04T00:00:00.000Z',
+              updatedAt: '2026-07-04T00:00:00.000Z',
+            })),
+            tombstonedIds: [],
+            stickyEphemeralIds: [],
+            warnings: [],
+          },
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await seedRewindTarget(bridge, handle, session.sessionId);
+    // Two pre-rewind durables make the partial window observable: the count
+    // drops 2 → 1 only once the gated restore applied the first snapshot
+    // artifact, so the waitFor cannot land on the pre-rewind state.
+    for (const url of [
+      'https://example.com/pre-rewind-a',
+      'https://example.com/pre-rewind-b',
+    ]) {
+      await bridge.addSessionArtifact(
+        session.sessionId,
+        { title: url, url },
+        { clientId: session.clientId },
+      );
+    }
+
+    const rewindPromise = bridge.rewindSession(
+      session.sessionId,
+      { promptId: 'prompt-1' },
+      { clientId: session.clientId },
+    );
+    const capturedStore = () =>
+      restoreSpy.mock.instances[0] as unknown as
+        | SessionArtifactStore
+        | undefined;
+    await vi.waitFor(() => {
+      expect(capturedStore()?.count()).toBe(1);
+    });
+    const partialRow = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === session.sessionId);
+    expect(partialRow).toBeDefined();
+    expect(partialRow?.artifactCount).toBeUndefined();
+    expect(partialRow?.artifactCountPending).toBe(true);
+
+    releaseRestore();
+    await expect(rewindPromise).resolves.toMatchObject({ targetTurnIndex: 0 });
+    const settledRow = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === session.sessionId);
+    expect(settledRow?.artifactCount).toBe(3);
+    expect(settledRow?.artifactCountPending).toBeUndefined();
+
+    await bridge.shutdown();
+  });
+
+  it('clears the rewind pending marker when the restore rejects', async () => {
+    // A leaked marker would stamp artifactCountPending on every later
+    // summary (the merge keeps the stale sidecar count forever), block
+    // conditional close, and stall the drain predicate.
+    const restoreSpy = vi
+      .spyOn(SessionArtifactStore.prototype, 'restore')
+      .mockRejectedValueOnce(new Error('snapshot directory missing'));
+    onTestFinished(() => restoreSpy.mockRestore());
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method === 'qwen/control/session/artifacts/persist') {
+          return {};
+        }
+        expect(method).toBe('qwen/control/session/rewind');
+        return {
+          targetTurnIndex: 0,
+          filesChanged: [],
+          filesFailed: [],
+          artifactSnapshot: {
+            v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+            sessionId: SESS_A,
+            sequence: 9,
+            artifacts: [
+              {
+                id: stableSessionArtifactId(
+                  SESS_A,
+                  'url:https://example.com/rewind-reject',
+                ),
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Rewind reject link',
+                url: 'https://example.com/rewind-reject',
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-04T00:00:00.000Z',
+                updatedAt: '2026-07-04T00:00:00.000Z',
+              },
+            ],
+            tombstonedIds: [],
+            stickyEphemeralIds: [],
+            warnings: [],
+          },
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await seedRewindTarget(bridge, handle, session.sessionId);
+
+    await expect(
+      bridge.rewindSession(
+        session.sessionId,
+        { promptId: 'prompt-1' },
+        { clientId: session.clientId },
+      ),
+    ).rejects.toThrow('snapshot directory missing');
+
+    const row = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === session.sessionId);
+    expect(row).toBeDefined();
+    expect(row?.artifactCountPending).toBeUndefined();
+
+    await bridge.shutdown();
+  });
+
+  it('keys the pending-restore marker per session on a shared channel', async () => {
+    const restoringId = 'restore-keying-restoring';
+    const settledId = 'restore-keying-settled';
+    const link = (sessionId: string, url: string) => ({
+      id: stableSessionArtifactId(sessionId, `url:${url}`),
+      kind: 'link',
+      storage: 'external_url',
+      source: 'client',
+      status: 'available',
+      title: url,
+      url,
+      retention: 'restorable',
+      clientRetained: true,
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    });
+    let releaseRestore!: () => void;
+    const restoreGate = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    const originalRestore = SessionArtifactStore.prototype.restore;
+    const stores = new Map<string, SessionArtifactStore>();
+    const restoreSpy = vi
+      .spyOn(SessionArtifactStore.prototype, 'restore')
+      .mockImplementation(async function (
+        this: SessionArtifactStore,
+        snapshot,
+        options,
+      ) {
+        if (!snapshot) return originalRestore.call(this, snapshot, options);
+        // Key by the snapshot's session id — the store's own sessionId is
+        // private, and tsc --build typechecks the test files.
+        stores.set(snapshot.sessionId, this);
+        if (snapshot.sessionId !== restoringId) {
+          return originalRestore.call(this, snapshot, options);
+        }
+        const first = await originalRestore.call(
+          this,
+          { ...snapshot, artifacts: snapshot.artifacts.slice(0, 1) },
+          options,
+        );
+        await restoreGate;
+        const rest = await originalRestore.call(this, snapshot, options);
+        return [...first, ...rest];
+      });
+    onTestFinished(() => {
+      releaseRestore();
+      restoreSpy.mockRestore();
+    });
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          loadSessionImpl: (request) =>
+            ({
+              artifactSnapshot: {
+                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                sessionId: request.sessionId,
+                sequence: 7,
+                artifacts: [
+                  link(
+                    request.sessionId,
+                    `https://example.com/${request.sessionId}-a`,
+                  ),
+                  link(
+                    request.sessionId,
+                    `https://example.com/${request.sessionId}-b`,
+                  ),
+                ],
+                warnings: [],
+              },
+            }) as LoadSessionResponse,
+        }).channel,
+    });
+
+    const restoringLoad = bridge.loadSession({
+      sessionId: restoringId,
+      workspaceCwd: WS_A,
+    });
+    // The second session loads on the SAME channel while the first
+    // restore is gated: its settled count must not be withheld by the
+    // other session's pending marker.
+    await bridge.loadSession({ sessionId: settledId, workspaceCwd: WS_A });
+    await vi.waitFor(() => {
+      expect(stores.get(restoringId)?.count()).toBe(1);
+    });
+    const rows = bridge.listWorkspaceSessions(WS_A);
+    const restoringRow = rows.find((s) => s.sessionId === restoringId);
+    const settledRow = rows.find((s) => s.sessionId === settledId);
+    expect(restoringRow?.artifactCount).toBeUndefined();
+    expect(restoringRow?.artifactCountPending).toBe(true);
+    expect(settledRow?.artifactCount).toBe(2);
+    expect(settledRow?.artifactCountPending).toBeUndefined();
+
+    releaseRestore();
+    await restoringLoad;
+    const after = bridge
+      .listWorkspaceSessions(WS_A)
+      .find((s) => s.sessionId === restoringId);
+    expect(after?.artifactCount).toBe(2);
+    expect(after?.artifactCountPending).toBeUndefined();
 
     await bridge.shutdown();
   });
@@ -8864,6 +9372,7 @@ describe('createAcpSessionBridge', () => {
     'session_metadata_updated',
     'session_cwd_changed',
     'artifact_changed',
+    'sub_session_task_changed',
     'settings_changed',
     'extensions_changed',
     'mcp_server_changed',
@@ -8872,6 +9381,7 @@ describe('createAcpSessionBridge', () => {
     'approval_mode_changed',
     'model_switched',
     'prompt_cancelled',
+    'mod_log',
     'tool_toggled',
     'workspace_initialized',
     'mcp_server_restarted',
@@ -8956,6 +9466,7 @@ describe('createAcpSessionBridge', () => {
         return {};
       };
       let bridge: ReturnType<typeof makeBridge>;
+      let agentConnection: ChannelHandle['agentConnection'] | undefined;
       const isModelSwitchCase =
         bookkeepingType === 'model_switch_failed' ||
         bookkeepingType === 'model_switched' ||
@@ -8992,6 +9503,7 @@ describe('createAcpSessionBridge', () => {
         bridge = makeBridge({ channelFactory: factory });
       } else {
         const handle = makeChannel({ promptImpl, extMethodImpl });
+        agentConnection = handle.agentConnection;
         bridge = makeBridge({ channelFactory: async () => handle.channel });
       }
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -9055,6 +9567,12 @@ describe('createAcpSessionBridge', () => {
         await bridge.manageMcpServer('loop-mcp-server', 'enable', undefined);
       } else if (bookkeepingType === 'prompt_cancelled') {
         await bridge.cancelSession(session.sessionId);
+      } else if (bookkeepingType === 'mod_log') {
+        await agentConnection!.extNotification('qwen/notify/session/mod-log', {
+          sessionId: session.sessionId,
+          plugin: 'fixture-mod',
+          text: 'Mod logged after the turn failed',
+        });
       } else if (bookkeepingType === 'language_changed') {
         await bridge.setSessionLanguage(session.sessionId, {
           language: 'zh-CN',
@@ -9078,6 +9596,7 @@ describe('createAcpSessionBridge', () => {
         bookkeepingType === 'agent_changed' ||
         bookkeepingType === 'git_status_changed' ||
         bookkeepingType === 'git_branch_changed' ||
+        bookkeepingType === 'sub_session_task_changed' ||
         bookkeepingType === 'github_setup_completed'
       ) {
         // The workspace service, git watcher, memory / agent CRUD, and the
@@ -9805,7 +10324,32 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('drops the stale turn error when a queued terminal folds newer automatic-turn content', async () => {
+  it.each([
+    ['agent_message_chunk', undefined, false],
+    [
+      'user_message_chunk',
+      { kind: 'agent_mention', mentionedAgentIds: [] },
+      false,
+    ],
+    [
+      'user_message_chunk',
+      {
+        kind: 'agent_mention',
+        mentionedAgentIds: [],
+        sentTo: { sessionId: 'other-session', workspaceCwd: WS_A },
+      },
+      true,
+    ],
+  ] as const)(
+    'refreshes after a queued terminal folds %s (%j)',
+    verifyQueuedTerminalRefresh,
+  );
+
+  async function verifyQueuedTerminalRefresh(
+    subtype: 'agent_message_chunk' | 'user_message_chunk',
+    qwenAgentMessage: Record<string, unknown> | undefined,
+    keepsError: boolean,
+  ) {
     // A queued terminal is a turn boundary on the bus: ingesting it folds
     // and resets the live journal. When newer turn content was journaled
     // after the pending loop terminal, that content supersedes the stale
@@ -9863,7 +10407,7 @@ describe('createAcpSessionBridge', () => {
         if (
           !sawContent &&
           event.type === 'session_update' &&
-          JSON.stringify(event.data).includes('automatic turn content')
+          JSON.stringify(event.data).includes('later transcript content')
         ) {
           sawContent = true;
           continue;
@@ -9921,45 +10465,49 @@ describe('createAcpSessionBridge', () => {
     );
     await expect(first).rejects.toThrow('Loop protection stopped this turn');
 
-    // An automatic turn journals content after the loop terminal; the
-    // queued terminal that follows folds it.
+    // The queued terminal folds this update, even when it came from an
+    // out-of-turn /send receipt.
     await handle.agentConnection.sessionUpdate({
       sessionId: session.sessionId,
       update: {
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'automatic turn content' },
+        sessionUpdate: subtype,
+        content: { type: 'text', text: 'later transcript content' },
+        ...(qwenAgentMessage ? { _meta: { qwenAgentMessage } } : {}),
       },
     });
 
+    const assertRefresh = async () => {
+      const refreshed = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        clientId: session.clientId,
+        historyReplay: 'response',
+        historyPageSize: 100,
+      });
+
+      const compactedReplay = refreshed.compactedReplay ?? [];
+      expect(compactedReplay[0]).toMatchObject({
+        type: 'session_update',
+        data: expect.objectContaining({
+          content: { type: 'text', text: 'persisted turn content' },
+        }),
+      });
+      expect(
+        compactedReplay.some(
+          (event) =>
+            event.type === 'turn_error' &&
+            (event.data as { errorKind?: string }).errorKind ===
+              'loop_detected',
+        ),
+      ).toBe(keepsError);
+    };
+    await assertRefresh();
     expect(
       bridge.removePendingPrompt(session.sessionId, 'prompt-queued'),
     ).toEqual({ removed: true });
     await sawContentThenQueuedTerminal;
-
-    const refreshed = await bridge.loadSession({
-      sessionId: session.sessionId,
-      workspaceCwd: WS_A,
-      clientId: session.clientId,
-      historyReplay: 'response',
-      historyPageSize: 100,
-    });
-
-    const compactedReplay = refreshed.compactedReplay ?? [];
-    expect(compactedReplay[0]).toMatchObject({
-      type: 'session_update',
-      data: expect.objectContaining({
-        content: { type: 'text', text: 'persisted turn content' },
-      }),
-    });
-    expect(
-      compactedReplay.some(
-        (event) =>
-          event.type === 'turn_error' &&
-          (event.data as { errorKind?: string }).errorKind === 'loop_detected',
-      ),
-    ).toBe(false);
-    // The supersede only drops the refresh-replay record; the session
-    // summary still carries the active turn's failure.
+    await assertRefresh();
+    // The session summary still carries the active turn's failure.
     expect(bridge.getSessionSummary(session.sessionId).turnError).toMatchObject(
       { code: 'LOOP_DETECTED' },
     );
@@ -9967,7 +10515,7 @@ describe('createAcpSessionBridge', () => {
     abort.abort();
     releaseCancel();
     await bridge.shutdown();
-  });
+  }
 
   it('drops the turn error on refresh after a subsequent successful interactive turn', async () => {
     // Loop reject, then a successful prompt, then refresh: the newer turn's
@@ -12230,6 +12778,7 @@ describe('createAcpSessionBridge', () => {
       sessionId: 'persisted-2',
       workspaceCwd: WS_A,
       suppressWorktreeContextRestore: true,
+      deferAutomaticWorkUntilCwdRestore: true,
     });
 
     expect(resumed).toEqual({
@@ -12248,6 +12797,7 @@ describe('createAcpSessionBridge', () => {
       {
         _meta: {
           [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+          [DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY]: true,
         },
         sessionId: 'persisted-2',
         cwd: WS_A,
@@ -28071,6 +28621,310 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('records a start commit on a live plain entry via setSessionBaseCommit (R5-1)', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(
+        bridge.getSessionSummary(session.sessionId).baseCommit,
+      ).toBeUndefined();
+      bridge.setSessionBaseCommit?.(session.sessionId, 'startsha');
+      expect(bridge.getSessionSummary(session.sessionId).baseCommit).toBe(
+        'startsha',
+      );
+      // Fill-only (R6-1): a second write (e.g. promoting a worktree's later
+      // creation tip on hand-back) must NOT overwrite the recorded creation
+      // start. Two distinct values pin immutability, not just presence.
+      bridge.setSessionBaseCommit?.(session.sessionId, 'latertip');
+      expect(bridge.getSessionSummary(session.sessionId).baseCommit).toBe(
+        'startsha',
+      );
+      // A missing entry is a no-op, not a throw.
+      bridge.setSessionBaseCommit?.('missing-session', 'startsha');
+      await bridge.shutdown();
+    });
+
+    it('captures the workspace HEAD as the start commit for a plain spawn (R5-1)', async () => {
+      const repo = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'bridge-base-commit-')),
+      );
+      const gitEnv = {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        GIT_AUTHOR_NAME: 'T',
+        GIT_AUTHOR_EMAIL: 't@e',
+        GIT_COMMITTER_NAME: 'T',
+        GIT_COMMITTER_EMAIL: 't@e',
+      };
+      const git = (...args: string[]) =>
+        execFileSync('git', args, {
+          cwd: repo,
+          encoding: 'utf8',
+          env: gitEnv,
+        }).trim();
+      git('init', '-q', '-b', 'main');
+      await fsp.writeFile(path.join(repo, 'a.txt'), 'a');
+      git('add', '.');
+      git('commit', '-qm', 'init');
+      const head = git('rev-parse', 'HEAD');
+      const bridge = makeBridge({
+        boundWorkspace: repo,
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        // A plain producer passes no baseCommit/branch/worktree; doSpawn must
+        // capture the workspace HEAD so the commit fallback keeps a boundary.
+        const session = await bridge.spawnOrAttach({ workspaceCwd: repo });
+        expect(bridge.getSessionSummary(session.sessionId).baseCommit).toBe(
+          head,
+        );
+      } finally {
+        await bridge.shutdown();
+        await fsp.rm(repo, { recursive: true, force: true });
+      }
+    });
+
+    it('does not recompute the start commit when attaching after HEAD moves (R5-1 ordering)', async () => {
+      // The capture is safe only because it sits after the attach/coalesce
+      // early returns: a second spawnOrAttach attaches to the existing session
+      // and must NOT re-read the (now moved) HEAD over the recorded start.
+      const repo = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'bridge-base-attach-')),
+      );
+      const gitEnv = {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        GIT_AUTHOR_NAME: 'T',
+        GIT_AUTHOR_EMAIL: 't@e',
+        GIT_COMMITTER_NAME: 'T',
+        GIT_COMMITTER_EMAIL: 't@e',
+      };
+      const git = (...args: string[]) =>
+        execFileSync('git', args, {
+          cwd: repo,
+          encoding: 'utf8',
+          env: gitEnv,
+        }).trim();
+      git('init', '-q', '-b', 'main');
+      await fsp.writeFile(path.join(repo, 'a.txt'), 'a');
+      git('add', '.');
+      git('commit', '-qm', 'init');
+      const start = git('rev-parse', 'HEAD');
+      const bridge = makeBridge({
+        boundWorkspace: repo,
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: repo });
+        expect(bridge.getSessionSummary(session.sessionId).baseCommit).toBe(
+          start,
+        );
+        // HEAD moves past the recorded start.
+        await fsp.writeFile(path.join(repo, 'b.txt'), 'b');
+        git('add', '.');
+        git('commit', '-qm', 'later work');
+        const moved = git('rev-parse', 'HEAD');
+        expect(moved).not.toBe(start);
+        // Attaching again coalesces to the same session; the start is immutable.
+        const again = await bridge.spawnOrAttach({ workspaceCwd: repo });
+        expect(again.sessionId).toBe(session.sessionId);
+        expect(bridge.getSessionSummary(session.sessionId).baseCommit).toBe(
+          start,
+        );
+      } finally {
+        await bridge.shutdown();
+        await fsp.rm(repo, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps the creation start S across a worktree visit and hand-back (R6-1 lifecycle)', async () => {
+      // Real bridge + real git, two distinct commits: the session starts at S,
+      // commits to T, hands off into a worktree whose creation tip is T, then
+      // hands back. The session start S must survive the whole lifecycle — the
+      // worktree meta carries T, but the fill-only promotion on hand-back must
+      // not overwrite S, and clearing the worktree must leave S as the boundary.
+      const repo = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'bridge-r61-life-')),
+      );
+      const gitEnv = {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        GIT_AUTHOR_NAME: 'T',
+        GIT_AUTHOR_EMAIL: 't@e',
+        GIT_COMMITTER_NAME: 'T',
+        GIT_COMMITTER_EMAIL: 't@e',
+      };
+      const git = (...args: string[]) =>
+        execFileSync('git', args, {
+          cwd: repo,
+          encoding: 'utf8',
+          env: gitEnv,
+        }).trim();
+      git('init', '-q', '-b', 'main');
+      await fsp.writeFile(path.join(repo, 'a.txt'), 'a');
+      git('add', '.');
+      git('commit', '-qm', 'session start');
+      const S = git('rev-parse', 'HEAD');
+      const bridge = makeBridge({
+        boundWorkspace: repo,
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        // The session starts at S; the pre-handoff work T is committed AFTER
+        // creation, so the recorded start must stay S even though HEAD moves.
+        const session = await bridge.spawnOrAttach({ workspaceCwd: repo });
+        expect(bridge.getSessionSummary(session.sessionId).baseCommit).toBe(S);
+        await fsp.writeFile(path.join(repo, 'b.txt'), 'b');
+        git('add', '.');
+        git('commit', '-qm', 'pre-handoff work');
+        const T = git('rev-parse', 'HEAD');
+        expect(T).not.toBe(S);
+        // Hand off into a worktree created at the current tip T.
+        bridge.setSessionWorktree(session.sessionId, {
+          slug: 'wt',
+          path: path.join(repo, '.wt'),
+          branch: '',
+          baseCommit: T,
+          baseBranch: 'main',
+        });
+        const inWorktree = bridge.getSessionSummary(session.sessionId);
+        expect(inWorktree.baseCommit).toBe(S);
+        expect(inWorktree.worktree?.baseCommit).toBe(T);
+        // Hand back: promote the worktree base (fill-only) then clear the meta.
+        bridge.setSessionBaseCommit?.(session.sessionId, T);
+        bridge.clearSessionWorktree?.(session.sessionId);
+        const backLocal = bridge.getSessionSummary(session.sessionId);
+        expect(backLocal.worktree).toBeUndefined();
+        expect(backLocal.baseCommit).toBe(S);
+      } finally {
+        await bridge.shutdown();
+        await fsp.rm(repo, { recursive: true, force: true });
+      }
+    });
+
+    it('does not promote over a branch session recorded start (R7-1)', async () => {
+      // A branch session records its start on branch.baseCommit and has no
+      // top-level value. The fill-only guard must treat that as already
+      // recorded: hand-back promotes the worktree tip T, but the top-level
+      // field must stay undefined so the summary-first hook falls through to
+      // branch.baseCommit S (installing T top-level would empty the window).
+      const repo = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'bridge-r71-branch-')),
+      );
+      const gitEnv = {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        GIT_AUTHOR_NAME: 'T',
+        GIT_AUTHOR_EMAIL: 't@e',
+        GIT_COMMITTER_NAME: 'T',
+        GIT_COMMITTER_EMAIL: 't@e',
+      };
+      const git = (...args: string[]) =>
+        execFileSync('git', args, {
+          cwd: repo,
+          encoding: 'utf8',
+          env: gitEnv,
+        }).trim();
+      git('init', '-q', '-b', 'main');
+      await fsp.writeFile(path.join(repo, 'a.txt'), 'a');
+      git('add', '.');
+      git('commit', '-qm', 'session start');
+      const S = git('rev-parse', 'HEAD');
+      await fsp.writeFile(path.join(repo, 'b.txt'), 'b');
+      git('add', '.');
+      git('commit', '-qm', 'pre-handoff work');
+      const T = git('rev-parse', 'HEAD');
+      const bridge = makeBridge({
+        boundWorkspace: repo,
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({
+          workspaceCwd: repo,
+          branch: { name: 'feat', baseBranch: 'main', baseCommit: S },
+        });
+        const created = bridge.getSessionSummary(session.sessionId);
+        expect(created.baseCommit).toBeUndefined();
+        expect(created.branch?.baseCommit).toBe(S);
+        bridge.setSessionWorktree(session.sessionId, {
+          slug: 'wt',
+          path: path.join(repo, '.wt'),
+          branch: '',
+          baseCommit: T,
+          baseBranch: 'main',
+        });
+        bridge.setSessionBaseCommit?.(session.sessionId, T);
+        bridge.clearSessionWorktree?.(session.sessionId);
+        const back = bridge.getSessionSummary(session.sessionId);
+        expect(back.baseCommit).toBeUndefined();
+        expect(back.branch?.baseCommit).toBe(S);
+      } finally {
+        await bridge.shutdown();
+        await fsp.rm(repo, { recursive: true, force: true });
+      }
+    });
+
+    it('still fills the boundary for a worktree-created session on hand-back (R7-1 constraint)', async () => {
+      // A worktree-created session has only worktree.baseCommit (no top-level,
+      // no branch). The guard must NOT gate on worktree.baseCommit (this runs
+      // before clearSessionWorktree), so the promotion still fills its boundary.
+      const repo = await fsp.realpath(
+        await fsp.mkdtemp(path.join(os.tmpdir(), 'bridge-r71-wt-')),
+      );
+      const gitEnv = {
+        ...process.env,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        GIT_AUTHOR_NAME: 'T',
+        GIT_AUTHOR_EMAIL: 't@e',
+        GIT_COMMITTER_NAME: 'T',
+        GIT_COMMITTER_EMAIL: 't@e',
+      };
+      const git = (...args: string[]) =>
+        execFileSync('git', args, {
+          cwd: repo,
+          encoding: 'utf8',
+          env: gitEnv,
+        }).trim();
+      git('init', '-q', '-b', 'main');
+      await fsp.writeFile(path.join(repo, 'a.txt'), 'a');
+      git('add', '.');
+      git('commit', '-qm', 'session start');
+      const S = git('rev-parse', 'HEAD');
+      const bridge = makeBridge({
+        boundWorkspace: repo,
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({
+          workspaceCwd: repo,
+          worktree: {
+            slug: 'wt',
+            path: path.join(repo, '.wt'),
+            branch: '',
+            baseCommit: S,
+            baseBranch: 'main',
+          },
+        });
+        const created = bridge.getSessionSummary(session.sessionId);
+        expect(created.baseCommit).toBeUndefined();
+        expect(created.worktree?.baseCommit).toBe(S);
+        bridge.setSessionBaseCommit?.(session.sessionId, S);
+        bridge.clearSessionWorktree?.(session.sessionId);
+        const back = bridge.getSessionSummary(session.sessionId);
+        expect(back.worktree).toBeUndefined();
+        expect(back.baseCommit).toBe(S);
+      } finally {
+        await bridge.shutdown();
+        await fsp.rm(repo, { recursive: true, force: true });
+      }
+    });
+
     it('advances on a persisted-only branch without a live registration', async () => {
       const handle = makeChannel({
         extMethodImpl: (method) => {
@@ -33427,6 +34281,81 @@ describe('createAcpSessionBridge', () => {
         v: 2,
         sessionId: session.sessionId,
         pr: { number: 77, url },
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      expect(bridge.getSessionCatalogVersion()).toEqual(before);
+      await bridge.shutdown();
+    });
+  });
+
+  describe('extNotification — session goal changed', () => {
+    const goalChangedFactory =
+      (capture: (conn: AgentSideConnection) => void): ChannelFactory =>
+      async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        capture(new AgentSideConnection(() => new FakeAgent(), agentStream));
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+
+    it('marks the session catalog when a child reports a goal transition', async () => {
+      // The child persists the goal sidecar itself; the notification is a
+      // pure catalog-clock mark (no projection values travel here).
+      let capturedConn: AgentSideConnection | undefined;
+      const bridge = makeBridge({
+        channelFactory: goalChangedFactory((c) => (capturedConn = c)),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const before = bridge.getSessionCatalogVersion();
+
+      void capturedConn!.extNotification('qwen/notify/session/goal-changed', {
+        v: 1,
+        sessionId: session.sessionId,
+      });
+
+      const deadline = Date.now() + 2000;
+      while (
+        bridge.getSessionCatalogVersion().revision <= before.revision &&
+        Date.now() < deadline
+      ) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(bridge.getSessionCatalogVersion().revision).toBeGreaterThan(
+        before.revision,
+      );
+      await bridge.shutdown();
+    });
+
+    it('drops malformed goal-changed payloads without marking the catalog', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const bridge = makeBridge({
+        channelFactory: goalChangedFactory((c) => (capturedConn = c)),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const before = bridge.getSessionCatalogVersion();
+
+      void capturedConn!.extNotification('qwen/notify/session/goal-changed', {
+        v: 1,
+        // missing sessionId
+      });
+      void capturedConn!.extNotification('qwen/notify/session/goal-changed', {
+        v: 1,
+        sessionId: '',
+      });
+      void capturedConn!.extNotification('qwen/notify/session/goal-changed', {
+        v: 2,
+        sessionId: session.sessionId,
+      });
+      void capturedConn!.extNotification('qwen/notify/session/goal-changed', {
+        v: 1,
+        sessionId: 'not-owned-session',
       });
       await new Promise((r) => setTimeout(r, 30));
       expect(bridge.getSessionCatalogVersion()).toEqual(before);

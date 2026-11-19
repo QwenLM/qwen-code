@@ -198,6 +198,7 @@ export type {
   DaemonInputAnnotation,
   DaemonInputReference,
   DaemonInputReferenceAnnotation,
+  DaemonInputSourceAnnotation,
   DaemonResourceLink,
   DaemonTextTranscriptBlock,
   DaemonTextDeltaMeta,
@@ -244,6 +245,7 @@ export type {
   DaemonUiSessionAvailableCommandsEvent,
   DaemonUiSessionMetadataChangedEvent,
   DaemonUiSessionSourceChangedEvent,
+  DaemonUiSessionSubSessionTaskChangedEvent,
   DaemonUiShellOutputEvent,
   DaemonUiStateResyncRequiredEvent,
   DaemonUiReplayCompleteEvent,
@@ -279,6 +281,8 @@ export type {
   DaemonSourceChangedEvent,
   DaemonArtifactChangedData,
   DaemonArtifactChangedEvent,
+  DaemonSubSessionTaskChangedEvent,
+  DaemonSubSessionTaskChangedData,
   DaemonApprovalModeChangedData,
   DaemonApprovalModeChangedEvent,
   DaemonClientEvictedData,
@@ -641,6 +645,8 @@ export type {
   DaemonSideTaskSession,
   DaemonForkSessionResult,
   ForkSessionRequest,
+  SendToSubSessionRequest,
+  DaemonSubSessionSendResult,
   SideTaskSessionRequest,
   DaemonRestoredSession,
   DaemonSession,
@@ -652,6 +658,7 @@ export type {
   DaemonBranchInfo,
   DaemonSessionIssueInfo,
   DaemonSessionPrInfo,
+  DaemonSessionGoalInfo,
   DaemonBranchPoint,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,
@@ -702,6 +709,7 @@ export type {
   DaemonWorkflowCallTrace,
   DaemonWorkflowEvent,
   DaemonWorkflowPhaseVisit,
+  DaemonWorkflowPlannedPhase,
   DaemonSessionProcessTaskLifecycleStatus,
   DaemonSessionContextUsage,
   DaemonSessionContextUsageStatus,
@@ -749,6 +757,7 @@ export type {
   DaemonSessionTaskStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
+  DaemonSessionSubSessionTaskStatus,
   DaemonSessionAgentsStatus,
   DaemonAgentTrace,
   DaemonAgentTraceNode,
@@ -972,6 +981,7 @@ export {
 export type {
   QwenAgentMessageMeta,
   SessionAgentAuthor,
+  SessionMessageTarget,
   SessionAgentChangedFrame,
   SessionAgentEventFrame,
   SessionAgentPermissionPrompt,
@@ -1026,3 +1036,15 @@ export type {
   ToolLifecycleEntry,
   ToolLifecycleState,
 } from './ui/tool-lifecycle.js';
+
+export {
+  SERVE_CAPABILITY_REGISTRY,
+  SERVE_PROTOCOL_VERSION,
+  SUPPORTED_SERVE_PROTOCOL_VERSIONS,
+} from './capabilities.js';
+export type {
+  ServeCapabilityDescriptor,
+  ServeFeature,
+  ServeProtocolVersion,
+  ServeProtocolVersions,
+} from './capabilities.js';
