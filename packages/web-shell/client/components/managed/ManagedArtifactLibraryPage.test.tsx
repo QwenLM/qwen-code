@@ -50,6 +50,16 @@ function page(
   };
 }
 
+function pendingPage() {
+  let resolve!: (value: ReturnType<typeof page>) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<ReturnType<typeof page>>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('ManagedArtifactLibraryPage', () => {
   let root: Root;
   let container: HTMLDivElement;
@@ -287,6 +297,87 @@ describe('ManagedArtifactLibraryPage', () => {
     );
     expect(document.body.textContent).toContain('boom');
   });
+
+  it.each(['initial', 'cursor'])(
+    'aborts the pending %s page on unmount',
+    async (kind) => {
+      const list = vi.mocked(library.listArtifacts);
+      if (kind === 'cursor')
+        list.mockResolvedValueOnce(page([artifact], true, 'page-2'));
+      list.mockReturnValueOnce(pendingPage().promise);
+      await render();
+      if (kind === 'cursor') await click('Load more');
+      const signal = list.mock.lastCall![1].signal;
+      expect(signal?.aborted).toBe(false);
+      await act(async () => root.render(null));
+      expect(signal?.aborted).toBe(true);
+    },
+  );
+
+  it.each(['success', 'failure'])(
+    'ignores late first-page %s after a refresh',
+    async (outcome) => {
+      const stale = pendingPage();
+      vi.mocked(library.listArtifacts)
+        .mockReturnValueOnce(stale.promise)
+        .mockResolvedValueOnce(page([other]));
+      await render();
+      await click('Refresh');
+      await act(async () => {
+        if (outcome === 'success') stale.resolve(page([artifact]));
+        else stale.reject(new Error('stale request'));
+      });
+      expect(row(other.id)?.getAttribute('aria-pressed')).toBe('true');
+      expect(row(artifact.id)).toBeUndefined();
+      expect(document.querySelector('[role="alert"]')).toBeNull();
+    },
+  );
+
+  it.each(['success', 'failure'])(
+    'resets the paged list on refresh and ignores late cursor %s',
+    async (outcome) => {
+      const stale = pendingPage();
+      const fresh = pendingPage();
+      vi.mocked(library.listArtifacts)
+        .mockResolvedValueOnce(page([artifact], true, 'page-2'))
+        .mockResolvedValueOnce(page([other], true, 'page-3'))
+        .mockReturnValueOnce(stale.promise)
+        .mockReturnValueOnce(fresh.promise);
+      await render();
+      await click('Load more');
+      await act(async () => row(other.id).click());
+      expect(row(other.id).getAttribute('aria-pressed')).toBe('true');
+      expect(document.body.textContent).toContain(
+        'Original output is not available to your account.',
+      );
+      await click('Load more');
+      await click('Refresh');
+      expect(library.listArtifacts).toHaveBeenNthCalledWith(4, 'ws-1', {
+        clientId: 'client',
+        limit: 50,
+        signal: expect.any(AbortSignal),
+      });
+      expect(document.querySelector('button[aria-pressed]')).toBeNull();
+      expect(document.body.textContent).not.toContain('Load more');
+      expect(document.body.textContent).not.toContain(
+        'Original output is not available to your account.',
+      );
+
+      await act(async () => {
+        if (outcome === 'success')
+          stale.resolve(page([other], true, 'stale-cursor'));
+        else stale.reject(new Error('stale cursor request'));
+      });
+      expect(document.querySelector('[role="alert"]')).toBeNull();
+      expect(document.querySelector('button[aria-pressed]')).toBeNull();
+      expect(document.body.textContent).not.toContain('Load more');
+      expect(document.querySelector('[role="status"]')).not.toBeNull();
+
+      await act(async () => fresh.resolve(page([artifact])));
+      expect(row(artifact.id).getAttribute('aria-pressed')).toBe('true');
+      expect(row(other.id)).toBeUndefined();
+    },
+  );
 
   it('refreshes the page and closes on demand', async () => {
     await render();
