@@ -2,6 +2,12 @@
 
 [English](2026-11-15-opentui-stats-history.md) | [简体中文](2026-11-15-opentui-stats-history.zh-CN.md)
 
+## 验证记录——2026-11-19（验证门禁修复）
+
+本轮合入`origin/main`（`457656e0`）并修复确定性门禁的拒绝项；该拒绝是`packages/cli`套件红灯，而非stats缺陷：hosted-harness的idle-suspension用例对把冷打开的会话留活，于是该会话的idle定时器在下一个用例期间触发，并通过下一个用例的prototype级Broker mock排空它自己的MCP配置，使drain用例数到两次release而不是一次。该用例现在对冷打开的会话做终态关闭，从而解除定时器。该缺陷属于main而非本移植：失败测试的import闭包共1793个模块，不含本PR改动的任何源码文件。合并后的树上构建、类型检查、lint、i18n语言包门禁与格式检查均通过。相关CLI套件通过140项测试（stats服务、原生历史、历史hook、对话框frame、对话框挂载、Settings）与125项（i18n、Ink stats标签页）；区间基准在`TZ=Etc/GMT+12`下通过19项；修复后的hosted-harness文件全部859项通过。teardown有见证：把竞态窗口放宽后，去掉终态关闭该用例对变红，保留则保持绿。
+
+A–D组公开leg、几何重放与OpenTUI集成leg本轮未重跑（集成leg需要本runner不具备的bun）；合入验收前需重跑。
+
 ## 验证记录——2026-11-19（切换范围重置月份）
 
 本轮合入`origin/main`（`a8f43b92`）并修复评审的Critical：循环`r`会重置月份索引，因此切换范围不会让Activity热力图停在新范围按键无法离开的月份。tab栏冲突的解决保留本移植的compact换行header，宽视图按tab逐个渲染text节点，从而把main的screen-reader选中/未选中tab id保留在presentation实际读取的节点上；历史hook fixture补上main新增的必填`userPromptCount`字段。合并后的树上构建、类型检查、lint、i18n语言包门禁与格式检查均通过。相关CLI套件通过140项测试（stats服务、原生历史、历史hook、对话框frame、对话框挂载、Settings），第二批通过125项（i18n、Ink stats标签页）。六个变异见证在各自守卫被移除时变红：切换范围重置、热力图坐标标签前缀、两处本地化调用点（`peak {{value}}`、`{{count}} more`），以及宽视图按tab与compact的screen-reader id。

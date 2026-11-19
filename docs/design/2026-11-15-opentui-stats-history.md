@@ -2,6 +2,12 @@
 
 [English](2026-11-15-opentui-stats-history.md) | [简体中文](2026-11-15-opentui-stats-history.zh-CN.md)
 
+## Validation checkpoint — 2026-11-19 (verification repair)
+
+This round merges `origin/main` (`457656e0`) and repairs the deterministic gate rejection, which was a red `packages/cli` suite rather than a stats defect: the hosted-harness idle-suspension pair left its cold-opened session live, so that session's idle timer fired during the following case and drained its own MCP configuration through the next case's prototype-level Broker mock, giving the drain case two releases instead of one. The case now closes its cold-opened session terminally, which disarms the timer. The defect belongs to main, not to this port: the failing test's import closure spans 1793 modules and contains none of this PR's changed source files. Build, typecheck, lint, the i18n catalog gate and formatting passed on the merged tree. The focused CLI suites passed 140 tests (stats service, native history, history hook, dialog frame, dialog mount, Settings) and 125 (i18n, Ink stats tabs); the range golden passed 19 under `TZ=Etc/GMT+12`; the repaired hosted-harness file passed all 859. The teardown is witnessed: with the race window widened, the pair reds without the terminal close and stays green with it.
+
+The public Groups A–D legs, the geometry replay and the OpenTUI integration leg were not re-run here (the integration leg needs bun, which this runner lacks); re-run them before merge acceptance.
+
 ## Validation checkpoint — 2026-11-19 (range-change month reset)
 
 This round merges `origin/main` (`a8f43b92`) and fixes the review's Critical: cycling `r` resets the month index, so a range change cannot leave the Activity heatmap on a month the new range's keys cannot leave. The tab-bar conflict keeps the port's compact wrapped header and paints the wide header as one text node per tab, preserving main's screen-reader selected/unselected tab ids on nodes the presentation reads; the history-hook fixture gains main's new required `userPromptCount` field. Build, typecheck, lint, the i18n catalog gate and formatting passed on the merged tree. Focused CLI suites passed 140 tests (stats service, native history, history hook, dialog frame, dialog mount, Settings) and a second batch passed 125 (i18n, Ink stats tabs). Six mutation witnesses red when their guard is removed: the range-change reset, the heatmap axis-label prefix, the two localized call sites (`peak {{value}}`, `{{count}} more`), and the wide per-tab and compact screen-reader ids.
