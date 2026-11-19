@@ -11590,7 +11590,7 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/mod-row',
     mutate(),
-    withOwnerMutableSession(
+    withOwnerReadSession(
       'POST /session/:id/mod-row',
       async (req, res, sessionId, runtime) => {
         const parsed = modRowInput.safeParse(safeBody(req));
@@ -11603,15 +11603,21 @@ export function registerSessionRoutes(
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        res
-          .status(200)
-          .json(
-            await runtime.bridge.askSessionModRow(
-              sessionId,
-              parsed.data,
-              clientId !== undefined ? { clientId } : undefined,
-            ),
-          );
+        // Guard admission without making an explicit close wait for a render.
+        const { answer } = await archiveCoordinator.runSharedMany(
+          [sessionId],
+          async () => {
+            runtime.generationGuard?.assertOpen();
+            return {
+              answer: runtime.bridge.askSessionModRow(
+                sessionId,
+                parsed.data,
+                clientId !== undefined ? { clientId } : undefined,
+              ),
+            };
+          },
+        );
+        res.status(200).json(await answer);
       },
     ),
   );

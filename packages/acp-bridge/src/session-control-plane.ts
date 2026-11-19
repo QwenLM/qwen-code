@@ -8418,7 +8418,15 @@ export function createSessionControlPlane(
           entry.events.lastEventId === lastEventId &&
           entry.events.replayProjectionWatermark === projectionWatermark
         ) {
-          let compactedReplay = page.events;
+          const lifecycleSnapshot = entry.events.snapshotReplay();
+          // Mod logs live only in the event bus. Keep them in each replay
+          // section without splicing them into the persisted record order.
+          const compactedModLogs = lifecycleSnapshot?.compactedTurns.filter(
+            (event) => event.type === 'mod_log',
+          );
+          let compactedReplay = compactedModLogs?.length
+            ? page.events.concat(compactedModLogs)
+            : page.events;
           const turnErrorEvent = entry.turnErrorEvent;
           if (turnErrorEvent) {
             // Append only while no newer turn content was journaled after
@@ -8431,15 +8439,19 @@ export function createSessionControlPlane(
             // journal holds exactly the events published since the last
             // turn boundary (the terminal itself folds into the replay
             // window), so no history scan is needed.
-            const journal = entry.events.liveJournalSnapshot() ?? [];
+            const journal = lifecycleSnapshot?.liveJournal ?? [];
             const hasNewerTurnContent = journal.some(
               isRefreshAppendTurnContent,
             );
             if (!hasNewerTurnContent) {
-              compactedReplay = [...page.events, turnErrorEvent];
+              compactedReplay = [...compactedReplay, turnErrorEvent];
             }
           }
-          const lifecycleSnapshot = entry.events.snapshotReplay();
+          const liveJournal = (
+            liveReplayMode === 'summary'
+              ? entry.events.liveJournalSnapshot('summary')
+              : lifecycleSnapshot?.liveJournal
+          )?.filter((event) => event.type === 'mod_log');
           const lifecycleReplay: BridgeEvent[] = [];
           let lifecycleReplayIncomplete =
             lifecycleSnapshot === undefined ||
@@ -8490,7 +8502,7 @@ export function createSessionControlPlane(
           }
           return {
             compactedReplay,
-            liveJournal: [],
+            liveJournal: liveJournal ?? [],
             lifecycleReplay,
             lifecycleReplayIncomplete,
             lastEventId,
@@ -15442,9 +15454,7 @@ export function createSessionControlPlane(
     async askSessionModRow(sessionId, row, _context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
-      const info = channelInfoForEntry(entry);
-      if (!info || info.harness.isDying)
-        throw new SessionNotFoundError(sessionId);
+      assertAttachableSessionEntry(sessionId, entry);
       const endSideRequest = beginSideRequest(entry);
       try {
         return (await raceLongLived(

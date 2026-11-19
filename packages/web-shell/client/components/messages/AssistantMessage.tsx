@@ -152,7 +152,8 @@ export const AssistantMessage = memo(function AssistantMessage({
         if (!body) return;
         const range = body.ownerDocument.createRange();
         range.selectNodeContents(body);
-        value = getSelectedReplyText(body, range) ?? content;
+        const extracted = getSelectedReplyText(body, range);
+        value = extracted && extracted.trim() ? extracted : content;
       }
       void writeClipboardText(value)
         .then(format === 'text' ? flashCopied : flashMarkdownCopied)

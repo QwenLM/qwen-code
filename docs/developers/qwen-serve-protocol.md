@@ -4455,12 +4455,12 @@ Request body:
 }
 ```
 
-The child checks that `props` holds exactly the site's props with their kinds and builds the event's envelope itself: `surface: 'desktop'`, and a `requestId` digested from the component and props, so the same props are the same row for every client. Rows render one at a time in the session's Mod dispatch queue, each within 30 seconds; an answer is kept, so a second client or a reload is answered without running the hooks again. Non-strict mutation gate, as for `/session/:id/recap`: the call can cost model tokens, since a hook may call `$.model.complete`, and mutates no state. The row and its answer publish no SSE event; a hook that logs with `$.ui.log` publishes the usual `mod_log`.
+The child validates the site's prop names and types. It builds the event envelope with `surface: 'desktop'` and a `requestId` derived from the component and props, so clients share a row identity. Rows render one at a time in the session's Mod queue, with a 30-second deadline per render. The session can serve a cached answer after a reload or to a second client. The route uses the non-strict mutation gate because a hook can spend model tokens with `$.model.complete`. Rendering leaves the stored conversation intact. A hook that calls `$.ui.log` publishes the usual `mod_log` SSE event.
 
 Response (200), one of:
 
 - `{ "status": "unhooked" }` — no hook in this session hears the site (Mods off, failed to load, or none hooked it). Ask the session no more for this site.
-- `{ "status": "unanswered" }` — the hooks did not answer within the child's 60 seconds, or the session moved on (`/clear`). Draw the row as it is; ask again later.
+- `{ "status": "unanswered" }` — the hooks did not answer within the child's 60 seconds, or the session changed (`/clear`) or closed during the render. Draw the row as it is and retry later if the session is still live.
 - `{ "status": "answered", "props": { … } }` — draw `props`, which the hooks rewrote; without `props`, draw the row as it is.
 
 Errors:
@@ -4469,7 +4469,7 @@ Errors:
 - `400 {code: 'invalid_client_id'}` — malformed `X-Qwen-Client-Id` header.
 - `404` — session unknown or not live.
 
-Cancellation: none. The client sends one ask at a time per session, so an abandoned ask costs at most the one row it named; the bridge's backstop is 75 seconds. ACP-over-HTTP clients have no mapping for this route.
+An explicit session close can interrupt rendering. An HTTP disconnect leaves the request running, with a 75-second bridge backstop. The Web Shell sends one request at a time per session. ACP-over-HTTP clients have no mapping for this route.
 
 ### `POST /session/:id/generate`
 

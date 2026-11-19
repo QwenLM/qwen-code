@@ -112,11 +112,23 @@ it('classifies main replies and preserves continuation across thoughts and Mod l
     { ...reply('agent'), agentMessage: { kind: 'agent_message' } },
     { ...reply('local'), localCommandId: 'local-command' },
     reply('afterNonReplies'),
+    {
+      id: 'background-start',
+      role: 'system',
+      variant: 'info',
+      source: 'background_notification_turn_started',
+      content: 'Processing background results',
+    },
+    {
+      ...reply('background-answer'),
+      source: 'background_notification_response',
+    },
   ];
   expect([...modReplyRows(messages)]).toEqual([
     ['first', true],
     ['continuation', false],
     ['afterTool', true],
     ['afterNonReplies', true],
+    ['background-answer', true],
   ]);
 });

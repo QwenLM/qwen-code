@@ -57,11 +57,11 @@ The answer says one of three things. No hook in the session hears the site, and 
 
 ### What is a reply row
 
-The Web Shell offers the assistant messages that hold the model's reply. It does not offer command output (a block with a `meta.source`), a workspace agent's reply, a local command's output, or a subagent's text, which it draws inside the tool card. `isFirstOfReply` is true unless the message before it, thinking aside, is reply text too. The Web Shell keeps no response boundary, so this follows OpenTUI, which flags only a known continuation. The page draws the rewrite in the message's Markdown only; copying, search and branching keep the original, as `/copy` does in the terminals. A row keeps its answer after it scrolls away, so the rows above the viewport keep their height.
+The Web Shell offers assistant messages that hold the model's reply, including replies to background notifications. It excludes command output, a workspace agent's reply, local command output and subagent text inside tool cards. `isFirstOfReply` is true unless the preceding message is also reply text, skipping thinking and Mod log lines. The Web Shell keeps no response boundary, so this follows OpenTUI, which flags only a known continuation. The page draws the rewrite in the message's Markdown only. Copying, search and branching use the original, as `/copy` does in the terminals. A row keeps its answer after it scrolls away, so the rows above the viewport keep their height.
 
 ### Logs in the transcript
 
-The SDK knows the `mod_log` event and turns each into an informational line, `[Mod <plugin>] <text>`, as the terminals print it. A line does not end the reply block it arrives during; it sits below it. As in the terminals, the lines are not saved with the session: a page reloaded while the daemon holds the session replays them from the session's event history, and a session loaded again from disk shows none.
+The SDK shows each `mod_log` as an informational line, `[Mod <plugin>] <text>`, as the terminals print it. A line sits below the reply block it arrives during. Logs also leave split answers visible when the turn is collapsed. The daemon retains logs in memory. A paged reload of a live session includes retained logs alongside the page of persisted messages. A session restored from disk starts without earlier logs.
 
 ### The setting
 
@@ -89,5 +89,5 @@ Acceptance: in the Web Shell, with `experimental.mods` on and a Mod that rewrite
 - The surface is the daemon's: a session that another daemon client drives reports `desktop` and `isInteractive: true` though no page draws it.
 - `$.ui.invalidate('ui.render')` does not redraw rows a page already holds; the page asks again only after a reload. A notification that tells pages to ask again can follow.
 - `mod_log` lines take places in the session's event ring like any other frame.
-- An ask in flight counts as the session's work, as a recap does, so idle cleanup leaves the session open meanwhile and the session reads as active until the row is answered.
+- An ask in flight counts as session work for idle cleanup. An explicit close can cancel it while the hook waits for a model.
 - A `Thinking` hook in a Web Shell session loads without the "will not run" diagnostic, because the session raises `ui.render` for reply rows, and is not called until thinking rows land.

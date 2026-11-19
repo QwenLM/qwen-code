@@ -8384,6 +8384,86 @@ describe('createAcpSessionBridge', () => {
     },
   );
 
+  it.each(['full', 'summary'] as const)(
+    'supplements a persisted page with retained Mod logs in %s replay',
+    async (liveReplayMode) => {
+      const persisted: BridgeEvent = {
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'persisted prompt' },
+        },
+      };
+      const handle = makeChannel({
+        promptImpl: async ({ sessionId }) => {
+          await handle.agentConnection.extNotification(
+            'qwen/notify/session/mod-log',
+            { sessionId, plugin: 'mod', text: 'during turn' },
+          );
+          return { stopReason: 'end_turn' };
+        },
+        extMethodImpl: (method, params) => {
+          if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript)
+            throw new Error(`unexpected ${method}`);
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [persisted],
+            hasMore: true,
+            nextCursor: 'older-page',
+          };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const { sessionId } = session;
+        await bridge.sendPrompt(sessionId, {
+          sessionId,
+          prompt: [{ type: 'text', text: 'live prompt' }],
+        });
+        const idleLog = { sessionId, plugin: 'mod', text: 'after turn' };
+        await handle.agentConnection.extNotification(
+          'qwen/notify/session/mod-log',
+          idleLog,
+        );
+        await vi.waitFor(() => {
+          expect(
+            bridge.getSessionReplaySnapshot(sessionId)?.liveJournal,
+          ).toContainEqual(expect.objectContaining({ data: idleLog }));
+        });
+        const snapshot = bridge.getSessionReplaySnapshot(sessionId)!;
+        const refreshed = await bridge.loadSession({
+          sessionId,
+          workspaceCwd: WS_A,
+          clientId: session.clientId,
+          historyReplay: 'response',
+          historyPageSize: 100,
+          liveReplayMode,
+          compactedReplayMode: liveReplayMode,
+        });
+        expect(refreshed.compactedReplay).toEqual([
+          persisted,
+          expect.objectContaining({
+            type: 'mod_log',
+            data: { sessionId, plugin: 'mod', text: 'during turn' },
+          }),
+        ]);
+        expect(refreshed.liveJournal).toEqual([
+          expect.objectContaining({ type: 'mod_log', data: idleLog }),
+        ]);
+        expect(refreshed.historyHasMore).toBe(true);
+        expect(refreshed.lastEventId).toBe(snapshot.lastEventId);
+        expect(refreshed.eventEpoch).toBe(
+          bridge.getSessionEventEpoch(sessionId),
+        );
+      } finally {
+        await bridge.shutdown();
+      }
+    },
+  );
+
   it('supplements a persisted page with tool lifecycle metadata only', async () => {
     const handle = makeChannel({
       extMethodImpl: (method, params) => {

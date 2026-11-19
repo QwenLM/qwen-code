@@ -6,6 +6,7 @@ import TurndownService from 'turndown';
 import { WebShellCustomizationProvider } from '../../customization';
 import { getTranslator, I18nProvider } from '../../i18n';
 import { getSelectedReplyContent } from '../../utils/selectionClipboard';
+import { getSelectedReplyText as getTranscriptSelectedReplyText } from '../../utils/selectionClipboard.transcript-stub';
 import type { SessionContentGenerator } from './AssistantMessage';
 import { WebShellPortalRootContext } from '../../portalRoot';
 import styles from './AssistantMessage.module.css';
@@ -932,6 +933,30 @@ describe('AssistantMessage Markdown copy', () => {
       await act(async () => button.click());
       expect(writeText).toHaveBeenCalledWith(content);
       expect(writeText).not.toHaveBeenCalledWith('');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('copies the raw source when the read-only transcript extracts an empty string', async () => {
+    vi.spyOn(
+      await import('../../utils/selectionClipboard'),
+      'getSelectedReplyText',
+    ).mockImplementation(getTranscriptSelectedReplyText);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('navigator', { clipboard: { writeText } });
+    try {
+      const content = '![diagram](https://example.com/diagram.png)';
+      const container = render(
+        <AssistantMessage content={content} showFooterActions />,
+        'en',
+        'readonly',
+      );
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Copy content"]',
+      )!;
+      await act(async () => button.click());
+      expect(writeText).toHaveBeenCalledWith(content);
     } finally {
       vi.unstubAllGlobals();
     }

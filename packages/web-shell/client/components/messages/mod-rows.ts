@@ -131,7 +131,8 @@ export function modReplyRows(
       continue;
     const isReply =
       message.role === 'assistant' &&
-      message.source === undefined &&
+      (message.source === undefined ||
+        message.source === 'background_notification_response') &&
       message.agentMessage === undefined &&
       message.author === undefined &&
       message.localCommandId === undefined;

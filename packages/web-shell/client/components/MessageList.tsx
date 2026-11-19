@@ -843,6 +843,9 @@ function findAnswerStartIndex(
   for (let i = answerIdx - 1; i > start; i--) {
     const item = items[i]!;
     if (item.type !== 'message') break;
+    if (item.message.role === 'system' && item.message.source === 'mod_log') {
+      continue;
+    }
     if (
       item.message.role === 'system' &&
       item.message.source === 'background_task_completed'

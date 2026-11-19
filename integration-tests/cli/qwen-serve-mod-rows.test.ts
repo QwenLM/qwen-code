@@ -73,14 +73,34 @@ describe('Mod rows through the daemon', () => {
             + JSON.stringify(await $.session.surfaces()));
           return next(e);
         });
-        on('ui.render', { component: 'AssistantMessage' }, ($, e, next) =>
-          next({ ...e, props: { ...e.props, text: 'zh ' + ++renders + ': ' + e.props.text } }));
+        on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+          if (e.props.text === 'Answer 2') {
+            await $.model.complete({ model: 'sonnet', prompt: 'Wait for Mod render', timeoutMs: 25000 });
+          }
+          return next({ ...e, props: { ...e.props, text: 'zh ' + ++renders + ': ' + e.props.text } });
+        });
       }`,
     );
 
-    const fakeModel = await startFakeOpenAIServer(({ body }) =>
-      body['stream'] === true ? { content: 'Answer 1' } : { content: '{}' },
-    );
+    let releaseRender!: () => void;
+    const renderGate = new Promise<void>((resolve) => {
+      releaseRender = resolve;
+    });
+    let waitingForRewrite = false;
+    const fakeModel = await startFakeOpenAIServer(async ({ body }) => {
+      const messages = JSON.stringify(body['messages'] ?? []);
+      if (messages.includes('Wait for Mod render')) {
+        waitingForRewrite = true;
+        await renderGate;
+        return { content: 'Rewritten answer' };
+      }
+      if (body['stream'] !== true) return { content: '{}' };
+      return {
+        content: messages.includes('Produce another reply')
+          ? 'Answer 2'
+          : 'Answer 1',
+      };
+    });
     const env = {
       HOME: home,
       USERPROFILE: home,
@@ -214,7 +234,50 @@ describe('Mod rows through the daemon', () => {
           text: 'start desktop true ["desktop"]',
         },
       ]);
+
+      const paged = await client.loadSession(session.sessionId, {
+        workspaceCwd: workspace,
+        historyPageSize: 200,
+      });
+      expect(
+        [...(paged.compactedReplay ?? []), ...(paged.liveJournal ?? [])]
+          .filter((event) => event.type === 'mod_log')
+          .map((event) => event.data),
+      ).toEqual(logs);
+
+      expect(
+        (
+          await client.prompt(
+            session.sessionId,
+            { prompt: [{ type: 'text', text: 'Produce another reply' }] },
+            AbortSignal.timeout(60_000),
+            session.clientId,
+          )
+        ).stopReason,
+      ).toBe('end_turn');
+      const pendingRow = client
+        .askSessionModRow(
+          session.sessionId,
+          {
+            component: 'AssistantMessage',
+            props: { text: 'Answer 2', isFirstOfReply: true },
+          },
+          asked,
+        )
+        .then(
+          (answer) => ({ answer }),
+          (error: unknown) => ({ error }),
+        );
+      await expect
+        .poll(() => waitingForRewrite, { timeout: 10_000 })
+        .toBe(true);
+      await client.closeSession(session.sessionId, session.clientId);
+      expect(await pendingRow).toEqual({ answer: { status: 'unanswered' } });
+      await expect(
+        client.askSessionModRow(session.sessionId, row(true)),
+      ).rejects.toMatchObject({ status: 404 });
     } finally {
+      releaseRender();
       await daemon?.dispose();
       await fakeModel.close();
       rmSync(root, { recursive: true, force: true });
