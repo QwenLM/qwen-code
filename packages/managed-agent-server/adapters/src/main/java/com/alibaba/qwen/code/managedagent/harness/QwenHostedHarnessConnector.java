@@ -452,10 +452,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             if (WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)) {
                 return isWorkspaceFilesAvailable() && supportsSavedLifecycle(profile);
             }
-            return WorkspaceToolProfiles.FILES.equals(profile)
-                    ? isWorkspaceFilesAvailable() && client().capabilities().getLifecycleProtocolVersion() == 1
-                    : WorkspaceToolProfiles.lifecycleProtocol(profile) == 2
-                            && client().capabilities().getLifecycleV2Profiles().contains(profile);
+            // D3: ordinary files joins the v2 profiles, keeping its availability
+            // gate; external-files stays on the saved v1 path above.
+            if (WorkspaceToolProfiles.FILES.equals(profile) && !isWorkspaceFilesAvailable()) {
+                return false;
+            }
+            return WorkspaceToolProfiles.lifecycleProtocol(profile) == 2
+                    && client().capabilities().getLifecycleV2Profiles().contains(profile);
         } catch (DaemonException
                 | IllegalStateException unavailable) {
             return false;
@@ -825,7 +828,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     @Override
     public boolean supportsPublicChildAgents() {
         try {
-            return poolEndpoint == null && feature(HarnessFeature.PUBLIC_CHILD_AGENTS)
+            // D5′: a pooled worker that advertises the feature admits children
+            // too; the capability negotiation, not the deployment shape, gates.
+            return feature(HarnessFeature.PUBLIC_CHILD_AGENTS)
                     && supportsLifecycle(WorkspaceToolProfiles.SHELL);
         } catch (RuntimeException unavailable) {
             return false;
@@ -2532,15 +2537,24 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         "byteLength", copied.byteLength(), "digest", copied.digest()));
     }
 
-    private boolean publicChildLaunchAvailable(SessionRecord session) {
+    private boolean publicChildCapabilityAdmitted(SessionRecord session) {
         return session.publicChildAgentsVersion() == 1 && settings.admitsPublicChildAgents()
-                && supportsPublicChildAgents()
+                && supportsPublicChildAgents();
+    }
+
+    private boolean publicChildLaunchAvailable(SessionRecord session) {
+        // Only a root launches children; the depth-1 child's own launch gate
+        // stays closed even though it keeps the admitted execution surface.
+        return publicChildCapabilityAdmitted(session)
                 && sessions.findChildLineage(session.tenantId(), session.sessionId()) == null;
     }
 
     private boolean foregroundOnly(SessionRecord session) {
-        return sshWorkspace(session) && !(session.publicChildAgentsVersion() == 1
-                && settings.getExtensions().isEnabled() && settings.getManagedExtensions().isEnabled());
+        // D5′: public child Sessions keep the background surface on SSH when
+        // the deployment admits the capability — roots and their depth-1
+        // children alike, so an existing SSH child is not tightened. Incapable
+        // deployments stay foreground-only, fail-closed.
+        return sshWorkspace(session) && !publicChildCapabilityAdmitted(session);
     }
 
     private boolean sshWorkspace(SessionRecord session) {

@@ -906,7 +906,8 @@ class QwenHostedHarnessConnectorTest {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities unsupported = mock(HostedHarnessCapabilities.class);
         HostedHarnessCapabilities supported = mock(HostedHarnessCapabilities.class);
-        when(supported.getLifecycleProtocolVersion()).thenReturn(1);
+        // D3: ordinary files negotiates lifecycle v2 through the profile list.
+        when(supported.getLifecycleV2Profiles()).thenReturn(List.of("hosted-workspace-files/1"));
         when(client.capabilities()).thenReturn(unsupported, supported)
                 .thenThrow(new IllegalStateException("HostedHarnessClient is closed"));
         ManagedAgentProperties properties = properties();
@@ -1371,12 +1372,34 @@ class QwenHostedHarnessConnectorTest {
         Map<String, Object> loaded = ReflectionTestUtils.invokeMethod(load.getValue(), "toJson");
         for (var wire : List.of(created, loaded)) {
             assertThat(wire).doesNotContainKeys("childWorkspaces", "childSnapshots");
-            if (enabled && contractVersion == 1) {
+            // D5′: the admitted capability, not the extension switches, keeps
+            // the SSH public child root's child lane; a version-0 Session stays
+            // foreground-only.
+            if (contractVersion == 1) {
                 assertThat(wire).containsEntry("publicChildAgentsVersion", 1).doesNotContainKey("foregroundOnly");
             } else {
                 assertThat(wire).containsEntry("foregroundOnly", true);
             }
         }
+    }
+
+    @Test
+    void pooledEndpointAdmitsPublicChildrenWhenTheWorkerAdvertisesTheCapability() {
+        var client = mock(HostedHarnessClient.class);
+        var capabilities = mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(capabilities.getFeatures()).thenReturn(List.of("public-child-agents/1", "approval-selection/1"));
+        when(capabilities.getLifecycleV2Profiles()).thenReturn(List.of("hosted-workspace-shell/1"));
+        var connector = new QwenHostedHarnessConnector(properties(), sessions(),
+                mock(JdbcWorkspaceExecutionStore.class), mock(JdbcManagedActionStore.class), null, null, null);
+        connector.configurePool(new HarnessDiscovery.Endpoint("instance",
+                java.net.URI.create("http://127.0.0.1:1"), true), client, null, null);
+        // D5′: the deployment shape no longer gates; the negotiated capability
+        // does. A worker without the token keeps children refused.
+        assertThat(connector.supportsPublicChildAgents()).isTrue();
+        when(capabilities.getFeatures()).thenReturn(List.of("approval-selection/1"));
+        assertThat(connector.supportsPublicChildAgents()).isFalse();
     }
 
     @Test
@@ -1414,16 +1437,26 @@ class QwenHostedHarnessConnectorTest {
         ReflectionTestUtils.setField(sshForeground, "client", client);
         assertThat(sshForeground.supportsClientFiles(session)).isFalse();
 
-        // The same SSH Workspace with public child agents + extensions on is not
-        // foregroundOnly, so it is admitted.
+        // D5′: the same SSH Workspace with an admitted public child root
+        // (configuration + negotiated capability) is not foregroundOnly, so it
+        // is admitted — the extension switches no longer gate the exception.
+        when(capabilities.getFeatures()).thenReturn(List.of("client-files/1",
+                "public-child-agents/1", "approval-selection/1"));
+        when(capabilities.getLifecycleV2Profiles()).thenReturn(List.of("hosted-workspace-shell/1"));
         var childSettings = properties();
-        childSettings.getExtensions().setEnabled(true);
-        childSettings.getManagedExtensions().setEnabled(true);
+        childSettings.getHarness().setWorkspaceShellEnabled(true);
         var childSession = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null, null, "ACTIVE",
                 null, null, 0, 0, 0, 1, 1, null, 1, workspace, "default", "hosted-workspace-files/1", null, 1);
         var sshChild = new QwenHostedHarnessConnector(childSettings, sessions,
                 mock(JdbcWorkspaceExecutionStore.class), actions, null, null, ssh);
         ReflectionTestUtils.setField(sshChild, "client", client);
+        assertThat(sshChild.supportsClientFiles(childSession)).isTrue();
+        // D5′: a depth-1 child keeps the admitted surface — the relaxation
+        // must not tighten an existing SSH child — while its launch gate stays
+        // closed through the lineage conjunct of publicChildLaunchAvailable.
+        when(sessions.findChildLineage("tenant-a", SESSION_ID)).thenReturn(
+                new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(
+                        SESSION_ID, SESSION_ID, "run-1", 1));
         assertThat(sshChild.supportsClientFiles(childSession)).isTrue();
 
         // A profile-less Session is refused even when not foregroundOnly.

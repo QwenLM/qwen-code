@@ -239,7 +239,11 @@ final class AgentSessionAdmissions {
         if (worktree != null) {
             sessionWorktrees.admit(tenantId, actorId, admission.sessionId(), worktree, workspace);
         }
-        if (workspaceChildAgentsEnabled && publicChildrenSupported && (!sshWorkspace || managedExtensionExecutionEnabled)
+        // D5′: SSH roots admit children under the same arms as local roots;
+        // the configuration and harness capability gates, not the Workspace
+        // transport, decide. Resident Workspaces stay excluded by the
+        // Shell/resident configuration exclusivity.
+        if (workspaceChildAgentsEnabled && publicChildrenSupported
                 && (managedExtensionExecutionEnabled || "qwen-code".equals(agentId) && pin.digest() == null)
                 && WorkspaceToolProfiles.isPublicShell(pin.toolProfile())) {
             jdbc.update("UPDATE ma_session SET public_child_agents_version=1 WHERE tenant_id=? AND session_id=?",

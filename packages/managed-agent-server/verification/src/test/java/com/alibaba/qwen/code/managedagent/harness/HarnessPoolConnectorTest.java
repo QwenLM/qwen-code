@@ -82,6 +82,57 @@ class HarnessPoolConnectorTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    void publicChildAgentsUseTheNegotiatedPoolCapability(boolean supported) {
+        // D5′: a pooled worker that advertises the feature admits children.
+        var features = new java.util.ArrayList<>(List.of(
+                "harness-pool-owner/1", "harness-instance-lifecycle/1", "approval-selection/1"));
+        if (supported) {
+            features.add("public-child-agents/1");
+        }
+        var a = endpoint("a", 4101);
+        var clientA = client("a");
+        when(clientA.capabilities().getFeatures()).thenReturn(features);
+        when(clientA.capabilities().getLifecycleV2Profiles())
+                .thenReturn(List.of("hosted-workspace-shell/1"));
+        try (var pool = new HarnessPoolConnector(settings(), mock(JdbcHarnessPlacementStore.class),
+                () -> new HarnessDiscovery.Snapshot(List.of(a), true), ignored -> leaf(), null, null,
+                ignored -> clientA)) {
+            assertThat(pool.supportsPublicChildAgents()).isFalse();
+            pool.refresh();
+            assertThat(pool.supportsPublicChildAgents()).isEqualTo(supported);
+        }
+    }
+
+    @Test
+    void publicChildAgentsRequireApprovalSelectionAndShellLifecycleV2() {
+        var a = endpoint("a", 4101);
+        var clientA = client("a");
+        when(clientA.capabilities().getFeatures()).thenReturn(
+                List.of("harness-pool-owner/1", "harness-instance-lifecycle/1", "public-child-agents/1"));
+        when(clientA.capabilities().getLifecycleV2Profiles())
+                .thenReturn(List.of("hosted-workspace-shell/1"));
+        try (var pool = new HarnessPoolConnector(settings(), mock(JdbcHarnessPlacementStore.class),
+                () -> new HarnessDiscovery.Snapshot(List.of(a), true), ignored -> leaf(), null, null,
+                ignored -> clientA)) {
+            pool.refresh();
+            // The token builds on approval-selection/1.
+            assertThat(pool.supportsPublicChildAgents()).isFalse();
+        }
+        when(clientA.capabilities().getFeatures()).thenReturn(
+                List.of("harness-pool-owner/1", "harness-instance-lifecycle/1",
+                        "public-child-agents/1", "approval-selection/1"));
+        when(clientA.capabilities().getLifecycleV2Profiles()).thenReturn(List.of());
+        try (var pool = new HarnessPoolConnector(settings(), mock(JdbcHarnessPlacementStore.class),
+                () -> new HarnessDiscovery.Snapshot(List.of(a), true), ignored -> leaf(), null, null,
+                ignored -> clientA)) {
+            pool.refresh();
+            // Without the negotiated Shell v2 profile the lifecycle gate refuses.
+            assertThat(pool.supportsPublicChildAgents()).isFalse();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     void personalMemoryUsesTheNegotiatedPoolCapability(boolean supported) {
         var features = new java.util.ArrayList<>(List.of("harness-pool-owner/1", "harness-instance-lifecycle/1"));
         if (supported) {

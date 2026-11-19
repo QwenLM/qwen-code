@@ -12,7 +12,7 @@ close 保留字节。archive/unarchive 复用 L1，unarchive 恢复 closed，不
 
 ## 协议与状态机
 
-保留 files 客户端使用的 `lifecycleProtocolVersion: 1`。新增可选 `lifecycleV2Profiles`，精确列出支持的 profile，缺省表示不支持 v2。Java 同时检查 Broker 的原 worker 退役证明能力。活跃 Shell/MCP 新操作持久化 protocol 2。历史 protocol 0/1 保持语义；未知版本拒绝，不能按 legacy close 执行。
+D3（2026-11-20）：普通 `files/1` 也统一到 v2 关闭，与 Shell/MCP 一致；`external-files/1` 保留 protocol 1（其 Runtime 不支持 v2 资源阶段）。可选 `lifecycleV2Profiles` 精确列出支持的 profile（现含 `files/1`），缺省表示不支持 v2。Java 同时检查 Broker 的原 worker 退役证明能力。活跃 files/Shell/MCP 新操作持久化 protocol 2；external-files 持久化 protocol 1；protocol 0 保持冻结的 legacy close。未知版本拒绝，不能按 legacy close 执行。
 
 复用私有 `/session/:id/lifecycle`。v2 请求携带 `protocolVersion: 2`、`phase: effects | prepare_resources | settle_resources`、Session key、操作 kind 与当前 operation/claim authority；v1 保留原请求格式。响应绑定 operation、Session、phase 和版本。资源 ACK 不等于完成证明。
 
@@ -26,7 +26,7 @@ close 保留字节。archive/unarchive 复用 L1，unarchive 恢复 closed，不
 
 ## 清理授权与恢复
 
-v2 `DRAINING` 允许当前 operation claim 获取仅供清理的 writer。协调器停机期间租约过期的驻留 writer，只有 token、writer ID 和 generation 仍拥有已锁定的 journal head，且当前资源 claim 有效时，才可续租。冷 acquire 与该续租通过同一 head 串行决策，先成功的一方围栏另一方。普通续租、files v1、effects 阶段、旧 claim 和已被替换的 writer 保留租约检查。首次 v2 准入按数据库时间为仍有效写者保留一个已配置的 Session Store 写者租期。重放、重新提交和 claim 变化不刷新期限；过期写者不被复活。超过有限交接时间的 effects 仍执行租约拒绝，详见[交接设计](2026-10-23-managed-shell-lifecycle.zh-CN.md)。冷 attachment 读取已保存 definition 与原身份，不运行 SessionStart、模型、普通工具、configure/discover/invoke 或 Monitor rebuild。Broker recovery acquire、status、release 自身校验当前 claim 和保存的 binding/generation；禁止新普通 acquire。
+v2 `DRAINING` 允许当前 operation claim 获取仅供清理的 writer。协调器停机期间租约过期的驻留 writer，只有 token、writer ID 和 generation 仍拥有已锁定的 journal head，且当前资源 claim 有效时，才可续租。冷 acquire 与该续租通过同一 head 串行决策，先成功的一方围栏另一方。普通续租、external-files v1、effects 阶段、旧 claim 和已被替换的 writer 保留租约检查。首次 v2 准入按数据库时间为仍有效写者保留一个已配置的 Session Store 写者租期。重放、重新提交和 claim 变化不刷新期限；过期写者不被复活。超过有限交接时间的 effects 仍执行租约拒绝，详见[交接设计](2026-10-23-managed-shell-lifecycle.zh-CN.md)。冷 attachment 读取已保存 definition 与原身份，不运行 SessionStart、模型、普通工具、configure/discover/invoke 或 Monitor rebuild。Broker recovery acquire、status、release 自身校验当前 claim 和保存的 binding/generation；禁止新普通 acquire。
 
 journal/publication 写入按已有资源身份严格限定为输出引用推进、终态、释放证据和已有通知取消。拒绝新执行、换 Runtime 身份和新普通输入。新生命周期 Hook dispatch 仍校验当前 ACL 与挂载授权。claim 接管更新驻留和冷 attachment，旧 claim 不能修改清理记录。
 
@@ -69,7 +69,7 @@ worker 已停止不能证明缺失输出已发布。未知输出继续阻塞；�
 
 Harness 默认声明 `hosted-workspace-shell/1` 的 v2 能力。显式设置 `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` 会替换完整列表；空值禁用 v2。MCP 验收通过后才加入 `hosted-workspace-mcp/1`。启动时拒绝不支持或重复的条目。publication 对象内容在最终 SQL 事务前校验；事务内复核不可变回执/catalog 身份、资源终态与停止证明。
 
-验证计划覆盖精确协商、files v1、关闭新执行后的清理、actor 幂等与权限、活跃 Turn 拒绝、phase/claim fencing 和 DRAINING 冷恢复。Shell 覆盖前台、后台、Monitor、持久旧 hold、停止时最后输出和已知失败/未知输出。MCP 覆盖 stdio/HTTP/SSE、多 revision、Hook-only owner、release ACK 丢失、worker 死亡与未知业务效果。
+验证计划覆盖精确协商、files v2、external-files v1、关闭新执行后的清理、actor 幂等与权限、活跃 Turn 拒绝、phase/claim fencing 和 DRAINING 冷恢复。Shell 覆盖前台、后台、Monitor、持久旧 hold、停止时最后输出和已知失败/未知输出。MCP 覆盖 stdio/HTTP/SSE、多 revision、Hook-only owner、release ACK 丢失、worker 死亡与未知业务效果。
 
 真实 MySQL 与进程故障测试覆盖 Hook/effects、drain、publication seal、detach、stop、tombstone 前的切断；claim 接管不能重复 Hook 或业务效果。公开 API 删除 Shell 后直接触发 O4-2 回收，不使用测试接缝。close 不运行 SessionDelete，删除与退役原子提交。完成前执行 build、typecheck、bundle、针对性测试与 review；实际结果单独记录，不能以设计替代验证。macOS 开发环境的结果不能替代 Linux 原 worker/H3 cgroup 用例及完整 MCP transport 释放矩阵；这些仍是发布门槛，不能以 Shell 默认能力声明代替部署验收。
 

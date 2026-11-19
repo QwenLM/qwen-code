@@ -194,7 +194,10 @@ describe('Managed local startup supervision', () => {
               JSON.stringify({
                 hostedHarness: {
                   capabilityDigest: state.capabilityDigest,
-                  lifecycleV2Profiles: (lifecycle ?? 'hosted-workspace-shell/1')
+                  lifecycleV2Profiles: (
+                    lifecycle ??
+                    'hosted-workspace-files/1,hosted-workspace-shell/1'
+                  )
                     .split(',')
                     .filter(Boolean),
                 },
