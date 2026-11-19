@@ -1387,42 +1387,52 @@ describe('WorkspaceRuntimeCoordinator', () => {
     );
   });
 
-  it('times out one observer without cancelling the shared physical start', async () => {
-    vi.useFakeTimers();
-    try {
-      const harness = makeRuntime();
-      let release!: () => void;
-      const physicalStart = new Promise<void>((resolve) => {
-        release = () => {
-          harness.setSnapshot({
-            state: 'idle',
-            runtimeLive: true,
-            runtimeEpoch: 1,
-          });
-          resolve();
-        };
-      });
-      harness.preheat.mockImplementation(() => physicalStart);
-      const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+  it.each([
+    [60_000, undefined],
+    [10, 10],
+  ] as const)(
+    'expires a %i ms ensure observation without cancelling the shared startup',
+    async (observationMs, timeoutMs) => {
+      vi.useFakeTimers();
+      try {
+        const harness = makeRuntime();
+        let release!: () => void;
+        const physicalStart = new Promise<void>((resolve) => {
+          release = () => {
+            harness.setSnapshot({
+              state: 'idle',
+              runtimeLive: true,
+              runtimeEpoch: 1,
+            });
+            resolve();
+          };
+        });
+        harness.preheat.mockImplementation(() => physicalStart);
+        const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
 
-      const first = coordinator.ensure(10);
-      void first.catch(() => undefined);
-      await vi.advanceTimersByTimeAsync(10);
-      await expect(first).rejects.toBeInstanceOf(
-        WorkspaceRuntimeStillStartingError,
-      );
+        const first = coordinator.ensure(timeoutMs);
+        const rejected = vi.fn();
+        void first.catch(rejected);
+        await vi.advanceTimersByTimeAsync(observationMs - 1);
+        expect(rejected).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(first).rejects.toBeInstanceOf(
+          WorkspaceRuntimeStillStartingError,
+        );
 
-      const second = coordinator.ensure(10);
-      expect(harness.preheat).toHaveBeenCalledTimes(2);
-      release();
-      await expect(second).resolves.toMatchObject({
-        runtimeLive: true,
-        runtimeEpoch: 1,
-      });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+        const second = coordinator.ensure();
+        expect(harness.preheat).toHaveBeenCalledTimes(2);
+        await vi.advanceTimersByTimeAsync(10_000);
+        release();
+        await expect(second).resolves.toMatchObject({
+          runtimeLive: true,
+          runtimeEpoch: 1,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('wraps a failed physical start as an initialization failure', async () => {
     const harness = makeRuntime();

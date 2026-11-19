@@ -9445,10 +9445,12 @@ export function createSessionControlPlane(
       } catch (error) {
         void readiness?.then(
           (late) => {
+            const idlePolicyEnabled =
+              harness.configuredChannelIdleTimeoutMs() > 0;
             writeStderrLine(
-              `qwen serve: channel ${late.id} warmed after abandoned session/${action} preparation; decision=apply_idle_policy`,
+              `qwen serve: channel ${late.id} warmed after abandoned session/${action} preparation; decision=${idlePolicyEnabled ? 'apply_idle_policy' : 'keep_warm'}`,
             );
-            if (harness.configuredChannelIdleTimeoutMs() > 0) {
+            if (idlePolicyEnabled) {
               return harness.startIdleTimer(
                 late,
                 'abandoned restore preparation',

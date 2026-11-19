@@ -274,7 +274,7 @@ test('installer fails when the host still resolves the wrong family', () => {
 
 function runTerminalInstaller(env, systemFonts = false) {
   const systemDir = join(env.CASE_DIR, 'system-fonts');
-  mkdirSync(systemDir);
+  mkdirSync(systemDir, { recursive: true });
   if (systemFonts) {
     writeFileSync(join(systemDir, 'DejaVuSansMono.ttf'), 'system-regular');
     writeFileSync(join(systemDir, 'DejaVuSansMono-Bold.ttf'), 'system-bold');
@@ -312,11 +312,31 @@ test('terminal installer reuses both system weights without elevation or APT', (
       'system-bold',
     );
     const config = join(home, '.config/qwen-ci-terminal/fonts.conf');
-    assert.equal(
-      readFileSync(join(env.CASE_DIR, 'github-env'), 'utf8'),
-      `FONTCONFIG_FILE=${config}\n`,
-    );
+    const exported = readFileSync(join(env.CASE_DIR, 'github-env'), 'utf8');
+    const setting = /^FONTCONFIG_FILE=([^\r\n]+)\n$/.exec(exported);
+    assert.ok(setting, exported);
+    // Git Bash can export a POSIX path for the same file Node opened on Windows.
+    const sameFile = spawnSync('bash', [
+      '-c',
+      'test "$1" -ef "$2"',
+      'bash',
+      setting[1],
+      config,
+    ]);
+    assert.equal(sameFile.status, 0, exported);
     assert.match(readFileSync(config, 'utf8'), /<dir prefix="relative">/);
+  });
+});
+
+test('terminal installer reuses both downloaded weights on a second run', () => {
+  withCase({}, (env) => {
+    const first = runTerminalInstaller(env);
+    assert.equal(first.status, 0, first.stderr);
+    assert.match(first.calls, /download fonts-dejavu-core/);
+
+    const second = runTerminalInstaller({ ...env, CASE_APT_STATUS: '23' });
+    assert.equal(second.status, 0, second.stderr);
+    assert.equal(second.calls, first.calls);
   });
 });
 

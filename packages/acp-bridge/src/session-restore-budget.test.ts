@@ -212,6 +212,7 @@ describe('session restore budget', () => {
     async (action) => {
       for (const channelIdleTimeoutMs of [0, 1_000]) {
         vi.useFakeTimers();
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
         const handle = makeChannel();
         let releaseFactory!: (channel: AcpChannel) => void;
         const factory = new Promise<AcpChannel>((resolve) => {
@@ -236,6 +237,13 @@ describe('session restore budget', () => {
           await vi.advanceTimersByTimeAsync(30);
           releaseFactory(handle.channel);
           await vi.advanceTimersByTimeAsync(0);
+          const decision =
+            channelIdleTimeoutMs > 0 ? 'apply_idle_policy' : 'keep_warm';
+          expect(stderr).toHaveBeenCalledWith(
+            expect.stringContaining(
+              `warmed after abandoned session/${action} preparation; decision=${decision}`,
+            ),
+          );
           expect(handle.agent.loadSessionCalls).toHaveLength(0);
           expect(handle.agent.resumeSessionCalls).toHaveLength(0);
           await vi.advanceTimersByTimeAsync(999);
@@ -247,11 +255,57 @@ describe('session restore budget', () => {
         } finally {
           releaseFactory(handle.channel);
           await bridge.shutdown();
+          stderr.mockRestore();
           vi.useRealTimers();
         }
       }
     },
   );
+
+  it('handles a startup rejection after the restore deadline and admits a retry', async () => {
+    vi.useFakeTimers();
+    const handle = makeChannel();
+    let rejectStartup!: (error: Error) => void;
+    const startup = new Promise<AcpChannel>((_, reject) => {
+      rejectStartup = reject;
+    });
+    const channelFactory = vi
+      .fn(async () => handle.channel)
+      .mockImplementationOnce(() => startup);
+    const bridge = makeBridge({
+      initializeTimeoutMs: 100,
+      sessionRestoreTimeoutMs: 50,
+      maxSessions: 1,
+      channelFactory,
+    });
+    const request = {
+      sessionId: 'retry-after-late-rejection',
+      workspaceCwd: WS_A,
+    };
+    const onUnhandled = vi.fn();
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const outcome = bridge
+        .loadSession(request)
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(await outcome).toMatchObject({ dispatched: false });
+      rejectStartup(new Error('factory failed after restore timed out'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(onUnhandled).not.toHaveBeenCalled();
+      expect(handle.agent.loadSessionCalls).toHaveLength(0);
+      await expect(bridge.loadSession(request)).resolves.toMatchObject({
+        sessionId: request.sessionId,
+      });
+      expect(channelFactory).toHaveBeenCalledTimes(2);
+      expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      rejectStartup(new Error('test cleanup'));
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
+  });
 
   it.each(['load', 'resume'] as const)(
     'allows a healthy session/%s to use a small positive remainder',
