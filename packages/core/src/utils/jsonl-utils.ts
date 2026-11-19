@@ -419,11 +419,15 @@ function canAppendWithoutTailInspection(
   // allowing the append handle.
   const windowsSharingViolation =
     code === 'EBUSY' && process.platform === 'win32';
+  // A Linux file lease can reject the nonblocking read probe while the
+  // normal blocking append succeeds after the lease is released.
+  const temporarilyUnavailable = code === 'EAGAIN';
   if (
     code !== 'EACCES' &&
     code !== 'EPERM' &&
     !readDeniedByPermissionModel &&
-    !windowsSharingViolation
+    !windowsSharingViolation &&
+    !temporarilyUnavailable
   ) {
     return false;
   }
@@ -471,17 +475,20 @@ export async function writeLine(
       let prefix = '';
       let existing: fs.promises.FileHandle | undefined;
       try {
-        existing = await fs.promises.open(filePath, tailProbeFlags);
-        const stats = await existing.stat();
-        if (stats.isFile() && stats.size > 0) {
-          const lastByte = Buffer.allocUnsafe(1);
-          const { bytesRead } = await existing.read(
-            lastByte,
-            0,
-            1,
-            stats.size - 1,
-          );
-          prefix = bytesRead === 1 && lastByte[0] === 0x0a ? '' : '\n';
+        const fileStats = await fs.promises.stat(filePath);
+        if (fileStats.isFile()) {
+          existing = await fs.promises.open(filePath, tailProbeFlags);
+          const stats = await existing.stat();
+          if (stats.isFile() && stats.size > 0) {
+            const lastByte = Buffer.allocUnsafe(1);
+            const { bytesRead } = await existing.read(
+              lastByte,
+              0,
+              1,
+              stats.size - 1,
+            );
+            prefix = bytesRead === 1 && lastByte[0] === 0x0a ? '' : '\n';
+          }
         }
       } catch (error) {
         if (!canAppendWithoutTailInspection(filePath, error)) {
@@ -540,12 +547,21 @@ export function writeLineSync(filePath: string, data: unknown): void {
   let prefix = '';
   let descriptor: number | undefined;
   try {
-    descriptor = fs.openSync(filePath, tailProbeFlags);
-    const stats = fs.fstatSync(descriptor);
-    if (stats.isFile() && stats.size > 0) {
-      const lastByte = Buffer.allocUnsafe(1);
-      const bytesRead = fs.readSync(descriptor, lastByte, 0, 1, stats.size - 1);
-      prefix = bytesRead === 1 && lastByte[0] === 0x0a ? '' : '\n';
+    const fileStats = fs.statSync(filePath);
+    if (fileStats.isFile()) {
+      descriptor = fs.openSync(filePath, tailProbeFlags);
+      const stats = fs.fstatSync(descriptor);
+      if (stats.isFile() && stats.size > 0) {
+        const lastByte = Buffer.allocUnsafe(1);
+        const bytesRead = fs.readSync(
+          descriptor,
+          lastByte,
+          0,
+          1,
+          stats.size - 1,
+        );
+        prefix = bytesRead === 1 && lastByte[0] === 0x0a ? '' : '\n';
+      }
     }
   } catch (error) {
     if (!canAppendWithoutTailInspection(filePath, error)) {

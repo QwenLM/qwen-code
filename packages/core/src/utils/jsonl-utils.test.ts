@@ -906,6 +906,26 @@ describe('writeLine / writeLineSync / write', () => {
       },
     );
 
+    it('restores the record boundary when the read probe is temporarily unavailable', async () => {
+      const file = tmpFile('{"existing":true}');
+      const error = Object.assign(new Error('temporarily unavailable'), {
+        code: 'EAGAIN',
+      });
+      const spy = denyTailProbe(error);
+
+      try {
+        await append(file, { next: true });
+        expect(
+          spy.mock.calls.filter(([, flags]) => flags === tailProbeFlags),
+        ).toHaveLength(1);
+        expect(fs.readFileSync(file, 'utf8')).toBe(
+          '{"existing":true}\n{"next":true}\n',
+        );
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     it.each([
       { platform: 'win32', shouldAppend: true },
       { platform: 'linux', shouldAppend: false },
@@ -1237,6 +1257,43 @@ describe('writeLine / writeLineSync / write', () => {
           drainRecord();
         } finally {
           fs.closeSync(reader);
+        }
+      },
+    );
+
+    it.runIf(process.platform !== 'win32')(
+      'does not open a FIFO just to inspect its tail',
+      async () => {
+        const fifo = tmpPath('fifo-no-probe');
+        execFileSync('mkfifo', [fifo]);
+        const asyncStatSpy = vi.spyOn(fs.promises, 'stat');
+        const syncStatSpy = vi.spyOn(fs, 'statSync');
+        const probeSpy = denyTailProbe(new Error('unexpected FIFO probe'));
+        const appendSpy =
+          name === 'writeLine'
+            ? vi.spyOn(fs.promises, 'appendFile').mockImplementation(() => {
+                throw new Error('append without probe');
+              })
+            : vi.spyOn(fs, 'appendFileSync').mockImplementation(() => {
+                throw new Error('append without probe');
+              });
+
+        try {
+          await expect(
+            Promise.resolve().then(() => append(fifo, { next: true })),
+          ).rejects.toThrow('append without probe');
+          expect(
+            probeSpy.mock.calls.filter(([, flags]) => flags === tailProbeFlags),
+          ).toHaveLength(0);
+          expect(
+            (name === 'writeLine' ? asyncStatSpy : syncStatSpy).mock.calls,
+          ).toContainEqual([fifo]);
+          expect(appendSpy.mock.calls[0]?.[0]).toBe(fifo);
+        } finally {
+          appendSpy.mockRestore();
+          probeSpy.mockRestore();
+          asyncStatSpy.mockRestore();
+          syncStatSpy.mockRestore();
         }
       },
     );
