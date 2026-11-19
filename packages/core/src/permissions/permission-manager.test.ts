@@ -2199,6 +2199,181 @@ describe('PermissionManager', () => {
     });
   });
 
+  describe('Windows drive path rules', () => {
+    const projectRoot = 'C:\\project';
+    const cwd = 'C:\\project\\work';
+    const filePath = 'D:\\x\\a.txt';
+
+    beforeEach(() => {
+      const platform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      return () => {
+        Object.defineProperty(process, 'platform', { value: platform });
+      };
+    });
+
+    describe.each(['D:/x/**', '//D:/x/**', 'D:\\x/**', 'd:/x/**', '//d:/x/**'])(
+      '%s',
+      (pattern) => {
+        it.each([
+          ['permissionsDeny', 'deny'],
+          ['permissionsAsk', 'ask'],
+          ['permissionsAllow', 'allow'],
+        ] as const)('honors %s', async (option, decision) => {
+          const manager = new PermissionManager(
+            makeConfig({ projectRoot, cwd, [option]: [`Read(${pattern})`] }),
+          );
+          manager.initialize();
+
+          expect(
+            await manager.evaluate({ toolName: 'read_file', filePath }),
+          ).toBe(decision);
+        });
+      },
+    );
+
+    // Released versions saved `Read(D:\/**)` for a file at the drive root.
+    // It has always matched nothing; it must not start allowing the volume.
+    it('does not allow the drive for a rule saved for a drive-root file', async () => {
+      const manager = new PermissionManager(
+        makeConfig({ projectRoot, cwd, permissionsAllow: ['Read(D:\\/**)'] }),
+      );
+      manager.initialize();
+
+      expect(await manager.evaluate({ toolName: 'read_file', filePath })).toBe(
+        'default',
+      );
+    });
+
+    it.each([
+      ['D:/x/**', 'd:\\x\\a.txt'],
+      ['d:/x/**', 'D:\\x\\a.txt'],
+    ])(
+      'honors deny for %s when the drive letter differs in case',
+      async (pattern, target) => {
+        const manager = new PermissionManager(
+          makeConfig({
+            projectRoot,
+            cwd,
+            permissionsDeny: [`Read(${pattern})`],
+          }),
+        );
+        manager.initialize();
+
+        expect(
+          await manager.evaluate({ toolName: 'read_file', filePath: target }),
+        ).toBe('deny');
+        expect(
+          await manager.evaluate({
+            toolName: 'read_file',
+            filePath: 'E:\\x\\a.txt',
+          }),
+        ).toBe('default');
+      },
+    );
+
+    it('anchors a root-level wildcard to the drive root', async () => {
+      const realpath = vi
+        .spyOn(fs.realpathSync, 'native')
+        .mockImplementationOnce((base) =>
+          base === 'D:' ? 'D:\\project\\work' : 'D:\\',
+        );
+      try {
+        const manager = new PermissionManager(
+          makeConfig({
+            projectRoot: 'D:\\project',
+            cwd: 'D:\\project\\work',
+            permissionsDeny: ['Read(D:/*/a.txt)'],
+          }),
+        );
+        manager.initialize();
+
+        expect(
+          await manager.evaluate({
+            toolName: 'read_file',
+            filePath: 'D:\\project\\work\\x\\a.txt',
+          }),
+        ).toBe('default');
+        expect(
+          await manager.evaluate({ toolName: 'read_file', filePath }),
+        ).toBe('deny');
+      } finally {
+        realpath.mockRestore();
+      }
+    });
+
+    // Forward slashes because a POSIX `path.dirname` does not split on `\`.
+    it.each([
+      ['read_file', 'D:/x/a.txt', 'Read(//D:/x/**)'],
+      ['list_directory', 'D:\\x', 'Read(//D:/x/**)'],
+    ])(
+      'round-trips the Always Allow rule for %s on %s',
+      async (toolName, target, rule) => {
+        const ctx = { toolName, filePath: target };
+        const rules = buildPermissionRules(ctx);
+        const manager = new PermissionManager(
+          makeConfig({ projectRoot, cwd, permissionsAllow: rules }),
+        );
+        manager.initialize();
+
+        expect(rules).toEqual([rule]);
+        expect(await manager.evaluate(ctx)).toBe('allow');
+      },
+    );
+
+    // The drive root as the rule's directory would be `D:/**` once repeated
+    // separators collapse, so one click would allow the whole volume.
+    it.each([
+      ['read_file', 'D:/notes.txt', 'Read(//D:/notes.txt)'],
+      ['list_directory', 'D:\\', 'Read(//D:/)'],
+    ])(
+      'scopes the Always Allow rule for the drive root target %s %s to the target alone',
+      async (toolName, target, rule) => {
+        const ctx = { toolName, filePath: target };
+        const rules = buildPermissionRules(ctx);
+        const manager = new PermissionManager(
+          makeConfig({ projectRoot, cwd, permissionsAllow: rules }),
+        );
+        manager.initialize();
+
+        expect(rules).toEqual([rule]);
+        expect(await manager.evaluate(ctx)).toBe('allow');
+        expect(
+          await manager.evaluate({
+            toolName: 'read_file',
+            filePath: 'D:\\secrets\\key.txt',
+          }),
+        ).toBe('default');
+      },
+    );
+
+    describe('key:value warning', () => {
+      const keyValueWarnings = () =>
+        debugLoggerMock.warn.mock.calls.filter(([message]) =>
+          String(message).startsWith('key:value syntax'),
+        );
+
+      beforeEach(() => {
+        debugLoggerMock.warn.mockClear();
+      });
+
+      it.each(['D:/x/**', '//D:/x/**', 'D:\\x/**'])(
+        'is not logged for the drive path %s',
+        (pattern) => {
+          parseRule(`Read(${pattern})`);
+
+          expect(keyValueWarnings()).toEqual([]);
+        },
+      );
+
+      it('is still logged for a key:value path specifier', () => {
+        parseRule('Read(foo:bar)');
+
+        expect(keyValueWarnings()).toHaveLength(1);
+      });
+    });
+  });
+
   describe('file path evaluation', () => {
     beforeEach(() => {
       pm = makePm({
