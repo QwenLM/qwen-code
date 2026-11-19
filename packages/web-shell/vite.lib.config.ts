@@ -247,6 +247,7 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/managed/managed-artifact-library-messages.ts',
       './client/components/managed/managed-artifact-library-messages.transcript-stub.ts',
     ],
+    ['./client/i18n-catalogs.ts', './client/i18n-catalogs.eager.ts'],
     ['./client/i18n-zh-tw.ts', './client/i18n-zh-tw.transcript-stub.ts'],
     ['./client/i18n-ru-part1.ts', './client/i18n-ru-part1.transcript-stub.ts'],
     ['./client/i18n-ru-part2.ts', './client/i18n-ru-part2.transcript-stub.ts'],
