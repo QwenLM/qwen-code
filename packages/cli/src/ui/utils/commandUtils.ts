@@ -16,6 +16,7 @@ import type { SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import { MessageType } from '../types.js';
 import { isWaylandSession, writeOsc52 } from './clipboardUtils.js';
+import { copyTextViaNativeClipboard } from './native-clipboard.js';
 import { toCodePoints } from './textUtils.js';
 
 /** Shared prefix for the context-files announcement INFO item.
@@ -267,11 +268,12 @@ export const copyToClipboard = async (text: string): Promise<void> => {
               ? ''
               : `wl-copy failed ("${formatCommandFailure(wlCopyError, 'wl-copy')}"); `;
           if (xclipNotFound && xselNotFound) {
-            // Neither xclip nor xsel available — try OSC 52 escape sequence
-            // (works over SSH without X11 display server).
+            // Neither xclip nor xsel available — try the native clipboard
+            // addon (via Node when this process is Bun), then OSC 52.
+            if (await copyTextViaNativeClipboard(text)) return;
             if (!writeOsc52(text)) {
               throw new Error(
-                `Clipboard unavailable: ${wlCopyFailure}xclip/xsel not found and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
+                `Clipboard unavailable: ${wlCopyFailure}xclip/xsel and native clipboard addon unavailable, and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
               );
             }
             return;
@@ -280,11 +282,12 @@ export const copyToClipboard = async (text: string): Promise<void> => {
           const primaryMsg = formatCommandFailure(primaryError, 'xclip');
           const fallbackMsg = formatCommandFailure(fallbackError, 'xsel');
 
-          // Tools exist but failed — try OSC 52 before giving up
+          // Tools exist but failed — try the native addon, then OSC 52.
+          if (await copyTextViaNativeClipboard(text)) return;
           if (writeOsc52(text)) return;
 
           throw new Error(
-            `Clipboard unavailable: ${wlCopyFailure}xclip/xsel failed ("${primaryMsg}", "${fallbackMsg}") and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
+            `Clipboard unavailable: ${wlCopyFailure}xclip/xsel failed ("${primaryMsg}", "${fallbackMsg}"), the native clipboard addon is unavailable, and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
           );
         }
       }

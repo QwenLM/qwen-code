@@ -60,6 +60,7 @@ const TUI_ONLY_SETTINGS = new Set([
   'ui.mouseTracking',
   'ui.arrowKeysScrollTranscript',
   'ui.showScrollbar',
+  'ui.showOpenTuiScrollbar',
   'ui.hideBanner',
   'ui.enableWelcomeBack',
 ]);

@@ -118,6 +118,8 @@ export interface OpenTuiComposerHandle {
   setText(text: string): void;
   cancelTurn?(): void;
   submitDraft?(text: string): Promise<void>;
+  /** Runs the composer's Ctrl+V clipboard path (image first, then text). */
+  pasteClipboard?(): void;
   /** Puts a prompt back ahead of whatever the composer holds. */
   restoreSubmission?(submission: OpenTuiInputSubmission): void;
   invalidateImportedInput?(): void;
