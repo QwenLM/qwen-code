@@ -4667,6 +4667,16 @@ const SETTINGS_SCHEMA = {
           'Run the shared agent loop on the event-bus architecture (experimental). Applies to the surfaces that run on the shared agent loop: headless sessions (`-p` and stream-json), ACP sessions (Zed, VS Code, Web Shell, channels), the Ink TUI and subagents by default, and OpenTUI when experimental.unifiedAgentLoop is enabled; other surfaces keep their current loop internals. The QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP environment variable overrides this setting: `1` enables it, `0` disables it, and a comma-separated list such as `headless=0` forces individual surfaces (headless, acp, ink, opentui, agent-core; `speculation` is reserved). Only those wired surfaces take effect today; a bare `1`/`0` is only recognized as the whole value, not inside a list, and surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
         showInDialog: true,
       },
+      modelAvailabilityTracking: {
+        type: 'boolean',
+        label: 'Model Availability Tracking',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Remember model health across requests within a session (experimental). When a fallback model exhausts its retries on a capacity error (429/503/529), the model fallback chain skips it for the rest of the turn instead of re-trying it on every request, and re-probes it once on the next turn; an explicit retry also re-probes skipped models. The primary model is still attempted on every request. Permanent quota exhaustion still fails fast and is not treated as a transient capacity skip. When disabled, the fallback chain behaves exactly as before.',
+        showInDialog: true,
+      },
       agentCollaboration: {
         type: 'boolean',
         label: 'Enable Agent Collaboration',

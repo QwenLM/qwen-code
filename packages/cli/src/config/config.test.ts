@@ -3401,6 +3401,44 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it('propagates the model availability tracking opt-in and opt-out', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig(
+      { experimental: { modelAvailabilityTracking: true } },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: true,
+      }),
+    );
+
+    await loadCliConfig(
+      { experimental: { modelAvailabilityTracking: false } },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: false,
+      }),
+    );
+  });
+
+  it('leaves the model availability tracking setting unset by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: undefined,
+      }),
+    );
+  });
+
   it('should not enable the session writer lease for invalid truthy values', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
