@@ -298,8 +298,9 @@ which happens only when the plan needs more rows than the grant holds.
     rows being compressed under a five-row cap; a one-row warning ask pins the
     last warning on a row that counts the earlier ones as `+N warning(s) hidden`;
     a warnings box with no row of its own registers the reveal and hands its
-    count to the row that survived; and a command shrunk to a single row
-    announces itself the same way;
+    count to the row that survived; a command shrunk to a single row announces
+    itself the same way, and a single-row command that still fits registers
+    nothing and counts nothing, because a pinned row is not itself a cut;
   - 30 destinations at small budgets down to two body rows: the
     `URLs to fetch:` header, a contiguous prefix of destinations and a counted
     hidden-URLs row are on screen, and a scattered sample is not; the header is

@@ -1710,6 +1710,60 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).toContain('No');
     });
 
+    it('keeps the last warning when the exec warning box is cut to one row', async () => {
+      // Nine rows of chrome leave a two-row body. Three one-row warnings cannot
+      // all fit it and the command reserves its row, so the box falls to its
+      // one-row arm: a pinned row holding the warning that names the exact
+      // action, with the warnings it dropped counted on its tail. A frame that
+      // kept an earlier warning instead would read as the mode warnings and
+      // hide the one that changes the approval.
+      const availableTerminalHeight = 9;
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'exec',
+                title: 'Confirm Shell Command',
+                command: 'npm run deploy -- --dry-run --verbose --project=prod',
+                rootCommand: 'npm',
+                hideAlwaysAllow: true,
+                warnings: [
+                  'warning one: writes to production',
+                  'warning two: outside workspace',
+                  'warning three: network access',
+                ],
+                onConfirm: vi.fn(),
+              }}
+              config={mockConfig}
+              availableTerminalHeight={availableTerminalHeight}
+              contentWidth={50}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+
+      await vi.waitFor(() => {
+        const frame = lastFrame() ?? '';
+        expect(frame).toContain('warning three');
+        expect(frame).toContain('+2 warning(s) hidden');
+        expect(frame).toMatch(/overflowing:[1-9]/);
+      }, WAIT_FOR_FRAME);
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight + 1,
+      );
+      expect(frame).not.toContain('warning one');
+      expect(frame).not.toContain('warning two');
+      // Both sides of the split keep a row, so the ask still says what it asks.
+      expect(frame).toContain('npm run deploy');
+      expect(frame).not.toContain('--project=prod');
+      expect(frame).toContain("Allow execution of: 'npm'?");
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No, suggest changes (esc)');
+    });
+
     it('announces an exec command the body budget shrinks to a single row', async () => {
       // The floor of the body grant is one row, and with no warnings that row
       // is the command's. `MaxSizedBox` cannot honour a one-row ask — its floor
@@ -1747,6 +1801,49 @@ describe('ToolConfirmationMessage', () => {
         availableTerminalHeight + 1,
       );
       expect(frame).not.toContain('--project=prod');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No, suggest changes (esc)');
+    });
+
+    it('registers no reveal for a one-row exec command that still fits', async () => {
+      // The same one-row arm, minus the truncation. A pinned row is not itself
+      // a clip: the reveal hint is a claim that something was cut, so a command
+      // the row shows whole must leave the shared overflow state empty and must
+      // not announce a hidden tail.
+      const availableTerminalHeight = 8;
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'exec',
+                title: 'Confirm Shell Command',
+                command: 'ls -la',
+                rootCommand: 'ls',
+                hideAlwaysAllow: true,
+                onConfirm: vi.fn(),
+              }}
+              config={mockConfig}
+              availableTerminalHeight={availableTerminalHeight}
+              contentWidth={50}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+
+      await vi.waitFor(
+        () => expect(lastFrame() ?? '').toContain('ls -la'),
+        WAIT_FOR_FRAME,
+      );
+      // The registration happens in a mount effect, so the frame that already
+      // shows the command predates it. Settle before claiming the state is
+      // empty, or the absence proves only that no effect has run yet.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('overflowing:0');
+      expect(frame).not.toContain('hidden');
+      expect(frame).toContain("Allow execution of: 'ls'?");
       expect(frame).toContain('Yes, allow once');
       expect(frame).toContain('No, suggest changes (esc)');
     });
