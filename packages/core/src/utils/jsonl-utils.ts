@@ -347,6 +347,10 @@ interface TailDiagnosticEntry {
 const diagnosedTailReadFailures = new Map<string, TailDiagnosticEntry>();
 const MAX_DIAGNOSED_TAIL_READ_FAILURES = 128;
 const MAX_TAIL_DIAGNOSTIC_DELIVERY_ATTEMPTS = 3;
+// Tail inspection deliberately keeps its own short-lived handle per append:
+// it checks the record boundary left by an interrupted append, and staying
+// separate from the append/fsync path keeps this bugfix focused. Merging the
+// two onto one handle is an independent performance change.
 const tailProbeFlags = nodeConstants.O_RDONLY | (nodeConstants.O_NONBLOCK ?? 0);
 
 function reportUninspectableTail(
