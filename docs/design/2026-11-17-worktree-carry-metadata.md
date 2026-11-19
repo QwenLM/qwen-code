@@ -196,7 +196,10 @@ unchanged in this deliverable.
   still matching the captured contents: the before/after digest includes
   per-path raw-byte identities and exec bits for untracked and ignored work,
   without invoking diff/textconv, so a same-path late autosave preserves
-  instead of deleting. Protected-path case variants refuse capture before tar.
+  instead of deleting. The first digest is taken before the has-work and
+  carried-source classification, so a new file saved during source hashing
+  cannot authorize a snapshot-free deletion. Protected-path case variants
+  refuse capture before tar.
 - A checkout with any non-carried work (a late-arriving ignored file, a populated
   directory beyond the carried files) reads as work and is snapshotted then
   deleted (P6 U3) — never deleted bare. States the snapshot cannot represent

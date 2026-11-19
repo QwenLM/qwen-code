@@ -518,10 +518,10 @@ async function checkoutChangeDigest(
       ) {
         continue;
       }
-      // Ignored=matching collapses a non-disposable ignored directory. Enumerate
-      // it without following links so a rewrite inside the directory has a raw
-      // identity just like an ignored file (R8-1). The archive walks it too.
-      if (xy === '!!' && rel.endsWith('/')) {
+      // Enumerate collapsed directories without following links so a rewrite
+      // inside an ignored directory or an untracked nested repository has a
+      // raw identity just like an ordinary file. The archive walks both too.
+      if ((xy === '!!' || xy === '??') && rel.endsWith('/')) {
         const entries = await fsp.readdir(path.join(worktreePath, rel), {
           withFileTypes: true,
         });
@@ -618,7 +618,10 @@ export async function executeWorktreeCleanup(
   // pristine carried copy is collected rather than preserved forever, while
   // a session change to a carried path reads as work and is snapshotted
   // (R9-6). Absent carriedEntries (legacy sidecars, no-carry creations) keeps
-  // the gate behaving exactly as before.
+  // the gate behaving exactly as before. Fingerprint the checkout BEFORE
+  // this classification: source verification may read a large carried file,
+  // and a new session file saved meanwhile must differ from this baseline.
+  const beforeDigest = await checkoutChangeDigest(plan.lockKey);
   let needsSnapshot = await worktreeHasWork(
     plan.lockKey,
     sidecar.carriedEntries,
@@ -643,7 +646,6 @@ export async function executeWorktreeCleanup(
   ) {
     needsSnapshot = true;
   }
-  const beforeDigest = await checkoutChangeDigest(plan.lockKey);
   if (needsSnapshot) {
     // P6 U3: a managed session worktree with genuine work is snapshotted then
     // deleted instead of preserved forever — the archive preserves the work

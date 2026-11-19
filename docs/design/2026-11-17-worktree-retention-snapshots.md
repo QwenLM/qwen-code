@@ -91,7 +91,13 @@ tracked protected-path case variants) and refuses those variants before tar;
 `ls-files -v` uses a 64 MiB capture buffer rather than truncating a large
 index. Restore validates EVERY member lexically and through its nearest existing
 parent, including Directory entries, before any removal or extraction; hardlink
-targets must stay inside the root. Absolute and parent-relative symlink targets
+targets must stay inside the root. A Directory member may replace a verified
+tracked regular file: deeper realpath checks allow that explicit file/directory
+boundary, and the file is removed only after every member has passed the guard.
+Every planned file removal also resolves its final target: a nested Directory
+member aliasing the top-level `.git` or session marker is refused before any
+clearing, rather than trusting only the member's lexical path. Absolute and
+parent-relative symlink targets
 remain supported without treating a parent symlink as an extraction target:
 archived symlinks are skipped during extraction and recreated only after all
 other members, so an archive cannot materialize an escaping parent for a later
@@ -129,7 +135,9 @@ Removal is additionally conditional on the checkout still matching the captured
 contents: before and after capture the reaper records each non-disposable
 status path together with its status, raw-byte `hash-object --no-filters`
 identity, and executable bit. It expands collapsed non-disposable ignored
-directories without following links, and records symlink targets too. No
+directories and collapsed untracked nested repositories without following
+links, and records symlink targets too. The first digest precedes the has-work
+classification and carried-source verification. No
 `git diff` runs, so textconv cannot execute. Disposable-output waivers apply
 only to the original collapsed status entry: every child of a non-disposable
 ignored directory counts because tar archives it. Marker temp waivers are

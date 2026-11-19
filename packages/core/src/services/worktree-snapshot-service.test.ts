@@ -565,9 +565,11 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     // the same name holds new untracked work. Restore must not delete the
     // folder while re-applying the recorded deletion.
     await fs.rm(path.join(worktree, 'committed.txt'));
-    await fs.mkdir(path.join(worktree, 'committed.txt'));
+    await fs.mkdir(path.join(worktree, 'committed.txt', 'drafts'), {
+      recursive: true,
+    });
     await fs.writeFile(
-      path.join(worktree, 'committed.txt', 'inner.txt'),
+      path.join(worktree, 'committed.txt', 'drafts', 'one.txt'),
       'folder-work\n',
     );
     const m = await buildWorktreeSnapshotMeta(worktree, {
@@ -587,7 +589,10 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       'restored-filedir',
     );
     await expect(
-      fs.readFile(path.join(restored, 'committed.txt', 'inner.txt'), 'utf8'),
+      fs.readFile(
+        path.join(restored, 'committed.txt', 'drafts', 'one.txt'),
+        'utf8',
+      ),
     ).resolves.toBe('folder-work\n');
   });
 
@@ -645,6 +650,106 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       'session-file\n',
     );
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'restores a directory that replaced a recursive symlink alias',
+    async () => {
+      await fs.symlink('.', path.join(worktree, 'link'));
+      git(worktree, 'add', 'link');
+      git(worktree, 'commit', '-qm', 'directory alias', '--no-verify');
+      await fs.unlink(path.join(worktree, 'link'));
+      await fs.mkdir(path.join(worktree, 'link'));
+      await fs.writeFile(
+        path.join(worktree, 'link', 'draft.txt'),
+        'nested-draft\n',
+      );
+      const m = await buildWorktreeSnapshotMeta(worktree, {
+        sessionId: 'session-alias-file',
+        slug: 'alias-file',
+        baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      });
+      const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: m,
+      });
+      const restored = await restoreOverHead(
+        snapshotPath,
+        metaPath,
+        'restored-alias-file',
+      );
+      await expect(
+        fs.readFile(path.join(restored, 'link', 'draft.txt'), 'utf8'),
+      ).resolves.toBe('nested-draft\n');
+      expect((await fs.lstat(path.join(restored, 'link'))).isDirectory()).toBe(
+        true,
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a directory alias that targets the worktree gitfile',
+    async () => {
+      await fs.symlink('.', path.join(worktree, 'link'));
+      git(worktree, 'add', 'link');
+      git(worktree, 'commit', '-qm', 'symlink to worktree root', '--no-verify');
+      await fs.unlink(path.join(worktree, 'link'));
+      await fs.mkdir(path.join(worktree, 'link'));
+      git(path.join(worktree, 'link'), 'init', '-q');
+      await fs.writeFile(
+        path.join(worktree, 'link', 'draft.txt'),
+        'nested-repository-work\n',
+      );
+      const m = await buildWorktreeSnapshotMeta(worktree, {
+        sessionId: 'session-directory-alias',
+        slug: 'directory-alias',
+        baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+      });
+      const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: m,
+      });
+      const members: string[] = [];
+      await tar.t({
+        file: snapshotPath,
+        onReadEntry: (entry) => {
+          members.push(entry.path);
+        },
+      });
+      expect(
+        members.some(
+          (name) =>
+            path.posix.normalize(name).replace(/\/$/, '') === 'link/.git',
+        ),
+      ).toBe(true);
+      const restored = path.join(root, 'restored-directory-alias');
+      git(worktree, 'worktree', 'add', '--detach', restored, 'HEAD');
+      const originalGitfile = await fs.readFile(
+        path.join(restored, '.git'),
+        'utf8',
+      );
+      expect(
+        (await fs.lstat(path.join(restored, 'link'))).isSymbolicLink(),
+      ).toBe(true);
+      const metadata = await readWorktreeSnapshotMeta(metaPath);
+      let resultError: unknown;
+      await restoreWorktreeSnapshot(snapshotPath, restored, metadata).catch(
+        (error) => {
+          resultError = error;
+        },
+      );
+      await expect(
+        fs.readFile(path.join(restored, '.git'), 'utf8'),
+      ).resolves.toBe(originalGitfile);
+      expect(resultError instanceof Error && resultError.message).toMatch(
+        /protected path/,
+      );
+      expect(
+        (await fs.lstat(path.join(restored, 'link'))).isSymbolicLink(),
+      ).toBe(true);
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'refuses capture when a deleted path is not valid UTF-8',

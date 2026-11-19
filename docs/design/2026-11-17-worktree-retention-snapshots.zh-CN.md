@@ -63,7 +63,10 @@ untracked 往返；未暂存/暂存删除与 rename 源在重建 HEAD 上重新�
 捕获扫描真实文件系统（仅看 `git status` 会漏掉 clean tracked 保护路径的大小写变体），
 在启动 tar 前拒绝这些变体；`ls-files -v` 使用 64 MiB 捕获缓冲，避免大索引截断。
 恢复先于任何删除/解包，对包括 Directory 在内的每个成员进行词法与最近存在父目录校验；
-hardlink 目标不得离开根目录。绝对与父相对符号链接目标继续支持，但父符号链接不得作为
+hardlink 目标不得离开根目录。Directory 成员可以替换已校验的 tracked 普通文件：更深层的
+realpath 检查只放行显式声明的文件到目录边界，且仅在所有成员通过校验后移除该文件。
+每个计划删除的文件还校验最终真实目标：若嵌套 Directory 成员经别名指向顶层 `.git` 或会话
+marker，则在任何清理之前拒绝，不能只相信成员的词法路径。绝对与父相对符号链接目标继续支持，但父符号链接不得作为
 解包写入目标：tar 先跳过归档中的符号链接，待其它成员写完后再按受约束路径重建，
 使归档不能在后续子成员之前创建一个越界父链接。
 
@@ -87,7 +90,8 @@ detached）：此时快照已写但检出被保留（`unmerged commits`），故
 skip-worktree 路径上的暂存编辑或新增、暂停的 merge/rebase/cherry-pick/revert/bisect——
 同样拒绝捕获并保留。移除还以检出仍与捕获内容一致为条件：捕获前后，回收器为每个
 非 disposable 状态路径记录其状态、`hash-object --no-filters` 原始字节身份与可执行位；
-递归展开折叠的非 disposable ignored 目录而不跟随链接，并记录符号链接目标。disposable
+递归展开折叠的非 disposable ignored 目录和折叠的 untracked 嵌套仓库而不跟随链接，并记录
+符号链接目标。首次摘要在 has-work 分类和搬运来源校验之前取得。disposable
 豁免仅适用于最初折叠的 status 条目；非 disposable ignored 目录的全部子内容都计数，
 因为 tar 会归档它们。marker 临时文件豁免仅限根路径。不运行 `git diff`，故 textconv 不执行。
 自动保存在 tar 写入期间改写字节或重定向链接时，漂移触发保留而非删除归档覆盖不到的工作。

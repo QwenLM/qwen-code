@@ -610,9 +610,17 @@ export async function restoreWorktreeSnapshot(
       try {
         realParent = await fs.realpath(parent);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        // Missing descendants are created later, but at least one real
-        // ancestor must prove containment before tar can traverse them.
+        const code = (error as NodeJS.ErrnoException).code;
+        const replacesTrackedFile =
+          code === 'ENOTDIR' &&
+          archived.get(
+            normalizeRel(path.relative(root, parent).split(path.sep).join('/')),
+          ) === 'Directory';
+        if (code !== 'ENOENT' && !replacesTrackedFile) throw error;
+        // Missing descendants are created later. A tracked regular file can
+        // also stand where an archived Directory belongs, making a deeper
+        // realpath throw ENOTDIR; that file is removed only after all checks.
+        // At least one real ancestor must still prove containment.
         if (parent === root) throw error;
         continue;
       }
@@ -646,6 +654,44 @@ export async function restoreWorktreeSnapshot(
         `Snapshot hardlink resolves outside worktree root: ${targetRel}`,
       );
     }
+  }
+  // All containment checks have completed before removing anything. Clear a
+  // tracked regular file only where a Directory member explicitly replaces
+  // it, so nested descendants can be restored without following a link.
+  const filesToClear: string[] = [];
+  for (const [rel, type] of archived) {
+    if (type !== 'Directory') continue;
+    const target = confine(rel);
+    const stat = await fs.lstat(target).catch((error) => {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return null;
+      if (
+        code === 'ENOTDIR' &&
+        filesToClear.some((file) => target.startsWith(file + path.sep))
+      ) {
+        return null;
+      }
+      throw error;
+    });
+    if (stat?.isFile()) {
+      await assertRealContained(target, rel);
+      const realTarget = await fs.realpath(target);
+      const realRel = path
+        .relative(realRoot, realTarget)
+        .split(path.sep)
+        .join('/');
+      // A nested member can alias the top-level protected gitfile through an
+      // existing symlink. Parent containment alone does not protect that file.
+      if (isProtectedRel(realRel)) {
+        throw new Error(
+          `Snapshot directory replacement targets a protected path: ${rel}`,
+        );
+      }
+      filesToClear.push(target);
+    }
+  }
+  for (const target of filesToClear) {
+    await fs.rm(target, { force: true });
   }
   for (const [rel, type] of archived) {
     if (type === 'Directory') continue;

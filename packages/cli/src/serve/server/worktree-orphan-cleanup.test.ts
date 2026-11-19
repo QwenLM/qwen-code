@@ -32,6 +32,38 @@ import {
   type WorktreeCleanupPlan,
 } from './worktree-orphan-cleanup.js';
 
+const sourceHashGate = vi.hoisted(() => ({
+  active: undefined as
+    | { source: string; started: () => void; resume: Promise<void> }
+    | undefined,
+}));
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/git-branches.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/git-branches.js')
+      >();
+    return {
+      ...actual,
+      runGit: async (...args: Parameters<typeof actual.runGit>) => {
+        const pending = actual.runGit(...args);
+        const gate = sourceHashGate.active;
+        if (
+          gate &&
+          args[0] === gate.source &&
+          args[1].includes('hash-object') &&
+          args[1].includes('large-carry.bin')
+        ) {
+          gate.started();
+          await gate.resume;
+        }
+        return pending;
+      },
+    };
+  },
+);
+
 function git(cwd: string, ...args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'pipe' });
 }
@@ -43,6 +75,7 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
   // any siblings wholesale.
   let repoParent: string;
   let repoRoot: string;
+  let caseSensitiveFilesystem: boolean;
 
   function archives(sessionId: string): string[] {
     return fs
@@ -87,9 +120,14 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     );
     git(repoRoot, 'add', '.');
     git(repoRoot, 'commit', '-qm', 'init', '--no-verify');
+    const caseProbe = path.join(repoRoot, 'case-probe');
+    fs.writeFileSync(caseProbe, '');
+    caseSensitiveFilesystem = !fs.existsSync(path.join(repoRoot, 'CASE-PROBE'));
+    fs.rmSync(caseProbe);
   });
 
   afterEach(() => {
+    sourceHashGate.active = undefined;
     fs.rmSync(repoParent, { recursive: true, force: true });
   });
 
@@ -299,6 +337,43 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
       lockKey: worktreePath,
     };
   }
+
+  it('preserves a new file written while the carry source is verified', async () => {
+    fs.writeFileSync(
+      path.join(repoRoot, 'large-carry.bin'),
+      randomBytes(256 * 1024 * 1024),
+    );
+    const plan = await carriedPlan('carried-late-file', true);
+    let sourceStarted!: () => void;
+    let releaseSource!: () => void;
+    const started = new Promise<void>((resolve) => {
+      sourceStarted = resolve;
+    });
+    const resume = new Promise<void>((resolve) => {
+      releaseSource = resolve;
+    });
+    sourceHashGate.active = {
+      source: repoRoot,
+      started: sourceStarted,
+      resume,
+    };
+    const cleanup = executeWorktreeCleanup(plan);
+    try {
+      await started;
+      fs.writeFileSync(
+        path.join(plan.lockKey, 'editor-draft.txt'),
+        'saved-now\n',
+      );
+    } finally {
+      releaseSource();
+      sourceHashGate.active = undefined;
+      await cleanup;
+    }
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(
+      fs.readFileSync(path.join(plan.lockKey, 'editor-draft.txt'), 'utf8'),
+    ).toBe('saved-now\n');
+  });
 
   it('collects a carried-only checkout when the sidecar records the overlay (R9-6)', async () => {
     const plan = await carriedPlan('carried-collect', true);
@@ -767,80 +842,112 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     },
   );
 
-  it.each(['nested-disposable', 'nested-tmp', 'bisect'] as const)(
-    'preserves late audit state during capture: %s',
-    async (kind) => {
-      const plan = await planFor(`late-${kind}`);
+  it.each([
+    'nested-disposable',
+    'nested-tmp',
+    'nested-repository',
+    'bisect',
+  ] as const)('preserves late audit state during capture: %s', async (kind) => {
+    const plan = await planFor(`late-${kind}`);
+    if (kind === 'nested-disposable') {
+      fs.appendFileSync(path.join(plan.lockKey, '.gitignore'), 'private/\n');
+      fs.mkdirSync(path.join(plan.lockKey, 'private', 'node_modules'), {
+        recursive: true,
+      });
+      fs.writeFileSync(
+        path.join(plan.lockKey, 'private', 'node_modules', 'result.txt'),
+        'before\n',
+      );
+    } else if (kind === 'nested-tmp') {
+      fs.mkdirSync(path.join(plan.lockKey, '.qwen-session.notes'));
+      fs.writeFileSync(
+        path.join(plan.lockKey, '.qwen-session.notes', 'draft.tmp'),
+        'before\n',
+      );
+    } else if (kind === 'nested-repository') {
+      const embedded = path.join(plan.lockKey, 'embedded');
+      fs.mkdirSync(embedded);
+      git(embedded, 'init', '-q');
+      fs.writeFileSync(path.join(embedded, 'draft.txt'), 'before\n');
+      expect(
+        execFileSync(
+          'git',
+          [
+            'status',
+            '--porcelain',
+            '--untracked-files=all',
+            '--ignored=matching',
+          ],
+          { cwd: plan.lockKey, encoding: 'utf8' },
+        ),
+      ).toContain('?? embedded/');
+    }
+    fs.writeFileSync(
+      path.join(plan.lockKey, 'payload.bin'),
+      randomBytes(256 * 1024 * 1024),
+    );
+    const late = editAtCaptureStart(plan.sessionId, () => {
       if (kind === 'nested-disposable') {
-        fs.appendFileSync(path.join(plan.lockKey, '.gitignore'), 'private/\n');
-        fs.mkdirSync(path.join(plan.lockKey, 'private', 'node_modules'), {
-          recursive: true,
-        });
         fs.writeFileSync(
           path.join(plan.lockKey, 'private', 'node_modules', 'result.txt'),
-          'before\n',
+          'after\n',
         );
       } else if (kind === 'nested-tmp') {
-        fs.mkdirSync(path.join(plan.lockKey, '.qwen-session.notes'));
         fs.writeFileSync(
           path.join(plan.lockKey, '.qwen-session.notes', 'draft.tmp'),
-          'before\n',
+          'after\n',
         );
-      }
-      fs.writeFileSync(
-        path.join(plan.lockKey, 'payload.bin'),
-        randomBytes(256 * 1024 * 1024),
-      );
-      const late = editAtCaptureStart(plan.sessionId, () => {
-        if (kind === 'nested-disposable') {
-          fs.writeFileSync(
-            path.join(plan.lockKey, 'private', 'node_modules', 'result.txt'),
-            'after\n',
-          );
-        } else if (kind === 'nested-tmp') {
-          fs.writeFileSync(
-            path.join(plan.lockKey, '.qwen-session.notes', 'draft.tmp'),
-            'after\n',
-          );
-        } else {
-          git(plan.lockKey, 'bisect', 'start');
-        }
-      });
-      try {
-        await executeWorktreeCleanup(plan);
-      } finally {
-        late.stop();
-      }
-      expect(late.edited()).toBe(true);
-      expect(archives(plan.sessionId)).toHaveLength(1);
-      expect(fs.existsSync(plan.lockKey)).toBe(true);
-      if (kind === 'nested-disposable') {
-        expect(
-          fs.readFileSync(
-            path.join(plan.lockKey, 'private', 'node_modules', 'result.txt'),
-            'utf8',
-          ),
-        ).toBe('after\n');
-      } else if (kind === 'nested-tmp') {
-        expect(
-          fs.readFileSync(
-            path.join(plan.lockKey, '.qwen-session.notes', 'draft.tmp'),
-            'utf8',
-          ),
-        ).toBe('after\n');
+      } else if (kind === 'nested-repository') {
+        fs.writeFileSync(
+          path.join(plan.lockKey, 'embedded', 'draft.txt'),
+          'after\n',
+        );
       } else {
-        const gitDir = execFileSync('git', ['rev-parse', '--git-dir'], {
-          cwd: plan.lockKey,
-          encoding: 'utf8',
-        }).trim();
-        expect(
-          fs.existsSync(path.resolve(plan.lockKey, gitDir, 'BISECT_START')),
-        ).toBe(true);
+        git(plan.lockKey, 'bisect', 'start');
       }
-    },
-  );
+    });
+    try {
+      await executeWorktreeCleanup(plan);
+    } finally {
+      late.stop();
+    }
+    expect(late.edited()).toBe(true);
+    expect(archives(plan.sessionId)).toHaveLength(1);
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    if (kind === 'nested-disposable') {
+      expect(
+        fs.readFileSync(
+          path.join(plan.lockKey, 'private', 'node_modules', 'result.txt'),
+          'utf8',
+        ),
+      ).toBe('after\n');
+    } else if (kind === 'nested-tmp') {
+      expect(
+        fs.readFileSync(
+          path.join(plan.lockKey, '.qwen-session.notes', 'draft.tmp'),
+          'utf8',
+        ),
+      ).toBe('after\n');
+    } else if (kind === 'nested-repository') {
+      expect(
+        fs.readFileSync(
+          path.join(plan.lockKey, 'embedded', 'draft.txt'),
+          'utf8',
+        ),
+      ).toBe('after\n');
+    } else {
+      const gitDir = execFileSync('git', ['rev-parse', '--git-dir'], {
+        cwd: plan.lockKey,
+        encoding: 'utf8',
+      }).trim();
+      expect(
+        fs.existsSync(path.resolve(plan.lockKey, gitDir, 'BISECT_START')),
+      ).toBe(true);
+    }
+  });
 
-  it('preserves a clean tracked protected case-variant (audit capture)', async () => {
+  it('preserves a clean tracked protected case-variant (audit capture)', async (ctx) => {
+    if (!caseSensitiveFilesystem) ctx.skip();
     fs.writeFileSync(path.join(repoRoot, '.QWEN-SESSION'), 'tracked variant\n');
     git(repoRoot, 'add', '.QWEN-SESSION');
     git(repoRoot, 'commit', '-qm', 'track marker variant', '--no-verify');
