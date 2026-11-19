@@ -356,8 +356,18 @@ function stateFile(ws) {
     const base = join(channelsDir, scope);
     for (const entry of readdirSync(base)) {
       if (entry.startsWith('github-')) {
-        const file = join(base, entry, 'managed-state.json');
-        if (existsSync(file)) return file;
+        const dir = join(base, entry);
+        // The live ledger is identity-keyed (managed-state-<16 hex>.json, the
+        // store's slice(0, 16) key). Match it exactly so the scan never hands
+        // back a managed-state.json.stranded-<uuid> archive or an in-flight
+        // <uuid>.tmp. Fall back to the pre-upgrade managed-state.json so the
+        // rig also works against an older build.
+        const keyed = readdirSync(dir).find((f) =>
+          /^managed-state-[0-9a-f]{16}\.json$/.test(f),
+        );
+        if (keyed) return join(dir, keyed);
+        const legacy = join(dir, 'managed-state.json');
+        if (existsSync(legacy)) return legacy;
       }
     }
   }

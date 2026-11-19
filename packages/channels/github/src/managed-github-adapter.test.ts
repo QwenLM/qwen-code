@@ -2730,6 +2730,108 @@ describe('managed GitHub adapter registration-identity isolation', () => {
       ),
     ).toHaveLength(0);
   });
+
+  it('losing ownership mid-connect leaves the legacy unarchived', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await first.adapter.connect();
+    // Give the keyed ledger an outbound segment so reportOrphanedOutbound has
+    // a receipt await to lose ownership during — a point AFTER where a hoisted
+    // archive would run but BEFORE the ownership re-check (R2-7).
+    seedState(first.adapter, (s) => {
+      s.outbound = [{ deliveryId: 'd-1', ordinal: 0 }];
+    });
+    await first.adapter.disconnect();
+    const dir = dirname(first.adapter.stateFile);
+    seedLegacy(dir, legacyState(1, 0));
+    lines.length = 0;
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    // A reaped stale lock means a second owner won the directory mid-connect.
+    second.plane.controlPlane.receipt = async () => {
+      second.fake.compromise();
+    };
+    await expect(second.adapter.connect()).rejects.toThrow(
+      /stopped during connection/,
+    );
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+    expect(
+      readdirSync(dir).filter((f) =>
+        f.startsWith('managed-state.json.stranded-'),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('carries the legacy watch.episodes into the fresh keyed ledger', async () => {
+    const cwd = tempCwd();
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        cursor: { lastProcessedAt: null, dispatchedComments: [] },
+        pending: [],
+        outbound: [],
+        watch: { prs: {}, episodes: { 'owner/repo#7': 5 } },
+      }),
+    );
+    await adapter.connect();
+    // The durable episode counter survives the upgrade so a post-upgrade
+    // recurrence derives episode 6, not a deduped episode 1 (R2-2). watch.prs
+    // re-baselines empty.
+    const state = readState(adapter);
+    expect(state.watch?.episodes).toEqual({ 'owner/repo#7': 5 });
+    expect(state.watch?.prs).toEqual({});
+    expect(state.pending).toEqual([]);
+    await adapter.disconnect();
+  });
+
+  it('a roll-forward over a keyed ledger with a cursor does not claim a skipped window', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await first.adapter.connect();
+    // The keyed ledger already has a watermark T0.
+    seedState(first.adapter, (s) => {
+      s.cursor.lastProcessedAt = '2026-11-19T08:00:00Z';
+    });
+    await first.adapter.disconnect();
+    // A rollback stages a legacy with a later watermark T1 > T0.
+    seedLegacy(dirname(first.adapter.stateFile), {
+      version: 1,
+      generation: 1,
+      cursor: {
+        lastProcessedAt: '2026-11-19T09:00:00Z',
+        dispatchedComments: [],
+      },
+      pending: [],
+      outbound: [],
+    });
+    lines.length = 0;
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await second.adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    // The loaded keyed cursor (T0) re-lists from before T1, so the window is
+    // NOT fresh: no false "were never listed" / "does not re-list" claim
+    // (R1-4 fix-induced).
+    expect(stranded[0]).not.toContain('were never listed');
+    expect(stranded[0]).not.toContain('does not re-list');
+    await second.adapter.disconnect();
+  });
 });
 
 describe('managed GitHub adapter PR watch', () => {

@@ -28,7 +28,7 @@
 
 ## 涉及文件
 
-- `packages/channels/base/src/managed-channel.ts` —— `destinationKey` 注释：点名 WeCom 与 DingTalk 为绑定者；GitHub/email 仍为后续。
+- `packages/channels/base/src/managed-channel.ts` —— `destinationKey` 注释：点名 WeCom 与 DingTalk 为绑定者；GitHub 已在 #17775 加入，email 仍为后续。
 - `packages/channels/dingtalk/src/managed-state.ts` —— 存储构造函数：条目键控目录 + 身份键控账本文件。
 - `packages/channels/dingtalk/src/managed-dingtalk-adapter.ts` —— 传 `destinationKey` 给存储。
 - `packages/channels/dingtalk/src/managed-state.test.ts` —— 更新文件路径期望；加键控与隔离见证。

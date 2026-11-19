@@ -393,6 +393,7 @@ export class ManagedGithubStateStore {
         outbound: number;
         readable: boolean;
         watermark: string | null;
+        episodes: Record<string, number> | undefined;
       }
     | undefined {
     const legacyPath = join(this.directory, 'managed-state.json');
@@ -401,11 +402,13 @@ export class ManagedGithubStateStore {
     let outbound = 0;
     let readable = true;
     let watermark: string | null = null;
+    let episodes: Record<string, number> | undefined;
     try {
       const value = JSON.parse(readFileSync(legacyPath, 'utf8')) as {
         pending?: unknown[];
         outbound?: unknown[];
         cursor?: { lastProcessedAt?: unknown };
+        watch?: { episodes?: unknown };
       } | null;
       const pendingList = value?.pending;
       const outboundList = value?.outbound;
@@ -418,12 +421,43 @@ export class ManagedGithubStateStore {
       // legacy staged no pending/outbound (R1-4).
       const lastProcessedAt = value?.cursor?.lastProcessedAt;
       watermark = typeof lastProcessedAt === 'string' ? lastProcessedAt : null;
+      // The durable per-PR episode counters are the one part of the legacy
+      // watch state the fresh ledger carries (R2-2): the admission ledger is
+      // permanent, so restarting the counter would re-derive an already-admitted
+      // input id and silently dedupe a genuine post-upgrade recurrence. The
+      // counter is monotone and the input id already binds tenant/channel, so
+      // carrying it only errs toward a new id. Sanitize to the validator's bound
+      // (safe integers >= 1, capped) so the carried state passes the next load().
+      const rawEpisodes = value?.watch?.episodes;
+      if (
+        !!rawEpisodes &&
+        typeof rawEpisodes === 'object' &&
+        !Array.isArray(rawEpisodes)
+      ) {
+        const carried: Record<string, number> = {};
+        for (const [key, entry] of Object.entries(rawEpisodes).slice(
+          0,
+          MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT,
+        )) {
+          if (Number.isSafeInteger(entry) && (entry as number) >= 1) {
+            carried[key] = entry as number;
+          }
+        }
+        if (Object.keys(carried).length > 0) episodes = carried;
+      }
     } catch {
       // A corrupt or unreadable legacy still strands; flag it so the caller
       // reports unknown counts and a possible loss, never a silent "empty".
       readable = false;
     }
-    return { path: legacyPath, pending, outbound, readable, watermark };
+    return {
+      path: legacyPath,
+      pending,
+      outbound,
+      readable,
+      watermark,
+      episodes,
+    };
   }
 
   /**

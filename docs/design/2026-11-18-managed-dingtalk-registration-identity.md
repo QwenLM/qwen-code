@@ -28,7 +28,7 @@ The shared `destinationKey` comment in `channel-base` is updated to name WeCom *
 
 ## Files affected
 
-- `packages/channels/base/src/managed-channel.ts` — `destinationKey` comment: name WeCom and DingTalk as binders; GitHub/email remain follow-ups.
+- `packages/channels/base/src/managed-channel.ts` — `destinationKey` comment: name WeCom and DingTalk as binders; GitHub has since been added in #17775, email remains the follow-up.
 - `packages/channels/dingtalk/src/managed-state.ts` — store constructor: entry-keyed directory + identity-keyed ledger file.
 - `packages/channels/dingtalk/src/managed-dingtalk-adapter.ts` — pass `destinationKey` to the store.
 - `packages/channels/dingtalk/src/managed-state.test.ts` — file-path expectations updated; keying and isolation witnesses added.

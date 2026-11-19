@@ -33,7 +33,7 @@ import {
 // Let one test force a real write failure inside store.save (after the temp
 // file is opened) so the save-failure catch/finally actually executes; every
 // other call passes through to the real fs.
-const fsControl = vi.hoisted(() => ({ failWrite: false }));
+const fsControl = vi.hoisted(() => ({ failWrite: false, failRename: false }));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
   return {
@@ -47,6 +47,14 @@ vi.mock('node:fs', async (importOriginal) => {
       }
       return actual.writeFileSync(...args);
     }) as typeof actual.writeFileSync,
+    renameSync: ((...args: Parameters<typeof actual.renameSync>) => {
+      if (fsControl.failRename) {
+        throw Object.assign(new Error('EACCES: permission denied, rename'), {
+          code: 'EACCES',
+        });
+      }
+      return actual.renameSync(...args);
+    }) as typeof actual.renameSync,
   };
 });
 
@@ -625,18 +633,23 @@ describe('ManagedGithubStateStore', () => {
   });
 
   it('a workspace change within one tenant isolates the ledger', () => {
+    // One shared cwd so the workspace-scope parent is identical: the file
+    // difference must come from the identity key alone, not from separate
+    // tempCwd() parents (R2-4). A constant ledger name must red this.
+    const cwd = tempCwd();
     const a = new ManagedGithubStateStore(
       'gh-1',
-      tempCwd(),
+      cwd,
       'https://api.github.com',
       'cp|tenant-a|chan-1|actor|ws|.',
     );
     const b = new ManagedGithubStateStore(
       'gh-1',
-      tempCwd(),
+      cwd,
       'https://api.github.com',
       'cp|tenant-a|chan-1|actor|ws-2|.',
     );
+    expect(a.directory).toBe(b.directory);
     expect(a.file).not.toBe(b.file);
   });
 
@@ -794,5 +807,58 @@ describe('ManagedGithubStateStore', () => {
     // An unreadable legacy cannot surface a watermark.
     writeFileSync(legacyPath, '{not json');
     expect(store.strandedLegacyLedger()!.watermark).toBeNull();
+  });
+
+  it('surfaces the legacy watch.episodes counters, sanitized to the validator bound', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-episodes',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    const legacyPath = join(store.directory, 'managed-state.json');
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({
+        ...freshState(),
+        watch: {
+          prs: {},
+          episodes: { 'owner/repo#7': 5, 'owner/repo#8': 0, bad: 'x' },
+        },
+      }),
+    );
+    // Only safe integers >= 1 are carried; the rest re-baseline (R2-2).
+    expect(store.strandedLegacyLedger()!.episodes).toEqual({
+      'owner/repo#7': 5,
+    });
+    // A legacy without watch carries no episodes.
+    writeFileSync(legacyPath, JSON.stringify(freshState()));
+    expect(store.strandedLegacyLedger()!.episodes).toBeUndefined();
+    // An unreadable legacy carries no episodes.
+    writeFileSync(legacyPath, '{not json');
+    expect(store.strandedLegacyLedger()!.episodes).toBeUndefined();
+  });
+
+  it('a failed archive rename leaves the legacy reported, never throws', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-archive-fail',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    const legacyPath = join(store.directory, 'managed-state.json');
+    writeFileSync(legacyPath, JSON.stringify(freshState()));
+    fsControl.failRename = true;
+    try {
+      // The documented rename-failure arm returns undefined and keeps the file
+      // so the next start reports it again (R2-6); it must not throw.
+      expect(store.archiveStrandedLegacy()).toBeUndefined();
+    } finally {
+      fsControl.failRename = false;
+    }
+    expect(existsSync(legacyPath)).toBe(true);
+    expect(store.strandedLegacyLedger()).toBeDefined();
   });
 });

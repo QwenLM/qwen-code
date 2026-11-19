@@ -548,12 +548,18 @@ export class ManagedGithubAdapter {
         // lost inbound comments, and a quiescent 0/0 legacy reports no loss.
         const pendingLabel = legacy.readable ? legacy.pending : 'unknown';
         const outboundLabel = legacy.readable ? legacy.outbound : 'unknown';
+        // The "fresh window" loss claims only hold when the loaded ledger has no
+        // watermark of its own. On a roll-forward after a rollback the keyed
+        // ledger already has a cursor, so the poll re-lists from it and the
+        // legacy watermark's window is NOT skipped — claiming a loss there would
+        // page the operator about a loss that does not exist (R1-4 fix-induced).
+        const freshWindow = !loaded || loaded.cursor.lastProcessedAt === null;
         let consequence = '';
         if (!legacy.readable) {
           consequence =
             ' Its contents could not be read, so any staged-but-unadmitted claims it held are stranded.';
         } else {
-          if (legacy.pending > 0)
+          if (legacy.pending > 0 && freshWindow)
             consequence +=
               ' Its staged-but-unadmitted claims are stranded; the fresh notification window does not re-list them.';
           if (legacy.outbound > 0)
@@ -563,7 +569,7 @@ export class ManagedGithubAdapter {
           // the fresh null cursor restarts the window at connect time, so
           // mentions received after the legacy watermark while the bot was down
           // are never listed. Name that skipped window separately (R1-4).
-          if (legacy.watermark !== null)
+          if (freshWindow && legacy.watermark !== null)
             consequence += ` Unread notifications updated after ${legacy.watermark} and before this start were never listed, so mentions received since then were not admitted.`;
         }
         this.log(
@@ -576,6 +582,13 @@ export class ManagedGithubAdapter {
         cursor: { lastProcessedAt: null, dispatchedComments: [] },
         pending: [],
         outbound: [],
+        // Carry only the legacy durable episode counters into the fresh keyed
+        // ledger (R2-2): the admission ledger is permanent, so restarting the
+        // counter would re-derive an already-admitted input id and dedupe a
+        // genuine post-upgrade recurrence. watch.prs re-baselines silently.
+        ...(legacy?.episodes
+          ? { watch: { prs: {}, episodes: legacy.episodes } }
+          : {}),
       };
       if (this.state.pending.some((entry) => entry.held)) {
         this.instanceStalled = true;
