@@ -256,6 +256,10 @@ core 邻近面是整面跑而非抽样：`src/managed-runtime` 加 `src/skills/b
 
 门与声明库存仍按规范决策名键控，故改名臂的门不被计数；它的 helper 调用会被计数，而这正是伪造解析所检验的部分。这是扫描器既有设计，不是本轮的改动。
 
+第七次合入 main（合并提交 `9750c4a696`，以 merge base 判定与本 PR 文件零重叠），改了 68 个 cli/core/Java/scripts 文件。首次构建**失败**：main 新增 `packages/channels/msteams` 并改了 `pnpm-lock.yaml`，故 `@microsoft/agents-hosting` 与 `@microsoft/agents-activity` 未安装，该包报 TS2307。这是依赖漂移、不是本 diff 的回归；`corepack pnpm install --frozen-lockfile`（rc=0）解决后重跑构建，而不是把失败当通过承接下去。
+
+本 head：全量构建 rc=0 且 core 与 cli 的 dist 按构建起点时间戳断言已刷新，jar 重建，`ManagedLoopSkillTest` **19/19**，bundle 重建并断言已刷新，重建 jar 内四个 sidecar 与已提交契约逐字节相等。臂：`--loop-skill` success（session `7a23c06a-5fe7-4a0c-8f84-3b78794d10f1`、modelRounds 6、cron create/list/delete 均见证）；`--loop-fire` success（session `ec5bc39a-2fb2-45e5-95c5-91e3264b2528`、schedule `asch_916ccb2d42000efe6c0fdc9ca225506d`、fireTrigger=scheduled、fireOutcome=fired、fireState=completed、occurrenceKey `schedule:2026-11-19T08:41:00Z`、modelRounds 5）。快速套件：core **35/35**、scripts 元 **184/184**；core `tsc --build`、eslint 与 prettier 净。
+
 ## 开放问题
 
 无阻塞项。

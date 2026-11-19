@@ -256,6 +256,10 @@ Round 12 returned **"No blocking issues. LGTM!"** with four deferred items. Thre
 
 The gate and declaration inventories still key on the canonical decision name, so a renamed arm's gate is not counted; its helper call is, which is what the fabrication resolution exercises. That is the scanner's existing design, not a change in this round.
 
+Main was merged a seventh time (merge commit `9750c4a696`, zero overlap with this PR's files measured against the merge base), changing 68 cli/core/Java/scripts files. The first build attempt **failed**: main added `packages/channels/msteams` and changed `pnpm-lock.yaml`, so `@microsoft/agents-hosting` and `@microsoft/agents-activity` were not installed and that package reported TS2307. That is dependency drift, not a regression in this diff; `corepack pnpm install --frozen-lockfile` (rc=0) resolved it and the build was re-run rather than the failure being carried forward as a pass.
+
+At this head: full build rc=0 with core and cli dist asserted refreshed against the build's start timestamp, jar rebuilt, `ManagedLoopSkillTest` **19/19**, bundle rebuilt and asserted refreshed, and the rebuilt jar's four sidecars byte-equal to the committed contracts. Arms: `--loop-skill` success (session `7a23c06a-5fe7-4a0c-8f84-3b78794d10f1`, modelRounds 6, cron create/list/delete all witnessed); `--loop-fire` success (session `ec5bc39a-2fb2-45e5-95c5-91e3264b2528`, schedule `asch_916ccb2d42000efe6c0fdc9ca225506d`, `fireTrigger=scheduled`, `fireOutcome=fired`, `fireState=completed`, occurrenceKey `schedule:2026-11-19T08:41:00Z`, modelRounds 5). Fast suites: core **35/35**, scripts meta **184/184**; core `tsc --build`, eslint and prettier clean.
+
 ## Open questions
 
 None blocking.
