@@ -21437,6 +21437,9 @@ describe('runQwenServe channel worker supervisor', () => {
       Authorization: 'Bearer deliberately-invalid-daemon-token',
       Cookie: 'browser-secret=must-not-reach-java',
       'X-Qwen-Tenant-Id': 'forged-tenant',
+      'X-Qwen-Actor-Id': 'forged-actor',
+      'X-Qwen-Signature': 'forged-signature',
+      'X-Qwen-Signature-Timestamp': '1',
       Origin: handle!.url,
     });
     try {
@@ -21523,7 +21526,8 @@ describe('runQwenServe channel worker supervisor', () => {
       });
       const result = await new Promise<{
         status: number;
-        protocol?: string;
+        protocol: string | undefined;
+        accept: string | undefined;
         echo: string;
       }>((resolve, reject) => {
         const target = new URL(terminalUrl());
@@ -21546,6 +21550,7 @@ describe('runQwenServe channel worker supervisor', () => {
         let upgraded = false;
         let status = 0;
         let protocol: string | undefined;
+        let accept: string | undefined;
         socket.on('data', (chunk) => {
           buffer += chunk.toString();
           let echo = '';
@@ -21558,19 +21563,23 @@ describe('runQwenServe channel worker supervisor', () => {
             protocol = /^Sec-WebSocket-Protocol:\s*(.+)$/im
               .exec(header)?.[1]
               ?.trim();
+            accept = /^Sec-WebSocket-Accept:\s*(.+)$/im
+              .exec(header)?.[1]
+              ?.trim();
             echo = buffer.slice(boundary + 4);
             if (!echo.includes('java-head')) return;
-            resolve({ status, protocol, echo: 'java-head' });
+            resolve({ status, protocol, accept, echo: 'java-head' });
             return;
           }
           if (buffer.includes('java-head'))
-            resolve({ status, protocol, echo: 'java-head' });
+            resolve({ status, protocol, accept, echo: 'java-head' });
         });
         socket.on('error', reject);
       });
       expect(result).toEqual({
         status: 101,
         protocol: 'qwen-ws',
+        accept: 'test-accept',
         echo: 'java-head',
       });
       expect(peerPath).toBe(
@@ -21579,12 +21588,19 @@ describe('runQwenServe channel worker supervisor', () => {
       await clientHead;
       expect(peerWire.endsWith('client-head')).toBe(true);
       expect(peerHeaders).toBeDefined();
+      expect(peerHeaders!['sec-websocket-key']).toBe(
+        'dGhlIHNhbXBsZSBub25jZQ==',
+      );
+      expect(peerHeaders!['sec-websocket-version']).toBe('13');
       expect(peerHeaders!['sec-websocket-protocol']).toBe(
         'qwen-ws, qwen-bearer.ticket-abc',
       );
       expect(peerHeaders!['authorization']).toBeUndefined();
       expect(peerHeaders!['cookie']).toBeUndefined();
       expect(peerHeaders!['x-qwen-tenant-id']).toBeUndefined();
+      expect(peerHeaders!['x-qwen-actor-id']).toBeUndefined();
+      expect(peerHeaders!['x-qwen-signature']).toBeUndefined();
+      expect(peerHeaders!['x-qwen-signature-timestamp']).toBeUndefined();
       expect(peerHeaders!['origin']).toBeUndefined();
 
       expect(forwardedUpgrades).toBe(1);

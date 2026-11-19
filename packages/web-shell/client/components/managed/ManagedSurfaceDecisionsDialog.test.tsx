@@ -79,7 +79,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-async function render(language: 'en' | 'zh-CN' = 'en') {
+async function render(language: 'en' | 'zh-CN' | 'zh-TW' | 'ru' = 'en') {
   await act(async () =>
     root.render(
       <I18nProvider language={language}>
@@ -97,12 +97,20 @@ async function click(button: Element) {
   );
 }
 
-async function open(language: 'en' | 'zh-CN' = 'en') {
+async function setFilterValue(search: HTMLInputElement, value: string) {
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(search, value);
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+
+async function open(language: 'en' | 'zh-CN' | 'zh-TW' | 'ru' = 'en') {
   await render(language);
-  const label =
-    language === 'zh-CN' ? 'Managed 功能说明' : 'Managed capabilities';
-  const trigger = [...container.querySelectorAll('button')].find(
-    (button) => button.textContent === label,
+  const trigger = container.querySelector(
+    '[data-managed-surface-decisions-trigger]',
   )!;
   await click(trigger);
   return trigger;
@@ -142,8 +150,32 @@ describe('ManagedSurfaceDecisionsDialog', () => {
     }
   });
 
-  it('keeps destructive-operation explanations independently pinned', () => {
+  it('keeps all 35 decision texts independently pinned', () => {
+    expect(MANAGED_SURFACE_DECISIONS).toMatchSnapshot();
+  });
+
+  it('keeps reviewed surface explanations independently pinned', () => {
     const pinned = [
+      {
+        id: 'github',
+        category: 'configuration',
+        issue: 15084,
+        label: ['GitHub setup and pull requests', 'GitHub 设置与 Pull Request'],
+        reason: [
+          'Managed has no GitHub setup, pull-request list or pull-request files surface.',
+          'Managed 没有 GitHub 设置、Pull Request 列表或 Pull Request 文件界面。',
+        ],
+      },
+      {
+        id: 'voice',
+        category: 'runtime',
+        issue: 15084,
+        label: ['Voice and transcription', '语音与转写'],
+        reason: [
+          'Managed has no voice, live-voice or transcription surface.',
+          'Managed 没有语音、实时语音或转写界面。',
+        ],
+      },
       {
         id: 'message-deletion',
         category: 'conversation',
@@ -177,9 +209,13 @@ describe('ManagedSurfaceDecisionsDialog', () => {
     ].sort((left, right) => left.id.localeCompare(right.id));
     expect(
       MANAGED_SURFACE_DECISIONS.filter((surface) =>
-        ['message-deletion', 'file-mutations', 'worktree-operations'].includes(
-          surface.id,
-        ),
+        [
+          'github',
+          'voice',
+          'message-deletion',
+          'file-mutations',
+          'worktree-operations',
+        ].includes(surface.id),
       ).sort((left, right) => left.id.localeCompare(right.id)),
     ).toEqual(pinned);
   });
@@ -220,6 +256,113 @@ describe('ManagedSurfaceDecisionsDialog', () => {
         `https://github.com/QwenLM/qwen-code/issues/${surface.issue}`,
       );
     }
+  });
+
+  it.each([
+    {
+      language: 'en',
+      title: 'Managed capabilities',
+      search: 'Search surfaces',
+      empty: 'No surfaces match this search.',
+      trackedIn: 'Tracked in',
+      category: 'Configuration and workspace identity',
+      close: 'close',
+    },
+    {
+      language: 'zh-CN',
+      title: 'Managed 功能说明',
+      search: '搜索界面',
+      empty: '没有符合搜索条件的界面。',
+      trackedIn: '跟踪于',
+      category: '配置与工作区身份',
+      close: '关闭',
+    },
+    {
+      language: 'zh-TW',
+      title: 'Managed 功能說明',
+      search: '搜尋介面',
+      empty: '沒有符合搜尋條件的介面。',
+      trackedIn: '追蹤於',
+      category: '組態與工作區身分識別',
+      close: '關閉',
+    },
+    {
+      language: 'ru',
+      title: 'Возможности Managed',
+      search: 'Поиск интерфейсов',
+      empty: 'Интерфейсы по этому запросу не найдены.',
+      trackedIn: 'Отслеживается в',
+      category: 'Конфигурация и идентичность рабочей области',
+      close: 'закрыть',
+    },
+  ] as const)('localizes the dialog chrome for $language', async (expected) => {
+    const trigger = await open(expected.language);
+    expect(trigger.textContent).toBe(expected.title);
+    expect(
+      portal.querySelector('[data-slot="dialog-title"]')?.textContent,
+    ).toBe(expected.title);
+    const search = portal.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    )!;
+    expect(search.placeholder).toBe(expected.search);
+    expect(portal.querySelector('h3')?.textContent).toBe(expected.category);
+    expect(portal.querySelector('li a')?.textContent).toBe(
+      `${expected.trackedIn} #15084`,
+    );
+    expect(
+      portal.querySelector('[data-slot="dialog-close"]')?.textContent,
+    ).toBe(expected.close);
+    await setFilterValue(search, 'no matching surface');
+    expect(portal.querySelector('[role="status"]')?.textContent).toBe(
+      expected.empty,
+    );
+  });
+
+  it('searches visible owners, tracking chrome and category titles', async () => {
+    await open();
+    const search = portal.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    )!;
+    for (const [query, count, id] of [
+      ['15084', 29, 'settings'],
+      ['Tracked in', 35, 'settings'],
+      ['#13396', 1, 'memory'],
+      ['Configuration and workspace identity', 8, 'settings'],
+    ] as const) {
+      await setFilterValue(search, query);
+      expect(portal.querySelectorAll('[data-managed-surface]')).toHaveLength(
+        count,
+      );
+      expect(
+        portal.querySelector(`[data-managed-surface="${id}"]`),
+      ).not.toBeNull();
+    }
+    expect(search.value).toBe('Configuration and workspace identity');
+  });
+
+  it('keeps committed results during IME composition and filters on commit', async () => {
+    await open();
+    const search = portal.querySelector<HTMLInputElement>(
+      'input[type="search"]',
+    )!;
+    await act(async () =>
+      search.dispatchEvent(new Event('compositionstart', { bubbles: true })),
+    );
+    await setFilterValue(search, 'xiaoxishanchu');
+    expect(portal.querySelectorAll('[data-managed-surface]')).toHaveLength(35);
+    expect(portal.querySelector('[role="status"]')).toBeNull();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(search, '消息删除');
+      search.dispatchEvent(new Event('compositionend', { bubbles: true }));
+    });
+    expect(portal.querySelectorAll('[data-managed-surface]')).toHaveLength(1);
+    expect(
+      portal.querySelector('[data-managed-surface="message-deletion"]'),
+    ).not.toBeNull();
+    expect(search.value).toBe('消息删除');
   });
 
   it('filters locally, reports an empty result and resets on close', async () => {

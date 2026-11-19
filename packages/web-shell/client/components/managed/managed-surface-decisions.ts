@@ -15,13 +15,38 @@ export interface ManagedSurfaceDecision {
 
 export const MANAGED_SURFACE_CATEGORY_LABELS: Record<
   ManagedSurfaceCategory,
-  readonly [string, string]
+  readonly [string, string, string, string]
 > = {
-  configuration: ['Configuration and workspace identity', '配置与工作区身份'],
-  knowledge: ['Knowledge, Skills and extensions', '知识、Skills 与扩展'],
-  conversation: ['Conversation editing', '会话编辑'],
-  files: ['Files, artifacts and sources', '文件、产物与来源'],
-  runtime: ['Runtime and tooling', '运行时与工具'],
+  configuration: [
+    'Configuration and workspace identity',
+    '配置与工作区身份',
+    '組態與工作區身分識別',
+    'Конфигурация и идентичность рабочей области',
+  ],
+  knowledge: [
+    'Knowledge, Skills and extensions',
+    '知识、Skills 与扩展',
+    '知識、Skills 與擴充功能',
+    'Знания, Skills и расширения',
+  ],
+  conversation: [
+    'Conversation editing',
+    '会话编辑',
+    '對話編輯',
+    'Редактирование диалога',
+  ],
+  files: [
+    'Files, artifacts and sources',
+    '文件、产物与来源',
+    '檔案、成品與來源',
+    'Файлы, артефакты и источники',
+  ],
+  runtime: [
+    'Runtime and tooling',
+    '运行时与工具',
+    '執行階段與工具',
+    'Среда выполнения и инструменты',
+  ],
 };
 
 export const MANAGED_SURFACE_DECISIONS: readonly ManagedSurfaceDecision[] = [
@@ -98,7 +123,7 @@ export const MANAGED_SURFACE_DECISIONS: readonly ManagedSurfaceDecision[] = [
     label: ['GitHub setup and pull requests', 'GitHub 设置与 Pull Request'],
     reason: [
       'Managed has no GitHub setup, pull-request list or pull-request files surface.',
-      'Managed 没有 GitHub 设置、Pull Request 列表或文件界面。',
+      'Managed 没有 GitHub 设置、Pull Request 列表或 Pull Request 文件界面。',
     ],
   },
   {

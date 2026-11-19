@@ -37,6 +37,7 @@ All rows are **tracked**, not declarations of permanent exclusion. A maintainer 
 ### Capability parity corrections
 
 - Change `session_btw`, `session_btw_stream` and `session_recap` to `managed`, citing `surface:SIDE_QUERY_CREATE` or `surface:SIDE_QUERY_STREAM`. Remove those two newly cited labels from `MANAGED_ONLY_REPORTED`.
+- `managed` records the mounted-route standing, not full integrated acceptance. Integrated acceptance of BTW and recap remains pending; preserve the [existing BTW and recap design](2026-11-09-managed-btw-recap.md) and its delivery-and-validation boundary rather than treating the rows as completed acceptance evidence.
 - Keep `session_worktree_persistence_v1` absent: durable Managed Session worktrees do not satisfy the daemon's per-response `persisted-v1` attestation contract. Explain that distinction.
 - Keep `session_worktree_reset_v1` absent and explain that cleanup is not the daemon reset/ownership-transfer operation.
 - Keep `session_worktree_branch_v1` absent: an initial branch allocated during creation is not the post-create **create branch here** operation.

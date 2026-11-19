@@ -473,11 +473,12 @@ describe('ManagedSessionsPage', () => {
     const newButton = [...container.querySelectorAll('button')].find(
       (button) => button.textContent === 'Новая управляемая задача',
     );
-    const actions = [...container.querySelectorAll('button')].find(
-      (button) => button.textContent === 'Managed capabilities',
+    const actions = container.querySelector(
+      '[data-managed-surface-decisions-trigger]',
     );
     expect(newButton).toBeDefined();
-    expect(actions).toBeDefined();
+    expect(actions).not.toBeNull();
+    expect(actions!.textContent).toBe('Возможности Managed');
     expect(newButton!.parentElement!.className).toContain('flex-wrap');
     expect(actions!.parentElement!.className).toContain('flex-wrap');
   });

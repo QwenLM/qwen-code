@@ -37,6 +37,7 @@ Managed Web Shell 没有解释许多 daemon 专属界面。它们的控件被隐
 ### 能力对照修正
 
 - 将 `session_btw`、`session_btw_stream` 与 `session_recap` 改为 `managed`，引用 `surface:SIDE_QUERY_CREATE` 或 `surface:SIDE_QUERY_STREAM`。从 `MANAGED_ONLY_REPORTED` 删除这两个新引用的标签。
+- `managed` 表示已挂载路由的归属，不表示完整集成验收已通过。BTW 与 recap 的完整集成验收仍待完成；保留[既有 BTW 与 recap 设计](2026-11-09-managed-btw-recap.zh-CN.md)及其交付与验证边界，不把矩阵中的这些行当作已完成验收的证据。
 - `session_worktree_persistence_v1` 保持 absent：持久化 Managed Session worktree 不等于 daemon 的逐响应 `persisted-v1` 见证合同。文案解释这一区别。
 - `session_worktree_reset_v1` 保持 absent，并解释 cleanup 不是 daemon 的 reset／所有权转移操作。
 - `session_worktree_branch_v1` 保持 absent：创建时分配初始分支不等于创建后的「在此建分支」操作。
@@ -92,7 +93,7 @@ Managed Web Shell 没有解释许多 daemon 专属界面。它们的控件被隐
 ## 验证计划
 
 1. 运行聚焦 CLI parity、本地启动器、原始 relay、gateway 与真实前门 upgrade 测试。
-2. 运行 Managed 弹窗与 Sessions 页面测试，覆盖全部 35 组、链接、中英文且不产生额外后端调用。
+2. 运行 Managed 弹窗与 Sessions 页面测试，覆盖全部 35 组、链接、全部语言变体且不产生额外后端调用。
 3. 按模块十分钟本地预算，使用 JDK 21 运行聚焦 Java 归档导出、scope 兼容与终端准入测试及 Checkstyle。
 4. 构建、类型检查并打包 TypeScript workspace。
 5. 通过 `dist/cli.js` 验证本地 Managed 终端：capability、ticket、101 upgrade、命令回显、resize／replay、一次性票拒绝、Host／Origin 拒绝以及其他 upgrade 路由不回归。

@@ -114,8 +114,11 @@ A shell-capable Managed Session also offers **Terminal**. The browser obtains
 a one-time ticket and connects through the same authenticated local front
 door. This is a human shell, not a model tool: an authorized operator can run
 arbitrary commands as the server OS account without per-command model
-approval. The local worker has no container isolation, so enable and use this
-entry only for operators you trust with that account.
+approval. The local worker has no container isolation, so the launcher is only
+for operators you trust with that account. This local launcher always enables
+Terminal and provides no opt-out. The remaining local control is who can reach
+the printed page and its bearer token, not whether Terminal is enabled. Shell
+approval for model actions is not terminal authorization.
 
 After a restart, continuing an existing Session may wait for its previous SQL
 writer lease to expire (60 seconds by default). Keep the original data directory

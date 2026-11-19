@@ -126,8 +126,9 @@ Session 的下一次生命周期 drain，因为不 sweep hold 的离开 ACTIVE �
 统一本地启动器（`qwen serve --managed`）把 Java 路由挂在 daemon 认证之后，
 并为此本地部署同时启用 `runtime-broker.tool-measurements` 与
 `runtime-broker.web-terminal`。其 managed 代理通过普通 daemon 的唯一 ACP
-upgrade 分发器转发该路由的 WebSocket upgrade，在既有 primary-loopback、Host
-与 Origin 检查之后、daemon bearer 校验之前接管。浏览器与上游 relay socket
+upgrade 分发器，在既有 Host 与 Origin 检查之后转发该路由的 WebSocket
+upgrade。此路由自身新增 primary-listener 与 loopback 限制，再于 daemon
+bearer 校验之前接管；这项限制不是已有的共享门禁。浏览器与上游 relay socket
 共用分发器的关闭清理。Java 独立于 daemon token 消费一次性终端票。由于终端
 依赖该分发器，Managed 本地启动拒绝 `QWEN_SERVE_ACP_HTTP=0`；普通 daemon
 的 ACP 关闭行为不变。独立 Managed Web gateway 复用同一个 relay helper。普通
@@ -164,8 +165,9 @@ Workspace 上的 OPERATOR 授权。这是一个有意的产品决策：启用终
 接受「被授权的操作者可以在工作区内以 worker 用户身份执行任意命令，
 无需逐命令审批」。只有普通本地 Workspace binding 能启用终端，而那里
 worker 以服务器账户运行、没有容器隔离，因此该 opt-in 授予的是该账户的
-shell 访问。opt-in 默认关闭，且独立于 Shell opt-in，使部署可以启用
-agent Shell 而保持用户终端关闭。
+shell 访问。在统一本地启动器之外，opt-in 默认关闭，且独立于 Shell
+opt-in，使部署可以启用 agent Shell 而保持用户终端关闭。统一本地启动器
+始终启用终端 opt-in，不提供单独的终端关闭选项。
 
 `external-scratch` 与 K1 scratch runtime 拒绝终端准入：它们的契约禁用
 Workspace files 与 Shell，终端继承该拒绝。`hosted-workspace-files/1` 的

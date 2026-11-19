@@ -148,8 +148,9 @@ The unified local launcher (`qwen serve --managed`) mounts Java routes behind
 daemon authentication and enables `runtime-broker.tool-measurements` together
 with `runtime-broker.web-terminal` for this local deployment. Its managed proxy
 forwards this route's WebSocket upgrade through the ordinary daemon's single
-ACP upgrade dispatcher, after the existing primary-loopback, Host and Origin
-checks and before daemon bearer verification. The browser and upstream relay
+ACP upgrade dispatcher, after the existing Host and Origin checks. This route
+adds its own primary-listener and loopback restriction before daemon bearer
+verification; that restriction is not an existing shared gate. The browser and upstream relay
 sockets share the dispatcher's shutdown cleanup. Java consumes the one-time
 terminal ticket independently of the daemon token. Managed local startup
 rejects `QWEN_SERVE_ACP_HTTP=0` because the terminal requires this dispatcher;
@@ -198,9 +199,11 @@ deployment that enables the terminal accepts that an authorized operator can
 run arbitrary commands as the worker user in the workspace, without
 per-command approval. Only ordinary local Workspace bindings can enable the
 terminal, and there the worker runs as the server account with no container
-isolating it, so the opt-in grants that account's shell access. The opt-in
-defaults to off and is independent of the Shell opt-in so a deployment can
-enable agent Shell while keeping the user terminal closed.
+isolating it, so the opt-in grants that account's shell access. Outside the
+unified local launcher, the opt-in defaults to off and is independent of the
+Shell opt-in so a deployment can enable agent Shell while keeping the user
+terminal closed. The unified local launcher always enables the terminal opt-in
+and provides no separate terminal opt-out.
 
 `external-scratch` and K1 scratch runtimes refuse terminal admission: their
 contracts disable Workspace files and Shell, and the terminal inherits that

@@ -180,6 +180,25 @@ describe('capability parity matrix', () => {
     );
   });
 
+  it('preserves the BTW/recap integrated-acceptance caveat in the linked bilingual design', () => {
+    expect(
+      readFileSync(
+        resolve(REPO, 'docs/design/2026-11-19-managed-web-ui-parity.md'),
+        'utf8',
+      ),
+    ).toContain(
+      'Integrated acceptance of BTW and recap remains pending; preserve the [existing BTW and recap design](2026-11-09-managed-btw-recap.md)',
+    );
+    expect(
+      readFileSync(
+        resolve(REPO, 'docs/design/2026-11-19-managed-web-ui-parity.zh-CN.md'),
+        'utf8',
+      ),
+    ).toContain(
+      'BTW 与 recap 的完整集成验收仍待完成；保留[既有 BTW 与 recap 设计](2026-11-09-managed-btw-recap.zh-CN.md)',
+    );
+  });
+
   it.each([
     [
       'session_btw',
