@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createServer, get } from 'node:http';
+import { createServer, get, request } from 'node:http';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -274,5 +274,65 @@ describe('ServeAppLifecycle', () => {
       code: 'conversation_runtime_unavailable',
       retryable: true,
     });
+  });
+
+  it('keeps the request-handler fall-through for upgrades while no transport owns them', async () => {
+    const app = express();
+    app.use((_req, res) => {
+      res.status(404).type('text/plain').send('Not Found');
+    });
+    const lifecycle = installServeAppLifecycle(app);
+    const server = createServer(app);
+    servers.add(server);
+    lifecycle.bindServer(server);
+    server.listen(0, '127.0.0.1');
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const { port } = server.address() as { port: number };
+
+    const req = request({
+      host: '127.0.0.1',
+      port,
+      path: '/acp',
+      headers: {
+        Connection: 'Upgrade',
+        Upgrade: 'websocket',
+        'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+        'Sec-WebSocket-Version': '13',
+      },
+    });
+    const response = new Promise<number>((resolve, reject) => {
+      req.on('response', (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode ?? 0));
+      });
+      req.on('upgrade', (_res, socket) => {
+        socket.destroy();
+        reject(new Error('upgrade emitted instead of request fall-through'));
+      });
+      req.on('error', reject);
+    });
+    req.end();
+    // A suppressed fall-through parks the upgrade with no response at all;
+    // report that cause explicitly instead of burning the test timeout.
+    let timer: NodeJS.Timeout | undefined;
+    const bounded = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              'upgrade request got no response; request-handler fall-through suppressed',
+            ),
+          ),
+        2_000,
+      );
+    });
+    try {
+      const status = await Promise.race([response, bounded]);
+      expect(status).toBe(404);
+    } finally {
+      clearTimeout(timer);
+      req.destroy();
+    }
+    await lifecycle.close();
   });
 });

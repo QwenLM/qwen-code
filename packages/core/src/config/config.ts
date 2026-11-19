@@ -2502,8 +2502,9 @@ export interface SubSessionSpawnRequest {
    * absent means the caller's workspace. */
   workspace?: string;
   workspaceGeneration?: string;
-  /** A sub-session this caller created earlier, to send the prompt to
-   * instead of creating one. It lives in `workspace`. */
+  /** The named workspace was selected under YOLO without one-time approval. */
+  requiresYolo?: true;
+  /** An existing session in `workspace` to send the prompt to. */
   sessionId?: string;
 }
 

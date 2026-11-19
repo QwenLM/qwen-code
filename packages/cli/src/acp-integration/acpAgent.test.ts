@@ -4600,6 +4600,50 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
+  it('gives each session the Mod rows its client draws and asks it for one', async () => {
+    await setupSessionMocks('mod-rows-session');
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    try {
+      await agent.initialize({
+        clientCapabilities: {
+          _meta: { 'qwen.modRows': ['AssistantMessage', 'Pane'] },
+        },
+      });
+      const { sessionId } = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      })) as { sessionId: string };
+      expect(vi.mocked(Session).mock.lastCall![9]).toEqual([
+        'AssistantMessage',
+      ]);
+      const session = vi.mocked(Session).mock.results.at(-1)!.value as {
+        askModRow: ReturnType<typeof vi.fn>;
+      };
+      const props = { text: 'Hi', isFirstOfReply: true };
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionModRow, {
+          sessionId,
+          component: 'AssistantMessage',
+          props,
+        }),
+      ).resolves.toEqual({ status: 'answered' });
+      expect(session.askModRow).toHaveBeenCalledWith('AssistantMessage', props);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('profiles newSession stages under the daemon trace context', async () => {
     const parentContext = { trace: 'parent' };
     mockExtractDaemonTraceContext.mockReturnValue(parentContext);
@@ -6282,6 +6326,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           hasStandaloneRelocationBlockers: vi.fn().mockReturnValue(false),
           recoverMessageDeletionContext: vi.fn().mockResolvedValue(undefined),
           assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
+          askModRow: vi.fn().mockResolvedValue({ status: 'answered' }),
           dispose: vi.fn(),
           getSettings: vi.fn().mockReturnValue(_settings),
           enqueuePeerMessage: vi.fn().mockReturnValue(true),

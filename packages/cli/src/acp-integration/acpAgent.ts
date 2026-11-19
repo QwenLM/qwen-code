@@ -340,6 +340,7 @@ import {
   registerCreateSubSessionTool,
   type WorkflowCommandsStatus,
 } from './session/Session.js';
+import { acpModRowSites } from './session/acp-mod-session.js';
 import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
 import { applyRestoredSessionApprovalMode } from './session-approval-mode-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
@@ -14223,6 +14224,19 @@ class QwenAgent implements Agent {
 
         return { sessionId, description, launched: true };
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionModRow: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return await this.sessionOrThrow(sessionId).askModRow(
+          params['component'],
+          params['props'],
+        );
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionShellHistory: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -18062,6 +18076,7 @@ class QwenAgent implements Agent {
       workflowHistory,
       (runId) => this.isWorkflowRunLiveOutsideSession(sessionId, runId),
       (deliveries) => this.expireHostedPeerDeliveries(deliveries),
+      acpModRowSites(this.clientCapabilities),
     );
     if (options.deferAutomaticWorkUntilCwdRestore) {
       session.deferAutomaticWorkUntilCwdRestore();
