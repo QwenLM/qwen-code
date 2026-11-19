@@ -6,6 +6,29 @@
   outline: none;
 }
 
+/* Hover/focus bridge: the 8px band between the top of the bar and the card
+   (.detail sits at bottom: calc(100% + 8px)). A real pointer crosses that
+   band on the way from the pill to the card; while it is inside the band,
+   the band — not the bar — must keep .panel's :hover alive, or the first
+   sample there drops the hover, pointer-events snaps back to none (it is
+   not in the transition list) and the click lands on the transcript behind
+   the fading card. The band has to stay a descendant of .panel
+   (.bottomPanels is pointer-events: none for everything but its direct
+   children), and .panel must NOT become a positioning context: that would
+   re-anchor .detail to the fit-content pill and restore the #16970
+   clipping. Gated exactly like the card, so while the card is hidden the
+   band passes every click to the transcript. */
+.panel::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: 100%;
+  width: min(560px, 100%);
+  height: 8px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
 .summary {
   display: inline-flex;
   align-items: center;
@@ -156,6 +179,17 @@
   opacity: 1;
   pointer-events: auto;
   transform: translate(-50%, 0);
+}
+
+/* The band joins the card in exactly the states the card is hit-testable
+   in; outside of them it must not intercept anything (see the rule above). */
+.panel:hover::after,
+.panel:focus-within::after {
+  pointer-events: auto;
+}
+
+.detailClickable {
+  cursor: pointer;
 }
 
 .item {

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TodoItem } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
 import { TodoPanel } from './TodoPanel';
+import styles from './TodoPanel.module.css';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -108,27 +109,91 @@ describe('TodoPanel detail tooltip', () => {
       />,
     );
 
-    const tooltip = container.querySelector('[role="tooltip"]') as HTMLElement;
-    expect(tooltip).not.toBeNull();
-    act(() => tooltip.click());
+    const detail = container.querySelector('div[role="button"]') as HTMLElement;
+    expect(detail).not.toBeNull();
+    expect(detail.getAttribute('tabindex')).toBe('0');
+    act(() => detail.click());
     expect(onOpen).toHaveBeenCalledTimes(1);
   });
 
-  it('shows a pointer affordance on the detail tooltip only when clickable', () => {
+  it('activates the detail tooltip with Enter and Space', () => {
+    const onOpen = vi.fn();
+    const container = render(
+      <TodoPanel todos={[todo('1', 'pending')]} onOpen={onOpen} />,
+    );
+
+    const detail = container.querySelector('div[role="button"]') as HTMLElement;
+    act(() => detail.focus());
+    act(() => {
+      detail.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    act(() => {
+      detail.dispatchEvent(
+        new KeyboardEvent('keydown', { key: ' ', bubbles: true }),
+      );
+    });
+    expect(onOpen).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows the pointer affordance as a module class only when clickable', () => {
     const container = render(
       <TodoPanel todos={[todo('1', 'pending')]} onOpen={vi.fn()} />,
     );
 
-    const tooltip = container.querySelector('[role="tooltip"]') as HTMLElement;
-    expect(tooltip.style.cursor).toBe('pointer');
+    const detail = container.querySelector('div[role="button"]') as HTMLElement;
+    expect(detail.classList.contains(styles.detailClickable)).toBe(true);
   });
 
   it('keeps the detail tooltip inert when onOpen is not provided', () => {
     const container = render(<TodoPanel todos={[todo('1', 'pending')]} />);
 
-    const tooltip = container.querySelector('[role="tooltip"]') as HTMLElement;
-    expect(tooltip).not.toBeNull();
-    expect(tooltip.style.cursor).toBe('');
-    act(() => tooltip.click());
+    const detail = container.querySelector('[role="tooltip"]') as HTMLElement;
+    expect(detail).not.toBeNull();
+    expect(detail.classList.contains(styles.detailClickable)).toBe(false);
+    expect(detail.getAttribute('tabindex')).toBeNull();
+    expect(detail.getAttribute('aria-label')).toBeNull();
+    act(() => detail.click());
+  });
+
+  it('ignores the click that ends a text selection', () => {
+    const onOpen = vi.fn();
+    const container = render(
+      <TodoPanel
+        todos={[todo('1', 'in_progress'), todo('2', 'pending')]}
+        onOpen={onOpen}
+      />,
+    );
+
+    const detail = container.querySelector('div[role="button"]') as HTMLElement;
+    const range = document.createRange();
+    range.selectNodeContents(detail);
+    const selection = window.getSelection();
+    expect(selection).not.toBeNull();
+    selection!.removeAllRanges();
+    selection!.addRange(range);
+    act(() => detail.click());
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('ignores the repeat click of a double-click', () => {
+    const onOpen = vi.fn();
+    const container = render(
+      <TodoPanel todos={[todo('1', 'pending')]} onOpen={onOpen} />,
+    );
+
+    const detail = container.querySelector('div[role="button"]') as HTMLElement;
+    act(() => {
+      detail.dispatchEvent(
+        new MouseEvent('click', {
+          bubbles: true,
+          cancelable: true,
+          detail: 2,
+        }),
+      );
+    });
+    expect(onOpen).not.toHaveBeenCalled();
   });
 });
