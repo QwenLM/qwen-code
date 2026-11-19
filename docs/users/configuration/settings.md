@@ -556,6 +556,9 @@ Some rule names automatically cover multiple tools:
 | `./`   | Relative to current working directory | `./secrets/**`      |
 | (none) | Same as `./`                          | `secrets/**`        |
 
+> [!note]
+> On Windows, an absolute path keeps its drive letter: `"Read(//D:/keys/**)"` and `"Read(D:/keys/**)"` both work, and either separator is accepted (`D:/keys/**` or `D:\keys/**`). A leading `/` on its own still means "relative to project root", as on every other platform.
+
 **Shell command bypass prevention:**
 
 Permission rules for `Read`, `Edit`, and `WebFetch` are also enforced when the agent runs equivalent shell commands. For example, if `Read(./.env)` is in `deny`, the agent cannot bypass it via `cat .env` in a shell command. Supported shell commands include `cat`, `grep`, `curl`, `wget`, `cp`, `mv`, `rm`, `chmod`, and many more. Unknown/safe commands (e.g. `git`) are unaffected by file/network rules.
