@@ -558,12 +558,14 @@ export function scrubInheritedLoaderEnv(
 // and tuning flags are legitimate cross-process state, and a bare `-e` probe
 // child still needs them. When a child must not inherit a broken module hook,
 // drop only the hook flags and keep the rest of the value intact.
+// Keep loader spellings in sync with utils/bundled-chunk-resolver.ts.
 const NODE_OPTIONS_LOADER_FLAGS = new Set([
   '--require',
   '-r',
   '--import',
   '--loader',
   '--experimental-loader',
+  '--experimental_loader',
 ]);
 
 export function scrubNodeOptionsLoaderFlags(value: string): string {

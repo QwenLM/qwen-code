@@ -335,11 +335,16 @@ import {
   HostedChannelSession,
 } from './hosted-channel-session.js';
 import {
+  parsePrWatchSubmitInput,
+  submitPrEventInput,
+} from './hosted-pr-watch-session.js';
+import {
   CHANNEL_INPUT_SOURCE,
   MANAGED_CHANNEL_LIMITS,
   assertChannelPolicy,
   assertChannelRouteScope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-channel-operations.js';
+import { PR_EVENT_INPUT_SOURCE } from '@qwen-code/qwen-code-core/managed-runtime/managed-pr-watch-operations.js';
 import type { ChannelDelivery } from '@qwen-code/qwen-code-core/managed-runtime/managed-channel-record.js';
 import {
   HostedMonitorWakeScheduler,
@@ -1615,7 +1620,8 @@ function isWakeInputSource(source: string): boolean {
     source === AUTOMATION_INPUT_SOURCE ||
     isChildNotificationSource(source) ||
     source === SESSION_MESSAGE_INPUT_SOURCE ||
-    source === LOOP_INPUT_SOURCE
+    source === LOOP_INPUT_SOURCE ||
+    source === PR_EVENT_INPUT_SOURCE
   );
 }
 
@@ -2013,7 +2019,7 @@ function isWakeOwnedInput(event: ManagedSessionEvent): boolean {
 // exactly like the unsettled-input arithmetic above treats it — including
 // the file-history obligation the turn left behind. Naming this once
 // keeps the load gate's exception aligned with the pump's ownership.
-function isChannelInputTurn(session: HostedSession, turnId: string): boolean {
+function isPumpOwnedToolTurn(session: HostedSession, turnId: string): boolean {
   const authority = session.managed.authority;
   return authority
     .eventsInSequenceRange(1, authority.committedSequence)
@@ -2021,7 +2027,8 @@ function isChannelInputTurn(session: HostedSession, turnId: string): boolean {
       (event) =>
         event.kind === 'input.accepted' &&
         event.payload['turnId'] === turnId &&
-        event.payload['source'] === CHANNEL_INPUT_SOURCE,
+        (event.payload['source'] === CHANNEL_INPUT_SOURCE ||
+          event.payload['source'] === PR_EVENT_INPUT_SOURCE),
     );
 }
 
@@ -4951,7 +4958,7 @@ export function registerHostedHarnessSessionRoutes(
       if (suspensions.get(sessionId) !== suspension) return;
       void attemptSuspend(sessionId).catch((cause) => {
         writeStderrLineSafe(
-          `qwen serve: Hosted Session ${sessionId} suspension attempt failed: ${String(cause)}`,
+          `qwen serve: Hosted Session ${sessionId} suspension attempt failed: ${sanitizeDaemonLogLine(String(cause))}`,
         );
       });
     };
@@ -4979,6 +4986,14 @@ export function registerHostedHarnessSessionRoutes(
     session.mcpBusy === true ||
     session.hooksBusy === true ||
     session.mcpRecovering > 0 ||
+    // The durable records, not just the in-flight flags: an operation the
+    // dispatch poll gave up on stays pending after the route cleared mcpBusy,
+    // and the owner close in teardown step 3 refuses while it does. Without
+    // these terms every idle period would spend its retries and hand the
+    // Session a blocked gate for a known-pending operation.
+    (session.mcp?.hasPendingOperations() ?? false) ||
+    (session.mcp?.hasUnsettledConfigurations ?? false) ||
+    (session.hooks?.hasPendingOperations ?? false) ||
     compressionBusy(session) ||
     session.fileHistoryOwed !== undefined ||
     hasHostedCleanupDebt(session.managed) ||
@@ -4990,7 +5005,10 @@ export function registerHostedHarnessSessionRoutes(
     session.extensionBootstrapPending === true ||
     (session.replyPlanRetries?.size ?? 0) > 0 ||
     session.ownershipRelease !== undefined ||
-    session.clientFiles !== undefined ||
+    // Liveness, not object presence: unregister() drops the client and
+    // registration but leaves the object on the Session, so testing the field
+    // would make the Session permanently un-suspendable after one panel use.
+    session.clientFiles?.active === true ||
     // An open Harness event stream is a reader this teardown would cut. The
     // design's predicate names it beside the Turn's own stream.
     session.streams.size > 0 ||
@@ -5069,7 +5087,7 @@ export function registerHostedHarnessSessionRoutes(
           }
           if (!done.owners) {
             await session.hooks?.close({ terminal: false });
-            await session.mcp?.close({ terminal: false });
+            await session.mcp?.suspend();
             done.owners = true;
           }
           if (!done.lease) {
@@ -5172,7 +5190,7 @@ export function registerHostedHarnessSessionRoutes(
       writeStderrLineSafe(
         `qwen serve: Hosted Session ${sessionId} teardown uncertain` +
           ` afterMs=${Date.now() - attemptStart} attempts=${suspension.teardownAttempts}` +
-          ` reason=${String(lastTeardownError)}; gate auto-clears in ${reconcileMs}ms`,
+          ` reason=${sanitizeDaemonLogLine(String(lastTeardownError))}; gate auto-clears in ${reconcileMs}ms`,
       );
       const reconcileTimer = setTimeout(() => {
         const entry = suspensions.get(sessionId);
@@ -8070,21 +8088,23 @@ export function registerHostedHarnessSessionRoutes(
           );
         }
       }
-      // H5/F5 follow-up: a channel turn interrupted inside a Write/Edit
-      // owes the wake pump its recovery, but refusing here would kill that
-      // pump before it started — the input is pump-owned, so the takeover
-      // arithmetic above can never match its pendingTurn. Let the load
-      // through: the pump proves the stop and settles right after
-      // attachment.
-      const channelParked =
+      // H5/F5 follow-up: a pump-owned tool turn (channel or pr_event)
+      // interrupted inside a Write/Edit owes the wake pump its recovery, but
+      // refusing here would kill that pump before it started — the input is
+      // pump-owned, so the takeover arithmetic above can never match its
+      // pendingTurn. Let the load through: the pump proves the stop and
+      // settles right after attachment.
+      const pumpOwnedParked =
         fileHistory?.pendingTurn !== null &&
         fileHistory?.pendingTurn !== undefined &&
-        isChannelInputTurn(session, fileHistory.pendingTurn);
+        isPumpOwnedToolTurn(session, fileHistory.pendingTurn);
       // A takeover's own parked Turn is exempt from the settle probe; a
       // stranger's record is named pending_turn_mismatch outright rather
       // than by whichever conjunct of it the probe trips first.
       const settle: HostedFileHistorySettlement | null =
-        !fileHistory?.pendingUndo && fileHistory?.pendingTurn && !channelParked
+        !fileHistory?.pendingUndo &&
+        fileHistory?.pendingTurn &&
+        !pumpOwnedParked
           ? (takeover || extensionsCommandStepTakeover) &&
             unsettled !== undefined
             ? fileHistory.pendingTurn === unsettled
@@ -9248,6 +9268,7 @@ export function registerHostedHarnessSessionRoutes(
             ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
             ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),
             LOOP_INPUT_SOURCE,
+            PR_EVENT_INPUT_SOURCE,
           ],
         });
         await session.automations?.reconcileRuns();
@@ -12184,12 +12205,14 @@ export function registerHostedHarnessSessionRoutes(
   app.post('/session/:id/channels/operations', async (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
-    if (!session.channels)
-      return error(res, 409, 'hosted_channels_unavailable');
     if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
     const body = object(req.body);
     const operationId = body?.['operationId'];
     const kind = body?.['kind'];
+    // A PR-watch injection targets the bound Session, which need not be a
+    // channel Session; every other channel operation requires the funnel.
+    if (!session.channels && kind !== 'submit_pr_event_input')
+      return error(res, 409, 'hosted_channels_unavailable');
     const reconciliation =
       typeof operationId === 'string' &&
       kind === 'settle_delivery' &&
@@ -12201,7 +12224,9 @@ export function registerHostedHarnessSessionRoutes(
     ) {
       return error(res, 400, 'invalid_channel_operation');
     }
-    const channels = session.channels;
+    // Non-null for every kind except submit_pr_event_input (guarded above);
+    // that case commits through session.managed and never reads this funnel.
+    const channels = session.channels!;
     const summary = (delivery: ChannelDelivery) => ({
       deliveryId: delivery.deliveryId,
       routeId: delivery.routeId,
@@ -12216,7 +12241,8 @@ export function registerHostedHarnessSessionRoutes(
       })),
     });
     const deliveryId = body?.['deliveryId'];
-    const needsDelivery = kind !== 'submit_input';
+    const needsDelivery =
+      kind !== 'submit_input' && kind !== 'submit_pr_event_input';
     if (
       needsDelivery &&
       (typeof deliveryId !== 'string' ||
@@ -12233,6 +12259,35 @@ export function registerHostedHarnessSessionRoutes(
           if (parsed === undefined)
             return error(res, 400, 'invalid_channel_operation');
           result = { ...(await channels.submitInput(parsed)) };
+          break;
+        }
+        case 'submit_pr_event_input': {
+          const parsed = parsePrWatchSubmitInput(body);
+          if (parsed === undefined)
+            return error(res, 400, 'invalid_channel_operation');
+          // A pr_event input is driven into a turn only by the in-process
+          // wake pump. A Session without one (e.g. the external-files
+          // profile, which installs neither automations nor channels) would
+          // acknowledge the input and never run it, while the adapter records
+          // the transition as fired. Refuse so the adapter sees an actionable
+          // failure instead of a false 202.
+          //
+          // A resident opened for recovery cleanup is the one absence that is
+          // not permanent: it registers before its funnel and pump exist, and
+          // the next full load replaces it with one that has both. The
+          // permanent 409 below retires the binding, so that window answers a
+          // retryable 503 instead.
+          if (!session.monitorWake)
+            return session.recoveryCleanupOnly
+              ? error(res, 503, 'pr_event_wake_pending')
+              : error(res, 409, 'pr_event_wake_unavailable');
+          result = {
+            ...(await submitPrEventInput(
+              session.managed,
+              session.managed.authority.sessionHeader.sessionKey,
+              parsed,
+            )),
+          };
           break;
         }
         case 'claim_delivery': {
@@ -14601,6 +14656,7 @@ export function registerHostedHarnessSessionRoutes(
               ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
               ...(session.channels ? [CHANNEL_INPUT_SOURCE] : []),
               LOOP_INPUT_SOURCE,
+              PR_EVENT_INPUT_SOURCE,
             ],
           });
           // A refused settle revision never blocks the close: the next open

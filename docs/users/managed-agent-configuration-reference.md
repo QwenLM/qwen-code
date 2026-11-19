@@ -96,7 +96,7 @@ The trusted channel adapter surface on the internal listener and the lease on ou
 | Property | Variable | Type | Default | Description |
 | --- | --- | --- | --- | --- |
 | `claim-lease` | `QWEN_MANAGED_AGENT_CHANNELS_CLAIM_LEASE` | duration | `10m` | How long a channel adapter's claim on an outbound delivery stays valid without a receipt. Once it lapses, the reconcile pass records the delivery's outcome as unknown and never resends it automatically. A plain number is seconds. |
-| `enabled` | `QWEN_MANAGED_AGENT_CHANNELS_ENABLED` | boolean | `false` | Whether the trusted channel adapter routes under `/internal/managed-channels/` (register, disconnect, inbound events, delivery claims, receipts and resends) are served. They authenticate by the tenant header alone, so startup refuses it unless `qwen.managed-agent.internal-server.port` sets a separate internal listener. |
+| `enabled` | `QWEN_MANAGED_AGENT_CHANNELS_ENABLED` | boolean | `false` | Whether the trusted channel adapter routes under `/internal/managed-channels/` (register, disconnect, inbound events, delivery claims, receipts and resends, and PR-watch binding create/list/retire plus private PR-event injection) are served. They authenticate by the tenant header alone, so startup refuses it unless `qwen.managed-agent.internal-server.port` sets a separate internal listener. |
 | `scan-delay` | — | duration | `30s` | How long the channel reconcile pass waits between runs; each run settles up to 50 outbound delivery claims older than `qwen.managed-agent.channels.claim-lease` as unknown. Accepts a duration such as `30s`; a plain number is milliseconds. |
 
 ## `qwen.managed-agent.client-files`
@@ -296,6 +296,17 @@ The embedded Runtime Broker: its private HTTP listener for the Hosted Harness, t
 | `workspace-generation` | `QWEN_MANAGED_AGENT_WORKSPACE_GENERATION` | string | `1` | The generation of the Broker's default Workspace, carried in the Runtime scope of Sessions that are not bound to a registered Workspace. A non-empty string of at most 512 characters; required when `qwen.managed-agent.runtime-broker.enabled` is true. |
 | `workspace-id` | `QWEN_MANAGED_AGENT_WORKSPACE_ID` | string | *(empty)* | The ID of the Broker's default Workspace, which Sessions not bound to a registered Workspace share with the Session Store. With `local-process`, empty derives the first 16 hex characters of the SHA-256 of the canonical `qwen.managed-agent.runtime-broker.workspace-cwd`, and a set value must equal that hash; other provisioners require it. With the Hosted Harness and Session Store enabled, startup refuses a value that differs from `qwen.managed-agent.session-store.workspace-id`. Keep it unchanged once Sessions exist, since unbound Sessions resolve their Store scope from it. |
 | `workspace-mounts` | — | YAML list | *(empty)* | The administrator-mounted Workspace storage roots, set in a configuration file (YAML) as a list of entries with `tenant-id`, `storage-id` and `root`. Each `root` must be an existing canonical directory; roots must not overlap or alias each other, and each tenant and storage pair may appear once. Requires the `local-process` provisioner; startup refuses otherwise and with external provisioners. Every Broker sharing the database must use the same list. |
+
+## `qwen.managed-agent.runtime-broker.mcp-parking`
+
+Keeps the MCP connections of idle suspended Sessions alive for reuse on reopen, and reclaims them after an idle period.
+
+| Property | Variable | Type | Default | Description |
+| --- | --- | --- | --- | --- |
+| `batch-size` | `QWEN_MANAGED_AGENT_MCP_PARKING_BATCH_SIZE` | integer | `100` | How many Runtime Sessions one reclamation tick may examine. Must be between 1 and 1000; checked at startup even while parking is off. |
+| `enabled` | `QWEN_MANAGED_AGENT_MCP_PARKING_ENABLED` | boolean | `false` | Whether suspended Sessions keep their MCP connections and storage membership until reclamation. Off keeps draining them on every suspension. Takes effect only with `qwen.managed-agent.runtime-broker.enabled`, and never applies to external storage. |
+| `idle-duration` | `QWEN_MANAGED_AGENT_MCP_PARKING_IDLE_DURATION` | duration | `30m` | How long a Session must stay suspended before its parked MCP connections are closed and its storage membership is handed back. Physical maintenance on the same storage reclaims sooner. A suffix-less number binds as milliseconds. Must be at least `1ms`; checked at startup even while parking is off. |
+| `scan-delay` | `QWEN_MANAGED_AGENT_MCP_PARKING_SCAN_DELAY` | duration | `1m` | How long the reclamation job waits after one tick finishes before it starts the next. A suffix-less number binds as milliseconds. Must be at least `1ms`; checked at startup even while parking is off. |
 
 ## `qwen.managed-agent.runtime-broker.retention`
 
