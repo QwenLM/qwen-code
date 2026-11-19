@@ -153,29 +153,39 @@ describe('Feishu inbound file storage', () => {
     },
   );
 
-  it('keeps two messages with the same filename in separate directories', async () => {
+  it('stores and expires each message with the same filename independently', async () => {
+    const secondBytes = new Uint8Array([9, 8, 7, 6]);
+    const secondResource = resourceUrl.replace(
+      '/inbound-file/',
+      '/inbound-file-2/',
+    );
     vi.mocked(fetch).mockImplementation(async (input) => {
-      expect([
-        resourceUrl,
-        resourceUrl.replace('/inbound-file/', '/inbound-file-2/'),
-      ]).toContain(String(input));
-      return new Response(bytes);
+      if (String(input) === resourceUrl) return new Response(bytes);
+      expect(String(input)).toBe(secondResource);
+      return new Response(secondBytes);
     });
+
     receive();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(dispatch).toHaveBeenCalledTimes(1);
     receive({ message_id: 'inbound-file-2' });
     await vi.advanceTimersByTimeAsync(0);
 
     expect(dispatch).toHaveBeenCalledTimes(2);
-    const paths = dispatch.mock.calls.map(
-      ([envelope]) => envelope.attachments![0]!.filePath!,
-    );
-    expect(new Set(paths.map((path) => dirname(path))).size).toBe(2);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const firstPath = dispatch.mock.calls[0]![0].attachments![0]!.filePath!;
+    const secondPath = dispatch.mock.calls[1]![0].attachments![0]!.filePath!;
+    expect(dirname(firstPath)).not.toBe(dirname(secondPath));
     expect(readdirSync(join(directory, 'channel-files'))).toHaveLength(2);
-    for (const path of paths) {
-      expect(path).toBe(join(dirname(path), 'report.pdf'));
-      expect(readFileSync(path)).toEqual(Buffer.from(bytes));
-    }
-    await vi.advanceTimersByTimeAsync(60_000);
+    expect(firstPath).toBe(join(dirname(firstPath), 'report.pdf'));
+    expect(secondPath).toBe(join(dirname(secondPath), 'report.pdf'));
+    expect(readFileSync(firstPath)).toEqual(Buffer.from(bytes));
+    expect(readFileSync(secondPath)).toEqual(Buffer.from(secondBytes));
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(existsSync(firstPath)).toBe(false);
+    expect(readFileSync(secondPath)).toEqual(Buffer.from(secondBytes));
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
   });
 
