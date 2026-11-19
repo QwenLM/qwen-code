@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import { createWebShellDaemonScenario } from './e2e/utils/mockDaemon';
+import { makeSidebarSession } from './test/sidebarHarness';
 
 // The e2e notification-path cases mutate scenario.sessions in place after
 // install, and installMockDaemon keeps the scenario by reference so routes
@@ -9,16 +10,14 @@ import { createWebShellDaemonScenario } from './e2e/utils/mockDaemon';
 // later case sharing the fixture, in the same worker and across retries.
 // e2e/** is excluded from vitest, so this contract is pinned here.
 const goalSession = (): DaemonSessionSummary =>
-  ({
-    sessionId: 'fixture-session',
-    workspaceCwd: '/tmp/project',
+  makeSidebarSession('fixture-session', {
     displayName: 'Fixture Session',
     goal: {
       status: 'active',
       objective: 'keep the loop running',
       updatedAt: '2026-11-17T00:00:00.000Z',
     },
-  }) as DaemonSessionSummary;
+  });
 
 describe('createWebShellDaemonScenario fixture ownership', () => {
   it('does not hand back the caller array', () => {

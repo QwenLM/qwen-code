@@ -253,6 +253,7 @@ test('a goal-changed catalog bump removes the marker when the goal is cleared @s
     'running',
     { timeout: 30000 },
   );
+  await expect(page.getByTestId('session-goal-marker')).toHaveCount(2);
 
   const target = scenario.sessions.find(
     (item) => item.sessionId === 'web-shell-e2e-session',
