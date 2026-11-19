@@ -54,10 +54,6 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
   ToolNames.AUTOFIX_PR,
-  // Reports the BASE session's numbers through deriveConfig's prototype
-  // chain — a subagent would read the parent's context, not its own
-  // (#17320 F1). The full fix (per-turn chat handle) is a follow-up.
-  ToolNames.GET_CONTEXT_REMAINING,
   ToolNames.LIST_AGENTS,
   ToolNames.TASK_STOP,
   ToolNames.SEND_MESSAGE,
