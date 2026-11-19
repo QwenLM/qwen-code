@@ -159,7 +159,7 @@
 .diffContent {
   flex: 1 1 auto;
   min-width: 0;
-  white-space: pre;
-  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   padding-right: 8px;
 }
