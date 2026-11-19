@@ -76,6 +76,7 @@ import { getCurrentAgentId } from '../../agents/runtime/agent-context.js';
 import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
 import { trailingReattachPartCount } from '../../services/image-payload-references.js';
 import type { ResolvedReasoning } from '../reasoning-overrides.js';
+import { markRequestDispatched } from '../loggingContentGenerator/request-dispatch.js';
 import {
   ensureReasoningContentOnAssistantMessage,
   filterIsolatedModelOverrides,
@@ -707,6 +708,7 @@ export class ContentGenerationPipeline {
           // Use withResponse() to access HTTP response headers — this allows
           // early detection of non-SSE responses (e.g. gateway block pages
           // returning text/html with HTTP 200).
+          markRequestDispatched();
           const createPromise = this.client.chat.completions.create(
             openaiRequest,
             {

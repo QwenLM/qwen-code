@@ -25,6 +25,7 @@ import {
 import { OpenAIContentConverter } from './converter.js';
 import { toolCallArgumentsWereIncomplete } from '../incomplete-tool-call-args.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
+import { observeRequestDispatch } from '../loggingContentGenerator/request-dispatch.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
 import {
@@ -5210,6 +5211,24 @@ describe('ContentGenerationPipeline', () => {
       expect(responses).toHaveLength(1);
       expect(responses[0]).toBe(finalResponse);
     });
+  });
+
+  it('reports the request dispatch after building the request and before the SDK call', async () => {
+    convertEveryChunkTo(new GenerateContentResponse());
+    const onDispatch = vi.fn();
+
+    await observeRequestDispatch(onDispatch, async () => {
+      await collect(await streamFrom(streamOf(), userRequest(), 'p'));
+    });
+
+    expect(onDispatch).toHaveBeenCalledTimes(1);
+    const dispatchOrder = onDispatch.mock.invocationCallOrder[0];
+    expect(
+      (mockProvider.buildRequest as Mock).mock.invocationCallOrder[0],
+    ).toBeLessThan(dispatchOrder);
+    expect(dispatchOrder).toBeLessThan(
+      createMock().mock.invocationCallOrder[0],
+    );
   });
 
   describe('openaiRequestCaptureContext integration', () => {
