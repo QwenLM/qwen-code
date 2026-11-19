@@ -42278,6 +42278,70 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     },
   );
 
+  it('clears an autonomous Goal approval when Send now promotes queued input', async () => {
+    const turnId = 'goal-turn';
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) => {
+        if (method === MID_TURN_SEND_NOW_METHOD) {
+          await handle.agentConnection.extNotification('_qwencode/end_turn', {
+            sessionId: params['sessionId'],
+            source: 'goal',
+            reason: 'cancelled',
+            promptId: `${params['sessionId']}########1`,
+            turnId,
+          });
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const { sessionId, clientId } = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+      });
+      await handle.agentConnection.extNotification('_qwencode/start_turn', {
+        sessionId,
+        source: 'goal',
+        turnId,
+      });
+      const permission = handle.agentConnection
+        .requestPermission({
+          sessionId,
+          toolCall: { toolCallId: 'goal-write', title: 'write' },
+          options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+          _meta: { goalTurnId: turnId },
+        })
+        .catch(() => undefined);
+      await vi.waitFor(() =>
+        expect(bridge.getSessionPendingPermissionIds(sessionId)).toHaveLength(
+          1,
+        ),
+      );
+      expect(
+        bridge.enqueueMidTurnMessage(
+          sessionId,
+          'change course',
+          { clientId },
+          'goal-follow-up',
+          { rejectIfIdle: true },
+        ),
+      ).toEqual({ accepted: true, messageId: 'goal-follow-up' });
+      expect(bridge.sendMidTurnMessagesNow(sessionId, { clientId })).toEqual({
+        requested: true,
+      });
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      expect(handle.agent.promptCalls[0]?.prompt).toEqual([
+        { type: 'text', text: 'change course' },
+      ]);
+      expect(bridge.getSessionPendingPermissionIds(sessionId)).toEqual([]);
+      await expect(permission).resolves.toMatchObject({
+        outcome: { outcome: 'cancelled' },
+      });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('rejects a whitespace-only message even while busy', async () => {
     const { factory, release } = hangingPromptFactory();
     const bridge = makeBridge({ channelFactory: factory });

@@ -757,6 +757,7 @@ export interface BridgeClientSessionEntry {
    * that never cross the bridge's `session/prompt` RPC boundary.
    */
   goalTurnActive?: boolean;
+  goalTurnId?: string;
   backgroundTurn?: BackgroundNotificationTurn;
   /** Bridge prompt that owns the child Guard wait for this FIFO. */
   todoStopGuardAwaitingQueuedPromptOwnerPromptId?: string;
@@ -1099,16 +1100,24 @@ export class BridgeClient implements Client {
       return { outcome: { outcome: 'cancelled' } };
     }
     const usesPrompt = !appClientId && !backgroundWorkflowApproval;
-    const backgroundTurn = usesPrompt
-      ? (explicitBackgroundTurn ??
-        (entry.promptActive ? undefined : entry.backgroundTurn))
-      : undefined;
+    const goalTurnId = usesPrompt ? params._meta?.['goalTurnId'] : undefined;
+    if (
+      goalTurnId !== undefined &&
+      (typeof goalTurnId !== 'string' || goalTurnId !== entry.goalTurnId)
+    ) {
+      return { outcome: { outcome: 'cancelled' } };
+    }
+    const backgroundTurn =
+      usesPrompt && !goalTurnId
+        ? (explicitBackgroundTurn ??
+          (entry.promptActive ? undefined : entry.backgroundTurn))
+        : undefined;
     const permissionPromptId = usesPrompt
-      ? (backgroundTurn?.turnId ?? entry.activePromptId)
+      ? (goalTurnId ?? backgroundTurn?.turnId ?? entry.activePromptId)
       : undefined;
     let permissionOriginator =
       appClientId ??
-      (usesPrompt && !backgroundTurn
+      (usesPrompt && !backgroundTurn && !goalTurnId
         ? entry.activePromptOriginatorClientId
         : undefined);
     const workflowOriginatorClientId =
@@ -2815,7 +2824,12 @@ export class BridgeClient implements Client {
       }
       const entry = this.resolveEntry(sessionId);
       if (!entry || !this.ownsSession(sessionId)) return;
+      const turnId = params['turnId'];
       entry.goalTurnActive = true;
+      entry.goalTurnId =
+        typeof turnId === 'string' && turnId.length > 0 && turnId.length <= 256
+          ? turnId
+          : undefined;
       this.onGoalTurnStart?.(sessionId);
       return;
     }
@@ -2826,10 +2840,15 @@ export class BridgeClient implements Client {
       if (!entry || !this.ownsSession(sessionId)) return;
       const reason = params['reason'];
       const source = params['source'];
+      const turnId = params['turnId'];
       // A malformed Goal terminal must not pin future loads to live replay
       // or strand the queue when its turn_complete cannot be published.
       if (source === 'goal') {
+        const goalTurnId = entry.goalTurnId;
+        if (turnId !== goalTurnId) return;
         entry.goalTurnActive = false;
+        delete entry.goalTurnId;
+        if (goalTurnId) this.mediator.cancelForPrompt(sessionId, goalTurnId);
         this.onAutomaticTurnEnded?.(sessionId);
       }
       if (
@@ -2856,7 +2875,6 @@ export class BridgeClient implements Client {
         });
         return;
       }
-      const turnId = params['turnId'];
       if (turnId !== undefined) {
         if (
           typeof turnId !== 'string' ||

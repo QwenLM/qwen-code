@@ -33043,12 +33043,23 @@ describe('Session', () => {
           '\n[User message received while you were responding; your response was interrupted]: ';
         const responsePrefix =
           '\n[User message received while you were responding]: ';
-        const readFileTool = (execute: ReturnType<typeof vi.fn>) => ({
+        const readFileTool = (
+          execute: ReturnType<typeof vi.fn>,
+          permission: 'allow' | 'ask' = 'allow',
+        ) => ({
           name: 'read_file',
           kind: core.Kind.Read,
           build: vi.fn().mockReturnValue({
             params: { path: '/tmp/test.txt' },
-            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDefaultPermission: vi.fn().mockResolvedValue(permission),
+            ...(permission === 'ask' && {
+              getConfirmationDetails: vi.fn().mockResolvedValue({
+                type: 'info',
+                title: 'Read file',
+                prompt: 'Read /tmp/test.txt?',
+                onConfirm: vi.fn(),
+              }),
+            }),
             getDescription: vi.fn().mockReturnValue('Read file'),
             toolLocations: vi.fn().mockReturnValue([]),
             execute,
@@ -34054,22 +34065,9 @@ describe('Session', () => {
 
         it('ends the turn for input sent while a tool waits for approval', async () => {
           const execute = vi.fn();
-          mockToolRegistry.getTool.mockReturnValue({
-            ...readFileTool(execute),
-            build: vi.fn().mockReturnValue({
-              params: { path: '/tmp/test.txt' },
-              getDefaultPermission: vi.fn().mockResolvedValue('ask'),
-              getConfirmationDetails: vi.fn().mockResolvedValue({
-                type: 'info',
-                title: 'Read file',
-                prompt: 'Read /tmp/test.txt?',
-                onConfirm: vi.fn(),
-              }),
-              getDescription: vi.fn().mockReturnValue('Read file'),
-              toolLocations: vi.fn().mockReturnValue([]),
-              execute,
-            }),
-          });
+          mockToolRegistry.getTool.mockReturnValue(
+            readFileTool(execute, 'ask'),
+          );
           mockConfig.getApprovalMode = vi
             .fn()
             .mockReturnValue(ApprovalMode.DEFAULT);
@@ -34146,7 +34144,7 @@ describe('Session', () => {
           });
         });
 
-        it('ends a Goal turn for input sent once it called a tool without pausing the Goal', async () => {
+        it('hands off a Goal turn waiting for approval when the user sends input now', async () => {
           const permit: core.GoalTurnPermit = {
             goalId: 'goal-1',
             revision: 1,
@@ -34174,20 +34172,38 @@ describe('Session', () => {
           mockClient.extMethod = vi
             .fn()
             .mockResolvedValue({ messages: ['use plan B instead'] });
-          const { streaming, state } = openResponse([readFileCall]);
+          const execute = vi.fn();
+          mockToolRegistry.getTool.mockReturnValue(
+            readFileTool(execute, 'ask'),
+          );
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.DEFAULT);
+          mockClient.requestPermission = vi.fn(
+            () => new Promise<never>(() => {}),
+          );
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(createStreamWithChunks([readFileCall]));
 
           await boundGoalHost!.startGoalTurn({
             permit,
             continuationContext: 'check weather',
           });
-          await streaming;
+          await vi.waitFor(() =>
+            expect(mockClient.requestPermission).toHaveBeenCalledWith(
+              expect.objectContaining({ _meta: { goalTurnId: permit.turnId } }),
+            ),
+          );
           session.sendMidTurnInputNow();
 
           // A handoff to the input, as when a new prompt preempts the turn.
           await vi.waitFor(() =>
-            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit),
+            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit, {
+              interruptedForUserInput: true,
+            }),
           );
-          expect(state.signal?.aborted).toBe(true);
+          expect(execute).not.toHaveBeenCalled();
           expect(mockGoalRuntime.dispatch).not.toHaveBeenCalledWith(
             expect.objectContaining({ action: 'pause' }),
           );
@@ -34196,7 +34212,11 @@ describe('Session', () => {
           await vi.waitFor(() =>
             expect(mockClient.extNotification).toHaveBeenCalledWith(
               '_qwencode/end_turn',
-              expect.objectContaining({ source: 'goal', reason: 'cancelled' }),
+              expect.objectContaining({
+                source: 'goal',
+                reason: 'cancelled',
+                turnId: permit.turnId,
+              }),
             ),
           );
         });
@@ -41334,6 +41354,7 @@ describe('Session', () => {
               sessionId: 'test-session-id',
               reason: 'end_turn',
               source: 'goal',
+              turnId: permit.turnId,
               promptId: expect.stringMatching(
                 /^test-session-id########\d+$/,
               ) as unknown as string,
@@ -41345,6 +41366,7 @@ describe('Session', () => {
           {
             sessionId: 'test-session-id',
             source: 'goal',
+            turnId: permit.turnId,
           },
         );
       });

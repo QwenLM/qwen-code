@@ -116,7 +116,10 @@ background first and then the other tools are interrupted.
 3. Goal: an interrupted Goal turn (including a user turn while a Goal is
    active) is a handoff, the same as being preempted by a new prompt. The turn
    ends and the Goal is not paused. The daemon promotes the message, which runs
-   as the next Goal turn, and the Goal then continues on its own.
+   as the next Goal turn, and the Goal then continues on its own. The
+   interrupted turn still counts toward usage. Its work is exempt from adding
+   to the no-progress streak, since the host can submit the queued message
+   only after settlement.
 4. The interrupt does not drain first. The messages stay with the daemon and
    are promoted when the turn ends, so a message is never taken and then left
    unanswered.
@@ -224,10 +227,10 @@ in that phase.
   its FIFO. If the user has also queued an ordinary prompt, the click still ends
   the turn, but the message waits for that prompt's tool boundary.
 - An interrupt during a pending approval abandons that request on the agent
-  side; the daemon cancels the approvals still pending under the prompt when it
-  settles, so other clients' approval cards go away. A held send-now request is
-  also dropped when its turn ends, so it never reaches the next turn. Goal turns
-  have no prompt id, so approvals pending under them are out of scope here.
+  side. At settlement, the daemon cancels approvals owned by the ending prompt
+  or autonomous Goal turn. Autonomous Goal approvals use the Goal turn ID, so
+  the daemon can clear their cards before the next prompt starts. A held send-now
+  request is also dropped when its turn ends, so it never reaches the next turn.
 
 ## Validation plan
 

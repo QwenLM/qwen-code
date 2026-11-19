@@ -3508,7 +3508,7 @@ export class Session implements SessionContext {
       this.config.getToolRegistry?.(),
     );
     let result: PromptResponse | undefined;
-    await this.#emitGoalStartTurn();
+    await this.#emitGoalStartTurn(turn.permit.turnId);
     try {
       result = await this.prompt(
         {
@@ -3544,7 +3544,7 @@ export class Session implements SessionContext {
         }`,
       );
     } finally {
-      await this.#emitGoalEndTurn(result);
+      await this.#emitGoalEndTurn(turn.permit.turnId, result);
       if (this.activeGoalTurn === turn) this.activeGoalTurn = undefined;
       this.goalProcessing = false;
       this.#activeWorkChanged();
@@ -3665,9 +3665,11 @@ export class Session implements SessionContext {
       // pure timing. Without this, the same user action persists the goal as
       // either active-with-handoff or paused depending on where the abort
       // landed, and the paused branch silently stops the autonomous loop.
+      const interruptedForUserInput =
+        turn.controller.signal.reason === MID_TURN_SEND_NOW_ABORT_REASON;
       const supersededByNewPrompt =
         turn.controller.signal.reason === NEW_PROMPT_ABORT_REASON ||
-        turn.controller.signal.reason === MID_TURN_SEND_NOW_ABORT_REASON;
+        interruptedForUserInput;
       // One list, not two: the cause that decides whether to pause is the same
       // cause that names the pause. Enumerating them separately means a fifth
       // cause can compile, pause correctly, and fall through to the failure
@@ -3709,7 +3711,11 @@ export class Session implements SessionContext {
           });
           return;
         }
-        await runtime.finishTurn(turn.permit);
+        if (interruptedForUserInput) {
+          await runtime.finishTurn(turn.permit, { interruptedForUserInput });
+        } else {
+          await runtime.finishTurn(turn.permit);
+        }
       } catch (error) {
         debugLogger.warn(
           `Failed to record ACP Goal turn settlement: ${
@@ -15480,11 +15486,12 @@ export class Session implements SessionContext {
    * otherwise publish no `turn_complete` — leaving SSE clients (Web Shell,
    * SDK) with a streaming state that never settles.
    */
-  async #emitGoalStartTurn(): Promise<void> {
+  async #emitGoalStartTurn(turnId: string): Promise<void> {
     try {
       await this.client.extNotification('_qwencode/start_turn', {
         sessionId: this.sessionId,
         source: 'goal',
+        turnId,
       });
     } catch (error) {
       debugLogger.debug(
@@ -15493,12 +15500,16 @@ export class Session implements SessionContext {
     }
   }
 
-  async #emitGoalEndTurn(result: PromptResponse | undefined): Promise<void> {
+  async #emitGoalEndTurn(
+    turnId: string,
+    result: PromptResponse | undefined,
+  ): Promise<void> {
     try {
       await this.client.extNotification('_qwencode/end_turn', {
         sessionId: this.sessionId,
         reason: result?.stopReason ?? 'cancelled',
         source: 'goal',
+        turnId,
         promptId: this.config.getSessionId() + '########' + String(this.turn),
       });
     } catch (error) {
@@ -15611,26 +15622,31 @@ export class Session implements SessionContext {
     return pending;
   }
 
-  #withBackgroundPermission(
+  #withPermissionTurn(
     params: RequestPermissionRequest,
   ): RequestPermissionRequest {
     if (params.toolCall._meta?.['backgroundWorkflowApproval'] === true) {
       return params;
     }
     const execution = backgroundTurnContext.getStore();
-    return execution?.active && execution.sessionId === this.sessionId
-      ? {
-          ...params,
-          _meta: { ...params._meta, backgroundTurn: execution.turn },
-        }
-      : params;
+    if (execution?.active && execution.sessionId === this.sessionId) {
+      return {
+        ...params,
+        _meta: { ...params._meta, backgroundTurn: execution.turn },
+      };
+    }
+    const goalTurnId = goalTurnContext.getStore()?.turnId;
+    if (goalTurnId && goalTurnId === this.activeGoalTurn?.permit.turnId) {
+      return { ...params, _meta: { ...params._meta, goalTurnId } };
+    }
+    return params;
   }
 
   #requestPermissionQueued(
     params: RequestPermissionRequest,
     signal: AbortSignal,
   ): Promise<RequestPermissionResponse> {
-    params = this.#withBackgroundPermission(params);
+    params = this.#withPermissionTurn(params);
     const prior = this.permissionRequestTail;
     const transportRequest = prior.then(() =>
       signal.aborted

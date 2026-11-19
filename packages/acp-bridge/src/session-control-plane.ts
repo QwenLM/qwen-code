@@ -1000,6 +1000,7 @@ interface SessionEntry {
    * summaries because Goal turns never flip `promptActive`.
    */
   goalTurnActive?: boolean;
+  goalTurnId?: string;
   backgroundTurn?: BackgroundNotificationTurn;
   hasRunningBackgroundTasks?: boolean;
   backgroundAdmissionEpoch?: number;
