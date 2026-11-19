@@ -18,7 +18,10 @@ import {
   type MutableRefObject,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { useVirtualizer } from '@tanstack/react-virtual';
+import {
+  measureElement as measureVirtualElement,
+  useVirtualizer,
+} from '@tanstack/react-virtual';
 import type {
   DaemonContextMemoryDetail,
   DaemonSessionArtifact,
@@ -4765,7 +4768,25 @@ export const MessageList = memo(
       getScrollElement,
       getItemKey,
       estimateSize: estimateItemSize,
-      overscan: 20,
+      measureElement: (element, entry, instance) => {
+        if (
+          entry ||
+          !shouldFollow.current ||
+          restoringOlderHistoryRef.current ||
+          frozenViewportRef.current ||
+          !element.ownerDocument.defaultView?.ResizeObserver
+        ) {
+          return measureVirtualElement(element, entry, instance);
+        }
+        // When following the tail, let the observer measure newly mounted
+        // rows after layout instead of reading each height during commit.
+        const index = instance.indexFromElement(element);
+        return (
+          instance.itemSizeCache.get(getItemKey(index)) ??
+          estimateItemSize(index)
+        );
+      },
+      overscan: 15,
       anchorTo: 'end',
       useFlushSync: false,
       useAnimationFrameWithResizeObserver: true,

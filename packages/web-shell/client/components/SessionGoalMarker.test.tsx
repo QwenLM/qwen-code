@@ -159,4 +159,28 @@ describe('SessionGoalMarker', () => {
     });
     expect(rowKeyDown).toHaveBeenCalledOnce();
   });
+
+  it('stops a double-click from reaching the row rename handler', () => {
+    const onOpen = vi.fn();
+    const rowDoubleClick = vi.fn();
+    // The sidebar row's onDoubleClick starts a rename. Without the marker's
+    // own guard a double-click would both open the session and rename it.
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <div onDoubleClick={rowDoubleClick}>
+            <SessionGoalMarker goal={goal()} onOpen={onOpen} />
+          </div>
+        </I18nProvider>,
+      );
+    });
+
+    act(() => {
+      marker()!.dispatchEvent(
+        new MouseEvent('dblclick', { bubbles: true, cancelable: true }),
+      );
+    });
+
+    expect(rowDoubleClick).not.toHaveBeenCalled();
+  });
 });

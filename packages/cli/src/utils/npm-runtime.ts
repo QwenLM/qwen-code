@@ -95,7 +95,6 @@ export interface NpmBunHandoff {
 
 export function selectNpmBunHandoff({
   interactive,
-  screenReader,
   protocolMode,
   sandbox,
   env = process.env,
@@ -107,7 +106,6 @@ export function selectNpmBunHandoff({
   glibc,
 }: {
   interactive: boolean;
-  screenReader: boolean;
   protocolMode: boolean;
   sandbox: boolean;
   env?: NodeJS.ProcessEnv;
@@ -122,7 +120,6 @@ export function selectNpmBunHandoff({
     env[TUI_RENDERER_ENV_VAR]?.trim().toLowerCase() !==
       OPEN_TUI_RENDERER_VALUE ||
     !interactive ||
-    screenReader ||
     protocolMode ||
     sandbox ||
     env['SANDBOX'] ||
