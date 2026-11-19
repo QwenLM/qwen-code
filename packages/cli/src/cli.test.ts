@@ -26,7 +26,10 @@ import path from 'node:path';
 import { FatalError } from '@qwen-code/qwen-code-core';
 import { AlreadyReportedError } from './utils/errors.js';
 import { CHECKED_NODE_VERSION_ENV } from './utils/env-provenance.js';
-import { TOP_LEVEL_HELP_OPTIONS } from './config/top-level-options.js';
+import {
+  DEFAULT_COMMAND_OPTIONS,
+  TOP_LEVEL_HELP_OPTIONS,
+} from './config/top-level-options.js';
 import { commandMetadata } from './commands/command-metadata.js';
 import {
   MCP_COMMANDS,
@@ -983,10 +986,10 @@ describe('runCliEntry', () => {
     // The fast path mirrors config.ts and wraps help at the terminal width;
     // in a non-TTY (columns unset) that disables wrapping, so a description
     // longer than yargs' 80-column fallback renders on one unbroken line.
-    expect(helpText).toContain(
-      'Maximum cumulative tool calls executed during the run (success or ' +
-        'failure; `structured_output` under --json-schema is exempt).',
-    );
+    const toolCallDescription =
+      DEFAULT_COMMAND_OPTIONS['max-tool-calls'].description;
+    expect(toolCallDescription.length).toBeGreaterThan(80);
+    expect(helpText).toContain(toolCallDescription);
     expect(helpText).toContain('deprecated');
     expect(mocks.main).not.toHaveBeenCalled();
     expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
