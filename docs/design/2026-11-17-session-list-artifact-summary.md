@@ -189,11 +189,12 @@ clicked, using the list data the sidebar already holds.
   arrives via the recorder stamp and the CLI load funnel, so a daemon-only
   first open of a legacy conversation session without a sidecar shows no
   count until the next artifact event — a pre-existing #17518 limitation
-  tracked as a follow-up, not a shape this seed covers. The load funnel and
-  the library guard share one seed method and one record-composition
-  helper; the projection funnel shares the delivered-set definition (the
-  side-record selector and the restorable predicate) and counts its own
-  delivery rather than calling the seed method. The
+  tracked as a follow-up, not a shape this seed covers. The load funnel
+  seeds through one seed method; the library guard shares the shape
+  predicate and the record-composition helper, not the seed method; the
+  projection funnel shares the delivered-set definition (the side-record
+  selector and the restorable predicate) and counts its own delivery rather
+  than calling the seed method. The
   seed also requires an authoritative journal: no history gap (a broken chain
   can orphan artifact events off the active branch and undercount) and no
   record-level damage warnings — the same predicate the library mutation
@@ -374,9 +375,10 @@ clicked, using the list data the sidebar already holds.
   library guard alike, side-records-only sessions seeded before the
   empty-conversation early return and through the daemon restore projection
   funnel, creation-time `session_model` metadata admitted by the shape gate
-  on both funnels, the shared cap pinned on both funnels — above-cap skips
-  the auxiliary read, exactly-at-cap seeds, a failed size probe skips — and
-  the conversation load seed staying uncapped, a conversation-less
+  on both funnels, the shared cap pinned on the load funnel — above-cap
+  skips the seed, exactly-at-cap seeds, a failed size probe skips — and the
+  conversation load seed staying uncapped (the projection funnel pays no
+  stat, read or cap; it counts its own delivery), a conversation-less
   transcript carrying an unvalidatable record (unknown type, invalid
   identity) refused by both funnels instead of healing a correct count to
   zero — including the variant where creation-time metadata reconstructs a
