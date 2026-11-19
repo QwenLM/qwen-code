@@ -1955,6 +1955,19 @@ export default {
     'نموذج الصوت الحالي: {{voiceModel}}\nاستخدم "/model --voice <model-id>" لتعيين نموذج الصوت.',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     'نموذج الرؤية الحالي: {{visionModel}}\nاستخدم "/model --vision <model-id>" لتعيين نموذج جسر الرؤية.',
+  'Set the vision bridge timeout in seconds (use with --vision)':
+    'اضبط مهلة جسر الرؤية بالثواني (يُستخدم مع \u2066--vision\u2069)',
+  '--timeout can only be used with --vision.':
+    'لا يمكن استخدام \u2066--timeout\u2069 إلا مع \u2066--vision\u2069.',
+  'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.':
+    'قيمة \u2066--timeout\u2069 غير صالحة: "\u2066{{value}}\u2069". استخدم عدداً صحيحاً موجباً من الثواني، مثل \u206660\u2069 أو \u206660s\u2069 أو \u206690000ms\u2069.',
+  'Vision bridge timeout: {{timeout}}':
+    'مهلة جسر الرؤية: \u2066{{timeout}}\u2069',
+  'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.':
+    'حُفظت مهلة جسر الرؤية عند \u2066{{timeout}}\u2069{{scope}}. يُبقي إعداد ذو أولوية أعلى المهلة الفعلية عند \u2066{{effectiveTimeout}}\u2069.',
+  'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.':
+    'مهلة جسر الرؤية: \u2066{{timeout}}\u2069\nلتغييرها، استخدم "\u2066/model --vision --timeout <seconds>\u2069".',
+  '{{timeout}} (default)': '\u2066{{timeout}}\u2069 (افتراضي)',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     'نموذج توليد الصور الحالي: {{imageModel}}\nاستخدم "/model --image <model-id>" لتعيين نموذج توليد الصور.',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
