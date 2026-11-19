@@ -766,11 +766,19 @@ describe('writeLine / writeLineSync / write', () => {
             });
 
           try {
-            await append(file, { index: 0 });
-            await vi.waitFor(() => {
-              expect(holdWarning).toBe(false);
-            });
-            await append(file, { index: 1 });
+            if (name === 'writeLine') {
+              await append(file, { index: 0 });
+              await vi.waitFor(() => {
+                expect(holdWarning).toBe(false);
+              });
+              await append(file, { index: 1 });
+            } else {
+              append(file, { index: 0 });
+              append(file, { index: 1 });
+              await vi.waitFor(() => {
+                expect(holdWarning).toBe(false);
+              });
+            }
             expect(tailWarnings(logPath, file)).toHaveLength(0);
 
             resolvePending();
