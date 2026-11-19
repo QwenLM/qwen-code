@@ -123,9 +123,15 @@ live 数据，没有幂等重放语义，而且持久化它会把终端打印出
 Session 的下一次生命周期 drain，因为不 sweep hold 的离开 ACTIVE 转换
 尚未枚举存活中继（见「风险与后续」）。
 
-统一本地启动器（`qwen serve --managed`）把 Java 路由挂在 daemon 认证之后；
-其 managed 代理必须同样转发该路由的 WebSocket upgrade。普通 daemon 自己的
-`/terminal` 路由及其 `web_terminal` capability 不变。
+统一本地启动器（`qwen serve --managed`）把 Java 路由挂在 daemon 认证之后，
+并为此本地部署同时启用 `runtime-broker.tool-measurements` 与
+`runtime-broker.web-terminal`。其 managed 代理通过普通 daemon 的唯一 ACP
+upgrade 分发器转发该路由的 WebSocket upgrade，在既有 primary-loopback、Host
+与 Origin 检查之后、daemon bearer 校验之前接管。浏览器与上游 relay socket
+共用分发器的关闭清理。Java 独立于 daemon token 消费一次性终端票。由于终端
+依赖该分发器，Managed 本地启动拒绝 `QWEN_SERVE_ACP_HTTP=0`；普通 daemon
+的 ACP 关闭行为不变。独立 Managed Web gateway 复用同一个 relay helper。普通
+daemon 自己的 `/terminal` 路由及其 `web_terminal` capability 不变。
 
 ### 持久 hold 与生命周期
 

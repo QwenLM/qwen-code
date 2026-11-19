@@ -88,6 +88,8 @@ describe('Managed local service environment', () => {
     expect(JSON.parse(environment['SPRING_APPLICATION_JSON']!)).toEqual({
       'qwen.managed-agent.runtime-broker.session-worktrees-enabled':
         process.platform !== 'win32',
+      'qwen.managed-agent.runtime-broker.tool-measurements': true,
+      'qwen.managed-agent.runtime-broker.web-terminal': true,
       'qwen.managed-agent.model-catalog': models,
       'qwen.managed-agent.definition-models': ['a,comma-model'],
       'qwen.managed-agent.definition-tool-profiles': [

@@ -1494,6 +1494,16 @@ class ManagedAgentApiContractTest {
                 """
                 {"sessionId":"%s","idempotencyKey":"contract-web-archive"}
                 """.formatted(webSessionId));
+        assertThat(json(exchange(drift, "webShellGetSession", 200,
+                post(WEB_SHELL + "/sessions/get").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\"}".formatted(webSessionId)))
+                        .get("status").asText()).isEqualTo("archived");
+        JsonNode archivedExport = json(exchange(drift, "webShellExportSession", 200,
+                post(WEB_SHELL + "/sessions/export/query").header(TENANT, tenant),
+                "{\"sessionId\":\"%s\",\"limit\":1}".formatted(webSessionId)));
+        assertThat(archivedExport.path("items").size()).isEqualTo(1);
+        assertThat(archivedExport.at("/items/0/sessionId").asText()).isEqualTo(webSessionId);
+        assertThat(archivedExport.at("/items/0/itemId").asText()).isNotEmpty();
         exchange(drift, "archiveWebShellSession", 404,
                 post(WEB_SHELL + "/sessions/archive")
                         .header(TENANT, otherTenant),

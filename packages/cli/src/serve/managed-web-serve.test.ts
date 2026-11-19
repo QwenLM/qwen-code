@@ -335,6 +335,95 @@ describe('dedicated Managed Web gateway', () => {
     peerSocket?.destroy();
   });
 
+  it('relays distinct post-upgrade payloads in both directions', async () => {
+    let peerSocket: import('node:stream').Duplex | undefined;
+    let browserSocket: import('node:stream').Duplex | undefined;
+    peer.on('upgrade', (_req, socket) => {
+      peerSocket = socket;
+      socket.resume();
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          'Sec-WebSocket-Accept: test-accept\r\n' +
+          'Sec-WebSocket-Protocol: qwen-ws\r\n\r\n',
+      );
+      socket.on('data', (chunk) => {
+        if (chunk.toString().includes('browser-to-java'))
+          socket.write('java-to-browser');
+      });
+    });
+    await start();
+    try {
+      const echoed = await new Promise<string>((resolve, reject) => {
+        const upgrade = request(
+          `${gateway!.url}/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1`,
+          {
+            headers: {
+              Connection: 'Upgrade',
+              Upgrade: 'websocket',
+              'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+              'Sec-WebSocket-Version': '13',
+              'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.ticket-abc',
+              Authorization: `Bearer ${browserToken}`,
+            },
+          },
+        );
+        upgrade.on('upgrade', (_res, socket) => {
+          browserSocket = socket;
+          socket.on('data', (chunk) => {
+            if (chunk.toString().includes('java-to-browser'))
+              resolve('java-to-browser');
+          });
+          socket.write('browser-to-java');
+        });
+        upgrade.on('response', (res) => {
+          res.resume();
+          reject(new Error(`upgrade refused: ${res.statusCode}`));
+        });
+        upgrade.on('error', reject);
+        upgrade.end();
+      });
+      expect(echoed).toBe('java-to-browser');
+    } finally {
+      browserSocket?.destroy();
+      peerSocket?.destroy();
+    }
+  });
+
+  it('forwards the control-plane refusal status instead of completing a 101 relay', async () => {
+    handler = (_req, res) => {
+      res.writeHead(401);
+      res.end();
+    };
+    await start();
+    const status = await new Promise<number>((resolve, reject) => {
+      const upgrade = request(
+        `${gateway!.url}/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1`,
+        {
+          headers: {
+            Connection: 'Upgrade',
+            Upgrade: 'websocket',
+            'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+            'Sec-WebSocket-Version': '13',
+            'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.ticket-abc',
+            Authorization: `Bearer ${browserToken}`,
+          },
+        },
+      );
+      upgrade.on('upgrade', () =>
+        reject(new Error('refused ticket was upgraded')),
+      );
+      upgrade.on('response', (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      });
+      upgrade.on('error', reject);
+      upgrade.end();
+    });
+    expect(status).toBe(401);
+  });
+
   it('tears down the upstream tunnel when the browser drops abruptly after the 101', async () => {
     let peerSocket: import('node:stream').Duplex | undefined;
     peer.on('upgrade', (_req, socket) => {

@@ -180,6 +180,70 @@ describe('capability parity matrix', () => {
     );
   });
 
+  it.each([
+    [
+      'session_btw',
+      { standing: 'managed', evidence: 'surface:SIDE_QUERY_CREATE' },
+    ],
+    [
+      'session_btw_stream',
+      { standing: 'managed', evidence: 'surface:SIDE_QUERY_STREAM' },
+    ],
+    [
+      'session_recap',
+      { standing: 'managed', evidence: 'surface:SIDE_QUERY_CREATE' },
+    ],
+    [
+      'workspace_archived_session_export',
+      { standing: 'managed', evidence: 'surface:ITEM_LIST' },
+    ],
+    [
+      'session_worktree_persistence_v1',
+      {
+        standing: 'absent',
+        evidence:
+          'Managed persists Session-owned worktrees, but its descriptor has no per-response persisted-v1 attestation',
+      },
+    ],
+    [
+      'session_worktree_reset_v1',
+      {
+        standing: 'absent',
+        evidence:
+          'Managed worktree inspect and cleanup do not transfer checkout ownership to a fresh replacement Session',
+      },
+    ],
+    [
+      'session_worktree_branch_v1',
+      {
+        standing: 'absent',
+        evidence:
+          'Managed allocates an initial branch during worktree creation, but has no post-create create-branch-here operation',
+      },
+    ],
+    [
+      'session_worktree_handoff_v1',
+      {
+        standing: 'absent',
+        evidence:
+          'Managed has no operation that moves a Session and its work between its worktree and the local checkout',
+      },
+    ],
+    [
+      'workspace_git_worktrees',
+      {
+        standing: 'absent',
+        evidence:
+          'Managed lists, inspects and cleans up its own Session worktrees, not the repository-wide Git worktree set',
+      },
+    ],
+  ] as const)(
+    '%s records its #17717 correction without overstating parity',
+    (tag, row) => {
+      expect(CAPABILITY_PARITY[tag]).toEqual(row);
+    },
+  );
+
   it('derives the managed-only column from uncited route labels', () => {
     const cited = new Set(
       Object.values(CAPABILITY_PARITY).flatMap((row) =>

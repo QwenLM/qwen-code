@@ -110,6 +110,13 @@ Configure a model using the usual Qwen CLI setup before sending your first
 prompt. Files and Shell use the `default` approval mode; the Managed UI asks
 for approval before an action that requires it.
 
+A shell-capable Managed Session also offers **Terminal**. The browser obtains
+a one-time ticket and connects through the same authenticated local front
+door. This is a human shell, not a model tool: an authorized operator can run
+arbitrary commands as the server OS account without per-command model
+approval. The local worker has no container isolation, so enable and use this
+entry only for operators you trust with that account.
+
 After a restart, continuing an existing Session may wait for its previous SQL
 writer lease to expire (60 seconds by default). Keep the original data directory
 and retry after that interval; restarting processes does not clear ownership.

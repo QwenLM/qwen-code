@@ -145,9 +145,17 @@ transitions that leave ACTIVE without sweeping holds do not yet enumerate
 live relays (see Risks and follow-up).
 
 The unified local launcher (`qwen serve --managed`) mounts Java routes behind
-daemon authentication; its managed proxy must forward this route's WebSocket
-upgrade as well. The ordinary daemon's own `/terminal` route and its
-`web_terminal` capability are unchanged.
+daemon authentication and enables `runtime-broker.tool-measurements` together
+with `runtime-broker.web-terminal` for this local deployment. Its managed proxy
+forwards this route's WebSocket upgrade through the ordinary daemon's single
+ACP upgrade dispatcher, after the existing primary-loopback, Host and Origin
+checks and before daemon bearer verification. The browser and upstream relay
+sockets share the dispatcher's shutdown cleanup. Java consumes the one-time
+terminal ticket independently of the daemon token. Managed local startup
+rejects `QWEN_SERVE_ACP_HTTP=0` because the terminal requires this dispatcher;
+ordinary daemon ACP opt-out behavior is unchanged. The standalone Managed Web
+gateway uses the same relay helper. The ordinary daemon's own `/terminal` route
+and its `web_terminal` capability are unchanged.
 
 ### Durable hold and lifecycle
 

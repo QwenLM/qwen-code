@@ -10,6 +10,8 @@ import express from 'express';
 import { registerWorkspaceRuntimeStopRoutes } from './routes/workspace-runtime-stop.js';
 import type { Application } from 'express';
 import * as path from 'node:path';
+import type { IncomingMessage } from 'node:http';
+import type { Duplex } from 'node:stream';
 import { TLSSocket } from 'node:tls';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
@@ -114,6 +116,8 @@ import {
 } from './web-shell-static.js';
 import { mountMcpAppSandbox } from './mcp-app-sandbox.js';
 import {
+  forwardManagedTerminalUpgrade,
+  isManagedTerminalUpgradePath,
   mountManagedLocalWeb,
   type ManagedLocalWebOptions,
 } from './managed-local-web.js';
@@ -1160,6 +1164,11 @@ export function createServeApp(
     webTerminalRegistry.releaseWorkspace(workspaceCwd);
   const acpHttpEnabledAtBoot =
     opts.profile !== 'hosted-harness' && resolveAcpHttpEnabled(daemonEnvAtBoot);
+  if (deps.managedLocalWeb && !acpHttpEnabledAtBoot) {
+    throw new Error(
+      'Managed local Web Terminal requires the ACP WebSocket dispatcher; unset QWEN_SERVE_ACP_HTTP=0.',
+    );
+  }
   const runtimePlatform = deps.runtimePlatform ?? process.platform;
   // Live Voice needs a Web Shell to control it. The audio endpoint is the Web
   // Shell page itself (`/live/web`) on every platform; the native macOS Host
@@ -4260,6 +4269,10 @@ export function createServeApp(
     conversationRuntimeActivity,
   });
 
+  const managedLocalJava = deps.managedLocalWeb
+    ? new URL(deps.managedLocalWeb.javaUrl)
+    : undefined;
+
   // Official ACP Streamable HTTP transport (RFD #721) mounted at `/acp`
   // alongside the REST surface, sharing this same `bridge` instance.
   // Additive + toggleable (`QWEN_SERVE_ACP_HTTP=0` opts out).
@@ -4330,6 +4343,26 @@ export function createServeApp(
     // activate only when the flag is on and a registry is supplied.
     cdpTunnelOverWs: opts.cdpTunnelOverWs === true,
     ...(cdpTunnelRegistry ? { cdpTunnelRegistry } : {}),
+    ...(managedLocalJava
+      ? {
+          managedTerminalUpgrade: {
+            matches: isManagedTerminalUpgradePath,
+            forward: (
+              req: IncomingMessage,
+              socket: Duplex,
+              head: Buffer,
+              tracked: Set<Duplex>,
+            ) =>
+              forwardManagedTerminalUpgrade(
+                managedLocalJava,
+                req,
+                socket,
+                head,
+                tracked,
+              ),
+          },
+        }
+      : {}),
     // Browser captures audio and streams raw PCM here; the daemon transcribes
     // server-side via the reused CLI voice pipeline. Shares the ACP upgrade
     // listener's loopback/CSRF/bearer checks.
