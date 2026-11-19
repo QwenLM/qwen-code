@@ -179,7 +179,11 @@ The orderings below were chosen deliberately and are what the code does:
   one-row grant each label is cut inside itself and the row registers that a
   cut happened, rather than letting the joined line decide by overflowing.
 - In a plan body the editor hint is the way out of a clipped plan, so it is
-  charged a row only when the plan is clipped. At a grant that fits one of the
+  charged a row only when the plan is clipped. Clipped is what the plan view can
+  draw, not what the grant nominally holds: the view spends two of the rows it
+  is handed, one on its own truncation cue and one on headroom for rendered
+  height differing from source lines, so a plan past the grant minus those two
+  loses text while the grant still looks roomy. At a grant that fits one of the
   two, the plan keeps the row, and the view's two-row floor does not by itself
   drop a plan that needs no more rows than the grant holds: dropping it would
   hide the thing being approved behind a cue the cap cuts away anyway.
@@ -217,13 +221,20 @@ generic; the hint itself is left as the shared one.
 
 The exception is a plan body that survives the budget and is cut inside
 `MarkdownDisplay`: that component draws its own in-place cue and registers no
-overflow id, so the shortcut hint is not lit by it. The plan branch keeps its
-own `o open full plan in editor` row for that case and charges it a row only
-when the plan is actually clipped — a plan that fits the rows on offer has
-nothing to escape from, and at a grant that fits one of the two the plan is the
-one that keeps the row. The branch registers an overflow when the budget is so
-small that the plan body is dropped outright, which happens only when the plan
-needs more rows than the grant holds.
+overflow id, so the branch registers the reveal on its behalf. The reveal works
+there: revealing drops the height grant, and that view slices only when it has
+one. That predicate measures the plan source by wrapped rows at the content
+width, which does not know what the renderer adds: markdown draws list items
+indented, so a bullet sitting on a wrap boundary can draw taller than it was
+counted, and at a grant that then looks roomy the plan is cut with only that
+cue and no escape row. The two rows the branch charges absorb the ordinary
+case; closing the rest means measuring the plan the way that view draws it. The
+plan branch keeps its own `o open full plan in editor` row for that
+case and charges it a row only when the plan is actually clipped — a plan that
+fits the rows on offer has nothing to escape from, and at a grant that fits one
+of the two the plan is the one that keeps the row. The branch registers an
+overflow when the budget is so small that the plan body is dropped outright,
+which happens only when the plan needs more rows than the grant holds.
 
 ## Constraints
 
@@ -248,6 +259,13 @@ needs more rows than the grant holds.
 
 ## Risks and trade-offs
 
+- An estimate, not a measurement: the plan branch decides clipping from the
+  plan's wrapped source rows at the content width, so a plan that the renderer
+  draws taller than that — long list items indented past the width they were
+  counted at — can be cut inside the view with its own cue and neither the
+  escape row nor the reveal. Closing it means counting the plan the way
+  `MarkdownDisplay` draws it, which is more markdown layout than a confirmation
+  component should own.
 - Prose loss: a fetch-style confirmation with a tight budget can show zero
   prompt rows. Mitigated by the reveal path, and by the counted footer wherever
   a row is left for it.
@@ -301,7 +319,9 @@ needs more rows than the grant holds.
     is dropped at a two-row budget and announced, which is also what lights the
     reveal shortcut, and the hint keeps the row at a one-row grant; a plan that
     fits the single row the budget leaves is rendered as text, with neither the
-    hint row nor an announcement, because nothing was cut;
+    hint row nor an announcement, because nothing was cut; a two-line plan at the
+    grant that looks big enough but is not what the view can draw keeps its hint
+    row beside the view's own cue, registers the reveal, and is still on screen;
   - a long MCP identity at a one-row budget: the two identity rows give way to
     one pinned row that holds both halves, each label cut inside itself, so the
     row still says where the call goes and what it does instead of the longer

@@ -55,6 +55,12 @@ const MARKER_ROW = 1;
 // being asked to authorise, so it keeps one row of any shared grant.
 const SUBJECT_ROW = 1;
 
+// Rows the plan view keeps for itself out of whatever ceiling it is handed: one
+// pays for its "... N more lines not shown ..." cue, one is headroom for
+// rendered height differing from source-line count. Sizing against the grant
+// without charging them lets the view cut a plan the budget said would fit.
+const PLAN_VIEW_RESERVED_ROWS = 2;
+
 /**
  * Marker for content this component clipped by hand rather than through
  * MaxSizedBox. Registering the overflow is what makes the global
@@ -748,9 +754,16 @@ export const ToolConfirmationMessage: React.FC<
     // its row only when the plan is clipped. A plan that fits the rows on offer
     // has nothing to escape from, and at a grant that fits one of the two the
     // plan takes the row: it is what this confirmation asks about.
+    //
+    // Clipped is what the plan view can actually draw, not what the grant
+    // nominally holds: the view spends two of the rows it is handed, one on its
+    // own truncation cue and one on headroom for rendered height differing from
+    // source lines. A plan past that capacity loses text even though the grant
+    // looks roomier, so cutting the hint at the grant alone would hide the only
+    // proven escape over a cut the user is looking at.
     const planClipped =
       bodyBudget !== undefined &&
-      planRows > Math.max(bodyBudget - MARKER_ROW, 1);
+      planRows > Math.max(bodyBudget - PLAN_VIEW_RESERVED_ROWS, 1);
     const planHintRow = planClipped ? MARKER_ROW : 0;
     const planHeight =
       bodyBudget === undefined
@@ -813,6 +826,11 @@ export const ToolConfirmationMessage: React.FC<
             ctrl-s, which lifts the budget and restores the whole plan, offer
             itself. */}
         {planDropped && <OverflowNotice message={t('... plan hidden ...')} />}
+        {/* The plan view announces its own cut inline, which registers nothing,
+            so ctrl-s would stay hidden over a plan that is genuinely cut. It
+            works here: revealing drops the height grant, and the view slices
+            only when it has one. */}
+        {planClipped && !planDropped && <HiddenOverflowRegistration />}
       </Box>
     );
   } else if (confirmationDetails.type === 'info') {

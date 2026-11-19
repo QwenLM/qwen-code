@@ -2681,6 +2681,54 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).toContain('Allow entry into Plan Mode?');
     });
 
+    it('keeps the plan escape when the view cuts a plan the budget seemed to fit', async () => {
+      // Three body rows look like room for a two-line plan, but the view spends
+      // two of the rows it is handed — one on its own truncation cue, one on
+      // headroom for rendered height differing from source lines — so it draws
+      // one line and says the rest is missing. Charging the hint only the marker
+      // row called this plan unclipped and dropped the escape, leaving a cut plan
+      // with no way out and no reveal registered.
+      const availableTerminalHeight = 12;
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'plan',
+                title: 'Allow entry into Plan Mode?',
+                plan: 'Cache the parsed frame\nReuse it across turns',
+                onConfirm: vi.fn(),
+              }}
+              config={mockConfig}
+              availableTerminalHeight={availableTerminalHeight}
+              contentWidth={50}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+
+      await vi.waitFor(() => {
+        const frame = lastFrame() ?? '';
+        expect(frame).toContain('Cache the parsed frame');
+        expect(frame).toMatch(/more line/);
+        expect(frame).toContain('overflowing:1');
+      }, WAIT_FOR_FRAME);
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight + 1,
+      );
+      // The cut is announced by the view's own cue, so the escape has to be on
+      // screen beside it, as its own row.
+      const hintRows = frame
+        .split(EOL)
+        .filter((line) => line.trim() === 'o open full plan in editor');
+      expect(hintRows).toHaveLength(1);
+      expect(frame).not.toMatch(/plan hidden/);
+      expect(frame).toContain('Allow entry into Plan Mode?');
+      expect(frame).toContain('No, keep planning (esc)');
+    });
+
     it('announces the plan dropped to a two-row body budget', async () => {
       const availableTerminalHeight = 11;
       const details = {
