@@ -94,6 +94,28 @@ function tailWarnings(logPath: string, filePath?: string): string[] {
     );
 }
 
+let debugMarkerSequence = 0;
+
+async function flushDebugSink(
+  logPath: string,
+  label: string,
+  sessionId?: string,
+): Promise<void> {
+  const marker = `debug sink marker ${label} ${++debugMarkerSequence}`;
+  const logger = debugLogger.createDebugLogger('JSONL_TEST');
+  if (sessionId === undefined) {
+    logger.warn(marker);
+  } else {
+    debugLogger.runWithDebugLogSession({ getSessionId: () => sessionId }, () =>
+      logger.warn(marker),
+    );
+  }
+  await vi.waitFor(() => {
+    expect(fs.existsSync(logPath)).toBe(true);
+    expect(fs.readFileSync(logPath, 'utf8')).toContain(marker);
+  });
+}
+
 describe('append lock lifetime', () => {
   it('releases locks after writing distinct files', async () => {
     await Promise.all(
@@ -980,9 +1002,11 @@ describe('writeLine / writeLineSync / write', () => {
           for (const [index, file] of files.entries()) {
             await append(file, { repeated: index });
           }
-          await new Promise<void>((resolve) => setImmediate(resolve));
+          await flushDebugSink(logPath, `denied-path-${name}`);
 
           expect(tailWarnings(logPath)).toHaveLength(2);
+          expect(tailWarnings(logPath, files[0])).toHaveLength(1);
+          expect(tailWarnings(logPath, files[1])).toHaveLength(1);
           expect(tailWarnings(logPath, newFile)).toHaveLength(0);
           expect(
             spy.mock.calls.filter(([, flags]) => flags === tailProbeFlags),
@@ -1014,8 +1038,6 @@ describe('writeLine / writeLineSync / write', () => {
             { getSessionId: () => sessionId },
             () => append(file, record),
           );
-        const settleDebugLogWrites = () =>
-          new Promise<void>((resolve) => setImmediate(resolve));
 
         try {
           await appendFor(sessionA, { write: 'a1' });
@@ -1023,7 +1045,7 @@ describe('writeLine / writeLineSync / write', () => {
             expect(tailWarnings(logPathA, file)).toHaveLength(1);
           });
           await appendFor(sessionA, { write: 'a2' });
-          await settleDebugLogWrites();
+          await flushDebugSink(logPathA, `session-a-${name}`, sessionA);
           expect(tailWarnings(logPathA, file)).toHaveLength(1);
           expect(tailWarnings(logPathB, file)).toHaveLength(0);
 
@@ -1032,7 +1054,7 @@ describe('writeLine / writeLineSync / write', () => {
             expect(tailWarnings(logPathB, file)).toHaveLength(1);
           });
           await appendFor(sessionB, { write: 'b2' });
-          await settleDebugLogWrites();
+          await flushDebugSink(logPathB, `session-b-${name}`, sessionB);
 
           expect(tailWarnings(logPathA, file)).toHaveLength(1);
           expect(tailWarnings(logPathB, file)).toHaveLength(1);
@@ -1065,6 +1087,8 @@ describe('writeLine / writeLineSync / write', () => {
             expect(tailWarnings(logPath, withoutSession)).toHaveLength(1);
           });
           await append(withoutSession, { deduplicated: true });
+          await flushDebugSink(logPath, `activation-session-${name}`);
+          expect(tailWarnings(logPath, withoutSession)).toHaveLength(1);
 
           process.env['QWEN_DEBUG_LOG_FILE'] = '0';
           await append(withoutFileOutput, { disabled: true });
@@ -1073,9 +1097,11 @@ describe('writeLine / writeLineSync / write', () => {
           await vi.waitFor(() => {
             expect(tailWarnings(logPath, withoutFileOutput)).toHaveLength(1);
           });
-          await new Promise<void>((resolve) => setImmediate(resolve));
+          await flushDebugSink(logPath, `activation-output-${name}`);
 
           expect(tailWarnings(logPath)).toHaveLength(2);
+          expect(tailWarnings(logPath, withoutSession)).toHaveLength(1);
+          expect(tailWarnings(logPath, withoutFileOutput)).toHaveLength(1);
           expect(
             spy.mock.calls.filter(([, flags]) => flags === tailProbeFlags),
           ).toHaveLength(5);
