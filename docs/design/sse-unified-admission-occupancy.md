@@ -301,8 +301,9 @@ documented as-is.
 - **Reaper coverage unchanged.** A stalled writer on a non-REST surface still
   holds its slot until the client disconnects or the surface's own lifecycle
   ends; the cap bounds how many such slots can exist at once. Shutdown is
-  the backstop: the listener close force-closes remaining connections after
-  the close timeout — including upgraded sockets, which
+  the backstop: the listener close force-closes remaining connections —
+  after the close timeout on the primary listener, immediately on the
+  pairing listeners — including upgraded sockets, which
   `closeAllConnections()` alone does not reach — releasing their slots
   (pinned by the shutdown tests).
 
