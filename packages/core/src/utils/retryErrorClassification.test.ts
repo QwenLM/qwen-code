@@ -12,11 +12,14 @@ import {
   classifyRetryError,
   isFallbackEligible,
   isRetryableUpstreamError,
+  isTerminalQuotaError,
   RETRY_DIAGNOSTIC_REASONS,
   toRetryDiagnostics,
+  type RetryErrorClassification,
   type RetryErrorClassificationContext,
   type RetryErrorDiagnosis,
 } from './retryErrorClassification.js';
+import { retryWithBackoff } from './retry.js';
 
 /** Asserts `error` (with `context`) classifies to a match of `expected`. */
 function expectVerdict(
@@ -1110,5 +1113,278 @@ describe('toRetryDiagnostics', () => {
         statusCode: 400,
       }).reason,
     ).toBe('empty-body-4xx');
+  });
+});
+
+describe('isTerminalQuotaError', () => {
+  const cls = (
+    reason: string,
+    providerCode?: string,
+    diagnosis: RetryErrorDiagnosis = 'fail-fast',
+  ): RetryErrorClassification => ({
+    kind: 'http',
+    diagnosis,
+    reason,
+    ...(providerCode !== undefined ? { providerCode } : {}),
+  });
+
+  const resetTimeQuotaMessage =
+    '429 Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC.';
+
+  it('matches the qwen-oauth free-tier quota reason', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error('free allocated quota exceeded'),
+        cls('qwen-oauth-free-tier-quota'),
+      ),
+    ).toBe(true);
+  });
+
+  it('matches the allocated-quota-exceeded reason', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error('Throttling.AllocationQuota'),
+        cls('allocated-quota-exceeded'),
+      ),
+    ).toBe(true);
+  });
+
+  it('matches a permanent insufficient_quota provider code', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error('insufficient quota'),
+        cls('permanent-provider-code', 'insufficient_quota'),
+      ),
+    ).toBe(true);
+  });
+
+  it('matches insufficient_quota regardless of case and separator', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error('insufficient quota'),
+        cls('permanent-provider-code', 'Insufficient-Quota'),
+      ),
+    ).toBe(true);
+  });
+
+  it('matches a reset-time quota message even when classified retryable', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error(resetTimeQuotaMessage),
+        cls('rate-limit', undefined, 'retryable'),
+      ),
+    ).toBe(true);
+  });
+
+  it('matches the formatted mid-stream fast-fail Error', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error(
+          'Quota exhausted: Your token-plan 1-week quota has been exhausted. ' +
+            'The quota will reset at 07-27 09:25:00 UTC.\n\nPlease retry after ' +
+            'the reset time, or switch to another API key / auth method.',
+        ),
+        cls('unclassified', undefined, 'unknown'),
+      ),
+    ).toBe(true);
+  });
+
+  it('does not match a non-quota permanent provider code (moderation)', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error('data_inspection_failed: content moderation'),
+        cls('permanent-provider-code', 'data_inspection_failed'),
+      ),
+    ).toBe(false);
+  });
+
+  it('does not match an auth error', () => {
+    expect(
+      isTerminalQuotaError(new Error('invalid api key'), cls('auth-error')),
+    ).toBe(false);
+  });
+
+  it('does not match transient rate-limiting without a quota signal', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error('Throttling: TPM(1/1)'),
+        cls('rate-limit', undefined, 'retryable'),
+      ),
+    ).toBe(false);
+  });
+
+  it('does not match capacity overload (529)', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error('overloaded'),
+        cls('capacity-overload', undefined, 'retryable'),
+      ),
+    ).toBe(false);
+  });
+
+  it('does not match a server error (503)', () => {
+    expect(
+      isTerminalQuotaError(
+        new Error('service unavailable'),
+        cls('server-error', undefined, 'retryable'),
+      ),
+    ).toBe(false);
+  });
+
+  it('does not match a client error (400)', () => {
+    expect(
+      isTerminalQuotaError(new Error('bad request'), cls('client-error')),
+    ).toBe(false);
+  });
+
+  it('matches a statusless type-only insufficient_quota (OpenAI code:null shape)', () => {
+    // The OpenAI SDK puts insufficient_quota in `.type` with `code: null`; the
+    // classifier reads permanence via providerType, so providerCode is empty.
+    // The predicate must still mark it terminal (read the error's type).
+    const error = Object.assign(new Error('insufficient quota'), {
+      type: 'insufficient_quota',
+      code: null,
+    });
+    const classification = classifyRetryError(error);
+    expect(classification.reason).toBe('permanent-provider-code');
+    expect(classification.providerCode).toBeUndefined();
+    expect(isTerminalQuotaError(error, classification)).toBe(true);
+  });
+
+  it('does not match a statusless type-only moderation code', () => {
+    const error = Object.assign(new Error('content moderation'), {
+      type: 'data_inspection_failed',
+      code: null,
+    });
+    const classification = classifyRetryError(error);
+    expect(classification.reason).toBe('permanent-provider-code');
+    expect(isTerminalQuotaError(error, classification)).toBe(false);
+  });
+
+  it('matches the canonical 429 insufficient_quota through the real classifier (R1-1)', () => {
+    // isRateLimitError runs before the permanence arms, so a real 429
+    // insufficient_quota classifies 'rate-limit', never 'permanent-provider-code'.
+    // The quota code must be read independent of the classification reason.
+    const error = Object.assign(
+      new Error(
+        'You exceeded your current quota, please check your plan and billing details.',
+      ),
+      { status: 429, code: 'insufficient_quota', type: 'insufficient_quota' },
+    );
+    const classification = classifyRetryError(error);
+    expect(classification.reason).toBe('rate-limit');
+    expect(isTerminalQuotaError(error, classification)).toBe(true);
+  });
+
+  it('matches a reset-time quota message under a permanent non-quota code (R1-1)', () => {
+    // No arm returns a negative verdict, so the non-quota billing_error code
+    // does not mask the reset-time quota message checked at the same node: a
+    // permanent non-quota code carrying reset-time quota wording is terminal.
+    const error = Object.assign(
+      new Error(
+        'Your quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC.',
+      ),
+      { code: 'billing_error' },
+    );
+    const classification = classifyRetryError(error);
+    expect(classification.reason).toBe('permanent-provider-code');
+    expect(isTerminalQuotaError(error, classification)).toBe(true);
+  });
+
+  it('does not match a real 429 TPM throttle through the real classifier (R1-1)', () => {
+    const error = Object.assign(new Error('Throttling: TPM(1/1)'), {
+      status: 429,
+    });
+    const classification = classifyRetryError(error);
+    expect(classification.reason).toBe('rate-limit');
+    expect(isTerminalQuotaError(error, classification)).toBe(false);
+  });
+
+  it('reads the quota signal through the retry wrap cause chain (R2-1)', () => {
+    // retry.ts replaces the QWEN_OAUTH free-tier quota error with a status-less
+    // Error whose message strips the quota wording, keeping the original as
+    // cause. The predicate must walk the cause to find the quota code.
+    const rawFreeTier = Object.assign(
+      new Error('free allocated quota exceeded'),
+      {
+        status: 429,
+        code: 'insufficient_quota',
+        type: 'insufficient_quota',
+      },
+    );
+    const wrapped = new Error(
+      'Qwen OAuth free tier has been discontinued as of 2026-04-15.',
+      { cause: rawFreeTier },
+    );
+    const classification = classifyRetryError(wrapped);
+    expect(classification.reason).toBe('unclassified');
+    expect(isTerminalQuotaError(wrapped, classification)).toBe(true);
+  });
+
+  it('marks the free-tier replacement terminal through the real retry layer without singleAttempt (R2-1)', async () => {
+    // The fallback chain's retryWithBackoff call passes no singleAttempt, so the
+    // free-tier replacement must carry the original as cause unconditionally for
+    // the predicate to read the quota signal through the wrap.
+    const rawFreeTier = Object.assign(
+      new Error('free allocated quota exceeded'),
+      {
+        status: 429,
+        code: 'insufficient_quota',
+        type: 'insufficient_quota',
+      },
+    );
+    let thrown: unknown;
+    try {
+      await retryWithBackoff(
+        async () => {
+          throw rawFreeTier;
+        },
+        { authType: AuthType.QWEN_OAUTH },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).cause).toBe(rawFreeTier);
+    expect(isTerminalQuotaError(thrown, classifyRetryError(thrown))).toBe(true);
+    // The replacement must stay status-less: a 429 status would make
+    // isRateLimitError true (re-triggering the stream-side rate-limit loop) and
+    // isFallbackEligible true (cascading the chain past a permanent quota).
+    expect(isFallbackEligible(classifyRetryError(thrown))).toBe(false);
+  });
+
+  it('reads the message-scraped providerType beside a non-quota code (R2-2)', () => {
+    // A statusless body {code:Throttling, type:insufficient_quota} classifies
+    // permanent-provider-code via details.providerType; providerCode is the
+    // non-quota sibling code. The predicate must read the scraped type.
+    const error = new Error(
+      '{"error":{"code":"Throttling","type":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details."}}',
+    );
+    const classification = classifyRetryError(error);
+    expect(classification.reason).toBe('permanent-provider-code');
+    expect(classification.providerCode).toBe('Throttling');
+    expect(isTerminalQuotaError(error, classification)).toBe(true);
+  });
+
+  it('does not match a wrapped non-quota cause (R2-1 negative)', () => {
+    const wrapped = new Error('wrapper', {
+      cause: Object.assign(new Error('bad request'), { status: 400 }),
+    });
+    const classification = classifyRetryError(wrapped);
+    expect(isTerminalQuotaError(wrapped, classification)).toBe(false);
+  });
+
+  it('reads the message-scraped providerCode on a nested cause (deferred coverage)', () => {
+    // A cause whose quota code lives only in the message body (no object
+    // .code/.type, no sibling type): getProviderFields surfaces nothing, so the
+    // signal comes from getRateLimitErrorDetails(cause).providerCode. The top
+    // classification.providerCode is empty, pinning the scraped-code arm.
+    const cause = new Error(
+      '{"error":{"code":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details."}}',
+    );
+    const wrapped = new Error('wrapper', { cause });
+    const classification = classifyRetryError(wrapped);
+    expect(classification.providerCode).toBeUndefined();
+    expect(isTerminalQuotaError(wrapped, classification)).toBe(true);
   });
 });

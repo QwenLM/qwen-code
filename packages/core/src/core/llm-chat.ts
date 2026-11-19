@@ -72,6 +72,7 @@ import {
   classifyRetryError,
   isFallbackEligible,
   isRetryableUpstreamError,
+  isTerminalQuotaError,
   toRetryDiagnostics,
   type RetryDiagnostics,
   type RetryErrorClassificationContext,
@@ -5997,14 +5998,15 @@ export class LlmChat {
                     fallbackConfig,
                   ) ?? resolvedFallbackModel;
 
-                // Skip a fallback the health ledger already exhausted this turn.
-                if (
-                  availability &&
-                  !availability.snapshot(fallbackRouteKey).available
-                ) {
+                // Skip a fallback the health ledger marks unavailable: a
+                // terminal quota mark lasts the whole session, a sticky capacity
+                // mark only the current turn. Log the snapshot reason so the two
+                // are distinguishable when debugging a skipped fallback.
+                const fallbackHealth = availability?.snapshot(fallbackRouteKey);
+                if (fallbackHealth && !fallbackHealth.available) {
                   debugLogger.warn(
                     `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
-                      `marked unavailable for this turn.`,
+                      `marked unavailable (reason: ${fallbackHealth.reason ?? 'unknown'}).`,
                   );
                   continue;
                 }
@@ -6117,12 +6119,31 @@ export class LlmChat {
                   );
                   // Record the unhealthy fallback even when it emitted output
                   // before failing: the chain stops below to avoid duplicating
-                  // output, but the model must still be skipped for the rest of
-                  // the turn. Gated on fallback-eligibility so a post-output
+                  // output, but the model must still be skipped. A permanent
+                  // quota exhaustion is terminal (skipped for the rest of the
+                  // session, surviving resetTurn); a transient capacity error
+                  // is sticky_retry (skipped this turn, re-probed next turn).
+                  // Terminal wins: a reset-time quota that classifies retryable
+                  // must not be downgraded to a per-turn re-probe. The sticky
+                  // arm stays gated on fallback-eligibility so a post-output
                   // auth/client error is not recorded as turn-unavailable.
-                  if (availability && canTryNextFallback) {
-                    availability.markRetryOncePerTurn(fallbackRouteKey);
-                    availability.consumeStickyAttempt(fallbackRouteKey);
+                  if (availability) {
+                    if (
+                      isTerminalQuotaError(
+                        fallbackError,
+                        fallbackClassification,
+                      )
+                    ) {
+                      availability.markTerminal(fallbackRouteKey, 'quota');
+                      debugLogger.warn(
+                        `[FALLBACK] Marking fallback model "${resolvedFallbackModel}" ` +
+                          `terminal for the session (reason: quota); it is skipped on ` +
+                          `later requests until a new session.`,
+                      );
+                    } else if (canTryNextFallback) {
+                      availability.markRetryOncePerTurn(fallbackRouteKey);
+                      availability.consumeStickyAttempt(fallbackRouteKey);
+                    }
                   }
 
                   if (currentFallbackYieldedAnyChunk) {
