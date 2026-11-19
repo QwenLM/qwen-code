@@ -22571,6 +22571,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       get merged() {
         return mergedSettings;
       },
+      forScope: () => ({ settings: mergedSettings }),
       reloadScopesFromDiskAtomically: vi.fn(() => {
         mergedSettings = {
           permissions: { allow: [], ask: [], deny: ['Bash(rm -rf:*)'] },
@@ -22648,6 +22649,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       get merged() {
         return mergedSettings;
       },
+      forScope: () => ({ settings: mergedSettings }),
       reloadScopesFromDiskAtomically: vi.fn(() => {
         mergedSettings = {
           permissions: { allow: [], ask: [], deny: ['Bash(git push:*)'] },
@@ -23835,6 +23837,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     settings.setValue(SettingScope.User, 'permissions.allow', [
       'ShellTool(git status)',
       'ShellTool(git diff)',
+      'ShellTool(git log)',
+    ]);
+    settings.setValue(SettingScope.Workspace, 'permissions.allow', [
+      'ShellTool(git log)',
     ]);
     vi.mocked(settings.setValue).mockClear();
     const addPersistentRule = vi.fn();
@@ -23871,6 +23877,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     );
     expect(removePersistentRule).not.toHaveBeenCalledWith(
       'ShellTool(git diff)',
+      'allow',
+    );
+    expect(removePersistentRule).not.toHaveBeenCalledWith(
+      'ShellTool(git log)',
       'allow',
     );
     expect(addPersistentRule).toHaveBeenCalledWith(

@@ -689,6 +689,7 @@ export function createDaemonSessionActions({
       // The classification read bounds below the default action timeout and
       // races the caller's abort so a cancelled prompt settles immediately
       // instead of after the round trip.
+      const workflowStatusRevision = getConnection().workflowStatusRevision;
       const request = withActionTimeout(
         session.supportedCommands(),
         'Loading commands timed out',
@@ -702,7 +703,8 @@ export function createDaemonSessionActions({
         const mapped = mapSupportedCommands(status);
         commands = mapped.commands;
         setConnection((current) =>
-          sessionRef.current === session
+          sessionRef.current === session &&
+          current.workflowStatusRevision === workflowStatusRevision
             ? { ...current, ...mapped, supportedCommands: status }
             : current,
         );
@@ -3104,6 +3106,7 @@ export function createDaemonSessionActions({
         'Refresh commands failed',
         'refresh_commands',
       );
+      const workflowStatusRevision = getConnection().workflowStatusRevision;
       try {
         const status = await withActionTimeout(
           session.supportedCommands(),
@@ -3111,12 +3114,11 @@ export function createDaemonSessionActions({
         );
         if (sessionRef.current === session) {
           const { commands, skills } = mapSupportedCommands(status);
-          setConnection((current) => ({
-            ...current,
-            commands,
-            skills,
-            supportedCommands: status,
-          }));
+          setConnection((current) =>
+            current.workflowStatusRevision === workflowStatusRevision
+              ? { ...current, commands, skills, supportedCommands: status }
+              : current,
+          );
         }
       } catch (error) {
         throw dispatchActionError(

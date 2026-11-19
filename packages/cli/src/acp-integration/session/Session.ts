@@ -397,6 +397,7 @@ import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAt
 import {
   SERVE_CONTROL_EXT_METHODS,
   type ServeSessionContextStatus,
+  type ServeSessionSupportedCommandsStatus,
 } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
@@ -2545,6 +2546,13 @@ export interface AvailableCommandsSnapshot {
     modelInvocable?: boolean;
   }>;
 }
+
+export type WorkflowCommandsStatus = Required<
+  Pick<
+    ServeSessionSupportedCommandsStatus,
+    'workflowsEnabled' | 'savedWorkflows'
+  >
+>;
 
 const STANDALONE_SLASH_COMMAND_POLICY: NonInteractiveSlashCommandPolicy =
   Object.freeze({
@@ -15463,9 +15471,11 @@ export class Session implements SessionContext {
     }
   }
 
-  async sendAvailableCommandsUpdate(): Promise<void> {
+  async sendAvailableCommandsUpdate(
+    readWorkflowStatus?: () => Promise<WorkflowCommandsStatus>,
+  ): Promise<void> {
     try {
-      await this.sendAvailableCommandsUpdateOrThrow();
+      await this.sendAvailableCommandsUpdateOrThrow(readWorkflowStatus);
     } catch (error) {
       // Log error but don't fail session creation
       debugLogger.error('Error sending available commands update:', error);
@@ -15529,21 +15539,27 @@ export class Session implements SessionContext {
     );
   }
 
-  private sendAvailableCommandsUpdateOrThrow(): Promise<void> {
+  private sendAvailableCommandsUpdateOrThrow(
+    readWorkflowStatus?: () => Promise<WorkflowCommandsStatus>,
+  ): Promise<void> {
     const pending = this.availableCommandsUpdateTail.then(async () => {
       if (this.disposed || this.#isAutomaticWorkHeld()) return;
       const { availableCommands, availableSkills, availableSkillDetails } =
         await this.buildAvailableCommandsSnapshot();
+      const workflowStatus = readWorkflowStatus
+        ? await readWorkflowStatus()
+        : undefined;
       if (this.disposed || this.#isAutomaticWorkHeld()) return;
       this.config.refreshWorkflowMode?.();
       const update: SessionUpdate = {
         sessionUpdate: 'available_commands_update',
         availableCommands,
-        ...(availableSkills !== undefined
+        ...(availableSkills !== undefined || workflowStatus
           ? {
               _meta: {
                 availableSkills,
                 ...(availableSkillDetails ? { availableSkillDetails } : {}),
+                ...(workflowStatus ? { workflowStatus } : {}),
               },
             }
           : {}),

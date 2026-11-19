@@ -165,6 +165,44 @@ describe('redactWorkflowsFromAvailableCommandsEvent', () => {
 
     expect(redactWorkflowsFromAvailableCommandsEvent(event)).toBe(event);
   });
+
+  it.each([false, true])(
+    'redacts Workflow status even without the workflows command (saved command: %s)',
+    (includeSavedCommand) => {
+      const init = { name: 'init', description: 'Initialize' };
+      const workflowStatus = {
+        workflowsEnabled: true,
+        savedWorkflows: [{ name: 'review-probe', source: 'project' }],
+      };
+      const update = {
+        sessionUpdate: 'available_commands_update',
+        availableCommands: [
+          init,
+          ...(includeSavedCommand
+            ? [{ name: 'review-probe', _meta: { source: 'workflow-command' } }]
+            : []),
+        ],
+        _meta: { availableSkills: ['review'], workflowStatus },
+      };
+      const event = {
+        v: 1,
+        type: 'session_update',
+        data: { sessionId: 'sess-1', update },
+      };
+
+      expect(
+        redactWorkflowsFromAvailableCommandsEvent(event).data.update,
+      ).toEqual({
+        sessionUpdate: 'available_commands_update',
+        availableCommands: [init],
+        _meta: {
+          availableSkills: ['review'],
+          workflowStatus: { workflowsEnabled: false, savedWorkflows: [] },
+        },
+      });
+      expect(event.data.update._meta.workflowStatus).toBe(workflowStatus);
+    },
+  );
 });
 
 describe('redactWorkflowsFromReplayArrays', () => {

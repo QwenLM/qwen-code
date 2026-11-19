@@ -16001,6 +16001,30 @@ describe('Session', () => {
         });
       });
 
+      it('publishes a Workflow policy change with an unchanged command list', async () => {
+        const readWorkflowStatus = vi
+          .fn()
+          .mockResolvedValueOnce({
+            workflowsEnabled: false,
+            savedWorkflows: [],
+          })
+          .mockResolvedValue({ workflowsEnabled: true, savedWorkflows: [] });
+
+        await session.sendAvailableCommandsUpdate(readWorkflowStatus);
+        await session.sendAvailableCommandsUpdate(readWorkflowStatus);
+        await session.sendAvailableCommandsUpdate(readWorkflowStatus);
+
+        expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(2);
+        expect(mockClient.sessionUpdate).toHaveBeenLastCalledWith({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            _meta: expect.objectContaining({
+              workflowStatus: { workflowsEnabled: true, savedWorkflows: [] },
+            }),
+          }),
+        });
+      });
+
       it('sends changed commands and a return to an earlier successful snapshot', async () => {
         await session.sendAvailableCommandsUpdate();
         buildSnapshot.mockResolvedValue(changedSnapshot);

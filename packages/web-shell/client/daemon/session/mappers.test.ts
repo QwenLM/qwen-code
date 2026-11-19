@@ -1550,6 +1550,55 @@ describe('updateConnectionFromDaemonEvent', () => {
     ]);
   });
 
+  it('updates Workflow availability and saved workflows for the connected session', () => {
+    const sessionId = 'session-1';
+    const workflowStatusEvent = (
+      workflowsEnabled: boolean,
+      owner = sessionId,
+    ): DaemonEvent => ({
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: owner,
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+          _meta: {
+            workflowStatus: {
+              workflowsEnabled,
+              savedWorkflows: workflowsEnabled
+                ? [{ name: 'review-probe', source: 'project' }]
+                : [],
+            },
+          },
+        },
+      },
+    });
+    const initial: DaemonConnectionState = {
+      status: 'connected',
+      workspaceCwd: '/workspace',
+      sessionId,
+    };
+
+    const enabled = applyEvent(initial, workflowStatusEvent(true));
+    expect(enabled.supportedCommands).toMatchObject({
+      sessionId,
+      workflowsEnabled: true,
+      savedWorkflows: [{ name: 'review-probe', source: 'project' }],
+    });
+    const previous = applyEvent(
+      enabled,
+      workflowStatusEvent(false, 'old-session'),
+    );
+    expect(previous.supportedCommands).toBe(enabled.supportedCommands);
+    const disabled = applyEvent(previous, workflowStatusEvent(false));
+    expect(disabled.supportedCommands).toMatchObject({
+      sessionId,
+      workflowsEnabled: false,
+      savedWorkflows: [],
+    });
+  });
+
   it('reads nested availableSkills from the daemon wire shape', () => {
     const next = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace' },

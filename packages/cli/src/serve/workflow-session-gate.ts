@@ -15,9 +15,7 @@ export function redactWorkflowsFromSupportedCommands(
 ): ServeSessionSupportedCommandsStatus {
   return {
     ...status,
-    availableCommands: status.availableCommands.filter(
-      (command) => command.name !== 'workflows',
-    ),
+    availableCommands: status.availableCommands.filter(isNonWorkflowCommand),
     workflowsEnabled: false,
     savedWorkflows: [],
   };
@@ -65,11 +63,27 @@ export function redactWorkflowsFromAvailableCommandsEvent<
   } else if (candidate['sessionUpdate'] === 'available_commands_update') {
     const availableCommands = candidate['availableCommands'];
     if (!Array.isArray(availableCommands)) return event;
-    const filteredCommands = availableCommands.filter(
-      (command) => asRecord(command)?.['name'] !== 'workflows',
-    );
-    if (filteredCommands.length === availableCommands.length) return event;
-    nextCandidate = { ...candidate, availableCommands: filteredCommands };
+    const filteredCommands = availableCommands.filter(isNonWorkflowCommand);
+    const meta = asRecord(candidate['_meta']);
+    const hasWorkflowStatus = meta?.['workflowStatus'] !== undefined;
+    if (
+      !hasWorkflowStatus &&
+      filteredCommands.length === availableCommands.length
+    ) {
+      return event;
+    }
+    nextCandidate = {
+      ...candidate,
+      availableCommands: filteredCommands,
+      ...(hasWorkflowStatus
+        ? {
+            _meta: {
+              ...meta,
+              workflowStatus: { workflowsEnabled: false, savedWorkflows: [] },
+            },
+          }
+        : {}),
+    };
   } else {
     return event;
   }
@@ -115,6 +129,14 @@ export function redactWorkflowsFromReplayArrays<
         }
       : {}),
   };
+}
+
+function isNonWorkflowCommand(value: unknown): boolean {
+  const command = asRecord(value);
+  return (
+    command?.['name'] !== 'workflows' &&
+    asRecord(command?.['_meta'])?.['source'] !== 'workflow-command'
+  );
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

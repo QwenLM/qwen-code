@@ -335,7 +335,11 @@ import {
   inactiveExtensionSkillRefs,
   isInactiveExtensionSkill,
 } from './extension-skills.js';
-import { Session, registerCreateSubSessionTool } from './session/Session.js';
+import {
+  Session,
+  registerCreateSubSessionTool,
+  type WorkflowCommandsStatus,
+} from './session/Session.js';
 import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
 import { applyRestoredSessionApprovalMode } from './session-approval-mode-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
@@ -7902,6 +7906,23 @@ class QwenAgent implements Agent {
   ): Promise<void> {
     const workflowChanges: Array<{ session: Session; wasEnabled: boolean }> =
       [];
+    const effectiveRulesByWorkspace = new Map<string, PermissionRuleSet>();
+    const getEffectiveRules = (workspace: string): PermissionRuleSet => {
+      const cached = effectiveRulesByWorkspace.get(workspace);
+      if (cached) return cached;
+      const { merged } = this.loadRequestSettings(workspace);
+      const rules = readPermissionRuleSet(merged);
+      rules.allow.push(
+        ...normalizeDisabledToolList(merged.tools?.allowed),
+        ...(this.argv.allowedTools ?? []),
+      );
+      rules.deny.push(
+        ...normalizeDisabledToolList(merged.tools?.exclude),
+        ...(this.argv.excludeTools ?? []),
+      );
+      effectiveRulesByWorkspace.set(workspace, rules);
+      return rules;
+    };
     for (const ruleType of PERMISSION_RULE_TYPES) {
       const oldRules = new Set(before[ruleType]);
       const newRules = new Set(after[ruleType]);
@@ -7911,23 +7932,21 @@ class QwenAgent implements Agent {
       if (removed.length === 0 && added.length === 0) continue;
 
       for (const session of this.sessions.values()) {
+        const config = session.getConfig();
+        const workspace = this.sessionWorkspaceRoot(config);
         if (settingScope === SettingScope.Workspace) {
           // A workspace-scoped write only applies to sessions bound to the
           // workspace it landed in. `settingsCwd` is the requesting session's
           // stable workspace root; skip sessions in other workspaces so a
           // worktree's grant/deny doesn't fan out to every live session with
           // no record in their own settings files.
-          const sessionWorkspace = this.sessionWorkspaceRoot(
-            session.getConfig(),
-          );
           if (
-            this.canonicalWorkspacePath(sessionWorkspace) !==
+            this.canonicalWorkspacePath(workspace) !==
             this.canonicalWorkspacePath(settingsCwd)
           ) {
             continue;
           }
         }
-        const config = session.getConfig();
         const pm = config.getPermissionManager?.();
         if (!pm) continue;
         // Isolate per-session failures: a stale/broken permission manager for
@@ -7936,11 +7955,22 @@ class QwenAgent implements Agent {
         try {
           const workflowsWereEnabled =
             ruleType === 'deny' && config.isWorkflowsEnabled();
+          const effective = new Set(
+            getEffectiveRules(workspace)[ruleType].map((rule) => rule.trim()),
+          );
           for (const rule of removed) {
-            pm.removePersistentRule(rule, ruleType);
+            // Another scope, a legacy setting, or argv may still supply it.
+            const normalized = rule.trim();
+            if (!effective.has(normalized)) {
+              while (pm.removePersistentRule(normalized, ruleType)) {
+                // Different settings entries can parse to the same string.
+              }
+            }
           }
           for (const rule of added) {
-            pm.addPersistentRule(rule, ruleType);
+            if (effective.has(rule.trim())) {
+              pm.addPersistentRule(rule, ruleType);
+            }
           }
           if (
             ruleType === 'deny' &&
@@ -7995,7 +8025,9 @@ class QwenAgent implements Agent {
 
   private async refreshWorkflowCommands(session: Session): Promise<void> {
     try {
-      await session.sendAvailableCommandsUpdate();
+      await session.sendAvailableCommandsUpdate(() =>
+        this.buildWorkflowCommandsStatus(session.getConfig()),
+      );
     } catch (err) {
       debugLogger.warn(
         `sendAvailableCommandsUpdate failed for session ${session.getId()}: ${err}`,
@@ -9597,21 +9629,7 @@ class QwenAgent implements Agent {
     const config = session.getConfig();
     const { availableCommands, availableSkills } =
       await session.buildAvailableCommandsSnapshot();
-    const workflowsEnabled = this.canUseWorkflowControls(config);
-    const savedWorkflows = workflowsEnabled
-      ? (
-          await listSavedWorkflows(config).catch((error: unknown) => {
-            debugLogger.warn(
-              'Saved workflow discovery failed while listing session commands:',
-              error,
-            );
-            return [];
-          })
-        ).map(({ name, source }) => ({
-          name,
-          source,
-        }))
-      : [];
+    const workflowStatus = await this.buildWorkflowCommandsStatus(config);
     return {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
@@ -9621,7 +9639,7 @@ class QwenAgent implements Agent {
           ? availableCommands.filter((command) => command.name !== 'workflows')
           : availableCommands,
       availableSkills: availableSkills ?? [],
-      workflowsEnabled,
+      ...workflowStatus,
       workflowToolFeatures: {
         sourceRef: true,
         agentStepId: true,
@@ -9631,7 +9649,28 @@ class QwenAgent implements Agent {
         nameOnly: config.isWorkflowNameOnly?.() === true,
         retryHistorical: true,
       },
-      savedWorkflows,
+    };
+  }
+
+  private async buildWorkflowCommandsStatus(
+    config: Config,
+  ): Promise<WorkflowCommandsStatus> {
+    if (!this.canUseWorkflowControls(config)) {
+      return { workflowsEnabled: false, savedWorkflows: [] };
+    }
+    const entries = await listSavedWorkflows(config).catch((error: unknown) => {
+      debugLogger.warn(
+        'Saved workflow discovery failed while listing session commands:',
+        error,
+      );
+      return [];
+    });
+    if (!this.canUseWorkflowControls(config)) {
+      return { workflowsEnabled: false, savedWorkflows: [] };
+    }
+    return {
+      workflowsEnabled: true,
+      savedWorkflows: entries.map(({ name, source }) => ({ name, source })),
     };
   }
 
@@ -11456,11 +11495,13 @@ class QwenAgent implements Agent {
           }
           switch (kind) {
             case 'permissions': {
-              // The live manager holds the scopes' rules merged, without
-              // provenance, so diff the effective set: a rule another scope
-              // still provides must never be removed. The workspace filter
-              // stays on the apply.
-              const before = readPermissionRuleSet(this.settings.merged);
+              const scope =
+                params['scope'] === 'user'
+                  ? SettingScope.User
+                  : SettingScope.Workspace;
+              const before = readPermissionRuleSet(
+                this.settings.forScope(scope).settings,
+              );
               if (
                 !this.settings.reloadScopesFromDiskAtomically([
                   SettingScope.User,
@@ -11471,13 +11512,9 @@ class QwenAgent implements Agent {
                   'The permission rules could not be reloaded for a workspace change.',
                 );
               }
-              const scope =
-                params['scope'] === 'user'
-                  ? SettingScope.User
-                  : SettingScope.Workspace;
               await this.syncLivePermissionManagers(
                 before,
-                readPermissionRuleSet(this.settings.merged),
+                readPermissionRuleSet(this.settings.forScope(scope).settings),
                 scope,
                 changeCwd,
                 true,
@@ -15872,18 +15909,15 @@ class QwenAgent implements Agent {
 
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
         const settings = this.loadPermissionSettings(settingsCwd);
-        const before = readPermissionRuleSet(settings.merged);
         const settingScope =
           scope === 'workspace' ? SettingScope.Workspace : SettingScope.User;
-        const scopeSettings =
-          scope === 'workspace'
-            ? settings.workspace.settings
-            : settings.user.settings;
-        const existingRules = readPermissionRuleSet(scopeSettings)[ruleType];
+        const before = readPermissionRuleSet(
+          settings.forScope(settingScope).settings,
+        );
         let rules: string[];
         try {
           rules = normalizePermissionRules(params['rules'], {
-            existingRules,
+            existingRules: before[ruleType],
           });
         } catch (error) {
           if (error instanceof PermissionRulesValidationError) {
@@ -15893,14 +15927,9 @@ class QwenAgent implements Agent {
         }
 
         settings.setValue(settingScope, `permissions.${ruleType}`, rules);
-        // `setValue` already recomputed the in-memory merged view, so read the
-        // "after" state from the same instance instead of reloading from disk
-        // (avoids redundant I/O and a concurrency window where another handler
-        // could mutate settings between the two loads).
-        const after = readPermissionRuleSet(settings.merged);
         await this.syncLivePermissionManagers(
           before,
-          after,
+          readPermissionRuleSet(settings.forScope(settingScope).settings),
           settingScope,
           settingsCwd,
         );

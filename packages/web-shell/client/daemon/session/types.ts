@@ -174,6 +174,8 @@ export interface DaemonConnectionState {
   contextWindow?: number;
   providers?: DaemonWorkspaceProvidersStatus;
   supportedCommands?: DaemonSessionSupportedCommandsStatus;
+  /** Orders live Workflow updates against in-flight supported-commands reads. */
+  workflowStatusRevision?: number;
   context?: DaemonSessionContextStatus;
   capabilities?: DaemonCapabilities;
   /** True while the current session transcript is being loaded. */

@@ -7773,6 +7773,41 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('preserves a live Workflow update when an older commands request finishes', async () => {
+    const session = createMockSession('session-a', 'client-a');
+    const disabled = {
+      ...supportedCommandsStatus(session.sessionId),
+      workflowsEnabled: false,
+    };
+    const deferred = createDeferred<typeof disabled>();
+    session.supportedCommands.mockReturnValueOnce(deferred.promise);
+    const initial: DaemonConnectionState = {
+      status: 'connected',
+      sessionId: session.sessionId,
+      clientId: session.clientId,
+      supportedCommands: disabled,
+    };
+    const { actions, getConnection, replaceConnection } = createActionsHarness({
+      connection: initial,
+      session,
+    });
+    const pending = actions.refreshCommands();
+    const enabled = {
+      ...disabled,
+      workflowsEnabled: true,
+      savedWorkflows: [{ name: 'review-probe', source: 'project' as const }],
+    };
+    replaceConnection({
+      ...initial,
+      workflowStatusRevision: 1,
+      supportedCommands: enabled,
+    });
+    deferred.resolve(disabled);
+
+    await pending;
+    expect(getConnection().supportedCommands).toBe(enabled);
+  });
+
   it('does not apply late context to a replacement attachment', async () => {
     const source = createMockSession('session-a', 'client-a');
     const target = createMockSession('session-a', 'client-b');

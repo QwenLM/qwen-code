@@ -457,7 +457,8 @@ export function updateConnectionFromDaemonEvent(
   setConnection: Dispatch<SetStateAction<DaemonConnectionState>>,
 ): void {
   if (event.type === 'session_update') {
-    const update = getRecord(getRecord(event.data)?.['update']);
+    const data = getRecord(event.data);
+    const update = getRecord(data?.['update']);
     const meta = getRecord(update?.['_meta']);
     const backgroundTurn = parseDaemonBackgroundTurn(meta?.['backgroundTurn']);
     if (
@@ -490,7 +491,30 @@ export function updateConnectionFromDaemonEvent(
       }));
     }
     if (getString(update, 'sessionUpdate') === 'available_commands_update') {
-      const { commands, skills } = mapAvailableCommandsUpdate(update);
+      const { commands, skills, availableCommands } =
+        mapAvailableCommandsUpdate(update);
+      const sessionId = getString(data, 'sessionId');
+      const workflowStatus = getRecord(meta?.['workflowStatus']);
+      const workflowsEnabled = workflowStatus?.['workflowsEnabled'];
+      const saved = workflowStatus?.['savedWorkflows'];
+      const savedWorkflows: DaemonSessionSupportedCommandsStatus['savedWorkflows'] =
+        Array.isArray(saved)
+          ? saved.flatMap<
+              NonNullable<
+                DaemonSessionSupportedCommandsStatus['savedWorkflows']
+              >[number]
+            >((value: unknown) => {
+              const entry = getRecord(value);
+              const name = getString(entry, 'name');
+              const source = getString(entry, 'source');
+              return name &&
+                (source === 'project' ||
+                  source === 'user' ||
+                  source === 'extension')
+                ? [{ name, source }]
+                : [];
+            })
+          : [];
       // An available_commands_update is the daemon's authoritative snapshot of
       // the current slash commands, so assign it directly (matching `skills`)
       // rather than keeping the previous list when it is empty — otherwise a
@@ -500,6 +524,24 @@ export function updateConnectionFromDaemonEvent(
         ...current,
         commands,
         skills,
+        ...(sessionId &&
+        current.sessionId === sessionId &&
+        typeof workflowsEnabled === 'boolean'
+          ? {
+              workflowStatusRevision: (current.workflowStatusRevision ?? 0) + 1,
+              supportedCommands: {
+                ...(current.supportedCommands?.sessionId === sessionId
+                  ? current.supportedCommands
+                  : undefined),
+                v: 1 as const,
+                sessionId,
+                availableCommands,
+                availableSkills: skills,
+                workflowsEnabled,
+                savedWorkflows,
+              },
+            }
+          : {}),
       }));
     }
     return;
@@ -1000,8 +1042,9 @@ function mapAvailableCommandsUpdate(
 ): {
   commands: DaemonCommandInfo[];
   skills: string[];
+  availableCommands: DaemonAvailableCommand[];
 } {
-  if (!update) return { commands: [], skills: [] };
+  if (!update) return { commands: [], skills: [], availableCommands: [] };
 
   const commandRecords = Array.isArray(update['availableCommands'])
     ? update['availableCommands']
@@ -1053,6 +1096,7 @@ function mapAvailableCommandsUpdate(
   return {
     commands: mergeCommands(commands, skillCommands),
     skills,
+    availableCommands: commands.map((command) => command.raw),
   };
 }
 

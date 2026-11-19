@@ -3589,6 +3589,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 activeSession,
               )
             : undefined;
+          const workflowStatusRevision =
+            connectionRef.current.workflowStatusRevision;
           const metadataPromise = Promise.allSettled([
             canReuseSessionMetadata || !activeWorkspaceScoped
               ? Promise.resolve(undefined)
@@ -3728,6 +3730,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               recoveryGeneration !== undefined &&
               sessionRecoveryGenerationRef.current.get(activeSession) ===
                 recoveryGeneration;
+            const commandsSnapshotCurrent =
+              supportedCommands !== undefined &&
+              current.workflowStatusRevision === workflowStatusRevision;
             const nextContext =
               configSnapshotCurrent && context
                 ? context
@@ -3764,9 +3769,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // would let a genuinely-empty snapshot leave a stale command list
               // in place (see getConnectionAfterSessionClear, which now
               // preserves commands across a clear).
-              commands:
-                supportedCommands !== undefined ? commands : current.commands,
-              skills: supportedCommands !== undefined ? skills : current.skills,
+              commands: commandsSnapshotCurrent ? commands : current.commands,
+              skills: commandsSnapshotCurrent ? skills : current.skills,
               models:
                 configSnapshotCurrent &&
                 (sessionModels.length > 0 || hasContextModelCatalog)
@@ -3805,7 +3809,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   ? (providers ?? current.providers)
                   : current.providers
                 : undefined,
-              supportedCommands: supportedCommands ?? current.supportedCommands,
+              supportedCommands: commandsSnapshotCurrent
+                ? supportedCommands
+                : current.supportedCommands,
               context: nextContext
                 ? {
                     ...nextContext,
