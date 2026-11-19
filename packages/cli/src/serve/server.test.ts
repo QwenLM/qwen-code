@@ -52134,8 +52134,10 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
 
   it('disable releases pairing-listener slots over a non-answering upgraded peer (issue #17712)', async () => {
     // The local-control service pin asserts disable() settlement only; this
-    // pin asserts the counted slot returns to baseline through the
-    // tracked-destroy -> 'close' -> release-hook path on the LAN listener.
+    // pin asserts the counted LAN slot returns to baseline on disable over a
+    // non-answering upgraded peer. The ws detach terminates the client here;
+    // the tracked-destroy loop is the backstop for upgrades no ws server owns
+    // (witnessed by the service-level raw-upgrade pin, not by this one).
     const pair = await enablePairingListener({ maxConnections: 256 });
     handle = pair.handle;
     const { lanBase, lanAuth } = pair;
