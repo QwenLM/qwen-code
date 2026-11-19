@@ -46894,6 +46894,13 @@ describe('idle suspension', () => {
       .send(operation())
       .expect(202);
     expect(requests.some((r) => r.kind === 'mcp-configure')).toBe(!parkable);
+    // The cold-opened session keeps its idle timer. Left live, it suspends
+    // during the next case and drains its own configuration through that
+    // case's prototype-level Broker mock, landing in the wrong requests array.
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      load.body.clientId as string,
+    );
   });
 
   it('an admitted mutation resets the idle timer', async () => {
