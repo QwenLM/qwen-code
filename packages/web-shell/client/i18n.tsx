@@ -100,6 +100,12 @@ import {
 } from './components/managed/managed-workspace-messages.js';
 
 import {
+  ARTIFACT_LIBRARY_MESSAGES_EN,
+  ARTIFACT_LIBRARY_MESSAGES_RU,
+  ARTIFACT_LIBRARY_MESSAGES_ZH,
+} from './components/managed/managed-artifact-library-messages.js';
+
+import {
   MANAGED_MCP_MESSAGES_EN,
   MANAGED_MCP_MESSAGES_RU,
   MANAGED_MCP_MESSAGES_ZH,
@@ -4408,7 +4414,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'chat.scrollToBottom': 'Scroll to bottom',
   'chatHeader.toggleEnvironment': 'Toggle environment information',
   'chatHeader.toggleRightPanel': 'Toggle right panel',
-  'chatHeader.openArtifacts': (v) => `Open artifacts (${v?.count ?? 0})`,
+  'chatHeader.openArtifacts': (v) => `Artifacts (${v?.count ?? 0})`,
   'environment.title': 'Environment',
   'environment.changes': 'Changes',
   'environment.changeCount': (v) => `${v?.count ?? 0} changed`,
@@ -4519,6 +4525,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'workflow.graph.omitted': (v) =>
     `Graph limited for performance: ${v?.lanes ?? 0} phases, ${v?.nodes ?? 0} agents, and ${v?.edges ?? 0} connections omitted.`,
   'workflow.noPhase': 'No phase',
+  'workflow.phase.notStarted': 'Not started',
   'workflow.dispatchCount': (v) =>
     `${v?.count ?? 0} dispatch${v?.count === 1 ? '' : 'es'}`,
   'workflow.selectedDispatch': 'Selected dispatch',
@@ -5461,6 +5468,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   ...MANAGED_TASK_MESSAGES_EN,
   ...MANAGED_LIFECYCLE_MESSAGES_EN,
   ...WORKSPACE_REGISTRATION_MESSAGES_EN,
+  ...ARTIFACT_LIBRARY_MESSAGES_EN,
   ...MANAGED_MCP_MESSAGES_EN,
   ...MANAGED_EXTENSION_MESSAGES_EN,
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,
@@ -9555,7 +9563,7 @@ const ZH: Messages = {
   'chat.scrollToBottom': '回到底部',
   'chatHeader.toggleEnvironment': '切换环境信息',
   'chatHeader.toggleRightPanel': '切换右侧扩展区',
-  'chatHeader.openArtifacts': (v) => `打开产物（${v?.count ?? 0}）`,
+  'chatHeader.openArtifacts': (v) => `产物（${v?.count ?? 0}）`,
   'environment.title': '环境信息',
   'environment.changes': '变更',
   'environment.changeCount': (v) => `${v?.count ?? 0} 项变更`,
@@ -9646,6 +9654,7 @@ const ZH: Messages = {
   'workflow.graph.omitted': (v) =>
     `为保证性能，执行图已省略 ${v?.lanes ?? 0} 个阶段、${v?.nodes ?? 0} 个 Agent 和 ${v?.edges ?? 0} 条连线。`,
   'workflow.noPhase': '未分阶段',
+  'workflow.phase.notStarted': '未开始',
   'workflow.dispatchCount': (v) => `${v?.count ?? 0} 个调度`,
   'workflow.selectedDispatch': '已选调度',
   'workflow.dependencies': '依赖',
@@ -10533,6 +10542,7 @@ const ZH: Messages = {
   ...MANAGED_TASK_MESSAGES_ZH,
   ...MANAGED_LIFECYCLE_MESSAGES_ZH,
   ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
+  ...ARTIFACT_LIBRARY_MESSAGES_ZH,
   ...MANAGED_MCP_MESSAGES_ZH,
   ...MANAGED_EXTENSION_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,
@@ -10561,6 +10571,7 @@ const RU: Messages = {
   ...MANAGED_TASK_MESSAGES_RU,
   ...MANAGED_LIFECYCLE_MESSAGES_RU,
   ...WORKSPACE_REGISTRATION_MESSAGES_RU,
+  ...ARTIFACT_LIBRARY_MESSAGES_RU,
   ...MANAGED_MCP_MESSAGES_RU,
   ...TRAJECTORY_EXECUTION_MESSAGES_RU,
   ...TRAJECTORY_FILTER_MESSAGES_RU,

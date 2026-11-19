@@ -42,6 +42,104 @@ export type { ManagedReceipt };
 export const MANAGED_GITHUB_PENDING_LIMIT = 32;
 export const DISPATCHED_COMMENTS_LIMIT = 500;
 
+/**
+ * The PR-watch transition vocabulary of the first slice (state_change is
+ * deferred). Mirrors the daemon's event set, minus state_change.
+ */
+export type ManagedGithubPrTransition =
+  | 'ci_failure'
+  | 'merge_conflict'
+  | 'head_change';
+
+export const MANAGED_GITHUB_PR_TRANSITIONS: readonly ManagedGithubPrTransition[] =
+  ['ci_failure', 'merge_conflict', 'head_change'];
+
+/** The CI rollup vocabulary, one definition with the daemon's aggregateChecks. */
+export type ManagedGithubCiAggregate =
+  | 'passing'
+  | 'failing'
+  | 'pending'
+  | 'none';
+
+/**
+ * Per-PR pending cap, the daemon's bound: overflow drops the oldest with a
+ * log line instead of growing the state file without limit.
+ */
+export const MANAGED_GITHUB_PR_WATCH_PENDING_LIMIT = 16;
+/** Fired-ring cap, the retired channel watch's bound (MAX_FIRED_KEYS). */
+export const MANAGED_GITHUB_PR_WATCH_FIRED_LIMIT = 64;
+/**
+ * Durable per-PR episode-watermark cap. The watermark outlives prune/rebind
+ * (the admission ledger is permanent), so it is bounded separately from the
+ * prunable baselines; overflow evicts the oldest watermark.
+ */
+export const MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT = 1024;
+
+/**
+ * One detected transition durably queued for injection. The full inject
+ * identity rides the entry because a restart re-drives it without re-listing
+ * bindings, and the control plane forces the target Session from its own
+ * binding — the adapter never chooses one.
+ */
+export interface ManagedGithubPrWatchPending {
+  /** Local dedupe key; ci_failure keys match by PR+SHA prefix. */
+  key: string;
+  /**
+   * Durable per-PR occurrence number fed to the control plane's input-id
+   * derivation: a legitimate recurrence is a new episode (new input id), a
+   * redelivery of this same pending entry reuses it (same input id).
+   */
+  episode: number;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  transition: ManagedGithubPrTransition;
+  headSha: string;
+  /** Sanitized transition summary for the injected prompt's evidence. */
+  evidence: string;
+  detectedAt: string;
+}
+
+/**
+ * Persisted per-PR observation backing edge-triggered watch events, the
+ * retired channel watch's PrWatchEntry shape: the baseline advances with
+ * each observation, ciFiredSha pins ci_failure once-per-head across fired-ring
+ * eviction, and seq numbers non-ci episodes so a legitimate recurrence
+ * (dirty → clean → dirty, a SHA revisit) fires again.
+ */
+export interface ManagedGithubPrWatchEntry {
+  headSha?: string;
+  mergeableState?: string;
+  ci?: ManagedGithubCiAggregate;
+  ciFiredSha?: string;
+  seq?: number;
+  /** Monotonic per-PR occurrence counter; the last assigned pending episode. */
+  episode?: number;
+  /** Dedupe keys already injected, oldest first (capped ring). */
+  fired?: string[];
+  /** Detected but not yet injected transitions, oldest first (capped). */
+  pending?: ManagedGithubPrWatchPending[];
+}
+
+export interface ManagedGithubWatchState {
+  /** Keyed by lowercased `owner/repo#prNumber`. */
+  prs: Record<string, ManagedGithubPrWatchEntry>;
+  /**
+   * Rotation offset into the stably-ordered binding list: each tick observes a
+   * capped window starting here and advances, so every binding is observed
+   * across successive ticks instead of only the first cap (the daemon's
+   * sweepStart). Absent means start at the head of the list.
+   */
+  sweepStart?: number;
+  /**
+   * Durable per-PR occurrence watermark keyed like `prs`, carried across
+   * prune/rebind: the admission ledger is permanent and keyed without a
+   * binding discriminant, so a rebind must resume the episode counter rather
+   * than restart it and re-derive an already-admitted input id.
+   */
+  episodes?: Record<string, number>;
+}
+
 export interface ManagedGithubPendingEvent {
   eventId: string;
   /**
@@ -76,6 +174,59 @@ export interface ManagedGithubState {
   cursor: ManagedGithubCursor;
   pending: ManagedGithubPendingEvent[];
   outbound: ManagedGithubOutboundSegment[];
+  /** PR-watch baselines, fired-ring and pending; absent means no watch yet. */
+  watch?: ManagedGithubWatchState;
+}
+
+function validPrWatchEntry(value: unknown): value is ManagedGithubPrWatchEntry {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const entry = value as ManagedGithubPrWatchEntry;
+  const nonEmptyStringOrUndefined = (v: unknown): boolean =>
+    v === undefined || (typeof v === 'string' && v.length > 0);
+  return (
+    nonEmptyStringOrUndefined(entry.headSha) &&
+    nonEmptyStringOrUndefined(entry.mergeableState) &&
+    nonEmptyStringOrUndefined(entry.ciFiredSha) &&
+    (entry.ci === undefined ||
+      entry.ci === 'passing' ||
+      entry.ci === 'failing' ||
+      entry.ci === 'pending' ||
+      entry.ci === 'none') &&
+    (entry.seq === undefined ||
+      (Number.isSafeInteger(entry.seq) && entry.seq >= 0)) &&
+    (entry.episode === undefined ||
+      (Number.isSafeInteger(entry.episode) && entry.episode >= 0)) &&
+    (entry.fired === undefined ||
+      (Array.isArray(entry.fired) &&
+        entry.fired.length <= MANAGED_GITHUB_PR_WATCH_FIRED_LIMIT &&
+        entry.fired.every(
+          (key) => typeof key === 'string' && key.length > 0,
+        ))) &&
+    (entry.pending === undefined ||
+      (Array.isArray(entry.pending) &&
+        entry.pending.length <= MANAGED_GITHUB_PR_WATCH_PENDING_LIMIT &&
+        entry.pending.every(
+          (p) =>
+            !!p &&
+            typeof p === 'object' &&
+            typeof p.key === 'string' &&
+            p.key.length > 0 &&
+            Number.isSafeInteger(p.episode) &&
+            p.episode >= 1 &&
+            typeof p.owner === 'string' &&
+            p.owner.length > 0 &&
+            typeof p.repo === 'string' &&
+            p.repo.length > 0 &&
+            Number.isSafeInteger(p.prNumber) &&
+            p.prNumber >= 1 &&
+            MANAGED_GITHUB_PR_TRANSITIONS.includes(p.transition) &&
+            typeof p.headSha === 'string' &&
+            p.headSha.length > 0 &&
+            typeof p.evidence === 'string' &&
+            typeof p.detectedAt === 'string' &&
+            !Number.isNaN(Date.parse(p.detectedAt)),
+        )))
+  );
 }
 
 export function validManagedGithubState(
@@ -125,7 +276,27 @@ export function validManagedGithubState(
         Number.isSafeInteger(entry.ordinal) &&
         entry.ordinal >= 0 &&
         validManagedReceipt(entry.receipt),
-    )
+    ) &&
+    (state.watch === undefined ||
+      (!!state.watch &&
+        typeof state.watch === 'object' &&
+        !Array.isArray(state.watch) &&
+        !!state.watch.prs &&
+        typeof state.watch.prs === 'object' &&
+        !Array.isArray(state.watch.prs) &&
+        Object.values(state.watch.prs).every(validPrWatchEntry) &&
+        (state.watch.sweepStart === undefined ||
+          (Number.isSafeInteger(state.watch.sweepStart) &&
+            state.watch.sweepStart >= 0)) &&
+        (state.watch.episodes === undefined ||
+          (!!state.watch.episodes &&
+            typeof state.watch.episodes === 'object' &&
+            !Array.isArray(state.watch.episodes) &&
+            Object.keys(state.watch.episodes).length <=
+              MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT &&
+            Object.values(state.watch.episodes).every(
+              (episode) => Number.isSafeInteger(episode) && episode >= 1,
+            )))))
   );
 }
 
