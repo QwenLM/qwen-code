@@ -36,6 +36,8 @@ import {
   isPropertyAccessExpression,
   isPropertyAssignment,
   isShorthandPropertyAssignment,
+  isSpreadAssignment,
+  isSpreadElement,
   isStringLiteral,
   isVariableDeclaration,
   isVariableStatement,
@@ -222,11 +224,18 @@ const loopClassifierWiring = (text) => {
   // A destructuring assignment rebinds the input without any identifier the
   // direct resolver recognises on the left: `[blockProperties] = [fabricated]`
   // or `({ x: blockProperties.shouldBlock } = …)`. Walk the pattern's leaves.
+  // A rest element is a leaf too: `[...blockProperties] = …` and
+  // `({ ...blockProperties } = …)` write INTO the existing binding rather than
+  // declaring a new one, so skipping them let an in-place write evade every
+  // write inventory.
   // Kept separate from writtenBinding so an in-place writer's first argument
   // (a value, not a target) is never read as a pattern.
   const assignmentTarget = (node) => {
     const direct = writtenBinding(node);
     if (direct !== undefined) return direct;
+    if (isSpreadElement(node)) {
+      return assignmentTarget(node.expression);
+    }
     if (isArrayLiteralExpression(node)) {
       for (const element of node.elements) {
         const hit = assignmentTarget(element);
@@ -239,7 +248,9 @@ const loopClassifierWiring = (text) => {
           ? property.name
           : isPropertyAssignment(property)
             ? property.initializer
-            : undefined;
+            : isSpreadAssignment(property)
+              ? property.expression
+              : undefined;
         if (target === undefined) continue;
         const hit = assignmentTarget(target);
         if (hit !== undefined) return hit;
@@ -4136,6 +4147,10 @@ describe('managed-agent-server e2e runner', () => {
       // writes a member through the pattern, the second rebinds the input.
       "({ x: blockProperties.shouldBlock } = { x: { type: 'boolean' } });",
       '({ blockProperties } = { blockProperties: undefined });',
+      // A rest element writes INTO the existing binding rather than declaring
+      // a new one, in both pattern kinds.
+      "[...blockProperties] = [{ shouldBlock: { type: 'boolean' } }];",
+      "({ ...blockProperties } = { shouldBlock: { type: 'boolean' } });",
       "Object.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } });",
       "Reflect.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } });",
       // A receiver that resolves to a prototype function must not crash the
@@ -4233,9 +4248,9 @@ describe('managed-agent-server e2e runner', () => {
       '(anonymous)',
     ]);
     // Every write form is recorded: the member write, the in-place calls, the
-    // delete, the alias write, both destructuring patterns (array, object
-    // property and object shorthand) and the nullish assignment — none of them
-    // rebinds an identifier the direct way.
+    // delete, the alias write, every destructuring pattern (array, object
+    // property, object shorthand, and both rest forms) and the nullish
+    // assignment — none of them rebinds an identifier the direct way.
     expect(scope.reassignments).toEqual([
       "blockProperties['shouldBlock'] = { type: 'boolean' }",
       "Object.assign(blockProperties, { shouldBlock: { type: 'boolean' } })",
@@ -4246,6 +4261,8 @@ describe('managed-agent-server e2e runner', () => {
       "[blockProperties] = [{ shouldBlock: { type: 'boolean' } }]",
       "{ x: blockProperties.shouldBlock } = { x: { type: 'boolean' } }",
       '{ blockProperties } = { blockProperties: undefined }',
+      "[...blockProperties] = [{ shouldBlock: { type: 'boolean' } }]",
+      "{ ...blockProperties } = { shouldBlock: { type: 'boolean' } }",
       "Object.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } })",
       "Reflect.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } })",
       'blockAnswer ??= { shouldBlock: false }',

@@ -281,6 +281,21 @@ core 邻近面在本 head 整面跑而非抽样：`src/managed-runtime` 加 `src
 
 **本 head 的 CI：必需检查链上一条继承红，已按实测归因。** 落定为 28 通过 / 2 失败 / 40 跳过，两条失败是同一根因——`Linux unit tests (shard 1/2)` 与由它派生的汇总 job `Test (ubuntu-latest, Node 22.x)`（后者是必需检查）。其余三项必需检查通过。失败是 `packages/cli/src/i18n/mustTranslateKeys.test.ts › covers every English locale key in ru`，`AssertionError: expected [ …(7) ] to deeply equal []`，缺的七个键全是 vision-bridge-timeout 文案。它来自 main 的 `ed8a4045ba`（#17830），该提交经第九次合并成为本 head 的祖先且在 `origin/main` 上；本 delta 触碰 i18n 或 vision 文件 0 个；`packages/cli/src/i18n/locales/ru.js` 与整个 `packages/cli/src/i18n` 目录在本 head 与 `origin/main` 之间逐字节相同；这些键在 `ru.js` 中不存在（0 命中）、在 `en.js` 中存在（2 命中）；且在本 head 本地复现（`1 failed | 21 passed (22)`）。它在 CI 两次重试与本地运行中确定性失败，故按 deflake 约定属真 bug 而非非确定性——不重跑、不稳化。两个开放的上游 PR 恰好改该文件（#17857、#17858），均 MERGEABLE 且在等评审，故此处不重复修复：姿态是等任一落地、合并 main 并复跑，与继承的 `web-templates` 预算红（main 在 #17746 修好）一致。归因评论 `issuecomment-7015384854`。
 
+## 第 14 轮评审：四条延后项——三条修复、一条实测为已被覆盖
+
+第 14 轮因上文归因的那条 CI 红（main #17830 的俄语覆盖缺口，已由上游 #17858 修好并在此合入）把自己的 Approve 降级为 Comment。它未发内联发现，给了四条延后项，并披露其边界既跑不了两个改动套件（没有已构建的 `packages/core/dist`）也重放不了记录里的变异见证。四条都先实测再处置：三条是本 PR 所交付内容的缺陷或覆盖缺口，在此修复；第四条实测为已被覆盖，并关闭其唯一残留。
+
+- **rest 解构写入逃过写入库存（rounds 7/8 遗留）。** 在按字节抽取出的扫描器上实测并带负向控制：成员写入使 file-wide 重赋值库存 0 → 1，但 `[...blockProperties] = […]`、`({ ...blockProperties } = …)` 与嵌套 `[[...blockProperties]] = […]` 都使它停在 **0**。赋值模式里的 rest 元素是写**进**既有绑定、而非声明新绑定，故属对决策输入的原地写入。`assignmentTarget` 现把 `SpreadElement`（数组 rest）与 `SpreadAssignment`（对象 rest）当模式叶子走，被执行控制用例携带两种形态。
+- **`loopBearingProfiles` 的文档捕获吞掉了夹在中间的注释。** 实测三种形态：loop Javadoc 后接 creator-less Javadoc，会把 creator-less 常量判为 loop-bearing；loop Javadoc 后接非 Javadoc 块注释，同样误判；loop Javadoc 与其声明之间隔一行注释，则把 loop-bearing 常量整个漏掉——相对被路由集合是假红。惰性 `[\s\S]*?` 的 body 能越过自身的 `*/`。现 body 改 tempered（`(?:[^*]|\*(?!\/))*`）使其不能越过自身终止符，间隙容许行注释（Java 允许文档与声明之间有行注释）。三种形态都成为已提交的合成夹具，且真实 Java 文件仍分类为恰好被路由集合（`FILES_V4`、`INTERNAL_TEAM_LEAD_V2`、`SHELL_V3`、`SHELL_V4`），独立于套件复测过。
+- **Managed Nd 格的 timezone 子句无钉。** `(pass the user's IANA ``timezone`` for local midnight)` 只出现在生成器的替换串与重生 sidecar 里；既有断言读 UTC 那半句并禁止 `midnight local`，故删掉该子句时全套件仍绿，却丢掉了唯一区分 UTC 午夜与用户本地午夜的模型可见文案。Nd 格测试现按 profile 断言它。
+- **bundled 源 Nd 行没有直接内容钉——实测为已被传递性覆盖。** `sub()` 是 fail-closed：源句缺失即抛 `Managed loop substitution source not found in bundled SKILL.md: …`。经真实生成器在内存中实测，把源行还原为 `every N days`、以及丢掉其日域语义，两者都抛，故 parity 构建会红。残留是**协同**改动源行与 `sub()` 的源串，两者会一致而滑过；现也直接断言源行语义，关闭该残留。
+
+六条见证，每次还原字节相等。写入库存的子句级：只删数组 rest 叶子打红 13 个站点对 14，只删对象 rest 叶子打红 13 对 14，两者都删打红 12 对 14（各 1 失败 / 88 通过）。把 doc body 还原为惰性形式打红过度捕获夹具（`expected [ 'B' ] to deeply equal []`，1 失败 / 34 通过）。两条内容钉在**生产**文本上见证，先重生 sidecar 使 parity 保持绿、只有新断言触发：从生成器删掉 timezone 子句恰好打红 Nd 格测试（1 失败 / 34 通过）；协同改行——源行与 `sub()` 源串一起改、sidecar 重生——恰好打红新的源行断言（1 失败 / 34 通过），而这正是传递性钉看不到的场景。还原后干净基线：core 35/35、scripts 89/89。
+
+第十次合入 main（合并提交 `8d2b0fa022`，3 个 incoming 提交，以 merge base `d79bb9b712` 判定零文件重叠；delta 仍恰好 11 文件）。incoming 的 `adca3e7ddc` 就是 **#17858**，即上文那条继承红的上游修复，故 `packages/cli/src/i18n/mustTranslateKeys.test.ts` 在本 head 由 `1 failed | 21 passed` 变为 **22 passed**。另两个 incoming 提交是 docs 与 verify-pr skill 配方；其余代码文件只有 `packages/web-shell/client/settings/messages.ts`、`.github/scripts/ci/classify-profile.mjs` 与 `scripts/tests/qwen-triage-workflow.test.js`——都不碰 loop 路径、oracle、runner、core、Java 或 lockfile。
+
+尽管如此，整栈仍在本 head 重建并重跑双臂而非承接：全量构建 **rc=0** 且 core 与 cli 的 dist 断言已刷新，jar 重建且其**四个** sidecar 与已提交契约逐字节相等，`ManagedLoopSkillTest` **19/19**（`Tests run: 19, Failures: 0, Errors: 0, Skipped: 0`），bundle 重建并断言已刷新。臂：`--loop-skill` success（session `0b114926-4cb5-48c1-b416-a99349d97dc2`、modelRounds 6、cronToolResults 3、create/list/delete 均见证）；`--loop-fire` success（session `edcbeb63-68fb-41cb-85cb-2b22ca825d5c`、schedule `asch_074e80c825c4318812ca2a13b7b121b0`、fireTrigger=scheduled、fireOutcome=fired、fireState=completed、occurrenceKey `schedule:2026-11-19T17:15:00Z`、modelRounds 5）。本 head 套件：core **35/35**、scripts 元 **185/185**、cli i18n **22/22**；core `tsc --build`、eslint 与 prettier 净。第 14 轮修复只动测试，且上面那些生产变异是在链结束之后做的并字节级还原，故没有任一条臂跑在被变异的生产文本上。
+
 ## 开放问题
 
 无阻塞项。

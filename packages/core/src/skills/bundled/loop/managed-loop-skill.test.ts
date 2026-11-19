@@ -105,7 +105,12 @@ function resolveJavaRouting(javaCode: string): Map<string, string> {
 function loopBearingProfiles(javaCode: string): string[] {
   return [
     ...javaCode.matchAll(
-      /(?:\/\*\*([\s\S]*?)\*\/\s*)?public static final String (\w+)\s*=/g,
+      // The doc body is tempered so it cannot run past its own `*/`: a lazy
+      // `[\s\S]*?` expanded across an intervening comment and attached the
+      // PREVIOUS declaration's loop doc to a creator-less constant. The gap
+      // admits line comments, which Java allows between a doc and its
+      // declaration, but no other comment form.
+      /(?:\/\*\*((?:[^*]|\*(?!\/))*)\*\/(?:\s|\/\/[^\n]*)*)?public static final String (\w+)\s*=/g,
     ),
   ]
     .filter((match) => /loop|cron/i.test(match[1] ?? ''))
@@ -533,6 +538,37 @@ describe('managed loop skill parity', () => {
     expect(
       loopBearingProfiles('public static final String MCP = "x/1";'),
     ).toEqual([]);
+    // The doc capture must not run past its own terminator. Each of these
+    // misclassified before the body was tempered: the first two attached the
+    // PREVIOUS loop doc to a creator-less constant, the third dropped a
+    // loop-bearing constant whose doc is separated by a line comment.
+    expect(
+      loopBearingProfiles(
+        [
+          '/** Self-paced /loop revision. */',
+          '/** #15076: adds `todo_write`, no creator. */',
+          'public static final String B = "b/1";',
+        ].join('\n'),
+      ),
+    ).toEqual([]);
+    expect(
+      loopBearingProfiles(
+        [
+          '/** Fixed-interval /loop: plus cron. */',
+          '/* not a doc */',
+          'public static final String B = "b/1";',
+        ].join('\n'),
+      ),
+    ).toEqual([]);
+    expect(
+      loopBearingProfiles(
+        [
+          '/** Fixed-interval /loop: plus cron. */',
+          '// rollout note',
+          'public static final String A = "a/1";',
+        ].join('\n'),
+      ),
+    ).toEqual(['A']);
   });
 
   it('the routing resolution is first-match and comment-blind, witnessed on a synthetic chain', () => {
@@ -650,8 +686,20 @@ describe('managed loop skill parity', () => {
     for (const profile of FIXED_INTERVAL_PROFILES) {
       const text = asset(profile).body;
       expect(text).toContain('midnight UTC on days 1, 1+N, … of each month');
+      // The carried-over timezone clause is model-facing content in its own
+      // right: it is the only text telling the model that UTC midnight is not
+      // the user's local midnight, and no other assertion reads it.
+      expect(text).toContain(
+        "(pass the user's IANA `timezone` for local midnight)",
+      );
       expect(text).not.toContain('every N days');
     }
+    // The bundled source row is pinned directly too. sub() is fail-closed on
+    // its exact text, so a reworded row already reddens the parity build — but
+    // a coordinated edit of the row AND sub()'s source string would agree and
+    // slip through, so the source semantics are asserted here as well.
+    expect(body).toContain('midnight local on days 1, 1+N, … of each month');
+    expect(body).not.toContain('every N days');
   });
 
   it('the sentinel guard is an allow-list, so a new sentinel ships red', () => {
