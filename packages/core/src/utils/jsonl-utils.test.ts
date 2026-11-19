@@ -232,6 +232,53 @@ describe('_recoverObjectsFromLine', () => {
     ]);
   });
 
+  it('preserves earlier recovered records when salvaging suffix (monotonicity)', () => {
+    const gluedTriple = '{"a":1}{"b":"torn...{"c":2}';
+    expect(
+      _recoverObjectsFromLine<{ a?: number; b?: string; c?: number }>(
+        gluedTriple,
+      ),
+    ).toEqual([{ a: 1 }, { c: 2 }]);
+
+    expect(
+      parseLineTolerantWithIntegrity(gluedTriple, '/tmp/test.jsonl'),
+    ).toEqual({
+      records: [{ a: 1 }, { c: 2 }],
+      complete: false,
+    });
+  });
+
+  it('salvages suffix records with nested objects', () => {
+    const lineWithNestedSuffix =
+      '{"backgroundTurn":{"taskId":"Explore_call","sess{"uuid":"c2fdde8f","meta":{"nested":true}}';
+    expect(_recoverObjectsFromLine(lineWithNestedSuffix)).toEqual([
+      { uuid: 'c2fdde8f', meta: { nested: true } },
+    ]);
+  });
+
+  it('salvages suffix records containing literal braces inside strings', () => {
+    const lineWithBracesInString =
+      '{"backgroundTurn":{"sess{"uuid":"c2fdde8f","content":"with { inner } brace"}';
+    expect(_recoverObjectsFromLine(lineWithBracesInString)).toEqual([
+      { uuid: 'c2fdde8f', content: 'with { inner } brace' },
+    ]);
+  });
+
+  it('salvages suffix record when torn string ends in comma or colon', () => {
+    const lineComma =
+      '{"backgroundTurn":{"content":"prefix ending with comma,{"uuid":"c2fdde8f"}';
+    expect(_recoverObjectsFromLine(lineComma)).toEqual([{ uuid: 'c2fdde8f' }]);
+
+    const lineColon =
+      '{"backgroundTurn":{"content":"prefix ending with colon:{"uuid":"c2fdde8f"}';
+    expect(_recoverObjectsFromLine(lineColon)).toEqual([{ uuid: 'c2fdde8f' }]);
+  });
+
+  it('rejects candidate suffix following punctuation outside string', () => {
+    const line = '{"a":1,{"b":2}';
+    expect(_recoverObjectsFromLine(line)).toEqual([]);
+  });
+
   it('preserves complete: false when recovering suffix after torn prefix in parseLineTolerantWithIntegrity', () => {
     const tornLine =
       '{"backgroundTurn":{"taskId":"Explore_call","sess{"uuid":"c2fdde8f"}';

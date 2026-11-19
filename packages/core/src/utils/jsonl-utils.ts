@@ -64,10 +64,10 @@ function getFileLock(filePath: string): Mutex {
   return fileLocks.get(filePath)!;
 }
 
-function canStartRecoveredSuffix(line: string, recordStart: number): boolean {
-  const previous = line.slice(0, recordStart).trimEnd().at(-1);
-  if (previous === '[' || previous === ',' || previous === ':') return false;
-
+export function canStartRecoveredSuffix(
+  line: string,
+  recordStart: number,
+): boolean {
   let depth = 0;
   let inString = false;
   let escape = false;
@@ -86,6 +86,12 @@ function canStartRecoveredSuffix(line: string, recordStart: number): boolean {
       depth = Math.max(0, depth - 1);
     }
   }
+
+  if (!inString) {
+    const previous = line.slice(0, recordStart).trimEnd().at(-1);
+    if (previous === '[' || previous === ',' || previous === ':') return false;
+  }
+
   return inString || depth === 0;
 }
 
@@ -97,6 +103,11 @@ function canStartRecoveredSuffix(line: string, recordStart: number): boolean {
  * Walks the line with a brace-depth counter that respects string boundaries
  * and `\` escapes, then tries `JSON.parse` on each balanced top-level fragment.
  * Fragments that still fail to parse are skipped silently.
+ *
+ * **Limitation**: only top-level `{...}` records are recovered. A glued line
+ * whose records are top-level arrays (`[...][...]`) will not split. All
+ * existing JSONL writers in this codebase produce object records, so this
+ * matches the actual corruption shape — extend if that ever changes.
  *
  * Exported for unit tests; not part of the module's stable surface.
  */
@@ -157,26 +168,31 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
     };
   }
 
-  // If a torn prefix prevented depth from returning to 0 (e.g. truncated mid-string
-  // like `..."parentUuid":"...","sess` + `{"uuid":"..."}`), scan from the end of the line
-  // for a complete suffix record using the canStartRecoveredSuffix rule.
-  const lastOpenBrace = line.lastIndexOf('{');
-  if (lastOpenBrace > 0 && canStartRecoveredSuffix(line, lastOpenBrace)) {
-    try {
-      const parsed = JSON.parse(line.slice(lastOpenBrace));
-      if (
-        parsed !== null &&
-        typeof parsed === 'object' &&
-        !Array.isArray(parsed)
-      ) {
-        return {
-          records: [parsed as T],
-          complete: false,
-        };
+  // If a torn prefix or unparseable fragment prevented clean consumption,
+  // scan candidate open braces backwards from the end of the line for a complete
+  // suffix record using the canStartRecoveredSuffix rule.
+  let offset = line.length;
+  while (offset > 0) {
+    const candidate = line.lastIndexOf('{', offset - 1);
+    if (candidate <= 0) break;
+    if (canStartRecoveredSuffix(line, candidate)) {
+      try {
+        const parsed = JSON.parse(line.slice(candidate));
+        if (
+          parsed !== null &&
+          typeof parsed === 'object' &&
+          !Array.isArray(parsed)
+        ) {
+          return {
+            records: [...out, parsed as T],
+            complete: false,
+          };
+        }
+      } catch {
+        // Suffix was not valid JSON; try earlier candidate brace.
       }
-    } catch {
-      // Suffix was not valid JSON either.
     }
+    offset = candidate;
   }
 
   return {
