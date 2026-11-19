@@ -11,6 +11,7 @@ import type { ToolArtifact, ToolArtifactKind } from '../tools.js';
 import {
   ARTIFACT_TITLE_MAX_LENGTH,
   ARTIFACT_WORKSPACE_PATH_MAX_LENGTH,
+  fileHiddenFromArtifactsPanel,
   hasControlCharacter,
   hasUnsafeDisplayPayload,
 } from '../record-artifact.js';
@@ -159,6 +160,20 @@ function resolveRecordedWorkspaceFile(
     return null;
   }
   if (pathHasSkippedDirectoryComponent(workspacePath)) {
+    return null;
+  }
+  // The explicit record_artifact gate refuses this predicate, so the
+  // auto-record must skip the same files — the two producers agree.
+  if (
+    fileHiddenFromArtifactsPanel(
+      workspacePath,
+      resolvedRoot,
+      config.getFileFilteringOptions().customIgnoreFiles,
+    )
+  ) {
+    debugLogger.debug('workspace artifact skipped (hidden from panel)', {
+      path: filePath,
+    });
     return null;
   }
   return { filePath: resolvedFile, workspacePath };

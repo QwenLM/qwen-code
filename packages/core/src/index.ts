@@ -257,6 +257,7 @@ export {
   OFFICE_DOCUMENT_EXTENSIONS,
   collectRecordableWorkspaceFiles,
   isOfficeDocumentExtension,
+  pathHasSkippedArtifactDirectoryAncestor,
   pathHasSkippedDirectoryComponent,
   shouldSkipDirectoryArtifactName,
   stripWorktreeArtifactPrefix,

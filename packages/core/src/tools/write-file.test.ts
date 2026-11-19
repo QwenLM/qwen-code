@@ -98,6 +98,11 @@ const mockConfigInternal = {
   getFileReadCacheDisabled: () => false,
   getFileHistoryService: () => mockFileHistoryService,
   isRecordArtifactEnabled: vi.fn(() => false),
+  getFileFilteringOptions: () => ({
+    respectGitIgnore: true,
+    respectQwenIgnore: true,
+    customIgnoreFiles: ['.agentignore', '.aiignore'],
+  }),
 };
 const mockConfig = mockConfigInternal as unknown as Config;
 
@@ -1426,6 +1431,24 @@ describe('workspace artifact metadata guard', () => {
     } finally {
       fs.rmSync(linkDir, { force: true });
       fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('does not auto-record a file the record_artifact gate refuses', () => {
+    // The direct-file gate refuses paths the panel cannot surface (here:
+    // hidden by the workspace .gitignore), so auto-record must skip the
+    // same file — the two producers agree.
+    const ignoreFile = p('.gitignore');
+    const secretsDir = p('secrets');
+    const filePath = path.join(secretsDir, 'creds.md');
+    fs.mkdirSync(secretsDir, { recursive: true });
+    fs.writeFileSync(ignoreFile, 'secrets/\n');
+    fs.writeFileSync(filePath, 'a,b\n');
+    try {
+      expect(buildWorkspaceArtifactMetadata(mockConfig, filePath)).toBeNull();
+    } finally {
+      fs.rmSync(ignoreFile, { force: true });
+      fs.rmSync(secretsDir, { recursive: true, force: true });
     }
   });
 
