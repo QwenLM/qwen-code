@@ -20,11 +20,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { execFileSync } from 'node:child_process';
 import { Storage } from '../config/storage.js';
-import {
-  resetDebugLoggingState,
-  runWithDebugLogSession,
-  setDebugLogSession,
-} from './debugLogger.js';
+import * as debugLogger from './debugLogger.js';
 import {
   _getFileLockCountForTest,
   _recoverObjectsFromLine,
@@ -70,13 +66,13 @@ async function withDebugLog(
   const previousDebugLogFile = process.env['QWEN_DEBUG_LOG_FILE'];
   process.env['QWEN_DEBUG_LOG_FILE'] = fileOutputEnabled ? '1' : '0';
   Storage.setRuntimeBaseDir(tmpRoot);
-  resetDebugLoggingState();
-  setDebugLogSession({ getSessionId: () => sessionId });
+  debugLogger.resetDebugLoggingState();
+  debugLogger.setDebugLogSession({ getSessionId: () => sessionId });
   try {
     await run(Storage.getDebugLogPath(sessionId));
   } finally {
-    setDebugLogSession(null);
-    resetDebugLoggingState();
+    debugLogger.setDebugLogSession(null);
+    debugLogger.resetDebugLoggingState();
     Storage.setRuntimeBaseDir(null);
     if (previousDebugLogFile === undefined) {
       delete process.env['QWEN_DEBUG_LOG_FILE'];
@@ -604,6 +600,101 @@ describe('writeLine / writeLineSync / write', () => {
       });
     };
 
+    it.each([
+      {
+        condition: 'file output is disabled',
+        fileOutputEnabled: false,
+        suppressSession: false,
+      },
+      {
+        condition: 'session logging is suppressed',
+        fileOutputEnabled: true,
+        suppressSession: true,
+      },
+    ])(
+      'does not resolve a debug session when $condition',
+      async ({ fileOutputEnabled, suppressSession }) => {
+        const sessionId = `jsonl-tail-log-lazy-${name}-${fileOutputEnabled}`;
+        await withDebugLog(sessionId, fileOutputEnabled, async () => {
+          const file = tmpFile('{"existing":');
+          const sessionLookup = vi
+            .spyOn(debugLogger, 'getActiveDebugSessionId')
+            .mockImplementation(() => {
+              throw new Error('unexpected debug session lookup');
+            });
+          const spy = denyTailProbe(
+            Object.assign(new Error('read denied'), { code: 'EACCES' }),
+          );
+
+          try {
+            const appendRecord = () => append(file, { next: true });
+            if (suppressSession) {
+              await debugLogger.runWithoutDebugLogSession(appendRecord);
+            } else {
+              await appendRecord();
+            }
+
+            expect(sessionLookup).not.toHaveBeenCalled();
+            expect(
+              spy.mock.calls.filter(([, flags]) => flags === tailProbeFlags),
+            ).toHaveLength(1);
+            expect(fs.readFileSync(file, 'utf8')).toBe(
+              '{"existing":\n{"next":true}\n',
+            );
+          } finally {
+            spy.mockRestore();
+            sessionLookup.mockRestore();
+          }
+        });
+      },
+    );
+
+    it('warns once at a healthy debug sink after the initial sink fails', async () => {
+      const sessionId = `jsonl-tail-log-sink-${name}`;
+      await withDebugLog(sessionId, true, async () => {
+        const file = tmpFile('{"partial":');
+        const spy = denyTailProbe(
+          Object.assign(new Error('read denied'), { code: 'EACCES' }),
+        );
+
+        try {
+          const blockedRuntime = tmpPath('blocked-runtime');
+          fs.writeFileSync(blockedRuntime, 'not a directory');
+          Storage.setRuntimeBaseDir(blockedRuntime);
+          const blockedLog = Storage.getDebugLogPath(sessionId);
+
+          await append(file, { stage: 'blocked' });
+          await vi.waitFor(() => {
+            expect(debugLogger.isDebugLoggingDegraded()).toBe(true);
+          });
+          expect(tailWarnings(blockedLog, file)).toHaveLength(0);
+
+          const healthyRuntime = path.join(tmpRoot, `healthy-runtime-${name}`);
+          Storage.setRuntimeBaseDir(healthyRuntime);
+          const healthyLog = Storage.getDebugLogPath(sessionId);
+          await append(file, { stage: 'healthy' });
+          await vi.waitFor(() => {
+            expect(tailWarnings(healthyLog, file)).toHaveLength(1);
+          });
+
+          await append(file, { stage: 'deduplicated' });
+          const marker = 'healthy debug sink settled';
+          debugLogger.createDebugLogger('JSONL_TEST').warn(marker);
+          await vi.waitFor(() => {
+            expect(fs.existsSync(healthyLog)).toBe(true);
+            expect(fs.readFileSync(healthyLog, 'utf8')).toContain(marker);
+          });
+          expect(tailWarnings(healthyLog, file)).toHaveLength(1);
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"partial":\n{"stage":"blocked"}\n\n' +
+              '{"stage":"healthy"}\n\n{"stage":"deduplicated"}\n',
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
+
     it.each(['EACCES', 'EPERM'])(
       'restores the record boundary after an %s tail-read denial',
       async (code) => {
@@ -800,8 +891,9 @@ describe('writeLine / writeLineSync / write', () => {
         });
         const spy = denyTailProbe(error);
         const appendFor = (sessionId: string, record: unknown) =>
-          runWithDebugLogSession({ getSessionId: () => sessionId }, () =>
-            append(file, record),
+          debugLogger.runWithDebugLogSession(
+            { getSessionId: () => sessionId },
+            () => append(file, record),
           );
         const settleDebugLogWrites = () =>
           new Promise<void>((resolve) => setImmediate(resolve));
@@ -846,9 +938,9 @@ describe('writeLine / writeLineSync / write', () => {
         const spy = denyTailProbe(error);
 
         try {
-          setDebugLogSession(null);
+          debugLogger.setDebugLogSession(null);
           await append(withoutSession, { inactive: true });
-          setDebugLogSession({ getSessionId: () => sessionId });
+          debugLogger.setDebugLogSession({ getSessionId: () => sessionId });
           await append(withoutSession, { active: true });
           await vi.waitFor(() => {
             expect(tailWarnings(logPath, withoutSession)).toHaveLength(1);
