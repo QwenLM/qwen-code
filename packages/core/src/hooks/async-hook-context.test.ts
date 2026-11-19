@@ -91,11 +91,13 @@ describe('async-hook-context', () => {
     });
 
     it('bounds the joined block across many completions to exactly the cap', () => {
-      const contexts = Array.from({ length: 20 }, () => 'y'.repeat(10_000));
+      const contexts = Array.from({ length: 20 }, () =>
+        'y'.repeat(MAX_ASYNC_HOOK_CONTEXT_LENGTH),
+      );
       const rendered = formatAsyncHookOutput({ contexts, messages: [] });
       // A total-loss regression (returning null) must not satisfy this bound.
       expect(rendered).not.toBeNull();
-      expect(rendered).toHaveLength(10_000);
+      expect(rendered).toHaveLength(MAX_ASYNC_HOOK_CONTEXT_LENGTH);
     });
 
     it('does not truncate a block under the cap', () => {
@@ -212,9 +214,9 @@ describe('async-hook-context', () => {
       // its cut must be marked too rather than dropping its tail unmarked.
       expect(rendered).toContain(ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE);
       expect(rendered).toContain('[warning]');
-      expect((rendered ?? '').length).toBeLessThanOrEqual(
-        MAX_ASYNC_HOOK_CONTEXT_LENGTH,
-      );
+      // Exactly the cap: an over-reservation that silently drops warning tail
+      // must not pass a mere under-cap check.
+      expect(rendered).toHaveLength(MAX_ASYNC_HOOK_CONTEXT_LENGTH);
     });
 
     it('bounds a message-dominated block with no context', () => {
@@ -234,9 +236,7 @@ describe('async-hook-context', () => {
         ],
       });
       expect(rendered).not.toBeNull();
-      expect((rendered ?? '').length).toBeLessThanOrEqual(
-        MAX_ASYNC_HOOK_CONTEXT_LENGTH,
-      );
+      expect(rendered).toHaveLength(MAX_ASYNC_HOOK_CONTEXT_LENGTH);
       // The cut half is the message, so it carries the message notice — not the
       // context notice, which would name a context truncation that never happened.
       expect(rendered).toContain(ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE);
@@ -264,9 +264,7 @@ describe('async-hook-context', () => {
         true,
       );
       expect(rendered).toContain('[warning]');
-      expect((rendered ?? '').length).toBeLessThanOrEqual(
-        MAX_ASYNC_HOOK_CONTEXT_LENGTH,
-      );
+      expect(rendered).toHaveLength(MAX_ASYNC_HOOK_CONTEXT_LENGTH);
     });
 
     it('strips a partial entity left by the message-only cut', () => {
