@@ -140,12 +140,18 @@ Spring skips an optional file it cannot see, so where this process cannot enter
 a directory the server looks in for a configuration file or a config tree, or
 list one it lists, as it lists `config/` for `config/*/`, a `config` row names
 that directory and says to run the check as the service account or as root, or
-as root alone when that is the service account. When that account cannot look
-in it either, Spring reads nothing there, and the directory gets no row; nor
-does it without a service account, or when the check runs as that account, as
-this process then stands in for the server's, as it does for every file row. A
-service account of root reads and enters whatever the modes say, as the kernel
-lets it.
+as that account alone when its uid is 0. When that account cannot look in it
+either, Spring reads nothing there, and the directory gets no row; nor does it
+without a service account, or when the check runs as that account, as this
+process then stands in for the server's, as it does for every file row. A
+service account of root, the account whose uid is 0 by whatever name, reads and
+enters whatever the modes say, as the kernel lets it. Where this process cannot
+look along a file's path but the service account may, or cannot read a file the
+account can and the check reads, the file's row fails as a directory's does: it
+says the file is not readable by the account running the check, and whom to run
+the check as. Behind a directory this process may not enter, a missing file
+looks like one root reads, and a file system that refuses root looks the same,
+so the check does not judge it as present.
 
 A file holds a secret by one rule, the configuration reference's: a key named as
 a password, token, key or secret, or a map of keys, in any spelling Spring

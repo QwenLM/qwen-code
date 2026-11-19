@@ -10,10 +10,10 @@ import com.alibaba.qwen.code.daemon.SessionCreationOutcomeUnknownException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedActionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedActionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.junit.jupiter.api.Test;
@@ -167,6 +167,10 @@ class QwenHostedMcpManagementAttachmentTest {
         } else {
             var conflict = mock(DaemonHttpException.class);
             when(conflict.getStatusCode()).thenReturn(409);
+            // The re-take keys on the code, not the bare status: the same 409
+            // also carries a closing gate, a full cold-open slot and a wedged
+            // teardown, which must reach the caller instead of loading again.
+            when(conflict.getErrorCode()).thenReturn("hosted_session_already_attached");
             error = conflict;
         }
         when(fixture.client.createSession(any())).thenThrow(error);
@@ -209,9 +213,9 @@ class QwenHostedMcpManagementAttachmentTest {
                     new ContextBinding("tenant", "workspace", 1, "storage", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1),
                     "default", "hosted-workspace-shell/1", "a".repeat(64));
             when(sessions.requireSession("tenant", SESSION)).thenReturn(session);
-            var definitions = mock(ManagedAgentDefinitionStore.class);
+            var definitions = mock(JdbcManagedAgentDefinitionStore.class);
             when(definitions.pinnedContent(session)).thenReturn(Map.of());
-            var actions = mock(ManagedActionStore.class);
+            var actions = mock(JdbcManagedActionStore.class);
             when(actions.approvalMode("tenant", SESSION)).thenReturn("default");
             var settings = new ManagedAgentProperties();
             settings.getHarness().setToken("test-token");
@@ -221,8 +225,8 @@ class QwenHostedMcpManagementAttachmentTest {
             settings.getSessionStore().setEnabled(true);
             settings.getSessionStore().setBaseUrl("https://store.example");
             settings.getSessionStore().setWorkspaceId("workspace");
-            connector = new QwenHostedHarnessConnector(settings, sessions, mock(WorkspaceExecutionStore.class), actions,
-                    definitions, mock(ManagedSessionStore.class));
+            connector = new QwenHostedHarnessConnector(settings, sessions, mock(JdbcWorkspaceExecutionStore.class), actions,
+                    definitions, mock(JdbcManagedSessionStore.class));
             ReflectionTestUtils.setField(connector, "client", client);
         }
 

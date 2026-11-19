@@ -73,7 +73,7 @@ class ChildResultRelayLockMySqlIT {
     @Timeout(30)
     void classifyLocksOnlyItsOwnRecord() throws Exception {
         long now = System.currentTimeMillis();
-        ChildResultRelayStore store = new ChildResultRelayStore(jdbc);
+        JdbcChildResultRelayStore store = new JdbcChildResultRelayStore(jdbc);
         RelayRow row = store.claim(TENANT, SESSION, "run-lock", "key-lock",
                 "owner", now + 30_000, now);
         assertThat(row).isNotNull();
@@ -96,7 +96,7 @@ class ChildResultRelayLockMySqlIT {
                 return result;
             }
         };
-        ChildResultRelayStore pausingStore = new ChildResultRelayStore(
+        JdbcChildResultRelayStore pausingStore = new JdbcChildResultRelayStore(
                 pausing);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         Future<?> classify = executor.submit(() -> pausingStore.classify(row,

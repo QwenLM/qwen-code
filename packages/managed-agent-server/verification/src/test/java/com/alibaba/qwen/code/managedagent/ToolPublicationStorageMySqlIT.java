@@ -5,12 +5,12 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySqlTestDatabase;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -44,6 +44,7 @@ import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.COMMI
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.digest;
+import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
@@ -181,6 +182,16 @@ class ToolPublicationStorageMySqlIT {
         }
         ToolPublicationObjectStore objects = new ToolPublicationObjectStore() {
             @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
+            @Override
             public void putIfAbsent(String key, byte[] bytes) {
                 throw new AssertionError("Inline fixture expected");
             }
@@ -200,7 +211,7 @@ class ToolPublicationStorageMySqlIT {
         envelope.set("capture", JSON.createObjectNode().put("captureStatus", "unavailable")
                 .put("captureReason", "storage_failed").put("previewTruncated", false)
                 .put("deliveryStatus", "pending").putNull("manifest"));
-        data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", envelope.toString().getBytes(StandardCharsets.UTF_8));
+        verified(data).finish(key, "pub-1", PUBLICATION_TOKEN, "finish", envelope.toString().getBytes(StandardCharsets.UTF_8));
         var outcome = JSON.createObjectNode().put("schemaVersion", 1).put("decision", "blocked").putNull("manifestRef");
         outcome.set("envelope", envelope);
         var history = JSON.createObjectNode().put("messageId", "11111111-1111-4111-8111-111111111111")
@@ -270,7 +281,7 @@ class ToolPublicationStorageMySqlIT {
         };
     }
 
-    private ManagedSessionStore transactionalSessions() {
+    private JdbcManagedSessionStore transactionalSessions() {
         var beans = new DefaultListableBeanFactory();
         beans.registerSingleton("managedAgentTransactionManager", journal.manager);
         var interceptor = new TransactionInterceptor();
@@ -281,7 +292,7 @@ class ToolPublicationStorageMySqlIT {
         var factory = new ProxyFactory(journal.sessions);
         factory.setProxyTargetClass(true);
         factory.addAdvice(interceptor);
-        var result = (ManagedSessionStore) factory.getProxy();
+        var result = (JdbcManagedSessionStore) factory.getProxy();
         assertThat(AopUtils.isCglibProxy(result)).isTrue();
         return result;
     }
@@ -293,9 +304,9 @@ class ToolPublicationStorageMySqlIT {
         journal.jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
                         + " storage_kind, registration_state, registration_revision, registration_json)"
                         + " VALUES (?, ?, ?, 'tenant-1', 'storage', ?, 'LOCAL', 'REGISTERED', 1, '{}')",
-                JdbcRuntimeBindingRepository.storageAliasKey("tenant-1", "storage"),
-                JdbcRuntimeBindingRepository.storageFenceKey("tenant-1"),
-                JdbcRuntimeBindingRepository.storageFenceKey("storage"), PHYSICAL);
+                RuntimeAdmissionFences.storageAliasKey("tenant-1", "storage"),
+                RuntimeAdmissionFences.storageFenceKey("tenant-1"),
+                RuntimeAdmissionFences.storageFenceKey("storage"), PHYSICAL);
         journal.jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, tenant_id, storage_id, mount_state)"
                 + " VALUES (?, ?, 'LOCAL', 'tenant-1', 'storage', 'READY')", PHYSICAL, PHYSICAL);
         journal.jdbc.update("UPDATE ma_session SET workspace_storage_id = 'storage' WHERE tenant_id = 'tenant-1'");
@@ -306,7 +317,7 @@ class ToolPublicationStorageMySqlIT {
                 : "SELECT storage_key FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE";
         try (var statement = connection.prepareStatement(sql)) {
             statement.setString(1, "alias".equals(row)
-                    ? JdbcRuntimeBindingRepository.storageAliasKey("tenant-1", "storage") : PHYSICAL);
+                    ? RuntimeAdmissionFences.storageAliasKey("tenant-1", "storage") : PHYSICAL);
             try (var result = statement.executeQuery()) {
                 assertThat(result.next()).isTrue();
                 assertThat(result.next()).isFalse();

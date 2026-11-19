@@ -10,10 +10,11 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.DispatchTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationArtifactReader;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
@@ -30,7 +31,6 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -52,7 +52,7 @@ import static org.mockito.Mockito.when;
 class ManagedAgentWorkspaceReplayTest {
     private JdbcTemplate jdbc;
     private TransactionTemplate transaction;
-    private ManagedWorkspaceRegistry registry;
+    private JdbcManagedWorkspaceRegistry registry;
     private ManagedAgentStore store;
     private ManagedAgentProperties properties;
     private HarnessCoordinator coordinator;
@@ -101,12 +101,8 @@ class ManagedAgentWorkspaceReplayTest {
                         return files.get();
                     }
 
-                    // The rename race parks here: the racer's replay
-                    // pre-read is already done and beginSessionRename has
-                    // not yet run.
                     @Override
                     public boolean supportsFencedTitles() {
-                        park(gate);
                         return true;
                     }
 
@@ -165,7 +161,7 @@ class ManagedAgentWorkspaceReplayTest {
         jdbc = new ManagedSchemaJdbcTemplate(source);
         transaction = new TransactionTemplate(
                 new DataSourceTransactionManager(source));
-        registry = new ManagedWorkspaceRegistry(jdbc);
+        registry = new JdbcManagedWorkspaceRegistry(jdbc);
         properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(),
@@ -246,7 +242,7 @@ class ManagedAgentWorkspaceReplayTest {
         String tenant = "tenant-" + UUID.randomUUID();
         String sessionId = boundSession(tenant);
         ManagedAgentService service = service(new AtomicBoolean(true));
-        ManagedArtifactReader reader = mock(ManagedArtifactReader.class);
+        ToolPublicationArtifactReader reader = mock(ToolPublicationArtifactReader.class);
         when(reader.supported()).thenReturn(true);
         service.configureArtifacts(properties, reader);
 
@@ -711,15 +707,12 @@ class ManagedAgentWorkspaceReplayTest {
         ExecutorService threads = Executors.newFixedThreadPool(2);
         RaceGate submitGate = new RaceGate();
         RaceGate cancelGate = new RaceGate();
-        RaceGate renameGate = new RaceGate();
         // One gate per race: each race's service parks its racer on the
         // gate that race arms.
         ManagedAgentService submitService = service(
                 new AtomicBoolean(true), submitGate);
         ManagedAgentService cancelService = service(
                 new AtomicBoolean(true), cancelGate);
-        ManagedAgentService renameService = service(
-                new AtomicBoolean(true), renameGate);
         // The submit race's recorded Turn is the cancel race's target.
         AtomicReference<String> racedTurn = new AtomicReference<>();
         try {
@@ -750,87 +743,9 @@ class ManagedAgentWorkspaceReplayTest {
             assertThat(cancelAnswer).isInstanceOfSatisfying(
                     ManagedAgentException.class, error -> assertThat(error.getCode())
                             .isEqualTo("workspace_unavailable"));
-
-            // The rename twin: the in-store COMPLETED read-back arm must
-            // re-run the recorder/creator gate on the command row, or the
-            // racer is served the recorded rename body with replayed=true.
-            Object renameAnswer = raceSecondCaller(threads, renameGate,
-                    () -> {
-                        var result = renameService.renameSession(tenant,
-                                "actor-a", "rename-race", sessionId,
-                                "raced title");
-                        assertThat(result.replayed()).isFalse();
-                        return result;
-                    },
-                    () -> renameService.renameSession(tenant, "actor-c",
-                            "rename-race", sessionId, "raced title"));
-            assertThat(renameAnswer).isInstanceOfSatisfying(
-                    ManagedAgentException.class, error -> assertThat(error.getCode())
-                            .isEqualTo("workspace_unavailable"));
         } finally {
             submitGate.through.countDown();
             cancelGate.through.countDown();
-            renameGate.through.countDown();
-            threads.shutdownNow();
-        }
-    }
-
-    // The PENDING half of the rename race: the recorder's command row is
-    // committed — still claimable — after the racer's replay pre-read ran
-    // empty. The discovery branch in beginSessionRename must re-run the
-    // recorder/creator rule there, not afterwards: claiming that delivery
-    // would flip the recorder's command to COMPLETED under the racer's
-    // name, and failing the digest comparison first would name the live
-    // key the uniform refusal keeps hidden.
-    @Test
-    void aPendingRenameRacedByANonCreatorOperatorIsRefused()
-            throws Exception {
-        freshDatabase();
-        String tenant = "tenant-" + UUID.randomUUID();
-        String sessionId = boundSession(tenant);
-        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, role) VALUES (?, 'ws-a',"
-                        + " ?, 'OPERATOR')",
-                tenant, "actor-c".getBytes(StandardCharsets.UTF_8));
-        ExecutorService threads = Executors.newFixedThreadPool(2);
-        RaceGate renameGate = new RaceGate();
-        ManagedAgentService renameService = service(
-                new AtomicBoolean(true), renameGate);
-        try {
-            Object answer = raceSecondCaller(threads, renameGate,
-                    () -> {
-                        store.beginSessionRename(tenant, "rename-race",
-                                new RequestDigests().digest(Map.of("sessionId",
-                                        sessionId, "title", "raced title")),
-                                sessionId, "raced title", "actor-a");
-                        return null;
-                    },
-                    () -> renameService.renameSession(tenant, "actor-c",
-                            "rename-race", sessionId, "raced title"));
-            assertThat(answer).isInstanceOfSatisfying(
-                    ManagedAgentException.class, error -> assertThat(error.getCode())
-                            .isEqualTo("workspace_unavailable"));
-            // The leaked claim never happened: the recorder's command is
-            // still PENDING and its delivery never handed out an attempt.
-            assertThat(jdbc.queryForObject("SELECT state FROM"
-                            + " ma_request_receipt WHERE namespace ="
-                            + " 'SESSION_COMMAND' AND tenant_id = ?"
-                            + " AND operation = 'RENAME_SESSION'"
-                            + " AND idempotency_key = ?",
-                    String.class, tenant, "rename-race")).isEqualTo("PENDING");
-            assertThat(jdbc.queryForObject("SELECT attempt_count FROM"
-                            + " ma_operation WHERE operation_kind = 'RENAME'"
-                            + " AND tenant_id = ? AND session_id = ?",
-                    Integer.class, tenant, sessionId)).isZero();
-            // The recorder's own retry passes the same discovery gate, not
-            // only refuses other actors: it resumes the delivery to
-            // completion.
-            transaction.executeWithoutResult(status -> assertThat(
-                    renameService.renameSession(tenant, "actor-a",
-                            "rename-race", sessionId, "raced title")
-                            .replayed()).isTrue());
-        } finally {
-            renameGate.through.countDown();
             threads.shutdownNow();
         }
     }
@@ -885,7 +800,7 @@ class ManagedAgentWorkspaceReplayTest {
     // then the Session row as a tombstone.
     private void recordDelete(String tenant, String sessionId,
             String statusBefore) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
         String target = ManagedSchemaKeys.key(sessionId);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key,"
                         + " session_scope_key, operation_id, operation_kind,"

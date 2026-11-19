@@ -29,6 +29,7 @@ import {
 } from './hosted-tool-approval.js';
 import {
   findHostedApprovalContinuation,
+  HostedPublicChildRecoveryProfileChanged,
   readHostedApprovalContinuation,
 } from './hosted-approval-continuation.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
@@ -46,7 +47,12 @@ afterEach(() => vi.restoreAllMocks());
 const WAIT_TIMEOUT_MS = slowHostBudgetMs(10_000, 45_000);
 const TEST_TIMEOUT_MS = slowHostBudgetMs(20_000, 75_000);
 
-function nativeContinuationFixture(toolNames = ['ask_user_question']) {
+function nativeContinuationFixture(
+  toolNames = ['ask_user_question'],
+  definition: Record<string, unknown> = {
+    toolProfile: 'hosted-workspace-files/1',
+  },
+) {
   const bytesById = new Map<string, Buffer>();
   const publish = (kind: string, value: unknown): ManagedSessionDurableRef => {
     const bytes = Buffer.from(JSON.stringify(value));
@@ -80,9 +86,7 @@ function nativeContinuationFixture(toolNames = ['ask_user_question']) {
   const parts = toolNames.map((name, index) => ({
     functionCall: { id: `call-${index}`, name, args: input },
   }));
-  const definitionRef = publish('managed-definition', {
-    toolProfile: 'hosted-workspace-files/1',
-  });
+  const definitionRef = publish('managed-definition', definition);
   const rootSnapshotRef = publish('managed-root', {});
   const assistantRef = publish('managed-message', {
     daemonPromptId: 'prompt',
@@ -182,6 +186,93 @@ it('accepts legacy native owners and the local question provider pin', async () 
     nativeContinuationFixture(['read_file']).read(),
   ).resolves.toMatchObject({
     plan: { runtime: { runtimeSessionId: 'prompt' } },
+  });
+});
+
+it('accepts runtime-free personal memory batches', async () => {
+  const fixture = nativeContinuationFixture([
+    'context_search',
+    'context_remember',
+    'context_get',
+    'context_forget',
+  ]);
+  fixture.plan['runtime'] = null;
+  await expect(fixture.read()).resolves.toMatchObject({
+    plan: { runtime: null },
+  });
+});
+
+it.each([
+  { tools: ['read_file'] },
+  { tools: ['ask_user_question'] },
+  { tools: ['context_remember', 'read_file'] },
+])('rejects a runtime-free $tools batch', async ({ tools }) => {
+  const fixture = nativeContinuationFixture(tools);
+  fixture.plan['runtime'] = null;
+  await expect(fixture.read()).rejects.toThrow(
+    'Hosted approval continuation conflicts with the original Turn.',
+  );
+});
+
+it.each(['commandStep', 'publicChildModel'])(
+  'rejects %s metadata on runtime-free personal memory batches',
+  async (field) => {
+    const fixture = nativeContinuationFixture(['context_remember']);
+    fixture.plan['runtime'] = null;
+    fixture.plan[field] = {};
+    await expect(fixture.read()).rejects.toThrow(
+      'Hosted approval continuation conflicts with the original Turn.',
+    );
+  },
+);
+
+// #17260: a continuation captured under the shell topology whose saved
+// definition no longer runs a public-shell profile is a durable verdict —
+// the typed error the load route maps to the terminal decline instead of
+// the retriable refusal that looped the coordinator's recovery forever.
+it.each([
+  'hosted-workspace-external-files/1',
+  'hosted-workspace-files/1',
+  'hosted-workspace-mcp/1',
+])(
+  'declares a stale public-child profile terminally unrecoverable (%s)',
+  async (toolProfile) => {
+    const fixture = nativeContinuationFixture(['run_shell_command'], {
+      toolProfile,
+      publicChildAgentsVersion: 1,
+    });
+    fixture.plan['publicChildModel'] = {
+      modelId: 'model-pin',
+      route: {
+        authType: 'openai',
+        endpointDigest: 'a'.repeat(64),
+        providerPin: 'b'.repeat(64),
+      },
+    };
+    await expect(fixture.read()).rejects.toBeInstanceOf(
+      HostedPublicChildRecoveryProfileChanged,
+    );
+    await expect(fixture.read()).rejects.toThrow(
+      'Public child recovery profile changed.',
+    );
+  },
+);
+
+it('keeps accepting a public-child continuation on its own shell topology', async () => {
+  const fixture = nativeContinuationFixture(['run_shell_command'], {
+    toolProfile: 'hosted-workspace-shell/1',
+    publicChildAgentsVersion: 1,
+  });
+  fixture.plan['publicChildModel'] = {
+    modelId: 'model-pin',
+    route: {
+      authType: 'openai',
+      endpointDigest: 'a'.repeat(64),
+      providerPin: 'b'.repeat(64),
+    },
+  };
+  await expect(fixture.read()).resolves.toMatchObject({
+    plan: { publicChildModel: { modelId: 'model-pin' } },
   });
 });
 

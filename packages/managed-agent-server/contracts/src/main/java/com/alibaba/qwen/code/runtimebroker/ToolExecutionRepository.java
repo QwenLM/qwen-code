@@ -8,6 +8,18 @@ import java.util.Set;
 
 /** Persistence boundary for idempotent Tool execution state. */
 public interface ToolExecutionRepository {
+    /**
+     * Adds observational metadata to the identical settled execution; cannot change its outcome.
+     */
+    public default ToolExecutionRecord attachMeasurements(
+            ToolExecutionRecord expected, Map<String, Object> metadata) {
+        throw new RuntimeBrokerException(
+                501,
+                "runtime_tool_v4_unsupported",
+                "Measured result persistence is unavailable.",
+                false);
+    }
+
     public ToolExecutionRecord findOrCreate(ToolExecutionRecord candidate);
 
     public ToolExecutionRecord findByExecutionCallId(String executionCallId);

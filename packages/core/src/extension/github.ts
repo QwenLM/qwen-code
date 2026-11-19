@@ -1390,7 +1390,7 @@ export async function extractFile(
       throw error;
     }
   } else if (file.endsWith('.zip')) {
-    await extractZipArchive(file, dest, signal);
+    await extractZipArchive(file, dest, signal, options);
   } else {
     throw new Error(`Unsupported file extension for extraction: ${file}`);
   }

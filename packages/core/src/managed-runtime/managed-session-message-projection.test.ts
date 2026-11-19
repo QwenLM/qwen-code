@@ -5,6 +5,7 @@
  */
 
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -1899,6 +1900,131 @@ describe('managed message body cache', () => {
     expect(capped.bytes).toBe(300);
     await capped.read(big, ref('b3', 50));
     expect(big.read).toHaveBeenCalledTimes(3);
+  });
+
+  function handedOver(
+    resourceId: string,
+    text: string,
+  ): { ref: ManagedSessionDurableRef; body: Buffer } {
+    const body = Buffer.from(text);
+    return {
+      body,
+      ref: {
+        resourceId,
+        kind: 'managed-message',
+        schemaVersion: 1,
+        byteLength: body.byteLength,
+        digest: createHash('sha256').update(body).digest('hex'),
+      },
+    };
+  }
+
+  it('serves a handed-over body without reading it from the store', async () => {
+    const cache = new ManagedMessageBodyCache(1024, 0);
+    const store = fakeStore();
+    const { ref: bodyRef, body } = handedOver('given', 'verified body');
+    cache.remember(store, bodyRef, body);
+    expect(cache.bytes).toBe(body.byteLength);
+    await expect(cache.read(store, bodyRef)).resolves.toEqual(body);
+    expect(store.read).not.toHaveBeenCalled();
+  });
+
+  it('keeps a handed-over body itself unless it is a slice', async () => {
+    const cache = new ManagedMessageBodyCache(1024, 0);
+    const store = fakeStore();
+    const { ref: sliceRef } = handedOver('slice', 'verified body');
+    const pool = Buffer.alloc(4096, 'x');
+    pool.write('verified body', 100);
+    cache.remember(
+      store,
+      sliceRef,
+      pool.subarray(100, 100 + sliceRef.byteLength),
+    );
+    const copied = await cache.read(store, sliceRef);
+    expect(copied.buffer.byteLength).toBe(sliceRef.byteLength);
+    expect(copied).toEqual(Buffer.from('verified body'));
+    const { ref: ownRef } = handedOver('own', 'another body');
+    const own = Buffer.alloc(ownRef.byteLength);
+    own.write('another body');
+    expect(own.buffer.byteLength).toBe(own.byteLength);
+    cache.remember(store, ownRef, own);
+    expect(await cache.read(store, ownRef)).toBe(own);
+    expect(store.read).not.toHaveBeenCalled();
+  });
+
+  it('keeps no handed-over body that does not match its ref', async () => {
+    const cache = new ManagedMessageBodyCache(1024, 0);
+    const store = fakeStore();
+    const { ref: bodyRef, body } = handedOver('given', 'verified body');
+    const refused: Array<[ManagedSessionDurableRef, Buffer]> = [
+      // Another body of the same length.
+      [bodyRef, Buffer.from('verified bodY')],
+      // A shorter body.
+      [bodyRef, body.subarray(1)],
+      // A ref that claims another length for the same bytes.
+      [{ ...bodyRef, byteLength: bodyRef.byteLength + 1 }, body],
+      // A chunk manifest: its entry would be the assembled body.
+      [{ ...bodyRef, kind: 'managed-message-chunks' }, body],
+    ];
+    for (const [given, bytes] of refused) cache.remember(store, given, bytes);
+    expect(cache.bytes).toBe(0);
+    await cache.read(store, bodyRef);
+    expect(store.read).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds handed-over bodies to the same bound as read ones', async () => {
+    const cache = new ManagedMessageBodyCache(20, 0);
+    const store = fakeStore();
+    const fits = handedOver('fits', 'x'.repeat(12));
+    const over = handedOver('over', 'y'.repeat(12));
+    const alone = handedOver('alone', 'z'.repeat(21));
+    cache.remember(store, fits.ref, fits.body);
+    cache.remember(store, over.ref, over.body);
+    cache.remember(store, alone.ref, alone.body);
+    expect(cache.bytes).toBe(12);
+    await cache.read(store, fits.ref);
+    expect(store.read).not.toHaveBeenCalled();
+    await cache.read(store, over.ref);
+    await cache.read(store, alone.ref);
+    expect(store.read).toHaveBeenCalledTimes(2);
+  });
+
+  it('lets a projection skip the bodies its caller already read', async () => {
+    const harness = await createHarness();
+    const writer = new ManagedSessionMessageProjection(
+      harness.authority,
+      harness.store,
+      new ManagedMessageBodyCache(1024 * 1024),
+    );
+    for (const [index, record] of records.entries()) {
+      await writer.commit(
+        command('commitMessage', `cmd-msg-${index}`),
+        { record },
+        HOLDS,
+      );
+    }
+    const contentRefs = harness.authority
+      .readEvents({ afterSequence: 0, limit: 100 })
+      .filter((event) => event.kind === 'message.committed')
+      .map((event) =>
+        assertManagedSessionDurableRef(
+          event.payload['contentRef'],
+          'content ref',
+        ),
+      );
+    expect(contentRefs).toHaveLength(records.length);
+    const projection = new ManagedSessionMessageProjection(
+      harness.authority,
+      harness.store,
+      new ManagedMessageBodyCache(1024 * 1024),
+    );
+    const reads = messageReads(harness.store);
+    for (const contentRef of contentRefs)
+      projection.rememberBody(contentRef, await harness.store.read(contentRef));
+    expect(reads()).toBe(records.length);
+    await expect(projection.project()).resolves.toEqual(records);
+    expect(reads()).toBe(records.length);
+    await harness.close();
   });
 
   it('keeps a store to free room after other stores empty it', async () => {

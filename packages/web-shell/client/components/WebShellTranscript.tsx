@@ -61,7 +61,21 @@ export interface WebShellTranscriptProps {
   blocks: readonly DaemonTranscriptBlock[];
   renderMode?: 'readonly' | 'document';
   theme?: WebShellTheme;
-  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn' | 'ru' | 'ru-ru';
+  language?:
+    | 'en'
+    | 'zh-CN'
+    | 'zh'
+    | 'zh-cn'
+    | 'zh-TW'
+    | 'zh-tw'
+    | 'zh-HK'
+    | 'zh-hk'
+    | 'zh-Hant'
+    | 'zh-hant'
+    | 'zh-MO'
+    | 'zh-mo'
+    | 'ru'
+    | 'ru-ru';
   className?: string;
   style?: CSSProperties;
   chatMaxWidth?: number;
@@ -108,11 +122,15 @@ function getChatWidthStyle(chatMaxWidth: number | undefined): CSSProperties {
       ? chatMaxWidth
       : DEFAULT_CHAT_MAX_WIDTH;
   const contentWidth = `${width}px`;
-  const shellWidth = `calc(${contentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
+  // Reserve timeline gutters where they fit without over-shrinking phone layouts.
+  const responsiveContentWidth = `min(${contentWidth}, clamp(440px, 85cqw, calc(100cqw - 128px)))`;
+  const regularShellWidth = `calc(${contentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
+  const shellWidth = `calc(${responsiveContentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
   return {
     '--chat-regular-content-width': contentWidth,
-    '--chat-regular-shell-width': shellWidth,
+    '--chat-regular-shell-width': regularShellWidth,
     '--chat-content-width': contentWidth,
+    '--chat-responsive-content-width': responsiveContentWidth,
     '--chat-shell-width': shellWidth,
   } as CSSProperties;
 }

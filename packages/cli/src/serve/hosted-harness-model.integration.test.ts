@@ -286,6 +286,7 @@ it('persists normalized provider prompt usage with the resolved configured capac
     modelScope: {
       bindBudget: vi.fn(),
       evaluate: vi.fn(),
+      diagnosticsEnabled: false,
       beginMainAttempt: vi.fn().mockResolvedValue(complete),
     },
   });
@@ -324,6 +325,7 @@ it('changes the next request model and capacity while retaining Session history'
     modelScope: {
       bindBudget: vi.fn(),
       evaluate: vi.fn(),
+      diagnosticsEnabled: false,
       beginMainAttempt: vi.fn().mockResolvedValue(complete),
     },
   });

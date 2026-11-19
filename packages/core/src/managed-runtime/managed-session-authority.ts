@@ -353,6 +353,13 @@ export interface ManagedSessionInputRequest {
   readonly deadline: number | null;
   readonly admissionRef: ManagedSessionDurableRef;
   readonly wakeReason: string;
+  /**
+   * The earliest instant this input may start a turn (epoch ms), or null for
+   * immediate delivery. The self-paced loop wakeup is the first producer; the
+   * wake pump defers a not-yet-due input rather than polling. Distinct from
+   * `deadline`, which is the absolute turn completion deadline.
+   */
+  readonly notBefore?: number | null;
 }
 
 export class ManagedSessionConflictError extends ManagedSessionRecordError {
@@ -452,6 +459,9 @@ export interface OpenManagedSessionAuthorityOptions {
   readonly retainVerifiedResources?: boolean;
 }
 
+/** How long resume waits for a settle answer before its one extra read. */
+const UNSETTLED_RESUME_BUDGET_MS = 30_000;
+
 /**
  * The semantic authority for one Managed Session. It validates complete
  * transactions, then gives them to one journal handle; the selected store owns
@@ -489,16 +499,17 @@ export class LocalManagedSessionAuthority {
   };
   /**
    * The transaction whose append outcome the journal has not settled yet.
-   * While it is held the log is not dead: the next append asks the journal
-   * whether these records landed and applies them here if they did, so a
-   * writer lease that lapsed under an outage can re-attest instead of
-   * fencing the Session for good.
+   * While it is held the log is not dead: resume asks the journal whether
+   * these exact bytes landed and, when the head has not moved, submits them
+   * again under the same command. A writer lease that lapsed under an outage
+   * can re-attest instead of fencing the Session for good.
    */
   private unsettledAppend:
     | {
         readonly key: string;
         readonly marker: ManagedSessionCommitMarker;
         readonly events: readonly ManagedSessionEvent[];
+        readonly records: readonly unknown[];
         readonly branches: ReadonlySet<string>;
         readonly lastRecordUuid: string;
         readonly extension?: {
@@ -510,7 +521,7 @@ export class LocalManagedSessionAuthority {
   private recoveryBlocked = false;
   private queue: Promise<unknown> = Promise.resolve();
   private retirementPreparation?: Promise<readonly unknown[]>;
-  private readonly eventIds = new Set<string>();
+  private readonly eventIds = new Map<string, ManagedSessionEvent>();
   private readonly latestByKind = new Map<
     ManagedSessionEventKind,
     ManagedSessionEvent
@@ -769,7 +780,7 @@ export class LocalManagedSessionAuthority {
     );
     const branches = await authority.validateRecoveryFacts(scan.events);
     for (const event of scan.events) {
-      authority.eventIds.add(event.eventId);
+      authority.eventIds.set(event.eventId, event);
       if (event.kind === 'domain.committed') {
         authority.recordDomainEvent(event);
       }
@@ -862,6 +873,14 @@ export class LocalManagedSessionAuthority {
     return this.latestByKind.get(kind);
   }
 
+  hasCommittedEvent(eventId: string): boolean {
+    return this.eventIds.has(eventId);
+  }
+
+  committedEvent(eventId: string): ManagedSessionEvent | undefined {
+    return this.eventIds.get(eventId);
+  }
+
   /**
    * The first committed `tool.receipt` for an execution call, in the same
    * order a scan from sequence 1 would return.
@@ -925,20 +944,62 @@ export class LocalManagedSessionAuthority {
     return out;
   }
 
-  /** Persists the accepted input and the wake intent in one transaction. */
+  /**
+   * Persists the accepted input and the wake intent in one transaction.
+   * With a `replacement`, the replaced input's turn settles `cancelled`
+   * (model-free) in the SAME transaction that commits the new input — the
+   * self-paced loop wakeup's single-unfired invariant: a re-arm must never
+   * leave two unfired inputs pending, even across a crash between the
+   * settle and the arm. The caller publishes the turn-result body
+   * (`resultRef`) and owns the guard that the replaced turn never started;
+   * the fixed `turn:<turnId>` event id here refuses a turn that already
+   * settled.
+   */
   submitInput(
     command: ManagedSessionCommand,
     input: ManagedSessionInputRequest,
+    replacement?: {
+      readonly turnId: string;
+      readonly stopReason: string;
+      readonly resultRef: ManagedSessionDurableRef;
+    },
   ): Promise<ManagedSessionCommitReceipt> {
-    return this.runSerial(() =>
+    return this.runSerial(() => {
       // Read inside the lock: the committed sequence moves as other
       // transactions commit.
-      this.commit(
+      const occurredAt = this.now();
+      if (replacement === undefined) {
+        return this.commit(
+          command,
+          inputEvents(command, input, this.committed + 1, occurredAt),
+          INPUT_ACTORS,
+        );
+      }
+      const settle = {
+        v: MANAGED_SESSION_FORMAT_VERSION,
+        sequence: this.committed + 1,
+        eventId: `turn:${replacement.turnId}`,
+        sessionKey: command.sessionKey,
+        kind: 'turn.settled',
+        occurredAt,
+        payload: {
+          turnId: replacement.turnId,
+          outcome: 'cancelled',
+          stopReason: replacement.stopReason,
+          resultRef: replacement.resultRef,
+          usageRef: null,
+          pendingOwnersRef: null,
+        },
+      };
+      return this.commit(
         command,
-        inputEvents(command, input, this.committed + 1, this.now()),
-        INPUT_ACTORS,
-      ),
-    );
+        [
+          settle,
+          ...inputEvents(command, input, this.committed + 2, occurredAt),
+        ],
+        [{ class: 'authority' }, ...INPUT_ACTORS],
+      );
+    });
   }
 
   /**
@@ -1339,6 +1400,7 @@ export class LocalManagedSessionAuthority {
         readonly outcome: string;
         readonly stopReason: string | null;
         readonly resultRef: ManagedSessionDurableRef;
+        readonly usageRef?: ManagedSessionDurableRef | null;
         readonly occurredAt: number;
         readonly eventId: string;
       };
@@ -1454,7 +1516,7 @@ export class LocalManagedSessionAuthority {
               outcome: request.turn.outcome,
               stopReason: request.turn.stopReason,
               resultRef: request.turn.resultRef,
-              usageRef: null,
+              usageRef: request.turn.usageRef ?? null,
               pendingOwnersRef: null,
             },
           },
@@ -1899,6 +1961,7 @@ export class LocalManagedSessionAuthority {
               .filter((event) => event.kind === 'turn.settled')
               .map((event) => event.payload['turnId']),
           );
+          const now = this.now();
           if (
             maintenance.historyCutSequence > this.committed ||
             this.events.some(
@@ -1906,7 +1969,16 @@ export class LocalManagedSessionAuthority {
                 (event.kind === 'message.committed' &&
                   event.sequence > maintenance.historyCutSequence) ||
                 (event.kind === 'input.accepted' &&
-                  !settled.has(event.payload['turnId'])),
+                  !settled.has(event.payload['turnId']) &&
+                  // A not-yet-due loop wakeup is deferred, not about to run:
+                  // it must not hold compaction for its whole delay window.
+                  // Its continuation re-reads guidance after a compaction, so
+                  // compacting beneath it is safe. A due loop input still blocks.
+                  !(
+                    event.payload['source'] === 'loop' &&
+                    typeof event.payload['notBefore'] === 'number' &&
+                    event.payload['notBefore'] > now
+                  )),
             )
           )
             throw new ManagedSessionConflictError(
@@ -3234,7 +3306,11 @@ export class LocalManagedSessionAuthority {
       refs = [command.argsRef, command.replyRef];
     } else if (domain === 'history_maintenance') {
       const maintenance = parseHistoryMaintenance(record);
-      refs = [maintenance.requestRef, maintenance.candidateRef];
+      refs = [
+        maintenance.requestRef,
+        maintenance.candidateRef,
+        ...(maintenance.schemaVersion === 2 ? [maintenance.modelStatsRef] : []),
+      ];
     } else if (domain === 'team_task') {
       const task = parseTeamTask(record);
       refs = [task.descriptionRef, task.metadataRef];
@@ -3430,11 +3506,19 @@ export class LocalManagedSessionAuthority {
           (event.kind === 'context.compacted' &&
             (!extension ||
               event.payload['compactionId'] !== maintenance.operationId)) ||
+          // A wake source is admitted during maintenance: the pump defers
+          // its turn until compaction settles, so refusing it would stall a
+          // delivery every sibling source parks instead.
           (event.kind === 'input.accepted' &&
             !isChildNotificationSource(source) &&
-            !['monitor', 'automation', 'channel', 'session_message'].includes(
-              String(source),
-            ))
+            ![
+              'monitor',
+              'automation',
+              'channel',
+              'session_message',
+              'loop',
+              'pr_event',
+            ].includes(String(source)))
         )
           throw new ManagedSessionConflictError(
             'Session history maintenance is active.',
@@ -3540,18 +3624,20 @@ export class LocalManagedSessionAuthority {
         cause instanceof ManagedSessionAppendUnsettledError &&
         this.journal.settleAppend !== undefined
       ) {
-        // The store can prove the outcome later from its durable head, so keep
-        // the exact attempt instead of fencing a journal whose writer lease a
-        // recoverable outage lapsed.
+        // The store can prove the outcome from its durable head, so keep the
+        // exact bytes. Resume submits them again when the head has not moved;
+        // re-encoding would mint a new record digest and conflict with a
+        // commit that lands after this acknowledgement was lost.
         this.unsettledAppend = {
           key,
           marker,
           events,
+          records,
           branches,
           lastRecordUuid,
           ...(extension === undefined ? {} : { extension }),
         };
-        throw cause;
+        return await this.resumeUnsettledAppend();
       }
       // Records may already be on disk, so the sequences this transaction
       // claimed are spent whether or not the marker landed.
@@ -3586,7 +3672,7 @@ export class LocalManagedSessionAuthority {
     this.lastRecordUuid = lastRecordUuid;
     for (const event of events) {
       this.events.push(event);
-      this.eventIds.add(event.eventId);
+      this.eventIds.set(event.eventId, event);
       this.indexCommittedEvent(event);
       if (event.kind === 'activation.changed') {
         this.activation = managedSessionActivationStateFrom(event);
@@ -3620,15 +3706,31 @@ export class LocalManagedSessionAuthority {
 
   /**
    * Resolves the append the journal could not acknowledge. `landed` applies
-   * those records here, `absent` drops them, and an unsettled answer keeps the
-   * attempt so the next append asks again. Any other failure proves the log
-   * cannot be trusted and fences it for good.
+   * those records here. `absent` submits the same bytes once: the head not
+   * having moved is not proof the holder rolled back, and dropping the batch
+   * would fence the next commit if that holder then lands. An unsettled
+   * answer keeps the attempt so the next append asks again. A definite
+   * rejection drops the batch without stopping the writer. Other failures
+   * prove the log cannot be trusted and fence it for good.
    */
   private async settleUnsettledAppend(): Promise<void> {
-    const pending = this.unsettledAppend!;
+    if (this.unsettledAppend === undefined) return;
+    try {
+      await this.resumeUnsettledAppend();
+    } catch (cause) {
+      if (!(cause instanceof ManagedSessionCommitRejectedError)) throw cause;
+    }
+  }
+
+  private async resumeUnsettledAppend(): Promise<ManagedSessionCommitReceipt> {
+    const pending = this.unsettledAppend;
+    if (pending === undefined || this.journal.settleAppend === undefined) {
+      throw new ManagedSessionRecordError('no unsettled append to resume.');
+    }
+    const deadline = this.now() + UNSETTLED_RESUME_BUDGET_MS;
     let outcome: 'landed' | 'absent';
     try {
-      outcome = await this.journal.settleAppend!();
+      outcome = await this.settleUntilKnown(deadline);
     } catch (cause) {
       if (cause instanceof ManagedSessionAppendUnsettledError) throw cause;
       this.unsettledAppend = undefined;
@@ -3636,16 +3738,47 @@ export class LocalManagedSessionAuthority {
         cause instanceof Error ? cause : new Error(String(cause));
       throw cause;
     }
+    if (outcome === 'absent') {
+      try {
+        await this.journal.appendTransaction(pending.records);
+      } catch (cause) {
+        if (cause instanceof ManagedSessionAppendUnsettledError) throw cause;
+        this.unsettledAppend = undefined;
+        if (cause instanceof ManagedSessionCommitRejectedError) throw cause;
+        this.writeFailure =
+          cause instanceof Error ? cause : new Error(String(cause));
+        throw cause;
+      }
+    }
     this.unsettledAppend = undefined;
-    if (outcome === 'landed') {
-      this.applyCommitted(
-        pending.key,
-        pending.marker,
-        pending.events,
-        pending.branches,
-        pending.lastRecordUuid,
-        pending.extension,
-      );
+    return this.applyCommitted(
+      pending.key,
+      pending.marker,
+      pending.events,
+      pending.branches,
+      pending.lastRecordUuid,
+      pending.extension,
+    );
+  }
+
+  private async settleUntilKnown(
+    deadline: number,
+  ): Promise<'landed' | 'absent'> {
+    let extraRead = true;
+    for (;;) {
+      try {
+        return await this.journal.settleAppend!();
+      } catch (cause) {
+        if (!(cause instanceof ManagedSessionAppendUnsettledError)) {
+          throw cause;
+        }
+        if (this.now() >= deadline) {
+          if (!extraRead) throw cause;
+          extraRead = false;
+          continue;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
     }
   }
 
@@ -3667,6 +3800,14 @@ export class LocalManagedSessionAuthority {
     readonly leaseDurationMs: number;
     readonly subject?: ManagedSessionSubject;
   }): Promise<{ activationId: string; epoch: number }> {
+    // Settlement can land a pending install and advance the epoch; settle
+    // first so the epoch assigned below is the one the log will expect.
+    if (
+      this.unsettledAppend !== undefined ||
+      this.unsettledActivationRenewal !== undefined
+    ) {
+      await this.settlePendingAppend();
+    }
     // The install's command identity is its activation ID, so a repeated ID
     // would replay the earlier receipt without appending, and the epoch below
     // would name an activation the log never recorded. Refuse it before the
@@ -4467,6 +4608,14 @@ function inputEvents(
         contentRef: input.contentRef,
         deadline: input.deadline,
         admissionRef: input.admissionRef,
+        // Omit the field unless a concrete fire time is set: closed readers
+        // (the CSI native-activation proof, older parsers) require exactly
+        // the six legacy fields, so even an explicit null would break
+        // ordinary input admission with the loop feature off. An absent
+        // field and a null both mean immediate delivery to the wake pump.
+        ...(typeof input.notBefore === 'number'
+          ? { notBefore: input.notBefore }
+          : {}),
       },
     },
     {

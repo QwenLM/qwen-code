@@ -33,6 +33,50 @@ describe('built-in Email channel #8281', () => {
     expect(await getPlugin('email')).toBeDefined();
   });
 
+  it('injects the group policy the Web Shell treats as inert for Email', async () => {
+    // The plugin does not declare groupPolicy, so the registry injects it.
+    // The Web Shell's private-only handling and its fixtures are built on this
+    // shape; pin it here at the producer rather than only in client fixtures.
+    const entry = (await supportedChannelCatalog()).find(
+      (channel) => channel.type === 'email',
+    );
+    const plugin = await getPlugin('email');
+    expect(
+      plugin?.management?.fields.some((field) => field.key === 'groupPolicy'),
+    ).toBe(false);
+    expect(
+      entry?.fields.find((field) => field.key === 'groupPolicy'),
+    ).toMatchObject({ kind: 'enum', required: true, default: 'disabled' });
+  });
+
+  it('gives every required field a readable label and defaults implicit TLS on', async () => {
+    const entry = (await supportedChannelCatalog()).find(
+      (channel) => channel.type === 'email',
+    );
+    // The descriptor is public: a client without its own translation table
+    // renders `label` directly, so a raw config key must never reach it.
+    // Iterate the plugin's own required list (not a hand copy) and assert the
+    // field exists, so dropping a required field cannot pass via undefined.
+    const plugin = await getPlugin('email');
+    for (const key of plugin?.requiredConfigFields ?? []) {
+      const field = entry?.fields.find((item) => item.key === key);
+      expect(field).toBeDefined();
+      expect(field?.label).not.toBe(key);
+      expect(field?.label?.trim()).toBeTruthy();
+    }
+    expect(entry?.fields.find((field) => field.key === 'imapHost')?.label).toBe(
+      'IMAP Host',
+    );
+    // The editor seeds an absent boolean from this default, so it is what
+    // keeps a mailbox on implicit TLS instead of silently dropping to STARTTLS.
+    for (const key of ['imapSecure', 'smtpSecure']) {
+      expect(entry?.fields.find((field) => field.key === key)).toMatchObject({
+        kind: 'boolean',
+        default: 'true',
+      });
+    }
+  });
+
   it('resolves environment references without mutating settings and defaults to isolated threads', async () => {
     vi.stubEnv('EMAIL_IMAP_TEST', 'imap-fixture-secret');
     vi.stubEnv('EMAIL_SMTP_TEST', 'smtp-fixture-secret');

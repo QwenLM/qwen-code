@@ -34,11 +34,17 @@ import type { PipelineConfig, RequestContext } from './types.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
-import { reconcileMaxTokens } from '../tokenLimits.js';
+import {
+  QWEN4_NON_THINKING_OUTPUT_CAP,
+  reconcileMaxTokens,
+} from '../tokenLimits.js';
 import { markToolCallArgumentsIncomplete } from '../incomplete-tool-call-args.js';
 import {
+  clampReasoningEffort,
   getGptReasoningCapabilities,
   isReasoningEffortPlaceholder,
+  REASONING_EFFORT_TIERS,
+  type ReasoningEffort,
 } from '../reasoning-effort.js';
 import {
   isQwenFamilyWireModel,
@@ -59,6 +65,7 @@ import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
 import { ProtocolTagSanitizedEvent } from '../../telemetry/types.js';
 import { getErrorMessage, getErrorStatus } from '../../utils/errors.js';
 import { getRateLimitErrorDetails } from '../../utils/rateLimit.js';
+import { retryContext } from '../../utils/retryContext.js';
 import {
   reportOpenAiChunk,
   reportOpenAiRequest,
@@ -69,7 +76,10 @@ import { getCurrentAgentId } from '../../agents/runtime/agent-context.js';
 import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
 import { trailingReattachPartCount } from '../../services/image-payload-references.js';
 import type { ResolvedReasoning } from '../reasoning-overrides.js';
-import { ensureReasoningContentOnAssistantMessage } from './provider/utils.js';
+import {
+  ensureReasoningContentOnAssistantMessage,
+  filterIsolatedModelOverrides,
+} from './provider/utils.js';
 import {
   getEffectiveReasoning,
   resolveReasoningForModel,
@@ -161,9 +171,27 @@ function applyConfiguredReasoningEffort(
   const reasoning = asObject(loose['reasoning']);
   if (!reasoning || !('effort' in reasoning)) return request;
 
-  const effort = capabilities.efforts.find(
-    (candidate) => candidate === reasoning['effort'],
+  const requested = reasoning['effort'];
+  let effort = capabilities.efforts.find(
+    (candidate) => candidate === requested,
   );
+  // qwen4-max's documented contract clamps legacy tiers onto the declared
+  // ladder (medium -> high, max -> xhigh) instead of dropping them to the
+  // server default. Other profile-less declarations (including other qwen4*
+  // routes) keep their shipped drop semantics (the legacy no-re-tier contract).
+  if (
+    !effort &&
+    typeof requested === 'string' &&
+    REASONING_EFFORT_TIERS.includes(requested as ReasoningEffort) &&
+    String(loose['model'] ?? '')
+      .toLowerCase()
+      .startsWith('qwen4-max')
+  ) {
+    effort = clampReasoningEffort(
+      requested as ReasoningEffort,
+      capabilities.efforts,
+    );
+  }
   // GPT flattens after raw overrides merge in the provider.
   if (effort && getGptReasoningCapabilities(loose['model'] as string))
     return request;
@@ -563,6 +591,7 @@ export class ContentGenerationPipeline {
             openaiRequest,
             {
               signal: perRequestAc?.signal,
+              ...(retryContext.getStore()?.singleAttempt && { maxRetries: 0 }),
             },
           )) as OpenAI.Chat.ChatCompletion;
           reportOpenAiResponse(telemetryAttempt, openaiResponse);
@@ -604,7 +633,10 @@ export class ContentGenerationPipeline {
           // returning text/html with HTTP 200).
           const createPromise = this.client.chat.completions.create(
             openaiRequest,
-            { signal: perRequestAc.signal },
+            {
+              signal: perRequestAc.signal,
+              ...(retryContext.getStore()?.singleAttempt && { maxRetries: 0 }),
+            },
           );
 
           // withResponse() is available on APIPromise (the OpenAI SDK's
@@ -1653,16 +1685,80 @@ export class ContentGenerationPipeline {
         effectiveReasoning.effort &&
         typed['thinking_budget'] === undefined
       ) {
-        typed['thinking_budget'] = {
-          low: 4096,
-          medium: 16384,
-          high: 32768,
-          xhigh: 32768,
-          max: 32768,
-        }[effectiveReasoning.effort];
+        // qwen4-max's thinking_budget ladder differs from qwen3.8: the server
+        // maps 1-4096->low, 4097-131072->high, 131073-262144->xhigh. Scoped to
+        // qwen4-max so other qwen4* and qwen3.8 subscription models keep their
+        // shipped budget table.
+        typed['thinking_budget'] = model.startsWith('qwen4-max')
+          ? {
+              low: 4096,
+              medium: 131072,
+              high: 131072,
+              xhigh: 262144,
+              max: 262144,
+            }[effectiveReasoning.effort]
+          : {
+              low: 4096,
+              medium: 16384,
+              high: 32768,
+              xhigh: 32768,
+              max: 32768,
+            }[effectiveReasoning.effort];
       }
     }
 
+    // qwen4-max caps non-thinking output at 131,072 tokens (thinking mode
+    // allows 262,144). The auto budget is sized for thinking mode and exempt
+    // from the flat output ceiling, so once thinking is disabled a short-prompt
+    // request would otherwise ship max_tokens=262,144 and exceed the
+    // non-thinking range (400). Clamp it here, where the disable shape is final
+    // (the provider's own cap runs before this reasoning shaping). Gate on the
+    // final wire shape, not the endpoint: the subscription gateway is not
+    // DashScope-detected yet ships enable_thinking:false through this same
+    // path, and generic hosts disable via chat_template_kwargs instead, so
+    // the clamp stays off there.
+    if (
+      model.startsWith('qwen4-max') &&
+      (typed['reasoning_effort'] === 'none' ||
+        typed['enable_thinking'] === false)
+    ) {
+      const maxTokens = providerRequest.max_tokens;
+      if (
+        typeof maxTokens === 'number' &&
+        maxTokens > QWEN4_NON_THINKING_OUTPUT_CAP
+      ) {
+        providerRequest.max_tokens = QWEN4_NON_THINKING_OUTPUT_CAP;
+      }
+      // The budget may travel under a provider key instead of max_tokens
+      // (e.g. a samplingParams.max_completion_tokens escape hatch); clamp
+      // those to the same non-thinking cap so that path is not exempt.
+      clampProviderOutputBudgetKeys(typed, QWEN4_NON_THINKING_OUTPUT_CAP);
+    }
+
+    const requestLimit = request.config?.maxOutputTokens;
+    if (retryContext.getStore()?.singleAttempt && requestLimit !== undefined) {
+      const limit = Math.min(
+        requestLimit,
+        getWireOutputBudget(baseRequest) ?? requestLimit,
+        getWireOutputBudget(providerRequest) ?? requestLimit,
+      );
+      // Keep a provider's chosen output field, without sending a conflicting
+      // max_tokens alongside it. The request's cap applies after extra_body.
+      if (hasProviderOutputBudgetKey(typed)) {
+        delete providerRequest.max_tokens;
+        for (const key of PROVIDER_OUTPUT_BUDGET_KEYS) {
+          const value = typed[key];
+          if (value === undefined) continue;
+          typed[key] =
+            typeof value === 'number' && value > 0
+              ? Math.min(value, limit)
+              : limit;
+        }
+      } else {
+        providerRequest.max_tokens = limit;
+      }
+      delete typed['max_output_tokens'];
+    }
     return providerRequest;
   }
 
@@ -1710,7 +1806,9 @@ export class ContentGenerationPipeline {
   ): Record<string, unknown> {
     const defaultSamplingParams =
       this.config.provider.getDefaultGenerationConfig();
-    const configSamplingParams = this.contentGeneratorConfig.samplingParams;
+    const configSamplingParams = filterIsolatedModelOverrides(
+      this.contentGeneratorConfig.samplingParams,
+    );
 
     // Helper function to get parameter value with priority: config > request > default
     const getParameterValue = <T>(
@@ -1906,6 +2004,9 @@ export class ContentGenerationPipeline {
       // matching; never throws, so awaiting cannot mask the original error,
       // and it must complete before a fast retry can race the file write.
       await this.invalidateOmniOssCacheOnError(openaiRequest, error);
+      if (retryContext.getStore()?.singleAttempt) {
+        return await this.handleError(error, context, request);
+      }
       const model = context.model.toLowerCase();
       const wireRequest = openaiRequest as Record<string, unknown> | undefined;
       const chatTemplateKwargs = wireRequest?.['chat_template_kwargs'] as
@@ -2061,6 +2162,7 @@ export class ContentGenerationPipeline {
     return {
       model: effectiveModel,
       modalities: this.contentGeneratorConfig.modalities ?? {},
+      imageDetail: this.contentGeneratorConfig.imageDetail,
       startTime: Date.now(),
       splitToolMedia:
         providerOverrides.splitToolMedia ??

@@ -157,10 +157,10 @@ there is no automatic retention cleanup in W1b. Budget database space for
 repeated operations; batching and garbage collection require follow-up designs
 that preserve the maintenance and receipt boundaries.
 
-The packaged maintenance artifact is `qwen-managed-agent-server-0.1.0-alpha-workspace-bundle.jar`.
-Run `java -jar <artifact> capture <request.json> --offline-confirmed`,
-`java -jar <artifact> verify <request.json> --offline-confirmed`, or
-`java -jar <artifact> inspect <request.json>`. Deploy the schema through the normal
+The packaged maintenance artifact is the executable server jar (`qwen-managed-agent-server-<version>-exec.jar`), run as `bin/qwen-managed-agent-admin workspace-recovery`.
+Run `bin/qwen-managed-agent-admin workspace-recovery capture <request.json> --offline-confirmed`,
+`bin/qwen-managed-agent-admin workspace-recovery verify <request.json> --offline-confirmed`, or
+`bin/qwen-managed-agent-admin workspace-recovery inspect <request.json>`. Deploy the schema through the normal
 upgrade first; the maintenance executable does not run migrations or boot the
 Broker. Configure `W1_JDBC_URL`, `W1_JDBC_USER`, and `W1_JDBC_PASSWORD`. Optional
 external O2 reads use `W1_OSS_ENDPOINT`, `W1_OSS_REGION`, `W1_OSS_BUCKET` and the

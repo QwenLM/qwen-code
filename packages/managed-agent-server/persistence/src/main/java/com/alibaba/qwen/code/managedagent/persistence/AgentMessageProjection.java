@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.MaterializationTarge
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -77,9 +78,6 @@ final class AgentMessageProjection {
     StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
             String cursor, int limit, boolean backward, long afterSequence) {
         storeRows.requireSession(tenantId, sessionId);
-        ManagedLegacySessionGuard.requireLegacyMutation(Boolean.TRUE.equals(jdbc.queryForObject(
-                "SELECT is_csi_guard FROM ma_session WHERE tenant_id = ? AND session_id = ?",
-                Boolean.class, tenantId, sessionId)));
         if (limit < 1 || limit > 100) {
             throw new ManagedAgentException(400, "invalid_limit",
                     "Limit must be between 1 and 100.");
@@ -99,7 +97,7 @@ final class AgentMessageProjection {
             throw new ManagedAgentException(503, "message_projection_pending",
                     "Retry after pending messages have been projected.");
         }
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         MessagePosition position = new MessagePosition(1, scope, backward, projection, covered,
                 backward ? covered + 1 : -1, "");
         if (org.apache.commons.lang3.StringUtils.isNotBlank(cursor)) {
@@ -291,9 +289,6 @@ final class AgentMessageProjection {
                 "SELECT s.tenant_id, s.session_id FROM ma_event_stream s"
                     + " WHERE s.stream_kind = 'SESSION' AND s.stream_id = X''"
                     + " AND s.covered_sequence > s.replay_floor_sequence"
-                    + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE"
-                    + " private_scope.tenant_id = s.tenant_id AND private_scope.session_id = s.session_id"
-                    + " AND private_scope.is_csi_guard = FALSE)"
                     + " AND NOT EXISTS (SELECT 1 FROM ma_turn t JOIN ma_public_event e ON"
                     + " e.tenant_id = t.tenant_id AND e.session_id = t.session_id AND e.turn_id = t.turn_id"
                     + " WHERE t.tenant_id = s.tenant_id AND t.session_id = s.session_id"
@@ -339,7 +334,7 @@ final class AgentMessageProjection {
 
     List<MaterializationTarget> findMaterializationTargets(int limit) {
         return jdbc.query(
-                "SELECT s.tenant_id, s.session_id FROM ma_session s JOIN ma_event_stream p ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.stream_kind = 'SESSION' AND p.stream_id = X'' WHERE s.session_kind = 'PUBLIC' AND s.is_csi_guard = FALSE AND s.retired_at IS NULL AND s.status <> 'DELETED' AND p.is_projection_pending = TRUE ORDER BY p.gmt_modified ASC LIMIT ?",
+                "SELECT s.tenant_id, s.session_id FROM ma_session s JOIN ma_event_stream p ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.stream_kind = 'SESSION' AND p.stream_id = X'' WHERE s.session_kind = 'PUBLIC' AND s.retired_at IS NULL AND s.status <> 'DELETED' AND p.is_projection_pending = TRUE ORDER BY p.gmt_modified ASC LIMIT ?",
                 (result, row) ->
                         new MaterializationTarget(
                                 result.getString("tenant_id"), result.getString("session_id")),
@@ -450,7 +445,6 @@ final class AgentMessageProjection {
 
     void deferMaterializationTarget(String tenantId,
             String sessionId) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
         jdbc.update("UPDATE ma_event_stream SET gmt_modified = ? WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
                 clock.millis(), tenantId, sessionId);
     }
@@ -510,7 +504,7 @@ final class AgentMessageProjection {
                         parts);
             }
         }
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         var iterator = parts.entrySet().iterator();
         while (iterator.hasNext()) {
             var entry = iterator.next();
@@ -783,7 +777,7 @@ final class AgentMessageProjection {
 
     void flushParts(
             String tenantId, String sessionId, Map<String, List<ItemPartRecord>> projectedParts) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         for (var entry : projectedParts.entrySet()) {
             String item = entry.getKey();
             byte[] bytes =
@@ -811,7 +805,7 @@ final class AgentMessageProjection {
             if (bytes.length > 64 * 1024) {
                 String digest = WorkspaceEvidenceResources.digest(bytes);
                 String id = "message:" + owner + ":" + revision + ":" + digest;
-                resource = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, id);
+                resource = ManagedSessionStore.resourceKey(scope, id);
                 try {
                     jdbc.update(
                             "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, 'managed-message-parts', 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
@@ -915,7 +909,7 @@ final class AgentMessageProjection {
                             return bytes;
                         },
                         resourceKey,
-                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                         tenantId,
                         sessionId,
                         "managed-message-parts");

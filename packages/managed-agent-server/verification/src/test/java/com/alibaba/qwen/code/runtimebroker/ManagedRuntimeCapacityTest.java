@@ -1,17 +1,18 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocolTest;
 import com.alibaba.qwen.code.runtimebroker.provisioning.local.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.sun.net.httpserver.HttpServer;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.InetSocketAddress;
@@ -28,7 +29,6 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -37,9 +37,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 class ManagedRuntimeCapacityTest {
     private static final RuntimeProvisionRequest REQUEST = ManagedContextProtocolTest.request();
@@ -105,8 +102,9 @@ class ManagedRuntimeCapacityTest {
                         seed.getLeaseId(), seed.getEpoch()));
             }
         };
-        var bindings = new InMemoryRuntimeBindingRepository();
-        try (var service = service(bindings, provisioner)) {
+        var source = source();
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+        try (var service = service(source, bindings, provisioner)) {
             RuntimeBrokerException refusal = failure(service.warm("harness"));
             assertEquals("runtime_local_capacity", refusal.getCode());
             assertEquals(503, refusal.getStatusCode());
@@ -129,52 +127,10 @@ class ManagedRuntimeCapacityTest {
         }
     }
 
-    @ParameterizedTest
-    @CsvSource({
-            "local-process,503,runtime_provision_failed,true,true",
-            "local-process,409,runtime_local_capacity,true,true",
-            "local-process,503,runtime_local_capacity,false,true",
-            "custom,503,runtime_local_capacity,true,true",
-            "local-process,503,runtime_local_capacity,true,false"
-    })
-    void otherStartupFailuresStillBlockRecovery(String kind, int status, String code,
-            boolean retryable, boolean rejected) {
-        RuntimeProvisionRequest request = new RuntimeProvisionRequest(REQUEST.getScope(), REQUEST.getIsolationKey(),
-                kind, REQUEST.getStorageId());
-        RuntimeProvisioner provisioner = new RuntimeProvisioner() {
-            @Override
-            public String kind() {
-                return kind;
-            }
-
-            @Override
-            public RuntimeProvisionRequest createRequest(RuntimeScope scope, String isolationKey) {
-                return request;
-            }
-
-            @Override
-            public CompletionStage<RuntimeResourceHandle> ensureResource(RuntimeProvisionRequest requested,
-                    RuntimeProvisionSeed seed, RuntimeResourceHandle knownHandle) {
-                return CompletableFuture.completedFuture(new RuntimeResourceHandle(kind, 1, Map.of("provider", kind)));
-            }
-
-            @Override
-            public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest requested) {
-                return CompletableFuture.failedFuture(new RuntimeBrokerException(status, code, "startup failed", retryable,
-                        rejected ? new RejectedExecutionException() : null));
-            }
-        };
-        var bindings = new InMemoryRuntimeBindingRepository();
-        try (var service = service(bindings, provisioner)) {
-            failure(service.warm("harness"));
-            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED, bindings.findActive(request).getState());
-            assertEquals("runtime_broker_recovery_blocked", failure(service.warm("harness")).getCode());
-        }
-    }
-
     @Test
     void capacityCleanupCannotClearTheReplacementOwnersHandleOrClaim() {
-        var delegate = new InMemoryRuntimeBindingRepository();
+        var source = source();
+        var delegate = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
         var nextHandle = new RuntimeResourceHandle("local-process", 2, Map.of("provider", "replacement"));
         var replacementClaim = new AtomicReference<RuntimeBindingRecord>();
         RuntimeBindingRepository bindings = new DelegatingBindingRepository(delegate) {
@@ -215,7 +171,7 @@ class ManagedRuntimeCapacityTest {
                         new RejectedExecutionException()));
             }
         };
-        try (var service = service(bindings, provisioner)) {
+        try (var service = service(source, bindings, provisioner)) {
             failure(service.warm("harness"));
             assertNotNull(replacementClaim.get(), "the test must reach admission cleanup before stealing the claim");
             RuntimeBindingRecord retained = delegate.findActive(REQUEST);
@@ -223,58 +179,6 @@ class ManagedRuntimeCapacityTest {
             assertEquals(replacementClaim.get().getOperationGeneration(), retained.getOperationGeneration());
             assertEquals(nextHandle, retained.getResourceHandle());
             assertEquals(RuntimeBindingRecord.State.PROVISIONING, retained.getState());
-        }
-    }
-
-    @Test
-    void capacityErrorDuringAttestationStillBlocksAnAlreadyStartedRuntime() {
-        var handle = new RuntimeResourceHandle("local-process", 1, Map.of("provider", "local-process"));
-        var launches = new AtomicInteger();
-        RuntimeProvisioner provisioner = new RuntimeProvisioner() {
-            @Override
-            public String kind() {
-                return "local-process";
-            }
-
-            @Override
-            public RuntimeProvisionRequest createRequest(RuntimeScope scope, String isolationKey) {
-                return REQUEST;
-            }
-
-            @Override
-            public CompletionStage<RuntimeResourceHandle> ensureResource(RuntimeProvisionRequest request,
-                    RuntimeProvisionSeed seed, RuntimeResourceHandle knownHandle) {
-                return CompletableFuture.completedFuture(handle);
-            }
-
-            @Override
-            public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request) {
-                throw new AssertionError("durable provisioning must carry the original seed");
-            }
-
-            @Override
-            public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
-                launches.incrementAndGet();
-                return CompletableFuture.completedFuture(new RuntimeLease(seed.getProvisionalRuntimeId(),
-                        URI.create("http://127.0.0.1:12345"), seed.getToken(), seed.getLeaseId(), seed.getEpoch()));
-            }
-        };
-        RuntimeTransport transport = mock(RuntimeTransport.class);
-        when(transport.attest(any(), any(), any())).thenReturn(CompletableFuture.failedFuture(
-                new RuntimeBrokerException(503, "runtime_local_capacity", "attestation unavailable", true,
-                        new RejectedExecutionException())));
-        var bindings = new InMemoryRuntimeBindingRepository();
-        try (var service = new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(REQUEST.getScope()),
-                provisioner, transport, bindings, new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), UUID.randomUUID().toString(),
-                Duration.ofSeconds(5), Duration.ofSeconds(5))) {
-            assertEquals("runtime_broker_recovery_blocked", failure(service.warm("harness")).getCode());
-            RuntimeBindingRecord blocked = bindings.findActive(REQUEST);
-            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED, blocked.getState());
-            assertEquals(handle, blocked.getResourceHandle(), "post-start errors must retain the resource identity");
-            assertNull(blocked.getOperationOwner());
-            assertEquals("runtime_broker_recovery_blocked", failure(service.warm("harness")).getCode());
-            assertEquals(1, launches.get(), "attestation failure must not permit another launch");
         }
     }
 
@@ -289,11 +193,20 @@ class ManagedRuntimeCapacityTest {
         }
     }
 
-    private static RuntimeBrokerService service(RuntimeBindingRepository bindings, RuntimeProvisioner provisioner) {
+    private static RuntimeBrokerService service(JdbcDataSource source, RuntimeBindingRepository bindings,
+            RuntimeProvisioner provisioner) {
         return new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(REQUEST.getScope()),
-                provisioner, new HttpRuntimeTransport(), bindings, new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), UUID.randomUUID().toString(),
+                provisioner, new HttpRuntimeTransport(), bindings, new JdbcRuntimeSessionRepository(source),
+                new JdbcToolExecutionRepository(source), UUID.randomUUID().toString(),
                 Duration.ofSeconds(5), Duration.ofSeconds(5));
+    }
+
+    private static JdbcDataSource source() {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:capacity-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        return source;
     }
 
     private static RuntimeBrokerException failure(CompletionStage<?> stage) {

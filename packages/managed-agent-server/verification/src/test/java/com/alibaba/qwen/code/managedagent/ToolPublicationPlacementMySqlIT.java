@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -53,7 +53,7 @@ class ToolPublicationPlacementMySqlIT {
                 Future<JsonNode> renew;
                 var owner = journal.manager.getTransaction(new DefaultTransactionDefinition());
                 try {
-                    WorkspaceLifecycleStore.lockPlacement(journal.jdbc, "tenant-1");
+                    JdbcWorkspaceLifecycleStore.lockPlacement(journal.jdbc, "tenant-1");
                     journal.jdbc.queryForList("SELECT binding_id FROM ma_runtime_binding WHERE binding_id = ?"
                             + " FOR UPDATE", binding);
                     renew = pool.submit(() -> journal.store.apply(journal.request("renew"), WRITER_TOKEN,

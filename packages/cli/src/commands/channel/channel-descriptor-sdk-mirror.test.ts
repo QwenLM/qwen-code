@@ -87,6 +87,7 @@ function assertDescriptorWireShape(
     }
     if (descriptor.kind === 'number') {
       allowedKeys.add('exclusiveMinimum');
+      allowedKeys.add('minimum');
       allowedKeys.add('maximum');
     }
     expect((descriptor as { properties?: unknown }).properties).toBeUndefined();
@@ -94,6 +95,7 @@ function assertDescriptorWireShape(
       expect(
         (descriptor as { exclusiveMinimum?: unknown }).exclusiveMinimum,
       ).toBeUndefined();
+      expect((descriptor as { minimum?: unknown }).minimum).toBeUndefined();
       expect((descriptor as { maximum?: unknown }).maximum).toBeUndefined();
     }
   }
@@ -131,6 +133,37 @@ describe('channel descriptor SDK mirror', () => {
       ),
     ).toBe(true);
     for (const entry of manageable) {
+      expect(Object.keys(entry)).toEqual(
+        expect.arrayContaining(['type', 'displayName', 'manageable', 'fields']),
+      );
+      expect(
+        Object.keys(entry).every((key) =>
+          [
+            'type',
+            'displayName',
+            'manageable',
+            'supportsQrLogin',
+            'fields',
+            'outboundOnly',
+            'defaultDeliveryTarget',
+          ].includes(key),
+        ),
+      ).toBe(true);
+      if (entry.outboundOnly !== undefined) {
+        expect(typeof entry.outboundOnly).toBe('boolean');
+      }
+      if (entry.defaultDeliveryTarget !== undefined) {
+        expect(['user', 'chat']).toContain(entry.defaultDeliveryTarget.type);
+        expect(entry.defaultDeliveryTarget.id.trim()).not.toBe('');
+        expect(Object.keys(entry.defaultDeliveryTarget)).toEqual(
+          expect.arrayContaining(['type', 'id']),
+        );
+        expect(
+          Object.keys(entry.defaultDeliveryTarget).every((key) =>
+            ['type', 'id', 'label'].includes(key),
+          ),
+        ).toBe(true);
+      }
       for (const field of entry.fields) {
         assertDescriptorWireShape(field);
       }
