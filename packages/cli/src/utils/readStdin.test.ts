@@ -199,6 +199,10 @@ describe('readStdin', () => {
 
       expect(destroySpy).toHaveBeenCalledTimes(1);
       expect(stderrSpy).toHaveBeenCalledTimes(2);
+      const addedListeners = process.stderr
+        .listeners('error')
+        .filter((listener) => !beforeListeners.has(listener));
+      expect(addedListeners).toHaveLength(1);
     } finally {
       (process.stderr as { write: typeof originalWrite }).write = originalWrite;
       for (const listener of process.stderr.listeners('error')) {
@@ -212,7 +216,6 @@ describe('readStdin', () => {
       destroySpy.mockRestore();
       vi.useRealTimers();
     }
-    expect(new Set(process.stderr.listeners('error'))).toEqual(beforeListeners);
   });
 
   it('should resolve with truncated input when stderr throws EPIPE during truncation warning', async () => {

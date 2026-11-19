@@ -389,23 +389,30 @@ function withLspDisabledConfig<T extends object>(
   };
 }
 
+function stubIsTTY(
+  stream: { isTTY?: unknown },
+  value: boolean | undefined,
+): () => void {
+  const original = Object.getOwnPropertyDescriptor(stream, 'isTTY');
+  Object.defineProperty(stream, 'isTTY', { value, configurable: true });
+  return () => {
+    if (original) {
+      Object.defineProperty(stream, 'isTTY', original);
+    } else {
+      delete stream.isTTY;
+    }
+  };
+}
+
 async function withStdinIsTTY<T>(
   isTTY: boolean,
   fn: () => Promise<T>,
 ): Promise<T> {
-  const originalIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
-  Object.defineProperty(process.stdin, 'isTTY', {
-    value: isTTY,
-    configurable: true,
-  });
+  const restore = stubIsTTY(process.stdin, isTTY);
   try {
     return await fn();
   } finally {
-    if (originalIsTTY) {
-      Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
-    } else {
-      delete (process.stdin as { isTTY?: unknown }).isTTY;
-    }
+    restore();
   }
 }
 
@@ -1889,20 +1896,6 @@ describe('llm.tsx main function', () => {
   ])(
     'resolves the auto theme baseline only when the run can render it (stdoutIsTTY=$stdoutIsTTY, promptInteractive=$promptInteractive)',
     async ({ stdoutIsTTY, promptInteractive, expectAuto }) => {
-      const stubIsTTY = (
-        stream: { isTTY?: unknown },
-        value: boolean | undefined,
-      ): (() => void) => {
-        const original = Object.getOwnPropertyDescriptor(stream, 'isTTY');
-        Object.defineProperty(stream, 'isTTY', { value, configurable: true });
-        return () => {
-          if (original) {
-            Object.defineProperty(stream, 'isTTY', original);
-          } else {
-            delete stream.isTTY;
-          }
-        };
-      };
       const restoreStdoutIsTTY = stubIsTTY(process.stdout, stdoutIsTTY);
       // `-i` exits early unless stdin is a terminal.
       const restoreStdinIsTTY = stubIsTTY(process.stdin, true);
