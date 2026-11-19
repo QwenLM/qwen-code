@@ -14,7 +14,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -47,11 +46,6 @@ public class JdbcAutomationLedgerStore
         implements AutomationLedgerStore {
     /** A claim whose Harness answer stayed unobtainable past the bound. */
 
-    /** The holder's proof: the definition row under this owner and fence. */
-    private static final String HELD = " AND EXISTS (SELECT 1 FROM"
-            + " ma_schedule s WHERE s.tenant_id = ?"
-            + " AND s.schedule_id = ? AND s.lease_owner = ? AND s.fence = ?)";
-
     /** How a gate probe decided a fire, as the Harness answers it. */
 
     /**
@@ -63,52 +57,6 @@ public class JdbcAutomationLedgerStore
     /** One occurrence decision. */
 
     /** An occurrence with the task state of its run, when one committed. */
-
-    private static final RowMapper<ScheduleRow> SCHEDULE = (result, row) ->
-            new ScheduleRow(result.getString("tenant_id"),
-                    result.getString("schedule_id"),
-                    result.getString("session_id"),
-                    result.getString("workspace_id"),
-                    result.getString("actor_id"),
-                    result.getLong("record_revision"),
-                    result.getLong("definition_revision"),
-                    result.getString("definition_digest"),
-                    result.getString("goal"), result.getString("cron"),
-                    result.getString("timezone"),
-                    result.getString("session_mode"),
-                    result.getString("overlap"), result.getString("catch_up"),
-                    result.getObject("catch_up_limit", Long.class),
-                    result.getBoolean("is_enabled"), result.getString("state"),
-                    result.getString("blocked_reason"),
-                    result.getLong("armed_at"),
-                    result.getObject("watermark_slot", Long.class),
-                    result.getString("lease_owner"),
-                    result.getObject("lease_until", Long.class),
-                    result.getLong("fence"), result.getLong("gmt_create"),
-                    result.getLong("gmt_modified"), result.getString("gate"),
-                    result.getString("gate_last_outcome"),
-                    result.getObject("gate_last_at", Long.class),
-                    result.getInt("gate_quiet_since_delivery"),
-                    result.getInt("gate_failures"),
-                    result.getString("gate_last_error"));
-
-    private static final RowMapper<OccurrenceRow> OCCURRENCE = (result, row) ->
-            new OccurrenceRow(result.getString("tenant_id"),
-                    result.getString("schedule_id"),
-                    result.getString("occurrence_key"),
-                    result.getString("run_id"), result.getString("session_id"),
-                    result.getObject("slot", Long.class),
-                    result.getString("trigger_kind"),
-                    result.getString("outcome"), result.getString("reason"),
-                    result.getLong("definition_revision"),
-                    result.getLong("fence"), result.getInt("attempts"),
-                    result.getLong("next_retry_at"),
-                    result.getString("last_error"),
-                    result.getLong("gmt_create"), result.getLong("gmt_modified"));
-
-    private static final String OCCURRENCE_SELECT = "SELECT " + ManagedSchemaProjection.SCHEDULE_OCCURRENCE.columns("o") + " FROM"
-            + " ma_schedule_occurrence o"
-            + " WHERE o.tenant_id = ? AND o.schedule_id = ?";
 
     /** The mirror's terminal task states, as the projection maps them. */
     private static final Set<String> TERMINAL_MIRROR_STATES = Set.of(
@@ -182,7 +130,7 @@ public class JdbcAutomationLedgerStore
     public Optional<ScheduleRow> findSchedule(String tenantId,
             String scheduleId) {
         return jdbc.query("SELECT " + ManagedSchemaProjection.SCHEDULE.columns() + " FROM ma_schedule"
-                        + " WHERE tenant_id = ? AND schedule_id = ?", SCHEDULE,
+                        + " WHERE tenant_id = ? AND schedule_id = ?", AutomationLedgerRows.SCHEDULE,
                 tenantId, scheduleId).stream().findFirst();
     }
 
@@ -239,7 +187,7 @@ public class JdbcAutomationLedgerStore
                         0,
                         0,
                         null);
-        Optional<ScheduleRow> existing = jdbc.query("SELECT " + ManagedSchemaProjection.SCHEDULE.columns() + " FROM ma_schedule WHERE tenant_id = ? AND schedule_id = ? FOR UPDATE", SCHEDULE,
+        Optional<ScheduleRow> existing = jdbc.query("SELECT " + ManagedSchemaProjection.SCHEDULE.columns() + " FROM ma_schedule WHERE tenant_id = ? AND schedule_id = ? FOR UPDATE", AutomationLedgerRows.SCHEDULE,
                 next.tenantId(), next.scheduleId()).stream().findFirst();
         if (existing.isEmpty()) {
             jdbc.update("INSERT INTO ma_schedule"
@@ -344,12 +292,12 @@ public class JdbcAutomationLedgerStore
      */
     public SchedulePage listReadableSchedules(String tenantId, String actorId,
             ScheduleCursor cursor, int limit) {
-        return AutomationScheduleQueries.listReadable(jdbc, SCHEDULE, tenantId, actorId, cursor, limit);
+        return AutomationScheduleQueries.listReadable(jdbc, AutomationLedgerRows.SCHEDULE, tenantId, actorId, cursor, limit);
     }
 
     public SchedulePage listSessionSchedules(String tenantId, String sessionId,
             ScheduleCursor cursor, int limit) {
-        return AutomationScheduleQueries.listSession(jdbc, SCHEDULE, tenantId, sessionId, cursor, limit);
+        return AutomationScheduleQueries.listSession(jdbc, AutomationLedgerRows.SCHEDULE, tenantId, sessionId, cursor, limit);
     }
 
     public int countLive(String tenantId, String sessionId) {
@@ -360,7 +308,7 @@ public class JdbcAutomationLedgerStore
 
     /** Live, enabled, unblocked definitions whose lease is free or expired. */
     public List<ScheduleRow> findArmed(long now, int limit) {
-        return AutomationScheduleQueries.findArmed(jdbc, SCHEDULE, STATE_LIVE, now, limit);
+        return AutomationScheduleQueries.findArmed(jdbc, AutomationLedgerRows.SCHEDULE, STATE_LIVE, now, limit);
     }
 
     /**
@@ -376,7 +324,7 @@ public class JdbcAutomationLedgerStore
                         + " AND o.schedule_id = s.schedule_id"
                         + " AND o.outcome = ? AND o.next_retry_at <= ?)"
                         + " ORDER BY s.gmt_modified, s.schedule_id LIMIT ?",
-                SCHEDULE, now, OUTCOME_FIRING, now, limit);
+                AutomationLedgerRows.SCHEDULE, now, OUTCOME_FIRING, now, limit);
     }
 
     /**
@@ -470,8 +418,8 @@ public class JdbcAutomationLedgerStore
                     row.trigger(), row.outcome(), row.reason(),
                     row.definitionRevision(), row.createdAt(), row.updatedAt(), terminal ? 1 : 0,
                     row.tenantId(), row.scheduleId(), owner, row.fence());
-            return jdbc.query(OCCURRENCE_SELECT + " AND o.occurrence_key = ? FOR UPDATE",
-                    OCCURRENCE, row.tenantId(), row.scheduleId(), row.occurrenceKey())
+            return jdbc.query(AutomationLedgerRows.OCCURRENCE_SELECT + " AND o.occurrence_key = ? FOR UPDATE",
+                    AutomationLedgerRows.OCCURRENCE, row.tenantId(), row.scheduleId(), row.occurrenceKey())
                     .stream().findFirst();
         });
     }
@@ -480,7 +428,7 @@ public class JdbcAutomationLedgerStore
             String scheduleId, String occurrenceKey) {
         return jdbc.query("SELECT " + ManagedSchemaProjection.SCHEDULE_OCCURRENCE.columns() + " FROM ma_schedule_occurrence"
                         + " WHERE tenant_id = ? AND schedule_id = ?"
-                        + " AND occurrence_key = ?", OCCURRENCE, tenantId,
+                        + " AND occurrence_key = ?", AutomationLedgerRows.OCCURRENCE, tenantId,
                 scheduleId, occurrenceKey).stream().findFirst();
     }
 
@@ -537,7 +485,7 @@ public class JdbcAutomationLedgerStore
                             + (replaceError ? ", o.last_error = ?" : "")
                             + " WHERE o.tenant_id = ? AND o.schedule_id = ?"
                             + " AND o.occurrence_key = ? AND o.outcome = ?"
-                            + " AND o.session_id = ? AND o.run_id = ?" + HELD,
+                            + " AND o.session_id = ? AND o.run_id = ?" + AutomationLedgerRows.HELD,
                     args.toArray()) == 1;
         }));
     }
@@ -559,7 +507,7 @@ public class JdbcAutomationLedgerStore
         return jdbc.update("UPDATE ma_schedule_occurrence o"
                         + " SET o.definition_revision = ?, o.gmt_modified = ?"
                         + " WHERE o.tenant_id = ? AND o.schedule_id = ?"
-                        + " AND o.occurrence_key = ? AND o.outcome = ?" + HELD,
+                        + " AND o.occurrence_key = ? AND o.outcome = ?" + AutomationLedgerRows.HELD,
                 definitionRevision, now, tenantId, scheduleId, occurrenceKey,
                 OUTCOME_FIRING, tenantId, scheduleId, owner, fence) == 1;
     }
@@ -573,7 +521,7 @@ public class JdbcAutomationLedgerStore
                         + " SET o.attempts = ?, o.next_retry_at = ?,"
                         + " o.last_error = ?, o.gmt_modified = ?"
                         + " WHERE o.tenant_id = ? AND o.schedule_id = ?"
-                        + " AND o.occurrence_key = ? AND o.outcome = ?" + HELD,
+                        + " AND o.occurrence_key = ? AND o.outcome = ?" + AutomationLedgerRows.HELD,
                 attempts, nextRetryAt, error, now, tenantId, scheduleId,
                 occurrenceKey, OUTCOME_FIRING, tenantId, scheduleId, owner,
                 fence) == 1;
@@ -585,7 +533,7 @@ public class JdbcAutomationLedgerStore
         return jdbc.query("SELECT " + ManagedSchemaProjection.SCHEDULE_OCCURRENCE.columns() + " FROM ma_schedule_occurrence"
                         + " WHERE tenant_id = ? AND schedule_id = ?"
                         + " AND outcome = ? AND next_retry_at <= ?"
-                        + " ORDER BY gmt_create, occurrence_key", OCCURRENCE,
+                        + " ORDER BY gmt_create, occurrence_key", AutomationLedgerRows.OCCURRENCE,
                 tenantId, scheduleId, OUTCOME_FIRING, now);
     }
 
@@ -626,10 +574,10 @@ public class JdbcAutomationLedgerStore
                 args.add(cursor.occurrenceKey());
             }
             args.add(RUN_READ_BATCH_SIZE);
-            List<OccurrenceRow> page = jdbc.query(OCCURRENCE_SELECT
+            List<OccurrenceRow> page = jdbc.query(AutomationLedgerRows.OCCURRENCE_SELECT
                             + " AND o.outcome = ? AND o.is_run_terminal = 0" + after
                             + " ORDER BY o.gmt_create, o.occurrence_key LIMIT ?",
-                    OCCURRENCE, args.toArray());
+                    AutomationLedgerRows.OCCURRENCE, args.toArray());
             if (page.isEmpty()) {
                 return blocking;
             }
@@ -667,8 +615,8 @@ public class JdbcAutomationLedgerStore
     /** One occurrence with its run's task state, when one committed. */
     public Optional<OccurrenceView> findOccurrenceView(String tenantId,
             String scheduleId, String occurrenceKey) {
-        return jdbc.query(OCCURRENCE_SELECT + " AND o.occurrence_key = ?",
-                OCCURRENCE, tenantId, scheduleId, occurrenceKey).stream()
+        return jdbc.query(AutomationLedgerRows.OCCURRENCE_SELECT + " AND o.occurrence_key = ?",
+                AutomationLedgerRows.OCCURRENCE, tenantId, scheduleId, occurrenceKey).stream()
                 .findFirst()
                 .map(row -> new OccurrenceView(row,
                         readTaskStates(tenantId,
@@ -680,13 +628,13 @@ public class JdbcAutomationLedgerStore
     public OccurrencePage listOccurrences(String tenantId, String scheduleId,
             OccurrenceCursor cursor, int limit) {
         List<OccurrenceRow> rows = cursor == null
-                ? jdbc.query(OCCURRENCE_SELECT + " ORDER BY o.gmt_create DESC,"
-                        + " o.occurrence_key DESC LIMIT ?", OCCURRENCE,
+                ? jdbc.query(AutomationLedgerRows.OCCURRENCE_SELECT + " ORDER BY o.gmt_create DESC,"
+                        + " o.occurrence_key DESC LIMIT ?", AutomationLedgerRows.OCCURRENCE,
                         tenantId, scheduleId, limit + 1)
-                : jdbc.query(OCCURRENCE_SELECT + " AND (o.gmt_create < ? OR"
+                : jdbc.query(AutomationLedgerRows.OCCURRENCE_SELECT + " AND (o.gmt_create < ? OR"
                         + " (o.gmt_create = ? AND o.occurrence_key < ?))"
                         + " ORDER BY o.gmt_create DESC, o.occurrence_key DESC"
-                        + " LIMIT ?", OCCURRENCE, tenantId, scheduleId,
+                        + " LIMIT ?", AutomationLedgerRows.OCCURRENCE, tenantId, scheduleId,
                         cursor.createdAt(), cursor.createdAt(),
                         cursor.occurrenceKey(), limit + 1);
         Map<RunIdentity, String> states = readTaskStates(tenantId, rows.stream()

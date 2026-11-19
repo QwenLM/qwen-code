@@ -229,16 +229,20 @@ public class JdbcChannelInstanceStore
      */
     public List<String> listSessionsWithPendingDeliveries(String tenantId,
             String channelId, int limit) {
+        // ma_session.session_scope_key stays NULL for PUBLIC Sessions (only
+        // CONTROL admission writes it), so the record join must stay on the
+        // raw tenant/session identity, not the scope key.
         return jdbc.query("SELECT r.session_id, MIN(r.gmt_create) AS"
                         + " oldest_due"
-                        + " FROM (SELECT DISTINCT tenant_id, session_id"
-                        + " FROM ma_channel_binding WHERE tenant_id = ? AND channel_id = ?) b"
+                        + " FROM ma_session_record r"
+                        + " JOIN ma_channel_binding b"
+                        + " ON b.tenant_id = r.tenant_id"
+                        + " AND b.session_id = r.session_id"
                         + " JOIN ma_session s"
-                        + " ON s.tenant_id = b.tenant_id AND s.session_id = b.session_id"
+                        + " ON s.tenant_id = r.tenant_id"
+                        + " AND s.session_id = r.session_id"
                         + " AND s.session_kind = 'PUBLIC' AND s.status = 'ACTIVE'"
-                        + " JOIN ma_session_record r ON r.session_scope_key = s.session_scope_key"
-                        + " AND r.tenant_id = s.tenant_id AND r.session_id = s.session_id"
-                        + " WHERE r.record_kind = 'DOMAIN'"
+                        + " WHERE r.record_kind = 'DOMAIN' AND r.tenant_id = ? AND b.channel_id = ?"
                         + " AND r.domain = 'channel_delivery'"
                         + " AND r.delivery_state IN ('planned', 'partial')"
                         + " GROUP BY r.session_id"

@@ -176,6 +176,16 @@ public final class SessionResourceCollectionCollector {
                 ManagedSchemaKeys.key(request), request, current, current);
     }
 
+    static void enqueueCollections(JdbcTemplate jdbc, String tenant, String session, long time) {
+        enqueue(jdbc, tenant, session, time);
+        var captures = jdbc.query(
+                "SELECT scope_key, publication_id, tenant_id, workspace_id, session_id"
+                    + " FROM ma_output_capture WHERE tenant_id = ? AND session_id = ?"
+                    + " AND retention_state = 'RETIRING' ORDER BY publication_id",
+                (row, index) -> ManagedSchemaRows.read(row), tenant, session);
+        ToolPublicationCollector.enqueue(jdbc, captures, time);
+    }
+
     Claim claim() {
         long time = ToolPublicationRetentionStore.now(jdbc);
         var candidates = jdbc.query(
