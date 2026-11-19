@@ -465,7 +465,7 @@ describe('managed-agent-server e2e runner', () => {
     expect(commitCarriesTurnSettled(Buffer.from('not json'))).toBe(false);
   });
 
-  it('requires the promoted storage version before an approval crash', () => {
+  it('requires the activity diagnostics flag before an approval crash', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     const barrier = source.indexOf(
       "'Approval snapshot was not committed before the crash barrier'",
@@ -485,18 +485,16 @@ describe('managed-agent-server e2e runner', () => {
       continuation: { phase: 'await_action' },
       approval: { requestId: 'approval' },
     };
-    expect(rejects(['4'], checkpoint, 'approval')).toBe(false);
-    for (const version of ['1', '2', '3', '5']) {
-      expect(rejects([version], checkpoint, 'approval')).toBe(true);
-    }
+    expect(rejects(['1'], checkpoint, 'approval')).toBe(false);
+    expect(rejects(['0'], checkpoint, 'approval')).toBe(true);
     expect(
       rejects(
-        ['4'],
+        ['1'],
         { ...checkpoint, continuation: { phase: 'done' } },
         'approval',
       ),
     ).toBe(true);
-    expect(rejects(['4'], checkpoint, 'other-approval')).toBe(true);
+    expect(rejects(['1'], checkpoint, 'other-approval')).toBe(true);
   });
 
   it('builds the rewritten-command package with a rewriting, fsyncing command Hook', async () => {
