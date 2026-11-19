@@ -2876,87 +2876,62 @@ describe('HTTP Managed Session store', () => {
     return { stores, session };
   }
 
-  it.each([1, 2, 3])(
-    'requires storage 3 before committing model statistics (version=%s)',
-    async (version) => {
-      const server = new FakeManagedSessionStore();
-      server.supportedStorageVersion = version;
-      const { stores, session } = await bootStoresAndSession(server);
-      try {
-        if (version === 3) server.headOverrides['storageVersion'] = 3;
-        expect(stores.supportsModelDiagnostics()).toBe(version === 3);
-        await enableManagedSessionDiagnostics(session);
-        await new ManagedHookActivationController(session).runTurn(
-          'diagnostics-turn',
-          async (scope) => {
-            const complete = await scope.beginMainAttempt('model');
-            if (version === 3) await complete(true, []);
-            else
-              await expect(complete(true, [])).rejects.toThrow(
-                'storage version 3',
-              );
-          },
-        );
-        const event = session.authority.lastEventOfKind('model.attempt')!;
-        expect(event.payload['state']).toBe(
-          version === 3 ? 'output_committed' : 'started',
-        );
-      } finally {
-        await session.close().catch(() => undefined);
-      }
-    },
-  );
+  it('commits model statistics', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      server.headOverrides['storageVersion'] = 3;
+      expect(stores.supportsModelDiagnostics()).toBe(true);
+      await enableManagedSessionDiagnostics(session);
+      await new ManagedHookActivationController(session).runTurn(
+        'diagnostics-turn',
+        async (scope) => {
+          const complete = await scope.beginMainAttempt('model');
+          await complete(true, []);
+        },
+      );
+      const event = session.authority.lastEventOfKind('model.attempt')!;
+      expect(event.payload['state']).toBe('output_committed');
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  });
 
-  it.each([1, 2, 3, 4])(
-    'requires storage 4 before committing execution diagnostics (version=%s)',
-    async (version) => {
-      const server = new FakeManagedSessionStore();
-      server.supportedStorageVersion = version;
-      const { stores, session } = await bootStoresAndSession(server);
-      try {
-        expect(stores.supportsExecutionDiagnostics()).toBe(version === 4);
-        if (version === 4) server.headOverrides['storageVersion'] = 4;
-        await enableManagedExecutionDiagnostics(session);
-        const record = {
-          uuid: 'activity-request',
-          parentUuid: null,
-          sessionId: SESSION_KEY.sessionId,
-          timestamp: new Date().toISOString(),
-          type: 'assistant' as const,
-          cwd: '/workspace',
-          version: 'test',
-          message: {
-            role: 'model',
-            parts: [
-              { functionCall: { id: 'call', name: 'read_file', args: {} } },
-            ],
-          },
-        };
-        if (version === 4) {
-          await session.sink.write(record);
-          expect(
-            session.authority.lastEventOfKind('message.committed')?.payload[
-              'diagnosticsRef'
-            ],
-          ).toBeDefined();
-        } else {
-          await expect(session.sink.write(record)).rejects.toThrow(
-            'storage version 4',
-          );
-          expect(
-            session.authority.lastEventOfKind('message.committed'),
-          ).toBeUndefined();
-        }
-      } finally {
-        await session.close().catch(() => undefined);
-      }
-    },
-  );
+  it('commits execution diagnostics', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      expect(stores.supportsExecutionDiagnostics()).toBe(true);
+      server.headOverrides['storageVersion'] = 4;
+      await enableManagedExecutionDiagnostics(session);
+      const record = {
+        uuid: 'activity-request',
+        parentUuid: null,
+        sessionId: SESSION_KEY.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'assistant' as const,
+        cwd: '/workspace',
+        version: 'test',
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'call', name: 'read_file', args: {} } },
+          ],
+        },
+      };
+      await session.sink.write(record);
+      expect(
+        session.authority.lastEventOfKind('message.committed')?.payload[
+          'diagnosticsRef'
+        ],
+      ).toBeDefined();
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  });
 
   it('continues writing and cold restores after diagnostics promote storage to version 3', async () => {
     const server = new FakeManagedSessionStore();
-    server.supportedStorageVersion = 3;
-    server.enforceReaderCeiling = true;
     const first = await bootStoresAndSession(server);
     try {
       await enableManagedSessionDiagnostics(first.session);
@@ -2995,58 +2970,46 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
-  it.each([undefined, 1, 2])(
-    'requires Store acknowledgement before a bounded retraction (version=%s)',
-    async (version) => {
-      const server = new FakeManagedSessionStore();
-      server.supportedStorageVersion = version;
-      const { session } = await bootStoresAndSession(server);
-      try {
-        const before = server.commits.length;
-        const commit = session.authority.appendExecutionEvent(
-          {
-            operation: 'assistantRetract',
-            commandId: 'bounded',
-            sessionKey: SESSION_KEY,
-            contentDigest: 'a'.repeat(64),
+  it('commits a bounded retraction through the recovery commit route', async () => {
+    const server = new FakeManagedSessionStore();
+    const { session } = await bootStoresAndSession(server);
+    try {
+      const before = server.commits.length;
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'assistantRetract',
+          commandId: 'bounded',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'a'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'bounded',
+          sessionKey: SESSION_KEY,
+          kind: 'message.retracted',
+          occurredAt: Date.now(),
+          subject: {
+            type: 'activation',
+            scopeId: session.activation.activationId,
+            ...session.activation,
           },
-          (sequence) => ({
-            v: 1,
-            sequence,
-            eventId: 'bounded',
-            sessionKey: SESSION_KEY,
-            kind: 'message.retracted',
-            occurredAt: Date.now(),
-            subject: {
-              type: 'activation',
-              scopeId: session.activation.activationId,
-              ...session.activation,
-            },
-            payload: {
-              messageId: 'message',
-              turnId: 'turn',
-              fromSequence: 1,
-              sourceBootId: 'boot',
-              sourceEventEpoch: 'epoch',
-              throughSequence: 1,
-            },
-          }),
-          { class: 'harness', activation: session.activation },
-        );
-        if (version === 2) {
-          await commit;
-          expect(server.commits.length).toBe(before + 1);
-        } else {
-          await expect(commit).rejects.toThrow(
-            'does not support Hosted recovery storage version 2',
-          );
-          expect(server.commits.length).toBe(before);
-        }
-      } finally {
-        await session.close().catch(() => undefined);
-      }
-    },
-  );
+          payload: {
+            messageId: 'message',
+            turnId: 'turn',
+            fromSequence: 1,
+            sourceBootId: 'boot',
+            sourceEventEpoch: 'epoch',
+            throughSequence: 1,
+          },
+        }),
+        { class: 'harness', activation: session.activation },
+      );
+      expect(server.commits.length).toBe(before + 1);
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  });
 
   // A committed message body must be the reader-facing record the cold
   // projection will replay: the commit-time fence refuses anything else.
@@ -3127,9 +3090,6 @@ describe('HTTP Managed Session store', () => {
         const headers = new Headers(init?.headers);
         expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
         expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
-        expect(headers.get('X-Qwen-Managed-Max-Readable-Storage-Version')).toBe(
-          '5',
-        );
         expect(init?.method).toBe('POST');
         expect(JSON.parse(String(init?.body))).toEqual(request);
         return jsonResponse(request);
@@ -8521,8 +8481,6 @@ describe('HTTP Managed Session store', () => {
 
   it.each([
     ['recoveryStatus', 'BLOCKED_RESOURCE'],
-    ['storageVersion', 3],
-    ['storageVersion', 4],
     ['state', 'SEALED'],
     ['writerGeneration', 2],
     ['compactedThroughRevision', 1],
@@ -9507,8 +9465,6 @@ describe('HTTP Managed Session store', () => {
 class FakeManagedSessionStore {
   activationLeaseRenewal = false;
   private activationLease?: ManagedSessionActivationLease;
-  supportedStorageVersion: number | undefined = 2;
-  enforceReaderCeiling = false;
   readonly commits: Array<Record<string, unknown>> = [];
   readonly recoveryBlocks: Array<Record<string, unknown>> = [];
   readonly headOverrides: Record<string, unknown> = {};
@@ -9533,21 +9489,6 @@ class FakeManagedSessionStore {
     const headers = new Headers(init?.headers);
     expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
     expect(headers.get('X-Qwen-Managed-Writer-Token')).toMatch(/^[ab]{32}$/);
-    if (
-      this.enforceReaderCeiling &&
-      Number(headers.get('X-Qwen-Managed-Max-Readable-Storage-Version') ?? 1) <
-        Number(this.headOverrides['storageVersion'] ?? 1)
-    )
-      return jsonResponse(
-        {
-          error: {
-            code: 'managed_session_reader_unsupported',
-            message:
-              'This reader cannot read the Managed Session storage version.',
-          },
-        },
-        409,
-      );
     const suffix = url.pathname.slice(
       url.pathname.indexOf('/internal/managed-session-store/v1/sessions/') +
         `/internal/managed-session-store/v1/sessions/${SESSION_KEY.sessionId}`
@@ -9970,9 +9911,6 @@ class FakeManagedSessionStore {
       ...(this.activationLease
         ? { activationLease: this.activationLease }
         : {}),
-      ...(this.supportedStorageVersion === undefined
-        ? {}
-        : { supportedStorageVersion: this.supportedStorageVersion }),
       writerGeneration: this.writerGeneration,
       leaseUntil: this.leaseUntil,
       journalRevision: this.transactions.length,

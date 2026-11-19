@@ -33,7 +33,6 @@ final class JournalCommit {
     private final JournalLifecycleAuthorization lifecycleAuthorization;
     private final JournalResourceWrites resourceWrites;
     private final JournalStoreRows storeRows;
-    private final com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion;
     private final JdbcTemplate jdbc;
     private final JdbcManagedToolResultStore toolResults;
     private final JournalEventTransport journalEventTransport;
@@ -45,7 +44,6 @@ final class JournalCommit {
             JournalLifecycleAuthorization lifecycleAuthorization,
             JournalResourceWrites resourceWrites,
             JournalStoreRows storeRows,
-            com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion,
             JdbcTemplate jdbc,
             JdbcManagedToolResultStore toolResults,
             JournalEventTransport journalEventTransport,
@@ -55,7 +53,6 @@ final class JournalCommit {
         this.lifecycleAuthorization = lifecycleAuthorization;
         this.resourceWrites = resourceWrites;
         this.storeRows = storeRows;
-        this.readerVersion = readerVersion;
         this.jdbc = jdbc;
         this.toolResults = toolResults;
         this.journalEventTransport = journalEventTransport;
@@ -83,9 +80,6 @@ final class JournalCommit {
         JdbcHarnessPlacementStore.Placement placement = fencing.requirePlacement(tenantId, request.workspaceId(),
                 sessionId, writerToken, request.writerId(), false);
         int storageFloor = ManagedModelDiagnosticProjection.storageFloor(validated.recordBytes(), request.resources(), validated.resources());
-        if (storageFloor > 1) {
-            readerVersion.requireReadable(storageFloor);
-        }
         JournalStoreRows.TransactionRow existing = storeRows.findTransactionByCommand(tenantId,
                 sessionId, JournalStoreRows.commandKeyHash(request.operation(),
                         request.commandId()));

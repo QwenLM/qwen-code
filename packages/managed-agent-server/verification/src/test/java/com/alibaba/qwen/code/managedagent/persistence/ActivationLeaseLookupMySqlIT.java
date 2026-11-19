@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.config.ManagedSessionReaderVersion;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -31,7 +30,7 @@ class ActivationLeaseLookupMySqlIT {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             ManagedSchema.initialize(database.source());
             var jdbc = new CapturingJdbc(database.source());
-            var rows = new JournalStoreRows(new ManagedSessionReaderVersion(), jdbc, null);
+            var rows = new JournalStoreRows(jdbc, null);
             // An earlier activation and its history, then the current one:
             // installed, renewed once by a later transaction, then history.
             var journal = new ArrayList<Object[]>();

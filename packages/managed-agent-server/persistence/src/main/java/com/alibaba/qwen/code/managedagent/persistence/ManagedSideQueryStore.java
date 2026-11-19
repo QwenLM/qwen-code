@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.*;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.sidequery.ManagedSideQueryModels;
 import com.alibaba.qwen.code.managedagent.contracts.sidequery.ManagedSideQueryModels.*;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -54,7 +53,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
         this.json = json;
         this.sessions = new AgentStoreRows(rules, jdbc, json);
         this.sessionQueries = new AgentSessionQueries(sessions, null, jdbc, List.of());
-        this.journal = new JournalStoreRows(StorageReadPolicy.inProcess(), jdbc, null);
+        this.journal = new JournalStoreRows(jdbc, null);
         this.workspaces = workspaces;
         this.models = models;
         this.retention = new ToolPublicationRetentionStore(jdbc, manager);
@@ -572,11 +571,6 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
             throw error(409, "side_query_history_unavailable");
         }
         var head = heads.getFirst();
-        int storageVersion = ((Number) head.get("storage_version")).intValue();
-        if (storageVersion < 1 || storageVersion
-                > com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedStorageVersions.SUPPORTED) {
-            throw error(409, "side_query_history_unavailable");
-        }
         return SideQueryConversation.capture(jdbc, tenant, session, ((Number) head.get("journal_revision")).longValue(),
                 ((Number) head.get("committed_sequence")).longValue(), (String) head.get("last_commit_digest"), packs);
     }

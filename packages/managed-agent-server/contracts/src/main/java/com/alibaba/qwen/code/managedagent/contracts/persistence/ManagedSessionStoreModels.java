@@ -196,17 +196,11 @@ public final class ManagedSessionStoreModels {
     public record WriterGrant(long writerGeneration, long leaseUntil,
             long journalRevision, long committedSequence,
             String lastCommitDigest, long activationEpoch,
-            boolean replayed, int supportedStorageVersion, boolean activationLeaseRenewal, ActivationLease activationLease) {
-        public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
-                long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed,
-                int supportedStorageVersion) {
-            this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
-                    activationEpoch, replayed, supportedStorageVersion, true, null);
-        }
+            boolean replayed, boolean activationLeaseRenewal, ActivationLease activationLease) {
         public WriterGrant(long writerGeneration, long leaseUntil, long journalRevision,
                 long committedSequence, String lastCommitDigest, long activationEpoch, boolean replayed) {
             this(writerGeneration, leaseUntil, journalRevision, committedSequence, lastCommitDigest,
-                    activationEpoch, replayed, ManagedStorageVersions.SUPPORTED);
+                    activationEpoch, replayed, true, null);
         }
     }
 

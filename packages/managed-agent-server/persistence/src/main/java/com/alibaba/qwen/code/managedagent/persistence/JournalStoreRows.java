@@ -32,13 +32,10 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 final class JournalStoreRows {
-    private final com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion;
     private final JdbcTemplate jdbc;
     private final ToolPublicationObjectStore objects;
 
-    JournalStoreRows(com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy readerVersion,
-            JdbcTemplate jdbc, ToolPublicationObjectStore objects) {
-        this.readerVersion = readerVersion;
+    JournalStoreRows(JdbcTemplate jdbc, ToolPublicationObjectStore objects) {
         this.jdbc = jdbc;
         this.objects = objects;
         this.headMapper = (result, row) ->
@@ -611,11 +608,6 @@ final class JournalStoreRows {
                 || !sessionId.equals(head.sessionId())) {
             throw sessionNotFound();
         }
-        if (head.storageVersion() < 1 || head.storageVersion() > com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedStorageVersions.SUPPORTED) {
-            throw conflict("managed_session_storage_version_unsupported",
-                    "The Managed Session storage version is unsupported.");
-        }
-        readerVersion.requireReadable(head.storageVersion());
         if (!HEAD_STATES.contains(head.state())
                 || !RECOVERY_STATES.contains(head.recoveryStatus())
                 || head.writerGeneration() < 1

@@ -79,15 +79,6 @@ class ManagedSideQueryStoreTest {
     }
 
     @Test
-    void unsupportedStorageRefusesGenerationWithoutAdmittingAQuery() {
-        jdbc.update("UPDATE ma_session_head SET storage_version=999 WHERE tenant_id=? AND session_id=?", tenant, session);
-        assertThat(tx(() -> queries.context(tenant, actor, session)).generationAvailable()).isFalse();
-        assertThatThrownBy(() -> tx(() -> queries.admit(tenant, actor, session, btw("key", "question"), true)))
-                .hasFieldOrPropertyWithValue("code", "side_query_history_unavailable");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_side_query WHERE tenant_id=?", Integer.class, tenant)).isZero();
-    }
-
-    @Test
     void actorPrivateReceiptReplaysAcrossDisableAndRejectsPayloadChanges() {
         Admission first = tx(() -> queries.admit(tenant, actor, session, btw("key", "question"), true));
         assertThat(first.dispatch()).isTrue();

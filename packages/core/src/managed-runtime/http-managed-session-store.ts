@@ -487,7 +487,6 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   );
   const head = parseRestoreHead(snapshot['head']);
   if (
-    ![1, 2, 3, 4, 5].includes(head.storageVersion) ||
     !['ACTIVE', 'SEALED'].includes(head.state) ||
     head.recoveryStatus !== 'READY' ||
     head.compactedThroughRevision !== 0
@@ -1006,7 +1005,6 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
 interface WriterGrant {
   readonly activationLeaseRenewal: boolean;
   readonly activationLease?: ManagedSessionActivationLease;
-  readonly supportedStorageVersion: number;
   readonly writerGeneration: number;
   readonly leaseUntil: number;
   readonly journalRevision: number;
@@ -1068,10 +1066,10 @@ interface TransactionDescriptor {
 
 class ManagedSessionStoreHttpClient {
   supportsExecutionDiagnostics(): boolean {
-    return (this.grant?.supportedStorageVersion ?? 1) >= 4;
+    return true;
   }
   supportsModelDiagnostics(): boolean {
-    return (this.grant?.supportedStorageVersion ?? 1) >= 3;
+    return true;
   }
   readonly sessionKey: ManagedSessionKey;
   private readonly baseUrl: string;
@@ -1844,7 +1842,6 @@ class ManagedSessionStoreHttpClient {
       raw['sessionId'] !== this.sessionKey.sessionId ||
       snapshot.snapshotId.length === 0 ||
       Buffer.byteLength(snapshot.snapshotId, 'utf8') > 512 ||
-      ![1, 2, 3, 4, 5].includes(storageVersion) ||
       storageVersion > head.storageVersion ||
       snapshot.coveredJournalRevision < 1 ||
       snapshot.coveredJournalRevision > head.journalRevision ||
@@ -2381,37 +2378,6 @@ class ManagedSessionStoreHttpClient {
           event.payload?.['sourceBootId'] !== undefined
         );
       });
-    if (needsVersionTwo && grant.supportedStorageVersion < 2)
-      throw new ManagedSessionRecordError(
-        'Managed Session Store does not support Hosted recovery storage version 2.',
-      );
-    const needsVersionThree = commitResources.some(
-      (resource) =>
-        MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(resource.kind) ||
-        (resource.kind === 'managed-history_maintenance' &&
-          resource.bytesBase64 &&
-          JSON.parse(
-            Buffer.from(resource.bytesBase64, 'base64').toString('utf8'),
-          ).schemaVersion === 2),
-    );
-    if (needsVersionThree && grant.supportedStorageVersion < 3)
-      throw new ManagedSessionRecordError(
-        'Managed Session Store does not support model diagnostics storage version 3.',
-      );
-    if (
-      commitResources.some(
-        (resource) => resource.kind === EXECUTION_DIAGNOSTICS_KIND,
-      ) &&
-      grant.supportedStorageVersion < 4
-    )
-      throw corrupt('Execution diagnostics require storage version 4.');
-    if (
-      descriptor.refs.some(
-        (ref) => ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND,
-      ) &&
-      grant.supportedStorageVersion < 5
-    )
-      throw corrupt('Tool measurements require storage version 5.');
     const publicationIds = new Set(
       descriptor.refs.flatMap((ref) => {
         const id = this.publicationAdmissions.get(ref.resourceId);
@@ -2689,7 +2655,6 @@ class ManagedSessionStoreHttpClient {
           method,
           headers: {
             Accept: 'application/json',
-            'X-Qwen-Managed-Max-Readable-Storage-Version': '5',
             ...(readOnly ? {} : { 'Content-Type': 'application/json' }),
             [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
               this.sessionKey.tenantId,
@@ -3222,7 +3187,6 @@ class ManagedSessionStoreHttpClient {
       this.grant = {
         ...this.requireGrant(),
         leaseUntil: renewed.leaseUntil,
-        supportedStorageVersion: renewed.supportedStorageVersion,
       };
       this.scheduleRenewal();
     })();
@@ -3319,8 +3283,6 @@ class ManagedSessionStoreHttpClient {
     const grant = this.requireGrant();
     if (
       head.state !== 'ACTIVE' ||
-      ![1, 2, 3, 4, 5].includes(head.storageVersion) ||
-      head.storageVersion > grant.supportedStorageVersion ||
       head.writerGeneration !== grant.writerGeneration ||
       head.recoveryStatus !== 'READY' ||
       head.compactedThroughRevision !== 0
@@ -3534,7 +3496,6 @@ class ManagedSessionStoreHttpClient {
         redirect: 'error',
         headers: {
           Accept: accept,
-          'X-Qwen-Managed-Max-Readable-Storage-Version': '5',
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
             this.sessionKey.tenantId,
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
@@ -3871,13 +3832,6 @@ function parseWriterGrant(value: unknown): WriterGrant {
     ...(record['activationLease'] == null
       ? {}
       : { activationLease: parseActivationLease(record['activationLease']) }),
-    supportedStorageVersion:
-      record['supportedStorageVersion'] === undefined
-        ? 1
-        : safeCounter(
-            record['supportedStorageVersion'],
-            'supportedStorageVersion',
-          ),
     writerGeneration: safeCounter(
       record['writerGeneration'],
       'writerGeneration',

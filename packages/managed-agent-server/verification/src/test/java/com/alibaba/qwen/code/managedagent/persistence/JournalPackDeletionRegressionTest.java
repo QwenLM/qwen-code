@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
@@ -220,7 +219,7 @@ class JournalPackDeletionRegressionTest {
     void activationLeaseRowResolvesDeletedBlobFromThePack() {
         appendActivation();
         compactAndDelete();
-        JournalStoreRows rows = new JournalStoreRows(StorageReadPolicy.inProcess(), jdbc, objects);
+        JournalStoreRows rows = new JournalStoreRows(jdbc, objects);
         JournalStoreRows.ActivationLeaseRow lease = rows.activationLeaseRow(activationHead());
         assertThat(lease.revision()).isEqualTo(1);
         assertThat(lease.workerId()).isEqualTo("worker");
@@ -234,7 +233,7 @@ class JournalPackDeletionRegressionTest {
     void activationLeaseRowFailsClosedWithoutAnObjectStore() {
         appendActivation();
         compactAndDelete();
-        JournalStoreRows rows = new JournalStoreRows(StorageReadPolicy.inProcess(), jdbc, null);
+        JournalStoreRows rows = new JournalStoreRows(jdbc, null);
         assertThatThrownBy(() -> rows.activationLeaseRow(activationHead()))
                 .isInstanceOf(ManagedAgentException.class);
     }
