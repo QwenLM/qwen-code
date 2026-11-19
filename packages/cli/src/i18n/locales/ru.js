@@ -2956,6 +2956,19 @@ export default {
     'Текущая голосовая модель: {{voiceModel}}\nИспользуйте «/model --voice <model-id>», чтобы задать голосовую модель.',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     'Текущая модель зрения: {{visionModel}}\nИспользуйте «/model --vision <model-id>», чтобы задать модель визуального моста.',
+  'Set the vision bridge timeout in seconds (use with --vision)':
+    'Задать тайм-аут визуального моста в секундах (используется с --vision)',
+  '--timeout can only be used with --vision.':
+    '--timeout можно использовать только с --vision.',
+  'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.':
+    'Недопустимое значение --timeout "{{value}}". Используйте положительное целое число секунд, например 60, 60s или 90000ms.',
+  'Vision bridge timeout: {{timeout}}':
+    'Тайм-аут визуального моста: {{timeout}}',
+  'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.':
+    'Сохранён тайм-аут визуального моста {{timeout}}{{scope}}. Настройка с более высоким приоритетом оставляет действующий тайм-аут {{effectiveTimeout}}.',
+  'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.':
+    'Тайм-аут визуального моста: {{timeout}}\nИспользуйте «/model --vision --timeout <секунды>», чтобы изменить его.',
+  '{{timeout}} (default)': '{{timeout}} (по умолчанию)',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     'Текущая модель изображений: {{imageModel}}\nИспользуйте «/model --image <model-id>», чтобы задать модель генерации изображений.',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
