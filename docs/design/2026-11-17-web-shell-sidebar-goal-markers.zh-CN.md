@@ -2,7 +2,9 @@
 
 [English](2026-11-17-web-shell-sidebar-goal-markers.md) | [简体中文](2026-11-17-web-shell-sidebar-goal-markers.zh-CN.md)
 
-状态：提案（2026-11-17）。Goal 展示增强（#17349，已合入为 2b4ce375d2）的续作；该 PR 的「非目标」段明确延后了本特性。
+状态：已落地（2026-11-18，经 #17515 合入为 c98108ee13）。下文按 2026-11-17 撰写时的设计描述，**验证计划一节除外**——该节已更正为测试实际覆盖的范围。评审期间有两处变化在此记明，以免状态行误导：完成态隐藏规则现在收在一个共享的 `hasVisibleGoal` 谓词里，由 strip、侧栏与标记三处共同读取；goal 侧车与 main 的另一套 artifact-count 侧车**并存**，并未合并成一套。终轮评审界定后排除的一个候选跟踪在 #17731——objective 仅在 `propose_goal` 路径上有长度上限。
+
+Goal 展示增强（#17349，已合入为 2b4ce375d2）的续作；该 PR 的「非目标」段明确延后了本特性。
 
 ## 问题
 
@@ -95,7 +97,7 @@ Goals 页（#17230、#17291、#17349）展示每个已加载会话的目标，�
 
 ## 验证计划
 
-- 单测：sidecar 写/读/搬移/删除（core）、日志钩子 upsert/删除含尽力而为的失败隔离、恢复时写、session-list 合并（有/无/已归档）、bridge 通知校验（坏 v/sessionId/status 拒绝、好的标记时钟）、SDK 类型面、侧栏标记渲染（各状态色调、tooltip、可访问名、点击打开会话、complete 隐藏、无目标缺席）。
+- 单测：sidecar 写/读/搬移/删除（core）、日志钩子 upsert/删除含尽力而为的失败隔离、恢复时写、session-list 合并（有/无/已归档）、bridge 通知校验（坏 v/sessionId 拒绝、无法解析的会话忽略、好的标记时钟——按上文决策，载荷不带 status；handler 里额外的归属判断目前没有测试见证）、SDK 类型面、侧栏标记渲染（各状态色调、tooltip、可访问名、点击打开会话、complete 隐藏、无目标缺席）。
 - E2E（mockDaemon）：带目标 sidecar 的目录夹具 → 标记按色调渲染；goal-changed 通知刷新标记；清除移除标记。
 - 真实环境：隔离 daemon + HTTP 真实会话/目标；设置时标记出现、暂停/继续色调翻转、清除消失、daemon 重启后仍在（磁盘 sidecar）、未加载会话也显示。截图上传 assets 分支并对账。
 - 承重钉子的变异见证（日志钩子、sidecar 读取、色调映射、complete 过滤），字节级还原。
