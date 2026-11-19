@@ -527,9 +527,10 @@ describe('markdown image fallback', () => {
   it.each([
     'data:image/png;base64,iVBORw0KGgo=',
     'DATA:image/png;base64,iVBORw0KGgo=',
-  ])('does not echo a failed data URI (%s) as text in document mode', (uri) => {
-    // Only document mode lets data URIs reach the img (interactive mode's
-    // urlTransform strips them), so that is where a failed one can load-fail.
+  ])('keeps an undecodable data URI img in document mode (%s)', (uri) => {
+    // The transcript-document browser gate pins src preservation for
+    // approved data URIs even when the browser cannot decode them, so
+    // document mode must not swap the img for the fallback chip.
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -554,8 +555,38 @@ describe('markdown image fallback', () => {
     act(() => {
       img.dispatchEvent(new Event('error'));
     });
+    expect(container.querySelector('img')?.getAttribute('src')).toBe(uri);
+    expect(container.querySelector('[class*="imageFallback"]')).toBeNull();
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('does not echo a remote URL for empty-alt images in document mode', () => {
+    // urlTransform passes https through in document mode; the gate, not the
+    // transform, keeps it out of the img src. The chip must not reintroduce
+    // it as text (hidden copy sources render raw markdown in document mode).
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(
+            TranscriptRenderModeProvider,
+            { value: 'document' },
+            createElement(Markdown, {
+              content: '![](https://example.com/secret.png)',
+            }),
+          ),
+        ),
+      );
+    });
+
     expect(container.querySelector('img')).toBeNull();
-    expect(container.innerHTML).not.toContain('iVBORw0KGgo');
+    expect(container.innerHTML).not.toContain('https://example.com');
     expect(container.textContent).toContain('Failed to load');
 
     act(() => root.unmount());

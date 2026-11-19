@@ -989,26 +989,30 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
   const renderMode = useTranscriptRenderMode();
   const { t } = useI18n();
   const [failedSrc, setFailedSrc] = useState<string>();
+  const documentMode = renderMode === 'document';
   const localPath = isLocalFilePath(src);
   const safeSrc =
-    !localPath && isSafeImageSrc(src, renderMode === 'document')
-      ? src
-      : undefined;
+    !localPath && isSafeImageSrc(src, documentMode) ? src : undefined;
   if (localPath || !safeSrc || failedSrc === src) {
-    // data: URIs would dump a base64 blob into the chat; document-mode srcs
-    // arrive pre-stripped so remote URLs never reach this text either.
-    const displaySrc = src && !/^data:/i.test(src) ? src : '';
+    // The export builder rewrites remote images upstream, but urlTransform
+    // passes https through and hidden copy sources render raw markdown in
+    // document mode, so the chip itself must never echo src there. data:
+    // URIs would dump a base64 blob into the chat in any mode.
+    const displaySrc = !documentMode && src && !/^data:/i.test(src) ? src : '';
     const text =
       (localPath ? displaySrc || alt : alt || displaySrc) ||
       t('common.failedToLoad');
     return <span className={styles.imageFallback}>{text}</span>;
   }
+  // Document mode keeps the img even when the payload is undecodable: the
+  // transcript-document browser gate pins src preservation for approved
+  // data URIs, so the onError degradation only applies to live chat.
   return (
     <img
       src={safeSrc}
       alt={alt || ''}
       className={styles.image}
-      onError={() => setFailedSrc(src)}
+      onError={documentMode ? undefined : () => setFailedSrc(src)}
     />
   );
 }
