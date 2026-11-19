@@ -5,6 +5,8 @@
  */
 
 import {
+  existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   rmSync,
@@ -12,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MANAGED_OUTBOUND_LIMIT } from '@qwen-code/channel-base';
 import type { ManagedInboundEvent } from '@qwen-code/channel-base';
@@ -260,7 +262,7 @@ describe('ManagedGithubStateStore', () => {
     expect(store.load()).toEqual(state);
   });
 
-  it('refuses to start over an unreadable or invalid state', () => {
+  it('refuses to start over a corrupt or invalid state, naming the file', () => {
     const store = new ManagedGithubStateStore(
       'gh-1',
       tempCwd(),
@@ -268,9 +270,40 @@ describe('ManagedGithubStateStore', () => {
     );
     store.save(freshState());
     writeFileSync(store.file, '{broken');
-    expect(() => store.load()).toThrow(/unreadable or invalid/);
+    let err: Error | undefined;
+    try {
+      store.load();
+    } catch (error) {
+      err = error as Error;
+    }
+    expect(err).toBeDefined();
+    expect(err!.message).toMatch(/is not valid JSON/);
+    expect(err!.message).toContain(store.file);
+    expect(err!.cause).toBeDefined();
     writeFileSync(store.file, JSON.stringify({ version: 99 }));
-    expect(() => store.load()).toThrow(/unreadable or invalid/);
+    expect(() => store.load()).toThrow(/is invalid/);
+    expect(() => store.load()).toThrow(store.file);
+  });
+
+  it('an I/O read failure is distinct from corrupt JSON and keeps the cause', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-1',
+      tempCwd(),
+      'https://api.github.com',
+    );
+    // A directory at the ledger path makes the read fail (EISDIR), which must
+    // be distinguishable from a merely corrupt file.
+    mkdirSync(store.file, { recursive: true });
+    let err: Error | undefined;
+    try {
+      store.load();
+    } catch (error) {
+      err = error as Error;
+    }
+    expect(err).toBeDefined();
+    expect(err!.message).toMatch(/could not be read/);
+    expect(err!.message).toContain(store.file);
+    expect((err!.cause as NodeJS.ErrnoException).code).toBe('EISDIR');
   });
 
   it('writes the directory 0700 and the file 0600', () => {
@@ -331,5 +364,181 @@ describe('ManagedGithubStateStore', () => {
     expect(a.directory).not.toBe(b.directory);
     expect(a.directory).not.toBe(c.directory);
     expect(a.directory).toMatch(/github-[0-9a-f]{16}$/);
+  });
+
+  it('keys the ledger file by registration identity beneath the shared entry directory', () => {
+    const cwd = tempCwd();
+    const a = new ManagedGithubStateStore(
+      'gh-1',
+      cwd,
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    const b = new ManagedGithubStateStore(
+      'gh-1',
+      cwd,
+      'https://api.github.com',
+      'cp|tenant-b|chan-1|actor|ws|.',
+    );
+    // The connection lock stays per entry: both registrations share ONE
+    // directory, but the ledger file beneath it is identity-keyed.
+    expect(a.directory).toBe(b.directory);
+    expect(a.file).not.toBe(b.file);
+    expect(basename(a.file)).toMatch(/^managed-state-[0-9a-f]{16}\.json$/);
+    expect(dirname(a.file)).toBe(a.directory);
+    // A pending claim staged under A is never loaded under B.
+    const state = freshState();
+    state.pending = [
+      {
+        eventId: 'github:IC_1',
+        event: event('github:IC_1'),
+        notificationThreadId: 'n-1',
+      },
+    ];
+    a.save(state);
+    expect(a.load()?.pending?.[0]?.eventId).toBe('github:IC_1');
+    expect(b.load()).toBeUndefined();
+  });
+
+  it('a workspace change within one tenant isolates the ledger', () => {
+    const a = new ManagedGithubStateStore(
+      'gh-1',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    const b = new ManagedGithubStateStore(
+      'gh-1',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws-2|.',
+    );
+    expect(a.file).not.toBe(b.file);
+  });
+
+  it('reports a stranded legacy ledger on upgrade, without adopting it', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-legacy',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    // Asymmetric counts (2 pending, 3 outbound) so swapping the two count
+    // assignments or the two interpolations in the adapter notice reds this.
+    const legacy = {
+      ...freshState(),
+      pending: [
+        {
+          eventId: 'github:IC_1',
+          event: event('github:IC_1'),
+          notificationThreadId: 'n-1',
+        },
+        {
+          eventId: 'github:IC_2',
+          event: event('github:IC_2'),
+          notificationThreadId: 'n-2',
+        },
+      ],
+      outbound: [
+        { deliveryId: 'd-1', ordinal: 0 },
+        { deliveryId: 'd-2', ordinal: 1 },
+        { deliveryId: 'd-3', ordinal: 2 },
+      ],
+    };
+    writeFileSync(
+      join(store.directory, 'managed-state.json'),
+      JSON.stringify(legacy),
+    );
+    const stranded = store.strandedLegacyLedger();
+    expect(stranded).toBeDefined();
+    expect(stranded!.path).toBe(join(store.directory, 'managed-state.json'));
+    expect(stranded!.pending).toBe(2);
+    expect(stranded!.outbound).toBe(3);
+    expect(stranded!.readable).toBe(true);
+    // Reported, not adopted: load() still returns undefined (no keyed ledger).
+    expect(store.load()).toBeUndefined();
+    // Once archived, the legacy is no longer detected.
+    const archived = store.archiveStrandedLegacy();
+    expect(archived).toBeDefined();
+    expect(store.strandedLegacyLedger()).toBeUndefined();
+  });
+
+  it('still reports a legacy ledger staged after a rollback (keyed ledger exists)', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-rollback',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    store.save(freshState());
+    writeFileSync(
+      join(store.directory, 'managed-state.json'),
+      JSON.stringify({
+        ...freshState(),
+        pending: [
+          {
+            eventId: 'github:IC_rb',
+            event: event('github:IC_rb'),
+            notificationThreadId: 'n-rb',
+          },
+        ],
+      }),
+    );
+    const stranded = store.strandedLegacyLedger();
+    expect(stranded).toBeDefined();
+    expect(stranded!.pending).toBe(1);
+    expect(stranded!.outbound).toBe(0);
+    expect(store.load()).toEqual(freshState());
+  });
+
+  it.each([
+    ['{not json', false],
+    ['null', true],
+    ['[]', true],
+  ])(
+    'a corrupt legacy ledger (%s) reports zero counts instead of throwing',
+    (raw, readable) => {
+      const store = new ManagedGithubStateStore(
+        'gh-corrupt',
+        tempCwd(),
+        'https://api.github.com',
+        'cp|tenant-a|chan-1|actor|ws|.',
+      );
+      mkdirSync(store.directory, { recursive: true });
+      writeFileSync(join(store.directory, 'managed-state.json'), raw);
+      const stranded = store.strandedLegacyLedger();
+      expect(stranded).toBeDefined();
+      expect(stranded!.pending).toBe(0);
+      expect(stranded!.outbound).toBe(0);
+      expect(stranded!.readable).toBe(readable);
+    },
+  );
+
+  it('an unreadable legacy ledger (directory at the path) is flagged, not empty', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-eisdir',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    mkdirSync(join(store.directory, 'managed-state.json'));
+    const stranded = store.strandedLegacyLedger();
+    expect(stranded).toBeDefined();
+    expect(stranded!.readable).toBe(false);
+  });
+
+  it('no stranded legacy ledger when none exists', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-none',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    expect(store.strandedLegacyLedger()).toBeUndefined();
+    expect(store.archiveStrandedLegacy()).toBeUndefined();
+    expect(existsSync(join(store.directory, 'managed-state.json'))).toBe(false);
   });
 });

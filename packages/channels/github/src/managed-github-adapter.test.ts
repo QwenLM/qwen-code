@@ -4,9 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   ManagedChannelControlPlane,
@@ -65,7 +73,10 @@ function comment(overrides: Partial<GithubComment> = {}): GithubComment {
   };
 }
 
-function fakeControlPlane(journal: string[]) {
+function fakeControlPlane(
+  journal: string[],
+  destinationKey = 'cp|tenant-a|chan-1|actor|ws|.',
+) {
   const register: unknown[] = [];
   const submit: ManagedInboundEvent[] = [];
   const receipts: Array<{ deliveryId: string; receipt: unknown }> = [];
@@ -75,14 +86,21 @@ function fakeControlPlane(journal: string[]) {
   let refuseSubmit: { status: number; code?: string } | undefined;
   let refuseClaim: { status: number; code?: string } | undefined;
   const claimLimits: number[] = [];
+  let registerError: (Error & { status?: number; code?: string }) | undefined;
   let receiptError:
     | ((
         deliveryId: string,
       ) => (Error & { status?: number; code?: string }) | undefined)
     | undefined;
   const controlPlane: ManagedChannelControlPlane = {
+    destinationKey,
     register: async (request) => {
       journal.push('register');
+      if (registerError) {
+        const error = registerError;
+        registerError = undefined;
+        throw error;
+      }
       register.push(request);
     },
     disconnect: async () => {
@@ -139,6 +157,9 @@ function fakeControlPlane(journal: string[]) {
     },
     setRefuseClaim: (value: { status: number; code?: string } | undefined) => {
       refuseClaim = value;
+    },
+    failNextRegister: (error: Error & { status?: number; code?: string }) => {
+      registerError = error;
     },
     setReceiptError: (
       fn:
@@ -2142,5 +2163,329 @@ describe('managed GitHub adapter round-4 hardening', () => {
       { deliveryId: 'd-1', receipt: { outcome: 'rejected' } },
     ]);
     await adapter.disconnect();
+  });
+});
+
+describe('managed GitHub adapter registration-identity isolation', () => {
+  function identityAdapter(
+    cwd: string,
+    destinationKey: string,
+    hooks: { log?: (line: string) => void } = {},
+  ) {
+    const journal: string[] = [];
+    const plane = fakeControlPlane(journal, destinationKey);
+    const fake = fakeDeps(journal, hooks);
+    const adapter = new ManagedGithubAdapter({
+      name: 'gh-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: fake.deps,
+      pollLoop: false,
+    });
+    return { adapter, plane, fake, journal };
+  }
+
+  function pendingOf(adapter: ManagedGithubAdapter): string[] {
+    const state = (
+      adapter as unknown as { state: { pending: Array<{ eventId: string }> } }
+    ).state;
+    return state.pending.map((entry) => entry.eventId);
+  }
+
+  function pendingEntry(eventId: string) {
+    return {
+      eventId,
+      notificationThreadId: `thread-${eventId}`,
+      event: {
+        accountGeneration: 1,
+        platformEventId: eventId,
+        semanticRevision: 1,
+        scope: {
+          kind: 'chat_thread',
+          senderId: null,
+          chatId: 'Owner/Repo',
+          threadId: 'issue:7',
+        },
+        senderId: 'alice',
+        chatId: 'Owner/Repo',
+        threadId: 'issue:7',
+        subject: 'Issue title',
+        text: '@bot-user help',
+        attachments: [],
+        replyContext: { owner: 'Owner', repo: 'Repo', issueNumber: 7 },
+      },
+    };
+  }
+
+  function seedLegacy(dir: string, state: unknown): void {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'managed-state.json'), JSON.stringify(state));
+  }
+
+  const legacyState = (pending: number, outbound: number) => ({
+    version: 1,
+    generation: 1,
+    cursor: { lastProcessedAt: null, dispatchedComments: [] },
+    pending: Array.from({ length: pending }, (_, i) =>
+      pendingEntry(`github:legacy-${i}`),
+    ),
+    outbound: Array.from({ length: outbound }, (_, i) => ({
+      deliveryId: `d-${i}`,
+      ordinal: i,
+    })),
+  });
+
+  it('a destination change never replays one tenant pending into another', async () => {
+    const cwd = tempCwd();
+    const a = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await a.adapter.connect();
+    const stateFileA = a.adapter.stateFile;
+    seedState(a.adapter, (s) => {
+      s.pending = [pendingEntry('github:IC_1')];
+    });
+    await a.adapter.disconnect();
+
+    // Restart the SAME configured entry against tenant B: a different
+    // destination keys a different ledger FILE beneath the SAME entry
+    // directory, so A's pending claim is never loaded into B.
+    const b = identityAdapter(cwd, 'cp|tenant-b|chan-1|actor|ws|.');
+    await b.adapter.connect();
+    expect(b.adapter.stateFile).not.toBe(stateFileA);
+    expect(dirname(b.adapter.stateFile)).toBe(dirname(stateFileA));
+    expect(pendingOf(b.adapter)).toEqual([]);
+    await b.adapter.tick();
+    expect(b.plane.submit).toHaveLength(0);
+    await b.adapter.disconnect();
+  });
+
+  it('a workspace change within one tenant isolates the ledger', async () => {
+    const cwd = tempCwd();
+    const a = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await a.adapter.connect();
+    seedState(a.adapter, (s) => {
+      s.pending = [pendingEntry('github:IC_1')];
+    });
+    await a.adapter.disconnect();
+    const b = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws-2|.');
+    await b.adapter.connect();
+    expect(b.adapter.stateFile).not.toBe(a.adapter.stateFile);
+    expect(pendingOf(b.adapter)).toEqual([]);
+    await b.adapter.disconnect();
+  });
+
+  it('a second destination of the same entry is refused the shared lock', async () => {
+    const cwd = tempCwd();
+    const a = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await a.adapter.connect();
+    const b = identityAdapter(cwd, 'cp|tenant-b|chan-1|actor|ws|.');
+    await expect(b.adapter.connect()).rejects.toThrow(
+      /owned by another process/,
+    );
+    await a.adapter.disconnect();
+  });
+
+  it('logs the stranded legacy ledger on upgrade rather than dropping it silently', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    const dir = dirname(adapter.stateFile);
+    seedLegacy(dir, legacyState(2, 3));
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain(join(dir, 'managed-state.json'));
+    expect(stranded[0]).toContain('2 pending');
+    expect(stranded[0]).toContain('3 outbound');
+    expect(stranded[0]).toContain('staged-but-unadmitted claims are stranded');
+    expect(stranded[0]).toContain(
+      'un-receipted outbound segments were dropped',
+    );
+    // Not adopted: the legacy pending never enters this registration's state.
+    expect(pendingOf(adapter)).toEqual([]);
+    // Archive contract: the legacy is renamed (not deleted) to a .stranded-
+    // sibling that still holds the seeded claims, a log line names the archived
+    // path, and a second start does not re-announce it.
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(false);
+    const archived = readdirSync(dir).filter((f) =>
+      f.startsWith('managed-state.json.stranded-'),
+    );
+    expect(archived).toHaveLength(1);
+    const archivedState = JSON.parse(
+      readFileSync(join(dir, archived[0]), 'utf8'),
+    );
+    expect(archivedState.pending).toHaveLength(2);
+    expect(archivedState.outbound).toHaveLength(3);
+    expect(lines.some((l) => l.includes(join(dir, archived[0])))).toBe(true);
+    await adapter.disconnect();
+    lines.length = 0;
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await second.adapter.connect();
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(0);
+    await second.adapter.disconnect();
+  });
+
+  it('a quiescent legacy ledger (0/0) is reported without a loss alarm', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    seedLegacy(dirname(adapter.stateFile), legacyState(0, 0));
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 pending');
+    expect(stranded[0]).toContain('0 outbound');
+    expect(stranded[0]).not.toContain('claims are stranded');
+    expect(stranded[0]).not.toContain('outbound segments were dropped');
+    await adapter.disconnect();
+  });
+
+  it('an outbound-only legacy strand names the outbound consequence, not lost inbound claims', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    seedLegacy(dirname(adapter.stateFile), legacyState(0, 3));
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 pending');
+    expect(stranded[0]).toContain('3 outbound');
+    expect(stranded[0]).toContain(
+      'un-receipted outbound segments were dropped',
+    );
+    expect(stranded[0]).not.toContain(
+      'staged-but-unadmitted claims are stranded',
+    );
+    await adapter.disconnect();
+  });
+
+  it('a pending-only legacy strand names the inbound consequence, not dropped outbound', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    seedLegacy(dirname(adapter.stateFile), legacyState(1, 0));
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('1 pending');
+    expect(stranded[0]).toContain('staged-but-unadmitted claims are stranded');
+    expect(stranded[0]).not.toContain('outbound segments were dropped');
+    await adapter.disconnect();
+  });
+
+  it('an unreadable legacy ledger reports unknown counts and a possible loss, not an empty one', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'managed-state.json'), '{not json');
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('unknown pending');
+    expect(stranded[0]).toContain('unknown outbound');
+    expect(stranded[0]).toContain('could not be read');
+    expect(stranded[0]).not.toContain('0 pending');
+    await adapter.disconnect();
+  });
+
+  it('a legacy ledger staged after a rollback is still reported (keyed ledger exists)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await first.adapter.connect();
+    await first.adapter.disconnect();
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(0);
+    lines.length = 0;
+    seedLegacy(dirname(first.adapter.stateFile), legacyState(1, 0));
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await second.adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('1 pending');
+    expect(pendingOf(second.adapter)).toEqual([]);
+    await second.adapter.disconnect();
+  });
+
+  it('a failed first start leaves the legacy ledger unarchived for a rollback to recover', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter, fake } = identityAdapter(
+      cwd,
+      'cp|tenant-a|chan-1|actor|ws|.',
+      { log: (l) => lines.push(l) },
+    );
+    const dir = dirname(adapter.stateFile);
+    seedLegacy(dir, legacyState(1, 0));
+    // The client identity cannot resolve: the ordinary failed-first-start shape.
+    fake.knobs.identityError = new Error('bad credentials');
+    await expect(adapter.connect()).rejects.toThrow('bad credentials');
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(1);
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+    expect(
+      readdirSync(dir).filter((f) =>
+        f.startsWith('managed-state.json.stranded-'),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('a register-refused first start also leaves the legacy ledger unarchived', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter, plane } = identityAdapter(
+      cwd,
+      'cp|tenant-a|chan-1|actor|ws|.',
+      { log: (l) => lines.push(l) },
+    );
+    const dir = dirname(adapter.stateFile);
+    seedLegacy(dir, legacyState(1, 0));
+    plane.failNextRegister(
+      Object.assign(new Error('channel_disconnected'), {
+        status: 409,
+        code: 'channel_disconnected',
+      }),
+    );
+    await expect(adapter.connect()).rejects.toThrow('channel_disconnected');
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+    expect(
+      readdirSync(dir).filter((f) =>
+        f.startsWith('managed-state.json.stranded-'),
+      ),
+    ).toHaveLength(0);
   });
 });

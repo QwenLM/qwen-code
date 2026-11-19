@@ -7,6 +7,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
+  existsSync,
   fsyncSync,
   mkdirSync,
   openSync,
@@ -132,13 +133,19 @@ export class ManagedGithubStateStore {
   readonly directory: string;
   readonly file: string;
 
-  constructor(name: string, cwd: string, baseUrl: string) {
-    // One directory per channel name per endpoint per workspace, beside the
-    // other channel state. Credentials never define identity. The lock
-    // serializes concurrent managed instances of this name + endpoint; it
-    // does not cross-lock the Legacy GitHub channel, so the operator must run
-    // exactly one consumer per bot identity.
-    const key = createHash('sha256')
+  constructor(name: string, cwd: string, baseUrl: string, identityKey = '') {
+    // The lock directory is keyed by the configured entry (channel name +
+    // endpoint baseUrl) per workspace — NOT by destination — so two instances
+    // of the same name + endpoint contend for one connection lock even when
+    // they target different control-plane destinations; a per-destination lock
+    // would let both run concurrently and duplicate inbound processing. The
+    // ledger FILE beneath that directory is keyed by the full registration
+    // identity (control plane + tenant + channel + actor + workspace +
+    // cwd-relative), so a pending comment staged under one registration is
+    // never loaded or replayed under another. Credentials never define
+    // identity. The lock does not cross-lock the Legacy GitHub channel, so the
+    // operator must run exactly one consumer per bot identity.
+    const entryKey = createHash('sha256')
       .update(`${name}\u0000${baseUrl}`)
       .digest('hex')
       .slice(0, 16);
@@ -146,21 +153,113 @@ export class ManagedGithubStateStore {
       getGlobalQwenDir(),
       'channels',
       getWorkspaceScopeDirName(cwd),
-      `github-${key}`,
+      `github-${entryKey}`,
     );
-    this.file = join(this.directory, 'managed-state.json');
+    const ledgerKey = createHash('sha256')
+      .update(identityKey)
+      .digest('hex')
+      .slice(0, 16);
+    this.file = join(this.directory, `managed-state-${ledgerKey}.json`);
   }
 
   load(): ManagedGithubState | undefined {
+    // Name the file and keep the cause, and keep an I/O failure distinguishable
+    // from a corrupt state: the directory now holds a ledger per registration,
+    // so the operator must know WHICH file is unreadable (e.g. EISDIR) versus
+    // merely invalid, while a sibling registration's healthy ledger sits beside
+    // it. Mirrors the WeCom / DingTalk stores this change parallels.
+    let raw: string;
     try {
-      const value: unknown = JSON.parse(readFileSync(this.file, 'utf8'));
-      if (!validManagedGithubState(value)) throw new Error('invalid state');
-      return value;
+      raw = readFileSync(this.file, 'utf8');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw new Error(
-        'Managed GitHub state is unreadable or invalid; restore it before restarting.',
+        `Managed GitHub state at ${this.file} could not be read; restore it before restarting.`,
+        { cause: error },
       );
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(
+        `Managed GitHub state at ${this.file} is not valid JSON; restore it before restarting.`,
+        { cause: error },
+      );
+    }
+    if (!validManagedGithubState(value)) {
+      throw new Error(
+        `Managed GitHub state at ${this.file} is invalid; restore it before restarting.`,
+      );
+    }
+    return value;
+  }
+
+  /**
+   * The pre-registration-identity ledger this entry used before the upgrade.
+   * A sibling `managed-state.json` is stranded by the upgrade: its staged-but-
+   * unadmitted claims were never seen by the control plane (only `submitInbound`
+   * makes a claim visible), and the fresh ledger's null cursor starts the poll
+   * window at connect time, so the old notification is not re-listed. Report
+   * the path and its pending / outbound counts so the drop is explicit, never
+   * silent. Detection is NOT gated on the identity-keyed ledger being absent: a
+   * rollback to the pre-upgrade build can stage fresh claims into
+   * `managed-state.json` after a keyed ledger already exists, and those must
+   * still be reported. The caller archives the file once the start succeeds
+   * (`archiveStrandedLegacy`). The legacy ledger is NOT adopted — adopting it
+   * would replay one registration's pending into another, the cross-ownership
+   * hazard the identity keying prevents.
+   *
+   * `readable` distinguishes a legacy whose contents could not be read or
+   * parsed (counts unknown, reported as 0 but flagged) from one that parsed to
+   * an empty ledger: an unreadable legacy certainly strands whatever it held,
+   * so the caller must not render it as a quiescent "nothing was lost".
+   */
+  strandedLegacyLedger():
+    | { path: string; pending: number; outbound: number; readable: boolean }
+    | undefined {
+    const legacyPath = join(this.directory, 'managed-state.json');
+    if (!existsSync(legacyPath)) return undefined;
+    let pending = 0;
+    let outbound = 0;
+    let readable = true;
+    try {
+      const value = JSON.parse(readFileSync(legacyPath, 'utf8')) as {
+        pending?: unknown[];
+        outbound?: unknown[];
+      } | null;
+      const pendingList = value?.pending;
+      const outboundList = value?.outbound;
+      pending = Array.isArray(pendingList) ? pendingList.length : 0;
+      outbound = Array.isArray(outboundList) ? outboundList.length : 0;
+    } catch {
+      // A corrupt or unreadable legacy still strands; flag it so the caller
+      // reports unknown counts and a possible loss, never a silent "empty".
+      readable = false;
+    }
+    return { path: legacyPath, pending, outbound, readable };
+  }
+
+  /**
+   * Archive a reported legacy ledger so it is not re-announced on every later
+   * start (and a second registration of the entry is not told the first
+   * registration's claims were its own). Renaming — not deleting — keeps the
+   * stranded claims inspectable, and a rollback that stages a fresh
+   * `managed-state.json` is detected again on the next upgrade. This never
+   * adopts the claims into the keyed ledger. Returns the archived path, or
+   * undefined when there is nothing to archive or the rename fails (the file
+   * then stays and is reported again next start — degraded, never a startup
+   * failure).
+   */
+  archiveStrandedLegacy(): string | undefined {
+    const legacyPath = join(this.directory, 'managed-state.json');
+    if (!existsSync(legacyPath)) return undefined;
+    const archived = `${legacyPath}.stranded-${randomUUID()}`;
+    try {
+      renameSync(legacyPath, archived);
+      return archived;
+    } catch {
+      return undefined;
     }
   }
 

@@ -1,0 +1,54 @@
+# Managed GitHub ledger registration-identity keying
+
+- **Status:** proposed
+- **Date:** 2026-11-19
+- **Scope:** `packages/channels/github` (state store + adapter), `channel-base` contract comment, tests
+- **Related:** the WeCom adapter's P1-D/E fix (PR #17441) and the DingTalk keying (PR #17742); the shared `destinationKey` contract in `channel-base`; [Chinese version](2026-11-19-managed-github-registration-identity.zh-CN.md)
+
+## Problem
+
+The managed GitHub state store keys its single ledger file by the configured entry only — channel name + endpoint `baseUrl`, per workspace scope. A comment staged as a pending claim under one control-plane registration (tenant A) is therefore loaded when the same configured entry is restarted against a different registration (tenant B, or a different actor/workspace/cwd-relative within one tenant). The persisted event carries the full text and no tenant identity; `resubmitPending()` forwards it through the HTTP client, which supplies the new registration's tenant header and channel id, so an event already admitted by A whose answer was lost can create an input under B. This is the same cross-ownership replay the WeCom adapter closed in P1-E and the DingTalk adapter closed in #17742.
+
+## Current state
+
+`ManagedGithubStateStore(name, cwd, baseUrl)` hashes `name\0baseUrl` into a per-entry directory `~/.qwen/channels/<workspace-scope>/github-<hash>` and stores a single `managed-state.json` beneath it. The directory lock (`proper-lockfile`) serializes concurrent managed instances of the name + endpoint. The adapter constructs the store with three arguments and never passes the control-plane destination. `load()` collapses an I/O failure and corrupt content into one unnamed error.
+
+The shared `ManagedChannelControlPlane.destinationKey` already binds the full registration identity — base URL + tenant + channel + actor + workspace + cwd-relative — and `HttpManagedChannelControlPlane`, the only production implementation, populates it on every real path. The base interface comment names the GitHub store as a sibling that does not yet bind it.
+
+## Proposed change
+
+Mirror the WeCom / DingTalk shape exactly:
+
+- **Store constructor** gains a fourth parameter `identityKey = ''`. The lock directory stays keyed by the configured entry (`name\0baseUrl`) per workspace scope — NOT by destination — so two instances of the same name + endpoint contend for one connection lock even when they target different control-plane destinations. The ledger FILE beneath that directory is keyed separately by `sha256(identityKey)`: `managed-state-<ledgerKey>.json`. A pending ledger staged under one registration is never loaded or replayed under another registration of the same entry.
+- **Adapter constructor** passes `options.controlPlane.destinationKey ?? ''` as the fourth argument. The `?? ''` fallback only spares non-persisting test doubles that omit the optional field; the production HTTP client always supplies it.
+- **`load()`** splits the read / parse / validate arms, names `this.file`, and keeps the fs `{ cause }`, so an operator facing several `<hash>.json` ledgers can tell which registration is unreadable versus merely invalid.
+
+The lock stays per-entry deliberately: a per-destination lock would let two registrations of one configured name + endpoint each acquire a lock and run concurrently, duplicating inbound processing. The ledger keying adds cross-registration isolation without narrowing the lock.
+
+The shared `destinationKey` comment in `channel-base` is updated to name WeCom, DingTalk **and GitHub** as the adapters that bind the registration identity, leaving email (a separate variant) as the remaining follow-up.
+
+## Upgrade consequence and diagnostics
+
+The ledger file is renamed from `managed-state.json` to `managed-state-<ledgerKey>.json` with **no adoption**: the first restart after upgrading starts on a pristine identity-keyed ledger. A claim that was staged (persisted) but not yet admitted is stranded — the control plane never saw it (only `submitInbound` makes a claim visible), so only this client's own ledger could re-drive it, and the new ledger does not contain it. Unlike DingTalk's stream, GitHub does not ack a frame to the provider; the loss comes from the notification window: a thread holding a claim is never marked read and freezes the watermark, but the fresh ledger's cursor is null, so the first poll's `since` is the connect time and the old notification is not re-listed. The same reset drops the cursor (notification watermark + dispatched-comment ring) and the un-receipted outbound segments. This is the deliberate stranding tradeoff the WeCom / DingTalk designs record: adopting the legacy ledger would replay one registration's pending into another, the cross-ownership hazard the keying prevents.
+
+To make the drop explicit rather than silent, `connect()` detects a sibling `managed-state.json` (`strandedLegacyLedger()`) and logs one line naming that path and its pending/outbound counts; it does not adopt it. Detection is deliberately NOT gated on the identity-keyed ledger being absent: a rollback to the pre-upgrade build can stage fresh claims into `managed-state.json` after a keyed ledger already exists, and those claims must still be reported, not vanish silently. The record carries a `readable` flag: a legacy whose contents cannot be read or parsed is reported with `unknown` counts and an explicit "any staged claims it held are stranded" warning, never rendered as a quiescent empty ledger. For a readable legacy the inbound and outbound consequences are named separately — the inbound clause only when `pending > 0`, the outbound clause only when `outbound > 0` — so an outbound-only strand does not report lost inbound comments and a quiescent 0/0 upgrade gets the diagnostic line but no false data-loss alarm. A corrupt legacy never throws, so a damaged legacy never turns the upgrade into a hard startup failure. The archive is deferred until the start succeeds: after the client identity resolves, registration and the ownership re-check, `archiveStrandedLegacy()` renames the legacy to `managed-state.json.stranded-<id>` — never deletes it, so the stranded claims stay inspectable — and a second log line names the archived path so an operator following the notice can find the claims. A failed first start leaves the legacy untouched so a rollback to the pre-upgrade build can still recover it (the notice simply repeats on the retry); a rollback that stages a fresh `managed-state.json` is detected again on the next upgrade. The reverse direction is bounded too: after a successful upgrade, rolling back to the pre-upgrade build starts on a fresh ledger because that build loads only `managed-state.json`, which the new build never writes; the claims are not destroyed (the identity-keyed ledger keeps them and a later roll-forward reloads them), but while the rollback stands the pre-upgrade build gives no signal that a previous registration is holding staged-but-unadmitted comments.
+
+## Files affected
+
+- `packages/channels/base/src/managed-channel.ts` — `destinationKey` comment: name WeCom, DingTalk and GitHub as binders; email remains a follow-up.
+- `packages/channels/github/src/managed-state.ts` — store constructor: entry-keyed directory + identity-keyed ledger file; `load()` split arms; `strandedLegacyLedger()` + `archiveStrandedLegacy()`.
+- `packages/channels/github/src/managed-github-adapter.ts` — pass `destinationKey` to the store; `connect()` strand notice + deferred archive + archived-path log.
+- `packages/channels/github/src/managed-state.test.ts` — file-path expectations updated; keying, isolation, stranding and corrupt-legacy witnesses added.
+- `packages/channels/github/src/managed-github-adapter.test.ts` — `fakeControlPlane` gains a `destinationKey`; destination/workspace isolation, shared-lock, and stranding-diagnostic witnesses added.
+- This design doc and its Chinese version.
+
+## Scope boundaries
+
+- The GitHub notification polling, admission/outbound discipline, and mark-read/window-freeze mechanism are unchanged. Only the ledger file name and the upgrade diagnostics change.
+- The `disconnect()` row-deregistration gate is a separate concern and is not touched here.
+- No control-plane (Java) change; no `channel-base` contract/API change — only the `destinationKey` doc comment is updated.
+- The email store is out of scope (a separate variant); it is the remaining follow-up.
+
+## Open questions
+
+- None: the shape is settled by the WeCom P1-D/E and DingTalk #17742 precedent and the shared `destinationKey` contract.
