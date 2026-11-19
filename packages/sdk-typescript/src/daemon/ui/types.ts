@@ -252,6 +252,8 @@ export interface DaemonTranscriptTimingMeta {
   durationMs: number;
   /** `kind === 'request'`: dispatch to first user-visible content. */
   ttftMs?: number;
+  /** `kind === 'request'`: request start to first user-visible content. */
+  firstVisibleOffsetMs?: number;
   /** `kind === 'request'`: 'error' means the request failed. */
   status?: 'ok' | 'error';
   responseId?: string;

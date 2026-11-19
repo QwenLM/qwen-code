@@ -122,10 +122,18 @@ function rowContent(
 ): { status?: Status; facts: Fact[]; sections: Section[] } {
   if (row.kind === 'request') {
     const { durationMs, startedAt, ttftMs } = row.timing;
-    const validTtft =
+    const firstToken =
       ttftMs !== undefined && ttftMs >= 0 && ttftMs <= durationMs
-        ? ttftMs
+        ? {
+            text: formatDuration(ttftMs),
+            offsetMs: row.timing.firstVisibleOffsetMs ?? ttftMs,
+          }
         : undefined;
+    const generating =
+      firstToken &&
+      t('trajectory.detail.generating', {
+        duration: formatDuration(durationMs - firstToken.offsetMs),
+      });
     const usage = row.usage;
     return {
       ...(row.status === 'error' ? { status: 'failed' as const } : {}),
@@ -137,31 +145,23 @@ function rowContent(
         {
           label: t('trajectory.inspector.ttft'),
           value:
-            ttftMs === undefined ? undefined : validTtft === undefined ? (
+            ttftMs === undefined ? undefined : firstToken === undefined ? (
               t('trajectory.inspector.invalidTtft')
             ) : (
               <>
-                {formatDuration(validTtft)}{' '}
-                <span className={styles.sub}>
-                  ·{' '}
-                  {t('trajectory.detail.generating', {
-                    duration: formatDuration(durationMs - validTtft),
-                  })}
-                </span>
+                {firstToken.text}{' '}
+                <span className={styles.sub}>· {generating}</span>
                 <span className={styles.ttftBar} aria-hidden="true">
                   <i
                     style={{
-                      width: `${durationMs > 0 ? (validTtft / durationMs) * 100 : 0}%`,
+                      width: `${durationMs > 0 ? (firstToken.offsetMs / durationMs) * 100 : 0}%`,
                     }}
                   />
                   <i />
                 </span>
               </>
             ),
-          text:
-            validTtft === undefined
-              ? undefined
-              : `${formatDuration(validTtft)} · ${t('trajectory.detail.generating', { duration: formatDuration(durationMs - validTtft) })}`,
+          text: firstToken && `${firstToken.text} · ${generating}`,
         },
         {
           label: t('trajectory.detail.tokens'),

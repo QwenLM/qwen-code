@@ -111,6 +111,18 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_000;
 // measures 2,137,893 (107 below the previous 2,138,000 ceiling) and head
 // d5f6a103a6 measures 2,138,797 in CI, 797 above it. The warning sits 203 above
 // that measurement and the ceiling 1,203 above it.
+// The document runtime measured 2,138,044 bytes on head 2ef7af8e69, 44 above
+// the previous 2,138,000 ceiling. SessionGoalMarker is NOT reachable from the
+// document entry (it is imported only by WebShellSidebar) and the RU catalog
+// is stubbed in transcript mode, so the sidebar goal marker feature (#17515)
+// contributes only its EN/ZH `sidebar.sessionGoal` label strings (~151 bytes)
+// to this bundle. This PR's deliberate budget raise was folded into main's
+// larger `/send` ceilings below when merging, so the CURRENT caps apply: the
+// warning sits 7,056 above that measurement and the ceiling 8,056 above it.
+// Those two figures price THIS feature against the caps, not the remaining
+// headroom: after merging main the same tree measures 2,145,649 locally,
+// already over the warning and 451 below the ceiling. Size new copy against
+// that 451, and re-measure in CI before trusting it.
 // The `/send` command, its composer chip and session tab copy (ten keys
 // across two locales) add 1,283: 2,137,893 against 2,139,176 locally on main
 // 039ed577fb without and with the change. Recording the exchange in the
@@ -126,11 +138,33 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_000;
 // against 2,144,387 with the new copy. CSS and third-party inputs are unchanged,
 // and the forbidden-input guard passes. Leave 713 bytes to the warning and
 // 1,713 to the ceiling.
+// The Goal sidebar marker (#17515) and the background-task composer chips
+// (#17398) then grew the transcript dictionary past that ceiling: the Lint &
+// Static / Build lane on main d83fa2154e measures 2,146,529 JS bytes (CSS
+// 2,423,645, separate), 429 over the old 2,146,100 cap, which reddened every
+// PR's build. The bundle pulls web-shell's whole i18n table, so these legitimate
+// first-party strings land here; the third-party input mix is unchanged and the
+// forbidden-input guard passes. Re-track the lane measurement: leave 671 bytes
+// to the warning and 1,671 to the ceiling. (A local build against the worktree's
+// own node_modules measures lower — 2,138,797 — but the lane's absolute number
+// is what these constants track.)
+// The workspace artifact library copy (nine keys across three locales) is
+// interactive-only: managed-artifact-library-messages.transcript-stub.ts
+// replaces it in transcript mode, so it contributes no bytes here. The merged
+// tree first measured 2,148,522 JS bytes with the copy inlined; registering
+// the stub brings it to 2,146,575 (CSS 2,423,645, separate), 46 above the
+// 2,146,529 lane measurement #17746 re-tracked. The forbidden-input guard
+// passes and the third-party input mix is unchanged, so the constants stay at
+// main's #17746 tracking instead of raising them for this PR.
 //
 // This branch (#13766, transcript context diff) carries its own budget above
 // main: merged with main 3d75b8ee (head 93e2d416) the document renderer
-// measures 2,149,889 bytes in CI, 3,789 above the previous 2,146,100 ceiling.
-// The warning sits 111 above that measurement and the ceiling 1,111 above it.
+// measured 2,149,889 bytes in CI. The commits since that merge base
+// (3d75b8ee..250e91a238) add zero bytes to this renderer — the local worktree
+// build measures the same 2,142,853 before and after the merge, and none of
+// them touches the transcript dictionary — so the branch budget stays at the
+// 93e2d416 CI measurement: the warning sits 111 above it and the ceiling
+// 1,111 above it. Re-track when the merged tree's own CI measurement lands.
 const MAX_DOCUMENT_RUNTIME_BYTES = 2_151_000;
 
 // Modules that must not be reachable from the document entry, checked against

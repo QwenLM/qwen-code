@@ -123,6 +123,7 @@ function makeFixture(
   const cdCalls: Array<{ sessionId: string; path: string }> = [];
   const setWorktreeCalls: unknown[][] = [];
   const clearWorktreeCalls: string[] = [];
+  const baseCommitCalls: unknown[][] = [];
   const resetPendingCalls: Array<[string, string]> = [];
   const gateOrder: string[] = [];
   // Model the bridge's admission fence: the handoff routes arm it and then
@@ -230,6 +231,9 @@ function makeFixture(
       const s = workspaceSessions.find((x) => x.sessionId === id);
       if (s) s.worktree = undefined;
     },
+    setSessionBaseCommit: (...args: unknown[]) => {
+      baseCommitCalls.push(args);
+    },
     setSessionResetPending: (id: string) => {
       resetPendingCalls.push(['set', id]);
       gateOrder.push(`arm:${id}`);
@@ -292,6 +296,7 @@ function makeFixture(
     cdCalls,
     setWorktreeCalls,
     clearWorktreeCalls,
+    baseCommitCalls,
     resetPendingCalls,
     gateOrder,
     summaries,
@@ -410,9 +415,16 @@ describe('POST /session/:id/worktree-handoff', () => {
     expect(res.status).toBe(200);
     expect(res.body.worktree.branch).toBe('');
     expect(res.body.currentCwd).toBe(res.body.worktree.path);
+    // The live worktree meta carries the start commit + base branch so the
+    // commit fallback keeps a boundary in the handoff-to-restart window (R5-1).
+    expect(res.body.worktree.baseCommit).toMatch(/^[0-9a-f]{40}$/);
+    expect(res.body.worktree.baseBranch).toBeTruthy();
     expect(fixture.cdCalls).toHaveLength(1);
     expect(fixture.cdCalls[0].path).toBe(res.body.worktree.path);
     expect(fixture.setWorktreeCalls).toHaveLength(1);
+    expect(
+      (fixture.setWorktreeCalls[0][1] as { baseCommit?: string }).baseCommit,
+    ).toBe(res.body.worktree.baseCommit);
     expect(
       await import('node:fs/promises').then((fs) =>
         fs.readFile(path.join(res.body.worktree.path, 'README.md'), 'utf8'),
@@ -471,6 +483,11 @@ describe('POST /session/:id/worktree-handoff', () => {
       ),
     ).toBe('dirty\n');
     expect(fixture.clearWorktreeCalls).toEqual([fixture.sessionId]);
+    // The worktree base is promoted into the plain start commit so the commit
+    // fallback keeps a boundary after the worktree meta is removed (R5-1).
+    expect(fixture.baseCommitCalls).toHaveLength(1);
+    expect(fixture.baseCommitCalls[0][0]).toBe(fixture.sessionId);
+    expect(fixture.baseCommitCalls[0][1]).toMatch(/^[0-9a-f]{40}$/);
     const sidecar = await fixture.readSidecar();
     expect(sidecar.state).toBe('missing');
   });

@@ -10,6 +10,7 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, expect, it, vi } from 'vitest';
 import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
+import { buildTimeline } from '../../trajectory/buildTimeline';
 import { buildTrajectory } from '../../trajectory/buildTrajectory';
 import { projectTrajectoryWindow } from '../../trajectory/projectTrajectoryWindow';
 import type { TrajectoryExecutionRow } from '../../trajectory/project-trajectory-executions';
@@ -188,6 +189,37 @@ it('shows request timing and tokens without adding cached tokens twice', async (
   );
   expect(container.textContent).not.toContain('140');
   expect(fact(container, 'Model')?.textContent).toBe('qwen-test');
+});
+
+it('uses the recorded first visible offset for the marker and generating time', async () => {
+  const entries = projectTrajectoryWindow([
+    {
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: {
+            timing: {
+              kind: 'request',
+              startedAt: 1_760_000_000_000,
+              durationMs: 1600,
+              ttftMs: 800,
+              firstVisibleOffsetMs: 1000,
+            },
+          },
+        },
+      },
+    },
+  ]);
+  const trajectory = buildTrajectory(entries);
+  const row = trajectory.rows[0]!;
+  const container = await render(row);
+  expect(fact(container, 'First token')?.textContent).toBe(
+    '800ms · 600ms generating',
+  );
+  expect(buildTimeline(trajectory)?.spans[0]?.ttftEnd).toBe(1000);
 });
 
 it('marks timing that was not recorded instead of leaving it out', async () => {

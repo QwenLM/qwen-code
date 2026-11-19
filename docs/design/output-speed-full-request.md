@@ -2,6 +2,8 @@
 
 [English](output-speed-full-request.md) | [简体中文](output-speed-full-request.zh-CN.md)
 
+> [TTFT from request dispatch](ttft-from-request-dispatch.md) later moved the start of TTFT from before the request is built to its dispatch, so the time below starts when the request is sent. The output-speed rules are unchanged.
+
 ## Status and scope
 
 Implemented for #16714. This changes how CLI `/stats` and Web Shell Token Usage compute output speed (TPS). TTFT, generation time and the recorded events stay as they are. It revises the output-speed rules of [Per-model generation timing](model-generation-timing.md) (D2, D5) and the [Token usage trend](token-usage-trend.md) speed view. The live tokens/s estimate next to the spinner and the managed diagnostics panel are out of scope.
