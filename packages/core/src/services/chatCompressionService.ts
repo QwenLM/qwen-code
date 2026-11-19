@@ -466,13 +466,6 @@ function collectActiveSubagents(config: Config): SubagentSnapshot[] {
 }
 
 /**
- * Compose the compression side-query system prompt: the base template,
- * optionally followed by an `Additional Instructions:` block containing
- * the user's `/compress <text>` directives and any `additionalContext`
- * returned by PreCompact hooks. Order is user-first / hook-appended so an
- * explicit user intent outranks a global hook policy when both speak.
- */
-/**
  * Bounded digest of recent failed tool calls for the compaction summarizer
  * (#17314). Failed attempts live in the history being summarized, but the
  * summary keeps them only at the summarizer's discretion; the digest states
@@ -483,16 +476,35 @@ function collectActiveSubagents(config: Config): SubagentSnapshot[] {
  */
 const FAILED_ATTEMPT_DIGEST_MAX_ENTRIES = 8;
 const FAILED_ATTEMPT_ERROR_SNIPPET_CHARS = 160;
-// ANSI CSI sequences (ESC [ ... final byte) stripped from untrusted
-// error text before it enters the system instruction (#17322 F2).
+const ESC = String.fromCharCode(27);
+const BEL = String.fromCharCode(7);
+// The full ANSI grammar, not just simple CSI sequences (#17322 F5): CSI
+// with private-mode and colon parameters (ESC [ [0-?]* [ -/]* [@-~]),
+// OSC strings (ESC ] ... BEL | ESC \), the general two-byte escape form
+// (ESC + optional intermediates + a final byte, covering `ESC c`, `ESC 7`,
+// `ESC M`, ...), and the 8-bit CSI form (U+009B). A trailing catch-all
+// drops any ESC left stranded by an unterminated sequence.
 const ANSI_ESCAPE_PATTERN = new RegExp(
-  `${String.fromCharCode(27)}\\[[0-9;]*[a-zA-Z]`,
+  [
+    `${ESC}\\[[0-?]*[ -/]*[@-~]`,
+    `${ESC}\\].*?(?:${BEL}|${ESC}\\\\)`,
+    `${ESC}[ -/]*[0-~]`,
+    '\\u009B[0-?]*[ -/]*[@-~]',
+    ESC,
+  ].join('|'),
+  'g',
+);
+// Every line terminator a terminal renders as a break, not just \n and \r
+// (#17322 F5): vertical tab, form feed, NEL (U+0085), U+2028, U+2029.
+const VT = String.fromCharCode(0x0b);
+const FF = String.fromCharCode(0x0c);
+const NEL = String.fromCharCode(0x85);
+const LINE_TERMINATOR_PATTERN = new RegExp(
+  `[\\n\\r${VT}${FF}${NEL}\\u2028\\u2029]`,
   'g',
 );
 
-export function buildFailedToolAttemptDigest(
-  history: Content[],
-): string | undefined {
+function buildFailedToolAttemptDigest(history: Content[]): string | undefined {
   const entries: string[] = [];
   for (
     let i = history.length - 1;
@@ -500,25 +512,32 @@ export function buildFailedToolAttemptDigest(
     i--
   ) {
     for (const part of history[i]?.parts ?? []) {
+      // Parallel tool responses share one Content (the send boundary
+      // flattens a batch into `parts`), so the cap must also hold inside
+      // a single turn (#17322 F1).
+      if (entries.length >= FAILED_ATTEMPT_DIGEST_MAX_ENTRIES) break;
       const response = part.functionResponse?.response as
         | { error?: unknown }
         | undefined;
       const error = response?.error;
       if (typeof error !== 'string' || error.length === 0) continue;
       const name = part.functionResponse?.name ?? 'unknown_tool';
+      // Untrusted error text enters the system-instruction channel, so it
+      // gets the same treatment the PreCompact hook path applies, and in
+      // this order: strip ANSI and flatten every line terminator BEFORE
+      // truncating (a bound-split sequence would otherwise leave a bare
+      // ESC behind), then escape < and > so the text cannot forge
+      // instruction tags (#17322 F2/F5).
+      const safe = error
+        .replaceAll(ANSI_ESCAPE_PATTERN, '')
+        .replaceAll(LINE_TERMINATOR_PATTERN, ' ')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
       const snippet =
-        error.length > FAILED_ATTEMPT_ERROR_SNIPPET_CHARS
-          ? `${error.slice(0, FAILED_ATTEMPT_ERROR_SNIPPET_CHARS)}...`
-          : error;
-      // Newlines and ANSI escapes from untrusted tool-error text are
-      // flattened so a hostile error message cannot forge digest lines
-      // or inject terminal controls into the system instruction
-      // (#17322 F2).
-      const flat = snippet
-        .replaceAll('\n', ' ')
-        .replaceAll('\r', ' ')
-        .replaceAll(ANSI_ESCAPE_PATTERN, '');
-      const entry = `- ${name}: ${flat}`;
+        safe.length > FAILED_ATTEMPT_ERROR_SNIPPET_CHARS
+          ? `${safe.slice(0, FAILED_ATTEMPT_ERROR_SNIPPET_CHARS)}...`
+          : safe;
+      const entry = `- ${name}: ${snippet}`;
       if (!entries.includes(entry)) entries.push(entry);
     }
   }
@@ -529,6 +548,13 @@ export function buildFailedToolAttemptDigest(
   ].join('\n');
 }
 
+/**
+ * Compose the compression side-query system prompt: the base template,
+ * optionally followed by an `Additional Instructions:` block containing
+ * the user's `/compress <text>` directives and any `additionalContext`
+ * returned by PreCompact hooks. Order is user-first / hook-appended so an
+ * explicit user intent outranks a global hook policy when both speak.
+ */
 function buildCompressionSystemPrompt(
   userInstructions: string | undefined,
   hookInstructions: string,
