@@ -11,6 +11,7 @@ import {
   getCustomSystemPrompt,
   getManualPlanExitSystemReminder,
   getPlanModeSystemReminder,
+  isTodoWriteToolAvailable,
   loadCoreSystemPromptSource,
   resolvePathFromEnv,
   getCompressionPrompt,
@@ -1834,6 +1835,98 @@ describe('getPlanModeSystemReminder', () => {
 
   it('should be deterministic', () => {
     expect(getPlanModeSystemReminder()).toBe(getPlanModeSystemReminder());
+  });
+
+  it('instructs todo_write before exit_plan_mode for Session Workflow', () => {
+    const result = getPlanModeSystemReminder(false, true, true);
+
+    expectText(result, [
+      'Before converging, capture the plan as a structured Todo list',
+      'call the todo_write tool with one Todo per plan step',
+      'a non-empty content',
+      'blockedBy listing the ids of the steps that must complete first',
+      'by calling the exit_plan_mode tool',
+    ]);
+    // The Todo list is captured first, only then is the plan presented.
+    expect(result.indexOf('todo_write')).toBeLessThan(
+      result.indexOf('by calling the exit_plan_mode tool'),
+    );
+  });
+
+  it('keeps the Todo reminder off when the gate is off or plan-only', () => {
+    // Gate off (default), todo_write disabled, and plan-only mode
+    // (SDK/subagents, which never run the interactive exit_plan_mode
+    // approval) must all stay text-only.
+    const base = getPlanModeSystemReminder();
+    expectText(base, ['exit_plan_mode'], ['todo_write']);
+    // Session Workflow on but todo_write disabled: the Todo sentence must
+    // stay out — it is gated on the same flag as every other Todo
+    // instruction, not on the workflow context alone.
+    expectText(
+      getPlanModeSystemReminder(false, true),
+      ['Present your plan'],
+      ['todo_write'],
+    );
+    expectText(
+      getPlanModeSystemReminder(true, true, true),
+      ['Present your plan directly'],
+      ['todo_write'],
+    );
+    // The Session Workflow variant is exactly the base reminder with one
+    // Todo-capture sentence inserted before the presentation instruction.
+    const inserted =
+      'Before converging, capture the plan as a structured Todo list: call the todo_write tool with one Todo per plan step (each with a stable id, a non-empty content, status "pending", and — when a step depends on others — blockedBy listing the ids of the steps that must complete first), so the plan can be reviewed as a task graph. Present your plan';
+    expect(getPlanModeSystemReminder(false, true, true)).toBe(
+      base.replace('Present your plan', inserted),
+    );
+  });
+});
+
+describe('isTodoWriteToolAvailable', () => {
+  const registered = () => ({
+    getAllToolNames: () => [ToolNames.TODO_WRITE],
+  });
+
+  it('answers from the prompt snapshot when one has been recorded', () => {
+    // An eager allowlist demotes the tool to deferred without removing it
+    // from the registry, so the registry alone would keep the gate open:
+    // the snapshot decides once it exists, in both directions.
+    expect(
+      isTodoWriteToolAvailable({
+        isTodoWriteEnabled: () => true,
+        getToolRegistry: registered,
+        getPromptToolSnapshot: () => new Set<string>(),
+      }),
+    ).toBe(false);
+    expect(
+      isTodoWriteToolAvailable({
+        isTodoWriteEnabled: () => true,
+        getToolRegistry: undefined,
+        getPromptToolSnapshot: () => new Set([ToolNames.TODO_WRITE]),
+      }),
+    ).toBe(true);
+  });
+
+  it('falls back to the registry when no prompt snapshot has been recorded', () => {
+    // Before startChat the snapshot is undefined: dropping the optional
+    // call here would throw on a config that lacks the method instead of
+    // degrading to the registry.
+    expect(
+      isTodoWriteToolAvailable({
+        isTodoWriteEnabled: () => true,
+        getToolRegistry: registered,
+      }),
+    ).toBe(true);
+  });
+
+  it('answers unavailable rather than throwing when no registry is set', () => {
+    // The last arm is the only one that can see nothing at all — a config
+    // without getToolRegistry must degrade to false, not throw.
+    expect(
+      isTodoWriteToolAvailable({
+        isTodoWriteEnabled: () => true,
+      }),
+    ).toBe(false);
   });
 });
 
