@@ -45,7 +45,9 @@ Then enter:
 
 3. Once `/mcp` shows the server is connected, ask the model to use its tools.
    Interactive sessions that load servers from `settings.json` pick up
-   `mcpServers` changes without a restart (hot reload).
+   `mcpServers` changes without a restart (hot reload). If you edit the
+   project's `.mcp.json`, restart Qwen Code in the same project to load the
+   changes.
 
 ### Server approval and session restrictions
 
@@ -61,7 +63,9 @@ Then enter:
 - The [Linux tool execution sandbox](./sandbox.md#linux-tool-execution-sandbox)
   rejects startup if the session configuration includes an MCP server. To start
   in this sandbox, remove the server entries from the settings and project
-  configuration used by the session and omit `--mcp-config`.
+  configuration used by the session and omit `--mcp-config`. If configured,
+  also unset `mcp.serverCommand` and remove `memory.mem0`, which registers
+  the bundled Mem0 server.
 
 If the session supports settings-based servers and an eligible server still
 does not appear in `/mcp` after a settings change, restart Qwen Code in the
