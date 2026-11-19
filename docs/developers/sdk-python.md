@@ -386,9 +386,11 @@ Use `interrupt()` to cancel the current operation, `close()` to clean up the
 underlying process, and `get_session_id()` to persist a session id for later.
 
 Control calls preserve initialization failures, including `ProcessExitError`
-when the CLI exits non-zero before initialization completes. Explicit closure
-or a clean process exit rejects control calls with `RuntimeError("Query is closed")`.
-A clean exit also ends pending controls immediately, without waiting for
+when the CLI exits non-zero before initialization completes. For a query that has
+not already failed, new control calls after `close()` completes raise
+`RuntimeError("Query is closed")`. A control call already writing when shutdown
+begins may instead raise the underlying transport error. A clean exit ends
+pending response waits immediately, without waiting for
 `timeout.control_request`. Already queued messages remain readable after a clean
 exit; use `close()` or the query context manager to finish input-task cleanup.
 

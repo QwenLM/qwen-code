@@ -103,6 +103,59 @@ async def test_input_cleanup_can_close_an_already_closing_query(
 
 
 @pytest.mark.asyncio
+async def test_close_during_blocked_input_preserves_closed_query_error(
+    tmp_path: Path,
+) -> None:
+    peer = tmp_path / "blocked_input.py"
+    peer.write_text(
+        textwrap.dedent(
+            """
+            import json
+            import sys
+            import time
+
+            request = json.loads(sys.stdin.readline())
+            print(json.dumps({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request["request_id"],
+                    "response": {},
+                },
+            }), flush=True)
+            time.sleep(60)
+            """
+        ),
+        encoding="utf-8",
+    )
+    input_started = asyncio.Event()
+
+    async def messages() -> AsyncIterator[SDKUserMessage]:
+        input_started.set()
+        yield {"type": "user", "message": {"role": "user", "content": "x" * 4_000_000}}
+
+    result = query(messages(), {"path_to_qwen_executable": str(peer)})
+    try:
+        await asyncio.wait_for(result._ensure_started(), timeout=2)
+        await asyncio.wait_for(input_started.wait(), timeout=2)
+        child = result._transport._process
+        assert child is not None and child.stdin is not None
+        assert child.stdin.transport.get_write_buffer_size() > 65_536
+        assert result._input_task is not None and not result._input_task.done()
+
+        await asyncio.wait_for(result.close(), timeout=10)
+        assert child.returncode is not None
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match=r"^Query is closed$"):
+                await asyncio.wait_for(result.supported_commands(), timeout=1)
+        assert result._pending_control_requests == {}
+    finally:
+        await result.close()
+        if result._input_task is not None:
+            await asyncio.gather(result._input_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_rejected_initialize_does_not_send_single_turn_prompt(
     tmp_path: Path,
 ) -> None:

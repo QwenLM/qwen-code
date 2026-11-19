@@ -599,6 +599,7 @@ class Query:
             self._cancel_event.set()
 
             error = RuntimeError("Query is closed")
+            self._close_reason = error
             self._fail_pending_control_requests(error)
             await self._cancel_incoming_control_requests()
 
@@ -628,7 +629,7 @@ class Query:
         if self._terminal_event_sent:
             return
         self._closed = True
-        self._close_reason = exc
+        self._close_reason = self._close_reason or exc
         self._terminal_event_sent = True
         self._cancel_event.set()
         self._fail_pending_control_requests(exc)
