@@ -2885,6 +2885,35 @@ describe('createTranscriptReplayMachine', () => {
       },
     });
   });
+
+  it('stamps card metadata on a failed plan-less todo_write result', () => {
+    // Replay skips the todo_write start frame, so a terminal frame without
+    // kind is dropped as malformed by both channel transports.
+    const machine = createTranscriptReplayMachine();
+    const failed = updates(
+      machine,
+      record('todo-failed', 'tool_result', {
+        message: {
+          role: 'user',
+          parts: [{ functionResponse: { name: 'todo_write', response: {} } }],
+        },
+        toolCallResult: {
+          callId: 'todo-call',
+          status: 'error',
+          error: { message: 'dependency cycle' },
+        },
+      }),
+    );
+    expect(failed).toEqual([
+      expect.objectContaining({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'todo-call',
+        status: 'failed',
+        title: 'todo_write',
+        kind: 'other',
+      }),
+    ]);
+  });
 });
 
 describe('ui_telemetry timing frames', () => {

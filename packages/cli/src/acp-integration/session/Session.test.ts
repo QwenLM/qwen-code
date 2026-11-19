@@ -60737,6 +60737,10 @@ describe('Session', () => {
         llmContent: 'Failed to modify todos',
         returnDisplay:
           'Error writing todos: Todo dependency graph contains a cycle',
+        error: {
+          message: 'Todo dependency graph contains a cycle',
+          type: 'execution_failed',
+        },
       });
       queuePendingTodoThenNaturalStops();
 
@@ -60749,6 +60753,17 @@ describe('Session', () => {
             ([params]) => params.update.sessionUpdate === 'plan',
           ),
       ).toBe(false);
+      // The failure has to reach the wire: without an `error` on the result
+      // the call looked successful and published no frame at all.
+      expect(
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.filter(
+            ([params]) =>
+              params.update.sessionUpdate === 'tool_call_update' &&
+              params.update.status === 'failed',
+          ),
+      ).toHaveLength(1);
     });
 
     it('preserves feature-off Stop hook loop reporting before token rejection', async () => {

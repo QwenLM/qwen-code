@@ -166,6 +166,39 @@ it('keeps wrapped tool timings across real pages, ignores injections, and stops 
   expect(JSON.stringify(events)).not.toContain('injected');
 });
 
+it('keeps a failed todo_write terminal frame that has no tool_call start', async () => {
+  await write([
+    record('turn-1'),
+    record('todo-result', {
+      type: 'tool_result',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: { name: 'todo_write', response: { output: '' } },
+          },
+        ],
+      },
+      toolCallResult: {
+        callId: 'todo-call',
+        status: 'error',
+        error: { message: 'dependency cycle' },
+        responseParts: [],
+        resultDisplay: 'Error writing todos: dependency cycle',
+      },
+    }),
+  ]);
+
+  const updates = (await read()).map((event) => event.data);
+  expect(updates).toContainEqual(
+    expect.objectContaining({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'todo-call',
+      status: 'failed',
+    }),
+  );
+});
+
 it('returns agent summaries and keeps ordinary tool results intact', async () => {
   const replay = vi.spyOn(historyReplay, 'replayTranscriptRecordPage');
   await write([

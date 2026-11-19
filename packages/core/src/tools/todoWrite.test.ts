@@ -726,6 +726,12 @@ describe('TodoWriteTool', () => {
       expect(result.llmContent).toContain('Todo list modification failed');
       expect(result.llmContent).toContain('Write failed');
       expect(result.returnDisplay).toContain('Error writing todos');
+      // The display string is the only place a failure used to be visible:
+      // status, telemetry, the persisted record and replay all read `error`.
+      expect(result.error).toMatchObject({
+        message: 'Write failed',
+        type: 'execution_failed',
+      });
     });
 
     it('should handle empty todos array', async () => {
