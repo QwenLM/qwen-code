@@ -5,6 +5,7 @@
  */
 
 import { createServer, get, request } from 'node:http';
+import { connect as netConnect, type Socket as NetSocket } from 'node:net';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -171,6 +172,50 @@ describe('ServeAppLifecycle', () => {
 
     expect(server.listening).toBe(false);
     client.destroy();
+  });
+
+  it('prunes closed sockets before the shutdown force-close sweep', async () => {
+    const lifecycle = installServeAppLifecycle(express());
+    const server = createServer();
+    servers.add(server);
+    const accepted: NetSocket[] = [];
+    server.on('connection', (socket) => accepted.push(socket));
+    lifecycle.bindServer(server);
+    server.listen(0, '127.0.0.1');
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('No address');
+    const connectClient = () =>
+      new Promise<NetSocket>((resolve, reject) => {
+        const client = netConnect(address.port, '127.0.0.1', () =>
+          resolve(client),
+        );
+        client.once('error', reject);
+      });
+
+    const firstClient = await connectClient();
+    let secondClient: NetSocket | undefined;
+    try {
+      await vi.waitFor(() => expect(accepted).toHaveLength(1));
+      const closedSocket = accepted[0]!;
+      const closed = new Promise<void>((resolve) => {
+        closedSocket.once('close', resolve);
+      });
+      firstClient.destroy();
+      await closed;
+      const destroyClosed = vi.spyOn(closedSocket, 'destroy');
+
+      // A second live socket keeps the force timer necessary and observable.
+      secondClient = await connectClient();
+      await vi.waitFor(() => expect(accepted).toHaveLength(2));
+      await lifecycle.close({ timeoutMs: 0 });
+
+      expect(destroyClosed).not.toHaveBeenCalled();
+    } finally {
+      firstClient.destroy();
+      secondClient?.destroy();
+      await lifecycle.close({ timeoutMs: 0 }).catch(() => undefined);
+    }
   });
 
   it('starts every drain and listener close when one drain throws synchronously', async () => {
