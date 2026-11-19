@@ -7760,8 +7760,21 @@ describe('Server Config (config.ts)', () => {
         },
       );
 
-      it('restores review auto-activation when an explicit opt-out is removed', async () => {
+      it('returns to the default when an explicit opt-out is removed', async () => {
         const config = await workflowConfig({ workflowsEnabled: false });
+        await config.enableReviewWorkflow();
+        expect(config.isWorkflowsEnabled()).toBe(false);
+        config.setWorkflowsEnabled(undefined);
+        expect(config.isWorkflowsEnabled()).toBe(true);
+      });
+
+      // Safe mode keeps workflows off unless settings turn them on, so the
+      // review skill's own activation is what these exercise.
+      it('restores review auto-activation in safe mode when an explicit opt-out is removed', async () => {
+        const config = await workflowConfig({
+          safeMode: true,
+          workflowsEnabled: false,
+        });
         config.setWorkflowsEnabled(undefined);
         expect(config.isWorkflowsEnabled()).toBe(false);
         await config.enableReviewWorkflow();
@@ -7769,7 +7782,7 @@ describe('Server Config (config.ts)', () => {
       });
 
       it('keeps a review activation through a settings reload that leaves the flag unset', async () => {
-        const config = await workflowConfig();
+        const config = await workflowConfig({ safeMode: true });
         await config.enableReviewWorkflow();
         await config.enableReviewWorkflow();
         config.applyWorkflowsEnabledSetting(undefined);
@@ -7782,7 +7795,10 @@ describe('Server Config (config.ts)', () => {
       });
 
       it('turns off settings-enabled workflows when the reloaded settings drop the flag', async () => {
-        const config = await workflowConfig({ workflowsEnabled: true });
+        const config = await workflowConfig({
+          safeMode: true,
+          workflowsEnabled: true,
+        });
         await config.enableReviewWorkflow();
         config.applyWorkflowsEnabledSetting(undefined);
         expect(config.isWorkflowsEnabled()).toBe(false);
@@ -7791,7 +7807,7 @@ describe('Server Config (config.ts)', () => {
       it.each(['registered', 'deferred', 'disabled'] as const)(
         'uses the existing registry with %s permissions',
         async (status) => {
-          const config = await initConfig();
+          const config = await initConfig({ safeMode: true });
           const registry = config.getToolRegistry();
           const names = new Set<string>();
           vi.spyOn(registry, 'getAllToolNames').mockImplementation(() => [
@@ -7863,7 +7879,7 @@ describe('Server Config (config.ts)', () => {
       );
 
       it('does not activate workflows or refresh the parent chat from a subagent', async () => {
-        const config = makeConfig();
+        const config = makeConfig({ safeMode: true });
         const registry = vi.spyOn(config, 'getToolRegistry');
         const refresh = vi.spyOn(config.getLlmClient(), 'setTools');
         await runWithAgentContext('review-child', () =>

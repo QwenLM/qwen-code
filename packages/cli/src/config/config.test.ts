@@ -7490,11 +7490,18 @@ describe('loadCliConfig workflowsEnabled', () => {
     vi.restoreAllMocks();
   });
 
-  it('should be disabled by default when workflowsEnabled is not set in settings', async () => {
+  it('should be enabled by default when workflowsEnabled is not set in settings', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isWorkflowsEnabled()).toBe(true);
+  });
+
+  it('should keep workflows off by default under --bare', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isWorkflowsEnabled()).toBe(false);
   });
 

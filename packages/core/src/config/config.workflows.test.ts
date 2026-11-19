@@ -127,11 +127,26 @@ describe('Config workflows feature gate', () => {
     }
   });
 
-  it('defaults to disabled', () => {
+  it.each([
+    ['unset', {}, true],
+    ['turned off', { workflowsEnabled: false }, false],
+    ['unset in bare mode', { bareMode: true }, false],
+    ['unset in safe mode', { safeMode: true }, false],
+    [
+      'turned on in bare mode',
+      { bareMode: true, workflowsEnabled: true },
+      true,
+    ],
+    [
+      'turned on in safe mode',
+      { safeMode: true, workflowsEnabled: true },
+      true,
+    ],
+  ] as const)('defaults: %s', (_label, params, expected) => {
     delete process.env['QWEN_CODE_ENABLE_WORKFLOWS'];
     delete process.env['QWEN_CODE_DISABLE_WORKFLOWS'];
-    const cfg = new Config({ ...baseParams });
-    expect(cfg.isWorkflowsEnabled()).toBe(false);
+    const cfg = new Config({ ...baseParams, ...params });
+    expect(cfg.isWorkflowsEnabled()).toBe(expected);
   });
 
   it('respects QWEN_CODE_ENABLE_WORKFLOWS=1', () => {

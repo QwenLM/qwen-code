@@ -11236,11 +11236,12 @@ export class Config {
   isWorkflowsEnabled(): boolean {
     if (this.shellExecutionSandbox) return false;
     if (this.provisionalWorkspace) return false;
-    // Workflows are opt-in via settings, env, or the bundled review skill.
-    // P1 also honors a kill switch: QWEN_CODE_DISABLE_WORKFLOWS=1 forces off
+    // On unless settings turn them off, except that bare and safe mode keep
+    // them off unless settings turn them on. The env pair overrides
+    // settings, and QWEN_CODE_DISABLE_WORKFLOWS=1 wins.
     if (process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
     if (process.env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1') return true;
-    return this.workflowsEnabled ?? false;
+    return this.workflowsEnabled ?? !(this.bareMode || this.safeMode);
   }
 
   setWorkflowsEnabled(enabled: boolean | undefined): void {

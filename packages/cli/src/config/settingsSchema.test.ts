@@ -297,12 +297,12 @@ describe('SettingsSchema', () => {
     // registered once while the tool registry is built, so a mid-session
     // toggle would leave the dialog claiming the feature is on while the
     // tool is absent from the registry.
-    it('should keep dynamic workflows opt-in and restart-scoped', () => {
+    it('should keep dynamic workflows on by default and restart-scoped', () => {
       expect(
         getSettingsSchema().tools.properties.workflowsEnabled,
       ).toMatchObject({
         type: 'boolean',
-        default: false,
+        default: true,
         requiresRestart: true,
         showInDialog: true,
         category: 'Tools',

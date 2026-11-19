@@ -8,8 +8,9 @@ decides whether a workflow is useful, and all permission, trust, budget and
 tool restrictions continue to apply. Enabling the mode does not start a run,
 change reasoning effort, or change your default settings.
 
-Workflow tools are opt-in. Enable `tools.workflowsEnabled` in settings or set
-`QWEN_CODE_ENABLE_WORKFLOWS=1` before turning the mode on:
+Workflow tools are on by default. If `tools.workflowsEnabled` is set to
+`false`, enable it again or set `QWEN_CODE_ENABLE_WORKFLOWS=1` before turning
+the mode on:
 
 ```sh
 QWEN_CODE_ENABLE_WORKFLOWS=1 qwen --workflow-mode on

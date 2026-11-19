@@ -402,7 +402,7 @@ Extension subagents appear in the subagent manager dialog under "Extension Agent
 
 ### Custom workflows
 
-Extensions can ship workflow scripts by placing `.js` files in a `workflows/` subdirectory, or in the directories and files the manifest lists in `workflows`. They appear only when Workflows are enabled with the [`tools.workflowsEnabled`](../configuration/settings.md) setting, which is off by default; the install consent prompt lists them either way.
+Extensions can ship workflow scripts by placing `.js` files in a `workflows/` subdirectory, or in the directories and files the manifest lists in `workflows`. They appear only when Workflows are enabled with the [`tools.workflowsEnabled`](../configuration/settings.md) setting, which is on by default; the install consent prompt lists them either way.
 
 **Example**
 

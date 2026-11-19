@@ -128,11 +128,21 @@ describe('WorkflowTool registration', () => {
   it('is NOT registered when isWorkflowsEnabled() is false', async () => {
     delete process.env['QWEN_CODE_ENABLE_WORKFLOWS'];
     delete process.env['QWEN_CODE_DISABLE_WORKFLOWS'];
-    const cfg = new Config({ ...baseParams });
+    const cfg = new Config({ ...baseParams, workflowsEnabled: false });
     const registry = await cfg.createToolRegistry(undefined, {
       skipDiscovery: true,
     });
     expect(registry.getAllToolNames()).not.toContain(ToolNames.WORKFLOW);
+  });
+
+  it('is registered by default', async () => {
+    delete process.env['QWEN_CODE_ENABLE_WORKFLOWS'];
+    delete process.env['QWEN_CODE_DISABLE_WORKFLOWS'];
+    const cfg = new Config({ ...baseParams });
+    const registry = await cfg.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    expect(registry.getAllToolNames()).toContain(ToolNames.WORKFLOW);
   });
 
   it('is registered when isWorkflowsEnabled() is true', async () => {

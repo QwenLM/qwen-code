@@ -5632,7 +5632,7 @@ async function runQwenServeImpl(
       overlayKeys: [...runtimeEnvSnapshot.overlayKeys],
       effectiveEnv: runtimeEffectiveEnv,
       workflowsEnabledBySettings:
-        runtimeBootSettings?.merged.tools?.workflowsEnabled === true,
+        runtimeBootSettings?.merged.tools?.workflowsEnabled !== false,
       envFilePaths: [...runtimeEnvSnapshot.envFilePaths],
       envFileReadFailed: runtimeEnvSnapshot.envFileReadFailed,
       envFileReadFailures: [...runtimeEnvSnapshot.envFileReadFailures],
@@ -6726,7 +6726,7 @@ async function runQwenServeImpl(
         }
         replaceRuntimeEffectiveEnv(refreshedRuntimeEnv.effectiveEnv);
         primaryRuntimeEnv.workflowsEnabledBySettings =
-          fresh.merged.tools?.workflowsEnabled === true;
+          fresh.merged.tools?.workflowsEnabled !== false;
         delete primaryRuntimeEnv.fallbackReason;
         primaryRuntimeEnv.envFileReadFailed =
           refreshedRuntimeEnv.envFileReadFailed;
@@ -6891,7 +6891,7 @@ async function runQwenServeImpl(
         overlayKeys: [...snapshot.overlayKeys],
         effectiveEnv,
         workflowsEnabledBySettings:
-          settings?.merged.tools?.workflowsEnabled === true,
+          settings?.merged.tools?.workflowsEnabled !== false,
         envFilePaths: [...snapshot.envFilePaths],
         envFileReadFailed: snapshot.envFileReadFailed,
         envFileReadFailures: [...snapshot.envFileReadFailures],
@@ -7402,7 +7402,7 @@ async function runQwenServeImpl(
             try {
               secondaryEnv.replace(refreshedRuntimeEnv.effectiveEnv);
               secondaryEnv.metadata.workflowsEnabledBySettings =
-                fresh.merged.tools?.workflowsEnabled === true;
+                fresh.merged.tools?.workflowsEnabled !== false;
               secondaryEnv.metadata.envFileReadFailed =
                 refreshedRuntimeEnv.envFileReadFailed;
               secondaryEnv.metadata.envFileReadFailures.splice(
@@ -8471,7 +8471,7 @@ async function runQwenServeImpl(
               try {
                 wsEnv.replace(refreshedRuntimeEnv.effectiveEnv);
                 wsEnv.metadata.workflowsEnabledBySettings =
-                  fresh.merged.tools?.workflowsEnabled === true;
+                  fresh.merged.tools?.workflowsEnabled !== false;
                 wsEnv.metadata.envFileReadFailed =
                   refreshedRuntimeEnv.envFileReadFailed;
                 wsEnv.metadata.envFileReadFailures.splice(

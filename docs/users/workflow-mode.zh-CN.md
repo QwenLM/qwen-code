@@ -6,8 +6,8 @@ Workflow 模式保存当前会话的偏好：对普通新输入考虑使用 Work
 模型仍决定任务是否适合工作流；权限、信任、预算与工具限制保持生效。
 开启模式不会启动工作流、修改推理 effort 或修改默认设置。
 
-Workflow 工具默认关闭。开启模式前，先在设置中启用 `tools.workflowsEnabled`，
-或设置 `QWEN_CODE_ENABLE_WORKFLOWS=1`：
+Workflow 工具默认开启。如果 `tools.workflowsEnabled` 被设为 `false`，开启模式前
+先重新启用它，或设置 `QWEN_CODE_ENABLE_WORKFLOWS=1`：
 
 ```sh
 QWEN_CODE_ENABLE_WORKFLOWS=1 qwen --workflow-mode on
