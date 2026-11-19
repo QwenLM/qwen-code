@@ -110,8 +110,26 @@ export function mainMigrations(root, modules) {
   );
 }
 
-async function openPullRequests(repo, gh) {
+// Old PR heads still expose retired roots for the same classpath resources.
+function normalizeMigrationPath(file, modules) {
+  const currentModule = 'packages/managed-agent-server';
+  if (!modules.includes(currentModule)) return file;
+  return file
+    .replace(
+      /^packages\/sdk-java\/(?:managed-agent-server|runtime-broker)\/src\//,
+      `${currentModule}/src/`,
+    )
+    .replace(
+      /^packages\/managed-agent-server\/src\/main\/resources\/db\/managed-schema\//,
+      `${currentModule}/persistence/src/main/resources/db/managed-schema/`,
+    );
+}
+
+async function openPullRequests(repo, gh, modules, mainFiles) {
   const [owner, name] = repo.split('/');
+  const publishedNames = new Set(
+    mainFiles.map((file) => path.posix.basename(file)),
+  );
   const query = async (text, variables) => {
     const args = ['api', 'graphql', '-f', `query=${text}`];
     for (const [key, value] of Object.entries({ owner, name, ...variables })) {
@@ -123,6 +141,68 @@ async function openPullRequests(repo, gh) {
   const prs = [];
   let exhausted = false;
   let budget = FILE_PAGE_BUDGET;
+  async function readRenameSources(pr, files) {
+    // GraphQL only names the destination. The REST file list supplies
+    // the source, so an unrelated rename cannot hide a real collision.
+    const pending = new Set(
+      files
+        .filter(
+          (file) =>
+            file.changeType === 'RENAMED' &&
+            publishedNames.has(path.posix.basename(file.path)) &&
+            isMigrationPath(
+              modules,
+              normalizeMigrationPath(file.path, modules),
+            ),
+        )
+        .map((file) => file.path),
+    );
+    const movedFrom = [];
+    if (!pending.size) return { files };
+    try {
+      const endpoint = `repos/${repo}/pulls/${pr.number}`;
+      const pages = Math.ceil(Math.min(pr.changedFiles, 3000) / 100);
+      for (let page = 1; pending.size && page <= pages; page += 1) {
+        if (!budget) {
+          exhausted = true;
+          break;
+        }
+        budget -= 1;
+        const renames = JSON.parse(
+          await gh([
+            'api',
+            `${endpoint}/files?per_page=100&page=${page}`,
+            '--jq',
+            '[.[] | select(.status == "renamed") | [.filename, .previous_filename]]',
+          ]),
+        );
+        for (const [dest, source] of renames) {
+          if (
+            source &&
+            pending.delete(dest) &&
+            path.posix.basename(source) === path.posix.basename(dest)
+          ) {
+            movedFrom.push({ path: source, changeType: 'DELETED' });
+          }
+        }
+      }
+      // REST lists the live PR. A push during paging invalidates this
+      // snapshot; the next run will evaluate the new head.
+      if (
+        (await gh(['api', endpoint, '--jq', '.head.sha'])).trim() !==
+        pr.headRefOid
+      )
+        return null;
+      return {
+        files: files.concat(movedFrom),
+        missingRenameSource: pending.size > 0,
+      };
+    } catch {
+      // Keep evaluating the other PRs if this file list is unavailable.
+      return { files, missingRenameSource: true };
+    }
+  }
+
   let cursor = null;
   do {
     const page = (await query(PRS_QUERY, { cursor })).pullRequests;
@@ -141,6 +221,8 @@ async function openPullRequests(repo, gh) {
         next = more.pageInfo;
       }
       if (next.hasNextPage) exhausted = true;
+      const renameInfo = await readRenameSources(pr, files);
+      if (!renameInfo) continue;
       // The last commit has always been the head. If it ever is not, the
       // head reads as carrying no status and is written on every run.
       const head = pr.commits.nodes[0]?.commit;
@@ -154,7 +236,7 @@ async function openPullRequests(repo, gh) {
           state: current.state.toLowerCase(),
           description: current.description,
         },
-        files,
+        ...renameInfo,
       });
     }
     cursor = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
@@ -170,25 +252,11 @@ function evaluate(modules, mainFiles, prs) {
     .map(versionOf)
     .sort(compareMigrationVersions)
     .at(-1);
-  const currentModule = 'packages/managed-agent-server';
-  const relocated = modules.includes(currentModule);
   const claims = prs.map((pr) => {
-    // Old PR heads still expose the retired roots; normalize only their
-    // metadata so existing migrations compare as the same classpath resource.
     const touched = pr.files
       .map((file) => ({
         ...file,
-        path: relocated
-          ? file.path
-              .replace(
-                /^packages\/sdk-java\/(?:managed-agent-server|runtime-broker)\/src\//,
-                `${currentModule}/src/`,
-              )
-              .replace(
-                /^packages\/managed-agent-server\/src\/main\/resources\/db\/managed-schema\//,
-                `${currentModule}/persistence/src/main/resources/db/managed-schema/`,
-              )
-          : file.path,
+        path: normalizeMigrationPath(file.path, modules),
       }))
       .filter((file) => isMigrationPath(modules, file.path));
     const deleted = new Set(
@@ -220,9 +288,7 @@ function evaluate(modules, mainFiles, prs) {
     );
     return {
       pr,
-      // The merge result. The API does not name a renamed file's old path,
-      // so a migration the PR renames away from main still counts here —
-      // which can only over-report.
+      // Remove explicit deletions and the confirmed sources of same-name moves.
       merged: [
         ...new Set([
           ...mainFiles.filter((file) => !deleted.has(file)),
@@ -252,6 +318,7 @@ function evaluate(modules, mainFiles, prs) {
         sha: pr.sha,
         incomplete: pr.incomplete,
         current: pr.current,
+        missingRenameSource: pr.missingRenameSource,
         outOfOrder,
         newestVersion,
         collisions: versions
@@ -287,7 +354,10 @@ function evaluate(modules, mainFiles, prs) {
 function statusFor(verdict) {
   let state;
   let text;
-  if (verdict.collisions.length > 0) {
+  if (verdict.missingRenameSource) {
+    state = 'error';
+    text = 'Could not verify a renamed migration source against main';
+  } else if (verdict.collisions.length > 0) {
     state = 'failure';
     text = `Version collision when merged into main: ${verdict.collisions
       .map(
@@ -331,7 +401,12 @@ export async function run({
   gh,
 }) {
   const mainFiles = mainMigrations(root, modules);
-  const { prs, exhausted } = await openPullRequests(repo, gh);
+  const { prs, exhausted } = await openPullRequests(
+    repo,
+    gh,
+    modules,
+    mainFiles,
+  );
   const verdicts = evaluate(modules, mainFiles, prs);
   const lines = [
     `### Flyway versions of open PRs against main@${mainSha.slice(0, 7)}`,

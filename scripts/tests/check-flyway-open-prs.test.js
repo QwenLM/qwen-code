@@ -55,14 +55,15 @@ function onMain(...files) {
 }
 
 // An open PR as the API lists it: every path ADDED unless given as
-// [path, changeType]. `current` is the status its last commit carries, and
+// [path, changeType, previousPath]. Only REST exposes the previous path.
+// `current` is the status its last commit carries, and
 // `currentOid` that commit when it is not the head.
 const pr = (number, files, extra = {}) => ({
   number,
   headRefOid: String(number).padEnd(40, 'a'),
   files: files.map((file) =>
     Array.isArray(file)
-      ? { path: file[0], changeType: file[1] }
+      ? { path: file[0], changeType: file[1], previousPath: file[2] }
       : { path: file, changeType: 'ADDED' },
   ),
   ...extra,
@@ -87,7 +88,9 @@ function fakeGh(prs, { failPost = [], graphqlError } = {}) {
     const end = start + 2;
     return {
       pageInfo: { hasNextPage: end < files.length, endCursor: String(end) },
-      nodes: files.slice(start, end),
+      nodes: files
+        .slice(start, end)
+        .map(({ path, changeType }) => ({ path, changeType })),
     };
   };
   const gh = async (args) => {
@@ -144,6 +147,19 @@ function fakeGh(prs, { failPost = [], graphqlError } = {}) {
         },
       });
     }
+    if (args[1]?.includes('/pulls/')) {
+      const [, number, page] =
+        /\/pulls\/(\d+)(?:\/files\?per_page=100&page=(\d+))?$/.exec(args[1]);
+      const target = prs.find((p) => p.number === Number(number));
+      if (!page) return target.restHead ?? target.headRefOid;
+      if (target.restError) throw new Error(target.restError);
+      return JSON.stringify(
+        target.files
+          .slice((Number(page) - 1) * 100, Number(page) * 100)
+          .filter((file) => file.changeType === 'RENAMED')
+          .map((file) => [file.path, file.previousPath]),
+      );
+    }
     const sha = args[3].split('/').pop();
     if (failPost.includes(sha)) {
       throw new Error('HTTP 422: No commit found\n::error::forged ##[group]x');
@@ -152,7 +168,7 @@ function fakeGh(prs, { failPost = [], graphqlError } = {}) {
   };
   const posts = () =>
     calls
-      .filter((args) => args[1] !== 'graphql')
+      .filter((args) => args[1] === '--method' && args[2] === 'POST')
       .map((args) => {
         const f = flags(args);
         return {
@@ -253,6 +269,55 @@ describe('check-flyway-open-prs', () => {
       description:
         'Out of order when merged into main: V52 is not above V53 (newest on main)',
     });
+  });
+
+  it('recognizes a single RENAMED migration by its published source path', async () => {
+    const source = sql('V53__workspace_roles.sql');
+    const dest = sql('archive/V53__workspace_roles.sql');
+    const { byPr } = await check([
+      pr(10001, [[dest, 'RENAMED', source]]),
+      pr(10002, [[dest, 'RENAMED', 'fixtures/V53__workspace_roles.sql']]),
+      pr(10003, [dest]),
+    ]);
+    expect(byPr[10001]).toMatchObject({
+      state: 'success',
+      description: 'No collision with main',
+    });
+    expect(byPr[10002].description).toContain('Version collision');
+    expect(byPr[10003].description).toContain('Version collision');
+  });
+
+  it('reads later REST pages only for a relevant migration rename', async () => {
+    const source = sql('V53__workspace_roles.sql');
+    const files = Array.from({ length: 100 }, (_, i) => `docs/${i}.md`);
+    const { byPr, calls } = await check([
+      pr(10001, [
+        ...files,
+        [sql('archive/V53__workspace_roles.sql'), 'RENAMED', source],
+      ]),
+      pr(10002, [['docs/V53__workspace_roles.sql', 'RENAMED', source]]),
+    ]);
+    expect(byPr[10001].state).toBe('success');
+    expect(
+      calls.some(([, url]) => url.endsWith('/10001/files?per_page=100&page=2')),
+    ).toBe(true);
+    expect(calls.some(([, url]) => url.includes('/pulls/10002'))).toBe(false);
+  });
+
+  it('reports unavailable rename metadata per PR and skips a superseded head', async () => {
+    const source = sql('V53__workspace_roles.sql');
+    const dest = sql('archive/V53__workspace_roles.sql');
+    const move = [dest, 'RENAMED', source];
+    const { byPr } = await check([
+      pr(10001, [[dest, 'RENAMED']]),
+      pr(10002, [move], { restError: 'HTTP 503' }),
+      pr(10003, [move], { restHead: 'b'.repeat(40) }),
+      pr(10004, [move]),
+    ]);
+    expect(byPr[10001].state).toBe('error');
+    expect(byPr[10002].state).toBe('error');
+    expect(byPr[10003]).toBeUndefined();
+    expect(byPr[10004].state).toBe('success');
   });
 
   it('fails a PR whose version main took after its own check passed', async () => {
