@@ -1189,6 +1189,7 @@ describe('Session', () => {
       getManagedRuntimeOutcomes: vi.fn().mockReturnValue(undefined),
       getSessionService: vi.fn().mockReturnValue({
         setSessionPrBoundCallback: vi.fn(),
+        setSessionGoalChangedCallback: vi.fn(),
       }),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getDisabledTools: vi.fn().mockReturnValue(new Set<string>()),
@@ -4158,6 +4159,36 @@ describe('Session', () => {
     );
     session.dispose();
     expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it('emits a goal-changed catalog notification when the goal callback fires', async () => {
+    // The child's journal hook persists the goal sidecar; the registered
+    // callback must carry the catalog-clock mark so version-watching
+    // clients refetch the sidebar marker.
+    let goalChanged: ((sessionId: string) => void) | undefined;
+    vi.mocked(
+      mockConfig.getSessionService().setSessionGoalChangedCallback,
+    ).mockImplementation((callback) => {
+      goalChanged = callback;
+    });
+    session.dispose();
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    expect(goalChanged).toBeDefined();
+
+    vi.mocked(mockClient.extNotification).mockClear();
+    goalChanged!('goal-session-id');
+    await Promise.resolve();
+
+    expect(mockClient.extNotification).toHaveBeenCalledWith(
+      'qwen/notify/session/goal-changed',
+      { v: 1, sessionId: 'goal-session-id' },
+    );
+    session.dispose();
   });
 
   it('registers the dedicated Live screen tool and routes it over extMethod', async () => {
@@ -9997,6 +10028,69 @@ describe('Session', () => {
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
   });
 
+  it('holds automatic work until the restored working directory is ready', async () => {
+    let cwd = '/workspace';
+    const starts: string[] = [];
+    const scheduler = {
+      hasPendingWork: false,
+      enableDurable: vi.fn(async () => {
+        starts.push(cwd);
+      }),
+      start: vi.fn(),
+      stop: vi.fn(),
+      list: vi.fn().mockReturnValue([]),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+
+    session.deferAutomaticWorkUntilCwdRestore();
+    session.startCronScheduler();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(scheduler.enableDurable).not.toHaveBeenCalled();
+    expect(session.isTurnIdle()).toBe(false);
+    expect(session.collectActiveWorkHolds()).toContainEqual({
+      category: 'session',
+      id: 'session:active-turn',
+    });
+    await expect(session.assertCanStartTurn()).rejects.toMatchObject({
+      code: -32602,
+      data: { errorKind: 'session_busy' },
+    });
+
+    const releaseClose = session.beginClose();
+    await expect(session.waitForActiveTurnsToSettle()).resolves.toBeUndefined();
+    cwd = '/workspace/.qwen/worktrees/restored';
+    releaseClose();
+    session.releaseAutomaticWorkAfterCwdRestore();
+    session.releaseAutomaticWorkAfterCwdRestore();
+
+    await vi.waitFor(() =>
+      expect(scheduler.enableDurable).toHaveBeenCalledOnce(),
+    );
+    expect(starts).toEqual(['/workspace/.qwen/worktrees/restored']);
+    await expect(session.assertCanStartTurn()).resolves.toBeUndefined();
+    expect(session.collectActiveWorkHolds()).not.toContainEqual({
+      category: 'session',
+      id: 'session:active-turn',
+    });
+  });
+
+  it('does not start deferred automatic work after disposal', async () => {
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    const scheduler = {
+      enableDurable: vi.fn(),
+      stop: vi.fn(),
+      list: vi.fn().mockReturnValue([]),
+    };
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    session.deferAutomaticWorkUntilCwdRestore();
+    session.dispose();
+    session.releaseAutomaticWorkAfterCwdRestore();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(scheduler.enableDurable).not.toHaveBeenCalled();
+  });
+
   it('pins durable cron startup, prompt restart, and stop to the session runtime', async () => {
     const runtimeDir = path.resolve('runtime', 'cron-session');
     const observedStarts: string[] = [];
@@ -10909,7 +11003,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           undefined,
-          { promptId },
+          { isSessionTurn: true, promptId },
         );
         expect(
           mockChatRecordingService.recordUserMessage,
@@ -11143,7 +11237,7 @@ describe('Session', () => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       const sendOptions = vi.mocked(mockChat.sendMessageStream).mock
         .calls[0][4];
-      expect(sendOptions).toBeUndefined();
+      expect(sendOptions).toEqual({ isSessionTurn: true });
     });
 
     it('does not re-lend an id that is still live after a retry strips only a continuation', async () => {
@@ -11183,7 +11277,7 @@ describe('Session', () => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       const sendOptions = vi.mocked(mockChat.sendMessageStream).mock
         .calls[0][4];
-      expect(sendOptions).toBeUndefined();
+      expect(sendOptions).toEqual({ isSessionTurn: true });
     });
 
     it('re-lends the newest stripped id when a retry strips two orphans', async () => {
@@ -11217,7 +11311,10 @@ describe('Session', () => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       const sendOptions = vi.mocked(mockChat.sendMessageStream).mock
         .calls[0][4];
-      expect(sendOptions).toEqual({ promptId: 'test-session-id########7' });
+      expect(sendOptions).toEqual({
+        isSessionTurn: true,
+        promptId: 'test-session-id########7',
+      });
     });
 
     it('associates a recording-disabled fresh prompt with its admitted daemon identity', async () => {
@@ -11560,6 +11657,43 @@ describe('Session', () => {
         },
       ];
     }
+
+    it('keeps automatic work held after cwd restore while a saved question is pending', async () => {
+      const history = danglingAuqHistory();
+      vi.mocked(mockChat.getHistory).mockImplementation(() => history);
+      const scheduler = {
+        hasPendingWork: false,
+        enableDurable: vi.fn().mockResolvedValue(undefined),
+        start: vi.fn(),
+        stop: vi.fn(),
+        list: vi.fn().mockReturnValue([]),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+
+      session.deferAutomaticWorkUntilCwdRestore();
+      session.releaseAutomaticWorkAfterCwdRestore();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(scheduler.enableDurable).not.toHaveBeenCalled();
+      await expect(session.assertCanStartTurn()).resolves.toBeUndefined();
+      history.push({
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-auq',
+              name: 'ask_user_question',
+              response: { answer: 'Polling' },
+            },
+          },
+        ],
+      });
+      session.startCronScheduler();
+      await vi.waitFor(() =>
+        expect(scheduler.enableDurable).toHaveBeenCalledOnce(),
+      );
+    });
 
     it('does not classify a restorable question as an interrupted tool turn', async () => {
       vi.mocked(mockChat.getHistory).mockReturnValue(danglingAuqHistory());
@@ -21335,7 +21469,7 @@ describe('Session', () => {
         },
         expect.stringMatching(/^test-session-id########notification[\w-]+$/),
         undefined,
-        undefined,
+        { isSessionTurn: false },
       );
       expect(mockChatRecordingService.recordNotification).toHaveBeenCalledWith(
         [
@@ -21517,6 +21651,18 @@ describe('Session', () => {
       );
       expect(responseTurnIds[1]).toBe(responseTurnIds[0]);
       expect(responseTurnIds[2]).toBe(responseTurnIds[0]);
+      // The notification and its tool-result continuation both stay out of the
+      // foreground ledger (P2): every notification send carries isSessionTurn
+      // false, so a fallback the notification exhausts cannot skip a recovered
+      // fallback for the live turn. Call 0 is the user prompt; the rest are the
+      // notification's own sends.
+      const notificationSends = (
+        mockChat.sendMessageStream as ReturnType<typeof vi.fn>
+      ).mock.calls.slice(1);
+      expect(notificationSends.length).toBeGreaterThanOrEqual(2);
+      for (const send of notificationSends) {
+        expect(send[4]).toMatchObject({ isSessionTurn: false });
+      }
       expect(responses).toEqual([
         expect.objectContaining({
           update: expect.objectContaining({
@@ -23920,7 +24066,8 @@ describe('Session', () => {
           }),
           expect.any(String),
           undefined,
-          undefined,
+          // Background notifications opt out of the foreground ledger (P2).
+          expect.objectContaining({ isSessionTurn: false }),
         );
       });
       expect(
@@ -24252,7 +24399,7 @@ describe('Session', () => {
         },
         expect.stringMatching(/^test-session-id########notification[\w-]+$/),
         undefined,
-        undefined,
+        { isSessionTurn: false },
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -25423,7 +25570,7 @@ describe('Session', () => {
         expect.any(Object),
         expect.any(String),
         undefined,
-        { promptId: 'test-session-id########1' },
+        { isSessionTurn: true, promptId: 'test-session-id########1' },
       );
       expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
         2,
@@ -25431,7 +25578,7 @@ describe('Session', () => {
         expect.any(Object),
         expect.any(String),
         undefined,
-        undefined,
+        { isSessionTurn: true },
       );
       expect(resolveForModel).toHaveBeenCalledWith(
         'vision-agent\0https://vision.example.com/v1',
@@ -25455,7 +25602,7 @@ describe('Session', () => {
         expect.any(Object),
         expect.any(String),
         undefined,
-        { promptId: 'test-session-id########2' },
+        { isSessionTurn: true, promptId: 'test-session-id########2' },
       );
       expect(mockLlmClient.tryCompressChat).toHaveBeenCalledOnce();
     });
@@ -29454,7 +29601,7 @@ describe('Session', () => {
           },
           'test-session-id########1',
           undefined,
-          { promptId: 'test-session-id########1' },
+          { isSessionTurn: true, promptId: 'test-session-id########1' },
         );
       });
 
@@ -29574,7 +29721,7 @@ describe('Session', () => {
           },
           'test-session-id########1',
           undefined,
-          { promptId: 'test-session-id########1' },
+          { isSessionTurn: true, promptId: 'test-session-id########1' },
         );
       });
 
@@ -29910,7 +30057,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           undefined,
-          { promptId: 'test-session-id########1' },
+          { isSessionTurn: true, promptId: 'test-session-id########1' },
         );
 
         // Second same-override send: compression throws, so the gate falls
@@ -30026,7 +30173,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           undefined,
-          { promptId: expect.any(String) },
+          { isSessionTurn: true, promptId: expect.any(String) },
         );
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
 
@@ -35577,6 +35724,22 @@ describe('Session', () => {
         const sendMessageStream = mockChat.sendMessageStream as ReturnType<
           typeof vi.fn
         >;
+        // The Stop-hook continuation rewrites the prompt id with a suffix, but
+        // the ledger key stays the turn's base id (R7-3); the initial send has
+        // no suffix and therefore no ledgerTurnKey override.
+        expect(sendMessageStream.mock.calls[0][2]).toBe(
+          'test-session-id########1',
+        );
+        expect(sendMessageStream.mock.calls[0][4]).not.toHaveProperty(
+          'ledgerTurnKey',
+        );
+        expect(sendMessageStream.mock.calls[1][2]).toBe(
+          'test-session-id########1_stop_hook_1',
+        );
+        expect(sendMessageStream.mock.calls[1][4]).toMatchObject({
+          isSessionTurn: true,
+          ledgerTurnKey: 'test-session-id########1',
+        });
         expectCompressBeforeSend(
           mockLlmClient.tryCompressChat,
           sendMessageStream,
@@ -40801,7 +40964,7 @@ describe('Session', () => {
           }),
           expect.any(String),
           permit,
-          undefined,
+          { isSessionTurn: true },
         );
         expect(mockGoalRuntime.markTurnDelivered).toHaveBeenCalledWith(
           'goal-runtime:turn-1',
@@ -43226,7 +43389,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           permit,
-          undefined,
+          { isSessionTurn: true },
         );
       });
 
@@ -43343,7 +43506,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           permit,
-          { promptId: 'test-session-id########1' },
+          { isSessionTurn: true, promptId: 'test-session-id########1' },
         );
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
           'hello',
@@ -43458,7 +43621,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           userPermit,
-          { promptId: 'test-session-id########2' },
+          { isSessionTurn: true, promptId: 'test-session-id########2' },
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(
           automaticPermit,
@@ -43710,7 +43873,7 @@ describe('Session', () => {
           expect.any(Object),
           expect.any(String),
           userPermit,
-          { promptId: 'test-session-id########2' },
+          { isSessionTurn: true, promptId: 'test-session-id########2' },
         );
         expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
       });

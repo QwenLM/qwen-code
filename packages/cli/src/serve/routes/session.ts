@@ -17,6 +17,7 @@ import {
   withDaemonSpan,
 } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import { GENERATED_UI_CARD_ID_PATTERN } from '@qwen-code/qwen-code-core/services/generated-ui-state.js';
+import { writeSessionBranchSidecar } from '@qwen-code/qwen-code-core/services/session-branch-sidecar.js';
 import {
   APPROVAL_MODES,
   AGENT_WORKTREE_SLUG_PATTERN,
@@ -183,6 +184,8 @@ import {
 } from '../server/session-artifact-library.js';
 import { WorkspaceArtifactCache } from '../server/workspace-artifact-cache.js';
 import { ArtifactLibraryStream } from '../server/artifact-library-stream.js';
+import type { SseAdmissionCaps } from '../daemon-status.js';
+import { checkSseAdmission, countSseStream } from '../sse-occupancy.js';
 import {
   PROMPT_IDEMPOTENCY_KEY_MAX_LENGTH,
   admitSessionPrompt,
@@ -369,6 +372,7 @@ interface RegisterSessionRoutesDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
   daemonLog?: DaemonLogger;
+  sseAdmissionCaps?: SseAdmissionCaps;
   channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
@@ -3144,10 +3148,18 @@ export function registerSessionRoutes(
       }
     }
 
-    let branchMeta: { name: string; baseBranch: string } | undefined;
+    let branchMeta:
+      | { name: string; baseBranch: string; baseCommit?: string }
+      | undefined;
     let branchBaseCommit: string | undefined;
     let worktreeMeta:
-      | { slug: string; path: string; branch: string }
+      | {
+          slug: string;
+          path: string;
+          branch: string;
+          baseCommit?: string;
+          baseBranch?: string;
+        }
       | undefined;
     let worktreeBaseBranch: string | undefined;
     let worktreeBaseCommit: string | undefined;
@@ -3345,7 +3357,7 @@ export function registerSessionRoutes(
           });
           return;
         }
-        branchMeta = { name: branchName, baseBranch };
+        branchMeta = { name: branchName, baseBranch, baseCommit };
         branchBaseCommit = baseCommit;
         sessionScope = 'thread';
       }
@@ -3446,6 +3458,8 @@ export function registerSessionRoutes(
           slug,
           path: wtResult.worktree.path,
           branch: wtResult.worktree.branch,
+          baseCommit: worktreeBaseCommit,
+          baseBranch: worktreeBaseBranch,
         };
         // Worktree sessions must be independent — never coalesce onto an
         // existing single-scope session that lives in the main checkout.
@@ -3456,6 +3470,15 @@ export function registerSessionRoutes(
       if (requestedSessionId !== undefined) {
         sessionScope = 'thread';
       }
+
+      // A plain session (no branch/worktree) still has a start commit: the
+      // HEAD it was created from. Capture it so the change overview's commit
+      // fallback can scope to <baseCommit>..HEAD instead of suppressing for
+      // lack of a boundary. A failed read stays undefined (no boundary).
+      const plainBaseCommit =
+        !branchMeta && !worktreeMeta
+          ? await getHeadCommit(workspaceCwd).catch(() => undefined)
+          : undefined;
 
       assertRuntimeGenerationOpen?.();
       const session = await runtime.bridge.spawnOrAttach({
@@ -3471,6 +3494,7 @@ export function registerSessionRoutes(
         ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
         ...(worktreeMeta ? { worktree: worktreeMeta } : {}),
         ...(branchMeta ? { branch: branchMeta } : {}),
+        ...(plainBaseCommit ? { baseCommit: plainBaseCommit } : {}),
         ...(requestedSessionId !== undefined
           ? { sessionId: requestedSessionId }
           : {}),
@@ -4538,6 +4562,21 @@ export function registerSessionRoutes(
                   ) {
                     throw new WorktreeResetActiveError(replacementId);
                   }
+                  // Carry the superseded session's recorded start onto the
+                  // resumed replacement too (R9-13): its worktree.baseCommit is
+                  // the creation tip T, and T..HEAD would hide the session's own
+                  // pre-handoff S..T commits.
+                  const supersededSummary = readSummary(sessionId);
+                  const priorStart =
+                    supersededSummary?.baseCommit ??
+                    supersededSummary?.branch?.baseCommit ??
+                    supersededSummary?.worktree?.baseCommit;
+                  if (priorStart) {
+                    runtime.bridge.setSessionBaseCommit?.(
+                      replacementId,
+                      priorStart,
+                    );
+                  }
                   runtime.bridge.clearSessionWorktree(sessionId);
                   const severCompleted =
                     await runtime.bridge.severSessionClients(sessionId);
@@ -4566,6 +4605,11 @@ export function registerSessionRoutes(
                       slug: oldSidecar.slug,
                       path: realTarget,
                       branch: oldSidecar.worktreeBranch,
+                      baseCommit:
+                        oldSidecar.worktreeBase ||
+                        oldSidecar.originalHeadCommit ||
+                        undefined,
+                      baseBranch: oldSidecar.originalBranch || undefined,
                     },
                     worktreeState: 'persisted-v1',
                     attached: false,
@@ -4601,10 +4645,20 @@ export function registerSessionRoutes(
                 // same thread-scope, source and worktree metadata conventions
                 // as a fresh worktree creation, minus worktree creation. The
                 // worktree metadata also keeps it on the Legacy engine.
+                // Carry the superseded session's recorded start so the
+                // replacement keeps its pre-handoff commits: worktree.baseCommit
+                // below is the worktree's creation tip T, and T..HEAD would hide
+                // the session's own S..T work (R9-13). T stays on the worktree
+                // meta for the handoff rewind classification.
+                const priorStart =
+                  oldSummary?.baseCommit ??
+                  oldSummary?.branch?.baseCommit ??
+                  oldSummary?.worktree?.baseCommit;
                 const spawned = await runtime.bridge.spawnOrAttach({
                   workspaceCwd,
                   modelServiceId,
                   sessionScope: 'thread',
+                  ...(priorStart ? { baseCommit: priorStart } : {}),
                   ...(approvalMode !== undefined ? { approvalMode } : {}),
                   ...(source.sourceType !== undefined
                     ? { sourceType: source.sourceType }
@@ -4616,6 +4670,11 @@ export function registerSessionRoutes(
                     slug: effectiveOldSidecar.slug,
                     path: realTarget,
                     branch: effectiveOldSidecar.worktreeBranch,
+                    baseCommit:
+                      effectiveOldSidecar.worktreeBase ||
+                      effectiveOldSidecar.originalHeadCommit ||
+                      undefined,
+                    baseBranch: effectiveOldSidecar.originalBranch || undefined,
                   },
                 });
                 spawnedNew = { sessionId: spawned.sessionId };
@@ -4729,6 +4788,11 @@ export function registerSessionRoutes(
                   slug: effectiveOldSidecar.slug,
                   path: realTarget,
                   branch: effectiveOldSidecar.worktreeBranch,
+                  baseCommit:
+                    effectiveOldSidecar.worktreeBase ||
+                    effectiveOldSidecar.originalHeadCommit ||
+                    undefined,
+                  baseBranch: effectiveOldSidecar.originalBranch || undefined,
                 };
                 runtime.bridge.setSessionWorktree(
                   spawned.sessionId,
@@ -5001,18 +5065,24 @@ export function registerSessionRoutes(
               ...sidecar,
               worktreeBranch: name,
             });
-            runtime.bridge.setSessionWorktree(storageSessionId, {
+            // Branching the checkout must not drop the session's start
+            // commit/base branch: the change overview still scopes its window
+            // to them, so carry them onto the live meta and the response.
+            const branchedWorktree = {
               slug: sidecar.slug,
               path: realTarget,
               branch: name,
-            });
+              baseCommit:
+                sidecar.worktreeBase || sidecar.originalHeadCommit || undefined,
+              baseBranch: sidecar.originalBranch || undefined,
+            };
+            runtime.bridge.setSessionWorktree(
+              storageSessionId,
+              branchedWorktree,
+            );
             res.status(200).json({
               sessionId: storageSessionId,
-              worktree: {
-                slug: sidecar.slug,
-                path: realTarget,
-                branch: name,
-              },
+              worktree: branchedWorktree,
             });
           } finally {
             releaseOwnership();
@@ -5679,6 +5749,15 @@ export function registerSessionRoutes(
                     // The cd landed: finish the transfer instead of
                     // discarding the branch/snapshot just applied locally.
                     await clearWorktreeSessionDurable(sidecarPath);
+                    // Promote the worktree base into the plain start commit so
+                    // the commit fallback keeps a boundary after the worktree
+                    // meta is removed (R5-1).
+                    if (base) {
+                      runtime.bridge.setSessionBaseCommit?.(
+                        storageSessionId,
+                        base,
+                      );
+                    }
                     runtime.bridge.clearSessionWorktree?.(storageSessionId);
                     res.status(200).json({
                       sessionId: storageSessionId,
@@ -5696,6 +5775,12 @@ export function registerSessionRoutes(
                 throw error;
               }
               await clearWorktreeSessionDurable(sidecarPath);
+              // Promote the worktree base into the plain start commit so the
+              // commit fallback keeps a boundary after the worktree meta is
+              // removed (R5-1).
+              if (base) {
+                runtime.bridge.setSessionBaseCommit?.(storageSessionId, base);
+              }
               runtime.bridge.clearSessionWorktree?.(storageSessionId);
               res.status(200).json({
                 sessionId: storageSessionId,
@@ -5874,10 +5959,18 @@ export function registerSessionRoutes(
                 slug,
                 path: worktree.path,
                 branch: '',
+                baseCommit,
+                baseBranch: currentBranch ?? undefined,
               });
               res.status(200).json({
                 sessionId: storageSessionId,
-                worktree: { slug, path: worktree.path, branch: '' },
+                worktree: {
+                  slug,
+                  path: worktree.path,
+                  branch: '',
+                  baseCommit,
+                  baseBranch: currentBranch ?? undefined,
+                },
                 currentCwd: changed.newCwd,
               });
             } catch (error) {
@@ -5895,10 +5988,18 @@ export function registerSessionRoutes(
                   slug,
                   path: worktree.path,
                   branch: '',
+                  baseCommit,
+                  baseBranch: currentBranch ?? undefined,
                 });
                 res.status(200).json({
                   sessionId: storageSessionId,
-                  worktree: { slug, path: worktree.path, branch: '' },
+                  worktree: {
+                    slug,
+                    path: worktree.path,
+                    branch: '',
+                    baseCommit,
+                    baseBranch: currentBranch ?? undefined,
+                  },
                   currentCwd: worktree.path,
                 });
                 return;
@@ -6395,6 +6496,12 @@ export function registerSessionRoutes(
                   slug,
                   path: worktreeResult.worktree.path,
                   branch: worktreeResult.worktree.branch,
+                  baseCommit: base.headCommit,
+                  // Carry the base branch so the live summary has the same
+                  // base-branch exclusion the sidecar restores after restart
+                  // (R9-1); without it, integrating upstream re-lists foreign
+                  // commits as this session's loose work.
+                  baseBranch: base.branch || undefined,
                 };
                 await createWorktreeSessionMarker(
                   worktree.path,
@@ -6581,6 +6688,11 @@ export function registerSessionRoutes(
           );
           return;
         }
+        // Record the branch point so the change overview's commit fallback can
+        // scope this session's window to <baseCommit>..HEAD. A current-checkout
+        // branch session has no worktree sidecar to restore it from, so without
+        // this capture the fallback would be suppressed permanently (R5-1).
+        const branchBaseCommit = await getHeadCommit(runtime.workspaceCwd);
         const result = await runtime.bridge.branchSession(
           sessionId,
           {
@@ -6589,8 +6701,36 @@ export function registerSessionRoutes(
           },
           { clientId },
         );
+        // Persist the branch point next to the new transcript. A checkpoint
+        // branch (atRecordId) is persist-only — no live entry exists at branch
+        // time, so the in-memory setter below cannot reach it; the restore flow
+        // re-applies this sidecar as the start commit (R8-2). Writing it for the
+        // live arm too heals that arm's start commit across a daemon restart.
+        // Best-effort: a durably committed fork must not fail on a sidecar write.
+        if (branchBaseCommit) {
+          // Best-effort: writeSessionBranchSidecar never throws (returns false
+          // on failure), so a failed persist degrades to the pre-sidecar
+          // behavior and the fork stays committed; surface it in the log.
+          const persisted = writeSessionBranchSidecar(
+            createWorkspaceRuntimeSessionService(
+              runtime,
+            ).getBranchSessionPathForArchiveState(result.sessionId, 'active'),
+            branchBaseCommit,
+          );
+          if (!persisted) {
+            daemonLog?.warn('branch point sidecar write failed', {
+              sessionId: result.sessionId,
+            });
+          }
+        }
         if (atRecordId === undefined) {
           const restored = result as BridgeBranchedSession;
+          if (branchBaseCommit) {
+            runtime.bridge.setSessionBaseCommit?.(
+              restored.sessionId,
+              branchBaseCommit,
+            );
+          }
           const releaseLiveBranch = async () => {
             if (restored.attached) {
               await runtime.bridge
@@ -8490,6 +8630,18 @@ export function registerSessionRoutes(
                 req.accepts(['application/json', 'text/event-stream']) ===
                 'text/event-stream'
               ) {
+                if (
+                  !checkSseAdmission({
+                    surface: 'artifactLibrary',
+                    req,
+                    res,
+                    caps: deps.sseAdmissionCaps,
+                    daemonLog: deps.daemonLog,
+                  })
+                ) {
+                  return;
+                }
+                countSseStream('artifactLibrary', req, res);
                 stream = new ArtifactLibraryStream(res);
                 await stream.send('start', { total: groups.length });
               }
@@ -8552,7 +8704,9 @@ export function registerSessionRoutes(
               : { v: 1, sessions: readResults, errors };
           }),
         );
-        if (!stream && !res.destroyed)
+        // headersSent: an SSE admission refusal inside the closure already
+        // answered 503; the JSON fallback must not double-send.
+        if (!stream && !res.destroyed && !res.headersSent)
           res.status(200).set('Cache-Control', 'no-store').json(response);
       } catch (error) {
         if (stream) {
@@ -9505,6 +9659,18 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (
+          !checkSseAdmission({
+            surface: 'generation',
+            req,
+            res,
+            caps: deps.sseAdmissionCaps,
+            daemonLog: deps.daemonLog,
+            logContext: { sessionId },
+          })
+        ) {
+          return;
+        }
 
         const abort = new AbortController();
         let completed = false;
@@ -9520,6 +9686,7 @@ export function registerSessionRoutes(
           clientId !== undefined ? { clientId } : undefined,
         );
 
+        countSseStream('generation', req, res);
         res.status(200);
         res.setHeader('Content-Type', 'text/event-stream');
         res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -11468,6 +11635,30 @@ export function registerSessionRoutes(
             return;
           }
           const { requestId, question, resume } = parsed.data;
+          // Terminal outcomes (409 conflict / 410 expired) must survive
+          // saturation: decide them BEFORE the admission gate, which stays
+          // immediately before open() so a refusal never starts the bridge
+          // side request (issue #17554 review R1-5).
+          btwStreams.precheck(
+            bridge,
+            sessionId,
+            clientId,
+            requestId,
+            question,
+            resume === true,
+          );
+          if (
+            !checkSseAdmission({
+              surface: 'artifactLibrary',
+              req,
+              res,
+              caps: deps.sseAdmissionCaps,
+              daemonLog: deps.daemonLog,
+              logContext: { sessionId },
+            })
+          ) {
+            return;
+          }
           const request = btwStreams.open(
             bridge,
             sessionId,
@@ -11476,6 +11667,7 @@ export function registerSessionRoutes(
             question,
             resume === true,
           );
+          countSseStream('artifactLibrary', req, res);
           // The bridge's side request holds generation alive independently of HTTP.
           void streamBtwSnapshots(res, request);
         } catch (error) {
