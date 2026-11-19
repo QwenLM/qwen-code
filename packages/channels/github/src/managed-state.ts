@@ -387,28 +387,43 @@ export class ManagedGithubStateStore {
    * so the caller must not render it as a quiescent "nothing was lost".
    */
   strandedLegacyLedger():
-    | { path: string; pending: number; outbound: number; readable: boolean }
+    | {
+        path: string;
+        pending: number;
+        outbound: number;
+        readable: boolean;
+        watermark: string | null;
+      }
     | undefined {
     const legacyPath = join(this.directory, 'managed-state.json');
     if (!existsSync(legacyPath)) return undefined;
     let pending = 0;
     let outbound = 0;
     let readable = true;
+    let watermark: string | null = null;
     try {
       const value = JSON.parse(readFileSync(legacyPath, 'utf8')) as {
         pending?: unknown[];
         outbound?: unknown[];
+        cursor?: { lastProcessedAt?: unknown };
       } | null;
       const pendingList = value?.pending;
       const outboundList = value?.outbound;
       pending = Array.isArray(pendingList) ? pendingList.length : 0;
       outbound = Array.isArray(outboundList) ? outboundList.length : 0;
+      // The legacy notification watermark: the fresh ledger's null cursor
+      // restarts the poll window at connect time, so unread notifications
+      // updated after this watermark while the bot was down are never listed.
+      // Surfacing it lets the notice name that skipped window even when the
+      // legacy staged no pending/outbound (R1-4).
+      const lastProcessedAt = value?.cursor?.lastProcessedAt;
+      watermark = typeof lastProcessedAt === 'string' ? lastProcessedAt : null;
     } catch {
       // A corrupt or unreadable legacy still strands; flag it so the caller
       // reports unknown counts and a possible loss, never a silent "empty".
       readable = false;
     }
-    return { path: legacyPath, pending, outbound, readable };
+    return { path: legacyPath, pending, outbound, readable, watermark };
   }
 
   /**

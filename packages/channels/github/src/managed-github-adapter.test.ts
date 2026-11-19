@@ -2551,6 +2551,46 @@ describe('managed GitHub adapter registration-identity isolation', () => {
     expect(stranded[0]).toContain('0 outbound');
     expect(stranded[0]).not.toContain('claims are stranded');
     expect(stranded[0]).not.toContain('outbound segments were dropped');
+    // A genuinely cursor-less 0/0 legacy names no skipped window either.
+    expect(stranded[0]).not.toContain('were never listed');
+    await adapter.disconnect();
+  });
+
+  it('a 0/0 legacy with a watermark names the skipped offline notification window', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    // No pending/outbound, but the bot went down with a watermark: mentions
+    // received while it was down are dropped by the fresh null cursor (R1-4).
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        cursor: {
+          lastProcessedAt: '2026-11-19T09:00:00Z',
+          dispatchedComments: [],
+        },
+        pending: [],
+        outbound: [],
+      }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 pending');
+    expect(stranded[0]).toContain('0 outbound');
+    expect(stranded[0]).toContain('2026-11-19T09:00:00Z');
+    expect(stranded[0]).toContain('were never listed');
+    // The watermark clause is separate from the pending/outbound loss clauses.
+    expect(stranded[0]).not.toContain('claims are stranded');
+    expect(stranded[0]).not.toContain('outbound segments were dropped');
     await adapter.disconnect();
   });
 

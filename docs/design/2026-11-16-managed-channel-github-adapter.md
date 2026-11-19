@@ -294,9 +294,15 @@ cause so the errno is diagnosable.
 ### State and ownership
 
 - State directory:
-  `~/.qwen/channels/<workspace-scope>/github-<sha256(name\0baseUrl)[:16]>/managed-state.json`,
+  `~/.qwen/channels/<workspace-scope>/github-<sha256(name\0baseUrl)[:16]>/`,
   written 0700/0600 with the atomic temp-file + fsync + rename discipline.
-  Credentials never define identity.
+  Credentials never define identity. The live ledger file beneath it is keyed
+  by the registration identity:
+  `managed-state-<sha256(destinationKey)[:16]>.json` (see
+  [the registration-identity keying design](2026-11-19-managed-github-registration-identity.md)).
+  The pre-upgrade `managed-state.json` is only ever the retired legacy: a
+  successful start reports it and archives it as
+  `managed-state.json.stranded-<uuid>`; the new build never loads that name.
 - Contents: `version`, `generation`, `instanceRefusals`, the cursor
   (`lastProcessedAt`, dispatched comment ring), `pending` (full events, ≤ 32),
   `outbound` (segment ledger, ≤ 64, receipts validated by the shared

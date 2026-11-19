@@ -21,7 +21,7 @@
 
 - **存储构造函数**加第四参 `identityKey = ''`。锁目录仍按配置条目（`name\0baseUrl`）按工作区范围键控——不按目的地——故同一 name + endpoint 的两个实例即便目标控制面目的地不同也争同一把连接锁。目录下的账本文件另按 `sha256(identityKey)` 键控：`managed-state-<ledgerKey>.json`。一个注册下暂存的 pending 账本绝不会被同一条目的另一注册加载或重放。
 - **适配器构造函数**传 `options.controlPlane.destinationKey ?? ''` 作第四参。`?? ''` 回退仅用于省略该可选字段的非持久化测试替身；生产 HTTP 客户端恒供给它。
-- **`load()`** 拆分 read / parse / validate 三臂，点名 `this.file`，并以 `{ cause }` 保留 fs 错误，使面对多个 `<hash>.json` 账本的操作者能判断哪个注册不可读、哪个 merely 无效。
+- **`load()`** 拆分 read / parse / validate 三臂，点名 `this.file`，并以 `{ cause }` 保留 fs 错误，使面对多个 `<hash>.json` 账本的操作者能判断哪个注册不可读、哪个只是格式无效。
 
 锁刻意保持按条目：按目的地的锁会让一个配置 name + endpoint 的两个注册各拿一把锁并发运行，重复入站处理。账本键控在不收窄锁的前提下加跨注册隔离。
 
@@ -29,9 +29,9 @@
 
 ## 升级后果与诊断
 
-账本文件从 `managed-state.json` 改名为 `managed-state-<ledgerKey>.json`，**不接管**：升级后第一次重启在全新的身份键控账本上启动。一条已暂存（已持久化）但尚未准入的认领被滞留——控制面从未见过它（只有 `submitInbound` 使认领可见），故只有本客户端自己的账本能重驱动它，而新账本不含它。与 DingTalk 的流不同，GitHub 不向提供方 ack 帧；丢失来自通知窗口：持有认领的线程从不标已读并冻结水位，但全新账本的 cursor 为 null，故首次轮询的 `since` 是 connect 时刻，旧通知不再被列出。同一次重置还丢掉 cursor（通知水位 + 已派发评论环）与未回执的出站段。这是 WeCom / DingTalk 设计记录的刻意滞留取舍：接管旧账本会把一个注册的 pending 重放进另一注册，正是键控要防的跨所有权 hazard。
+账本文件从 `managed-state.json` 改名为 `managed-state-<ledgerKey>.json`，**不接管**：升级后第一次重启在全新的身份键控账本上启动。一条已暂存（已持久化）但尚未准入的认领被滞留——控制面从未见过它（只有 `submitInbound` 使认领可见），故只有本客户端自己的账本能重驱动它，而新账本不含它。与 DingTalk 的流不同，GitHub 不向提供方 ack 帧；丢失来自通知窗口：持有认领的线程从不标已读并冻结水位，但全新账本的 cursor 为 null，故首次轮询的 `since` 是 connect 时刻，旧通知不再被列出。同一次重置还丢掉 cursor（通知水位 + 已派发评论环）与未回执的出站段。这是 WeCom / DingTalk 设计记录的刻意滞留取舍：接管旧账本会把一个注册的 pending 重放进另一注册，正是键控要防的跨所有权风险。
 
-为使丢弃显式而非静默，`connect()` 探测同目录的 `managed-state.json`（`strandedLegacyLedger()`），打一行日志指明该路径及其 pending/outbound 条数，但不接管它。探测刻意**不**以身份键控账本缺失为门：回滚到升级前版本可能在键控账本已存在后又向 `managed-state.json` 暂存新认领，这些认领仍须被报告，而非无声消失。记录带 `readable` 标志：内容无法读取或解析的旧账本以 `unknown` 计数加一句「其所含任何已暂存认领均被滞留」的明确警告报告，绝不渲染成静默的空账本。对可读旧账本，入站与出站后果分别点名——仅当 `pending > 0` 才输出入句子句，仅当 `outbound > 0` 才输出出站子句——故仅出站滞留不会谎报入站评论丢失，静默升级（0/0）仍得到诊断行但无虚假数据丢失告警。损坏旧账本绝不抛出，故受损旧账本绝不会把升级变成硬性启动失败。归档推迟到启动成功之后：在客户端身份解析、注册与 ownership 复查完成后，`archiveStrandedLegacy()` 把旧账本重命名为 `managed-state.json.stranded-<id>`——绝不删除，使被滞留认领仍可查——并打第二行日志点名归档路径，使循通知而来的操作者能找到认领。首次启动失败则旧账本原样保留，使回滚到升级前版本仍能恢复它（提示仅在重试时重复）；回滚若再暂存新的 `managed-state.json`，下次升级会再次探测到。反向亦有界：成功升级后回滚到升级前版本会在全新账本上启动，因该版本只加载 `managed-state.json` 而新版本从不写它；认领并未销毁（身份键控账本保留、后续再升级重新加载），但回滚期间升级前版本不给任何信号表明先前注册正持有已暂存未准入的评论。
+为使丢弃显式而非静默，`connect()` 探测同目录的 `managed-state.json`（`strandedLegacyLedger()`），打一行日志指明该路径及其 pending/outbound 条数，但不接管它。探测刻意**不**以身份键控账本缺失为门：回滚到升级前版本可能在键控账本已存在后又向 `managed-state.json` 暂存新认领，这些认领仍须被报告，而非无声消失。记录带 `readable` 标志：内容无法读取或解析的旧账本以 `unknown` 计数加一句「其所含任何已暂存认领均被滞留」的明确警告报告，绝不渲染成静默的空账本。对可读旧账本，入站与出站后果分别点名——仅当 `pending > 0` 才输出入句子句，仅当 `outbound > 0` 才输出出站子句——故仅出站滞留不会谎报入站评论丢失。即便 0/0，若旧账本带非空通知水位，仍单独点名「水位之后、本次启动之前的未读通知从未被列出，故其间收到的 mention 未被准入」的离线积压丢失——这是独立子句，不放宽 pending 门；真正无水位的 0/0 才无丢失告警。损坏旧账本绝不抛出，故受损旧账本绝不会把升级变成硬性启动失败。归档推迟到启动成功之后：在客户端身份解析、注册与 ownership 复查完成后，`archiveStrandedLegacy()` 把旧账本重命名为 `managed-state.json.stranded-<id>`——绝不删除，使被滞留认领仍可查——并打第二行日志点名归档路径，使循通知而来的操作者能找到认领。首次启动失败则旧账本原样保留，使回滚到升级前版本仍能恢复它（提示仅在重试时重复）；回滚若再暂存新的 `managed-state.json`，下次升级会再次探测到。反向亦有界：成功升级后回滚到升级前版本会在全新账本上启动，因该版本只加载 `managed-state.json` 而新版本从不写它；认领并未销毁（身份键控账本保留、后续再升级重新加载），但回滚期间升级前版本不给任何信号表明先前注册正持有已暂存未准入的评论。
 
 ## 涉及文件
 
@@ -40,12 +40,15 @@
 - `packages/channels/github/src/managed-github-adapter.ts` —— 传 `destinationKey` 给存储；`connect()` 滞留通知 + 延迟归档 + 归档路径日志。
 - `packages/channels/github/src/managed-state.test.ts` —— 更新文件路径期望；加键控、隔离、滞留与损坏旧账本见证。
 - `packages/channels/github/src/managed-github-adapter.test.ts` —— `fakeControlPlane` 加 `destinationKey`；加目的地/工作区隔离、共享锁与滞留诊断见证。
+- `docs/design/2026-11-16-managed-channel-github-adapter.md`（及中文版）—— 「State and ownership」更新为条目键控目录 + `managed-state-<sha256(destinationKey)[:16]>.json`，注明 `managed-state.json` 为升级前文件、归档为 `.stranded-<uuid>`，并链接本设计文档。
+- `docs/design/2026-11-18-managed-dingtalk-registration-identity.md`（及中文版）—— 修正「GitHub 仅按 name+endpoint 键控、为剩余后续」的过时表述。
 - 本设计文档及其中文版。
 
 ## 范围边界
 
 - GitHub 通知轮询、准入/出站纪律、标已读/窗口冻结机制不变。仅账本文件名与升级诊断改变。
-- `disconnect()` 的行注销门控是独立 concern，本次不动。
+- `disconnect()` 的行注销门控是独立问题，本次不动。
+- 滞留诊断仅覆盖升级前的 `managed-state.json`。升级后若 `destinationKey` 变更，前一注册的身份键控账本（`managed-state-<hash>.json`）被废弃而无提示——这与 DingTalk 兄弟相同，已并入 #17769 第 1 项跟踪，不在本次实现；故本诊断不应被读作覆盖一切滞留情形。
 - 无控制面（Java）改动；无 `channel-base` 契约/API 改动——仅更新 `destinationKey` 注释。
 - email 存储不在范围（独立变体）；它是剩余后续。
 

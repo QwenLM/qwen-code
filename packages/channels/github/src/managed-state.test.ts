@@ -765,4 +765,34 @@ describe('ManagedGithubStateStore', () => {
     expect(store.archiveStrandedLegacy()).toBeUndefined();
     expect(existsSync(join(store.directory, 'managed-state.json'))).toBe(false);
   });
+
+  it('surfaces the legacy notification watermark, null when unreadable or cursor-less', () => {
+    const store = new ManagedGithubStateStore(
+      'gh-watermark',
+      tempCwd(),
+      'https://api.github.com',
+      'cp|tenant-a|chan-1|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    const legacyPath = join(store.directory, 'managed-state.json');
+    writeFileSync(
+      legacyPath,
+      JSON.stringify({
+        ...freshState(),
+        cursor: {
+          lastProcessedAt: '2026-11-19T09:00:00Z',
+          dispatchedComments: [],
+        },
+      }),
+    );
+    expect(store.strandedLegacyLedger()!.watermark).toBe(
+      '2026-11-19T09:00:00Z',
+    );
+    // A cursor-less legacy has no watermark to name.
+    writeFileSync(legacyPath, JSON.stringify(freshState()));
+    expect(store.strandedLegacyLedger()!.watermark).toBeNull();
+    // An unreadable legacy cannot surface a watermark.
+    writeFileSync(legacyPath, '{not json');
+    expect(store.strandedLegacyLedger()!.watermark).toBeNull();
+  });
 });

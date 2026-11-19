@@ -24,7 +24,7 @@ Mirror the WeCom P1-D/E shape exactly:
 
 The lock stays per-entry deliberately: a per-destination lock would let two registrations of one configured robot app each acquire a lock and run concurrently, duplicating inbound processing. The ledger keying adds cross-registration isolation without narrowing the lock.
 
-The shared `destinationKey` comment in `channel-base` is updated to name WeCom **and DingTalk** as the adapters that bind the registration identity, and to point at GitHub (name+endpoint only) and email (separate variant) as the remaining follow-ups, so the contract documentation does not keep naming DingTalk as the sibling that lacks the keying.
+The shared `destinationKey` comment in `channel-base` is updated to name WeCom **and DingTalk** as the adapters that bind the registration identity, and to point at GitHub (name+endpoint only) and email (separate variant) as the remaining follow-ups, so the contract documentation does not keep naming DingTalk as the sibling that lacks the keying. _(Update: GitHub has since been added as a binder in #17775; the comment now names WeCom, DingTalk and GitHub, leaving email as the follow-up.)_
 
 ## Files affected
 
@@ -48,7 +48,7 @@ The webhook reply-target cache (`state.webhooks`) lives inside the identity-keye
 - The DingTalk stream connection and admission/outbound discipline are unchanged. The webhook reply _mechanism_ is unchanged, but the webhook cache is now identity-scoped (see Upgrade consequence): a webhook-less frame after an identity change is dropped rather than admitted from a cross-registration cache.
 - The `disconnect()` row-deregistration gate is a separate concern and is not touched here.
 - No control-plane (Java) change; no `channel-base` contract/API change — only the `destinationKey` doc comment is updated to name WeCom and DingTalk as the adapters that bind the registration identity.
-- The email and GitHub stores are out of scope. GitHub keys its single ledger by name + endpoint (`baseUrl`) only, and email is a separate variant; neither binds the full registration identity, so each is its own follow-up rather than part of this DingTalk change.
+- The email and GitHub stores are out of scope of this DingTalk change. At the time, GitHub keyed its single ledger by name + endpoint (`baseUrl`) only, and email is a separate variant. _(Update: GitHub registration-identity keying has since landed in #17775; email remains the follow-up.)_
 
 ## Open questions
 

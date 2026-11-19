@@ -559,6 +559,12 @@ export class ManagedGithubAdapter {
           if (legacy.outbound > 0)
             consequence +=
               ' Its un-receipted outbound segments were dropped, so their delivery status is unknown.';
+          // Even a legacy with no pending/outbound drops the offline backlog:
+          // the fresh null cursor restarts the window at connect time, so
+          // mentions received after the legacy watermark while the bot was down
+          // are never listed. Name that skipped window separately (R1-4).
+          if (legacy.watermark !== null)
+            consequence += ` Unread notifications updated after ${legacy.watermark} and before this start were never listed, so mentions received since then were not admitted.`;
         }
         this.log(
           `Managed GitHub upgraded to per-registration ledgers; the legacy ledger ${legacy.path} (${pendingLabel} pending, ${outboundLabel} outbound) is stranded and not replayed.${consequence}`,
