@@ -705,6 +705,7 @@ interface ChannelInfo {
    * restore or creation lands on this channel afterwards is fenced too.
    */
   workspaceChangeFence?: number;
+  approvalModeReload: { generation: number; inFlight: number };
   /**
    * The user-language change last sent to this channel, settled either way,
    * so a session request on a new Managed channel waits for it rather than
@@ -4214,6 +4215,21 @@ export function createSessionControlPlane(
 
   let workspaceChangeRevision = 0;
 
+  // Track ACP settlement rather than the public timeout: a late settings
+  // reload can still change the approval mode used by a queued delegation.
+  async function trackApprovalModeReload<T>(
+    ci: ChannelInfo,
+    request: Promise<T>,
+  ): Promise<T> {
+    ci.approvalModeReload.generation++;
+    ci.approvalModeReload.inFlight++;
+    try {
+      return await request;
+    } finally {
+      ci.approvalModeReload.inFlight--;
+    }
+  }
+
   /** Sends a change to every live channel of another engine; returns the ones that did not acknowledge it. */
   async function propagateWorkspaceChange(
     change: WorkspaceChange,
@@ -4261,8 +4277,11 @@ export function createSessionControlPlane(
           params,
         );
         try {
+          const pending = raceLongLived(request, getChannelClosedReject(ci));
           const response = await withTimeout(
-            raceLongLived(request, getChannelClosedReject(ci)),
+            change.kind === 'settings'
+              ? trackApprovalModeReload(ci, pending)
+              : pending,
             timeoutMs,
             SERVE_CONTROL_EXT_METHODS.workspaceChange,
           );
@@ -5188,6 +5207,7 @@ export function createSessionControlPlane(
       overdueAbandonedNewSessions: new Set(),
       newSessionSettlementTimers: new Map(),
       newSessionCleanupFailed: false,
+      approvalModeReload: { generation: 0, inFlight: 0 },
       isQuarantined: false,
     };
     infoRef.current = info;
@@ -14341,11 +14361,14 @@ export function createSessionControlPlane(
         method === SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan;
       const invoke = async (info: ChannelInfo) => {
         const timeout = invokeOpts?.timeoutMs ?? initTimeoutMs;
+        const pending = raceLongLived(
+          info.connection.extMethod(method, params ?? {}),
+          getChannelClosedReject(info),
+        );
         const response = await withTimeout(
-          raceLongLived(
-            info.connection.extMethod(method, params ?? {}),
-            getChannelClosedReject(info),
-          ),
+          method === SERVE_CONTROL_EXT_METHODS.workspaceReload
+            ? trackApprovalModeReload(info, pending)
+            : pending,
           timeout,
           method,
         );
@@ -14589,12 +14612,16 @@ export function createSessionControlPlane(
     captureSessionApprovalModeGuard(sessionId) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      const { approvalModeReload } = assertLivePromptEntry(sessionId, entry);
+      const reloadGeneration = approvalModeReload.generation;
       const generation = entry.approvalModePublishGeneration;
       const assertCurrent = () => {
         assertLivePromptEntry(sessionId, entry);
         if (
           entry.approvalModeRoundtripInFlight ||
-          entry.approvalModePublishGeneration !== generation
+          entry.approvalModePublishGeneration !== generation ||
+          approvalModeReload.inFlight > 0 ||
+          approvalModeReload.generation !== reloadGeneration
         ) {
           throw new Error(
             'The session approval mode changed during delegation. Retry the launch.',

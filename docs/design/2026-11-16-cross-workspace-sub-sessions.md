@@ -77,7 +77,9 @@ to apply to calls that omit the selector. In `yolo` mode the tool resolves the
 selector itself when the call runs, so the deny rules and the generation check
 still apply. The tool checks the calling mode again after resolution. The
 daemon verifies that a call without one-time approval is still in `yolo` and
-checks the caller's approval revision again before dispatch.
+checks the caller's approval revision again before dispatch. A workspace
+settings reload invalidates existing approval checks on the affected ACP
+channel and blocks new checks until the reload request settles.
 
 ### Resolving the target
 
@@ -147,7 +149,8 @@ person's session, or a sub-session of another session. The session keeps its
 own parent and source. The launcher reads them from the live entry or, for a
 session the idle reaper already closed, from the creation records at the head
 of its transcript. The caller itself, an unknown or archived session, and a
-standalone session are refused.
+standalone session are refused. A closed worktree session must be opened
+before a follow-up so the daemon verifies and restores its worktree first.
 
 The first version reached only sessions the caller created, because a
 follow-up puts the caller model's text into the target as a user turn. That
@@ -381,8 +384,9 @@ and any pending notification.
 
 - A `first-turn` follow-up waits at most five minutes, and a busy session can
   hold it in the queue past that. This wait does not withdraw the prompt,
-  so it still runs later, and nothing reports its result. Use `sent` when
-  the queue delay is uncertain.
+  so it can still run later without a result notification. The timeout result
+  warns that the prompt may still be queued or running and includes any partial
+  output. Use `sent` when the queue delay is uncertain.
 
 - Should every `sent` sub-session notify its caller, not only one that names
   a workspace? That would make the tool consistent, but it would change
@@ -394,7 +398,8 @@ and any pending notification.
   targets and callers, the depth gate, target-bridge dispatch, caller-bridge
   notification delivery, named-workspace confirmation despite legacy grants,
   no confirmation while the caller stays in `yolo`, deny rules still applied,
-  loss of YOLO during resolution or before dispatch, live approval reads,
+  loss of YOLO during resolution or before dispatch, settings reload
+  invalidation on control and secondary channels, live approval reads,
   incompatible or changed modes, and target cancellation.
 - End to end: with two trusted workspaces, start a child in B from A, read B's
   `QWEN.md` in `first-turn` mode, and verify `sent` notification delivery in A.
@@ -407,10 +412,11 @@ and any pending notification.
   a session another session started, such as a side task, is followed up
   with its own lineage and compatible mode; an incompatible local mode
   prevents dispatch; the caller itself, an unknown session, a Live caller,
-  a consensus destination, and a caller that cannot take a `sent` completion
-  are refused before the target session is attached; a failed follow-up
-  releases its client; a follow-up in another workspace runs on that
-  workspace's bridge under the delegated mode.
+  a consensus destination, a closed worktree session, and a caller that cannot
+  take a `sent` completion are refused before the target session is attached;
+  `first-turn` timeout reports the pending execution and any partial output;
+  a failed follow-up releases its client; a follow-up in another workspace
+  runs on that workspace's bridge under the delegated mode.
 - Step 2, end to end: follow up a child in B with `first-turn`, and again with
   `sent` after a daemon restart, and see B answer with the context of its
   earlier turns; follow up while the child runs a long turn and receive only

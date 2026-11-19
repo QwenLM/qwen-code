@@ -349,6 +349,26 @@ describe('CreateSubSessionTool', () => {
     expect(res.llmContent).toContain('no text output');
   });
 
+  it.each(['', 'partial answer'])(
+    'reports a timed-out follow-up with partial output %j',
+    async (result) => {
+      const spawner = vi.fn(async () => ({
+        sessionId: 'sub-3',
+        result,
+        stopReason: 'timeout',
+      }));
+      const res = await new CreateSubSessionTool(makeConfig(spawner))
+        .build({ prompt: 'summarize', sessionId: 'sub-3' })
+        .execute(new AbortController().signal);
+
+      expect(res.returnDisplay).toBe('[sub-3](qwen-session://sub-3) timed out');
+      expect(res.llmContent).toBe(
+        'Timed out waiting for [sub-3](qwen-session://sub-3). The original prompt may still be queued or running.' +
+          (result ? `\n\nPartial output:\n\n${result}` : ''),
+      );
+    },
+  );
+
   it('first-turn: warns when the parent link is live-only (parentSessionPersisted:false)', async () => {
     // The daemon reported the parent lineage was NOT durably written — surface
     // the degraded link so the caller knows it won't survive a daemon restart.

@@ -51,6 +51,7 @@ import {
   APPROVAL_MODES,
   ApprovalMode,
 } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import { readWorktreeSessionStrict } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   ACTIVE_WORK_CLOSE_TIMEOUT_MS,
@@ -1318,6 +1319,16 @@ export function createSubSessionLauncher(
           storedId,
           'active',
         );
+        if (metadata) {
+          const worktree = await readWorktreeSessionStrict(
+            service.getWorktreeSessionPath(storedId),
+          );
+          if (worktree.state !== 'missing') {
+            throw new Error(
+              'Open the destination worktree session before sending a follow-up.',
+            );
+          }
+        }
       }
     }
     if (!metadata) {

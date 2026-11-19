@@ -31878,6 +31878,59 @@ describe('createAcpSessionBridge', () => {
       ).resolves.toMatchObject({ stopReason: 'end_turn' });
     });
 
+    it('invalidates delegation guards when the ACP channel reloads settings', async () => {
+      let markReloadStarted!: () => void;
+      let finishReload!: () => void;
+      const started = new Promise<void>(
+        (resolve) => (markReloadStarted = resolve),
+      );
+      const pending = new Promise<void>((resolve) => (finishReload = resolve));
+      const { channel, agent } = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.workspaceReload) {
+            markReloadStarted();
+            await pending;
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => channel });
+      onTestFinished(() => bridge.shutdown());
+      const { sessionId } = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const guard = bridge.captureSessionApprovalModeGuard(sessionId);
+      const reload = bridge.invokeWorkspaceCommand(
+        SERVE_CONTROL_EXT_METHODS.workspaceReload,
+        { cwd: WS_A },
+      );
+      const modeChanged = 'The session approval mode changed during delegation';
+      const request = {
+        sessionId,
+        prompt: [{ type: 'text' as const, text: 'hello' }],
+      };
+      try {
+        await started;
+        expect(guard).toThrow(modeChanged);
+        expect(() => bridge.captureSessionApprovalModeGuard(sessionId)).toThrow(
+          modeChanged,
+        );
+      } finally {
+        finishReload();
+        await reload;
+      }
+      await expect(
+        bridge.sendPrompt(sessionId, request, undefined, {
+          assertCanDispatch: guard,
+        }),
+      ).rejects.toThrow(modeChanged);
+      expect(agent.promptCalls).toEqual([]);
+      expect(() =>
+        bridge.captureSessionApprovalModeGuard(sessionId),
+      ).not.toThrow();
+    });
+
     it('serializes concurrent approval-mode changes through the per-session queue (A3)', async () => {
       // doudouOUC #4484 post-merge review (A3): two concurrent
       // `setSessionApprovalMode` calls must not interleave their ACP

@@ -337,6 +337,16 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
         };
       }
 
+      if (followUp && res.stopReason === 'timeout') {
+        return {
+          llmContent:
+            `Timed out waiting for ${sessionLink}. The original prompt may still be queued or running.` +
+            (res.result ? `\n\nPartial output:\n\n${res.result}` : '') +
+            parentWarning,
+          returnDisplay: `${sessionLink} timed out`,
+        };
+      }
+
       // first-turn: return the output of the turn this prompt started.
       const stop = res.stopReason ? ` (stopReason: ${res.stopReason})` : '';
       const body =

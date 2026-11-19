@@ -28,6 +28,7 @@ import {
   sessionTitleSidecarPath,
   writeSessionTitleSidecar,
 } from '@qwen-code/qwen-code-core/services/session-title-sidecar.js';
+import * as worktreeSessionService from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 
@@ -3933,6 +3934,63 @@ describe('following up a sub-session', () => {
       resolve.mockRestore();
     }
   });
+
+  it.each([
+    {
+      state: 'valid' as const,
+      session: {
+        slug: 'my-task',
+        worktreePath: `${WS}/.qwen/worktrees/my-task`,
+        worktreeBranch: 'worktree-my-task',
+        originalCwd: WS,
+        originalBranch: 'main',
+        originalHeadCommit: 'abc123',
+      },
+    },
+    { state: 'invalid' as const, reason: 'invalid sidecar JSON' },
+  ])(
+    'refuses a cold worktree target with a $state sidecar before restoring',
+    async (sidecar) => {
+      const sessionId = 'abcdef00-0000-4000-8000-000000000001';
+      const storedId = sessionId.toUpperCase();
+      const resolve = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+        .mockResolvedValue(storedId);
+      const read = vi
+        .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+        .mockResolvedValue({});
+      const readWorktree = vi
+        .spyOn(worktreeSessionService, 'readWorktreeSessionStrict')
+        .mockResolvedValue(sidecar);
+      try {
+        const fake = makeFakeBridge({
+          notLive: [sessionId],
+          resumable: [sessionId],
+          defaultMode: 'default',
+          events: (pid) => [chunkFor(pid, 'ok'), turnComplete(pid)],
+        });
+        const launcher = createSubSessionLauncher({
+          getBridge: () => fake.bridge,
+          boundWorkspace: WS,
+          getArchiveCoordinator,
+        });
+        await expect(
+          followUp(launcher, 'first-turn', sessionId),
+        ).rejects.toThrow(
+          'Open the destination worktree session before sending a follow-up',
+        );
+        expect(readWorktree).toHaveBeenCalledWith(
+          new SessionService(WS).getWorktreeSessionPath(storedId),
+        );
+        expect(fake.resumes).toEqual([]);
+        expect(fake.prompts).toEqual([]);
+      } finally {
+        readWorktree.mockRestore();
+        read.mockRestore();
+        resolve.mockRestore();
+      }
+    },
+  );
 
   it('the tool may follow up a session another session started', async () => {
     const { fake, launcher } = ownChild({
