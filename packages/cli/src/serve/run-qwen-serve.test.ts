@@ -21434,6 +21434,7 @@ describe('runQwenServe channel worker supervisor', () => {
       'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
       'Sec-WebSocket-Version': '13',
       'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.ticket-abc',
+      'Sec-WebSocket-Extensions': 'permessage-deflate',
       Authorization: 'Bearer deliberately-invalid-daemon-token',
       Cookie: 'browser-secret=must-not-reach-java',
       'X-Qwen-Tenant-Id': 'forged-tenant',
@@ -21520,7 +21521,8 @@ describe('runQwenServe channel worker supervisor', () => {
             'Upgrade: websocket\r\n' +
             'Connection: Upgrade\r\n' +
             'Sec-WebSocket-Accept: test-accept\r\n' +
-            'Sec-WebSocket-Protocol: qwen-ws\r\n\r\n' +
+            'Sec-WebSocket-Protocol: qwen-ws\r\n' +
+            'Sec-WebSocket-Extensions: permessage-deflate\r\n\r\n' +
             'java-head',
         );
       });
@@ -21528,6 +21530,7 @@ describe('runQwenServe channel worker supervisor', () => {
         status: number;
         protocol: string | undefined;
         accept: string | undefined;
+        extensions: string | undefined;
         echo: string;
       }>((resolve, reject) => {
         const target = new URL(terminalUrl());
@@ -21551,6 +21554,7 @@ describe('runQwenServe channel worker supervisor', () => {
         let status = 0;
         let protocol: string | undefined;
         let accept: string | undefined;
+        let extensions: string | undefined;
         socket.on('data', (chunk) => {
           buffer += chunk.toString();
           let echo = '';
@@ -21566,13 +21570,28 @@ describe('runQwenServe channel worker supervisor', () => {
             accept = /^Sec-WebSocket-Accept:\s*(.+)$/im
               .exec(header)?.[1]
               ?.trim();
+            extensions = /^Sec-WebSocket-Extensions:\s*(.+)$/im
+              .exec(header)?.[1]
+              ?.trim();
             echo = buffer.slice(boundary + 4);
             if (!echo.includes('java-head')) return;
-            resolve({ status, protocol, accept, echo: 'java-head' });
+            resolve({
+              status,
+              protocol,
+              accept,
+              extensions,
+              echo: 'java-head',
+            });
             return;
           }
           if (buffer.includes('java-head'))
-            resolve({ status, protocol, accept, echo: 'java-head' });
+            resolve({
+              status,
+              protocol,
+              accept,
+              extensions,
+              echo: 'java-head',
+            });
         });
         socket.on('error', reject);
       });
@@ -21580,6 +21599,7 @@ describe('runQwenServe channel worker supervisor', () => {
         status: 101,
         protocol: 'qwen-ws',
         accept: 'test-accept',
+        extensions: 'permessage-deflate',
         echo: 'java-head',
       });
       expect(peerPath).toBe(
@@ -21594,6 +21614,9 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(peerHeaders!['sec-websocket-version']).toBe('13');
       expect(peerHeaders!['sec-websocket-protocol']).toBe(
         'qwen-ws, qwen-bearer.ticket-abc',
+      );
+      expect(peerHeaders!['sec-websocket-extensions']).toBe(
+        'permessage-deflate',
       );
       expect(peerHeaders!['authorization']).toBeUndefined();
       expect(peerHeaders!['cookie']).toBeUndefined();
