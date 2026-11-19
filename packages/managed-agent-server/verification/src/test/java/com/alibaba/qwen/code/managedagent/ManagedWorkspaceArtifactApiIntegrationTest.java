@@ -25,6 +25,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.jdbc.core.RowMapper;
@@ -39,8 +40,6 @@ import java.util.Base64;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
@@ -477,7 +476,8 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
             assertThat(artifact.required("availability").asText()).isEqualTo(available ? "available" : "unavailable");
             assertThat(row.required("access").required("can_read_content").booleanValue()).isEqualTo(available);
         }
-        verify(jdbc).query(contains("FROM ma_output_capture"), any(RowMapper.class), any(Object[].class));
+        verify(jdbc).query(ArgumentMatchers.contains("FROM ma_output_capture"),
+                ArgumentMatchers.any(RowMapper.class), ArgumentMatchers.any(Object[].class));
     }
 
     @Test
