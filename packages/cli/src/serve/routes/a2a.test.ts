@@ -417,7 +417,7 @@ it.each(['replaced', 'untrusted', 'disabled'] as const)(
 
 describe('the default session port factory', () => {
   it.each(['active', 'archived'] as const)(
-    'recovers the same task after a filesystem error on its %s transcript',
+    'recovers the same task after an EIO reading its %s transcript',
     async (location) => {
       const callerId = headers['x-qwen-caller-id'];
       const agentId = headers['x-qwen-agent-id'];
