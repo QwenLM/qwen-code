@@ -62,7 +62,6 @@ function fixture({ nested = false, platform = 'darwin', arch = 'arm64' } = {}) {
   const bun = file(join(dependency, 'bin', 'bun'));
   const options = {
     interactive: true,
-    screenReader: false,
     protocolMode: false,
     sandbox: false,
     env: { QWEN_TUI_RENDERER: 'opentui' },
@@ -138,7 +137,6 @@ describe('npm Bun runtime admission', () => {
     ['Ink', { env: { QWEN_TUI_RENDERER: 'ink' } }],
     ['unknown renderer', { env: { QWEN_TUI_RENDERER: 'other' } }],
     ['headless or pipe', { interactive: false }],
-    ['screen reader', { screenReader: true }],
     ['ACP/SDK/IDE or dual-output protocol', { protocolMode: true }],
     ['whole-CLI sandbox', { sandbox: true }],
     ['inside sandbox', { env: { QWEN_TUI_RENDERER: 'opentui', SANDBOX: '1' } }],

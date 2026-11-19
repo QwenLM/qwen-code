@@ -262,3 +262,21 @@ describe('localizeToolDisplayName', () => {
     expect(untranslated).toEqual([]);
   });
 });
+
+describe('setLanguageAsync', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('keeps the previous language until the new dictionary has loaded', async () => {
+    const { setLanguageAsync, getCurrentLanguage } = await import('./index.js');
+    await setLanguageAsync('en');
+    const pending = setLanguageAsync('zh');
+    // A frame landing inside the load window must still see the language its
+    // strings are written in, or it reseeds the screen-reader dedupe state
+    // against the old dictionary and replays the conversation on the swap.
+    expect(getCurrentLanguage()).toBe('en');
+    await pending;
+    expect(getCurrentLanguage()).toBe('zh');
+  });
+});

@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_196_000;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_197_000;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -156,7 +156,15 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_196_000;
 // +3,669 over the Arabic head). Third-party input bytes are unchanged and
 // the forbidden-input guard passes for all three. The warning sits 501
 // bytes above the merged measurement and the ceiling 1,501 above it.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_197_000;
+// The workspace artifact library copy (nine keys across three locales) is
+// interactive-only: managed-artifact-library-messages.transcript-stub.ts
+// replaces it in transcript mode, so it contributes no bytes here. Merging
+// main c5247e9727 (its transcript-reachable copy since d83fa2154e) measures
+// 2,196,205 JS bytes on Node 22.23.2 with the workflow's installed
+// dependencies (CSS 2,438,122, separate); the forbidden-input guard passes
+// and the third-party input mix is unchanged. Re-track: the warning sits
+// 795 above that measurement and the ceiling 1,795 above it.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_198_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

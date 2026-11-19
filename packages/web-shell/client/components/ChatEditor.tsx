@@ -3347,24 +3347,18 @@ export const ChatEditor = memo(
           Number.parseFloat(getComputedStyle(toolbar).columnGap) || 0,
         );
         const toolbarWidth = Math.floor(toolbar.getBoundingClientRect().width);
-        const rightWidth = Math.ceil(
-          toolbarRight.getBoundingClientRect().width,
-        );
         const rightGap =
           Number.parseFloat(getComputedStyle(toolbarRight).columnGap) || 0;
         const toggle = widthToggleRef.current;
-        // Exclude the toggle so its own visibility cannot affect the result.
         const toggleSpace = toggle
           ? toggle.getBoundingClientRect().width + rightGap
           : 0;
-        setWidthToggleFits(
-          toolbarWidth - currentLeadingWidth - rightWidth + toggleSpace - gap >=
-            50,
-        );
         const availableWidth = getToolbarExpansionBudget({
           toolbarWidth,
           leadingWidth: currentLeadingWidth,
-          rightWidth,
+          rightWidth: Math.ceil(
+            toolbarRight.getBoundingClientRect().width - toggleSpace,
+          ),
           currentExpansionWidth,
           gap,
         });
@@ -3377,6 +3371,13 @@ export const ChatEditor = memo(
           // expanding so a collapsed/expanded pair cannot form a two-cycle.
           expansionMargin: items.length,
         });
+        // Give labels first use of the space so the toggle cannot evict them.
+        const nextExpansionWidth = items.reduce(
+          (total, item) =>
+            total + (itemVisibility[item.id] ? item.expansionWidth : 0),
+          0,
+        );
+        setWidthToggleFits(availableWidth - nextExpansionWidth >= 50);
         const next = {
           workspaceSelect: itemVisibility.workspaceSelect ?? false,
           workspace: itemVisibility.workspace ?? false,

@@ -1054,6 +1054,16 @@ describe('web-shell zh-TW locale', () => {
       'sidebar.liveVoicePending',
       'memory.lastDream',
       'memory.savedIn',
+      'managed.artifactLibrary.title',
+      'managed.artifactLibrary.description',
+      'managed.artifactLibrary.empty',
+      'managed.artifactLibrary.unavailable',
+      'managed.artifactLibrary.workspaceGone',
+      'managed.artifactLibrary.loadFailed',
+      'managed.artifactLibrary.unavailableBadge',
+      'managed.artifactLibrary.sessionFallback',
+      'managed.artifactLibrary.refresh',
+      'managed.artifactLibrary.close',
     ]) {
       expect(tw(key, { path: '/w' })).not.toBe(en(key, { path: '/w' }));
     }

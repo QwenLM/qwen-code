@@ -39,6 +39,7 @@ import {
   WrenchIcon,
   ListTreeIcon,
   MessageCirclePlusIcon,
+  PackageIcon,
   PanelRightIcon,
   PlusIcon,
   ShrinkIcon,
@@ -144,6 +145,7 @@ import { WebPreviewPanel } from '../preview/WebPreviewPanel';
 import { SavedWebPreview } from '../preview/SavedWebPreview';
 import type { WebPreviewState } from '../preview/web-preview';
 import { TokenUsagePanel } from './TokenUsagePanel';
+import { ArtifactsListPanel } from './ArtifactsListPanel';
 import { ChangeOverviewPanel } from './ChangeOverviewPanel';
 import { TrajectoryPanel } from './TrajectoryPanel';
 import type { TrajectoryPageLoader } from '../../trajectory/useTrajectoryWindow';
@@ -394,6 +396,12 @@ export type ArtifactPanelTab =
     }
   | {
       id: string;
+      kind: 'artifacts';
+      title: string;
+      sessionId?: string;
+    }
+  | {
+      id: string;
       kind: 'change_overview';
       title: string;
       workspaceCwd: string;
@@ -466,6 +474,14 @@ const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
 interface ArtifactPanelProps {
   contextUsageControls?: Readonly<Record<string, ContextUsageControls>>;
   artifacts: readonly DaemonSessionArtifact[];
+  /**
+   * The session's own artifacts, matching the header count badge. The list tab
+   * renders these rather than the panel-wide merged collection (which also
+   * carries pane/open-time extras used for preview-tab icon lookup).
+   */
+  sessionArtifacts?: readonly DaemonSessionArtifact[];
+  /** Open an artifact preview tab from the artifacts list tab. */
+  onOpenArtifact?: (artifactId: string) => void;
   tabs: readonly ArtifactPanelTab[];
   activeTabId: string | null;
   reviewChanges: readonly TurnOutputFileChange[];
@@ -709,6 +725,8 @@ function WorkspaceFilesPane({
 export function ArtifactPanel({
   contextUsageControls,
   artifacts,
+  sessionArtifacts,
+  onOpenArtifact,
   tabs,
   activeTabId,
   reviewChanges,
@@ -995,6 +1013,11 @@ export function ArtifactPanel({
                         />
                       ) : tab.kind === 'token_usage' ? (
                         <GaugeIcon
+                          className={styles.tabIconSvg}
+                          strokeWidth={1.6}
+                        />
+                      ) : tab.kind === 'artifacts' ? (
+                        <PackageIcon
                           className={styles.tabIconSvg}
                           strokeWidth={1.6}
                         />
@@ -1879,6 +1902,13 @@ export function ArtifactPanel({
             key={activeTab.id}
             sessionActions={activeTab.sessionActions}
             sessionId={activeTab.sessionId}
+          />
+        ) : activeTab.kind === 'artifacts' ? (
+          <ArtifactsListPanel
+            key={activeTab.id}
+            artifacts={sessionArtifacts ?? artifacts}
+            loading={loading}
+            onOpenArtifact={onOpenArtifact}
           />
         ) : activeTab.kind === 'change_overview' ? (
           <ChangeOverviewPanel

@@ -792,6 +792,9 @@ export class Turn {
     private readonly yieldsToolCallPreparations?: boolean,
     private readonly suppressedHookContext?: string,
     private readonly onModelRequestDispatched?: () => void,
+    private readonly isExplicitRetry?: boolean,
+    private readonly isSessionTurn?: boolean,
+    private readonly ledgerTurnKey?: string,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -806,30 +809,28 @@ export class Turn {
     try {
       // Note: This assumes `sendMessageStream` yields events like
       // { type: StreamEventType.RETRY } or { type: StreamEventType.CHUNK, value: GenerateContentResponse }
-      // Keep the no-options call shape: callers without either flag pass
-      // `undefined`, as before either option existed.
-      const sendOptions =
-        this.promptIdentity !== undefined ||
-        this.retractDeliveredOutputOnRetry === true ||
-        this.onPreparedRequest !== undefined ||
-        this.onModelRequestDispatched !== undefined ||
-        this.suppressedHookContext !== undefined
-          ? {
-              ...(this.onPreparedRequest
-                ? { onPreparedRequest: this.onPreparedRequest }
-                : {}),
-              ...(this.onModelRequestDispatched
-                ? { onModelRequestDispatched: this.onModelRequestDispatched }
-                : {}),
-              ...(this.suppressedHookContext
-                ? { suppressedHookContext: this.suppressedHookContext }
-                : {}),
-              ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
-              ...(this.retractDeliveredOutputOnRetry
-                ? { retractDeliveredOutputOnRetry: true }
-                : {}),
-            }
-          : undefined;
+      // Membership in the model-availability ledger is decided by the sender
+      // (LlmClient sets isSessionTurn for the live turn's own sends), not
+      // inferred from "went through Turn": background rounds built on Turn
+      // (turnModelRound) leave it unset. The remaining fields stay conditional.
+      const sendOptions = {
+        ...(this.isSessionTurn ? { isSessionTurn: true } : {}),
+        ...(this.onPreparedRequest
+          ? { onPreparedRequest: this.onPreparedRequest }
+          : {}),
+        ...(this.onModelRequestDispatched
+          ? { onModelRequestDispatched: this.onModelRequestDispatched }
+          : {}),
+        ...(this.suppressedHookContext
+          ? { suppressedHookContext: this.suppressedHookContext }
+          : {}),
+        ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
+        ...(this.retractDeliveredOutputOnRetry
+          ? { retractDeliveredOutputOnRetry: true }
+          : {}),
+        ...(this.isExplicitRetry ? { isExplicitRetry: true } : {}),
+        ...(this.ledgerTurnKey ? { ledgerTurnKey: this.ledgerTurnKey } : {}),
+      };
       const responseStream = prepared
         ? await this.chat.sendPreparedMessageStream(
             prepared,

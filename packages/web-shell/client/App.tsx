@@ -2344,6 +2344,10 @@ type PersistedArtifactPanelTab =
   | Pick<
       Extract<ArtifactPanelTab, { kind: 'workflow' }>,
       'id' | 'kind' | 'title' | 'sessionId'
+    >
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'artifacts' }>,
+      'id' | 'kind' | 'title' | 'sessionId'
     >;
 
 function parsePersistedArtifactPanelTab(
@@ -2573,6 +2577,12 @@ function parsePersistedArtifactPanelTab(
         kind: 'workflow',
         sessionId: tab['sessionId'],
       } as PersistedArtifactPanelTab;
+    case 'artifacts':
+      return {
+        ...common,
+        kind: 'artifacts',
+        sessionId: tab['sessionId'],
+      } as PersistedArtifactPanelTab;
     default:
       return;
   }
@@ -2738,6 +2748,8 @@ function serializeArtifactPanelTabs(
             ]
           : [];
       case 'workflow':
+        return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
+      case 'artifacts':
         return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
       case 'change_overview':
         // Persist the identity like the neighbouring trajectory/workflow arms;
@@ -7056,6 +7068,28 @@ export function App({
       openContextUsagePanel(sessionId, actions, true),
     [openContextUsagePanel],
   );
+  const openArtifactsListPanel = useCallback(
+    (sourceSessionId: string) => {
+      rememberArtifactPanelTrigger();
+      const tab: ArtifactPanelTab = {
+        id: `artifacts:${sourceSessionId}`,
+        kind: 'artifacts',
+        title: t('environment.artifacts'),
+        sessionId: sourceSessionId,
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, rememberArtifactPanelTrigger, t],
+  );
   const openAttachmentPanel = useCallback(
     (
       file: AttachmentPreviewRequest,
@@ -8263,6 +8297,13 @@ export function App({
                       sessionAgentTraceSupported)
                     ? tab
                     : undefined;
+                case 'artifacts':
+                  // A stored tab outlives the host's opt-in, like the sibling
+                  // restore arms: a host that hides the artifacts header entry
+                  // must not get the list tab back through the browser profile.
+                  if (!artifactsHeaderItemVisible) return undefined;
+                  // Identity only; the list reads the live artifacts prop.
+                  return tab;
                 case 'change_overview':
                   // A stored tab outlives the host's opt-in, so a host that
                   // has stopped listing the item must not get the panel back
@@ -8372,6 +8413,7 @@ export function App({
       cancelled = true;
     };
   }, [
+    artifactsHeaderItemVisible,
     artifactsLoading,
     connection.sessionContext,
     connection.loadingTranscript,
@@ -23457,10 +23499,6 @@ export function App({
     sessionWorktree,
     gitStatusTarget,
   ]);
-  // Bumped when the header artifact entry opens the panel, so the panel
-  // expands its artifacts section even if the user had collapsed it (the
-  // panel hides rather than unmounts, so its local section state persists).
-  const [artifactsExpandSignal, setArtifactsExpandSignal] = useState(0);
   const handleEnvironmentPanelOpenChange = useCallback(
     (open: boolean) => {
       persistEnvironmentPanelOpen(open);
@@ -23477,20 +23515,25 @@ export function App({
   // The count and the opener are derived from one gate so an embedder never
   // receives a count it cannot act on: the built-in header additionally
   // requires both props, but the custom renderChatHeader contract does not.
+  // The entry toggles the right panel's artifacts list tab, independent of the
+  // environment panel.
+  const artifactsTabActive =
+    activeArtifactPanelTabId === `artifacts:${connection.sessionId}`;
   const artifactsHeaderEntry =
-    artifactsHeaderItemVisible &&
-    mainView === 'chat' &&
-    environmentPanelItems.includes('artifacts') &&
-    connection.sessionId
+    artifactsHeaderItemVisible && mainView === 'chat' && connection.sessionId
       ? {
           // The live list wins once present; before it lands, the click-time
           // hint from the session-list summary shows the count early. The
           // hook retires the hint when authoritative data arrives.
           artifactCount:
             artifacts.length > 0 ? artifacts.length : (artifactCountHint ?? 0),
+          artifactsTabActive,
           onOpenArtifacts: () => {
-            handleEnvironmentPanelOpenChange(true);
-            setArtifactsExpandSignal((value) => value + 1);
+            if (artifactPanelOpen) {
+              closeArtifactPanel();
+            } else {
+              openArtifactsListPanel(connection.sessionId!);
+            }
           },
         }
       : {};
@@ -23668,7 +23711,14 @@ export function App({
     const syncVariables = () => {
       frameId = null;
       const computedStyle = getComputedStyle(root);
-      const nextNames = new Set<string>();
+      const nextVariables = new Map<string, string>();
+      // Read the live computed style before any portal writes can invalidate it.
+      const propertyCount = computedStyle.length;
+      for (let index = 0; index < propertyCount; index += 1) {
+        const name = computedStyle[index];
+        if (!name.startsWith('--')) continue;
+        nextVariables.set(name, computedStyle.getPropertyValue(name));
+      }
       portalRoot.dataset.webShellShadcn = '';
       portalRoot.classList.toggle(
         'dark',
@@ -23676,21 +23726,17 @@ export function App({
       );
       portalRoot.lang = selectedLanguage;
       portalRoot.dir = languageDirection(selectedLanguage);
-      for (let index = 0; index < computedStyle.length; index += 1) {
-        const name = computedStyle[index];
-        if (!name.startsWith('--')) continue;
-        nextNames.add(name);
-        const value = computedStyle.getPropertyValue(name);
+      for (const [name, value] of nextVariables) {
         portalRoot.style.setProperty(name, value);
         portalHost?.style.setProperty(name, value);
       }
       for (const name of portalRootVariableNamesRef.current) {
-        if (!nextNames.has(name)) {
+        if (!nextVariables.has(name)) {
           portalRoot.style.removeProperty(name);
           portalHost?.style.removeProperty(name);
         }
       }
-      portalRootVariableNamesRef.current = nextNames;
+      portalRootVariableNamesRef.current = new Set(nextVariables.keys());
     };
     const scheduleSync = () => {
       if (frameId === null) frameId = requestAnimationFrame(syncVariables);
@@ -23868,6 +23914,8 @@ export function App({
   const artifactPanelSharedProps = {
     onSelectTurnCallsPrompt: openTurnCalls,
     artifacts: artifactPanelArtifacts,
+    sessionArtifacts: artifacts,
+    onOpenArtifact: openArtifactPanel,
     tabs: lockedWorkspaceCwd
       ? artifactPanelTabs.filter(
           (tab) =>
@@ -27437,7 +27485,6 @@ export function App({
                 }
                 artifacts={artifacts}
                 artifactsLoading={artifactsLoading}
-                artifactsExpandSignal={artifactsExpandSignal}
                 items={environmentPanelItems}
                 onOpenGitDiff={
                   workspaceContextActive && gitDiffWorkspaceCwd

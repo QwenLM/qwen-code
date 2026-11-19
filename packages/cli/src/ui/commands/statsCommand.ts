@@ -711,7 +711,8 @@ export const statsCommand: SlashCommand = {
   ): OpenDialogActionReturn | MessageActionReturn | void => {
     if (context.executionMode !== 'interactive') {
       const now = new Date();
-      const { sessionStartTime, promptCount, metrics } = context.session.stats;
+      const { sessionStartTime, userPromptCount, metrics } =
+        context.session.stats;
       const wallDuration = sessionStartTime
         ? now.getTime() - sessionStartTime.getTime()
         : 0;
@@ -730,7 +731,7 @@ export const statsCommand: SlashCommand = {
           t('Session duration: {{duration}}', {
             duration: formatDuration(wallDuration),
           }),
-          t('Prompts: {{count}}', { count: String(promptCount) }),
+          t('Prompts: {{count}}', { count: String(userPromptCount) }),
           t('API requests: {{count}}', { count: String(totalRequests) }),
           t('Tokens — prompt: {{prompt}}, output: {{output}}', {
             prompt: String(totalPromptTokens),

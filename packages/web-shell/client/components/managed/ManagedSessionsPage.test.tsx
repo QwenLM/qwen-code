@@ -2166,6 +2166,23 @@ describe('ManagedSessionsPage', () => {
     expect(provider.workspaceFiles!.read).not.toHaveBeenCalled();
   });
 
+  it('enables inline attachments on an unbound Session without Workspace upload', async () => {
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        capabilities: {
+          canSend: true,
+          canCancel: false,
+          inputAttachments: true,
+          workspaceTurns: false,
+        },
+      }),
+    );
+    await render('s1');
+    expect(mocks.editorProps?.attachmentsEnabled).toBe(true);
+    expect(mocks.editorProps?.visibleToolbarActions).toContain('addMenu');
+    expect(mocks.editorProps?.fileUploadTarget).toBeUndefined();
+  });
+
   it.each(['default', 'auto-edit', 'yolo'] as const)(
     'shows persisted policy as fixed even on an unbound Session (%s)',
     async (approvalMode) => {
@@ -5012,6 +5029,357 @@ describe('ManagedSessionsPage', () => {
       expect.objectContaining({ limit: 50, signal: expect.any(AbortSignal) }),
     );
     expect(provider.toolResults!.readRange).not.toHaveBeenCalled();
+  });
+
+  it('opens the workspace artifact library from the workspace group header', async () => {
+    const listWorkspaceArtifacts = vi.fn().mockResolvedValue({
+      data: [{ artifact, access: { can_read_content: false } }],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const bound = summary('s1', {
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+      capabilities: { canSend: true, canCancel: false, artifacts: true },
+    });
+    mocks.client.getSession.mockResolvedValue(bound);
+    mocks.client.listSessions.mockResolvedValue({ sessions: [bound] });
+    provider = {
+      ...provider,
+      workspaceBinding: {
+        agentId: 'agent',
+        list: vi.fn().mockResolvedValue({
+          data: [
+            {
+              workspaceId: 'ws-a',
+              displayName: 'Project',
+              state: 'active',
+              canCreateSession: true,
+            },
+          ],
+          supported: true,
+          artifactLibrary: true,
+        }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      },
+      workspaceArtifacts: { listArtifacts: listWorkspaceArtifacts },
+      toolResults: {
+        canDownload: false,
+        getResult: vi.fn(),
+        listArtifacts: vi.fn(),
+        getArtifact: vi
+          .fn()
+          .mockResolvedValue({ artifact, access: { can_read_content: false } }),
+        readRange: vi.fn(),
+        downloadArtifact: vi.fn(),
+      },
+    };
+    const slot = document.createElement('aside');
+    container.appendChild(slot);
+    await render('s1', 'en', provider, slot);
+    const entry = slot.querySelector<HTMLButtonElement>(
+      'button[aria-label="Artifact library: Project"]',
+    );
+    expect(entry).toBeTruthy();
+    expect(listWorkspaceArtifacts).not.toHaveBeenCalled();
+    await act(async () => {
+      entry!.click();
+      await flush();
+    });
+    expect(listWorkspaceArtifacts).toHaveBeenCalledWith(
+      'ws-a',
+      expect.objectContaining({ limit: 50, signal: expect.any(AbortSignal) }),
+    );
+    expect(document.body.textContent).toContain('Artifact library · Project');
+    const close = [...document.body.querySelectorAll('button')].find(
+      (node) => node.textContent === 'Close',
+    );
+    expect(close).toBeTruthy();
+    await act(async () => {
+      close!.click();
+      await flush();
+    });
+    expect(document.body.textContent).not.toContain(
+      'Artifact library · Project',
+    );
+  });
+
+  it('hides the artifact library entry while the page is not interactive', async () => {
+    const listWorkspaceArtifacts = vi.fn().mockResolvedValue({
+      data: [{ artifact, access: { can_read_content: false } }],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const bound = summary('s1', {
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+      capabilities: { canSend: true, canCancel: false, artifacts: true },
+    });
+    mocks.client.getSession.mockResolvedValue(bound);
+    mocks.client.listSessions.mockResolvedValue({ sessions: [bound] });
+    provider = {
+      ...provider,
+      workspaceBinding: {
+        agentId: 'agent',
+        list: vi.fn().mockResolvedValue({
+          data: [
+            {
+              workspaceId: 'ws-a',
+              displayName: 'Project',
+              state: 'active',
+              canCreateSession: true,
+            },
+          ],
+          supported: true,
+          artifactLibrary: true,
+        }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      },
+      workspaceArtifacts: { listArtifacts: listWorkspaceArtifacts },
+      toolResults: {
+        canDownload: false,
+        getResult: vi.fn(),
+        listArtifacts: vi.fn(),
+        getArtifact: vi
+          .fn()
+          .mockResolvedValue({ artifact, access: { can_read_content: false } }),
+        readRange: vi.fn(),
+        downloadArtifact: vi.fn(),
+      },
+    };
+    const slot = document.createElement('aside');
+    container.appendChild(slot);
+    await render('s1', 'en', provider, slot, false);
+    expect(
+      slot.querySelector('button[aria-label="Artifact library: Project"]'),
+    ).toBeNull();
+    expect(listWorkspaceArtifacts).not.toHaveBeenCalled();
+    await render('s1', 'en', provider, slot, true);
+    expect(document.body.textContent).not.toContain(
+      'Artifact library · Project',
+    );
+    const entry = slot.querySelector<HTMLButtonElement>(
+      'button[aria-label="Artifact library: Project"]',
+    );
+    expect(entry).toBeTruthy();
+    await act(async () => {
+      entry!.click();
+      await flush();
+    });
+    expect(document.body.textContent).toContain('Artifact library · Project');
+  });
+
+  it('keeps the workspace library open across session selection', async () => {
+    const listWorkspaceArtifacts = vi.fn().mockResolvedValue({
+      data: [{ artifact, access: { can_read_content: false } }],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const bound = (id: string) =>
+      summary(id, {
+        workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+        capabilities: { canSend: true, canCancel: false, artifacts: true },
+      });
+    mocks.client.getSession.mockResolvedValue(bound('s1'));
+    mocks.client.listSessions.mockResolvedValue({
+      sessions: [bound('s1'), bound('s2')],
+    });
+    provider = {
+      ...provider,
+      workspaceBinding: {
+        agentId: 'agent',
+        list: vi.fn().mockResolvedValue({
+          data: [
+            {
+              workspaceId: 'ws-a',
+              displayName: 'Project',
+              state: 'active',
+              canCreateSession: true,
+            },
+          ],
+          supported: true,
+          artifactLibrary: true,
+        }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      },
+      workspaceArtifacts: { listArtifacts: listWorkspaceArtifacts },
+      toolResults: {
+        canDownload: false,
+        getResult: vi.fn(),
+        listArtifacts: vi.fn(),
+        getArtifact: vi
+          .fn()
+          .mockResolvedValue({ artifact, access: { can_read_content: false } }),
+        readRange: vi.fn(),
+        downloadArtifact: vi.fn(),
+      },
+    };
+    const slot = document.createElement('aside');
+    container.appendChild(slot);
+    await render('s1', 'en', provider, slot);
+    const entry = slot.querySelector<HTMLButtonElement>(
+      'button[aria-label="Artifact library: Project"]',
+    );
+    await act(async () => {
+      entry!.click();
+      await flush();
+    });
+    expect(document.body.textContent).toContain('Artifact library · Project');
+    expect(listWorkspaceArtifacts).toHaveBeenCalledTimes(1);
+    const sessionRow = slot.querySelector<HTMLElement>(
+      '[data-managed-session-id="s2"]',
+    );
+    expect(sessionRow).toBeTruthy();
+    await act(async () => {
+      sessionRow!.click();
+      await flush();
+    });
+    expect(onSelect).toHaveBeenCalledWith('s2', 'ws-a');
+    // Feed the selection back into the page: the content is keyed by
+    // provider identity alone, so this re-render changes sessionId without
+    // remounting — only a sessionId-sensitive clear would close the dialog.
+    mocks.client.getSession.mockImplementation(async (id: string) =>
+      id === 's2' ? bound('s2') : bound('s1'),
+    );
+    await render('s2', 'en', provider, slot);
+    expect(document.body.textContent).toContain('Artifact library · Project');
+    expect(listWorkspaceArtifacts).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears the workspace library when the provider identity changes', async () => {
+    const listWorkspaceArtifacts = vi.fn().mockResolvedValue({
+      data: [{ artifact, access: { can_read_content: false } }],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const bound = summary('s1', {
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+      capabilities: { canSend: true, canCancel: false, artifacts: true },
+    });
+    mocks.client.getSession.mockResolvedValue(bound);
+    mocks.client.listSessions.mockResolvedValue({ sessions: [bound] });
+    provider = {
+      ...provider,
+      workspaceBinding: {
+        agentId: 'agent',
+        list: vi.fn().mockResolvedValue({
+          data: [
+            {
+              workspaceId: 'ws-a',
+              displayName: 'Project',
+              state: 'active',
+              canCreateSession: true,
+            },
+          ],
+          supported: true,
+          artifactLibrary: true,
+        }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      },
+      workspaceArtifacts: { listArtifacts: listWorkspaceArtifacts },
+      toolResults: {
+        canDownload: false,
+        getResult: vi.fn(),
+        listArtifacts: vi.fn(),
+        getArtifact: vi
+          .fn()
+          .mockResolvedValue({ artifact, access: { can_read_content: false } }),
+        readRange: vi.fn(),
+        downloadArtifact: vi.fn(),
+      },
+    };
+    const slot = document.createElement('aside');
+    container.appendChild(slot);
+    await render('s1', 'en', provider, slot);
+    const entry = slot.querySelector<HTMLButtonElement>(
+      'button[aria-label="Artifact library: Project"]',
+    );
+    await act(async () => {
+      entry!.click();
+      await flush();
+    });
+    expect(document.body.textContent).toContain('Artifact library · Project');
+    // A fresh provider object with the SAME storageKey: the content key does
+    // not remount, so only the [provider] effect can clear the dialog.
+    const otherProvider = { ...provider };
+    await render('s1', 'en', otherProvider, slot);
+    expect(document.body.textContent).not.toContain(
+      'Artifact library · Project',
+    );
+  });
+
+  it('resolves library row titles beyond the loaded session list', async () => {
+    const listWorkspaceArtifacts = vi.fn().mockResolvedValue({
+      data: [{ artifact, access: { can_read_content: false } }],
+      nextCursor: null,
+      hasMore: false,
+    });
+    // The artifact fixture belongs to session-1, which only the archived
+    // list knows: the active list is empty and no session is open, so the
+    // page list alone would fall back to the shortened id.
+    const archived = summary('session-1', {
+      lifecycleStatus: 'archived',
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    mocks.client.listSessions.mockImplementation(
+      async (options: { archiveState?: string }) => ({
+        sessions: options.archiveState === 'archived' ? [archived] : [],
+      }),
+    );
+    provider = {
+      ...provider,
+      lifecycle: { submit: vi.fn(), unarchive: vi.fn(), query: vi.fn() },
+      workspaceBinding: {
+        agentId: 'agent',
+        list: vi.fn().mockResolvedValue({
+          data: [
+            {
+              workspaceId: 'ws-a',
+              displayName: 'Project',
+              state: 'active',
+              canCreateSession: true,
+            },
+          ],
+          supported: true,
+          artifactLibrary: true,
+        }),
+        get: vi.fn(),
+        createEmpty: vi.fn(),
+      },
+      workspaceArtifacts: { listArtifacts: listWorkspaceArtifacts },
+      toolResults: {
+        canDownload: false,
+        getResult: vi.fn(),
+        listArtifacts: vi.fn(),
+        getArtifact: vi
+          .fn()
+          .mockResolvedValue({ artifact, access: { can_read_content: false } }),
+        readRange: vi.fn(),
+        downloadArtifact: vi.fn(),
+      },
+    };
+    const slot = document.createElement('aside');
+    container.appendChild(slot);
+    const archiveSlot = document.createElement('aside');
+    container.appendChild(archiveSlot);
+    await render(undefined, 'en', provider, slot, true, {
+      archivedNavigationTarget: archiveSlot,
+    });
+    expect(archiveSlot.textContent).toContain('Task session-1');
+    const entry = slot.querySelector<HTMLButtonElement>(
+      'button[aria-label="Artifact library: Project"]',
+    );
+    await act(async () => {
+      entry!.click();
+      await flush();
+    });
+    const dialog = document.body.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain('Artifact library · Project');
+    const row = dialog?.querySelector('button[aria-pressed]');
+    expect(row?.textContent).toContain('Task session-1');
+    expect(row?.textContent).not.toContain('Session session-');
   });
 
   it('uses an explicit Java provider without daemon Managed capabilities', async () => {

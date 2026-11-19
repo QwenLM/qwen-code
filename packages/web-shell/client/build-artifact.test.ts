@@ -539,6 +539,24 @@ describe('build artifact — transcript entry (#11031)', () => {
     }
   });
 
+  it('keeps artifact-library copy and lookups in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]managed\.artifactLibrary\./);
+    expect(js).not.toContain(
+      'No artifacts have been produced in this workspace yet.',
+    );
+    expect(js).not.toContain('此工作区还没有产出产物。');
+    expect(js).not.toContain('В этом Workspace ещё нет артефактов.');
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('managed.artifactLibrary.title');
+    expect(interactive).toContain('Artifact library');
+    expect(interactive).toContain('产物库');
+    expect(interactive).toContain('Библиотека артефактов');
+  });
+
   it('keeps workspace mutations out of the read-only transcript entry', () => {
     const transcript = readTranscriptBundle();
     const packaged = readPackageJavascript();

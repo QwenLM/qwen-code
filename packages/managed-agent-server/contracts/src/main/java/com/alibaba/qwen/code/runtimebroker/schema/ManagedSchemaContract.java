@@ -46,6 +46,7 @@ public final class ManagedSchemaContract {
                     "ma_read_lease",
                     "ma_channel_instance",
                     "ma_channel_binding",
+                    "ma_pr_watch_binding",
                     "ma_delivery",
                     "ma_channel_segment",
                     "ma_schedule",
@@ -82,6 +83,7 @@ public final class ManagedSchemaContract {
         WORKSPACE_RETIREMENT,
         WORKSPACE_UPLOAD,
         CHANNEL_INGRESS,
+        PR_WATCH_INJECT,
         SUBMIT_INPUT,
         CANCEL
     }
@@ -93,6 +95,7 @@ public final class ManagedSchemaContract {
         AGENT_DEFINITION,
         AUTOMATION,
         CHANNEL_INGRESS,
+        PR_WATCH_INJECT,
         ACTION_DECISION,
         WORKSPACE_CREATE,
         EXTERNAL_STORAGE,

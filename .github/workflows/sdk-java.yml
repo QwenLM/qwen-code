@@ -1532,10 +1532,10 @@ jobs:
     # need only the bundled CLI, the server jar and a runner-private mysqld,
     # not its MySQL service. The rewritten-command arm delegates its own
     # cgroup root below. Each arm also runs when an earlier one failed.
-    # Ceilings: 30 arms × 10 + the capped cgroup delegation × 10 = 310 plus
-    # ~13 minutes for the uncapped setup steps (Checkout.. Install MySQL
-    # binaries): 323 + 2.
-    timeout-minutes: 325
+    # Ceilings: 30 arms × 10 + the capped cgroup delegation × 10 + the
+    # PR-watch bound-session rig × 10 = 320 plus ~13 minutes for the uncapped
+    # setup steps (Checkout.. Install MySQL binaries): 333 + 2.
+    timeout-minutes: 335
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
     steps:
@@ -1592,6 +1592,11 @@ jobs:
             sudo apt-get update
             sudo apt-get install --yes --no-install-recommends mysql-server mysql-client
           fi
+      - name: 'Run managed PR-watch bound-session E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-pr-watch
       - name: 'Run session owner failover E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
