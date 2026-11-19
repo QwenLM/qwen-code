@@ -198,6 +198,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
             ToolPublicationContract.require(
                     operation.equals(existing.getFirst().get("operation_id")),
                     "Session was retired by another operation");
+            SessionResourceCollectionCollector.enqueueCollections(jdbc, tenant, session, now(jdbc));
             return;
         }
         var heads =
@@ -243,6 +244,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 JdbcManagedToolResultStore.scope(tenant, session),
                 tenant,
                 session);
+        SessionResourceCollectionCollector.enqueueCollections(jdbc, tenant, session, time);
     }
 
     /**
