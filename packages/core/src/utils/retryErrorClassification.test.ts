@@ -1235,4 +1235,28 @@ describe('isTerminalQuotaError', () => {
       isTerminalQuotaError(new Error('bad request'), cls('client-error')),
     ).toBe(false);
   });
+
+  it('matches a statusless type-only insufficient_quota (OpenAI code:null shape)', () => {
+    // The OpenAI SDK puts insufficient_quota in `.type` with `code: null`; the
+    // classifier reads permanence via providerType, so providerCode is empty.
+    // The predicate must still mark it terminal (read the error's type).
+    const error = Object.assign(new Error('insufficient quota'), {
+      type: 'insufficient_quota',
+      code: null,
+    });
+    const classification = classifyRetryError(error);
+    expect(classification.reason).toBe('permanent-provider-code');
+    expect(classification.providerCode).toBeUndefined();
+    expect(isTerminalQuotaError(error, classification)).toBe(true);
+  });
+
+  it('does not match a statusless type-only moderation code', () => {
+    const error = Object.assign(new Error('content moderation'), {
+      type: 'data_inspection_failed',
+      code: null,
+    });
+    const classification = classifyRetryError(error);
+    expect(classification.reason).toBe('permanent-provider-code');
+    expect(isTerminalQuotaError(error, classification)).toBe(false);
+  });
 });

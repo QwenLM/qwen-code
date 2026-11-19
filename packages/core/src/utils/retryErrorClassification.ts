@@ -659,13 +659,30 @@ export function isTerminalQuotaError(
   error: unknown,
   classification: RetryErrorClassification,
 ): boolean {
-  return (
+  if (
     classification.reason === 'qwen-oauth-free-tier-quota' ||
-    classification.reason === 'allocated-quota-exceeded' ||
-    (classification.reason === 'permanent-provider-code' &&
-      /insufficient[_-]?quota/i.test(classification.providerCode ?? '')) ||
-    isQuotaExhaustedError(error)
-  );
+    classification.reason === 'allocated-quota-exceeded'
+  ) {
+    return true;
+  }
+  if (classification.reason === 'permanent-provider-code') {
+    // Permanence can come off the provider code or the SDK's `.type`: the
+    // OpenAI SDK puts `insufficient_quota` in `.type` with `code: null`, which
+    // the classifier reads via providerType, leaving classification.providerCode
+    // empty. Read the error's type/code too so that shape is marked terminal
+    // rather than re-probed each turn.
+    const errorTypeOrCode =
+      typeof error === 'object' && error !== null
+        ? ((error as { type?: unknown }).type ??
+          (error as { code?: unknown }).code)
+        : undefined;
+    return (
+      /insufficient[_-]?quota/i.test(classification.providerCode ?? '') ||
+      (typeof errorTypeOrCode === 'string' &&
+        /insufficient[_-]?quota/i.test(errorTypeOrCode))
+    );
+  }
+  return isQuotaExhaustedError(error);
 }
 
 /**

@@ -54,7 +54,10 @@ fallback；该路径在此不变。
 - `classification.reason === 'qwen-oauth-free-tier-quota'`，或
 - `classification.reason === 'allocated-quota-exceeded'`，或
 - `classification.reason === 'permanent-provider-code'` **且**
-  `classification.providerCode` 命中 `insufficient_quota`（大小写/分隔符不敏感），或
+  `insufficient_quota`（大小写/分隔符不敏感）出现在 `classification.providerCode`
+  或错误的 `.type`/`.code` 中。OpenAI SDK 把 `insufficient_quota` 放在 `.type`、
+  `code: null`；分类器经 `providerType` 读取该永久性，使 `providerCode` 为空，
+  故也读错误自身的 type/code，或
 - `isQuotaExhaustedError(error)`——重置时间配额信号，从错误消息读取，因此无论
   错误以原始形状还是格式化 fast-fail `Error` 到达、无论它如何分类，都能捕获。
 
@@ -98,14 +101,14 @@ terminal 优先于 sticky：恰好分类为可重试的重置时间配额被记�
 
 ## 关键设计决策
 
-| 决策                          | 理由                                                                                                                                               |
-| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 仅 fallback，不含 primary     | primary 每请求必试（primary-skip 范围外，#17377）。给 primary 写 terminal 是没有读取方的死写。                                                     |
-| 仅 reason `quota`             | 窄切片接配额信号。台账上的 `terminal` reason `capacity` 仍可用但无调用方（main 无永久容量分类；529 可重试）。                                      |
-| terminal 优先 `else if`       | 避免重置时间配额恰好分类可重试时的双重标记；`markRetryOncePerTurn` 本就拒绝降级 terminal，`else if` 让意图显式。                                   |
-| 谓词读分类 + 消息             | 两个 fail-fast 配额 reason 与 `insufficient_quota` 永久 code 取自已校验的分类；重置时间信号基于消息（`isQuotaExhaustedError`），须独立于分类捕获。 |
-| 门不变                        | 标记以绑定的 `availability` 为门（`isSessionTurn && isModelAvailabilityTrackingEnabled?.()`）；gate-off 行为逐字节不变。                           |
-| 不做 `modelPolicy` action map | preview 的 prompt-vs-silent `ModelPolicy` UI 是独立关注点，范围外（Option B：main 架构赢）。                                                       |
+| 决策                               | 理由                                                                                                                                                                                                                                |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 仅 fallback，不含 primary          | primary 每请求必试（primary-skip 范围外，#17377）。给 primary 写 terminal 是没有读取方的死写。                                                                                                                                      |
+| 仅 reason `quota`                  | 窄切片接配额信号。台账上的 `terminal` reason `capacity` 仍可用但无调用方（main 无永久容量分类；529 可重试）。                                                                                                                       |
+| terminal 优先 `else if`            | 避免重置时间配额恰好分类可重试时的双重标记；`markRetryOncePerTurn` 本就拒绝降级 terminal，`else if` 让意图显式。                                                                                                                    |
+| 谓词读分类 + 错误 type/code + 消息 | 两个 fail-fast 配额 reason 取自已校验的分类；`insufficient_quota` 永久 code 取自分类的 providerCode 或错误自身 `.type`/`.code`（覆盖 OpenAI `code:null` 形状）；重置时间信号基于消息（`isQuotaExhaustedError`），须独立于分类捕获。 |
+| 门不变                             | 标记以绑定的 `availability` 为门（`isSessionTurn && isModelAvailabilityTrackingEnabled?.()`）；gate-off 行为逐字节不变。                                                                                                            |
+| 不做 `modelPolicy` action map      | preview 的 prompt-vs-silent `ModelPolicy` UI 是独立关注点，范围外（Option B：main 架构赢）。                                                                                                                                        |
 
 ## 涉及文件
 
