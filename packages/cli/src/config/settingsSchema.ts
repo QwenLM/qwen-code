@@ -2223,7 +2223,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: undefined as 'ephemeral' | '1h' | undefined,
             description:
-              "Default Anthropic cache_control retention. 'ephemeral' uses the spec 5-minute default (no ttl on the wire). '1h' requests the extended cache tier (ttl: '1h') -- note the 1h tier writes at 2x base input token cost (vs 1.25x for the 5-minute default; cached reads stay 0.1x for both), so it only pays off when a prefix survives long enough between requests to outlast several 5-minute windows.",
+              "Default cache_control retention. Applies to Anthropic cache anchors and to qwen4 DashScope cache breakpoints. 'ephemeral' uses the spec 5-minute default (no ttl on the wire). '1h' requests the extended cache tier (ttl: '1h') -- note the 1h tier writes at 2x base input token cost (vs 1.25x for the 5-minute default; cached reads stay 0.1x for both), so it only pays off when a prefix survives long enough between requests to outlast several 5-minute windows.",
             parentKey: 'generationConfig',
             showInDialog: false,
             options: [
@@ -2254,6 +2254,22 @@ const SETTINGS_SCHEMA = {
               },
               additionalProperties: false,
             },
+          },
+          imageDetail: {
+            type: 'enum',
+            label: 'Image Detail',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as 'low' | 'high' | 'auto' | undefined,
+            description:
+              "Detail level stamped on each image_url part for providers that read the OpenAI `detail` field. Undefined leaves the decision to the server (qwen4-max defaults to 'high', ~16K image tokens per image); 'low' trades resolution for tokens (~2.5K on qwen4-max), 'high' forces full resolution, 'auto' lets the provider choose.",
+            parentKey: 'generationConfig',
+            showInDialog: false,
+            options: [
+              { value: 'low', label: 'Low (fewer tokens)' },
+              { value: 'high', label: 'High (full resolution)' },
+              { value: 'auto', label: 'Auto' },
+            ],
           },
           splitToolMedia: {
             type: 'boolean',
@@ -4499,7 +4515,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.',
+          'Enable experimental Mods from enabled extensions in trusted local terminal, headless and ACP sessions. Restart required.',
         showInDialog: true,
       },
       liveVoice: {
@@ -4660,6 +4676,16 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'Run the shared agent loop on the event-bus architecture (experimental). Applies to the surfaces that run on the shared agent loop: headless sessions (`-p` and stream-json), the Ink TUI and subagents by default, and ACP sessions (Zed, VS Code, Web Shell, channels) and OpenTUI when experimental.unifiedAgentLoop is enabled; other surfaces keep their current loop internals. The QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP environment variable overrides this setting: `1` enables it, `0` disables it, and a comma-separated list such as `headless=0` forces individual surfaces (headless, acp, ink, opentui, agent-core; `speculation` is reserved). Only those wired surfaces take effect today; a bare `1`/`0` is only recognized as the whole value, not inside a list, and surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
+        showInDialog: true,
+      },
+      modelAvailabilityTracking: {
+        type: 'boolean',
+        label: 'Model Availability Tracking',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Remember model health across requests within a session (experimental). When a fallback model exhausts its retries on a capacity error (429/503/529), the model fallback chain skips it for the rest of the turn instead of re-trying it on every request, and re-probes it once on the next turn; an explicit retry also re-probes skipped models. The primary model is still attempted on every request. Permanent quota exhaustion still fails fast and is not treated as a transient capacity skip. When disabled, the fallback chain behaves exactly as before.',
         showInDialog: true,
       },
       agentCollaboration: {

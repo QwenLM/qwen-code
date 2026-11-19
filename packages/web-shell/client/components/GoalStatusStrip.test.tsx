@@ -8,6 +8,7 @@ import {
   GoalStatusStrip,
   getGoalActiveTimeMs,
   goalStatusTone,
+  hasVisibleGoal,
 } from './GoalStatusStrip';
 
 function snapshot(
@@ -69,6 +70,18 @@ describe('GoalStatusStrip', () => {
     });
     return handlers;
   }
+
+  it('keeps the goal-status attribute on the outermost element for the stack CSS', () => {
+    render('active');
+    // ComposerStatusStack.module.css selects `.root > [data-web-shell-goal-status]`
+    // and the adjacent-sibling divider, so the attribute must ride on the strip's
+    // outermost element. I18nProvider renders no DOM node, so the container's
+    // first element child is the strip itself; querySelector would match at any
+    // depth and miss an extra wrapper that breaks the direct-child contract.
+    const strip = container.firstElementChild as HTMLElement | null;
+    expect(strip?.getAttribute('data-testid')).toBe('goal-status-strip');
+    expect(strip?.hasAttribute('data-web-shell-goal-status')).toBe(true);
+  });
 
   it('shows pause for an active Goal and wires actions', () => {
     const handlers = render('active');
@@ -381,5 +394,21 @@ describe('GoalStatusStrip', () => {
     expect(goalStatusTone('blocked')).toBe('attention');
     expect(goalStatusTone('usage_limited')).toBe('attention');
     expect(goalStatusTone('complete')).toBe('done');
+  });
+
+  it('hides only absent and completed goals from the list-facing surfaces', () => {
+    // The strip, the sidebar reservation and the marker guard all read this
+    // one predicate, so every non-complete state must stay visible.
+    for (const status of [
+      'active',
+      'paused',
+      'blocked',
+      'usage_limited',
+    ] as const) {
+      expect(hasVisibleGoal({ status })).toBe(true);
+    }
+    expect(hasVisibleGoal({ status: 'complete' })).toBe(false);
+    expect(hasVisibleGoal(null)).toBe(false);
+    expect(hasVisibleGoal(undefined)).toBe(false);
   });
 });

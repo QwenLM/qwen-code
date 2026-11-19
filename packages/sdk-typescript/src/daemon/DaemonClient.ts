@@ -278,6 +278,8 @@ import type {
   DaemonDeleteMessageGroupsResult,
   DaemonRewindResult,
   ForkSessionRequest,
+  SendToSubSessionRequest,
+  DaemonSubSessionSendResult,
   DaemonSessionHooksStatus,
   DaemonWorkspaceExtensionsStatus,
   DaemonWorkspaceExtensionSummaries,
@@ -1726,6 +1728,8 @@ export class DaemonClient {
     if (range) params.set('range', range);
     if (options?.all) params.set('all', '1');
     if (options?.search) params.set('search', options.search);
+    if (options?.excludeRefs?.length)
+      params.set('exclude', options.excludeRefs.join(','));
     const qs = params.toString();
     return await this.jsonRequest<DaemonGitLog>(
       `/workspace/git/log${qs ? `?${qs}` : ''}`,
@@ -4215,6 +4219,40 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Send a prompt from `sessionId` to another session: a new one, in its own
+   * workspace or another registered one, or any other active session there.
+   * The target reports back to `sessionId` when its turn finishes.
+   */
+  async sendToSubSession(
+    sessionId: string,
+    req: SendToSubSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonSubSessionSendResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/sub-sessions`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({
+          prompt: req.prompt,
+          ...(req.workspace !== undefined ? { workspace: req.workspace } : {}),
+          ...(req.targetSessionId !== undefined
+            ? { targetSessionId: req.targetSessionId }
+            : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/sub-sessions');
+        }
+        return (await res.json()) as DaemonSubSessionSendResult;
+      },
+      // The daemon may spawn or restore the session before answering.
+      this.resolveSessionSpawnTimeoutMs(),
+    );
+  }
+
   async sessionContext(
     sessionId: string,
     clientId?: string,
@@ -4295,9 +4333,10 @@ export class DaemonClient {
   async sessionTasks(
     sessionId: string,
     clientId?: string,
+    opts: { includeSubSessions?: boolean } = {},
   ): Promise<DaemonSessionTasksStatus> {
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/tasks${opts.includeSubSessions ? '?includeSubSessions=true' : ''}`,
       { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) {
@@ -8870,6 +8909,8 @@ export class WorkspaceDaemonClient {
     if (range) params.set('range', range);
     if (options?.all) params.set('all', '1');
     if (options?.search) params.set('search', options.search);
+    if (options?.excludeRefs?.length)
+      params.set('exclude', options.excludeRefs.join(','));
     if (options?.sessionId != null) params.set('sessionId', options.sessionId);
     const qs = params.toString();
     return this.client.workspaceJsonRequest<DaemonGitLog>(

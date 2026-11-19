@@ -80,7 +80,9 @@ export const MOD_EVENTS = [
   'ui.render',
 ] as const;
 // Events only some hosts raise: the load request names the sites a host
-// draws, whether it raises `prompt.submit`, and whether it keeps a store.
+// draws, whether it raises `prompt.submit` and the tool events, and whether it
+// keeps a store.
+export const MOD_TOOL_EVENTS: readonly ModEvent[] = ['tool.call', 'tool.check'];
 export const MOD_STORE_EVENTS: readonly ModEvent[] = [
   'store.delete',
   'store.get',
@@ -90,6 +92,7 @@ export const MOD_STORE_EVENTS: readonly ModEvent[] = [
 export const MOD_HOST_EVENTS: readonly ModEvent[] = [
   'prompt.submit',
   'ui.render',
+  ...MOD_TOOL_EVENTS,
   ...MOD_STORE_EVENTS,
 ];
 // `$` methods that read rather than dispatch, so no hook hears them.
