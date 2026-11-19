@@ -163,10 +163,7 @@ test('a goal-changed catalog bump repaints the marker without a reload @smoke', 
   // the sidecar in the child and bumps the catalog version, and the
   // polling client must refetch and repaint the marker on its own.
   const scenario = createWebShellDaemonScenario({
-    // The factory keeps overrides.sessions by reference, so a case that
-    // mutates a session must own its copy or it edits the shared fixture for
-    // every later test in this worker.
-    sessions: structuredClone(goalSessions),
+    sessions: goalSessions,
     capabilities: {
       sessionLiveStatePollIntervalMs: 250,
       features: [
@@ -230,9 +227,7 @@ test('a goal-changed catalog bump removes the marker when the goal is cleared @s
   // mutation plus a revision bump — because a reload would assert the load
   // path instead of the notification path this covers.
   const scenario = createWebShellDaemonScenario({
-    // Own copy: the factory keeps overrides.sessions by reference, so clearing
-    // a goal here would otherwise strip it from the shared fixture.
-    sessions: structuredClone(goalSessions),
+    sessions: goalSessions,
     capabilities: {
       sessionLiveStatePollIntervalMs: 250,
       features: [

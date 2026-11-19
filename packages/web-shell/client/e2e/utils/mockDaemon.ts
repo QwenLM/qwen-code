@@ -457,26 +457,33 @@ export function createWebShellDaemonScenario(
     ...(overrides.mcp ?? {}),
   };
 
-  const sessions = overrides.sessions ?? [
-    {
-      sessionId,
-      workspaceCwd,
-      createdAt: now,
-      updatedAt: now,
-      displayName,
-      clientCount: 1,
-      hasActivePrompt: false,
-    },
-    {
-      sessionId: 'previous-session',
-      workspaceCwd,
-      createdAt: now,
-      updatedAt: now,
-      displayName: 'Previous Session',
-      clientCount: 0,
-      hasActivePrompt: false,
-    },
-  ];
+  // Clone at construction, like goalsByWorkspace below: notification-path
+  // cases mutate scenario.sessions in place after install, and without this
+  // clone that mutation would reach the caller's fixture array and leak into
+  // every later case sharing it. installMockDaemon still holds the scenario
+  // itself by reference, so those in-place mutations stay visible to routes.
+  const sessions = structuredClone(
+    overrides.sessions ?? [
+      {
+        sessionId,
+        workspaceCwd,
+        createdAt: now,
+        updatedAt: now,
+        displayName,
+        clientCount: 1,
+        hasActivePrompt: false,
+      },
+      {
+        sessionId: 'previous-session',
+        workspaceCwd,
+        createdAt: now,
+        updatedAt: now,
+        displayName: 'Previous Session',
+        clientCount: 0,
+        hasActivePrompt: false,
+      },
+    ],
+  );
 
   return {
     workspaceCwd,
