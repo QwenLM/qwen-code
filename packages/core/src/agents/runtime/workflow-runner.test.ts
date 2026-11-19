@@ -1095,9 +1095,10 @@ describe('WorkflowRunner', () => {
 
   it.each([
     [true, true, false, true],
-    [true, false, false, false],
-    // An ACP session (Web Shell, IDE clients) reports non-interactive, and
-    // still resumes in the background: it delivers completion too.
+    // A headless run waits for a background run's completion, and an ACP
+    // session (Web Shell, IDE clients) delivers it too: both report
+    // non-interactive and still resume in the background.
+    [true, false, false, true],
     [true, false, true, true],
     [true, true, true, true],
     [false, true, false, false],

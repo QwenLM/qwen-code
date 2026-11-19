@@ -7,6 +7,7 @@
 import { ACTIVITY_MESSAGES_RU } from './components/sidebar/activity-messages.js';
 import { CHANNEL_EVENTS_MESSAGES_RU } from './components/channels/channel-events-messages.js';
 import { MANAGED_EXTENSION_MESSAGES_RU } from './components/managed/managed-extension-messages.js';
+import { ruPlural } from './utils/plural.js';
 
 /**
  * Interactive-only Russian catalogs whose English/Chinese siblings stay in
@@ -57,4 +58,50 @@ export const RU_REMAINDER: Record<
     security_advisory_credit:
       'Вас указали в благодарностях к бюллетеню безопасности',
   }),
+  'hooks.title': 'Статистика хуков',
+  'hooks.thisTurn': 'Этот ход · основной агент',
+  'hooks.executions': 'Запуски',
+  'hooks.blocked': 'Блокировки',
+  'hooks.unsuccessful': 'Сбои',
+  'hooks.duration': 'Всего времени',
+  'hooks.compactSummary': (v) =>
+    `${v?.executions ?? 0} ${ruPlural(v?.executions, 'запуск', 'запуска', 'запусков')} · ${v?.blocked ?? 0} ${ruPlural(v?.blocked, 'блокировка', 'блокировки', 'блокировок')} · ${v?.unsuccessful ?? 0} ${ruPlural(
+      v?.unsuccessful,
+      'сбой',
+      'сбоя',
+      'сбоев',
+    )} · ${v?.duration ?? '—'}`,
+  'hooks.partial':
+    'Записи неполные. Итоги покрывают только записанные запуски.',
+  'hooks.more': 'Другие действия с ответом',
+  'hooks.loading': 'Загрузка хуков…',
+  'hooks.loadFailed': 'Не удалось загрузить записи хуков.',
+  'hooks.retry': 'Повторить',
+  'hooks.loadMore': 'Загрузить ещё 50',
+  'hooks.type': 'Тип хука',
+  'hooks.started': 'Начало',
+  'hooks.ended': 'Конец',
+  'hooks.exitCode': 'Код выхода',
+  'hooks.dispatchDuration': 'Длительность отправки',
+  'hooks.dispatchHelp': 'Отправлено в фон. Итоговый результат не собирается.',
+  'hooks.unknownHelp': 'Итог в терминале не записан или соединение прервалось.',
+  'hooks.status.running': 'Выполняется',
+  'hooks.status.unknown': 'Результат недоступен',
+  'hooks.status.dispatched': 'Отправлено в фон',
+  'hooks.status.success': 'Успешно',
+  'hooks.status.blocked': 'Заблокировано',
+  'hooks.status.error': 'Ошибка',
+  'hooks.status.timeout': 'Таймаут',
+  'hooks.status.cancelled': 'Отменено',
+  'hooks.source.system': 'Система',
+  'hooks.source.user': 'Пользователь',
+  'hooks.source.project': 'Проект',
+  'hooks.source.extensions': 'Расширение',
+  'hooks.source.session': 'Сессия',
+  'hooks.source.unknown': 'Неизвестный источник',
+  'hooks.coverage.recorded': 'Запусков хуков не записано.',
+  'hooks.coverage.unrecorded': 'Запуски хуков в этом ходе не записывались.',
+  'hooks.coverage.unsupported':
+    'Статистика хуков для этой среды выполнения не поддерживается.',
+  'hooks.coverage.partial': 'В сохранённых записях нет доступных запусков.',
 };
