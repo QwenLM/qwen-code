@@ -85,30 +85,33 @@ matches. Changes outside the scope still reach the nightly run.
 
 ### Required check
 
-The `gate` job always reports under the required-check name
-`Managed Agent gate`. Its conclusion and the `SDK Java (<tier>)` job distinguish
-the selected tier instead of moving it into the check name:
+The `gate` job reports under the stable required-check name `Managed Agent gate`
+for every run whose result can gate a merge. Its conclusion and the
+`SDK Java (<tier>)` job distinguish the selected tier:
 
-| Event                 | Scope                           | Result                         |
-| --------------------- | ------------------------------- | ------------------------------ |
-| any                   | untouched                       | pass without Java              |
-| `pull_request`        | touched                         | fast-tier result               |
-| `pull_request_review` | touched, full run               | full-tier result               |
-| `pull_request_review` | touched, no full run            | pass; no new full run selected |
-| `pull_request_review` | not an approval, or a closed PR | all jobs skip                  |
-| `push`, `merge_group` | touched                         | fast-tier result               |
-| any                   | tier selection failed           | fail                           |
+| Event                 | Scope                           | Result                                            |
+| --------------------- | ------------------------------- | ------------------------------------------------- |
+| any                   | untouched                       | pass without Java                                 |
+| `pull_request`        | touched                         | fast-tier result                                  |
+| `pull_request_review` | touched, full run               | full-tier result                                  |
+| `pull_request_review` | touched, no full run            | non-required `Managed Agent review (no full run)` |
+| `pull_request_review` | not an approval, or a closed PR | all jobs skip; no required-context check          |
+| `push`, `merge_group` | touched                         | fast-tier result                                  |
+| any                   | tier selection failed           | fail                                              |
 
 A review that is not an approval, or one submitted after its pull request
 closed, starts no job: GitHub still creates the run, but it can never select a
 tier above `none` — or the check it would report no longer gates anything —
 so both `scope` and `gate` skip and it finishes in seconds without taking a
-runner. The fixed job name still gives its skipped check the stable
-`Managed Agent gate` context.
+runner. Its computed name remains unevaluated, so no skipped check is published
+under the required context.
 
 The ruleset can therefore require one context for every PR. A touched PR's
 fast-tier result satisfies that check before its first approval; approval still
-starts the full suite, which reports its result under the same name. Check runs
+starts the full suite, which reports its result under the same name. A touched
+review that selects no new full run keeps the non-required
+`Managed Agent review (no full run)` context, so it cannot overwrite the prior
+fast or full result. Check runs
 need no write token after GitHub allows the workflow run. A first-time
 contributor's run can remain `action_required` until a maintainer approves it,
 so no gate check exists before that approval.
@@ -325,12 +328,13 @@ query. Main's required checks live in ruleset `main`, not in legacy branch
 protection, and adding the name there must not disturb its two-approval and
 dismiss-on-push rules.
 
-Only step 3's single name is needed. The fixed name is deliberate: fast, full,
-untouched and skipped runs all report `Managed Agent gate`, so the ruleset can
-require it without blocking on a tier-specific context. A fast-tier pass can
-satisfy the required check; the first approval still starts the full suite for
-deeper verification. Do not add the retired `Managed Agent fast tier` or
-`Managed Agent review (no full run)` contexts to the ruleset.
+Only step 3's single name is needed. Fast, full, untouched, push and merge-group
+runs all report `Managed Agent gate`, so the ruleset can require it without
+blocking on a tier-specific context. A fast-tier pass can satisfy the required
+check; the first approval still starts the full suite for deeper verification.
+`Managed Agent review (no full run)` remains deliberately non-required so a
+review that runs no suite cannot overwrite a real gate result. Do not add that
+context or the retired `Managed Agent fast tier` context to the ruleset.
 
 ## Validation
 

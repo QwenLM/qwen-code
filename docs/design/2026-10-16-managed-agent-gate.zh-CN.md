@@ -72,26 +72,28 @@ helper 与配置、`sdk-java.yml` 运行的脚本，以及门禁自身文件。P
 
 ### 必需检查
 
-`gate` job 始终使用必需检查名 `Managed Agent gate`。它的结论和
-`SDK Java (<tier>)` job 用来区分所选层级，不再把层级放进 check 名字：
+`gate` job 对每个其结果能够决定合并的运行，都使用稳定的必需检查名
+`Managed Agent gate`。它的结论和 `SDK Java (<tier>)` job 用来区分所选层级：
 
-| 事件                  | 范围                     | 结果                     |
-| --------------------- | ------------------------ | ------------------------ |
-| 任意                  | 未改到                   | 不跑 Java，直接通过      |
-| `pull_request`        | 改到                     | fast 层级结果            |
-| `pull_request_review` | 改到，跑了全量           | 全量层级结果             |
-| `pull_request_review` | 改到，未跑全量           | 通过；未选择新的全量运行 |
-| `pull_request_review` | 非 approve，或 PR 已关闭 | 所有 job 跳过            |
-| `push`、`merge_group` | 改到                     | fast 层级结果            |
-| 任意                  | 层级选择失败             | 失败                     |
+| 事件                  | 范围                     | 结果                                          |
+| --------------------- | ------------------------ | --------------------------------------------- |
+| 任意                  | 未改到                   | 不跑 Java，直接通过                           |
+| `pull_request`        | 改到                     | fast 层级结果                                 |
+| `pull_request_review` | 改到，跑了全量           | 全量层级结果                                  |
+| `pull_request_review` | 改到，未跑全量           | 非必需的 `Managed Agent review (no full run)` |
+| `pull_request_review` | 非 approve，或 PR 已关闭 | 所有 job 跳过，不生成必需名字的 check         |
+| `push`、`merge_group` | 改到                     | fast 层级结果                                 |
+| 任意                  | 层级选择失败             | 失败                                          |
 
 非 approve 的 review，以及 PR 关闭后才提交的 review，都不启动任何 job：GitHub 仍会
 创建这次运行，但它永远选不到 `none` 以上的层级——或者它要报告的检查已经不再门禁任何
-东西——因此 `scope` 与 `gate` 都跳过，运行在几秒内结束且不占用 runner。固定的 job 名
-仍让它的 skipped check 使用稳定的 `Managed Agent gate` context。
+东西——因此 `scope` 与 `gate` 都跳过，运行在几秒内结束且不占用 runner。它计算出来的
+名字保持未求值，因此不会以必需 context 发布 skipped check。
 
 因此 ruleset 可以对每个 PR 要求同一个 context。改到路径的 PR 在首个 approve 前由
-fast 层级结果满足这项检查；approve 仍会启动全量套件，并以同一个名字报告结果。GitHub
+fast 层级结果满足这项检查；approve 仍会启动全量套件，并以同一个名字报告结果。改到路径
+且未选择新全量运行的 review 仍使用非必需的 `Managed Agent review (no full run)` context，
+所以不会覆盖此前的 fast 或全量结果。GitHub
 允许工作流运行后，check run 不需要写权限 token。首次贡献者的运行可能保持
 `action_required`，直到维护者批准；批准前不会生成门禁 check。
 
@@ -265,10 +267,11 @@ Hosted 泳道：
 个查询会得到不同的分母。main 的必需检查位于 ruleset `main`，而不是旧的 branch
 protection；在那里添加名字时不得扰动它「两个 approve」与「push 后作废」这两条规则。
 
-第 3 步只需要那一个名字。固定名字是刻意设计：fast、全量、未改到与 skipped 运行都报告
+第 3 步只需要那一个名字。fast、全量、未改到、push 与 merge-group 运行都报告
 `Managed Agent gate`，ruleset 因而可以要求它，而不必等待某个层级专用的 context。fast
-层级通过即可满足必需检查；首个 approve 仍会启动全量套件做更深入的验证。不要把已废弃的
-`Managed Agent fast tier` 或 `Managed Agent review (no full run)` context 加入 ruleset。
+层级通过即可满足必需检查；首个 approve 仍会启动全量套件做更深入的验证。
+`Managed Agent review (no full run)` 刻意保持非必需，因此没跑套件的 review 不能覆盖真实的
+门禁结果。不要把这个 context 或已废弃的 `Managed Agent fast tier` context 加入 ruleset。
 
 ## 验证
 

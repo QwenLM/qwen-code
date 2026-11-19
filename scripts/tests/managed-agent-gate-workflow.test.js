@@ -297,24 +297,33 @@ describe('Managed Agent gate triggers', () => {
 });
 
 describe('Managed Agent gate required check', () => {
-  const name = () => gate.jobs.gate.name;
+  const name = (event, tier, touched) =>
+    evaluate(gate.jobs.gate.name, {
+      github: github(event),
+      needs: { scope: { outputs: { tier, touched } } },
+    });
 
   it.each([
-    ['pull_request', 'none', 'false'],
-    ['pull_request', 'fast', 'true'],
-    ['pull_request_review', 'full', 'true'],
-    ['pull_request_review', 'none', 'true'],
-    ['pull_request_review', 'none', 'false'],
-    ['push', 'fast', 'true'],
-    ['merge_group', 'fast', 'true'],
+    ['pull_request', 'none', 'false', 'Managed Agent gate'],
+    ['pull_request', 'fast', 'true', 'Managed Agent gate'],
+    ['pull_request_review', 'full', 'true', 'Managed Agent gate'],
+    [
+      'pull_request_review',
+      'none',
+      'true',
+      'Managed Agent review (no full run)',
+    ],
+    ['pull_request_review', 'none', 'false', 'Managed Agent gate'],
+    ['push', 'fast', 'true', 'Managed Agent gate'],
+    ['merge_group', 'fast', 'true', 'Managed Agent gate'],
     // A failed tier selection leaves the outputs empty and must still
     // report, and fail, under the required name.
-    ['pull_request', '', ''],
-    ['pull_request_review', '', ''],
+    ['pull_request', '', '', 'Managed Agent gate'],
+    ['pull_request_review', '', '', 'Managed Agent gate'],
   ])(
-    '%s with tier %j, touched %j keeps the stable required name',
-    (event, tier, touched) => {
-      expect(name(event, tier, touched)).toBe('Managed Agent gate');
+    '%s with tier %j, touched %j reports as %s',
+    (event, tier, touched, expected) => {
+      expect(name(event, tier, touched)).toBe(expected);
     },
   );
 
@@ -352,8 +361,9 @@ describe('Managed Agent gate required check', () => {
 
   // A review that is not an approval can never select a tier above `none`
   // (Choose the tier), so starting a run for it buys two runner slots only to
-  // repeat a no-suite result. Both jobs skip; the fixed job name still leaves
-  // a consistently named skipped check without taking a runner.
+  // repeat a no-suite result. Both jobs must skip instead. Because a skipped
+  // job leaves this workflow's computed name unevaluated, it cannot publish a
+  // passing check under the required `Managed Agent gate` context.
   it.each(['commented', 'changes_requested'])(
     'a %s review starts no job',
     (state) => {
