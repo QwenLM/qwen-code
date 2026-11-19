@@ -248,6 +248,7 @@ export {
   type DaemonWorkflowDispatchStatusEntry,
   type DaemonWorkflowEvent,
   type DaemonWorkflowPhaseVisit,
+  type DaemonWorkflowPlannedPhase,
   type DaemonSessionProcessTaskLifecycleStatus,
   type DaemonSessionDiedData,
   type DaemonSessionDiedEvent,

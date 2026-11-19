@@ -416,6 +416,18 @@ describe('managed session record sink', () => {
       wakeReason: 'input',
       notBefore: Date.now() + 60_000,
     });
+    // A watched-PR transition is a wake source on the same terms: a long
+    // bound Session that compacts mid-flight must not answer the adapter's
+    // injection with a conflict it cannot converge on.
+    await harness.authority.submitInput(command('wake-pr-event'), {
+      inputId: 'wake-pr-event',
+      turnId: 'wake-pr-event',
+      source: 'pr_event',
+      contentRef: inputRef,
+      deadline: null,
+      admissionRef: inputRef,
+      wakeReason: 'input',
+    });
     maintenance = {
       ...maintenance,
       phase: 'generating',

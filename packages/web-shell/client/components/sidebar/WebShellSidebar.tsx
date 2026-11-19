@@ -161,6 +161,8 @@ import { sessionMatchesSource as matchesSessionSource } from './sessionSearch';
 import { SessionSearchDialog } from './SessionSearchDialog';
 import { useLivePresence } from '../../live/live-presence';
 import { SessionPrBadge, openableSessionPrs } from '../SessionPrBadge';
+import { hasVisibleGoal } from '../GoalStatusStrip';
+import { SessionGoalMarker } from '../SessionGoalMarker';
 import {
   hasWorkspaceExpansionPreference,
   migrateWorkspaceExpansionPreference,
@@ -5552,11 +5554,19 @@ export function WebShellSidebar({
         </span>
       ) : null;
       const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
+      // Completed goals render no marker, matching the Goals listings' filter.
+      const hasGoalMarker = hasVisibleGoal(session.goal);
+      // Archived rows do not open on click, so their marker is a pure
+      // indicator; the active row below renders the button variant.
+      const goalMarker =
+        hasGoalMarker && session.goal ? (
+          <SessionGoalMarker goal={session.goal} />
+        ) : null;
       // The badge is a click target of its own right before the meta slot, so
       // its row keeps the slot at the hover actions' width instead of growing
       // it on hover — growing slid `#N` left and put Pin where it had been.
       const reserveActionsWidth =
-        openableSessionPrs(session.prs ?? []).length > 0;
+        openableSessionPrs(session.prs ?? []).length > 0 || hasGoalMarker;
       const withDetails = (row: ReactElement) => (
         <Fragment key={sessionIdentity}>
           {sessionActionItems.has('details') ? (
@@ -5631,6 +5641,7 @@ export function WebShellSidebar({
               </span>
             )}
             {prBadge}
+            {goalMarker}
             <div
               className={cx(
                 styles.sessionMetaSlot,
@@ -6071,6 +6082,9 @@ export function WebShellSidebar({
                 )}
               </span>
               {prBadge}
+              {hasGoalMarker && session.goal && (
+                <SessionGoalMarker goal={session.goal} onOpen={openRow} />
+              )}
               <div
                 className={cx(
                   styles.sessionMetaSlot,

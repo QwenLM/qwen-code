@@ -457,26 +457,35 @@ export function createWebShellDaemonScenario(
     ...(overrides.mcp ?? {}),
   };
 
-  const sessions = overrides.sessions ?? [
-    {
-      sessionId,
-      workspaceCwd,
-      createdAt: now,
-      updatedAt: now,
-      displayName,
-      clientCount: 1,
-      hasActivePrompt: false,
-    },
-    {
-      sessionId: 'previous-session',
-      workspaceCwd,
-      createdAt: now,
-      updatedAt: now,
-      displayName: 'Previous Session',
-      clientCount: 0,
-      hasActivePrompt: false,
-    },
-  ];
+  // Clone the caller-supplied collections that routes mutate in place:
+  // sessions here, standaloneSessions and midTurnMessages below, and
+  // goalsByWorkspace. Notification-path cases mutate them after install, and
+  // without the clone that mutation would reach the caller's fixture and leak
+  // into every later case sharing it. installMockDaemon still holds the
+  // scenario itself by reference, so those mutations stay visible to routes.
+  // allocatedSessions is factory-owned, so it needs no clone.
+  const sessions = structuredClone(
+    overrides.sessions ?? [
+      {
+        sessionId,
+        workspaceCwd,
+        createdAt: now,
+        updatedAt: now,
+        displayName,
+        clientCount: 1,
+        hasActivePrompt: false,
+      },
+      {
+        sessionId: 'previous-session',
+        workspaceCwd,
+        createdAt: now,
+        updatedAt: now,
+        displayName: 'Previous Session',
+        clientCount: 0,
+        hasActivePrompt: false,
+      },
+    ],
+  );
 
   return {
     workspaceCwd,
@@ -503,7 +512,7 @@ export function createWebShellDaemonScenario(
     sessions,
     workspaceOrder: overrides.workspaceOrder ?? [],
     workspaceOrderSaveError: overrides.workspaceOrderSaveError,
-    standaloneSessions: overrides.standaloneSessions ?? [],
+    standaloneSessions: structuredClone(overrides.standaloneSessions ?? []),
     standaloneCreateError: overrides.standaloneCreateError,
     sessionGroups: overrides.sessionGroups ?? [],
     sessionCatalogVersion: overrides.sessionCatalogVersion ?? {
@@ -538,7 +547,7 @@ export function createWebShellDaemonScenario(
       ? structuredClone(overrides.goalsByWorkspace)
       : undefined,
     allocatedSessions: [],
-    midTurnMessages: overrides.midTurnMessages ?? [],
+    midTurnMessages: structuredClone(overrides.midTurnMessages ?? []),
     branch: overrides.branch,
   };
 }
