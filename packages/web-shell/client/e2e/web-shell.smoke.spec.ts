@@ -1252,8 +1252,20 @@ test('allows drafting while session history loads and sends after replay @smoke'
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
   const daemon = await installScenario(page, scenario, testInfo);
+  const loadPath = `/session/${encodeURIComponent(scenario.sessionId)}/load`;
+  const loadGate = Promise.withResolvers<void>();
+  await page.route(
+    (url) => url.pathname === loadPath,
+    async (route) => {
+      await loadGate.promise;
+      await route.fallback();
+    },
+  );
+  const loadStarted = page.waitForRequest(
+    (request) => new URL(request.url()).pathname === loadPath,
+  );
   await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
-  await daemon.sse.waitForConnection(scenario.sessionId);
+  await loadStarted;
 
   const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
   const send = page.locator('[data-web-shell-composer-submit]');
@@ -1265,6 +1277,7 @@ test('allows drafting while session history loads and sends after replay @smoke'
   await expect(editor).toHaveText(draft);
   expect(daemon.promptRequests()).toHaveLength(0);
 
+  loadGate.resolve();
   await completeReplay(page, daemon, scenario.sessionId);
   await expect(editor).toHaveText(draft);
   await expect(send).toBeEnabled();
