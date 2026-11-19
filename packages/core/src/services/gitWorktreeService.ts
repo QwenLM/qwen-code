@@ -3371,7 +3371,29 @@ export class GitWorktreeService {
         options?.dirtyStateSource ?? this.sourceRepoPath,
       );
       if (includedPaths.length > 0) {
-        carriedPaths = [...(carriedPaths ?? []), ...includedPaths];
+        // The copies are exempted from the rollback only through this
+        // journaled list, so a bound applies to their sum: appending an
+        // included set past the journal cap would strand the worktree on
+        // the next phase transition. Nothing is recorded (fail-open to
+        // committed state) and the rolled-back copies make room.
+        const merged = [...(carriedPaths ?? []), ...includedPaths];
+        const bound = options?.maxCarriedPathsBytes;
+        if (
+          bound !== undefined &&
+          Buffer.byteLength(JSON.stringify(merged), 'utf8') > bound
+        ) {
+          debugLogger.warn(
+            `createUserWorktree: carried overlay too large to record for ${slug} ` +
+              `(${merged.length} paths); starting from committed state`,
+          );
+          await this.removeWorktree(worktreePath).catch(() => undefined);
+          return {
+            success: false,
+            error:
+              'The carried overlay is too large to record in the preparation journal.',
+          };
+        }
+        carriedPaths = merged;
       }
 
       const worktree: WorktreeInfo = {

@@ -19,6 +19,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  CARRIED_PATHS_MAX_BYTES,
   GitWorktreeService,
   WORKTREE_INCLUDE_FILE,
   listIgnoredFiles,
@@ -602,5 +603,40 @@ describe('GitWorktreeService.setupWorktrees() — .worktreeinclude', () => {
     expect(await read(path.join(created.worktree!.path, '.env'))).toBe(
       'FROM_SESSION=1\n',
     );
+  });
+
+  it('applies the journal bound to the included copies as well', async () => {
+    // The copies are exempted from the rollback only through carriedPaths,
+    // so an included set appended without its own bound pushes the record
+    // past the journal cap and strands the worktree on the next phase
+    // transition. The merged list has to be measured, not just the overlay.
+    // The dirty overlay alone stays well under the bound here.
+    const filler = 'x'.repeat(60);
+    const fillerCount = 500;
+    for (let i = 0; i < fillerCount; i++) {
+      await fs.writeFile(
+        path.join(repoRoot, `bulk-${String(i).padStart(4, '0')}-${filler}`),
+        'bulk\n',
+      );
+    }
+    await fs.writeFile(path.join(repoRoot, '.gitignore'), 'bulk-*\n');
+    gitIn(repoRoot, 'add', '.gitignore');
+    gitIn(repoRoot, 'commit', '-q', '-m', 'ignore bulk', '--no-verify');
+    await fs.writeFile(path.join(repoRoot, WORKTREE_INCLUDE_FILE), 'bulk-*\n');
+    gitIn(repoRoot, 'add', '-f', WORKTREE_INCLUDE_FILE);
+    gitIn(repoRoot, 'commit', '-q', '-m', 'include bulk', '--no-verify');
+    await fs.writeFile(path.join(repoRoot, 'one.txt'), 'dirty\n');
+
+    const service = new GitWorktreeService(repoRoot, baseDir);
+    const created = await service.createUserWorktree('bulk', 'main', {
+      carryDirtyState: true,
+      maxCarriedPathsBytes: CARRIED_PATHS_MAX_BYTES,
+    });
+
+    // Refused and cleaned up rather than handed back with a record no
+    // journal phase transition can write or read.
+    expect(created.success).toBe(false);
+    expect(created.error).toMatch(/too large to record/);
+    expect(await exists(path.join(baseDir, 'bulk'))).toBe(false);
   });
 });
