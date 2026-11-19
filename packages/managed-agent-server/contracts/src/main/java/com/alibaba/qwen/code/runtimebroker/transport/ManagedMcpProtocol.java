@@ -16,6 +16,7 @@ import java.util.Set;
 public final class ManagedMcpProtocol {
     public static final String PATH = "/internal/managed-runtime/v3/mcp";
     public static final String DEFINITIONS_PATH = PATH + "/definitions";
+    public static final String RECLAIM_PATH = PATH + "/reclaim";
     private static final Set<String> KINDS = Set.of("mcp-configure", "mcp-discover",
             "mcp-invoke", "mcp-status", "mcp-cancel", "mcp-release");
     private static final Set<String> RECOVERY_KINDS = Set.of("mcp-status", "mcp-cancel", "mcp-release");

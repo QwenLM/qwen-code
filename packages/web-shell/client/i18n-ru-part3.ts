@@ -348,6 +348,9 @@ export const RU_PART3: Record<
   'scheduledTasks.delivery.channel': 'Канал доставки',
   'scheduledTasks.delivery.configuredGroupHint':
     'Сообщения отправляются в группу, заданную для этого канала.',
+  'scheduledTasks.delivery.configuredEndpointHint':
+    'Сообщения отправляются на конечную точку, заданную для этого канала.',
+  'scheduledTasks.delivery.endpoint': 'Конечная точка',
   'scheduledTasks.delivery.configuredHint':
     'Сообщения отправляются по адресу, заданному для этого канала.',
   'scheduledTasks.delivery.useConfiguredDestination':
@@ -874,6 +877,8 @@ export const RU_PART3: Record<
   'sidebar.scheduledTasks': 'Задачи по расписанию',
   'sidebar.workflows': 'Воркфлоу',
   'sidebar.goals': 'Цели',
+  'sidebar.sessionGoal': (v) =>
+    `Цель: ${v?.status ?? ''} — ${v?.objective ?? ''}`,
   'sidebar.prWatches': 'Наблюдение за PR',
   'sidebar.themeLight': 'Переключить на светлую тему',
   'sidebar.themeDark': 'Переключить на тёмную тему',

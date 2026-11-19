@@ -68,6 +68,8 @@ const SETTING_KEYS = {
   'setting:tool-use-summaries': 'experimental.emitToolUseSummaries',
   'setting:unified-agent-loop': 'experimental.unifiedAgentLoop',
   'setting:event-bus-agent-loop': 'experimental.eventBusAgentLoop',
+  'setting:model-availability-tracking':
+    'experimental.modelAvailabilityTracking',
   'setting:voice-model': 'voiceModel',
   'setting:image-model': 'imageModel',
 } as const;
