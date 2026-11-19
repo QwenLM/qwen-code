@@ -569,18 +569,25 @@ export class ManagedGithubAdapter {
             consequence +=
               ' Its staged-but-unadmitted claims are stranded; the fresh notification window does not re-list them.';
           // The queued PR-watch transitions are not adopted (R3-1); name that
-          // even when the legacy staged no inbound pending/outbound. The
-          // consequence depends on the window (R4-3): a fresh ledger
-          // re-baselines watch.prs empty and only re-pins still-failing heads,
-          // so a queued transition is neither replayed nor re-derived; a
-          // roll-forward keeps the loaded baseline, so the next tick re-detects
-          // the edge against it and may re-derive the transition with a new
-          // episode — claiming "never re-derived" there would page the operator
-          // about work that is about to be delivered.
-          if (legacy.watchPending > 0)
-            consequence += freshWindow
-              ? ' Its queued PR-watch transitions were dropped; the fresh ledger only re-baselines, so they are neither replayed nor re-derived.'
-              : ' Its queued PR-watch transitions were not adopted; this ledger re-detects them against its own baseline, so one may be re-derived.';
+          // even when the legacy staged no inbound pending/outbound. Whether
+          // one can be re-derived depends on the LOADED BASELINES, not the
+          // window alone (R5): a roll-forward re-detects the edge only if the
+          // loaded ledger holds a watch.prs baseline for the stranded PR. A
+          // ledger can have a cursor yet no baseline for it (the PR was bound
+          // only during the rollback window, or the earlier run never finished
+          // a watch pass) — there the first observation detects nothing and
+          // only records a baseline, so promising re-detection would page the
+          // operator about work that never arrives. A fresh ledger has no
+          // baseline either, so it takes the dropped arm too.
+          if (legacy.watchPending > 0) {
+            const loadedPrs: Record<string, unknown> = loaded?.watch?.prs ?? {};
+            const reDerivable = legacy.watchPendingKeys.every(
+              (key) => loadedPrs[key] !== undefined,
+            );
+            consequence += reDerivable
+              ? ' Its queued PR-watch transitions were not adopted; this ledger re-detects them against its own baseline, so one may be re-derived.'
+              : ' Its queued PR-watch transitions were dropped; there is no baseline to re-detect them against, so they are neither replayed nor re-derived.';
+          }
           if (legacy.outbound > 0)
             consequence +=
               ' Its un-receipted outbound segments were dropped, so their delivery status is unknown.';

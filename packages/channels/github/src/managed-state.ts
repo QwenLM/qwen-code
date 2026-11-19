@@ -393,6 +393,7 @@ export class ManagedGithubStateStore {
         pending: number;
         outbound: number;
         watchPending: number;
+        watchPendingKeys: string[];
         readable: boolean;
         watermark: string | null;
       }
@@ -402,6 +403,7 @@ export class ManagedGithubStateStore {
     let pending = 0;
     let outbound = 0;
     let watchPending = 0;
+    const watchPendingKeys: string[] = [];
     let readable = true;
     let watermark: string | null = null;
     try {
@@ -427,14 +429,18 @@ export class ManagedGithubStateStore {
       // adopt them — injecting one registration's detected events under
       // another is the cross-ownership replay the keying prevents — so they
       // are stranded work. Count the PR entries whose queue is non-empty so
-      // the notice names that loss instead of a quiescent "0 pending". The
-      // durable episode counters are carried separately, entry-scoped, by
-      // entryWatchEpisodes().
+      // the notice names that loss instead of a quiescent "0 pending", and
+      // collect their keys so the caller can tell whether the loaded ledger
+      // holds a baseline to re-detect them against (R5). The durable episode
+      // counters are carried separately, entry-scoped, by entryWatchEpisodes().
       const rawPrs = value?.watch?.prs;
       if (!!rawPrs && typeof rawPrs === 'object' && !Array.isArray(rawPrs)) {
-        for (const entry of Object.values(rawPrs)) {
+        for (const [key, entry] of Object.entries(rawPrs)) {
           const queue = (entry as { pending?: unknown } | null)?.pending;
-          if (Array.isArray(queue) && queue.length > 0) watchPending += 1;
+          if (Array.isArray(queue) && queue.length > 0) {
+            watchPending += 1;
+            watchPendingKeys.push(key);
+          }
         }
       }
     } catch {
@@ -447,6 +453,7 @@ export class ManagedGithubStateStore {
       pending,
       outbound,
       watchPending,
+      watchPendingKeys,
       readable,
       watermark,
     };

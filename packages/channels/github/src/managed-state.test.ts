@@ -977,6 +977,8 @@ describe('ManagedGithubStateStore', () => {
     expect(stranded.pending).toBe(0);
     // One PR entry holds a non-empty queue; the baseline-only entry does not.
     expect(stranded.watchPending).toBe(1);
+    // The keys let the caller check the loaded baselines for the stranded PRs.
+    expect(stranded.watchPendingKeys).toEqual(['owner/repo#9']);
     // An empty queue counts no watch pending.
     writeFileSync(
       legacyPath,
@@ -986,9 +988,11 @@ describe('ManagedGithubStateStore', () => {
       }),
     );
     expect(store.strandedLegacyLedger()!.watchPending).toBe(0);
+    expect(store.strandedLegacyLedger()!.watchPendingKeys).toEqual([]);
     // No watch at all counts none.
     writeFileSync(legacyPath, JSON.stringify(freshState()));
     expect(store.strandedLegacyLedger()!.watchPending).toBe(0);
+    expect(store.strandedLegacyLedger()!.watchPendingKeys).toEqual([]);
   });
 
   it('a failed archive rename leaves the legacy reported, never throws', () => {

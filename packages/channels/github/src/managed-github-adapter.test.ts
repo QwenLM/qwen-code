@@ -2985,6 +2985,67 @@ describe('managed GitHub adapter registration-identity isolation', () => {
     await second.adapter.disconnect();
   });
 
+  it('a roll-forward without a baseline for the stranded PR names the drop, not a re-detection promise (R5)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await first.adapter.connect();
+    // The keyed ledger has a cursor but NO watch.prs baseline for the PR (it
+    // was bound only during the rollback window, or no watch pass finished).
+    seedState(first.adapter, (s) => {
+      s.cursor.lastProcessedAt = '2026-11-19T08:00:00Z';
+      s.watch = { prs: {} };
+    });
+    await first.adapter.disconnect();
+    // A rollback legacy holds one queued merge_conflict for that PR.
+    seedLegacy(dirname(first.adapter.stateFile), {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: {
+        prs: {
+          'owner/repo#9': {
+            headSha: 'sha-a',
+            pending: [
+              {
+                key: 'prw:merge_conflict:owner/repo#9:1:1',
+                episode: 1,
+                owner: 'owner',
+                repo: 'repo',
+                prNumber: 9,
+                transition: 'merge_conflict',
+                headSha: 'sha-a',
+                evidence: 'Merge conflicts',
+                detectedAt: '2026-11-19T09:00:00Z',
+              },
+            ],
+          },
+        },
+      },
+    });
+    lines.length = 0;
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await second.adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('1 pending');
+    // No loaded baseline for the stranded PR: the first observation detects
+    // nothing and only records a baseline, so the notice must name the drop,
+    // not promise a re-detection that cannot happen (a cursor alone is not a
+    // baseline).
+    expect(stranded[0]).toContain('queued PR-watch transitions were dropped');
+    expect(stranded[0]).not.toContain('may be re-derived');
+    await second.adapter.disconnect();
+  });
+
   it('a legacy with queued PR-watch transitions names that count, not a quiescent 0 pending (R3-1)', async () => {
     const cwd = tempCwd();
     const lines: string[] = [];
