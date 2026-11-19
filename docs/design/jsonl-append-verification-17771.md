@@ -154,6 +154,7 @@ the broader original #17747 work.
 - Evidence comments:
   [final verification](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7007985759),
   [native and end-to-end evidence](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7008079523),
-  [closeout and attribution](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7009882478).
+  [closeout and attribution](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7009882478),
+  [final-head R3-1 re-evaluation](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7011877438).
 - Deferred work: [#17852](https://github.com/QwenLM/qwen-code/issues/17852).
 - Independent read-side work: [#17756](https://github.com/QwenLM/qwen-code/issues/17756).

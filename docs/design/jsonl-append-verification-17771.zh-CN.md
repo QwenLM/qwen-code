@@ -125,7 +125,7 @@ timeout。对这些失败进行了归因，没有将其隐藏：
   失败 append 叠加 throwing observer 的测试见证；也跟踪 Windows 与 current-head
   macOS 原生验证。
 - 两个 `R3-1` 条目并不相同。一次投递失败后，已通过同一路径的真实 debug append
-  验证 sink 恢复后能投递一次告警。三次失败投递耗尽终身上限后，即使 sink 随后恢复，
+  验证 sink 恢复后恰好投递一条告警。三次失败投递耗尽终身上限后，即使 sink 随后恢复，
   后续告警仍被终身上限抑制。预算重置/cooldown 由 #17852 延期跟踪，并未宣称修复；尤其不能在
   缺少有效 cooldown 与 failure-budget 设计时，简单地在达到上限后清零 attempt counter。
 
@@ -138,6 +138,7 @@ timeout。对这些失败进行了归因，没有将其隐藏：
 - 证据评论：
   [最终验证](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7007985759)、
   [原生与端到端证据](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7008079523)、
-  [收尾与归因](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7009882478)。
+  [收尾与归因](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7009882478)、
+  [R3-1 最终 head 对照复验](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7011877438)。
 - 延期工作：[#17852](https://github.com/QwenLM/qwen-code/issues/17852)。
 - 独立读取侧工作：[#17756](https://github.com/QwenLM/qwen-code/issues/17756)。
