@@ -279,10 +279,12 @@ a live PTY, and the panel stays mounted across transient UI/capability dips.
   state, Broker owns execution bindings, the worker owns processes. The relay
   is the first live channel and must not grow process supervision on the Java
   side.
-- The Harness capability digest is a frozen binding input; changing it after
-  Sessions are placed invalidates existing bindings with no unblock path.
-  Terminal capability therefore ships only in a coordinated deployment, as
-  the Shell profile consolidation required.
+- The Harness capability digest is fixed for a binding at admission. Later
+  changes to tenant, workspace id, workspace generation, canonical cwd or
+  isolation class require a new binding. The ordinary local-mount digest
+  compatibility group in Rollout is a bounded exception, not an upgrade to
+  that binding's security properties. Terminal attach still requires a READY,
+  undrained terminal-digest binding.
 - Until the first formal Managed Agent release the shared V1 schema baseline
   is edited in place; if the hold needs new columns or tables they join
   `V1__managed_schema.sql`, and development catalogs are recreated. Reusing
@@ -335,13 +337,15 @@ Acceptance is binary:
 ## Rollout
 
 Deploy matching control-plane, Harness and Runtime artifacts together before
-enabling the opt-in; the capability digest change invalidates bindings placed
-against the old digest. Outside the unified local launcher, the terminal
-opt-in defaults to off, independently of the Shell opt-in; the launcher always
-enables it (see Admission and approval model). Existing Sessions gain the
-terminal only when their runtime is placed on the new digest and the admission
-chain passes; saved Session scope is not rewritten. Do not downgrade consumers
-with active holds.
+enabling the opt-in. On the ordinary local-mount path, existing bindings stay
+valid across ordinary, measured and terminal digests when the other recorded
+scope fields are unchanged; attaching a terminal still requires a READY,
+undrained binding carrying the terminal digest. Outside the unified local
+launcher, the terminal opt-in defaults to off, independently of the Shell
+opt-in; the launcher always enables it (see Admission and approval model).
+Existing Sessions gain the terminal only when their runtime is placed on the
+new digest and the admission chain passes; saved Session scope is not
+rewritten. Do not downgrade consumers with active holds.
 
 ## Risks and follow-up
 

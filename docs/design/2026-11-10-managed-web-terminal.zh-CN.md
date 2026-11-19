@@ -235,9 +235,10 @@ terminal id，因此 detach 的终端被空闲回收而非恢复——与本地�
 - 所有权边界保持不变：控制平面拥有生命周期与持久状态，Broker 拥有执行
   binding，worker 拥有进程。中继是第一条 live 通道，不得在 Java 侧长出
   进程监管。
-- Harness capability digest 是冻结的 binding 输入；在 Session 已放置之后
-  变更它会使既有 binding 全部失效且无解锁路径。因此终端能力只能随协同部署
-  发布，正如 Shell profile 合并所要求的那样。
+- 准入 binding 时必须固定 Harness capability digest。之后改变租户、Workspace id、
+  Workspace generation、canonical cwd 或隔离类别都要求新的 binding。「发布」节的
+  普通本地挂载兼容组是有界例外，并不升级旧 binding 的安全属性；附着终端仍要求
+  处于 READY、未 drain 状态并携带 terminal digest 的 binding。
 - 在 Managed Agent 首个正式版本发布之前，共享 V1 schema 基线原地编辑；
   hold 若需要新列或新表，加入 `V1__managed_schema.sql` 并重建开发 catalog。
   复用现有 execution 表可以连这一步都省掉。
@@ -280,9 +281,11 @@ lost-Runtime 语义。故障用例（attach 期间杀 worker、hold 准入期间
 
 ## 发布
 
-在启用 opt-in 之前协同部署配套的控制平面、Harness 与 Runtime 制品；
-capability digest 变更会使按旧 digest 放置的 binding 失效。在统一本地启动器之外，
-终端 opt-in 默认关闭，且独立于 Shell opt-in；统一本地启动器始终启用终端
+在启用 opt-in 之前协同部署配套的控制平面、Harness 与 Runtime 制品。
+在普通本地挂载路径上，只要其它已记录的 scope 字段保持不变，既有 binding 在
+ordinary、measured 与 terminal 三种 capability digest 之间保持有效；附着终端仍
+要求 binding 处于 READY、未 drain 状态并携带 terminal digest。在统一本地启动器
+之外，终端 opt-in 默认关闭，且独立于 Shell opt-in；统一本地启动器始终启用终端
 （见「准入与审批模型」）。既有 Session 只有在其 runtime 放置到新 digest 且准入链
 通过时才获得终端；已保存的 Session 作用域不被改写。不要降级仍有活跃 hold 的
 消费者。

@@ -1489,11 +1489,12 @@ class ManagedAgentApiContractTest {
                 """
                 {"sessionId":"%s","operationId":"%s"}
                 """.formatted(webSessionId, webCloseId));
-        exchange(drift, "archiveWebShellSession", 202,
+        String webArchiveId = json(exchange(drift, "archiveWebShellSession", 202,
                 post(WEB_SHELL + "/sessions/archive").header(TENANT, tenant),
                 """
                 {"sessionId":"%s","idempotencyKey":"contract-web-archive"}
-                """.formatted(webSessionId));
+                """.formatted(webSessionId))).get("operationId").asText();
+        awaitOperation(tenant, webSessionId, webArchiveId);
         assertThat(json(exchange(drift, "webShellGetSession", 200,
                 post(WEB_SHELL + "/sessions/get").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\"}".formatted(webSessionId)))
