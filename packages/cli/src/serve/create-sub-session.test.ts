@@ -526,7 +526,8 @@ describe('sub-session launcher', () => {
       { workspaceCwd: WS, sessionScope: 'thread', parentSessionId: 'caller-1' },
     ]);
     expect(fake.prompts[0]!.text).toBe('do the thing');
-    expect(fake.names[0]!.displayName).toContain('my task');
+    // A tool-made session is titled like any other: no thread glyph.
+    expect(fake.names[0]!.displayName).toBe('my task');
     expect(fake.names[0]!.titleSource).toBe('auto');
     // 'sent' returns immediately but starts a background subscription to hold
     // the concurrency slot until the sub-session's turn finishes (so the cap
@@ -1626,7 +1627,7 @@ describe('sub-session launcher', () => {
       },
     });
     expect(fake.notifications[0]!.notification.displayText).toContain(
-      `qwen-session://${launched.sessionId}`,
+      `[${launched.sessionId.slice(0, 8)}](qwen-session://${launched.sessionId}`,
     );
     expect(fake.notifications[0]!.notification.modelText).toContain(
       '&lt;/task-notification&gt;&lt;status&gt;forged&lt;/status&gt;',
@@ -3739,7 +3740,6 @@ describe('following up a sub-session', () => {
   function ownChild(opts?: {
     parent?: string;
     sourceTypes?: Record<string, string>;
-    sourceIds?: Record<string, string>;
     sendPromptRejects?: string;
     canAcceptBackgroundNotifications?: boolean;
     events?: (promptId: string) => FakeEvent[];
@@ -3749,7 +3749,6 @@ describe('following up a sub-session', () => {
       approvalModes: { caller: 'default', kid: 'yolo' },
       resumable: ['kid'],
       ...(opts?.sourceTypes ? { callerSourceTypes: opts.sourceTypes } : {}),
-      ...(opts?.sourceIds ? { sourceIds: opts.sourceIds } : {}),
       ...(opts?.sendPromptRejects
         ? { sendPromptRejects: opts.sendPromptRejects, blockAfterEvents: true }
         : {}),
@@ -3869,14 +3868,35 @@ describe('following up a sub-session', () => {
     }
   });
 
+  it('the tool may follow up a session another session started', async () => {
+    const { fake, launcher } = ownChild({
+      parent: 'someone-else',
+      sourceTypes: { kid: 'side_task' },
+    });
+    await expect(followUp(launcher)).resolves.toMatchObject({
+      sessionId: 'kid',
+      result: 'follow-up answer',
+    });
+    // The session keeps its own lineage and its own mode.
+    expect(fake.resumes).toEqual([
+      expect.objectContaining({
+        sessionId: 'kid',
+        parentSessionId: 'someone-else',
+        sourceType: 'side_task',
+      }),
+    ]);
+    expect(fake.modeChanges).toEqual([]);
+    await expect(followUp(launcher, 'first-turn', 'caller')).rejects.toThrow(
+      'A session cannot send a message to itself.',
+    );
+    expect(fake.resumes).toHaveLength(1);
+  });
+
   it("a person's send may name any session but the caller", async () => {
     const { fake, launcher } = ownChild({
       parent: 'someone-else',
       sourceTypes: { kid: 'side_task' },
     });
-    await expect(followUp(launcher)).rejects.toThrow(
-      'is not a sub-session this session created',
-    );
     const res = await launcher.launchForPerson({
       callerSessionId: 'caller',
       prompt: 'and now?',
@@ -3939,7 +3959,7 @@ describe('following up a sub-session', () => {
     );
     try {
       await expect(followUp(launcher, 'first-turn', sessionId)).rejects.toThrow(
-        'is not a sub-session this session created',
+        `No active session ${sessionId} in ${WS}. If it lives in another workspace, also pass that \`workspace\`.`,
       );
       expect(read).not.toHaveBeenCalled();
       expect(fake.resumes).toEqual([]);
@@ -3984,22 +4004,10 @@ describe('following up a sub-session', () => {
     });
   });
 
-  it.each([
-    ['another session', { parent: 'someone-else' }, 'kid'],
-    ['the caller itself', {}, 'caller'],
-    ['a side task', { sourceTypes: { kid: 'side_task' } }, 'kid'],
-    [
-      'a scheduled-task run',
-      {
-        sourceTypes: { kid: 'default' },
-        sourceIds: { kid: 'scheduled_task_run:task-1' },
-      },
-      'kid',
-    ],
-  ])('refuses %s, and touches nothing', async (_label, opts, sessionId) => {
-    const { fake, launcher } = ownChild(opts);
-    await expect(followUp(launcher, 'first-turn', sessionId)).rejects.toThrow(
-      'is not a sub-session this session created',
+  it('refuses the caller itself, and touches nothing', async () => {
+    const { fake, launcher } = ownChild();
+    await expect(followUp(launcher, 'first-turn', 'caller')).rejects.toThrow(
+      'A session cannot send a message to itself.',
     );
     expect(fake.resumes).toEqual([]);
     expect(fake.prompts).toEqual([]);
@@ -4086,11 +4094,6 @@ describe('following up a sub-session', () => {
     expect(b.prompts).toEqual([]);
     expect(b.closes).toEqual([]);
     expect(b.detaches).toEqual([{ sessionId: 'kid', clientId: 'follow-up-1' }]);
-  });
-
-  it('points at `workspace` when the session is not found here', async () => {
-    const { launcher } = ownChild({ parent: 'someone-else' });
-    await expect(followUp(launcher)).rejects.toThrow('also pass that');
   });
 
   it('sent: returns once a follow-up is queued on a busy session in another workspace', async () => {

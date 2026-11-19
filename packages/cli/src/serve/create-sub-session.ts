@@ -507,8 +507,7 @@ type IsolatedWorkspace = NonNullable<
 >;
 
 /** A readable, control-char-free session name (the bridge's title guard rejects
- * control chars, silently dropping an unsanitized rename). Prefixed with a
- * thread glyph so sub-sessions are recognizable in the list. */
+ * control chars, silently dropping an unsanitized rename). */
 // Unicode Bidi_Control marks — ALM (U+061C), LRM/RLM (U+200E/200F), the
 // embedding/override set (U+202A..U+202E), and the isolates (U+2066..U+2069): a
 // Trojan-Source-style reordering defense for the session list, mirroring the
@@ -519,19 +518,16 @@ const BIDI_CONTROL_MARKS = new RegExp(
   'g',
 );
 
-function subSessionName(label: string, includeThreadGlyph = true): string {
+function subSessionName(label: string): string {
   const cleaned = stripTerminalControlSequences(label)
     .replace(BIDI_CONTROL_MARKS, '')
     .trim()
     .replace(/\s+/g, ' ');
-  let short = cleaned;
-  if (cleaned.length > MAX_NAME_LENGTH) {
-    let cut = MAX_NAME_LENGTH - 1;
-    const boundary = cleaned.charCodeAt(cut - 1);
-    if (boundary >= 0xd800 && boundary <= 0xdbff) cut -= 1;
-    short = `${cleaned.slice(0, cut)}…`;
-  }
-  return includeThreadGlyph ? `🧵 ${short}` : short;
+  if (cleaned.length <= MAX_NAME_LENGTH) return cleaned;
+  let cut = MAX_NAME_LENGTH - 1;
+  const boundary = cleaned.charCodeAt(cut - 1);
+  if (boundary >= 0xd800 && boundary <= 0xdbff) cut -= 1;
+  return `${cleaned.slice(0, cut)}…`;
 }
 
 function sentCompletionStatus(
@@ -589,10 +585,7 @@ function buildSentCompletionNotification(
     (workspaceCwd
       ? `?${new URLSearchParams({ workspace: workspaceCwd })}`
       : '');
-  const sessionLink =
-    personMessage === undefined
-      ? `[🧵 ${sessionId.slice(0, 8)}](${sessionUrl})`
-      : `[${sessionId.slice(0, 8)}](${sessionUrl})`;
+  const sessionLink = `[${sessionId.slice(0, 8)}](${sessionUrl})`;
   const safeResult =
     result.trim() || `No text output (stopReason: ${stopReason}).`;
   const modelSessionId = truncateCodePoints(sessionId, 256);
@@ -1288,32 +1281,19 @@ export function createSubSessionLauncher(
   };
 
   /**
-   * Restore a sub-session the caller created in this workspace, so a
-   * follow-up prompt can be queued on it. The lineage is checked before the
-   * session is touched, from the live entry or, for one that was reaped,
-   * from its transcript: the recorded parent must be the caller, and the
-   * session must carry no source marker. Side tasks and scheduled-task runs
-   * also record the session they came from as their parent, but they carry
-   * a source, and a person or a schedule started them, not this tool.
-   * A person's send may name any session but the caller itself: the person
-   * could type into it directly. Either way the session keeps its own
-   * lineage.
+   * Restore an existing session in this workspace, so a follow-up prompt can
+   * be queued on it. Any session but the caller itself can be named; its
+   * metadata comes from the live entry or, for one that was reaped, from its
+   * transcript, and the session keeps its own lineage.
    */
-  const resumeOwnSubSession = async (
+  const resumeExistingSession = async (
     bridge: AcpSessionBridge,
     sessionId: string,
     callerSessionId: string,
-    anySession: boolean,
+    byPerson: boolean,
   ): Promise<BridgeSession> => {
-    const notOwn = new Error(
-      `Session ${sessionId} is not a sub-session this session created in ` +
-        `${boundWorkspace}. If it lives in another workspace, also pass that ` +
-        '`workspace`.',
-    );
     if (sessionId === normalizeSessionIdForLookup(callerSessionId)) {
-      throw anySession
-        ? new Error('A session cannot send a message to itself.')
-        : notOwn;
+      throw new Error('A session cannot send a message to itself.');
     }
     let metadata:
       | { parentSessionId?: string; sourceType?: string; sourceId?: string }
@@ -1340,19 +1320,13 @@ export function createSubSessionLauncher(
         );
       }
     }
-    if (anySession && !metadata) {
-      throw new Error(`No active session ${sessionId} in ${boundWorkspace}.`);
-    }
-    if (
-      !anySession &&
-      (metadata?.parentSessionId === undefined ||
-        normalizeSessionIdForLookup(metadata.parentSessionId) !==
-          normalizeSessionIdForLookup(callerSessionId) ||
-        (metadata.sourceType !== undefined &&
-          metadata.sourceType !== 'default') ||
-        metadata.sourceId !== undefined)
-    ) {
-      throw notOwn;
+    if (!metadata) {
+      throw new Error(
+        `No active session ${sessionId} in ${boundWorkspace}.` +
+          (byPerson
+            ? ''
+            : ' If it lives in another workspace, also pass that `workspace`.'),
+      );
     }
     return bridge.resumeSession({
       sessionId,
@@ -1536,7 +1510,7 @@ export function createSubSessionLauncher(
     const prepareAndQueue = async (): Promise<BridgeSession> => {
       let sub: BridgeSession;
       if (followUpSessionId !== undefined) {
-        sub = await resumeOwnSubSession(
+        sub = await resumeExistingSession(
           bridge,
           followUpSessionId,
           info.callerSessionId,
@@ -1652,13 +1626,7 @@ export function createSubSessionLauncher(
       if (!reusing) {
         try {
           bridge.updateSessionMetadata(sessionId, {
-            // A per-run scheduled task child is titled like its manual-run
-            // sibling (see the scheduled-task route), and a person's send
-            // like any session they start: flat, no thread glyph.
-            displayName: subSessionName(
-              info.name ?? info.prompt,
-              !isScheduledTaskRunSource(info) && !byPerson,
-            ),
+            displayName: subSessionName(info.name ?? info.prompt),
             titleSource: 'auto',
           });
         } catch (err) {
@@ -1821,7 +1789,7 @@ export function createSubSessionLauncher(
         // A person sending to an existing session knows it by its title.
         const label =
           (byPerson && reusing ? sessionTitle(bridge, sessionId) : undefined) ??
-          subSessionName(info.name ?? info.prompt, false);
+          subSessionName(info.name ?? info.prompt);
         // A person's message goes into the caller's conversation as a record;
         // the reply comes back as a turn in which the caller's model tells the
         // person what the target said, named by where it came from.

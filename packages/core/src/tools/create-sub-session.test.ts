@@ -14,8 +14,12 @@ import { ApprovalMode } from '../config/approval-mode.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import type { Config, SubSessionSpawner } from '../config/config.js';
 
-function makeConfig(spawner?: SubSessionSpawner): Config {
+function makeConfig(
+  spawner?: SubSessionSpawner,
+  approvalMode = ApprovalMode.DEFAULT,
+): Config {
   return {
+    getApprovalMode: () => approvalMode,
     getSubSessionSpawner: () => spawner,
     getSubSessionWorkspaceResolver: () => async () => ({
       workspaceId: 'repo-b',
@@ -98,6 +102,61 @@ describe('CreateSubSessionTool', () => {
     expect(await local.getConfirmationDetails(signal)).toMatchObject({
       type: 'info',
     });
+  });
+
+  it('runs a named workspace without a prompt in YOLO mode', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1', result: 'ok' }));
+    let mode = ApprovalMode.YOLO;
+    const config = makeConfig(spawner);
+    config.getApprovalMode = () => mode;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'do X',
+      workspace: '/repos/b',
+    });
+
+    expect(invocation.requiresUserInteraction?.()).toBe(false);
+    expect((await invocation.execute(new AbortController().signal)).error).toBe(
+      undefined,
+    );
+    expect(spawner).toHaveBeenCalledWith({
+      prompt: 'do X',
+      completion: 'first-turn',
+      workspace: '/repos/b',
+      workspaceGeneration: 'generation-b',
+    });
+
+    // Leaving YOLO before the call runs brings the approval back.
+    mode = ApprovalMode.AUTO_EDIT;
+    expect(invocation.requiresUserInteraction?.()).toBe(true);
+    expect(
+      (await invocation.execute(new AbortController().signal)).error?.message,
+    ).toContain('requires one-time approval');
+    expect(spawner).toHaveBeenCalledOnce();
+  });
+
+  it('applies destination deny rules in YOLO mode', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1' }));
+    const config = makeConfig(spawner, ApprovalMode.YOLO);
+    const permissionManager = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => ApprovalMode.YOLO,
+    });
+    permissionManager.initialize();
+    permissionManager.addSessionDenyRule(
+      'CreateSubSession(workspace:/canonical/other repo)',
+    );
+    config.getPermissionManager = () => permissionManager;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'summarize',
+      workspace: 'repo-b',
+    });
+
+    expect(
+      (await invocation.execute(new AbortController().signal)).error?.message,
+    ).toContain('denied by permission rules');
+    expect(spawner).not.toHaveBeenCalled();
   });
 
   it('honors a destination deny rule added while approval is pending', async () => {
@@ -237,7 +296,7 @@ describe('CreateSubSessionTool', () => {
     expect(res.error).toBeUndefined();
     expect(res.llmContent).toContain('sub-2');
     expect(res.llmContent).toMatch(/did not wait/i);
-    expect(res.returnDisplay).toContain('qwen-session://sub-2)');
+    expect(res.returnDisplay).toBe('[sub-2](qwen-session://sub-2) started');
   });
 
   it('reports a completed-but-empty first turn without an error', async () => {

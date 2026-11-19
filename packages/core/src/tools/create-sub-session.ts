@@ -41,6 +41,7 @@ import {
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { StructuredToolError, ToolErrorType } from './tool-error.js';
 import { buildPermissionCheckContext } from '../core/permission-helpers.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import type { Config, SubSessionWorkspaceBinding } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
@@ -156,7 +157,11 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
   }
 
   override requiresUserInteraction(): boolean {
-    return this.params.workspace !== undefined;
+    return this.params.workspace !== undefined && !this.isYolo();
+  }
+
+  private isYolo(): boolean {
+    return this.config.getApprovalMode() === ApprovalMode.YOLO;
   }
 
   override async getConfirmationDetails(
@@ -240,11 +245,18 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
     let requestStarted = false;
 
     try {
-      const res = await raceCancellation(() => {
-        const destination = this.approvedDestination;
+      const res = await raceCancellation(async () => {
+        let destination = this.approvedDestination;
         this.approvedDestination = undefined;
         if (this.params.workspace !== undefined && !destination) {
-          throw new Error('A named workspace requires one-time approval.');
+          // YOLO approves the call without a prompt; the destination is
+          // still resolved here so deny rules and the runtime generation hold.
+          const resolveWorkspace = this.config.getSubSessionWorkspaceResolver();
+          if (!this.isYolo() || !resolveWorkspace) {
+            throw new Error('A named workspace requires one-time approval.');
+          }
+          destination = await resolveWorkspace(this.params.workspace);
+          signal.throwIfAborted();
         }
         if (destination) this.assertWorkspaceAllowed(destination);
         requestStarted = true;
@@ -292,7 +304,7 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
       const workspaceQuery = res.workspaceCwd
         ? `?${new URLSearchParams({ workspace: res.workspaceCwd })}`
         : '';
-      const sessionLink = `[🧵 ${res.sessionId.slice(0, 8)}](qwen-session://${res.sessionId}${workspaceQuery})`;
+      const sessionLink = `[${res.sessionId.slice(0, 8)}](qwen-session://${res.sessionId}${workspaceQuery})`;
 
       // The sub-session exists and is linked in memory, but the daemon reported
       // that the parent lineage was NOT durably written to its transcript — so
@@ -376,13 +388,14 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
         'Set `workspace` to run the sub-session in another workspace ' +
         "registered with this daemon, with that workspace's own instructions, " +
         'skills and settings. The user approves each call that names a ' +
-        'workspace. Both workspaces must be trusted; an unknown name is ' +
-        'refused with the list of workspaces you can use.\n\n' +
+        'workspace, except in YOLO mode. Both workspaces must be trusted; ' +
+        'an unknown name is refused with the list of workspaces you can use.' +
+        '\n\n' +
         '## Following up\n' +
-        'Set `sessionId` to send the prompt to a sub-session you created ' +
-        "earlier instead of creating a new one; it keeps that session's " +
-        'context. Also set `workspace` if it is in another workspace. Only ' +
-        'sub-sessions this session created can be followed up this way.',
+        'Set `sessionId` to send the prompt to an existing session instead ' +
+        "of creating a new one; it keeps that session's context. Any session " +
+        'but this one can be named. Also set `workspace` if it is in another ' +
+        'workspace.',
       Kind.Other,
       {
         type: 'object',
@@ -424,8 +437,8 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
           sessionId: {
             type: 'string',
             description:
-              'Optional id of a sub-session you created earlier, to send this ' +
-              'prompt to instead of creating a new one. Cannot be combined ' +
+              'Optional id of an existing session to send this prompt to ' +
+              'instead of creating a new one. Cannot be combined ' +
               'with `model` or `name`.',
           },
         },
