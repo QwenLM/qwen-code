@@ -297,14 +297,15 @@ async function agentCase(name, policy) {
         typeof received.content === 'string'
           ? received.content
           : received.content.map((part) => part.text ?? '').join('\n');
+      const outputPrefix = `Output (stdout and stderr combined): ${marker}`;
       const output = text
         .split('\n')
-        .find((line) => line.startsWith(`Output: ${marker}`));
+        .find((line) => line.startsWith(outputPrefix));
       assert(
         output,
         'Tool result must contain the actual payload output, not the echoed command',
       );
-      const observed = JSON.parse(output.slice(`Output: ${marker}`.length));
+      const observed = JSON.parse(output.slice(outputPrefix.length));
       const messages = JSON.parse(item.run.stdout);
       assert(
         messages.some(

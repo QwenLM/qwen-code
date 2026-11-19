@@ -456,6 +456,13 @@ export interface DaemonGitLogOptions {
   all?: boolean;
   /** Keep only commits whose message, author, or hash matches. */
   search?: string;
+  /**
+   * Single refs whose reachable commits are excluded from the window. Used
+   * to drop commits already covered by a bound PR. Requires the
+   * `workspace_git_log_exclude_refs` capability; an unsafe ref makes the
+   * daemon refuse the fetch (`available:false`).
+   */
+  excludeRefs?: string[];
 }
 
 /** Response from `GET /workspace/git/log`. */
@@ -743,13 +750,6 @@ export interface DaemonGitHubPullRequestFiles {
   deletions: number;
   /** The PR head commit (`headRefOid`), for scoping commit fallback. */
   headSha: string;
-  /**
-   * Whether `headSha` is an ancestor of the checkout's HEAD. Only an
-   * ancestor head is a trustworthy commit-fallback boundary; a merged or
-   * rewritten PR's head is not. Absent on daemons that predate the probe —
-   * treat as false.
-   */
-  headIsAncestor?: boolean;
 }
 
 /** Response from `POST /workspaces/:workspace/github/prs/create`. */
@@ -1474,6 +1474,21 @@ export interface DaemonWorktreeInfo {
   path: string;
   /** Empty string while the worktree is detached (no branch ref). */
   branch: string;
+  /**
+   * The base tip the worktree was created from (its physical creation base).
+   * A legacy sidecar without `worktreeBase` is restored from
+   * `originalHeadCommit`, so this is populated on restore even for worktrees
+   * persisted before the field. The commit fallback prefers the session's own
+   * top-level start commit over this derived tip, so a plain session that
+   * hands off into a worktree keeps its pre-handoff commits.
+   */
+  baseCommit?: string;
+  /**
+   * The branch the worktree was created from (its upstream base). The commit
+   * fallback excludes commits reachable from it so integrating upstream does
+   * not re-list pre-session work. Absent when unknown.
+   */
+  baseBranch?: string;
 }
 
 /** Result of `POST /session/:id/worktree-branch` ("Create branch here"). */
@@ -1494,6 +1509,15 @@ export interface DaemonWorktreeHandoffResult {
 export interface DaemonBranchInfo {
   name: string;
   baseBranch: string;
+  /**
+   * The HEAD the branch was created from — the session's start commit.
+   * Immutable; the commit fallback scopes its window to `<baseCommit>..HEAD`.
+   * Live-only: branch metadata is not yet restored across a daemon restart,
+   * so this (and `baseBranch`) are absent on a restored branch session and the
+   * fallback suppresses until durable branch metadata lands. Worktree sessions
+   * carry the start commit durably on `worktree.baseCommit` instead.
+   */
+  baseCommit?: string;
 }
 
 /** GitHub pull request bound to a session (e.g. created from the Web Shell Git dialog). */
@@ -1909,6 +1933,16 @@ export interface DaemonSessionSummary {
   worktree?: DaemonWorktreeInfo;
   /** Present when the session was created with a new branch. */
   branch?: DaemonBranchInfo;
+  /**
+   * The HEAD captured when the session was created — its immutable start
+   * commit. Present for plain sessions (which have no branch/worktree meta);
+   * branch/worktree sessions carry it on their respective meta instead. The
+   * commit fallback scopes its window to `<baseCommit>..HEAD`. Live-only for
+   * plain sessions (not restored across a daemon restart); absent when the
+   * creation read failed. Worktree sessions carry it durably on
+   * `worktree.baseCommit`.
+   */
+  baseCommit?: string;
   /** Present when GitHub PRs have been bound to the session (last = latest). */
   prs?: DaemonSessionPrInfo[];
   /**
@@ -1929,6 +1963,24 @@ export interface DaemonSessionSummary {
    * sidecar-enriched count for such rows. Absent once the restore settles.
    */
   artifactCountPending?: boolean;
+  /**
+   * List-facing projection of the session's Goal, read from the goal
+   * sidecar on disk. Present for unloaded and archived sessions too,
+   * unlike the live-only Goals listing; absent when the session has no
+   * goal. Older daemons omit it.
+   */
+  goal?: DaemonSessionGoalInfo;
+}
+
+/**
+ * The goal sidecar's wire projection: identity + lifecycle state. Budgets
+ * and spend stay on the Goals page's live listing.
+ */
+export interface DaemonSessionGoalInfo {
+  status: GoalStatus;
+  objective: string;
+  /** ISO time of the goal's last transition. */
+  updatedAt: string;
 }
 
 export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
@@ -3774,6 +3826,12 @@ export interface DaemonWorkflowPhaseVisit {
   endedAt?: number;
 }
 
+/** A phase the script declares in `meta.phases`, reached or not. */
+export interface DaemonWorkflowPlannedPhase {
+  title: string;
+  detail?: string;
+}
+
 export type DaemonWorkflowDispatchStatus =
   | 'queued'
   | 'running'
@@ -3934,6 +3992,13 @@ export interface DaemonSessionWorkflowTaskStatus {
   isBackgrounded: boolean;
   currentPhase: string | null;
   phaseVisits: DaemonWorkflowPhaseVisit[];
+  /**
+   * The phases the script declares in `meta.phases`, in order. Present from
+   * the start of the run, so a client can show phases the script has not
+   * reached yet; absent when the script declares none, and on daemons that
+   * predate the field.
+   */
+  plannedPhases?: DaemonWorkflowPlannedPhase[];
   dispatches: DaemonWorkflowDispatchStatusEntry[];
   agentsDispatched: number;
   agentsCompleted: number;

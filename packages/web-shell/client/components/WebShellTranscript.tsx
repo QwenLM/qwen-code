@@ -61,7 +61,21 @@ export interface WebShellTranscriptProps {
   blocks: readonly DaemonTranscriptBlock[];
   renderMode?: 'readonly' | 'document';
   theme?: WebShellTheme;
-  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn' | 'ru' | 'ru-ru';
+  language?:
+    | 'en'
+    | 'zh-CN'
+    | 'zh'
+    | 'zh-cn'
+    | 'zh-TW'
+    | 'zh-tw'
+    | 'zh-HK'
+    | 'zh-hk'
+    | 'zh-Hant'
+    | 'zh-hant'
+    | 'zh-MO'
+    | 'zh-mo'
+    | 'ru'
+    | 'ru-ru';
   className?: string;
   style?: CSSProperties;
   chatMaxWidth?: number;
@@ -71,6 +85,8 @@ export interface WebShellTranscriptProps {
   collapseCompletedTurns?: boolean;
   markdownTableMode?: MarkdownTableMode;
   virtualScrollThreshold?: number;
+  /** Extra transcript rows to render on each side of the viewport when virtualized. Defaults to 15. */
+  overscan?: number;
   markdown?: WebShellMarkdownCustomization;
   sourceSessionId?: string;
   sources?: readonly SessionSource[];
@@ -135,6 +151,7 @@ function WebShellTranscriptContent({
   collapseCompletedTurns,
   markdownTableMode = 'basic',
   virtualScrollThreshold,
+  overscan,
   markdown,
   sourceSessionId,
   sources,
@@ -181,6 +198,7 @@ function WebShellTranscriptContent({
       compactThinking,
       collapseCompletedTurns: effectiveCollapseCompletedTurns,
       markdownTableMode: effectiveMarkdownTableMode,
+      overscan,
       markdown,
       sourceReferences,
       getAssistantSourcesIcon,
@@ -194,6 +212,7 @@ function WebShellTranscriptContent({
       sourceReferences,
       getAssistantSourcesIcon,
       effectiveMarkdownTableMode,
+      overscan,
       parseUserMessageContent,
       renderAssistantTurnFooter,
       renderComposerTag,

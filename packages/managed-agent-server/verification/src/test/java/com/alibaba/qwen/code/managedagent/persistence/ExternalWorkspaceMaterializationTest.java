@@ -154,7 +154,8 @@ class ExternalWorkspaceMaterializationTest {
         assertThat(summary.canCreateSession()).isFalse();
         assertThat(summary.canSelectDirectory()).isFalse();
         assertThat(registry.findReadable("tenant", "owner", List.of("workspace")).get("workspace").canCreateSession()).isFalse();
-        var discovery = new WorkspaceDiscoveryController(new WorkspaceDiscoveryService(registry, json), mock(WorkspaceCreationStore.class));
+        var discovery = new WorkspaceDiscoveryController(new WorkspaceDiscoveryService(registry, json), mock(WorkspaceCreationStore.class), properties,
+                mock(com.alibaba.qwen.code.managedagent.repository.ManagedArtifactReader.class));
         var tenant = new TenantContext("tenant", "owner");
         assertThat(discovery.publicList(tenant, null, null).getBody().data()).singleElement()
                 .satisfies(item -> assertThat(item.canCreateSession()).isFalse());
