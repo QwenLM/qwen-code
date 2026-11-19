@@ -4,7 +4,7 @@
 
 ## 验证记录——2026-11-19（切换范围重置月份）
 
-本轮合入`origin/main`（`a8f43b92`）并修复评审的Critical：循环`r`会重置月份索引，因此切换范围不会让Activity热力图停在新范围按键无法离开的月份。tab栏冲突的解决保留本移植的compact换行header，宽视图按tab逐个渲染text节点，从而把main的screen-reader选中/未选中tab id保留在presentation实际读取的节点上；历史hook fixture补上main新增的必填`userPromptCount`字段。合并后的树上构建、类型检查、lint、i18n语言包门禁与格式检查均通过。相关CLI套件通过139项测试（stats服务、原生历史、历史hook、对话框frame、对话框挂载、Settings），第二批通过144项（探针后重跑的原生历史、i18n、Ink stats标签页）。五个变异见证在各自守卫被移除时变红：切换范围重置、热力图坐标标签前缀、两处本地化调用点（`peak {{value}}`、`{{count}} more`）以及按tab的screen-reader id。
+本轮合入`origin/main`（`a8f43b92`）并修复评审的Critical：循环`r`会重置月份索引，因此切换范围不会让Activity热力图停在新范围按键无法离开的月份。tab栏冲突的解决保留本移植的compact换行header，宽视图按tab逐个渲染text节点，从而把main的screen-reader选中/未选中tab id保留在presentation实际读取的节点上；历史hook fixture补上main新增的必填`userPromptCount`字段。合并后的树上构建、类型检查、lint、i18n语言包门禁与格式检查均通过。相关CLI套件通过140项测试（stats服务、原生历史、历史hook、对话框frame、对话框挂载、Settings），第二批通过125项（i18n、Ink stats标签页）。六个变异见证在各自守卫被移除时变红：切换范围重置、热力图坐标标签前缀、两处本地化调用点（`peak {{value}}`、`{{count}} more`），以及宽视图按tab与compact的screen-reader id。
 
 Ink参照实现带有同样的陈旧偏移机制与同样的窄宽度热力图超宽（共享`buildHeatmapData`列数）；两者均延后到follow-up队列，不在本移植内单独分叉。A–D组公开leg与几何重放本轮未重跑，OpenTUI集成leg需要本runner不具备的bun；合入验收前需重跑。
 
