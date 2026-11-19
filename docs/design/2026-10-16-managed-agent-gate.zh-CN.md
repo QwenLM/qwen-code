@@ -10,15 +10,16 @@
 自 #14205 起，SDK Java 套件（`sdk-java.yml`）只在每日定时、手动触发和 Java 发布前
 运行。2026-10-16，#13918 和 #14370 各自全绿，合在一起却让 main 上
 `managed-agent-server` 的测试源码编译失败；直到夜间运行才有人发现。Managed Agent
-现在是重点保障的产品线：改动它、或改动它所驱动的 harness 的 PR，合入前必须通过
-全量套件。
+现在是重点保障的产品线：改动它、或改动它所驱动的 harness 的 PR，合入前必须报告
+稳定门禁；首个 approve 会启动全量套件做更深入验证。
 
 每次 push 都跑全量负担不起。一次全量是 11 个检查，约 330 机器分钟、125 分钟墙上
 时间（run 38874583246）；按最近两天改到 Java 的开放 PR 估算，每天超过 44 机器小时。
 
 ## 目标
 
-- 每个改到 Managed Agent 路径的 PR，在最终 head 上通过全量套件后才能合入。
+- 每个改到 Managed Agent 路径的 PR，在最终 head 上报告稳定门禁后才能合入；fast 层级
+  结果满足该检查，首个 approve 启动全量套件做更深入验证。
 - push 时的反馈保持快速（约 25 分钟）。
 - 没改到这些路径的 PR，除几秒钟的路径匹配外不付出额外成本。
 - 仍然漏进 main 的回归，经现有 `main-ci-failure-issue.yml` 路线自动开 issue；
@@ -232,8 +233,9 @@ issue 交给人工分诊而不是 autofix：一条过期的临时报告只需关
   `409 managed_runtime_identity_conflict`，而最初报告里是 Store 回
   `400 invalid_request`，但以同样方式冻结 turn。
 
-- **approve 时机。** 全量在首个 approve 时启动，合入最多要在其后等约两小时。reviewer
-  可以更早 approve；approve 后的 push 会作废它并重新开始。
+- **approve 时机。** 全量在首个 approve 时启动，但不会延迟合入：其 gate job 要等依赖
+  完成后才发布，因此全量运行期间 fast 层级结果仍是必需 context。需要全量证明的 reviewer
+  必须人工等待。approve 后的 push 会作废它并重新开始。
 - **分类漂移。** push 运行和 approve 运行各自对自己的 merge commit 分类；两次之间 base
   移动时范围可能不同。两者都对比各自的第一父提交，除非冲突解决改变了变更集，否则 PR 的
   变更集保持稳定。

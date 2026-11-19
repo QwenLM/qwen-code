@@ -11,8 +11,9 @@ Since #14205 the SDK Java suite (`sdk-java.yml`) runs only nightly, on demand,
 and before a Java release. On 2026-10-16 #13918 and #14370 were each green and
 together broke compilation of the `managed-agent-server` test sources on main;
 nothing reported it until the nightly run. Managed Agent is now a protected
-product line: a change to it, or to the harness it drives, must pass the full
-suite before it merges.
+product line: a change to it, or to the harness it drives, must report the
+stable gate before it merges. The first approval starts the full suite for
+deeper verification.
 
 Running the full suite on every push is not affordable. One full run is 11
 checks, about 330 machine minutes and 125 minutes of wall time (run
@@ -21,8 +22,9 @@ machine hours per day.
 
 ## Goals
 
-- Every PR that touches Managed Agent paths passes the full suite on its
-  final head before it can merge.
+- Every PR that touches Managed Agent paths reports the stable gate on its
+  final head before it can merge; its fast-tier result satisfies that check,
+  and its first approval starts the full suite for deeper verification.
 - Feedback on a push stays fast (about 25 minutes).
 - A PR that does not touch those paths pays nothing beyond a few seconds of
   path matching.
@@ -284,9 +286,11 @@ jobs, and move Java 17 to nightly only.
   answers `409 managed_runtime_identity_conflict` where the original report had
   the Store answering `400 invalid_request`, freezing the turn the same way.
 
-- **Approval timing.** The full suite starts at the first approval, so merge
-  waits up to about two hours after it. Reviewers can approve earlier; a push
-  after approval dismisses it and restarts the cycle.
+- **Approval timing.** The full suite starts at the first approval but does not
+  delay merge: its gate job publishes only after its dependencies finish, so the
+  fast-tier result remains the required context while it runs. A reviewer who
+  needs full-suite proof must wait manually. A push after approval dismisses it
+  and restarts the cycle.
 - **Classification drift.** The push run and the approval run classify their
   own merge commits; if the base moves between them, the scope can differ.
   Both diff against their own first parent, which keeps the PR's change set

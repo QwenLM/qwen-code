@@ -315,6 +315,7 @@ describe('Managed Agent gate required check', () => {
     ['pull_request', 'none', 'false', 'Managed Agent gate'],
     ['pull_request', 'fast', 'true', 'Managed Agent gate'],
     ['pull_request', 'none', 'true', 'Managed Agent review (no full run)'],
+    ['pull_request', '', 'true', 'Managed Agent gate'],
     ['pull_request_review', 'full', 'true', 'Managed Agent gate'],
     [
       'pull_request_review',

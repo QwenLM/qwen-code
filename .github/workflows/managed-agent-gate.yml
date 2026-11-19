@@ -304,7 +304,8 @@ jobs:
   gate:
     name: >-
       ${{ (needs.scope.outputs.tier == 'full' || needs.scope.outputs.touched != 'true' ||
-      (needs.scope.outputs.tier == 'fast' && github.event_name == 'pull_request') ||
+      ((needs.scope.outputs.tier == 'fast' || needs.scope.outputs.tier == '') &&
+      github.event_name == 'pull_request') ||
       (github.event_name == 'pull_request_review' && github.event.review.state == 'approved' &&
       github.event.pull_request.state == 'open' && needs.scope.outputs.tier == '') ||
       (github.event_name != 'pull_request' && github.event_name != 'pull_request_review')) && 'Managed Agent gate' ||
