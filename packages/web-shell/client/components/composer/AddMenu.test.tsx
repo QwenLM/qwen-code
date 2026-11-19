@@ -1129,12 +1129,16 @@ describe('mobile AddMenu', () => {
       mobileProps({
         simpleMode: true,
         plan: { checked: false, onToggle: vi.fn() },
+        getWorkspaceActions: () => ({
+          listDirectory: vi.fn().mockResolvedValue([]),
+        }),
       }),
     );
     await openMenu();
     expect(
       portalRoot!.querySelector('[data-web-shell-mobile-add-menu]'),
     ).not.toBeNull();
+    expect(menuItem('composer-add-menu-reference-file')).not.toBeNull();
     expect(menuItem('composer-add-menu-plan')).toBeNull();
   });
 
