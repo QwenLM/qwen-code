@@ -145,13 +145,28 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
     return `LSP ${operationLabel}`;
   }
 
-  async execute(_signal: AbortSignal): Promise<ToolResult> {
+  async execute(signal: AbortSignal): Promise<ToolResult> {
+    signal.throwIfAborted();
     const client = this.config.getLspClient();
     if (!client || !this.config.isLspEnabled()) {
       const message = `LSP ${this.getOperationLabel()} is unavailable (LSP disabled or not initialized).`;
       return { llmContent: message, returnDisplay: message };
     }
 
+    let onAbort = () => {};
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(signal.reason);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      // LSP tool operations are read-only, so the turn can discard late replies.
+      return await Promise.race([aborted, this.executeOperation(client)]);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
+
+  private async executeOperation(client: LspClient): Promise<ToolResult> {
     switch (this.params.operation) {
       case 'goToDefinition':
         return this.executeDefinitions(client);
