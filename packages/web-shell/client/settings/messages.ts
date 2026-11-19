@@ -821,6 +821,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
     'Включить сотрудничество агентов',
   'settings.description.experimental.agentCollaboration':
     'Включить сотрудничество устойчивых агентов рабочей области в общих потоках задач (экспериментально). Независимо от Agent Team: ни один переключатель не подразумевает другой. Включение только разрешает сотрудничество; открытие агента внешним вызывающим, доверие к соединению и регистрация host по-прежнему требуют явной настройки. Также включается QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.',
+  'settings.label.experimental.mods': 'Mods (экспериментально)',
+  'settings.description.experimental.mods':
+    'Включить экспериментальные Mods из включённых расширений в доверенных локальных терминальных сессиях, а также в headless- и ACP-сессиях. Требуется перезапуск.',
   'settings.label.experimental.unifiedAgentLoop': 'Единый Agent Loop',
   'settings.description.experimental.unifiedAgentLoop':
     'Запускать сессии на общем agent loop. Если не задано, у каждого входа своё умолчание: headless (`-p` и stream-json), Ink TUI и субагенты идут на общем loop, ACP (Zed, VS Code, Web Shell, channel), OpenTUI и Hosted Harness — на своих (для этих входов это экспериментально). `true` переводит всех на общий loop (раунд модели Hosted Harness тоже на нём, с сохранением journal-диспетчеризации инструментов), `false` — всех на свои loop, включая headless, Ink TUI и субагентов. QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP перекрывает по входам: `1` включает все, `0` выключает все, список через запятую (например `headless,acp=0`) принуждает названные входы (headless, acp, ink, opentui, agent-core, speculation, hosted). Голые `1`/`0` распознаются только как целое значение, не внутри списка; неназванные входы откатываются к этой настройке. Проектные `.env` и `settings.env` переменную задать не могут.',

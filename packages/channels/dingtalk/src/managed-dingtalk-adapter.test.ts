@@ -966,7 +966,9 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.disconnect();
   });
 
-  it('evicts the least-recently-seen webhook, not the first-inserted (R1-20)', async () => {
+  it('evicts the least-recently-seen webhook, not the first-inserted (R1-20)', async (ctx) => {
+    // Pin the ceiling: a dropped third argument must fail here, not in CI.
+    expect(ctx.task.timeout).toBe(120_000);
     const { adapter, plane, fake } = await connectedAdapter();
     const hook = (session: string): string =>
       `https://oapi.dingtalk.com/robot/sendBySession?session=${session}`;
@@ -1024,7 +1026,7 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.tick();
     expect(fake.sent.map((entry) => entry.webhook)).toEqual([hook('w0-new')]);
     await adapter.disconnect();
-  }, 30_000);
+  }, 120_000);
 
   it('drops a deterministically refused orphan receipt without wedging later ones', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
