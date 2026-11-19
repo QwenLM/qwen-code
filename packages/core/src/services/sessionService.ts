@@ -3825,16 +3825,28 @@ export class SessionService {
     // artifactSnapshot for it and a count written here would advertise a
     // set no cold open can deliver. For a defined projection with an empty
     // apiHistory (the metadata-bearing side-records shape), count exactly
-    // the set THIS projection delivers — its artifactSnapshot is built
-    // from the active-segment side-record selection, which can be narrower
-    // than a whole-transcript rebuild (an event parented to a non-tail
-    // metadata record is counted by a rebuild but delivered by nobody).
-    // Counting the delivery keeps the row and the cold open telling one
-    // story, and needs no auxiliary read: the reader already paid the
-    // indexing cost. Sessions with a conversation keep the selective
-    // read's zero-extra-I/O contract; their count arrives via the recorder
-    // and the load funnel.
-    if (projection && projection.runtime.apiHistory.length === 0) {
+    // the set THIS projection delivers and heal an existing sidecar to
+    // that count. The side-record selector includes every artifact record
+    // for a metadata-only active chain, so this delivery matches the
+    // whole-transcript rebuild the load funnel counts and the recorder
+    // stamps — one delivered-set definition across all three writers.
+    // The authority gates mirror the load seed: a partial read
+    // (sourcesUnavailable), a broken history chain, or a damaged artifact
+    // journal must not overwrite a correct count — the library mutation
+    // guard refuses the same journal, and the load seed keeps the last
+    // known good count on refusal. Counting the delivery needs no
+    // auxiliary read: the reader already paid the indexing cost. Sessions
+    // with a conversation keep the selective read's zero-extra-I/O
+    // contract; their count arrives via the recorder and the load funnel.
+    if (
+      projection &&
+      projection.runtime.apiHistory.length === 0 &&
+      !projection.runtime.sourcesUnavailable &&
+      !projection.runtime.historyGaps?.length &&
+      !hasDisqualifyingArtifactJournalWarning(
+        projection.runtime.artifactJournalWarnings ?? [],
+      )
+    ) {
       const count =
         projection.runtime.artifactSnapshot?.artifacts.filter(
           isRestorablePersistedArtifact,

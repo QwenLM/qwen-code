@@ -873,13 +873,13 @@ describe('SessionService - artifact summary sidecar', () => {
     writeTranscript([titleRecord('x'.repeat(pad)), ...rest]);
   };
 
-  it('does not seed a count the projection does not deliver', async () => {
+  it('aligns the sidecar across both funnels for a non-tail-parented journal', async () => {
     // The recorder writes custom_title / re-anchored session_source with
-    // updateActiveTail=false, so an event parented to the non-tail metadata
-    // is outside the projection's active-segment selection: a whole-
-    // transcript rebuild counts it, the projection delivers nothing. The
-    // sidecar must match the delivery, not the rebuild (review round-6
-    // R6-1).
+    // updateActiveTail=false. For a metadata-only active chain the
+    // side-record selector includes every artifact record, so the
+    // projection delivers the same set the load rebuild counts and the
+    // recorder stamps — one delivered-set definition, no oscillation
+    // between the two funnels (review round-7 R7-1).
     const a = persistedArtifact('https://example.com/nontail-a');
     const b = persistedArtifact('https://example.com/nontail-b');
     const sourceRecord: ChatRecord = {
@@ -914,22 +914,115 @@ describe('SessionService - artifact summary sidecar', () => {
       { ...artifactEventRecord([a, b]), parentUuid: 'source-1' },
     ]);
 
+    const loaded = await service.loadSession(SESSION_ID);
+    expect(loaded?.artifactSnapshot?.artifacts.length).toBe(2);
+    const afterLoad =
+      readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount;
+    expect(afterLoad).toBe(2);
+
     const projection = await service.readRestoreProjection(SESSION_ID, {
       replay: { kind: 'none' },
     });
-
     expect(projection?.runtime.apiHistory.length).toBe(0);
-    expect(projection?.runtime.artifactSnapshot).toBeUndefined();
+    expect(projection?.runtime.artifactSnapshot?.artifacts.length).toBe(2);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      afterLoad,
+    );
+  });
+
+  it('heals a stale sidecar to zero when the journal has no artifacts', async () => {
+    // A metadata-only journal with no artifact records delivers nothing;
+    // an existing stale count heals to zero, and no sidecar is created
+    // from absent.
+    const sourceRecord: ChatRecord = {
+      uuid: 'source-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'session_source',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        sourceType: 'web_shell',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([sourceRecord]);
+
+    await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
     expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
 
-    // An existing stale count heals to the delivery (zero), it is not
-    // left advertising artifacts the cold open cannot show.
     writeSessionArtifactSummarySidecar(sidecarPath, 2);
     await service.readRestoreProjection(SESSION_ID, {
       replay: { kind: 'none' },
     });
     expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
       0,
+    );
+  });
+
+  it('keeps a correct sidecar when the projection journal is damaged or refused', async () => {
+    // The projection seed applies the load seed's authority gates: a
+    // forward-version (refused) event or a change-less (damaged) event
+    // must not heal a correct count to the empty delivery — the library
+    // mutation guard refuses the same journal (review round-7 R6-1).
+    const a = persistedArtifact('https://example.com/damaged-a');
+    const b = persistedArtifact('https://example.com/damaged-b');
+    const sourceRecord: ChatRecord = {
+      uuid: 'source-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'session_source',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        sourceType: 'web_shell',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    const refusedV3 = {
+      ...artifactEventRecord([a, b]),
+      uuid: 'artifact-event-v3',
+      parentUuid: 'source-1',
+      systemPayload: {
+        v: 3,
+        sessionId: SESSION_ID,
+        sequence: 1,
+        recordedAt: '2026-11-17T00:00:01.000Z',
+        changes: [],
+      },
+    } as unknown as ChatRecord;
+    writeTranscript([sourceRecord, refusedV3]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 2);
+
+    await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      2,
+    );
+
+    const damaged = {
+      uuid: 'artifact-event-damaged',
+      parentUuid: 'source-1',
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:01.000Z',
+      type: 'system',
+      subtype: 'session_artifact_event',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: { v: 2, sessionId: SESSION_ID, sequence: 1 },
+    } as unknown as ChatRecord;
+    writeTranscript([sourceRecord, damaged]);
+
+    await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      2,
     );
   });
 
@@ -985,6 +1078,101 @@ describe('SessionService - artifact summary sidecar', () => {
     expect(projection?.runtime.artifactSnapshot?.artifacts.length).toBe(3);
     expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
       2,
+    );
+  });
+
+  it('skips the projection write when the sidecar already carries the delivery', async () => {
+    // Equal-count write skip on the projection funnel: a warm open adds
+    // no disk write (review round-7 deferred pin). The atomic write's
+    // temp+rename changes the inode, so an unchanged inode witnesses no
+    // write.
+    const a = persistedArtifact('https://example.com/equal-a');
+    const sourceRecord: ChatRecord = {
+      uuid: 'source-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'session_source',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        sourceType: 'web_shell',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([
+      sourceRecord,
+      { ...artifactEventRecord([a]), parentUuid: 'source-1' },
+    ]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 1);
+    const beforeIno = statSync(sidecarPath).ino;
+
+    await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+
+    expect(statSync(sidecarPath).ino).toBe(beforeIno);
+  });
+
+  it('recounts restorable survivors on a non-tail-parented journal', async () => {
+    // The removal recount and the projection delivery share the same
+    // delivered-set definition for a metadata-only journal (review
+    // round-7 deferred pin): removing one of two non-tail-parented
+    // artifacts leaves 1, and the projection delivers 1.
+    const a = persistedArtifact('https://example.com/nontail-rm-a');
+    const b = persistedArtifact('https://example.com/nontail-rm-b');
+    const sourceRecord: ChatRecord = {
+      uuid: 'source-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.000Z',
+      type: 'system',
+      subtype: 'session_source',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        sourceType: 'web_shell',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    const title: ChatRecord = {
+      uuid: 'title-1',
+      parentUuid: 'source-1',
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.500Z',
+      type: 'system',
+      subtype: 'custom_title',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        title: 'Non-tail removal',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([
+      sourceRecord,
+      title,
+      { ...artifactEventRecord([a, b]), parentUuid: 'source-1' },
+    ]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 2);
+
+    const removed = await service.removeSessionArtifactsForLibrary(
+      SESSION_ID,
+      [a.id],
+      {
+        assertStorageUnchanged: async () => {},
+        assertCanMutate: () => {},
+      },
+    );
+
+    expect(removed).toEqual([a.id]);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      1,
+    );
+    const projection = await service.readRestoreProjection(SESSION_ID, {
+      replay: { kind: 'none' },
+    });
+    expect(projection?.runtime.artifactSnapshot?.artifacts.length).toBe(1);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      1,
     );
   });
 
@@ -1273,22 +1461,24 @@ describe('SessionService - artifact summary sidecar', () => {
       { ...artifactEventRecord([a, b]), parentUuid: null },
       unknownType,
     ]);
-    writeSessionArtifactSummarySidecar(sidecarPath, 2);
+    // Preset above the delivery: the load funnel's shape-gate refusal
+    // keeps the last known good count (5) — the dispatch distinction is
+    // observable precisely because the preset differs from the delivery
+    // (a messages.length dispatch would rebuild and heal to 2). The
+    // projection seed also leaves the correct count alone for this
+    // damaged shape.
+    writeSessionArtifactSummarySidecar(sidecarPath, 5);
 
     await service.loadSession(SESSION_ID);
     expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
-      2,
+      5,
     );
 
-    // The projection funnel counts its own delivery: the dropped record
-    // leaves the event outside the active segment, nothing is delivered,
-    // and the stale count heals to zero (round-6 semantics) — while the
-    // load funnel's refusal keeps the last known good count.
     await service.readRestoreProjection(SESSION_ID, {
       replay: { kind: 'none' },
     });
     expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
-      0,
+      5,
     );
   });
 
@@ -1329,10 +1519,10 @@ describe('SessionService - artifact summary sidecar', () => {
     expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
   });
 
-  it('counts the projection delivery when the journal tail is truncated', async () => {
-    // The projection funnel counts what its selective read delivers; a
-    // truncated last line drops out of the index, and the sidecar heals
-    // to the delivered set rather than keeping a stale count.
+  it('refuses the projection seed from a partial transcript read', async () => {
+    // A truncated last line makes the reader's parse incomplete
+    // (sourcesUnavailable); the projection seed's authority gate refuses
+    // to overwrite the correct count with the narrowed delivery.
     const a = persistedArtifact('https://example.com/partial-a');
     const b = persistedArtifact('https://example.com/partial-b');
     const title: ChatRecord = {
@@ -1361,9 +1551,9 @@ describe('SessionService - artifact summary sidecar', () => {
       replay: { kind: 'none' },
     });
 
-    expect(projection?.runtime.artifactSnapshot?.artifacts.length).toBe(2);
+    expect(projection?.runtime.sourcesUnavailable).toBe(true);
     expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
-      2,
+      5,
     );
   });
 
@@ -1408,8 +1598,8 @@ describe('SessionService - artifact summary sidecar', () => {
     // read already delivers — no full parse on either branch (review
     // round-6 R6-1: count and delivery share one source). A conversation
     // projection is skipped entirely; a side-records projection is counted
-    // from its delivery (here the null-parented event is outside the
-    // active segment, so nothing is delivered and no sidecar is written).
+    // from its delivery (the metadata-only selector includes the
+    // null-parented event, so it is delivered and seeded).
     const readSpy = vi.spyOn(
       service as unknown as {
         readAllRecords: (
@@ -1450,8 +1640,12 @@ describe('SessionService - artifact summary sidecar', () => {
     expect(projection).toBeDefined();
     expect(projection?.runtime.apiHistory.length).toBe(0);
     expect(readSpy).not.toHaveBeenCalled();
-    expect(projection?.runtime.artifactSnapshot).toBeUndefined();
-    expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
+    // The metadata-only selector includes the null-parented event, so the
+    // projection delivers it and the sidecar matches — still no read.
+    expect(projection?.runtime.artifactSnapshot?.artifacts.length).toBe(1);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      1,
+    );
     readSpy.mockRestore();
   });
 

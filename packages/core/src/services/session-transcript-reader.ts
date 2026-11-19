@@ -309,6 +309,10 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   };
   fileHistorySnapshots?: FileHistorySnapshot[];
   artifactSnapshot?: RebuiltSessionArtifactSnapshot;
+  /** Damage warnings from the artifact rebuild, present even when no
+   * readable record produced a snapshot (an all-refused journal). The
+   * first-open seed gates on these like the load funnel does. */
+  artifactJournalWarnings?: readonly string[];
   goalRecords: GoalRecoveryRecord[];
   goalRecoverySourceUuid?: string;
   initialTurn: number;
@@ -4004,6 +4008,9 @@ export class SessionTranscriptReader {
         ? restoreSessionSources(sourceRecords, sessionId)
         : { sourcesUnavailable: true as const }),
       ...(artifactSnapshot ? { artifactSnapshot } : {}),
+      ...(artifacts.warningList().length > 0
+        ? { artifactJournalWarnings: artifacts.warningList() }
+        : {}),
       goalRecords,
       ...(goalRecovery.selectedGoalRecovery.sourceUuid
         ? {
