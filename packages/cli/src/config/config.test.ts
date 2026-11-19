@@ -1590,14 +1590,14 @@ describe('loadCliConfig', () => {
       const argv = await parseArguments();
       vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
       vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
-      // ACP is off by default for both switches.
+      // The Hosted Harness is off by default for both switches.
       const defaults = await loadCliConfig({}, argv);
-      expect(defaults[getter]('acp')).toBe(false);
+      expect(defaults[getter]('hosted')).toBe(false);
       const enabled = await loadCliConfig(
         { experimental: { [setting]: true } },
         argv,
       );
-      expect(enabled[getter]('acp')).toBe(true);
+      expect(enabled[getter]('hosted')).toBe(true);
     },
   );
 

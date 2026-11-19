@@ -6180,7 +6180,11 @@ export class Session implements SessionContext {
         result,
       );
       return result;
-    } catch (error) {
+    } catch (caught) {
+      const error =
+        caught instanceof ManagedRuntimeOutcomeUnknownError
+          ? managedOutcomeUnknownError(caught)
+          : caught;
       recordAdmissionCancellation();
       const pendingSend = turnRecording?.abortController;
       const abortReason =
