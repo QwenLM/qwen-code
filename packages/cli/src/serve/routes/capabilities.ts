@@ -53,13 +53,14 @@ interface RegisterCapabilitiesRoutesDeps {
   hostedHarness?: HostedHarnessCapabilities;
 }
 
-function workflowsEnabledForRuntime(
+async function workflowsEnabledForRuntime(
   runtime: WorkspaceRuntime | undefined,
   daemonEnv: Readonly<NodeJS.ProcessEnv>,
-): boolean {
+): Promise<boolean> {
   if (
     !runtime ||
     !runtime.trusted ||
+    runtime.generationGuard?.closed ||
     runtime.routeFileSystemFactory.sshWorkspace
   )
     return false;
@@ -68,12 +69,16 @@ function workflowsEnabledForRuntime(
       ? (runtime.env.effectiveEnv ?? {})
       : (runtime.env.effectiveEnv ?? daemonEnv);
   const safeMode = isSafeModeEnv(env);
-  if (!safeMode && runtime.env.workflowToolDeniedBySettings) return false;
   if (env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
-  if (env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1') return true;
-  const setting = runtime.env.workflowsEnabledBySettings;
-  if (typeof setting === 'boolean') return setting;
-  return runtime.env.mode === 'runtime-overlay' && !safeMode;
+  const settings = runtime.readWorkflowSettings?.();
+  if (settings === null || (!safeMode && settings?.toolDenied)) return false;
+  const enabled =
+    env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1' ||
+    (settings?.enabled ??
+      (runtime.env.mode === 'runtime-overlay' && !safeMode));
+  if (!enabled) return false;
+  const engine = await runtime.selectDefaultSessionEngine?.();
+  return !runtime.generationGuard?.closed && engine !== 'managed';
 }
 
 export function registerCapabilitiesRoutes(
@@ -89,7 +94,7 @@ export function registerCapabilitiesRoutes(
     configuredPollIntervalMs <= 2_147_483_647
       ? configuredPollIntervalMs
       : 5_000;
-  app.get('/capabilities', (_req, res) => {
+  app.get('/capabilities', async (_req, res) => {
     const entries = deps.workspaceRegistry
       .listAllEntries()
       .filter(
@@ -162,36 +167,38 @@ export function registerCapabilitiesRoutes(
             }
           : {}),
       },
-      workspaces: entries.map((entry) => ({
-        id: entry.workspaceId,
-        cwd: entry.workspaceCwd,
-        ...(entry.current?.runtime.routeFileSystemFactory.sshWorkspace
-          ? { ssh: entry.current.runtime.routeFileSystemFactory.sshWorkspace }
-          : {}),
-        ...(entry.displayName !== undefined
-          ? { displayName: entry.displayName }
-          : {}),
-        primary: entry.primary,
-        trusted:
-          entry.state === 'active' && entry.current?.runtime.trusted === true,
-        ...(features.includes('agent_collaboration_v1')
-          ? {
-              agentCollaborationEnabled:
-                entry.state === 'active' &&
-                entry.current?.runtime.trusted === true &&
-                deps.agentCollaborationEnabledFor?.(entry.workspaceCwd) ===
-                  true,
-            }
-          : {}),
-        workflowsEnabled: workflowsEnabledForRuntime(
-          entry.state === 'active' ? entry.current?.runtime : undefined,
-          deps.daemonEnv,
-        ),
-        ...(runtimeRemoval ? { removable: entry.removable } : {}),
-        ...(entry.current?.runtime.provenance === 'live-conversation'
-          ? { kind: 'live' as const }
-          : {}),
-      })),
+      workspaces: await Promise.all(
+        entries.map(async (entry) => ({
+          id: entry.workspaceId,
+          cwd: entry.workspaceCwd,
+          ...(entry.current?.runtime.routeFileSystemFactory.sshWorkspace
+            ? { ssh: entry.current.runtime.routeFileSystemFactory.sshWorkspace }
+            : {}),
+          ...(entry.displayName !== undefined
+            ? { displayName: entry.displayName }
+            : {}),
+          primary: entry.primary,
+          trusted:
+            entry.state === 'active' && entry.current?.runtime.trusted === true,
+          ...(features.includes('agent_collaboration_v1')
+            ? {
+                agentCollaborationEnabled:
+                  entry.state === 'active' &&
+                  entry.current?.runtime.trusted === true &&
+                  deps.agentCollaborationEnabledFor?.(entry.workspaceCwd) ===
+                    true,
+              }
+            : {}),
+          workflowsEnabled: await workflowsEnabledForRuntime(
+            entry.state === 'active' ? entry.current?.runtime : undefined,
+            deps.daemonEnv,
+          ),
+          ...(runtimeRemoval ? { removable: entry.removable } : {}),
+          ...(entry.current?.runtime.provenance === 'live-conversation'
+            ? { kind: 'live' as const }
+            : {}),
+        })),
+      ),
       supportedLanguages: deps.languageCodes,
     };
     res.status(200).json(envelope);

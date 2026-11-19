@@ -11245,16 +11245,26 @@ export class Config {
     );
   }
 
+  private isWorkflowToolDenied(): boolean {
+    return (
+      this.getPermissionManager()?.findMatchingDenyRule({
+        toolName: ToolNames.WORKFLOW,
+      }) !== undefined
+    );
+  }
+
   isWorkflowsEnabled(): boolean {
     if (!this.supportsWorkflowTool()) return false;
     // On unless settings turn them off, except that bare and safe mode keep
     // them off unless settings turn them on. The env pair overrides
     // settings, and QWEN_CODE_DISABLE_WORKFLOWS=1 wins.
     if (process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
-    if (process.env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1') return true;
-    return typeof this.workflowsEnabled === 'boolean'
-      ? this.workflowsEnabled
-      : !(this.bareMode || this.safeMode);
+    const enabled =
+      process.env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1' ||
+      (typeof this.workflowsEnabled === 'boolean'
+        ? this.workflowsEnabled
+        : !(this.bareMode || this.safeMode));
+    return enabled && !this.isWorkflowToolDenied();
   }
 
   setWorkflowsEnabled(enabled: boolean | undefined): void {
@@ -11281,6 +11291,10 @@ export class Config {
       this.workflowsEnabledByReviewSkill = false;
       this.workflowsEnabled = enabled;
     }
+    await this.reconcileWorkflowToolAvailability(wasEnabled);
+  }
+
+  async reconcileWorkflowToolAvailability(wasEnabled: boolean): Promise<void> {
     this.refreshWorkflowMode();
     const isEnabled = this.isWorkflowsEnabled();
     if (!this.initialized || wasEnabled === isEnabled) return;
@@ -11506,7 +11520,8 @@ export class Config {
       this.workflowsEnabled === false ||
       !isTopLevelSession() ||
       this.getBareMode() ||
-      process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1'
+      process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1' ||
+      this.isWorkflowToolDenied()
     ) {
       return;
     }

@@ -22606,6 +22606,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         getTargetDir: vi.fn().mockReturnValue(admissionRoot),
         storage: { getProjectRoot: () => admissionRoot },
         getPermissionManager: () => manager,
+        isWorkflowsEnabled: () => false,
       }),
     });
     sessions.set(
@@ -22682,6 +22683,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         getTargetDir: vi.fn().mockReturnValue(admissionRoot),
         storage: { getProjectRoot: () => admissionRoot },
         getPermissionManager: () => manager,
+        isWorkflowsEnabled: () => false,
       }),
     });
     sessions.set(

@@ -146,4 +146,50 @@ describe('Workflow registration and cache continuity', () => {
       await config.shutdown();
     }
   });
+
+  it('reconciles the Workflow tool after a live whole-tool permission change', async () => {
+    const config = new Config({
+      cwd: directory,
+      targetDir: directory,
+      model: 'test-model',
+      debugMode: false,
+      permissions: { deny: ['Workflow'] },
+    });
+    await config.initialize({
+      skipLlmInitialization: true,
+      skipFileWatching: true,
+      skipMcpDiscovery: true,
+      skipHooks: true,
+    });
+    try {
+      const registry = config.getToolRegistry();
+      const permissions = config.getPermissionManager()!;
+      const refreshTools = vi.spyOn(config.getLlmClient(), 'setTools');
+      expect(config.isWorkflowsEnabled()).toBe(false);
+      expect(registry.hasRegisteredTool(ToolNames.WORKFLOW)).toBe(false);
+
+      permissions.removePersistentRule('Workflow', 'deny');
+      await config.reconcileWorkflowToolAvailability(false);
+      const workflow = registry.getTool(ToolNames.WORKFLOW)!;
+      expect(workflow.name).toBe(ToolNames.WORKFLOW);
+      const prepared = workflow.build({ script: 'return "allowed";' });
+
+      permissions.addPersistentRule('Workflow', 'deny');
+      await config.reconcileWorkflowToolAvailability(true);
+      expect(registry.getTool(ToolNames.WORKFLOW)).toBeUndefined();
+      await expect(
+        prepared.execute(new AbortController().signal),
+      ).resolves.toMatchObject({
+        error: { message: 'Workflows are disabled for this session.' },
+      });
+
+      permissions.removePersistentRule('Workflow', 'deny');
+      permissions.addPersistentRule('Workflow(name:other)', 'deny');
+      await config.reconcileWorkflowToolAvailability(false);
+      expect(registry.getTool(ToolNames.WORKFLOW)).toBe(workflow);
+      expect(refreshTools).toHaveBeenCalledTimes(3);
+    } finally {
+      await config.shutdown();
+    }
+  });
 });

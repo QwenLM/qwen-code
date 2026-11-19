@@ -5441,22 +5441,6 @@ async function runQwenServeImpl(
       import('@qwen-code/qwen-code-core/permissions/rule-parser.js'),
       import('@qwen-code/qwen-code-core/tools/tool-names.js'),
     ]);
-    const readWorkflowSettings = (
-      settings: ReturnType<SettingsRuntime['loadSettings']> | undefined,
-    ) => {
-      const tools = settings?.merged.tools;
-      return {
-        workflowsEnabledBySettings: tools?.workflowsEnabled,
-        workflowToolDeniedBySettings:
-          normalizeDisabledToolList(tools?.disabled).includes(
-            ToolNames.WORKFLOW,
-          ) ||
-          [
-            ...normalizeDisabledToolList(settings?.merged.permissions?.deny),
-            ...normalizeDisabledToolList(tools?.exclude),
-          ].some((rule) => matchesRule(parseRule(rule), ToolNames.WORKFLOW)),
-      };
-    };
     getWorkspaceRuntimeCoordinatorIfSupported =
       runtime.getWorkspaceRuntimeCoordinatorIfSupported;
     cliVersion = resolvedCliVersion;
@@ -5639,7 +5623,7 @@ async function runQwenServeImpl(
       Object.assign(runtimeEffectiveEnv, nextEnv);
       runtimeEffectiveEnv['QWEN_RUNTIME_DIR'] = primarySessionRuntimeBaseDir;
     };
-    type RuntimeEnvMetadata = ReturnType<typeof readWorkflowSettings> & {
+    type RuntimeEnvMetadata = {
       mode: 'runtime-overlay';
       overlayKeys: string[];
       envFilePaths: string[];
@@ -5652,7 +5636,6 @@ async function runQwenServeImpl(
       mode: 'runtime-overlay' as const,
       overlayKeys: [...runtimeEnvSnapshot.overlayKeys],
       effectiveEnv: runtimeEffectiveEnv,
-      ...readWorkflowSettings(runtimeBootSettings),
       envFilePaths: [...runtimeEnvSnapshot.envFilePaths],
       envFileReadFailed: runtimeEnvSnapshot.envFileReadFailed,
       envFileReadFailures: [...runtimeEnvSnapshot.envFileReadFailures],
@@ -6052,6 +6035,47 @@ async function runQwenServeImpl(
         workspaceTrusted: trusted,
       });
     };
+    const readWorkflowSettings = (
+      workspace: string,
+      environment: Readonly<NodeJS.ProcessEnv>,
+    ) => {
+      try {
+        const { tools, permissions } =
+          settingsRuntime.settings.readSettingsSnapshot(workspace, {
+            environment,
+            workspaceTrusted: true,
+          }).merged;
+        return {
+          enabled:
+            typeof tools?.workflowsEnabled === 'boolean'
+              ? tools.workflowsEnabled
+              : undefined,
+          toolDenied:
+            normalizeDisabledToolList(tools?.disabled).includes(
+              ToolNames.WORKFLOW,
+            ) ||
+            [
+              ...normalizeDisabledToolList(permissions?.deny),
+              ...normalizeDisabledToolList(tools?.exclude),
+            ].some((rule) => matchesRule(parseRule(rule), ToolNames.WORKFLOW)),
+        };
+      } catch {
+        return null;
+      }
+    };
+    const bindDefaultSessionEngine = (
+      executionEngines:
+        | ReturnType<typeof runtime.createPairedExecutionEngines>
+        | undefined,
+      workspaceCwd: string,
+    ) =>
+      executionEngines &&
+      (() =>
+        executionEngines.select({
+          operation: 'spawn',
+          request: { workspaceCwd },
+          daemonOwnedStandalone: false,
+        }));
     const resolveSkillToggleIdentities = async (
       workspace: string,
       skillNames: readonly string[],
@@ -6522,6 +6546,24 @@ async function runQwenServeImpl(
       boundWorkspace,
       primarySessionRuntimeBaseDir,
     );
+    const primaryExecutionEngines =
+      !deps.bridge && opts.experimentalPairedEngines
+        ? runtime.createPairedExecutionEngines({
+            legacy: channelFactory,
+            managed: runtime.createManagedExecutionEngine({
+              legacy: channelFactoryOptions,
+              host: {
+                workspaceCwd: boundWorkspace,
+                workspaceTrusted: trustedWorkspace,
+                environment: runtimeEffectiveEnv,
+                forwardedArgs: acpChildExtraArgs(opts) ?? [],
+                hasLiveMcpServers: () =>
+                  bridgeRef?.hasRuntimeMcpServers() === true,
+              },
+            }),
+            runtimeBaseDir: primarySessionRuntimeBaseDir,
+          })
+        : undefined;
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
@@ -6625,24 +6667,8 @@ async function runQwenServeImpl(
         ),
         sessionShellCommandEnabled,
         childEnvOverrides,
-        ...(opts.experimentalPairedEngines
-          ? {
-              executionEngines: runtime.createPairedExecutionEngines({
-                legacy: channelFactory,
-                managed: runtime.createManagedExecutionEngine({
-                  legacy: channelFactoryOptions,
-                  host: {
-                    workspaceCwd: boundWorkspace,
-                    workspaceTrusted: trustedWorkspace,
-                    environment: runtimeEffectiveEnv,
-                    forwardedArgs: acpChildExtraArgs(opts) ?? [],
-                    hasLiveMcpServers: () =>
-                      bridgeRef?.hasRuntimeMcpServers() === true,
-                  },
-                }),
-                runtimeBaseDir: primarySessionRuntimeBaseDir,
-              }),
-            }
+        ...(primaryExecutionEngines
+          ? { executionEngines: primaryExecutionEngines }
           : { channelFactory }),
         externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
@@ -6745,7 +6771,6 @@ async function runQwenServeImpl(
           };
         }
         replaceRuntimeEffectiveEnv(refreshedRuntimeEnv.effectiveEnv);
-        Object.assign(primaryRuntimeEnv, readWorkflowSettings(fresh));
         delete primaryRuntimeEnv.fallbackReason;
         primaryRuntimeEnv.envFileReadFailed =
           refreshedRuntimeEnv.envFileReadFailed;
@@ -6827,6 +6852,12 @@ async function runQwenServeImpl(
         removable: false,
         registrationIds: workspaceInputs[0]?.registrationIds ?? [],
         env: primaryRuntimeEnv,
+        readWorkflowSettings: () =>
+          readWorkflowSettings(boundWorkspace, runtimeEffectiveEnv),
+        selectDefaultSessionEngine: bindDefaultSessionEngine(
+          primaryExecutionEngines,
+          boundWorkspace,
+        ),
         bridge,
         workspaceService,
         routeFileSystemFactory: routeFsFactory,
@@ -6891,7 +6922,6 @@ async function runQwenServeImpl(
         mode: 'runtime-overlay',
         overlayKeys: [...snapshot.overlayKeys],
         effectiveEnv,
-        ...readWorkflowSettings(settings),
         envFilePaths: [...snapshot.envFilePaths],
         envFileReadFailed: snapshot.envFileReadFailed,
         envFileReadFailures: [...snapshot.envFileReadFailures],
@@ -7157,6 +7187,23 @@ async function runQwenServeImpl(
         workspaceInput.cwd,
         secondaryEnv.sessionRuntimeBaseDir,
       );
+      const secondaryExecutionEngines = opts.experimentalPairedEngines
+        ? runtime.createPairedExecutionEngines({
+            legacy: secondaryChannelFactory,
+            managed: runtime.createManagedExecutionEngine({
+              legacy: secondaryChannelFactoryOptions,
+              host: {
+                workspaceCwd: workspaceInput.cwd,
+                workspaceTrusted: secondaryTrusted,
+                environment: secondaryEnv.effectiveEnv,
+                forwardedArgs: acpChildExtraArgs(opts) ?? [],
+                hasLiveMcpServers: () =>
+                  secondaryBridgeRef?.hasRuntimeMcpServers() === true,
+              },
+            }),
+            runtimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
+          })
+        : undefined;
       const secondaryBridge = runtime.createAcpSessionBridge({
         isWorkflowModeWriteAllowed: createRuntimeWorkflowOwnerCheck(
           workspaceInput.cwd,
@@ -7255,24 +7302,8 @@ async function runQwenServeImpl(
         ),
         sessionShellCommandEnabled,
         childEnvOverrides,
-        ...(opts.experimentalPairedEngines
-          ? {
-              executionEngines: runtime.createPairedExecutionEngines({
-                legacy: secondaryChannelFactory,
-                managed: runtime.createManagedExecutionEngine({
-                  legacy: secondaryChannelFactoryOptions,
-                  host: {
-                    workspaceCwd: workspaceInput.cwd,
-                    workspaceTrusted: secondaryTrusted,
-                    environment: secondaryEnv.effectiveEnv,
-                    forwardedArgs: acpChildExtraArgs(opts) ?? [],
-                    hasLiveMcpServers: () =>
-                      secondaryBridgeRef?.hasRuntimeMcpServers() === true,
-                  },
-                }),
-                runtimeBaseDir: secondaryEnv.sessionRuntimeBaseDir,
-              }),
-            }
+        ...(secondaryExecutionEngines
+          ? { executionEngines: secondaryExecutionEngines }
           : { channelFactory: secondaryChannelFactory }),
         externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
@@ -7401,7 +7432,6 @@ async function runQwenServeImpl(
             }
             try {
               secondaryEnv.replace(refreshedRuntimeEnv.effectiveEnv);
-              Object.assign(secondaryEnv.metadata, readWorkflowSettings(fresh));
               secondaryEnv.metadata.envFileReadFailed =
                 refreshedRuntimeEnv.envFileReadFailed;
               secondaryEnv.metadata.envFileReadFailures.splice(
@@ -7467,6 +7497,12 @@ async function runQwenServeImpl(
         removable: workspaceInput.removable,
         registrationIds: workspaceInput.registrationIds,
         env: secondaryEnv.metadata,
+        readWorkflowSettings: () =>
+          readWorkflowSettings(workspaceInput.cwd, secondaryEnv.effectiveEnv),
+        selectDefaultSessionEngine: bindDefaultSessionEngine(
+          secondaryExecutionEngines,
+          workspaceInput.cwd,
+        ),
         bridge: secondaryBridge,
         workspaceService: secondaryWorkspaceService,
         routeFileSystemFactory: secondaryBridgeFsFactory,
@@ -8192,11 +8228,35 @@ async function runQwenServeImpl(
         isTrusted: (bridge) => subSessionWorkspaces.isTrusted(cwd, bridge),
       });
       let wsBridge: ReturnType<typeof runtime.createAcpSessionBridge>;
+      let wsExecutionEngines:
+        | ReturnType<typeof runtime.createPairedExecutionEngines>
+        | undefined;
       try {
         const wsAttachmentsRoots = sessionAttachmentsRoots(
           cwd,
           wsEnv.sessionRuntimeBaseDir,
         );
+        // Standalone Conversations always use Legacy.
+        if (
+          opts.experimentalPairedEngines &&
+          provenance !== 'live-conversation'
+        ) {
+          wsExecutionEngines = runtime.createPairedExecutionEngines({
+            legacy: wsChannelFactory,
+            managed: runtime.createManagedExecutionEngine({
+              legacy: wsChannelFactoryOptions,
+              host: {
+                workspaceCwd: cwd,
+                workspaceTrusted: trusted,
+                environment: wsEnv.effectiveEnv,
+                forwardedArgs: acpChildExtraArgs(opts) ?? [],
+                hasLiveMcpServers: () =>
+                  wsBridgeRef?.hasRuntimeMcpServers() === true,
+              },
+            }),
+            runtimeBaseDir: wsEnv.sessionRuntimeBaseDir,
+          });
+        }
         wsBridge = runtime.createAcpSessionBridge({
           isWorkflowModeWriteAllowed: createRuntimeWorkflowOwnerCheck(
             cwd,
@@ -8308,28 +8368,8 @@ async function runQwenServeImpl(
                     PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
                 }
               : childEnvOverrides,
-          // The Conversations runtime hosts only daemon-owned standalone
-          // conversations and the sessions they start, which stay on Legacy,
-          // so it keeps a single factory.
-          ...(opts.experimentalPairedEngines &&
-          provenance !== 'live-conversation'
-            ? {
-                executionEngines: runtime.createPairedExecutionEngines({
-                  legacy: wsChannelFactory,
-                  managed: runtime.createManagedExecutionEngine({
-                    legacy: wsChannelFactoryOptions,
-                    host: {
-                      workspaceCwd: cwd,
-                      workspaceTrusted: trusted,
-                      environment: wsEnv.effectiveEnv,
-                      forwardedArgs: acpChildExtraArgs(opts) ?? [],
-                      hasLiveMcpServers: () =>
-                        wsBridgeRef?.hasRuntimeMcpServers() === true,
-                    },
-                  }),
-                  runtimeBaseDir: wsEnv.sessionRuntimeBaseDir,
-                }),
-              }
+          ...(wsExecutionEngines
+            ? { executionEngines: wsExecutionEngines }
             : { channelFactory: wsChannelFactory }),
           externalToolGuard: daemonToolGuardHandler,
           onDiagnosticLine: diagnosticSink,
@@ -8469,7 +8509,6 @@ async function runQwenServeImpl(
               }
               try {
                 wsEnv.replace(refreshedRuntimeEnv.effectiveEnv);
-                Object.assign(wsEnv.metadata, readWorkflowSettings(fresh));
                 wsEnv.metadata.envFileReadFailed =
                   refreshedRuntimeEnv.envFileReadFailed;
                 wsEnv.metadata.envFileReadFailures.splice(
@@ -8564,6 +8603,12 @@ async function runQwenServeImpl(
           buildOptions?.removable ?? provenance !== 'live-conversation',
         registrationIds: [...(buildOptions?.registrationIds ?? [])],
         env: wsEnv.metadata,
+        readWorkflowSettings: () =>
+          readWorkflowSettings(cwd, wsEnv.effectiveEnv),
+        selectDefaultSessionEngine: bindDefaultSessionEngine(
+          wsExecutionEngines,
+          cwd,
+        ),
         bridge: wsBridge,
         workspaceService: wsService,
         routeFileSystemFactory: wsRouteFsFactory,

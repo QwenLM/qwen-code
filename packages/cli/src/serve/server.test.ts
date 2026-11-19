@@ -5927,10 +5927,11 @@ describe('createServeApp', () => {
           mode: 'runtime-overlay' as const,
           overlayKeys: [],
           effectiveEnv: { QWEN_CODE_SAFE_MODE: '1' },
-          workflowsEnabledBySettings: true,
-          workflowToolDeniedBySettings: true,
         },
+        readWorkflowSettings: () => ({ enabled: true, toolDenied: true }),
       };
+      let workflowDenied = true;
+      let workflowSettingsUnreadable = false;
       const toolDenied: WorkspaceRuntime = {
         ...makeWorkspaceRuntimeForTest({
           workspaceId: 'tool-denied-id',
@@ -5942,8 +5943,27 @@ describe('createServeApp', () => {
           mode: 'runtime-overlay',
           overlayKeys: ['QWEN_CODE_ENABLE_WORKFLOWS'],
           effectiveEnv: { QWEN_CODE_ENABLE_WORKFLOWS: '1' },
-          workflowToolDeniedBySettings: true,
         },
+        readWorkflowSettings: () =>
+          workflowSettingsUnreadable
+            ? null
+            : { enabled: undefined, toolDenied: workflowDenied },
+      };
+      let managedSelected = true;
+      const paired: WorkspaceRuntime = {
+        ...makeWorkspaceRuntimeForTest({
+          workspaceId: 'paired-id',
+          workspaceCwd: '/workspace/paired',
+          primary: false,
+          bridge: fakeBridge(),
+        }),
+        env: {
+          mode: 'runtime-overlay',
+          overlayKeys: ['QWEN_CODE_ENABLE_WORKFLOWS'],
+          effectiveEnv: { QWEN_CODE_ENABLE_WORKFLOWS: '1' },
+        },
+        selectDefaultSessionEngine: async () =>
+          managedSelected ? 'managed' : 'legacy',
       };
       const safeByDefault: WorkspaceRuntime = {
         ...makeWorkspaceRuntimeForTest({
@@ -5972,6 +5992,7 @@ describe('createServeApp', () => {
           secondary,
           settingsEnabled,
           toolDenied,
+          paired,
           safeByDefault,
           untrusted,
         ]),
@@ -6001,6 +6022,10 @@ describe('createServeApp', () => {
           workflowsEnabled: false,
         }),
         expect.objectContaining({
+          id: 'paired-id',
+          workflowsEnabled: false,
+        }),
+        expect.objectContaining({
           id: 'safe-default-id',
           workflowsEnabled: false,
         }),
@@ -6009,6 +6034,42 @@ describe('createServeApp', () => {
           workflowsEnabled: false,
         }),
       ]);
+
+      workflowDenied = false;
+      managedSelected = false;
+      const updated = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(updated.status).toBe(200);
+      expect(updated.body.workspaces).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'tool-denied-id',
+            workflowsEnabled: true,
+          }),
+          expect.objectContaining({
+            id: 'paired-id',
+            workflowsEnabled: true,
+          }),
+        ]),
+      );
+      workflowSettingsUnreadable = true;
+      const settingsFailure = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(settingsFailure.status).toBe(200);
+      expect(settingsFailure.body.workspaces).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'tool-denied-id',
+            workflowsEnabled: false,
+          }),
+          expect.objectContaining({
+            id: 'paired-id',
+            workflowsEnabled: true,
+          }),
+        ]),
+      );
     });
 
     it('advertises the scoped workspace-memory tags on the wire', async () => {

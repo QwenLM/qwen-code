@@ -7893,13 +7893,15 @@ class QwenAgent implements Agent {
     };
   }
 
-  private syncLivePermissionManagers(
+  private async syncLivePermissionManagers(
     before: PermissionRuleSet,
     after: PermissionRuleSet,
     settingScope: SettingScope,
     settingsCwd: string,
     strict = false,
-  ): void {
+  ): Promise<void> {
+    const workflowChanges: Array<{ session: Session; wasEnabled: boolean }> =
+      [];
     for (const ruleType of PERMISSION_RULE_TYPES) {
       const oldRules = new Set(before[ruleType]);
       const newRules = new Set(after[ruleType]);
@@ -7925,17 +7927,26 @@ class QwenAgent implements Agent {
             continue;
           }
         }
-        const pm = session.getConfig().getPermissionManager?.();
+        const config = session.getConfig();
+        const pm = config.getPermissionManager?.();
         if (!pm) continue;
         // Isolate per-session failures: a stale/broken permission manager for
         // one session must not abort syncing the rest (settings are already
         // persisted, so the in-memory sync is best-effort).
         try {
+          const workflowsWereEnabled =
+            ruleType === 'deny' && config.isWorkflowsEnabled();
           for (const rule of removed) {
             pm.removePersistentRule(rule, ruleType);
           }
           for (const rule of added) {
             pm.addPersistentRule(rule, ruleType);
+          }
+          if (
+            ruleType === 'deny' &&
+            workflowsWereEnabled !== config.isWorkflowsEnabled()
+          ) {
+            workflowChanges.push({ session, wasEnabled: workflowsWereEnabled });
           }
         } catch (error) {
           debugLogger.warn(
@@ -7946,6 +7957,49 @@ class QwenAgent implements Agent {
           if (strict) throw error;
         }
       }
+    }
+    await Promise.all(
+      workflowChanges.map(async ({ session, wasEnabled }) => {
+        try {
+          this.cancelDisabledWorkflowRuns(session);
+          await session
+            .getConfig()
+            .reconcileWorkflowToolAvailability(wasEnabled);
+          await this.refreshWorkflowCommands(session);
+        } catch (error) {
+          debugLogger.warn(
+            'Failed to reconcile the live Workflow tool:',
+            error,
+          );
+          if (strict) throw error;
+        }
+      }),
+    );
+  }
+
+  private cancelDisabledWorkflowRuns(session: Session): void {
+    const config = session.getConfig();
+    if (!config.isWorkflowsEnabled()) {
+      // Once controls are hidden, a background run would no longer be
+      // visible or cancellable through the session's workflow controls.
+      const cancelled = config
+        .getWorkflowRunRegistry()
+        .cancelBackgroundRuns(Date.now());
+      if (cancelled.length > 0) {
+        debugLogger.info(
+          `Workflow turned off; cancelled background workflow runs ${cancelled.join(', ')} in session ${session.getId()}`,
+        );
+      }
+    }
+  }
+
+  private async refreshWorkflowCommands(session: Session): Promise<void> {
+    try {
+      await session.sendAvailableCommandsUpdate();
+    } catch (err) {
+      debugLogger.warn(
+        `sendAvailableCommandsUpdate failed for session ${session.getId()}: ${err}`,
+      );
     }
   }
 
@@ -11421,7 +11475,7 @@ class QwenAgent implements Agent {
                 params['scope'] === 'user'
                   ? SettingScope.User
                   : SettingScope.Workspace;
-              this.syncLivePermissionManagers(
+              await this.syncLivePermissionManagers(
                 before,
                 readPermissionRuleSet(this.settings.merged),
                 scope,
@@ -15844,7 +15898,7 @@ class QwenAgent implements Agent {
         // (avoids redundant I/O and a concurrency window where another handler
         // could mutate settings between the two loads).
         const after = readPermissionRuleSet(settings.merged);
-        this.syncLivePermissionManagers(
+        await this.syncLivePermissionManagers(
           before,
           after,
           settingScope,
@@ -16075,26 +16129,8 @@ class QwenAgent implements Agent {
               disabledTools,
             );
             if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
-              if (!config.isWorkflowsEnabled()) {
-                // With the controls off, the tasks view hides a background
-                // run and cancel answers `disabled`; one admitted before
-                // the reload would keep running unseen, so end it here.
-                const cancelled = config
-                  .getWorkflowRunRegistry()
-                  .cancelBackgroundRuns(Date.now());
-                if (cancelled.length > 0) {
-                  debugLogger.info(
-                    `reload: workflows turned off; cancelled background workflow runs ${cancelled.join(', ')} in session ${id}`,
-                  );
-                }
-              }
-              try {
-                await session.sendAvailableCommandsUpdate();
-              } catch (err) {
-                debugLogger.warn(
-                  `reload: sendAvailableCommandsUpdate failed for session ${id}: ${err}`,
-                );
-              }
+              this.cancelDisabledWorkflowRuns(session);
+              await this.refreshWorkflowCommands(session);
             }
 
             const reasoningError = config.stageReasoningOverrides?.(

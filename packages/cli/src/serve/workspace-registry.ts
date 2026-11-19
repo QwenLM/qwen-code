@@ -12,6 +12,7 @@ import type { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-regis
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
+import type { BridgeExecutionEngine } from '@qwen-code/acp-bridge/bridgeOptions';
 import type { WorkspaceRuntimeCoordinator } from './workspace-runtime-coordinator.js';
 import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 
@@ -19,8 +20,6 @@ export interface WorkspaceRuntimeEnvMetadata {
   readonly mode: 'parent-process' | 'runtime-overlay';
   readonly overlayKeys: readonly string[];
   readonly effectiveEnv?: Readonly<NodeJS.ProcessEnv>;
-  readonly workflowsEnabledBySettings?: boolean;
-  readonly workflowToolDeniedBySettings?: boolean;
   readonly envFilePaths?: readonly string[];
   readonly envFileReadFailed?: boolean;
   readonly envFileReadFailures?: ReadonlyArray<{
@@ -45,6 +44,13 @@ export interface WorkspaceRuntime {
   /** Persistent registration ids that restore this runtime on daemon startup. */
   registrationIds?: string[];
   readonly env: WorkspaceRuntimeEnvMetadata;
+  readonly readWorkflowSettings?: () => {
+    enabled: boolean | undefined;
+    toolDenied: boolean;
+  } | null;
+  readonly selectDefaultSessionEngine?: () =>
+    | BridgeExecutionEngine
+    | Promise<BridgeExecutionEngine>;
   readonly bridge: AcpSessionBridge;
   readonly workspaceService: DaemonWorkspaceService;
   readonly routeFileSystemFactory: WorkspaceFileSystemFactory;
