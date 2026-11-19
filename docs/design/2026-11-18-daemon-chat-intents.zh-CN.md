@@ -132,8 +132,11 @@ daemon 同时保留至多 64 个待处理授权请求。在 `r2` 也在等待时
 响应随之被丢弃（迟到的 `rejected` 响应仍删除该行，因为被拒请求绝不进入 operations）。
 被弃尝试打上标记，迟到的 transport 响应无法复活其终态。被取代的 approval 决定（正向
 见证被强制为 `none`）获得终态 `failed` 出口，避免泄漏永久非终态行，而其返回 outcome
-仍为 `unsettled`、绝不认证；superseded 标志在每次 settle 时重算，故重新判定请求存活
-的重投递决定所发布的行状态与其 outcome 一致，并释放身份。
+仍为 `unsettled`、绝不认证。superseded 标志在每次「尚未终态」的 settle 时重算，故重新
+判定请求存活的重投递决定会把被取代的行升级，所发布的行状态与其 outcome 一致并释放
+身份；一旦被取代的行已终态化为 `failed` 即为最终态（已终态的尝试绝不再结算）。冻结在
+安全方向上单调：后续被判为取代的重复投递不能削弱已有效结算的行（`settled` 见证、未被
+取代），而升级（被取代→存活）仍适用。
 
 保留**按 kind 与 target 有界**——至多最新一条终态——终态行由 `acknowledge` 释放，
 而非跨不同 target 自动释放：slice-2c 界面必须对每个已消费的终态行调用 acknowledge，
@@ -203,6 +206,9 @@ daemon 同时保留至多 64 个待处理授权请求。在 `r2` 也在等待时
     回到 `idle`（持有的见证永远无法认证 `unknown` admission）。
 23. **重投递的在飞决定重算取代。** 把 pending approval 结算为被取代、标回请求存活、
     再结算一次，所发布的行状态与返回 outcome 一致并释放身份，故重投递不能再次建立。
+24. **取代后的重复投递不削弱已有效结算的 pending approval。** 存活时结算 pending
+    approval、随后取代并重投递同一决定，admission 解析后仍建立（单调 no-weaken 冻结）；
+    去掉该守卫时重复投递会使其终态化为 `failed`。
 
 配套用例钉住：rejected 准入（无 outcome、不跟踪，结算其 id 为空操作）、failed
 witness、对未知 id settle（空操作）、按 kind 与 target 有界保留、状态变化之间
@@ -227,8 +233,8 @@ rejected 清理会令在飞被弃 rejected 用例转红；在证据应用时重�
 `settled` 见证（而非仅 pending 行）会令抛错可 abandon 用例转红；superseded 标志只置位
 不重算会令重投递决定用例转红；把 superseded 标志收窄到带 requestId 的 target 会令
 无身份 approval 终态断言转红；把 abandoned 迟到响应见证由 `failed` 改为 `none` 会令
-返回 outcome 断言转红；把 `phase` 硬编码为 `idle` 会令 failed-phase 用例转红；移除
-`Object.freeze` 会令冻结 target 用例转红。
+返回 outcome 断言转红；去掉单调 no-weaken 冻结会令取代后重复投递用例转红；把 `phase`
+硬编码为 `idle` 会令 failed-phase 用例转红；移除 `Object.freeze` 会令冻结 target 用例转红。
 
 ## 遵守的约束
 

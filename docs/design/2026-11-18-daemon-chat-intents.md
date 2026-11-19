@@ -176,9 +176,14 @@ tracked). An abandoned attempt is flagged so a late transport response cannot
 revive its terminal state. A superseded approval decision (positive witness forced
 to `none`) is given a terminal `failed` exit so it does not leak a permanent
 non-terminal row, while its returned outcome stays `unsettled` and it never
-certifies; the superseded flag is recomputed on every settle so a re-delivered
-decision that judges the request live again publishes a state consistent with its
-outcome and releases the identity.
+certifies. The superseded flag is recomputed on every settle that is not already
+terminal, so a re-delivered decision that judges the request live again upgrades a
+superseded row and publishes a state consistent with its outcome, releasing the
+identity; once a superseded row has terminalized `failed` it is final (an
+already-terminal attempt is never re-settled). The freeze is monotonic in the safe
+direction: a later duplicate delivery judged superseded cannot weaken a row already
+validly settled (`settled` witness, not superseded), while an upgrade
+(superseded -> live) still applies.
 
 Retention is bounded **per kind and target** — at most the latest terminal entry
 — and terminal rows are released by `acknowledge`, not automatically across
@@ -276,6 +281,11 @@ older one.
     pending approval as superseded, re-marking the request live, and settling
     again publishes a row state consistent with the returned outcome and releases
     the identity, so a re-delivery cannot establish twice.
+24. **A duplicate delivery after a supersede does not weaken a validly-settled
+    pending approval.** Settling a pending approval while live, then superseding
+    and re-delivering the same decision, still establishes once admission resolves
+    (the monotonic no-weaken freeze); without the guard the duplicate would
+    terminalize it `failed`.
 
 Supporting cases pin rejected admission (no outcome, untracked, settling its id
 is a no-op), a failed witness, settling an unknown id (no-op), bounded retention
@@ -312,7 +322,8 @@ just a pending row) reds the thrown-transport-abandonable case; setting the
 superseded flag only instead of recomputing it reds the re-delivered-decision
 case; narrowing the superseded flag to request-id-bearing targets reds the
 unbound-approval terminal-state assertion; changing the abandoned late-response
-witness from `failed` to `none` reds the returned-outcome assertion; hardcoding
+witness from `failed` to `none` reds the returned-outcome assertion; removing the
+monotonic no-weaken freeze reds the duplicate-after-supersede case; hardcoding
 `phase` to `idle` reds the failed-phase case; removing `Object.freeze` reds the
 frozen-target case.
 

@@ -275,10 +275,25 @@ export function createDaemonChatIntents(): DaemonChatIntents {
       // settlement delivered in flight is applied once admission resolves
       // without re-judging currency or being discarded.
       const narrowed = narrowWitness(intent, witness);
+      // Monotonic freeze: a row already validly settled (settled witness, not
+      // superseded) must not be weakened by a later duplicate delivery that
+      // judges the request superseded. Upgrades (superseded -> live) still apply
+      // below, so a re-delivery that judges the request live again recovers it.
+      if (
+        intent.witness === 'settled' &&
+        !intent.superseded &&
+        narrowed === 'none'
+      ) {
+        return resolveIntent(
+          intent.admission,
+          intent.witness,
+          intent.operation.target,
+        );
+      }
       intent.witness = narrowed;
-      // Recompute on every settle: a re-delivered decision may judge the request
-      // live again, and a stale flag would publish a state that disagrees with
-      // the returned outcome and skip the identity release.
+      // Recompute on every settle that applies: a re-delivered decision may
+      // judge the request live again, and a stale flag would publish a state
+      // that disagrees with the returned outcome and skip the identity release.
       intent.superseded =
         intent.operation.kind === 'approval' &&
         witness === 'settled' &&

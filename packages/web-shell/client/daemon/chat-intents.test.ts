@@ -677,6 +677,27 @@ describe('daemon intents: recorded-target and evidence boundaries', () => {
     );
   });
 
+  it('a duplicate delivery after a supersede does not weaken a validly-settled pending approval', async () => {
+    const intents = createDaemonChatIntents();
+    intents.setApprovalRequestLive('r1', true);
+    const gate = deferredAdmission();
+    const pending = intents.dispatch(
+      'approval',
+      approvalTarget('r1'),
+      () => gate.promise,
+    );
+    const id = intents.operations.find((op) => op.kind === 'approval')!.id;
+    intents.settle(id, 'settled'); // settled while live
+    intents.setApprovalRequestLive('r1', false); // supersede
+    intents.settle(id, 'settled'); // duplicate delivery must not weaken it
+    gate.resolve('accepted');
+    const { result } = await pending;
+    expect(result.outcome).toBe('established');
+    expect(intents.operations.find((op) => op.id === id)?.state).toBe(
+      'established',
+    );
+  });
+
   it('phase passes the failed settled state through', () => {
     expect(createDaemonChatIntents().phase('failed')).toBe('failed');
   });
