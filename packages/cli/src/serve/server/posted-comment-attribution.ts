@@ -832,8 +832,8 @@ export function extractPostedCommentIds(entry: unknown): string[] {
 
     // The shell tool echoes "Command: <cmd>\nDirectory: ...\nOutput: <result>".
     const command =
-      output.match(/^Command: ([\s\S]*?)\nDirectory:/)?.[1] ??
-      output.match(/^Command: ([\s\S]*?)\nOutput:/)?.[1] ??
+      output.match(/(?:^|\n)Command: ([\s\S]*?)\nDirectory:/)?.[1] ??
+      output.match(/(?:^|\n)Command: ([\s\S]*?)\nOutput:/)?.[1] ??
       '';
     const segment = command ? creationSegment(command) : undefined;
     if (!segment) continue;

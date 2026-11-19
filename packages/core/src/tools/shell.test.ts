@@ -4657,6 +4657,25 @@ describe('ShellTool', () => {
           ]);
         });
 
+        it('places the untrusted framing at line 0, before Command (#17325)', async () => {
+          // Head placement is load-bearing: the posted-comment-attribution
+          // parser looks for Command: at line start, so the framing must not
+          // come after it. Moving the framing to the tail fails this test.
+          setExplicitThreshold(30_000);
+          const result = await runFg('framing-position-cmd', {
+            output: 'normal log line',
+            exitCode: 0,
+          });
+          const text = String(result.llmContent);
+          const lines = text.split('\n');
+          expect(lines[0]).toContain('UNTRUSTED EXTERNAL CONTENT');
+          // Command: must still be findable after the framing (not at line 0
+          // before it, and not buried past the truncation tail).
+          expect(
+            lines.findIndex((l) => l.startsWith('Command:')),
+          ).toBeGreaterThan(0);
+        });
+
         it('keeps the untrusted framing when the output is truncated (#17318)', async () => {
           // Large outputs are exactly when injection risk is highest; the
           // head placement must survive the middle cut.
