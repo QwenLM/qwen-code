@@ -372,17 +372,33 @@ const loopClassifierWiring = (text) => {
     }
     if (isObjectLiteralExpression(node)) {
       for (const property of node.properties) {
+        const isShorthand = isShorthandPropertyAssignment(property);
         if (
-          isPropertyAssignment(property) &&
+          (isPropertyAssignment(property) || isShorthand) &&
           // A quoted key is the same property: `{ 'shouldBlock': false }` was
           // invisible to an identifier-only match, so an inline allow could be
           // built outside the helper without moving this inventory.
           (isIdentifier(property.name)
             ? property.name.text
-            : literalText(property.name)) === 'shouldBlock' &&
-          property.initializer.kind === SyntaxKind.FalseKeyword
+            : literalText(property.name)) === 'shouldBlock'
         ) {
-          allowSites.push(enclosingFunction(node));
+          // Requiring the literal `false` at the property missed two spellings
+          // of the same allow: `{ shouldBlock }` with `const shouldBlock =
+          // false`, and `{ 'shouldBlock': flag }` with `const flag = false`.
+          // A shorthand's value is a binding reference, so it is recorded
+          // unconditionally: the inventory cannot tell a shorthand allow from
+          // a shorthand schema, and the pin requires the one construction site
+          // to sit inside the helper. An explicit key counts when its value is
+          // `false` or a binding ever initialised to `false`.
+          const value = isShorthand ? property.name : property.initializer;
+          if (
+            isShorthand ||
+            value.kind === SyntaxKind.FalseKeyword ||
+            (isIdentifier(value) &&
+              bindingInitializers.get(value.text)?.has('false'))
+          ) {
+            allowSites.push(enclosingFunction(node));
+          }
         }
       }
     }
@@ -3965,8 +3981,11 @@ describe('managed-agent-server e2e runner', () => {
     // inventories whatever its name spells, so none is allowed.
     expect(scope.handBuiltToolCalls).toEqual([]);
     // The allow is constructed exactly once, inside the helper; an inline
-    // `{ shouldBlock: false }` on either answer path reddens here. This one
-    // inventory is file-wide by design: the helper is outside every callback.
+    // `{ shouldBlock: false }` on either answer path reddens here, and so does
+    // the same allow spelled without the literal — `{ shouldBlock }`, or
+    // `{ 'shouldBlock': flag }` with the binding initialised to `false`. This
+    // one inventory is file-wide by design: the helper is outside every
+    // callback.
     expect(scope.allowSites).toEqual(['classifierBlockAnswer']);
     // Neither the decision nor its input is ever written after the lookup: no
     // assignment operator (`??=` included), no member write, no delete and no
@@ -4133,6 +4152,12 @@ describe('managed-agent-server e2e runner', () => {
       "return { toolCalls: [fakeToolCall(`respond_in_schema`, classifierBlockAnswer({ shouldBlock: { type: 'boolean' } }), 'loop-fire-sibling')] };",
       // A quoted allow key is the same property as an identifier one.
       "return { toolCalls: [fakeToolCall('respond_in_schema', { 'shouldBlock': false }, 'loop-fire-quoted')] };",
+      // The same allow built without spelling `false` at the property: a
+      // shorthand key, and a quoted key whose value is a binding bound to it.
+      'const shouldBlock = false;',
+      'const shorthandAllow = { shouldBlock };',
+      'const flag = false;',
+      "const boundAllow = { 'shouldBlock': flag };",
       // A toolCalls source that is not an inline array cannot be enumerated.
       "const hoistedCalls = [{ id: 'hb2', type: 'function', function: { name: 'respond_in_schema', arguments: '{}' } }];",
       'return { toolCalls: hoistedCalls };',
@@ -4197,9 +4222,16 @@ describe('managed-agent-server e2e runner', () => {
     ]);
     expect(scope.declarations).toEqual(['blockProperties']);
     expect(scope.gates).toHaveLength(1);
-    // Two inline allows: the `??=` rewrite and the quoted-key one. A quoted
-    // key is the same property, so it is attributed to the same function.
-    expect(scope.allowSites).toEqual(['(anonymous)', '(anonymous)']);
+    // Four inline allows: the `??=` rewrite, the quoted-key one, the shorthand
+    // key and the quoted key whose value is a binding initialised to `false`.
+    // A quoted key is the same property, so all four are attributed to the
+    // same function; neither of the last two spells `false` at the property.
+    expect(scope.allowSites).toEqual([
+      '(anonymous)',
+      '(anonymous)',
+      '(anonymous)',
+      '(anonymous)',
+    ]);
     // Every write form is recorded: the member write, the in-place calls, the
     // delete, the alias write, both destructuring patterns (array, object
     // property and object shorthand) and the nullish assignment — none of them
@@ -4305,6 +4337,24 @@ describe('managed-agent-server e2e runner', () => {
         (entry) => !scope.callbacks.includes(entry.callback),
       ),
     ).toHaveLength(1);
+  });
+
+  // The unconditional shorthand rule needs a source of its own: the control
+  // above binds `shouldBlock` to `false` elsewhere and the initializer map is
+  // scope-insensitive, so a parameter-bound shorthand there resolves through
+  // that binding — deleting the rule survived unwitnessed until this source
+  // existed. The second assertion is the negative control for the widening: a
+  // schema is not an allow, so an object-valued key must stay out.
+  it('records a shorthand allow site with no false initializer anywhere', () => {
+    const wiring = loopClassifierWiring(
+      'function allow(shouldBlock) { return { shouldBlock }; }',
+    );
+    expect(wiring.allowSites).toEqual(['allow']);
+    expect(
+      loopClassifierWiring(
+        "const schema = { shouldBlock: { type: 'boolean' } };",
+      ).allowSites,
+    ).toEqual([]);
   });
 
   // The fake-side minted-id extraction is executed, not counted as source
