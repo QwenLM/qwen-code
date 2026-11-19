@@ -26,6 +26,7 @@ import {
 function makeMockConfig(targetDir = '/tmp/mock-repo'): Config {
   return {
     getTargetDir: vi.fn(() => targetDir),
+    getWorktreeSymlinkDirectories: () => [],
   } as unknown as Config;
 }
 
@@ -151,10 +152,7 @@ describe('EnterWorktreeTool.execute', () => {
         .spyOn(GitWorktreeService.prototype, 'createUserWorktree')
         .mockResolvedValue({ success: false, error: 'test stopped creation' });
       const signal = new AbortController().signal;
-      const tool = new EnterWorktreeTool({
-        ...makeMockConfig(cwd),
-        getWorktreeSymlinkDirectories: () => [],
-      } as Config);
+      const tool = new EnterWorktreeTool(makeMockConfig(cwd));
       try {
         await tool.build({ name: 'signal-probe' }).execute(signal);
         expect(create).toHaveBeenCalledOnce();
