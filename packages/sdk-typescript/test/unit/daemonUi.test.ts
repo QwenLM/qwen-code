@@ -4064,7 +4064,8 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
       ]);
       expect(snapshot.retainedBytes).toBe(pageBytes);
       expect(snapshot.lastEventId).toBe(2);
-      expect(onTruncation).toHaveBeenCalledExactlyOnceWith(
+      expect(onTruncation).toHaveBeenCalledTimes(1);
+      expect(onTruncation).toHaveBeenCalledWith(
         expect.objectContaining({
           kind: 'blocks',
           oldestRetainedRecordId: 'r-1',
