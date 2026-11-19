@@ -56,6 +56,7 @@ import {
   A2A_CARD_DESCRIPTION,
   A2A_CARD_NAME,
   A2A_EXTENSION_DESCRIPTION,
+  A2ASessionError,
   a2aAgentCardForCaller,
   a2aCancelTask,
   a2aGetTask,
@@ -540,6 +541,9 @@ function withoutInternalDetail(handler: A2ARequestHandler): A2ARequestHandler {
         writeStderrLine(
           `qwen serve: A2A ${name} failed: ${error instanceof Error ? error.message : String(error)}`,
         );
+        if (error instanceof A2ASessionError && error.kind === 'unavailable') {
+          fail({ kind: 'unavailable' });
+        }
         throw new Error('Internal error.');
       }
     };

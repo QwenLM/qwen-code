@@ -21,8 +21,8 @@
  * stays on the Legacy engine, which is the one that writes agent records.
  */
 
-import { constants as fsConstants, promises as fsp } from 'node:fs';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import { isNodeError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import {
   AGENT_MESSAGE_SUBTYPE,
   type AgentMessageRecordPayload,
@@ -104,30 +104,25 @@ function defaultLoadRecords(workspaceCwd: string, runtimeBaseDir?: string) {
     sessionId: string,
   ): Promise<readonly A2ATranscriptRecord[] | undefined> => {
     const service = sessionService(workspaceCwd, runtimeBaseDir);
-    const data =
-      (await service.loadSession(sessionId)) ??
-      (await service.loadArchivedSession(sessionId, {
-        maxBytes: MAX_ARCHIVED_TRANSCRIPT_BYTES,
-      }));
-    if (data) return data.conversation.messages;
-    // `loadSession` folds every non-ENOENT read error into "no records", so a
-    // transcript that is there but unreadable would read as "no reply" and the
-    // caller would settle a finished run on it. The port's contract is to
-    // reject instead, so the distinction is made here; ENOENT stays "no
-    // transcript yet" (the path helper's own documented reading of it).
     try {
-      await fsp.access(
-        service.getSessionTranscriptPath(sessionId),
-        fsConstants.R_OK,
-      );
+      const data =
+        (await service.loadSession(sessionId, {
+          throwOnNonEnoentError: true,
+        })) ??
+        (await service.loadArchivedSession(sessionId, {
+          maxBytes: MAX_ARCHIVED_TRANSCRIPT_BYTES,
+          throwOnNonEnoentError: true,
+        }));
+      return data?.conversation.messages;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-      throw new A2ASessionError(
-        'unavailable',
-        `The transcript for session ${sessionId} could not be read.`,
-      );
+      if (isNodeError(error) && typeof error.syscall === 'string') {
+        throw new A2ASessionError(
+          'unavailable',
+          `The transcript for session ${sessionId} could not be read: ${error.message}`,
+        );
+      }
+      throw error;
     }
-    return undefined;
   };
 }
 
