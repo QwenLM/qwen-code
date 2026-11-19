@@ -2,10 +2,12 @@
 
 [English](2026-11-19-usage-dashboard-accounting.md) | [简体中文](2026-11-19-usage-dashboard-accounting.zh-CN.md)
 
-Status: Option A implemented, and the persist side of defect 2 is fixed too.
-Defect 1 is fixed outright; defect 3 is fixed wherever the per-request ledger
-covers the day. Defects 4 and 5 remain open. Records written before this change
-stay as they are — there is no migration.
+Status: implemented. Defect 1 is fixed outright; defect 2 is fixed on both the
+read and persist sides; defect 3 is fixed wherever the per-request ledger covers
+the day. Finding 4 is **retracted** — the ledger disproved it. Finding 5 is
+**corrected**: last-wins was right for existing records, and what needed fixing is
+the run-delta regression that fixing defect 2 introduces. Records written before
+these changes stay as they are — there is no migration.
 
 ## Problem
 
@@ -24,7 +26,9 @@ approximate; the per-session reconciliation below is exact. History shape: 2,060
 persisted records, 3,877 merged records, 76,849 project directories, ~12 GB of
 transcripts, 770,906 ledger lines (~291 MB).
 
-Five independent defects produce the gap.
+Three defects produce the gap. Two further findings from the first pass are
+recorded below with their corrections, because both were reported as measured
+defects and neither survived an independent check.
 
 1. **Reasoning billed twice (fixed).** The output tile rendered
    `summary.outputTokens + summary.thoughtsTokens`, but chat-completions providers
@@ -53,27 +57,36 @@ Five independent defects produce the gap.
    started on earlier days and carried 818,260,710 tokens (48.4% of the displayed
    total).
 
-4. **One run counted twice under two session ids (open).** A transcript is named by
-   `chatRecordingService`'s `binding?.sessionId ?? pinnedSessionId ??
-config.getSessionId()`, while `persistSessionUsage` keys on
-   `config.getSessionId()`. Only 1 of 189 transcripts touched in the trailing two
-   days had an id present in the persisted set, so both `skipSessionIds` and
-   `dedupBySessionId` miss. Matching a persisted record whose end time is within
-   2 s of the transcript's last record, same project, replay tokens <= persisted
-   tokens: 2 pairs today (51,636,168 tokens), 13 in 7 days (2,249,442,081), 120 in
-   30 days (5,302,870,324). Example: transcript `8159416a` replays 23 requests /
-   816,135 tokens while persisted `d8111ad4` records 34 requests / 1,117,620 for
-   the same run, 83 ms apart; both were counted. This now affects only the
-   session-granular tiles and days the ledger does not cover.
+4. **"One run counted twice under two session ids" — retracted.** The first pass
+   read the id mismatch between transcripts and persisted records as an identity
+   divergence (`chatRecordingService`'s `binding ?? pinnedSessionId ??
+config.getSessionId()` versus `config.getSessionId()`), and reported 2 same-run
+   pairs today (51,636,168 tokens), 13 in 7 days, 120 in 30 days. The ledger, which
+   keys on `config.getSessionId()` at response time, disproves it: all four
+   persisted ids in those pairs (`d8111ad4`, `d7a62020`, `15c11db0`, `4669c795`)
+   have **zero ledger requests and no transcript file**, while the transcript ids
+   they were paired with (`8159416a`, `7f6dc04d`) have 31 and 257 ledger requests,
+   own transcripts, and **zero persisted records**. There is no second identity —
+   those persisted records came from runs that made no request of their own and
+   wrote only replayed history. It was a symptom of defect 2, and it disappears
+   with it: such a run now fails `hasActivity` and writes nothing. The 188-of-189
+   unmatched transcripts are simply runs that never persisted.
 
-5. **Last-wins dedup drops disjoint segments (open).** `dedupBySessionId` keeps one
-   record per sessionId, but a resumed conversation legitimately persists several
-   non-overlapping segments under one id. 11 ids hold multiple records, 9 of them
-   disjoint; dedup discards 22 records / 120,082,542 tokens. `df2ad8ce` holds 6
-   segments (07-30 -> 10-15) of which only the last (43,386,166) survives, and its
-   transcript is then skipped from replay because its id is in the persisted set.
-   Measured impact is confined to windows older than 30 days (0 tokens dropped
-   inside today / 7 days / 30 days), so it distorts the heatmap and long ranges.
+5. **Last-wins dedup — corrected, and the regression it now needs to avoid.**
+   The first pass reported that last-wins drops 22 records / 120,082,542 tokens of
+   real usage across 11 multi-record ids. Classifying segments as "disjoint" by
+   their _windows_ was misleading: their _contents_ are cumulative copies.
+   `6eed223d` holds 5 segments of exactly 35,036 tokens each and its ledger truth
+   is 35,036. Across the 7 multi-record ids that have ledger presence, last-wins
+   keeps 52,500,008 against a ledger truth of 54,780,252 (4% under), while summing
+   the segments would give 172,089,989 — **3.1x the truth**. So last-wins was
+   accidentally right for pre-existing records, and "fixing" it by summing would
+   have been a regression.
+
+   What is real is the consequence of fixing defect 2: once each record is a run
+   delta, last-wins silently drops every run but the last. Reproduced with the
+   real persist and load functions — two runs of one conversation (1,000 + 2,000
+   tokens) loaded back as one record / 2,000 tokens. That is fixed here.
 
 ## Current state
 
@@ -100,8 +113,9 @@ explicitly left the local-`today` window semantics out of scope.
 ## Scope boundaries
 
 - In scope: `usage-dashboard-service.ts`, `tokenUsageService.ts` (read path only),
-  the `usage-stats` route, the Web Shell usage tab's output tile, and the persist
-  side (`UiTelemetryService`, the two replay sites, the two persist callers).
+  the `usage-stats` route, the Web Shell usage tab's output tile, the persist side
+  (`UiTelemetryService`, the two replay sites, the two persist callers), and
+  `usageHistoryService`'s record marker and reduction.
 - Out of scope: the `/stats` session view, whose cumulative resumed-history
   semantics are intentional; the ledger and usage-record schemas; migrating
   records already on disk; cost billing; the replay cache's scan bounds.
@@ -154,6 +168,32 @@ would only help days the ledger does not cover, at the cost of per-day buckets i
 telemetry, a record schema addition and a degradation rule for existing records.
 Deferred rather than built speculatively.
 
+## Implemented solution (run-scoped reduction)
+
+`persistSessionUsage` marks what it writes `runScoped: true`, because its caller
+passes that run's live metrics. Records reconstructed from a whole transcript
+(`summarizeTranscriptFile`, the persisting migration, the pre-deletion salvage)
+carry no marker — they are cumulative.
+
+`dedupBySessionId` groups by sessionId and then:
+
+- **No run-scoped record in the group** -> last-wins, exactly as before. This is
+  what keeps existing history unchanged and keeps the #4994 duplicate protection.
+- **Any run-scoped record** -> keep the run-scoped ones, dropping every cumulative
+  record for that id (a whole-transcript replay must not be added on top of
+  persisted runs). Among the runs, a record replaces the kept ones whose window it
+  overlaps and is otherwise added, so disjoint runs all survive while a run
+  written twice still collapses to the last.
+
+The marker is an optional field, so every reader that filters `version === 1`
+keeps working and no migration is needed.
+
+**Deliberate trade:** for a conversation that spans the upgrade, a cumulative
+record and run deltas coexist under one id. The cumulative one is dropped even
+though it may cover earlier runs, because it may also be replay-inflated.
+Undercounting that ambiguous overlap is the safe direction; double counting is
+not.
+
 ## Design decisions and rationale
 
 - **The ledger is the intended daily source.** #4479 chose per-response JSONL with
@@ -203,7 +243,14 @@ Deferred rather than built speculatively.
   `Storage.getGlobalQwenDir()`. They coincide by default; a deployment that pins a
   per-workspace runtime directory would aggregate that runtime's ledger next to
   global session history.
-- Defects 4 and 5 still distort the session-granular tiles and uncovered days.
+- **Existing history is mostly replay.** 1,482 of 2,065 persisted records (72%)
+  belong to ids with zero ledger requests, totalling 376,868,201,294 tokens. The
+  ledger only starts 2026-07-30 and a run with usage statistics disabled also
+  writes none, so this is an upper bound on the replay footprint, not a proof that
+  every one of those records is inflated.
+- **Mixed-era sessions.** A conversation spanning the upgrade keeps only its run
+  deltas, so pre-upgrade activity for that id can be undercounted (see the
+  deliberate trade above).
 - Records written before this change stay inflated, so other consumers of
   `loadUsageHistory` (notably the TUI cross-session view) still see the old
   numbers for that history. Only newly written records are correct.
@@ -226,6 +273,10 @@ Deferred rather than built speculatively.
   asserting display keeps history while live does not, and `/clear` asserting a
   pure resume writes no record. Plus a two-arm probe driving the real replay and
   persist functions from each checkout.
+- Reduction: unit tests for the marker on write, disjoint runs surviving, a run
+  written twice collapsing, cumulative records keeping last-wins, a cumulative
+  record losing to run deltas, and a whole-transcript replay not adding on top.
+  Plus a two-arm comparison of `loadUsageHistory` on the real history.
 - Mutation-witness each new guard, and record which suites were actually run.
 
 ## Acceptance criteria
@@ -248,18 +299,26 @@ Deferred rather than built speculatively.
   400-response history plus one live request persisted 401 requests / 400,000,005
   input tokens before the change and 1 request / 5 input tokens after, while the
   display aggregate stayed 401 / 400,000,005 in both arms.
+- Two runs of one conversation both survive the read side. **Verified**: the same
+  probe loaded 1 record / 2,000 tokens before the reduction change and 2 records /
+  3,000 after.
+- Existing history reduces exactly as before. **Verified** on the real
+  `usage_record.jsonl`: 2,065 raw records, none marked, both arms returning 2,043
+  records / 379,387,040,763 tokens with an identical per-session/per-window key
+  (`IDENTICAL_REDUCTION=true`).
 
 ## Open questions
 
 - Should a day with partial ledger coverage fall back per model instead of being
   replaced wholesale?
 - Should existing inflated records be repaired or marked, so the TUI
-  cross-session view and the fallback path stop showing them?
+  cross-session view and the fallback path stop showing them? The 72% figure above
+  sizes that work.
 - Should daemon sessions persist usage at session end (the open question inherited
   from the replay-cache design), which would shrink the replay path?
 - Should the TUI cross-session view (`statsDataService.ts`) adopt the same
   accounting, since it shares `loadUsageHistory` and the same dedup?
-- Defects 4 and 5 need a session-identity decision: key the persisted record on the
-  transcript's identity (or record both), and dedup on `sessionId` plus the segment
-  window so disjoint segments are summed. The pre-deletion salvage and the
-  persisting migration share that key, so all three callers must move together.
+- No session-identity change is needed: finding 4 was retracted, and the reduction
+  keys on `sessionId` plus the run window without touching what any writer uses as
+  its identity. The pre-deletion salvage and the persisting migration keep writing
+  cumulative records and are unaffected.

@@ -745,6 +745,110 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
       );
     },
   );
+
+  /** A run-scoped record covering [startMs, endMs]. */
+  const runRec = (
+    sessionId: string,
+    totalTokens: number,
+    startMs: number,
+    endMs: number,
+  ) => ({
+    ...persistedRec(sessionId, totalTokens),
+    startTime: startMs,
+    timestamp: endMs,
+    durationMs: endMs - startMs,
+    runScoped: true,
+  });
+
+  const DAY = 24 * 60 * 60 * 1000;
+  const t0 = Date.parse('2026-06-01T00:00:00Z');
+
+  it('marks what /clear and exit write as run-scoped', async () => {
+    persistLive('sess-marker');
+
+    const written = usageLines().map(
+      (l) => JSON.parse(l) as UsageSummaryRecord,
+    );
+    expect(written).toHaveLength(1);
+    expect(written[0]!.runScoped).toBe(true);
+  });
+
+  it('keeps every disjoint run of one session (run-scoped records are deltas)', async () => {
+    seedPersisted([
+      runRec('sess-runs', 1000, t0, t0 + 60_000),
+      runRec('sess-runs', 2000, t0 + DAY, t0 + DAY + 60_000),
+    ]);
+
+    const records = await loadUsageHistory();
+
+    expect(records).toHaveLength(2);
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(3000);
+  });
+
+  it('still collapses a run written twice (overlapping windows, last wins)', async () => {
+    seedPersisted([
+      runRec('sess-twice', 1000, t0, t0 + 60_000),
+      runRec('sess-twice', 1600, t0, t0 + 60_000),
+    ]);
+
+    const records = await loadUsageHistory();
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1600);
+  });
+
+  it('keeps last-wins for cumulative records, which are copies not runs', async () => {
+    // Pre-run-scoped history: a resume replayed the conversation's history into
+    // each record, so disjoint windows still describe the same spend.
+    const legacy = (tokens: number, startMs: number, endMs: number) => ({
+      ...persistedRec('sess-legacy', tokens),
+      startTime: startMs,
+      timestamp: endMs,
+    });
+    seedPersisted([
+      legacy(1000, t0, t0 + 60_000),
+      legacy(1600, t0 + DAY, t0 + DAY + 60_000),
+    ]);
+
+    const records = await loadUsageHistory();
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1600);
+  });
+
+  it('prefers run-scoped runs over a cumulative record for the same session', async () => {
+    // A conversation that spans the upgrade: one trustworthy run delta plus a
+    // pre-upgrade cumulative record. The cumulative one may itself be inflated
+    // by a replay, so it is dropped rather than added — undercounting an
+    // ambiguous legacy overlap is the safe direction, double counting is not.
+    seedPersisted([
+      runRec('sess-upgrade', 1000, t0, t0 + 60_000),
+      {
+        ...persistedRec('sess-upgrade', 5000),
+        startTime: t0 + DAY,
+        timestamp: t0 + DAY + 60_000,
+      },
+    ]);
+
+    const records = await loadUsageHistory();
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1000);
+  });
+
+  it('withLive: a whole-transcript replay does not add on top of persisted runs', async () => {
+    seedPersisted([
+      runRec('sess-mixed', 1000, t0, t0 + 60_000),
+      runRec('sess-mixed', 2000, t0 + DAY, t0 + DAY + 60_000),
+    ]);
+    // The transcript covers the whole conversation (3000 cumulative).
+    plantChatJsonl('sess-mixed', 3000);
+
+    const merged = await loadUsageHistoryWithLive();
+
+    expect(merged).toHaveLength(2);
+    expect(totalTokensOf(aggregateUsage(merged, 'all'))).toBe(3000);
+  });
 });
 
 // The live merge rescans only transcripts whose mtime/size changed and serves

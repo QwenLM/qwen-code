@@ -90,6 +90,14 @@ export interface UsageSummaryRecord {
     totalFail: number;
     byName: Record<string, { count: number; success: number; fail: number }>;
   };
+  /**
+   * True when the counters cover only the run that wrote them, so two records
+   * under one sessionId with disjoint windows are additive. Absent on records
+   * written before run-scoped persistence, and on records reconstructed from a
+   * whole transcript: those carry cumulative counters, making several records
+   * under one id copies of the same spend rather than separate runs.
+   */
+  runScoped?: boolean;
 }
 
 export interface PreparedUsageBeforeTranscriptDeletion {
@@ -171,6 +179,8 @@ export function persistSessionUsage(params: {
     endTime.getTime(),
     metrics,
   );
+  // The caller passes this run's live metrics, so the counters are a delta.
+  record.runScoped = true;
   jsonl.writeLineSync(getUsageHistoryPath(), record);
 }
 
@@ -766,18 +776,55 @@ async function rebuildFromSessionJsonl(
   return results;
 }
 
+/**
+ * Collapses repeated records for one session.
+ *
+ * Cumulative records (no `runScoped`) carry the conversation's whole spend, so
+ * several under one id are copies of it and the last is the most complete:
+ * last-wins. That also protects users whose `usage_record.jsonl` already holds
+ * duplicates from issue #4994.
+ *
+ * Run-scoped records carry only their own run's spend, so disjoint windows are
+ * separate runs and must all survive — collapsing them would silently drop
+ * every run but the last. Overlapping windows still collapse to the last one,
+ * keeping the #4994 protection for a run written twice. A cumulative record
+ * loses to any run-scoped record for the same id, which is what keeps a
+ * whole-transcript replay from being added on top of persisted runs.
+ */
 function dedupBySessionId(records: UsageSummaryRecord[]): UsageSummaryRecord[] {
-  // Last-wins by sessionId. Protects existing users whose usage_record.jsonl
-  // already contains duplicates produced by the bug fixed in this change
-  // (issue #4994) — without this, every aggregate stays inflated forever.
-  const map = new Map<string, UsageSummaryRecord>();
-  for (const r of records) map.set(r.sessionId, r);
-  if (map.size < records.length) {
+  const groups = new Map<string, UsageSummaryRecord[]>();
+  for (const r of records) {
+    const group = groups.get(r.sessionId);
+    if (group) group.push(r);
+    else groups.set(r.sessionId, [r]);
+  }
+
+  const out: UsageSummaryRecord[] = [];
+  for (const group of groups.values()) {
+    const runs = group.filter((r) => r.runScoped === true);
+    if (runs.length === 0) {
+      out.push(group[group.length - 1]!);
+      continue;
+    }
+    const kept: UsageSummaryRecord[] = [];
+    for (const r of runs) {
+      for (let i = kept.length - 1; i >= 0; i--) {
+        const k = kept[i]!;
+        if (k.startTime <= r.timestamp && r.startTime <= k.timestamp) {
+          kept.splice(i, 1);
+        }
+      }
+      kept.push(r);
+    }
+    out.push(...kept);
+  }
+
+  if (out.length < records.length) {
     debugLogger.debug(
-      `dedupBySessionId: removed ${records.length - map.size} duplicate record(s)`,
+      `dedupBySessionId: removed ${records.length - out.length} duplicate record(s)`,
     );
   }
-  return [...map.values()];
+  return out;
 }
 
 export async function loadUsageHistory(
