@@ -6,7 +6,6 @@ import com.networknt.schema.Error;
 import com.networknt.schema.SchemaLocation;
 import com.networknt.schema.SchemaRegistry;
 import com.networknt.schema.SchemaRegistryConfig;
-import com.networknt.schema.SpecificationVersion;
 import com.networknt.schema.dialect.Dialect;
 import com.networknt.schema.dialect.Dialects;
 import com.networknt.schema.keyword.AnnotationKeyword;

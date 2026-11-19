@@ -198,4 +198,24 @@ class ToolPublicationContractTest {
                     .isInstanceOf(IllegalArgumentException.class);
         }
     }
+
+    /**
+     * Pins the schema-rejection branch of {@link ToolPublicationContract#parseToolResult}
+     * so a validator downgrade cannot silently let invalid records through while the
+     * kind/size guards stay green.
+     */
+    @Test
+    void rejectsToolResultsThatViolateTheKindSchema() {
+        // `page` requires captureId/streamId/firstOrdinal/offset/segments/toolResult/type.
+        // A body with only `type` clears the kind/size pre-guards but fails the schema.
+        byte[] missingFields = "{\"type\":\"page\"}".getBytes(StandardCharsets.UTF_8);
+        assertThatThrownBy(() -> ToolPublicationContract.parseToolResult("page",
+                missingFields, missingFields.length))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Invalid tool-result page");
+        assertThatThrownBy(() -> ToolPublicationContract.parseToolResult("manifest",
+                missingFields, missingFields.length))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Invalid tool-result manifest");
+    }
 }
