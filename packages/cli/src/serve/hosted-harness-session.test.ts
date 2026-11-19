@@ -3138,6 +3138,30 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
+  it.each(['prompt', 'detach'])(
+    'maps a fenced v2 claim to the lifecycle conflict for ordinary %s',
+    async (route) => {
+      const { server, authorize, requests } = await hookApp();
+      state.authorizeOrdinary.mockRejectedValueOnce(
+        new ManagedSessionStoreHttpError(
+          409,
+          'workspace_lifecycle_claim_fenced',
+          'Close in flight',
+        ),
+      );
+      const refused = await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/${route}`),
+      ).send({});
+      expect(refused.status).toBe(409);
+      expect(refused.body.code).toBe('hosted_lifecycle_operation_active');
+      expect(state.model).not.toHaveBeenCalled();
+      expect(requests).toEqual([]);
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .send({})
+        .expect(204);
+    },
+  );
+
   it('aborts an active Turn and returns 503 when durable cancellation fails', async () => {
     const { server, authorize } = await hookApp();
     let signal!: AbortSignal;

@@ -4,9 +4,9 @@
 
 ## 问题与范围
 
-L3 只支持活跃的 `hosted-workspace-files/1` 会话关闭和删除。Shell capture、publication、后台 Shell、Monitor 与 MCP 连接必须先完成持久结算，才能复用关闭与删除屏障。本设计实现 #13164 L4，分 Shell、MCP 两片交付；开发基线包含 #13673、#13674、#13889 的原 worker 恢复、公开 Shell 准入和 H3 drain 接口。
+L3 只支持活跃的 `hosted-workspace-files/1` 会话关闭和删除。Shell capture、publication、后台 Shell、Monitor 与 MCP 连接必须先完成持久结算，才能复用关闭与删除屏障。本设计实现 #13164 L4，分 Shell、MCP 两片交付；D3（2026-11-20）把普通 `files/1` 纳入同一 v2 屏障。开发基线包含 #13673、#13674、#13889 的原 worker 恢复、公开 Shell 准入和 H3 drain 接口。
 
-精确支持 `hosted-workspace-shell/1` 与 `hosted-workspace-mcp/1`；不扩展 `hosted-workspace-files/2`、CSI、内部 TeamLead profile、UI 控件或子会话前台取消策略。沿用已有子会话级联。授权仍为会话 owner 且当前可读；幂等键仍按 actor 隔离。前台 Turn 运行、取消或等待审批时返回 `turn_active`。
+精确支持：普通 `hosted-workspace-files/1`、`hosted-workspace-shell/1` 与 `hosted-workspace-mcp/1` 走 v2 结算；`hosted-workspace-external-files/1` 保留 protocol 1（其 Runtime 不支持 v2 资源阶段）。不扩展 `hosted-workspace-files/2`、CSI、内部 TeamLead profile、UI 控件或子会话前台取消策略。沿用已有子会话级联。授权仍为会话 owner 且当前可读；幂等键仍按 actor 隔离。前台 Turn 运行、取消或等待审批时返回 `turn_active`。
 
 close 保留字节。archive/unarchive 复用 L1，unarchive 恢复 closed，不恢复 active。delete 复用 L2，原子提交 tombstone 与私有恢复/publication 退役。物理回收归 O4-2；保留其他会话和共享 Workspace 文件。关闭 profile 新执行开关不关闭已有会话的生命周期清理。
 

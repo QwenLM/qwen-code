@@ -1371,10 +1371,14 @@ function harnessAuthorizationDetail(
 }
 
 function ordinaryAuthorizationError(res: Response, cause: unknown): void {
+  // A close in flight fences ordinary admission under either protocol:
+  // the v1 lifecycle fence or the v2 claim fence (files-on-v2). Both are
+  // conflicts that retry cannot clear until the close finishes.
   if (
     cause instanceof ManagedSessionStoreHttpError &&
     cause.status === 409 &&
-    cause.remoteCode === 'managed_session_lifecycle_active'
+    (cause.remoteCode === 'managed_session_lifecycle_active' ||
+      cause.remoteCode === 'workspace_lifecycle_claim_fenced')
   )
     return error(res, 409, 'hosted_lifecycle_operation_active');
   error(res, 503, 'hosted_execution_authorization_unavailable');
