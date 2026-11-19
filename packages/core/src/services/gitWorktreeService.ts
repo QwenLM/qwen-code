@@ -2226,17 +2226,21 @@ export class GitWorktreeService {
    */
   async removeWorktree(
     worktreePath: string,
+    signal?: AbortSignal,
   ): Promise<{ success: boolean; error?: string }> {
     let git: SimpleGit;
     try {
-      git = await this.getGit();
+      git = await raceWithAbort(signal, () => this.getGit());
     } catch (error) {
+      signal?.throwIfAborted();
       return {
         success: false,
         error: `Failed to remove worktree: ${error instanceof Error ? error.message : 'Unknown error'}`,
       };
     }
 
+    // Keep cancellation outside the catch that falls back to fs.rm.
+    signal?.throwIfAborted();
     try {
       // Remove the worktree from git
       await git.raw(['worktree', 'remove', worktreePath, '--force']);
@@ -4349,6 +4353,8 @@ export class GitWorktreeService {
     options: {
       deleteBranch?: boolean;
       forceDeleteBranch?: boolean;
+      /** Cancel before Git removal starts. Once started, finish cleanup. */
+      signal?: AbortSignal;
       /** The slug-derived branch was created by this worktree's named
        * creation (which refuses a pre-existing ref), so it is owned even
        * if the checkout later moved to another branch. Without this,
@@ -4376,6 +4382,7 @@ export class GitWorktreeService {
      * own branch, or the slug ref when kept), if any. */
     keptBranch?: string;
   }> {
+    const { signal } = options;
     const worktreePath = this.getUserWorktreePath(slug);
     const branchName = worktreeBranchForSlug(slug);
     // Refuse to remove a checkout that EXISTS but cannot be verified as a
@@ -4386,20 +4393,26 @@ export class GitWorktreeService {
     // The registered-worktree probe (common-dir + toplevel) returns null in
     // that state, so fail closed. A directory already gone is a legitimate
     // no-op the removal flow below handles (branchSkipped), not a refusal.
-    const checkoutPresent = await fs
-      .stat(worktreePath)
-      .then(() => true)
-      .catch(() => false);
+    const checkoutPresent = await raceWithAbort(signal, () =>
+      fs
+        .stat(worktreePath)
+        .then(() => true)
+        .catch(() => false),
+    );
     if (
       checkoutPresent &&
-      (await this.getRegisteredWorktreeBranch(worktreePath)) === null
+      (await raceWithAbort(signal, () =>
+        this.getRegisteredWorktreeBranch(worktreePath),
+      )) === null
     ) {
       return {
         success: false,
         error: 'Worktree checkout is unverifiable',
       };
     }
-    const detached = await this.isDetachedWorktree(worktreePath);
+    const detached = await raceWithAbort(signal, () =>
+      this.isDetachedWorktree(worktreePath),
+    );
     // Capture the branch the checkout actually sits on BEFORE removal.
     // A session worktree branched in place ("Create branch here") is no
     // longer detached, but it never owned the slug-derived name either —
@@ -4407,7 +4420,9 @@ export class GitWorktreeService {
     // pre-existing user `worktree-<slug>` be deleted once it merges.
     const actualBranch = detached
       ? ''
-      : await this.getWorktreeBranchName(worktreePath);
+      : await raceWithAbort(signal, () =>
+          this.getWorktreeBranchName(worktreePath),
+        );
 
     // A detached worktree has no branch whose safe-delete refusal would
     // protect committed work: the `git branch -d` below can never fire for
@@ -4419,7 +4434,9 @@ export class GitWorktreeService {
       options.deleteBranch &&
       !options.forceDeleteBranch &&
       detached &&
-      (await this.hasUnmergedWorktreeCommits(slug, options.baseCommit))
+      (await raceWithAbort(signal, () =>
+        this.hasUnmergedWorktreeCommits(slug, options.baseCommit),
+      ))
     ) {
       return {
         success: false,
@@ -4428,7 +4445,7 @@ export class GitWorktreeService {
       };
     }
 
-    const removed = await this.removeWorktree(worktreePath);
+    const removed = await this.removeWorktree(worktreePath, signal);
     if (!removed.success) {
       return removed;
     }

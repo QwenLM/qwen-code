@@ -365,6 +365,82 @@ describe('GitWorktreeService', () => {
     expect(git.raw).toHaveBeenNthCalledWith(2, ['worktree', 'prune']);
   });
 
+  it('does not enter the removal fallback when cancelled before Git starts', async () => {
+    const service = new GitWorktreeService('/repo');
+    const reason = 'send-now';
+
+    await expect(
+      service.removeWorktree('/w/a', AbortSignal.abort(reason)),
+    ).rejects.toBe(reason);
+    expect(rawCalls('worktree', 'remove')).toHaveLength(0);
+    expect(hoistedMockFsRm).not.toHaveBeenCalled();
+  });
+
+  it('cancels while checkout registration is being verified', async () => {
+    const service = new GitWorktreeService('/repo');
+    let release = () => {};
+    const checkout = new Promise<{ branch: string; headCommit: string }>(
+      (resolve) => {
+        release = () =>
+          resolve({ branch: 'worktree-feature', headCommit: 'a' });
+      },
+    );
+    const inspect = vi
+      .spyOn(service, 'getRegisteredWorktreeBranch')
+      .mockReturnValue(checkout);
+    const controller = new AbortController();
+    const removal = service.removeUserWorktree('feature', {
+      signal: controller.signal,
+    });
+
+    try {
+      await vi.waitFor(() => expect(inspect).toHaveBeenCalledOnce());
+      const reason = 'send-now';
+      controller.abort(reason);
+      await expect(
+        Promise.race([removal, setImmediate('pending')]),
+      ).rejects.toBe(reason);
+
+      release();
+      await setImmediate();
+      expect(rawCalls('worktree', 'remove')).toHaveLength(0);
+      expect(hoistedMockFsRm).not.toHaveBeenCalled();
+    } finally {
+      release();
+    }
+  });
+
+  it('finishes branch cleanup when cancelled after Git removal starts', async () => {
+    const service = new GitWorktreeService('/repo');
+    vi.spyOn(service, 'getRegisteredWorktreeBranch').mockResolvedValue({
+      branch: 'worktree-feature',
+      headCommit: 'a',
+    });
+    vi.spyOn(service, 'localBranchExists').mockResolvedValue(true);
+    const { started, release } = holdGitCommand('worktree', 'remove');
+    const controller = new AbortController();
+    const removal = service.removeUserWorktree('feature', {
+      deleteBranch: true,
+      branchOwned: true,
+      signal: controller.signal,
+    });
+
+    try {
+      await started;
+      controller.abort('send-now');
+      await expect(
+        Promise.race([removal, setImmediate('pending')]),
+      ).resolves.toBe('pending');
+    } finally {
+      release();
+    }
+    await expect(removal).resolves.toMatchObject({
+      success: true,
+      deletedBranch: 'worktree-feature',
+    });
+    expect(git.branch).toHaveBeenCalledWith(['-d', 'worktree-feature']);
+  });
+
   it('cleanupSession should remove branches from listed worktrees', async () => {
     const service = new GitWorktreeService('/repo');
     vi.spyOn(service, 'listWorktrees').mockResolvedValue(
