@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionSummary,
+  DaemonStandaloneSessionSummary,
+} from '@qwen-code/sdk/daemon';
 import { createWebShellDaemonScenario } from './e2e/utils/mockDaemon';
 import { makeSidebarSession } from './test/sidebarHarness';
 
@@ -62,5 +65,29 @@ describe('createWebShellDaemonScenario fixture ownership', () => {
     // snapshot or re-copy it on access, or the notification path breaks.
     expect(scenario.sessions).toBe(held);
     expect(scenario.sessions[0]!.goal).toMatchObject({ status: 'paused' });
+  });
+
+  it('does not hand back the caller standaloneSessions array', () => {
+    // The standalone create and patch routes unshift and replace whole
+    // elements, so array identity is the property that decides whether a
+    // case's writes reach the caller's fixture.
+    const fixture: DaemonStandaloneSessionSummary[] = [];
+    const scenario = createWebShellDaemonScenario({
+      standaloneSessions: fixture,
+    });
+
+    expect(scenario.standaloneSessions).not.toBe(fixture);
+  });
+
+  it('keeps a mid-turn message push out of the caller fixture', () => {
+    const fixture = [{ messageId: 'seed', text: 'seed text' }];
+    const scenario = createWebShellDaemonScenario({
+      midTurnMessages: fixture,
+    });
+
+    scenario.midTurnMessages.push({ messageId: 'sent', text: 'sent text' });
+
+    expect(scenario.midTurnMessages).toHaveLength(2);
+    expect(fixture).toEqual([{ messageId: 'seed', text: 'seed text' }]);
   });
 });

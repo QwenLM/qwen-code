@@ -70,13 +70,14 @@ const row = (page: Page, name: string) =>
   page.locator('[class*="sessionRow"]').filter({ hasText: name });
 
 // Both transition cases need this exact wiring. workspace_session_live_state
-// is the switch: without it the client never refetches the catalog, so the
-// case stops exercising the notification path and fails as a bare locator
-// timeout with nothing naming the missing capability. The interval only sets
-// the cadence — resolveSessionLiveStatePollInterval rejects anything below
-// 1_000 and falls back to 5_000, so the 250 this block used to advertise was
-// silently ignored. File-local on purpose: the other specs inline different
-// feature subsets.
+// is the switch: without it the client never refetches the catalog and both
+// cases stop exercising the notification path. The repaint case then fails as
+// a bare locator timeout with nothing naming the missing capability; the
+// clearing case may still pass, because a slower catalog refresh can drop the
+// marker inside its timeout. The interval only sets the cadence —
+// resolveSessionLiveStatePollInterval rejects anything below 1_000 and falls
+// back to 5_000, so the 250 this block used to advertise was silently ignored.
+// File-local on purpose: the other specs inline different feature subsets.
 const liveGoalScenario = () =>
   createWebShellDaemonScenario({
     sessions: goalSessions,

@@ -457,11 +457,13 @@ export function createWebShellDaemonScenario(
     ...(overrides.mcp ?? {}),
   };
 
-  // Clone at construction, like goalsByWorkspace below: notification-path
-  // cases mutate scenario.sessions in place after install, and without this
-  // clone that mutation would reach the caller's fixture array and leak into
-  // every later case sharing it. installMockDaemon still holds the scenario
-  // itself by reference, so those in-place mutations stay visible to routes.
+  // Clone the caller-supplied collections that routes mutate in place:
+  // sessions here, standaloneSessions and midTurnMessages below, and
+  // goalsByWorkspace. Notification-path cases mutate them after install, and
+  // without the clone that mutation would reach the caller's fixture and leak
+  // into every later case sharing it. installMockDaemon still holds the
+  // scenario itself by reference, so those mutations stay visible to routes.
+  // allocatedSessions is factory-owned, so it needs no clone.
   const sessions = structuredClone(
     overrides.sessions ?? [
       {
@@ -510,7 +512,7 @@ export function createWebShellDaemonScenario(
     sessions,
     workspaceOrder: overrides.workspaceOrder ?? [],
     workspaceOrderSaveError: overrides.workspaceOrderSaveError,
-    standaloneSessions: overrides.standaloneSessions ?? [],
+    standaloneSessions: structuredClone(overrides.standaloneSessions ?? []),
     standaloneCreateError: overrides.standaloneCreateError,
     sessionGroups: overrides.sessionGroups ?? [],
     sessionCatalogVersion: overrides.sessionCatalogVersion ?? {
@@ -545,7 +547,7 @@ export function createWebShellDaemonScenario(
       ? structuredClone(overrides.goalsByWorkspace)
       : undefined,
     allocatedSessions: [],
-    midTurnMessages: overrides.midTurnMessages ?? [],
+    midTurnMessages: structuredClone(overrides.midTurnMessages ?? []),
     branch: overrides.branch,
   };
 }
