@@ -1233,6 +1233,78 @@ describe('SessionService - artifact summary sidecar', () => {
     );
   });
 
+  it('delivers the restore payload above the size cap even though the seed declines', async () => {
+    // The cap is a sidecar-count policy, not a payload gate (review
+    // round-9 R9-1): the load read completes authoritatively, so the
+    // conversation-less seed declines to WRITE the sidecar above the cap
+    // but the restore payload still carries the artifacts — the same
+    // contract the sibling conversation branch pins.
+    const a = persistedArtifact('https://example.com/cap-payload-a');
+    const b = persistedArtifact('https://example.com/cap-payload-b');
+    writeTranscriptOfSize(MAX_TRANSCRIPT_READ_BYTES + 1, [
+      { ...artifactEventRecord([a, b]), parentUuid: null },
+    ]);
+
+    const loaded = await service.loadSession(SESSION_ID);
+
+    expect(loaded?.artifactSnapshot?.artifacts).toHaveLength(2);
+    expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
+  });
+
+  it('delivers the active-branch payload for a rewound conversation-less session', async () => {
+    // A session rewound to its first turn keeps the abandoned turns in the
+    // file; the active chain is metadata-only with artifacts on it (review
+    // round-9 R9-1). The helper's shape gate declines because the raw file
+    // holds conversation records, but the authoritative load read must still
+    // deliver the active-branch artifacts in the payload; only the sidecar
+    // write is gated, so the preset count survives.
+    const a = persistedArtifact('https://example.com/rewound-a');
+    const b = persistedArtifact('https://example.com/rewound-b');
+    const abandonedUser: ChatRecord = {
+      ...userRecord(),
+      uuid: 'abandoned-user',
+    };
+    const abandonedAssistant: ChatRecord = {
+      uuid: 'abandoned-assistant',
+      parentUuid: 'abandoned-user',
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:00.500Z',
+      type: 'assistant',
+      cwd: root,
+      version: '1.0.0',
+      message: { role: 'assistant', parts: [{ text: 'abandoned turn' }] },
+    };
+    const sourceRecord: ChatRecord = {
+      uuid: 'source-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: '2026-11-17T00:00:01.000Z',
+      type: 'system',
+      subtype: 'session_source',
+      cwd: root,
+      version: '1.0.0',
+      systemPayload: {
+        sourceType: 'web_shell',
+      } as unknown as ChatRecord['systemPayload'],
+    };
+    writeTranscript([
+      abandonedUser,
+      abandonedAssistant,
+      sourceRecord,
+      { ...artifactEventRecord([a, b]), parentUuid: 'source-1' },
+    ]);
+    writeSessionArtifactSummarySidecar(sidecarPath, 5);
+
+    const loaded = await service.loadSession(SESSION_ID);
+
+    expect(
+      loaded?.artifactSnapshot?.artifacts.map((artifact) => artifact.id).sort(),
+    ).toEqual([a.id, b.id].sort());
+    expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
+      5,
+    );
+  });
+
   it('skips the load seed when the size probe fails', async () => {
     // Metadata-bearing shape so the load funnel enters the helper (a pure
     // artifact-only transcript is refused by the empty-message gate and

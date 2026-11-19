@@ -3879,8 +3879,10 @@ export class SessionService {
    * read already delivers, so count and delivery share one source.) The
    * boundary is inclusive, matching the library mutation read's
    * `size > maxBytes` refusal; a failed size probe skips the seed.
-   * Returns the rebuilt snapshot for the restore payload, or undefined
-   * when any gate declines.
+   * Returns the rebuilt snapshot when the seed runs, or undefined when a
+   * gate declines; the gates decide the sidecar COUNT only — the load
+   * funnel falls back to a payload-only rebuild on a decline so the restore
+   * payload still carries the active-branch artifacts (round-9 R9-1).
    */
   private async seedSideRecordsOnlyTranscript(
     sessionId: string,
@@ -4105,6 +4107,16 @@ export class SessionService {
     const hasConversationTurn = messages.some(
       (message) => message.type !== 'system',
     );
+    // The helper's size and shape gates are sidecar-COUNT policies: they
+    // decide whether to write the derived count, not whether the restore
+    // payload carries artifacts. The load read is the authoritative restore
+    // itself, so when the helper declines (an oversized journal, or a raw
+    // file holding rewound-away conversation records beside a metadata-only
+    // active chain) fall back to a payload-only rebuild — the resumed
+    // session must still see its active-branch artifacts, while the sidecar
+    // stays untouched (review round-9 R9-1). The empty-message refusal needs
+    // no fallback: messages.length === 0 returns below before the payload is
+    // used, and no restore path can open that shape anyway.
     const artifactSnapshot = hasConversationTurn
       ? this.seedArtifactSummaryFromRecords(
           sessionId,
@@ -4114,12 +4126,17 @@ export class SessionService {
           gaps,
           sourceReadComplete,
         )
-      : await this.seedSideRecordsOnlyTranscript(
+      : ((await this.seedSideRecordsOnlyTranscript(
           sessionId,
           state,
           filePath,
           async () => ({ records, sourceReadComplete }),
-        );
+        )) ??
+        rebuildSessionArtifactSnapshot(
+          artifactRebuildRecords(records, messages),
+          sessionId,
+          [],
+        ));
 
     if (messages.length === 0) {
       return;
