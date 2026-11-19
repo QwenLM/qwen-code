@@ -643,7 +643,10 @@ const DIRECT_MSG_API =
   'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend';
 const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
 const PROACTIVE_FILE_MSG_KEY = 'sampleFile';
-const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
+// Exported so the managed card path's token provider shares one copy of the
+// endpoint and the load-bearing errcode set (H5e of #12827). Additive exports;
+// the Legacy getProactiveToken behavior is unchanged.
+export const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
 // Shared with the managed adapter's webhook send so both paths validate the
 // sessionWebhook host against the same allowlist.
@@ -656,7 +659,7 @@ export const ROBOT_MESSAGE_HOSTS = new Set([
  * missing app. Any other errcode (-1 system busy, 88 throttled, ...) is
  * treated as transient so card recovery keeps retrying through it.
  */
-const PERMANENT_TOKEN_ERROR_CODES = new Set([
+export const PERMANENT_TOKEN_ERROR_CODES = new Set([
   40001, 40013, 40089, 40096, 90002, 90003,
 ]);
 const REPLY_FETCH_TIMEOUT_MS = 15_000;

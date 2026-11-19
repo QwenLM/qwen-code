@@ -35,7 +35,7 @@ import {
   waitForDaemonTokenMessage,
 } from './config/daemon';
 import { hydrateShellState } from './config/shell-state';
-import { normalizeLanguage, type WebShellLanguage } from './i18n';
+import { loadLanguage, normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
 import { DEFAULT_BRAND_NAME, type WebShellResolvedBrand } from './brandContext';
 import { inferStandaloneBasePath } from './utils/sessionPath';
@@ -520,6 +520,9 @@ async function main() {
     Boolean(DAEMON_BASE_URL) &&
     !isKnownDaemonTarget(DAEMON_BASE_URL) &&
     !isRemoteConnectionKnown(DAEMON_BASE_URL);
+  const bootLanguage =
+    getInitialLanguage() ?? normalizeLanguage(navigator.language);
+  const localeReady = loadLanguage(bootLanguage);
   const pairing = MANAGED_APP
     ? undefined
     : await exchangePairingCode(INVALID_DAEMON_TARGET ? '' : baseUrl);
@@ -529,6 +532,7 @@ async function main() {
     (!INVALID_DAEMON_TARGET && baseUrl === window.location.origin
       ? await waitForDaemonTokenMessage()
       : undefined);
+  if (localeReady) await localeReady;
 
   const container = document.getElementById('root');
   // Boot can outlast the watchdog's grace period (a slow daemon, a token
@@ -547,7 +551,7 @@ async function main() {
         // The auth gate renders before settings are reachable, so it keeps
         // the browser-locale default; the app itself now receives "no
         // opinion" (undefined) and lets the daemon's settings win.
-        language={getInitialLanguage() ?? normalizeLanguage(navigator.language)}
+        language={bootLanguage}
         initialAddress={REQUESTED_DAEMON_TARGET || baseUrl}
         theme={getInitialTheme()}
         invalidTarget={INVALID_DAEMON_TARGET}
@@ -555,12 +559,7 @@ async function main() {
       >
         {(token) =>
           MANAGED_APP ? (
-            <ManagedStandaloneApp
-              daemonToken={token}
-              language={
-                getInitialLanguage() ?? normalizeLanguage(navigator.language)
-              }
-            >
+            <ManagedStandaloneApp daemonToken={token} language={bootLanguage}>
               {(managedAgentProvider) => (
                 <StandaloneApp
                   daemonToken={token}

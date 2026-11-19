@@ -3497,6 +3497,71 @@ it('refuses an external files Skill lane before warming the Broker', () => {
   expect(broker.warm).not.toHaveBeenCalled();
 });
 
+it('declares the external Shell tool set: file tools, foreground Shell and glob', async () => {
+  const publication = {
+    owner: {} as HttpToolPublicationOwner,
+    captureBytes: 4096,
+  };
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    publication,
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-external-shell/1' },
+  );
+  const declared = await turn.declarations(new AbortController().signal);
+  expect(declared.map((tool) => tool.name)).toEqual([
+    'read_file',
+    'write_file',
+    'edit',
+    'run_shell_command',
+    'glob',
+  ]);
+  const shell = declared.find((tool) => tool.name === 'run_shell_command')!;
+  const schema = shell.parametersJsonSchema as {
+    properties?: Record<string, unknown>;
+  };
+  // The lane's drain proves foreground captures only: no background switch.
+  expect(schema.properties?.['is_background']).toBeUndefined();
+});
+
+it('refuses an external Shell Turn without its publication or with another lane', () => {
+  const build = (
+    publication?: { owner: HttpToolPublicationOwner; captureBytes: number },
+    extras?: { skills?: ReturnType<typeof publishedSkills> },
+  ) =>
+    new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      publication,
+      undefined,
+      undefined,
+      { profile: 'hosted-workspace-external-shell/1', ...extras },
+    );
+  // Deleting the Shell arm of the closedLane ternary (testing presence, not
+  // which member) lets the no-publication construction through: red here.
+  expect(() => build()).toThrow(
+    'External Shell profile requires a publication and no other lanes.',
+  );
+  expect(() =>
+    build(
+      { owner: {} as HttpToolPublicationOwner, captureBytes: 4096 },
+      { skills: publishedSkills() },
+    ),
+  ).toThrow(
+    'External Shell profile requires a publication and no other lanes.',
+  );
+});
+
 it('dispatches exactly the external file tools with ordinary capture controls', async () => {
   turn = new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },

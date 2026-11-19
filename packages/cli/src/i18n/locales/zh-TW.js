@@ -9,6 +9,51 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  user: '使用者',
+  assistant: '助手',
+  thinking: '思考',
+  task: '任務',
+  compaction: '壓縮',
+  info: '資訊',
+  warning: '警告',
+  retry: '重試',
+  'stop-hook': '停止掛鉤',
+  'away-recap': '離開摘要',
+  'user-shell': '使用者命令',
+  advisor: '顧問',
+  'arena-agent': '競技場代理',
+  'arena-session': '競技場工作階段',
+  goal: '目標',
+  'Protected input': '受保護的輸入',
+  'Focused input. Cursor: {{position}}': '輸入已聚焦。游標：{{position}}',
+  'Unfocused input.': '輸入未聚焦。',
+  'Focused Prompt: {{value}}': '已聚焦的提示輸入：{{value}}',
+  'Prompt: {{value}}': '提示輸入：{{value}}',
+  'Focused Input: {{value}}': '已聚焦的輸入：{{value}}',
+  'Input: {{value}}': '輸入：{{value}}',
+  'Placeholder: {{value}}': '預留提示：{{value}}',
+  'Cursor: {{position}}': '游標：{{position}}',
+  'Selected {{value}}': '已選取 {{value}}',
+  'Disabled {{value}}': '已停用 {{value}}',
+  'Focused Toggle on: {{value}}': '已聚焦，開關已開啟：{{value}}',
+  'Focused Toggle off: {{value}}': '已聚焦，開關已關閉：{{value}}',
+  'Toggle on: {{value}}': '開關已開啟：{{value}}',
+  'Toggle off: {{value}}': '開關已關閉：{{value}}',
+  'Conversation cleared.': '對話已清空。',
+  '{{role}}: {{value}}': '{{role}}：{{value}}',
+  'Revision {{value}}': '修訂 {{value}}',
+  Dialog: '對話框',
+  'Dialog closed. Focus: prompt.': '對話框已關閉。焦點：提示輸入。',
+  'Dialog closed.': '對話框已關閉。',
+  'Waiting for confirmation': '等待確認',
+  'Working. Escape to cancel.': '處理中。按 Escape 取消。',
+  'History items {{start}}-{{end}} of {{total}}':
+    '歷史記錄 {{start}}-{{end}}，共 {{total}} 筆。',
+  'Worktree: {{value}}': '工作樹：{{value}}',
+  'Workflow mode: on': '工作流模式：已開啟',
+  'Workflow mode: on (unavailable)': '工作流模式：已開啟（不可用）',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    '按 Shift+上/下或 PageUp/PageDown 閱讀歷史；按 Ctrl+Home/End 跳至最早/最新。',
   "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
     '週額度已用完{{reset}}。您可以等待額度恢復，或執行 /upgrade 升級方案以取得更多額度。',
   "You've used up your weekly credits.{{reset}} Please try again after the reset.":
@@ -740,8 +785,8 @@ export default {
     '要查看更改，必須重啟 Qwen Code。按 r 退出並立即應用更改。',
   'Code Mode Only (Experimental)': '僅程式碼模式（實驗性）',
   'Mods (Experimental)': 'Mods（實驗性）',
-  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
-    '在受信任的本機互動終端和無介面工作階段中載入已啟用擴充功能的實驗性 Mods。修改後需重新啟動。',
+  'Enable experimental Mods from enabled extensions in trusted local terminal, headless and ACP sessions. Restart required.':
+    '在受信任的本機互動終端、無介面工作階段和 ACP 工作階段中載入已啟用擴充功能的實驗性 Mods。修改後需重新啟動。',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '終端響鈴通知',
@@ -1683,6 +1728,18 @@ export default {
     '當前語音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 設置語音模型。',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     '當前視覺模型：{{visionModel}}\n使用 "/model --vision <model-id>" 設置視覺橋接模型。',
+  'Set the vision bridge timeout in seconds (use with --vision)':
+    '設置視覺橋接逾時（秒，搭配 --vision 使用）',
+  '--timeout can only be used with --vision.':
+    '--timeout 只能與 --vision 一起使用。',
+  'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.':
+    '無效的 --timeout 值 "{{value}}"。請使用正整數秒數，例如 60、60s 或 90000ms。',
+  'Vision bridge timeout: {{timeout}}': '視覺橋接逾時：{{timeout}}',
+  'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.':
+    '已儲存視覺橋接逾時 {{timeout}}{{scope}}。較高優先順序的設定使實際逾時為 {{effectiveTimeout}}。',
+  'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.':
+    '視覺橋接逾時：{{timeout}}\n使用 "/model --vision --timeout <seconds>" 修改。',
+  '{{timeout}} (default)': '{{timeout}}（預設）',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     '當前圖像模型：{{imageModel}}\n使用 "/model --image <model-id>" 設置圖像生成模型。',
   'Compaction model override cleared': '壓縮模型覆蓋已清除',

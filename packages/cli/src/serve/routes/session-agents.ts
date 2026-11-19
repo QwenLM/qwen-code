@@ -57,6 +57,9 @@ import type {
 import type { RateLimiterInstance } from '../rate-limit.js';
 import type { StandaloneSessionService } from '../conversations/standalone-session-service.js';
 import { isLoopbackAddress } from '../loopback-binds.js';
+import type { DaemonLogger } from '../daemon-logger.js';
+import type { SseAdmissionCaps } from '../daemon-status.js';
+import { checkSseAdmission, countSseStream } from '../sse-occupancy.js';
 
 let orchestratorFactory:
   | ((runtime: WorkspaceRuntime) => SessionAgentOrchestrator | undefined)
@@ -103,6 +106,8 @@ export interface RegisterSessionAgentRoutesDeps {
   standaloneSessionService?: () =>
     | Pick<StandaloneSessionService, 'resume'>
     | undefined;
+  sseAdmissionCaps?: SseAdmissionCaps;
+  daemonLog?: DaemonLogger;
 }
 
 /**
@@ -343,6 +348,19 @@ export function registerSessionAgentRoutes(
       res.status(400).json({ error: 'invalid_session_id' });
       return;
     }
+    if (
+      !checkSseAdmission({
+        surface: 'agentEvents',
+        req,
+        res,
+        caps: deps.sseAdmissionCaps,
+        daemonLog: deps.daemonLog,
+        logContext: { sessionId },
+      })
+    ) {
+      return;
+    }
+    countSseStream('agentEvents', req, res);
     res.status(200).set({
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',

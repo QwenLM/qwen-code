@@ -30,10 +30,10 @@ import {
   isCompletedAskUserQuestion,
 } from './messages/toolFormatting';
 import {
-  AssistantMessage,
   ThinkingMessage,
   type SessionContentGenerator,
 } from './messages/AssistantMessage';
+import { AssistantMessageRow } from './messages/AssistantMessageRow';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
 import type { TurnOutputOpenRequest } from './artifacts/TurnOutputs';
@@ -238,7 +238,8 @@ export const MessageItem = memo(function MessageItem({
         );
       case 'assistant':
         return (
-          <AssistantMessage
+          <AssistantMessageRow
+            messageId={message.id}
             hookTurn={hookTurn}
             content={message.content}
             author={message.author}
