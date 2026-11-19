@@ -4,12 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import * as os from 'node:os';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  SessionArchivingError,
+  SessionNotFoundError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   ACTIVE_WORK_CLOSE_TIMEOUT_MS,
   type AcpSessionBridge,
@@ -101,6 +106,29 @@ function makeFakeBridge(opts?: {
    * the first await), which must not clobber the launch error. */
   closeSessionFails?: 'sync' | 'async' | 'not-found';
   closeSessionHangs?: boolean;
+  /** Mutable close-failure mode for the TTL tests: read at call time, so a
+   * test can start failing and recover (retry-after-failure pinning). Takes
+   * precedence over the static options above. */
+  closeSessionState?: { fail?: 'sync' | 'async' };
+  /** Hang `closeSession` for exactly these session ids until
+   * `releaseCloseHang` fires — serializes the overlapping-sweep pinning. */
+  closeSessionHangsOn?: string[];
+  /** Model the real bridge for an unknown id: a `closeSession` for a
+   * session that is not live throws `SessionNotFoundError` (the TTL
+   * sweep's tolerance branch is the production path for idle-reaped
+   * entries). */
+  closeThrowsWhenNotLive?: boolean;
+  /** A revival that bypasses the lifecycle lane re-creates the live entry
+   * when `closeSession` succeeds for these ids — witnesses the TTL
+   * pre-removal re-validation. */
+  reviveAfterClose?: readonly string[];
+  /** Fixed id the fake `spawnOrAttach` returns for the spawned sub-session
+   * (default `sub-N`). A UUID-format id, so the persisted-row lifecycle
+   * classifier (`getMaintainableSessionLocation`) can see the transcript. */
+  spawnedSessionId?: string;
+  /** One-shot `getSessionSummary` failures: the first call for each id throws
+   * a plain Error, later calls behave normally (transient-error pinning). */
+  summaryErrors?: Map<string, string>;
   /** Accepted acknowledgements returned by successive completion deliveries. */
   notificationAcks?: boolean[];
   beforeNotificationAck?: () => Promise<void>;
@@ -108,6 +136,25 @@ function makeFakeBridge(opts?: {
   /** Persisted parent lineage for callers restored after a daemon restart. */
   restoredCallerParents?: Readonly<Record<string, string>>;
   callerSourceTypes?: Readonly<Record<string, string>>;
+  /** Per-session live summary overrides read by the completion TTL sweep:
+   * `null` = the entry is gone (SessionNotFoundError), an object merges
+   * `updatedAt`/`hasActivePrompt`/work-state fields into the default
+   * summary. Read at call time, so tests can mutate it mid-flight
+   * (revival, reaper). */
+  liveSessionSummaries?: Map<
+    string,
+    {
+      createdAt?: string;
+      updatedAt?: string;
+      hasActivePrompt?: boolean;
+      hasRunningBackgroundTasks?: boolean;
+      activeWorkState?: string;
+      /** Attached clients. The production summary always reports at least
+       * the launcher's own registration (1); a second client (a reader)
+       * must keep a TTL-expired session live. */
+      clientCount?: number;
+    } | null
+  >;
   /** Effective approval modes reported by the live ACP session. */
   approvalModes?: Record<string, string>;
   defaultMode?: string;
@@ -155,6 +202,7 @@ function makeFakeBridge(opts?: {
   }> = [];
   const kills: string[] = [];
   const detaches: Array<{ sessionId: string; clientId?: string }> = [];
+  const attachmentDeletions: string[] = [];
   const resumes: Array<{
     sessionId: string;
     workspaceCwd: string;
@@ -183,6 +231,8 @@ function makeFakeBridge(opts?: {
   let n = 0;
   let parentRestored = false;
   let notificationAttempt = 0;
+  let hangCloseRelease: (() => void) | undefined;
+
   const approvalModes = new Map(Object.entries(opts?.approvalModes ?? {}));
   const approvalRevisions = new Map<string, number>();
   const changeApprovalMode = (id: string, mode: string) => {
@@ -227,6 +277,15 @@ function makeFakeBridge(opts?: {
       return { sessionId, mode, previous: 'auto', persisted: false };
     },
     getSessionSummary: (sessionId: string) => {
+      const pendingError = opts?.summaryErrors?.get(sessionId);
+      if (pendingError !== undefined && opts?.summaryErrors) {
+        opts.summaryErrors.delete(sessionId);
+        throw new Error(pendingError);
+      }
+      const override = opts?.liveSessionSummaries?.get(sessionId);
+      if (override === null) {
+        throw new SessionNotFoundError(sessionId);
+      }
       if (closedSessions.has(sessionId))
         throw new SessionNotFoundError(sessionId);
       if (opts?.notLive?.includes(sessionId)) {
@@ -238,6 +297,7 @@ function makeFakeBridge(opts?: {
         sourceType: opts?.callerSourceTypes?.[sessionId],
         sourceId: opts?.sourceIds?.[sessionId],
         displayName: opts?.titles?.[sessionId],
+        ...(override ?? {}),
       };
     },
     appendExternalRecord: async (sessionId: string, request: unknown) => {
@@ -254,7 +314,7 @@ function makeFakeBridge(opts?: {
     }) => {
       spawns.push(req);
       return {
-        sessionId: `sub-${++n}`,
+        sessionId: opts?.spawnedSessionId ?? `sub-${++n}`,
         ...(req.modelServiceId !== undefined && opts?.modelApplied !== undefined
           ? { modelApplied: opts.modelApplied }
           : {}),
@@ -390,19 +450,76 @@ function makeFakeBridge(opts?: {
         ? opts.beforeQueuedDispatch().then(dispatch)
         : dispatch();
     },
-    closeSession: (sessionId: string) => {
+    closeSession: (
+      sessionId: string,
+      _context?: unknown,
+      closeOpts?: { closeIfUnheld?: boolean },
+    ) => {
       closes.push(sessionId);
+      const state = opts?.closeSessionState;
+      if (state?.fail === 'sync') throw new Error('closeSession exploded');
+      if (state?.fail === 'async') {
+        return Promise.reject(new Error('closeSession rejected'));
+      }
       if (opts?.closeSessionHangs) return new Promise<void>(() => {});
+      if (opts?.closeSessionHangsOn?.includes(sessionId)) {
+        return new Promise<void>((resolve) => {
+          hangCloseRelease = resolve;
+        });
+      }
       if (opts?.closeSessionFails === 'sync') {
         throw new Error('closeSession exploded');
       }
       if (opts?.closeSessionFails === 'async') {
         return Promise.reject(new Error('closeSession rejected'));
       }
+      const override = opts?.liveSessionSummaries?.get(sessionId);
+      const notLive =
+        override === null ||
+        closedSessions.has(sessionId) ||
+        (opts?.notLive?.includes(sessionId) ?? false);
+      if (notLive && opts?.closeThrowsWhenNotLive) {
+        // The real bridge throws SessionNotFoundError for unknown ids —
+        // the normal outcome for an idle-reaped entry.
+        throw new SessionNotFoundError(sessionId);
+      }
+      // The launcher holds the first registration; a second attached
+      // client makes a conditional close a silent no-close, modelled on
+      // the real bridge's closeIfUnheld path.
+      const clientCount =
+        override !== null && override !== undefined
+          ? (override.clientCount ?? 1)
+          : 1;
+      if (closeOpts?.closeIfUnheld === true && clientCount > 1) {
+        return Promise.resolve();
+      }
       closedSessions.add(sessionId);
+      // A successful close tears the live entry down — model the real bridge
+      // so the TTL pre-removal re-validation sees the session gone.
+      if (opts?.liveSessionSummaries?.has(sessionId)) {
+        opts.liveSessionSummaries.set(sessionId, null);
+      }
+      if (opts?.reviveAfterClose?.includes(sessionId)) {
+        // A revival that bypasses the lifecycle lane re-created the live
+        // entry between the close and the unlink. A fixed fresh stamp: the
+        // revival's activity is newer than the armed clock, so a later sweep
+        // restarts it. Literal timestamps — the TTL describe's `OLD`/`Date`
+        // are out of scope in this module-level helper.
+        closedSessions.delete(sessionId);
+        opts?.liveSessionSummaries?.set(sessionId, {
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:01.000Z',
+        });
+      }
       if (opts?.closeSessionFails === 'not-found') {
         throw new SessionNotFoundError(sessionId);
       }
+      return Promise.resolve();
+    },
+    // Present so a TTL attachment cleanup cannot fail silently inside its
+    // swallowing catch — the production bridge always implements it.
+    deleteSessionAttachments: (sessionId: string) => {
+      attachmentDeletions.push(sessionId);
       return Promise.resolve();
     },
     enqueueBackgroundNotification: async (
@@ -486,6 +603,7 @@ function makeFakeBridge(opts?: {
     relocations,
     kills,
     detaches,
+    attachmentDeletions,
     resumes,
     operations,
     notifications,
@@ -495,6 +613,9 @@ function makeFakeBridge(opts?: {
     modeChanges,
     changeApprovalMode,
     subscribeCalls: () => subscribeCalls,
+    releaseCloseHang: () => {
+      hangCloseRelease?.();
+    },
   };
 }
 
@@ -2632,6 +2753,2017 @@ describe('sub-session launcher', () => {
   });
 });
 
+describe('sub-session completion TTL', () => {
+  // The launcher's fixed sweep cadence; TTL tests advance in its steps.
+  const SWEEP_MS = 5 * 60_000;
+  const TTL_MS = 60_000;
+  const OLD = '2026-01-01T00:00:00.000Z';
+  // Real setImmediate, captured before fake timers: fake-timer advances
+  // flush microtasks only, while the sweep chain may wait on real fs I/O
+  // (the disk discovery), which needs real event-loop turns.
+  const realSetImmediate = globalThis.setImmediate;
+  // Real setTimeout, captured before fake timers: a fire-and-forget sweep
+  // driven by real fs I/O must be awaited on real time, not fake turns.
+  const realSetTimeout = globalThis.setTimeout;
+  const drainRealEvents = (check: () => boolean, maxTurns = 5000) => {
+    let turns = 0;
+    return new Promise<void>((resolve) => {
+      const step = (): void => {
+        if (check() || turns >= maxTurns) {
+          resolve();
+          return;
+        }
+        turns++;
+        realSetImmediate(step);
+      };
+      step();
+    });
+  };
+  let liveSummaries: Map<
+    string,
+    {
+      createdAt?: string;
+      updatedAt?: string;
+      hasActivePrompt?: boolean;
+      hasRunningBackgroundTasks?: boolean;
+      activeWorkState?: string;
+      /** Attached clients (the production summary always reports at least
+       * the launcher's own registration, 1). */
+      clientCount?: number;
+    } | null
+  >;
+  let ws: string;
+  let runtimeBaseDir: string;
+  const createdDirs: string[] = [];
+
+  const mkDir = (): string => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sub-session-ttl-'));
+    createdDirs.push(dir);
+    return dir;
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    stderrLines.length = 0;
+    liveSummaries = new Map();
+    liveSummaries.set('sub-1', {
+      createdAt: OLD,
+      updatedAt: OLD,
+      hasActivePrompt: false,
+    });
+    ws = mkDir();
+    runtimeBaseDir = mkDir();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    for (const dir of createdDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  const makeTtlBridge = (opts?: Parameters<typeof makeFakeBridge>[0]) =>
+    makeFakeBridge({
+      events: (promptId) => [chunk('done'), turnComplete(promptId)],
+      liveSessionSummaries: liveSummaries,
+      ...opts,
+    });
+
+  it('removes a completed sub-session after the completion TTL', async () => {
+    const fake = makeTtlBridge();
+    let transcriptRemovalRuntimeBaseDir: string | undefined;
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockImplementation(async () => {
+        transcriptRemovalRuntimeBaseDir = Storage.getRuntimeBaseDir();
+        return true;
+      });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      const res = await launcher.launch({
+        prompt: 'do it',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      expect(res.stopReason).toBe('end_turn');
+      // First sweep (t=5min): the 1min clock has expired — the row goes.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      expect(transcriptRemovalRuntimeBaseDir).toBe(runtimeBaseDir);
+      expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+      expect(stderrLines.join('\n')).toContain(
+        'removed completed sub-session sub-1 from the roster',
+      );
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('stays terminal after removal: later cycles do not re-remove, re-log, or re-mark', async () => {
+    const fake = makeTtlBridge();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'do it',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      // Sweep 1: the removal lands.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledTimes(1);
+      // Model the shape the phantom re-sweep lived in: the live entry is
+      // gone (the reaper owns it from here) and the transcript is gone too.
+      liveSummaries.set('sub-1', null);
+      // Three more full cycles: nothing left to do — no second close,
+      // removal, catalog mark, or operator line.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS * 3);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledTimes(1);
+      expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+      expect(
+        stderrLines.filter((l) => l.includes('removed completed sub-session'))
+          .length,
+      ).toBe(1);
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('discovers a persisted completed sub-session after a daemon restart and removes it after the TTL', async () => {
+    // A fresh launcher (no in-memory clocks) must rediscover transcripts of
+    // previously completed sub-sessions instead of orphaning them forever.
+    const service = new SessionService(ws, { runtimeBaseDir });
+    const childId = '550e8400-e29b-41d4-a716-446655440000';
+    const primaryId = '660e8400-e29b-41d4-a716-446655440001';
+    const writeTranscript = (sessionId: string, withParent: boolean) => {
+      const p = service.getSessionTranscriptPath(sessionId);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      const head = {
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-01-01T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'x' }] },
+        cwd: ws,
+        version: '1.0.0',
+      };
+      const lines = [JSON.stringify(head)];
+      if (withParent) {
+        lines.push(
+          JSON.stringify({
+            type: 'system',
+            subtype: 'parent_session',
+            systemPayload: { parentSessionId: 'parent-1' },
+            sessionId,
+            cwd: ws,
+          }),
+          // The persisted turn result discovery classifies on: a clean
+          // completion is what the restart path reaps.
+          JSON.stringify({
+            type: 'system',
+            subtype: 'turn_result',
+            systemPayload: {
+              promptId: 'p1',
+              state: 'completed',
+              stopReason: 'end_turn',
+              endedAt: Date.parse(OLD),
+            },
+            sessionId,
+            cwd: ws,
+          }),
+        );
+      }
+      fs.writeFileSync(p, lines.map((l) => `${l}\n`).join(''), 'utf8');
+      return p;
+    };
+    const childPath = writeTranscript(childId, true);
+    const primaryPath = writeTranscript(primaryId, false);
+    // Age both transcripts past the TTL (relative to the frozen clock).
+    const aged = (Date.now() - TTL_MS - SWEEP_MS) / 1000;
+    fs.utimesSync(childPath, aged, aged);
+    fs.utimesSync(primaryPath, aged, aged);
+
+    const fake = makeTtlBridge();
+    liveSummaries.set(childId, null); // no live entry — the reaper already won
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockImplementation(async (id: string) => {
+        if (id === childId) return true;
+        throw new Error(`unexpected removal of ${id}`);
+      });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      // No launch in this process: the first sweep must find the child on
+      // disk (its transcript names a parent session) and must not touch the
+      // primary (no parent lineage).
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      // The discovery reads real files — let the sweep chain settle.
+      await drainRealEvents(() => removeSession.mock.calls.length > 0);
+      expect(fake.closes).toEqual([childId]);
+      expect(removeSession).toHaveBeenCalledWith(childId);
+      expect(removeSession).toHaveBeenCalledTimes(1);
+      expect(stderrLines.join('\n')).toContain(
+        `removed completed sub-session ${childId}`,
+      );
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('discovers every persisted sub-session whose mtime ties across the old page boundary', async () => {
+    // The paged listSessions mtime cursor silently skipped rows whose mtime
+    // tied with a page's last entry; discovery enumerates exhaustively
+    // instead, so a same-mtime batch must be fully discovered and reaped.
+    const service = new SessionService(ws, { runtimeBaseDir });
+    const writeCleanChild = (sessionId: string) => {
+      const p = service.getSessionTranscriptPath(sessionId);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      const head = {
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: OLD,
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'x' }] },
+        cwd: ws,
+        version: '1.0.0',
+      };
+      fs.writeFileSync(
+        p,
+        [
+          JSON.stringify(head),
+          JSON.stringify({
+            type: 'system',
+            subtype: 'parent_session',
+            systemPayload: { parentSessionId: 'parent-1' },
+            sessionId,
+            cwd: ws,
+          }),
+          JSON.stringify({
+            type: 'system',
+            subtype: 'turn_result',
+            systemPayload: {
+              promptId: 'p1',
+              state: 'completed',
+              stopReason: 'end_turn',
+              endedAt: Date.parse(OLD),
+            },
+            sessionId,
+            cwd: ws,
+          }),
+        ]
+          .map((l) => `${l}\n`)
+          .join(''),
+        'utf8',
+      );
+      return p;
+    };
+    // One more than one old discovery page (500 rows), all sharing a single
+    // mtime: the paged cursor would have stopped after the first page.
+    const ids: string[] = [];
+    const aged = (Date.now() - TTL_MS - SWEEP_MS) / 1000;
+    for (let i = 0; i < 520; i++) {
+      const id =
+        '990e8400-e29b-41d4-a716-' +
+        (0x446600000000 + i).toString(16).padStart(12, '0');
+      ids.push(id);
+      fs.utimesSync(writeCleanChild(id), aged, aged);
+      liveSummaries.set(id, null);
+    }
+    const fake = makeTtlBridge();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      // The sweep is fire-and-forget and its per-child discovery + removal
+      // is a chain of real fs reads, so wait on real time (the fake clock
+      // is already at the sweep tick) until every child is removed. The
+      // cap stays under the test timeout (15s local / 60s ECS).
+      const maxRealWaits = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+        ? 3000
+        : 1000;
+      let realWaits = 0;
+      while (
+        removeSession.mock.calls.length < ids.length &&
+        realWaits < maxRealWaits
+      ) {
+        await new Promise((resolve) => realSetTimeout(resolve, 10));
+        realWaits++;
+      }
+      expect(removeSession.mock.calls.length).toBe(ids.length);
+      expect(fake.closes).toHaveLength(ids.length);
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('keeps persisted sub-sessions whose last turn failed, was cancelled, or has no persisted turn result', async () => {
+    // After a restart the discovery may only reap what it can prove clean:
+    // the last persisted turn result must be completed/end_turn. A failed or
+    // cancelled turn keeps its diagnostic transcript, and a transcript
+    // without a readable turn result is unclassifiable, so it stays too.
+    const service = new SessionService(ws, { runtimeBaseDir });
+    const writeChild = (sessionId: string, turnResult: unknown | null) => {
+      const p = service.getSessionTranscriptPath(sessionId);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      const lines = [
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          timestamp: OLD,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'x' }] },
+          cwd: ws,
+          version: '1.0.0',
+        }),
+        JSON.stringify({
+          type: 'system',
+          subtype: 'parent_session',
+          systemPayload: { parentSessionId: 'parent-1' },
+          sessionId,
+          cwd: ws,
+        }),
+      ];
+      if (turnResult !== null) {
+        lines.push(
+          JSON.stringify({
+            type: 'system',
+            subtype: 'turn_result',
+            systemPayload: turnResult,
+            sessionId,
+            cwd: ws,
+          }),
+        );
+      }
+      fs.writeFileSync(p, lines.map((l) => `${l}\n`).join(''), 'utf8');
+      return p;
+    };
+    const erroredId = '770e8400-e29b-41d4-a716-446655440001';
+    const cancelledId = '770e8400-e29b-41d4-a716-446655440002';
+    const unclassifiedId = '770e8400-e29b-41d4-a716-446655440003';
+    const aged = (Date.now() - TTL_MS - SWEEP_MS) / 1000;
+    fs.utimesSync(
+      writeChild(erroredId, {
+        promptId: 'p1',
+        state: 'error',
+        endedAt: Date.parse(OLD),
+      }),
+      aged,
+      aged,
+    );
+    fs.utimesSync(
+      writeChild(cancelledId, {
+        promptId: 'p1',
+        state: 'cancelled',
+        endedAt: Date.parse(OLD),
+      }),
+      aged,
+      aged,
+    );
+    fs.utimesSync(writeChild(unclassifiedId, null), aged, aged);
+    for (const id of [erroredId, cancelledId, unclassifiedId]) {
+      liveSummaries.set(id, null);
+    }
+    const fake = makeTtlBridge();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      // Let the discovery and sweep chain settle on real event-loop turns.
+      for (let i = 0; i < 200; i++) {
+        await new Promise((resolve) => realSetImmediate(resolve));
+      }
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('keeps a clean sub-session whose later turn started but never settled, and a clean session without parent lineage', async () => {
+    // A clean result is the session's outcome only while no later turn has
+    // started: a send_message revival writes its user prompt (then a
+    // turn_attempt), a retry or continuation writes only the turn_attempt,
+    // and a daemon that dies before that turn settles leaves the start at
+    // the tail. Such a row is unclassifiable and must stay. A clean session
+    // without a parent_session record is not a sub-session at all. Two
+    // siblings in the same sweep prove the sweep ran: a plain clean
+    // sub-session, and one whose trailing user record is a multi-agent
+    // message (a subtype-bearing user record never starts a turn).
+    const service = new SessionService(ws, { runtimeBaseDir });
+    const cleanResult = {
+      type: 'system',
+      subtype: 'turn_result',
+      systemPayload: {
+        promptId: 'p1',
+        state: 'completed',
+        stopReason: 'end_turn',
+        endedAt: Date.parse(OLD),
+      },
+    };
+    const userPrompt = (uuid: string) => ({
+      uuid,
+      timestamp: OLD,
+      type: 'user',
+      message: { role: 'user', parts: [{ text: uuid }] },
+      version: '1.0.0',
+    });
+    const turnAttempt = {
+      type: 'system',
+      subtype: 'turn_attempt',
+      promptId: 'p1',
+      daemonPromptId: 'd2',
+    };
+    const writeTranscript = (
+      sessionId: string,
+      withParent: boolean,
+      tail: Array<Record<string, unknown>>,
+    ) => {
+      const p = service.getSessionTranscriptPath(sessionId);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      const records: Array<Record<string, unknown>> = [
+        userPrompt('u1'),
+        ...(withParent
+          ? [
+              {
+                type: 'system',
+                subtype: 'parent_session',
+                systemPayload: { parentSessionId: 'parent-1' },
+              },
+            ]
+          : []),
+        cleanResult,
+        ...tail,
+      ];
+      fs.writeFileSync(
+        p,
+        records
+          .map((r) => `${JSON.stringify({ ...r, sessionId, cwd: ws })}\n`)
+          .join(''),
+        'utf8',
+      );
+      const aged = (Date.now() - TTL_MS - SWEEP_MS) / 1000;
+      fs.utimesSync(p, aged, aged);
+    };
+    const cleanId = '880e8400-e29b-41d4-a716-446655440001';
+    const agentMessageId = '880e8400-e29b-41d4-a716-446655440002';
+    const interruptedId = '880e8400-e29b-41d4-a716-446655440003';
+    const userAfterCleanId = '880e8400-e29b-41d4-a716-446655440004';
+    const attemptAfterCleanId = '880e8400-e29b-41d4-a716-446655440005';
+    const topLevelId = '880e8400-e29b-41d4-a716-446655440006';
+    writeTranscript(cleanId, true, []);
+    writeTranscript(agentMessageId, true, [
+      { ...userPrompt('u2'), subtype: 'agent_message' },
+    ]);
+    writeTranscript(interruptedId, true, [userPrompt('u2'), turnAttempt]);
+    writeTranscript(userAfterCleanId, true, [userPrompt('u2')]);
+    writeTranscript(attemptAfterCleanId, true, [turnAttempt]);
+    writeTranscript(topLevelId, false, []);
+    for (const id of [
+      cleanId,
+      agentMessageId,
+      interruptedId,
+      userAfterCleanId,
+      attemptAfterCleanId,
+      topLevelId,
+    ]) {
+      liveSummaries.set(id, null);
+    }
+    const fake = makeTtlBridge();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      // Discovery classifies every row before the sweep removes any, so
+      // once both clean siblings are gone the kept rows were decided; the
+      // extra turns let a wrongly armed row's removal land before the check.
+      await drainRealEvents(() => removeSession.mock.calls.length >= 2);
+      for (let i = 0; i < 200; i++) {
+        await new Promise((resolve) => realSetImmediate(resolve));
+      }
+      expect([...fake.closes].sort()).toEqual([cleanId, agentMessageId].sort());
+      expect(removeSession.mock.calls.map(([id]) => id).sort()).toEqual(
+        [cleanId, agentMessageId].sort(),
+      );
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('restarts the TTL from persisted freshness when a reaped transcript was revived cleanly', async () => {
+    const fake = makeTtlBridge();
+    const service = new SessionService(ws, { runtimeBaseDir });
+    const transcriptPath = service.getSessionTranscriptPath('sub-1');
+    fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+    const head = JSON.stringify({
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId: 'sub-1',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', parts: [{ text: 'x' }] },
+      cwd: ws,
+      version: '1.0.0',
+    });
+    // The revival's turn settles clean: its persisted turn_result is what
+    // the removal-time allowlist accepts.
+    const cleanResult = JSON.stringify({
+      type: 'system',
+      subtype: 'turn_result',
+      systemPayload: {
+        promptId: 'p1',
+        state: 'completed',
+        stopReason: 'end_turn',
+        endedAt: Date.parse(OLD),
+      },
+    });
+    fs.writeFileSync(transcriptPath, `${head}\n`, 'utf8');
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      const startedAt = Date.now();
+      // The live entry is reaped, then a revival writes fresh activity to
+      // the transcript (a new prompt after completion) — all before the
+      // next sweep sees the session.
+      liveSummaries.set('sub-1', null);
+      const revivedAt = (startedAt + 100_000) / 1000;
+      fs.appendFileSync(transcriptPath, `${cleanResult}\n`, 'utf8');
+      fs.utimesSync(transcriptPath, revivedAt, revivedAt);
+      // Sweep 1: the completion clock is due, but the persisted transcript
+      // is newer than the clock — the revival restarts it, no removal.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+      // One TTL after the revival's activity, the next sweep removes: the
+      // on-disk tail still proves a clean completion.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS * 2);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('keeps a reaped transcript whose revival never settled, even once its TTL is due', async () => {
+    const fake = makeTtlBridge();
+    const service = new SessionService(ws, { runtimeBaseDir });
+    const transcriptPath = service.getSessionTranscriptPath('sub-1');
+    fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+    const head = JSON.stringify({
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId: 'sub-1',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', parts: [{ text: 'x' }] },
+      cwd: ws,
+      version: '1.0.0',
+    });
+    fs.writeFileSync(transcriptPath, `${head}\n`, 'utf8');
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      const startedAt = Date.now();
+      // The live entry is reaped, then a revival starts a new turn — its
+      // user prompt lands at the tail, but the turn never settles (no
+      // turn_result): the exact shape restart discovery must keep.
+      liveSummaries.set('sub-1', null);
+      const revivedAt = (startedAt + 100_000) / 1000;
+      fs.appendFileSync(transcriptPath, `${head}\n`, 'utf8');
+      fs.utimesSync(transcriptPath, revivedAt, revivedAt);
+      // Sweep 1: the completion clock is due, but the persisted transcript
+      // is newer than the clock — the revival restarts it, no removal.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+      // One TTL after the revival's activity: the clock is due, but the
+      // on-disk tail is an unsettled turn start — the removal-time
+      // allowlist keeps the transcript and the clock stays armed.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS * 2);
+      expect(removeSession).not.toHaveBeenCalled();
+      expect(fs.existsSync(transcriptPath)).toBe(true);
+      // The next sweep retries (the close is attempted again) and still
+      // removes nothing: kept rows are not dropped from the candidate set.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(removeSession).not.toHaveBeenCalled();
+      expect(fs.existsSync(transcriptPath)).toBe(true);
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('keeps a reaped transcript the user archived, even when the archived head is empty', async () => {
+    // A UUID-format id: the persisted-row lifecycle classifier only inspects
+    // ids that match the session-file pattern (production sub-sessions are
+    // UUIDs), so a non-UUID id would leave the keep-forever guard a no-op.
+    const subId = '880e8400-e29b-41d4-a716-446655440020';
+    liveSummaries.set(subId, {
+      createdAt: OLD,
+      updatedAt: OLD,
+      hasActivePrompt: false,
+    });
+    const fake = makeTtlBridge({ spawnedSessionId: subId });
+    const service = new SessionService(ws, { runtimeBaseDir });
+    const transcriptPath = service.getSessionTranscriptPath(subId);
+    fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+    const head = JSON.stringify({
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId: subId,
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', parts: [{ text: 'x' }] },
+      cwd: ws,
+      version: '1.0.0',
+    });
+    fs.writeFileSync(transcriptPath, `${head}\n`, 'utf8');
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      // The user archives the finished sub-session, and the archived copy's
+      // head line is damaged (the archive action accepts a truncated
+      // transcript): a head-reading classifier cannot see the row at all,
+      // but the file occupies its archived state.
+      liveSummaries.set(subId, null);
+      const archivedPath = path.join(
+        path.dirname(transcriptPath),
+        'archive',
+        `${subId}.jsonl`,
+      );
+      fs.mkdirSync(path.dirname(archivedPath), { recursive: true });
+      fs.renameSync(transcriptPath, archivedPath);
+      fs.writeFileSync(archivedPath, `${head.slice(0, 12)}\n`, 'utf8');
+      // The clock is due, but the row is archived — kept forever, and the
+      // clock is dropped: later sweeps no-op.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+      expect(fs.existsSync(archivedPath)).toBe(true);
+      await vi.advanceTimersByTimeAsync(SWEEP_MS * 2);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+      expect(fs.existsSync(archivedPath)).toBe(true);
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('keeps a row present in both the active and the archive directories', async () => {
+    // A UUID-format id, as in the archived case above: the conflict
+    // classification (`getMaintainableSessionLocation`) only inspects
+    // ids that match the session-file pattern.
+    const subId = '880e8400-e29b-41d4-a716-446655440021';
+    liveSummaries.set(subId, {
+      createdAt: OLD,
+      updatedAt: OLD,
+      hasActivePrompt: false,
+    });
+    const fake = makeTtlBridge({ spawnedSessionId: subId });
+    const service = new SessionService(ws, { runtimeBaseDir });
+    const transcriptPath = service.getSessionTranscriptPath(subId);
+    fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+    const head = JSON.stringify({
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId: subId,
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', parts: [{ text: 'x' }] },
+      cwd: ws,
+      version: '1.0.0',
+    });
+    fs.writeFileSync(transcriptPath, `${head}\n`, 'utf8');
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      // A torn archive: the row is in both directories. The lifecycle
+      // classifier calls that a conflict, and the keep-forever guard must
+      // treat it as archived — removeSession unlinks every identity in a
+      // single call, so "not archived" would destroy the archived copy.
+      liveSummaries.set(subId, null);
+      const archivedPath = path.join(
+        path.dirname(transcriptPath),
+        'archive',
+        `${subId}.jsonl`,
+      );
+      fs.mkdirSync(path.dirname(archivedPath), { recursive: true });
+      fs.copyFileSync(transcriptPath, archivedPath);
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+      expect(fs.existsSync(archivedPath)).toBe(true);
+      await vi.advanceTimersByTimeAsync(SWEEP_MS * 2);
+      expect(removeSession).not.toHaveBeenCalled();
+      expect(fs.existsSync(archivedPath)).toBe(true);
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('keeps scanning when one persisted transcript cannot be opened', async () => {
+    const service = new SessionService(ws, { runtimeBaseDir });
+    const poisonId = '880e8400-e29b-41d4-a716-446655440010';
+    const cleanId = '880e8400-e29b-41d4-a716-446655440011';
+    const cleanResult = {
+      type: 'system',
+      subtype: 'turn_result',
+      systemPayload: {
+        promptId: 'p1',
+        state: 'completed',
+        stopReason: 'end_turn',
+        endedAt: Date.parse(OLD),
+      },
+    };
+    const writeRow = (sessionId: string) => {
+      const p = service.getSessionTranscriptPath(sessionId);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      const records = [
+        {
+          uuid: 'u1',
+          timestamp: OLD,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'x' }] },
+          version: '1.0.0',
+        },
+        {
+          type: 'system',
+          subtype: 'parent_session',
+          systemPayload: { parentSessionId: 'parent-1' },
+        },
+        cleanResult,
+      ];
+      fs.writeFileSync(
+        p,
+        records
+          .map((r) => `${JSON.stringify({ ...r, sessionId, cwd: ws })}\n`)
+          .join(''),
+        'utf8',
+      );
+      const aged = (Date.now() - TTL_MS - SWEEP_MS) / 1000;
+      fs.utimesSync(p, aged, aged);
+    };
+    writeRow(poisonId);
+    writeRow(cleanId);
+    // The poison row's head is readable (it lists and passes the parent
+    // check), but its tail read's open fails — EACCES after an ownership
+    // change, say. It must be skipped, not fatal: the clean sibling is
+    // still armed and removed.
+    const poisonPath = service.getSessionTranscriptPath(poisonId);
+    const realOpenSync = fs.openSync.bind(fs);
+    const openSpy = vi.spyOn(fs, 'openSync').mockImplementation(((
+      p: string,
+      ...rest: unknown[]
+    ) => {
+      if (p === poisonPath) {
+        const err = new Error(`open '${poisonPath}'`) as NodeJS.ErrnoException;
+        err.code = 'EACCES';
+        throw err;
+      }
+      return realOpenSync(p, ...(rest as [string]));
+    }) as typeof fs.openSync);
+    liveSummaries.set(poisonId, null);
+    liveSummaries.set(cleanId, null);
+    const fake = makeTtlBridge();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      await drainRealEvents(() => removeSession.mock.calls.length >= 1);
+      for (let i = 0; i < 200; i++) {
+        await new Promise((resolve) => realSetImmediate(resolve));
+      }
+      expect(removeSession.mock.calls.map(([id]) => id)).toEqual([cleanId]);
+    } finally {
+      openSpy.mockRestore();
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('keeps a TTL-expired sub-session while a second client is attached, and removes after it detaches', async () => {
+    const fake = makeTtlBridge();
+    const service = new SessionService(ws, { runtimeBaseDir });
+    const transcriptPath = service.getSessionTranscriptPath('sub-1');
+    fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+    const head = JSON.stringify({
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId: 'sub-1',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', parts: [{ text: 'x' }] },
+      cwd: ws,
+      version: '1.0.0',
+    });
+    const cleanResult = JSON.stringify({
+      type: 'system',
+      subtype: 'turn_result',
+      systemPayload: {
+        promptId: 'p1',
+        state: 'completed',
+        stopReason: 'end_turn',
+        endedAt: Date.parse(OLD),
+      },
+    });
+    fs.writeFileSync(transcriptPath, `${head}\n${cleanResult}\n`, 'utf8');
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      // A reader opens the finished sub-session from the roster: the
+      // launcher holds the first registration, the reader is the second.
+      liveSummaries.set('sub-1', {
+        createdAt: OLD,
+        updatedAt: OLD,
+        hasActivePrompt: false,
+        clientCount: 2,
+      });
+      // The clock is due, but the attached reader keeps the session live —
+      // no close, no removal.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+      // The reader detaches (back to the launcher's own registration):
+      // the next sweep removes.
+      liveSummaries.set('sub-1', {
+        createdAt: OLD,
+        updatedAt: OLD,
+        hasActivePrompt: false,
+        clientCount: 1,
+      });
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('keeps the transcript when a revival re-creates the live entry after the close', async () => {
+    const fake = makeTtlBridge({ reviveAfterClose: ['sub-1'] });
+    const service = new SessionService(ws, { runtimeBaseDir });
+    const transcriptPath = service.getSessionTranscriptPath('sub-1');
+    fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+    const head = JSON.stringify({
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId: 'sub-1',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', parts: [{ text: 'x' }] },
+      cwd: ws,
+      version: '1.0.0',
+    });
+    fs.writeFileSync(transcriptPath, `${head}\n`, 'utf8');
+    // Age the transcript well before the armed clock: the reaped branch
+    // restarts the clock when the persisted last write is newer than the
+    // due time, which would otherwise pre-empt the close under fake timers.
+    const aged = (Date.now() - TTL_MS - SWEEP_MS) / 1000;
+    fs.utimesSync(transcriptPath, aged, aged);
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      // The entry is idle-reaped, the clock is due, the close succeeds —
+      // and a revival that bypasses the lifecycle lane re-creates the
+      // live entry between the close and the unlink.
+      liveSummaries.set('sub-1', null);
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).not.toHaveBeenCalled();
+      expect(fs.existsSync(transcriptPath)).toBe(true);
+      // The re-validation saw the revived entry: it is live again, and the
+      // clock restarts from its fresh activity on the next sweeps.
+      expect(fake.bridge.getSessionSummary('sub-1').sessionId).toBe('sub-1');
+      await vi.advanceTimersByTimeAsync(SWEEP_MS * 2);
+      expect(removeSession).not.toHaveBeenCalled();
+      expect(fs.existsSync(transcriptPath)).toBe(true);
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('still removes when the close throws SessionNotFoundError for an idle-reaped entry', async () => {
+    const fake = makeTtlBridge({ closeThrowsWhenNotLive: true });
+    const service = new SessionService(ws, { runtimeBaseDir });
+    const transcriptPath = service.getSessionTranscriptPath('sub-1');
+    fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+    const head = JSON.stringify({
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId: 'sub-1',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', parts: [{ text: 'x' }] },
+      cwd: ws,
+      version: '1.0.0',
+    });
+    const cleanResult = JSON.stringify({
+      type: 'system',
+      subtype: 'turn_result',
+      systemPayload: {
+        promptId: 'p1',
+        state: 'completed',
+        stopReason: 'end_turn',
+        endedAt: Date.parse(OLD),
+      },
+    });
+    fs.writeFileSync(transcriptPath, `${head}\n${cleanResult}\n`, 'utf8');
+    // Age the transcript well before the armed clock (see the revival test):
+    // a persisted last write newer than the due time would restart the clock
+    // and pre-empt the close under fake timers.
+    const aged = (Date.now() - TTL_MS - SWEEP_MS) / 1000;
+    fs.utimesSync(transcriptPath, aged, aged);
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      // The idle reaper already won: the close throws the normal
+      // production path (SessionNotFoundError), which the sweep tolerates
+      // and proceeds past — replacing the tolerance with a
+      // catch-and-return would silently remove nothing.
+      liveSummaries.set('sub-1', null);
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      expect(stderrLines.join('\n')).toContain(
+        'removed completed sub-session sub-1',
+      );
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('stays armed when the transcript removal rejects, and removes on the retry', async () => {
+    const fake = makeTtlBridge();
+    const service = new SessionService(ws, { runtimeBaseDir });
+    const transcriptPath = service.getSessionTranscriptPath('sub-1');
+    fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+    const head = JSON.stringify({
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId: 'sub-1',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', parts: [{ text: 'x' }] },
+      cwd: ws,
+      version: '1.0.0',
+    });
+    const cleanResult = JSON.stringify({
+      type: 'system',
+      subtype: 'turn_result',
+      systemPayload: {
+        promptId: 'p1',
+        state: 'completed',
+        stopReason: 'end_turn',
+        endedAt: Date.parse(OLD),
+      },
+    });
+    fs.writeFileSync(transcriptPath, `${head}\n${cleanResult}\n`, 'utf8');
+    // Age the transcript well before the armed clock (see the revival test):
+    // a persisted last write newer than the due time would restart the clock
+    // and pre-empt the removal under fake timers.
+    const aged = (Date.now() - TTL_MS - SWEEP_MS) / 1000;
+    fs.utimesSync(transcriptPath, aged, aged);
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockRejectedValueOnce(new Error('unlink failed'))
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      liveSummaries.set('sub-1', null);
+      // The first removal attempt rejects: nothing is removed, marked, or
+      // logged, and the entry stays armed.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(removeSession).toHaveBeenCalledTimes(1);
+      expect(fake.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
+      expect(stderrLines.join('\n')).not.toContain(
+        'removed completed sub-session',
+      );
+      // The next sweep retries and lands.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(removeSession).toHaveBeenCalledTimes(2);
+      expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+      expect(stderrLines.join('\n')).toContain(
+        'removed completed sub-session sub-1',
+      );
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('drops the attachment store when the TTL removes a sub-session, and a failed drop does not break the removal', async () => {
+    const fake = makeTtlBridge();
+    const service = new SessionService(ws, { runtimeBaseDir });
+    const transcriptPath = service.getSessionTranscriptPath('sub-1');
+    fs.mkdirSync(path.dirname(transcriptPath), { recursive: true });
+    const head = JSON.stringify({
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId: 'sub-1',
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', parts: [{ text: 'x' }] },
+      cwd: ws,
+      version: '1.0.0',
+    });
+    const cleanResult = JSON.stringify({
+      type: 'system',
+      subtype: 'turn_result',
+      systemPayload: {
+        promptId: 'p1',
+        state: 'completed',
+        stopReason: 'end_turn',
+        endedAt: Date.parse(OLD),
+      },
+    });
+    fs.writeFileSync(transcriptPath, `${head}\n${cleanResult}\n`, 'utf8');
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      // (the live entry is work-free; no reaping needed)
+      await vi.advanceTimersByTimeAsync(SWEEP_MS * 2);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      // A reaped orphan is never looked up again: the attachment bytes
+      // must not leak from both storage roots.
+      expect(fake.attachmentDeletions).toEqual(['sub-1']);
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+
+    // A failing attachment drop logs instead of failing the sweep: the
+    // transcript removal still lands.
+    const failingFake = makeTtlBridge();
+    const failingService = new SessionService(ws, { runtimeBaseDir });
+    const failingPath = failingService.getSessionTranscriptPath('sub-1');
+    fs.writeFileSync(failingPath, `${head}\n${cleanResult}\n`, 'utf8');
+    const failingRemove = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const failingLauncher = createSubSessionLauncher({
+      getBridge: () => failingFake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+    const failingAttachments = vi
+      .spyOn(failingFake.bridge, 'deleteSessionAttachments')
+      .mockRejectedValue(new Error('attachment store gone'));
+    try {
+      await failingLauncher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      await vi.advanceTimersByTimeAsync(SWEEP_MS * 2);
+      expect(failingRemove).toHaveBeenCalledWith('sub-1');
+      expect(stderrLines.join('\n')).toContain(
+        'removed completed sub-session sub-1',
+      );
+    } finally {
+      failingLauncher.stop();
+      failingAttachments.mockRestore();
+      failingRemove.mockRestore();
+    }
+  });
+
+  it('keeps completed sub-sessions forever when the TTL is 0', async () => {
+    const fake = makeTtlBridge();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: 0,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      // Ten "days" of sweeps — none are even started when the TTL is 0
+      // (no sweeper is installed at all).
+      await vi.advanceTimersByTimeAsync(10 * 24 * 60 * 60_000);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('never removes a sub-session with an active prompt', async () => {
+    const fake = makeTtlBridge();
+    liveSummaries.set('sub-1', {
+      createdAt: OLD,
+      updatedAt: OLD,
+      hasActivePrompt: true,
+    });
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      // Well past the TTL, but the turn is still running.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS * 2);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('never removes a sub-session with running background tasks', async () => {
+    const fake = makeTtlBridge();
+    liveSummaries.set('sub-1', {
+      createdAt: OLD,
+      updatedAt: OLD,
+      hasActivePrompt: false,
+      hasRunningBackgroundTasks: true,
+    });
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      // The turn completed, but background work is still in flight.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS * 2);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('never removes a sub-session with an active work state', async () => {
+    const fake = makeTtlBridge();
+    liveSummaries.set('sub-1', {
+      createdAt: OLD,
+      updatedAt: OLD,
+      hasActivePrompt: false,
+      activeWorkState: 'active',
+    });
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      await vi.advanceTimersByTimeAsync(SWEEP_MS * 2);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('defers a due removal while the session lifecycle lane is held, then removes it', async () => {
+    const fake = makeTtlBridge();
+    const coordinator = new SessionArchiveCoordinator();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+      getArchiveCoordinator: () => coordinator,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      // A prompt admission (shared lane) is in flight when the clock falls
+      // due: the removal must not race it.
+      let releaseLease!: () => void;
+      const lease = coordinator.runSharedMany(
+        ['sub-1'],
+        () =>
+          new Promise<void>((resolve) => {
+            releaseLease = resolve;
+          }),
+      );
+      await vi.advanceTimersByTimeAsync(SWEEP_MS * 2);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+      // The lane is free again: the still-armed clock removes it.
+      releaseLease();
+      await lease;
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('closes and removes under the exclusive lane, so a revival cannot be admitted mid-removal', async () => {
+    const fake = makeTtlBridge();
+    const coordinator = new SessionArchiveCoordinator();
+    const admissionErrors: unknown[] = [];
+    const tryAdmit = async (): Promise<void> => {
+      try {
+        await coordinator.runSharedMany(['sub-1'], async () => undefined);
+        admissionErrors.push('admitted');
+      } catch (error) {
+        admissionErrors.push(error);
+      }
+    };
+    const close = fake.bridge.closeSession.bind(fake.bridge);
+    fake.bridge.closeSession = async (
+      ...args: Parameters<typeof close>
+    ): Promise<void> => {
+      await tryAdmit();
+      return close(...args);
+    };
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockImplementation(async () => {
+        await tryAdmit();
+        return true;
+      });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+      getArchiveCoordinator: () => coordinator,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      // Both the close and the transcript removal ran while the lane was
+      // exclusively held: a send_message admission there is refused.
+      expect(admissionErrors).toHaveLength(2);
+      for (const error of admissionErrors) {
+        expect(error).toBeInstanceOf(SessionArchivingError);
+      }
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('re-checks eligibility under the lane: a prompt admitted after the sweep check keeps the session', async () => {
+    const fake = makeTtlBridge();
+    const coordinator = new SessionArchiveCoordinator();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+      getArchiveCoordinator: () =>
+        ({
+          runExclusiveMany: (ids: string[], fn: () => Promise<unknown>) => {
+            // A revival lands after the sweep read the entry as work-free
+            // and before the removal holds the lane.
+            liveSummaries.set('sub-1', {
+              createdAt: OLD,
+              updatedAt: OLD,
+              hasActivePrompt: true,
+            });
+            return coordinator.runExclusiveMany(ids, fn);
+          },
+        }) as unknown as SessionArchiveCoordinator,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('restarts the TTL from the latest activity when the sub-session is revived', async () => {
+    const fake = makeTtlBridge();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      // A prompt after completion wrote fresh activity — visible to the
+      // first sweep as the entry's updated timestamp.
+      liveSummaries.set('sub-1', {
+        createdAt: OLD,
+        updatedAt: new Date(Date.now() + SWEEP_MS).toISOString(),
+        hasActivePrompt: false,
+      });
+      // Sweep 1: the clock restarts from the revival — nothing due yet.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+      // One full TTL after the revival, the next sweep removes.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS * 2);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('starts the TTL when an unobserved sub-session is idle-reaped', async () => {
+    const fake = makeTtlBridge({
+      events: () => [chunk('long')],
+      blockAfterEvents: true, // the turn runs past the observer's ceiling
+    });
+    liveSummaries.set('sub-1', {
+      createdAt: OLD,
+      updatedAt: OLD,
+      hasActivePrompt: true,
+    });
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+      firstTurnTimeoutMs: 200,
+    });
+
+    try {
+      const promise = launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      // The observer gives up at the wall-clock ceiling; the turn is not
+      // terminal-marked, so nothing is due while the entry is live.
+      await vi.advanceTimersByTimeAsync(200);
+      const res = await promise;
+      expect(res.stopReason).toBe('timeout');
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(removeSession).not.toHaveBeenCalled();
+      // The idle reaper closed the work-free session. The launcher now knows
+      // the turn is over and starts the clock from that moment.
+      liveSummaries.set('sub-1', null);
+      await vi.advanceTimersByTimeAsync(SWEEP_MS); // clock armed, not due
+      expect(removeSession).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(SWEEP_MS); // one TTL after arming
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('keeps the transcript of a sub-session whose turn errored', async () => {
+    const fake = makeTtlBridge({
+      events: (pid) => [chunk('partial'), turnError(pid, 'model exploded')],
+    });
+    liveSummaries.set('sub-1', null); // the reaper closes the work-free entry
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      const res = await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      expect(res.stopReason).toBe('error');
+      // Diagnostic transcripts are kept: several sweeps past the TTL.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS * 3);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('keeps the transcript of a cancelled sub-session', async () => {
+    const fake = makeTtlBridge({
+      events: (pid) => [chunk('partial'), turnComplete(pid, 'cancelled')],
+    });
+    liveSummaries.set('sub-1', null);
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      const res = await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      expect(res.stopReason).toBe('cancelled');
+      await vi.advanceTimersByTimeAsync(SWEEP_MS * 3);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('still removes a sub-session whose stream ended incomplete after the reaper closed it', async () => {
+    const fake = makeTtlBridge({
+      events: () => [chunk('partial')],
+      blockAfterEvents: false, // the stream ends on its own — 'incomplete'
+    });
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      const res = await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      expect(res.stopReason).toBe('incomplete');
+      // Not a clean completion, but not diagnostic either: the observer
+      // simply stopped seeing the turn. While the entry is live, nothing is
+      // due; the reaper closing it is what makes it terminal.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(removeSession).not.toHaveBeenCalled();
+      liveSummaries.set('sub-1', null);
+      await vi.advanceTimersByTimeAsync(SWEEP_MS); // clock armed, not due
+      expect(removeSession).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(SWEEP_MS); // one TTL after arming
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('retries a removal whose close failed, and stays armed meanwhile', async () => {
+    const closeSessionState: { fail?: 'sync' | 'async' } = {
+      fail: 'async',
+    };
+    const fake = makeTtlBridge({ closeSessionState });
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      // Sweep 1: the close fails — nothing may be removed, marked, or logged.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(removeSession).not.toHaveBeenCalled();
+      expect(fake.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
+      expect(stderrLines.join('\n')).not.toContain(
+        'removed completed sub-session',
+      );
+      // The bridge recovers — the next sweep retries and lands.
+      closeSessionState.fail = undefined;
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('marks nothing and logs nothing when the transcript removal reports false, and stays terminal', async () => {
+    const fake = makeTtlBridge();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(false);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledTimes(1);
+      expect(fake.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
+      expect(stderrLines.join('\n')).not.toContain(
+        'removed completed sub-session',
+      );
+      // Terminal anyway: the next sweep does not re-close or re-remove.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledTimes(1);
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('skips a candidate on a transient summary error and removes it later', async () => {
+    const fake = makeTtlBridge({
+      summaryErrors: new Map([['sub-1', 'bridge hiccup']]),
+    });
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      // Sweep 1: the summary read fails — the candidate is skipped, not
+      // removed (and the failure is not treated as "session gone").
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+      // Sweep 2: the bridge recovered — the removal lands.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('serializes overlapping sweeps so each due session is removed exactly once', async () => {
+    const fake = makeTtlBridge({ closeSessionHangsOn: ['sub-1'] });
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'one',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      await launcher.launch({
+        prompt: 'two',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      // Both are due; sub-1's close hangs, holding the sweep in flight.
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      // A second interval tick while the sweep is in flight must not start
+      // a second sweep (which would double-close sub-1).
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual(['sub-1']);
+      // The closes tore the entries down; release the hang and the in-flight
+      // sweep finishes sub-1, then proceeds to sub-2.
+      liveSummaries.set('sub-1', null);
+      liveSummaries.set('sub-2', null);
+      fake.releaseCloseHang();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fake.closes.sort()).toEqual(['sub-1', 'sub-2']);
+      expect(removeSession).toHaveBeenCalledTimes(2);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      expect(removeSession).toHaveBeenCalledWith('sub-2');
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('removes a completed sent sub-session after the drain observes the turn end', async () => {
+    const fake = makeTtlBridge();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      const res = await launcher.launch({
+        prompt: 'x',
+        completion: 'sent',
+        callerSessionId: 'c1',
+      });
+      expect(res.sessionId).toBe('sub-1');
+      // The background drain observes the turn end (sent-mode success path),
+      // then the clock expires on the first sweep.
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      expect(stderrLines.join('\n')).toContain(
+        'removed completed sub-session sub-1 from the roster',
+      );
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('keeps the transcript of a sent sub-session whose dispatch failed', async () => {
+    const fake = makeTtlBridge({
+      sendPromptRejects: 'dispatch failed',
+      events: () => [],
+      blockAfterEvents: true, // the drain observes the rejection, not a turn
+    });
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      const res = await launcher.launch({
+        prompt: 'x',
+        completion: 'sent',
+        callerSessionId: 'c1',
+      });
+      expect(res.sessionId).toBe('sub-1');
+      // The background drain observes the dispatch failure: the turn is over
+      // and failed — its diagnostic transcript is kept, never a removal
+      // candidate (even after the live entry is reaped).
+      await vi.advanceTimersByTimeAsync(0);
+      liveSummaries.set('sub-1', null);
+      await vi.advanceTimersByTimeAsync(SWEEP_MS * 3);
+      expect(fake.closes).toEqual([]);
+      expect(removeSession).not.toHaveBeenCalled();
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('removes a completed sub-session whose roster id the FIFO cap evicted', async () => {
+    const fake = makeTtlBridge();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      const first = await launcher.launch({
+        prompt: 'first',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+      expect(first.sessionId).toBe('sub-1');
+      // Spawn enough more sub-sessions to push the tracked-roster cap and
+      // FIFO-evict sub-1's roster entry — its completion clock must survive
+      // the eviction, or the transcript would outlive retention forever.
+      for (let i = 0; i < MAX_TRACKED_SPAWNED_SESSIONS; i++) {
+        await launcher.launch({
+          prompt: 'x',
+          completion: 'first-turn',
+          callerSessionId: 'c1',
+        });
+      }
+      // The reaper closed everything; every transcript is due at the sweep.
+      for (let i = 1; i <= fake.spawns.length; i++) {
+        liveSummaries.set(`sub-${i}`, null);
+      }
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
+      expect(fake.closes).toContain('sub-1');
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+    } finally {
+      launcher.stop();
+      removeSession.mockRestore();
+    }
+  });
+
+  it('stop() clears the TTL sweeper (no removal after shutdown)', async () => {
+    const fake = makeTtlBridge();
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: ws,
+      runtimeBaseDir,
+      completionTtlMs: TTL_MS,
+    });
+
+    try {
+      await launcher.launch({
+        prompt: 'x',
+        completion: 'first-turn',
+        callerSessionId: 'c1',
+      });
+    } finally {
+      launcher.stop();
+    }
+    await vi.advanceTimersByTimeAsync(SWEEP_MS * 2);
+    expect(fake.closes).toEqual([]);
+    expect(removeSession).not.toHaveBeenCalled();
+    removeSession.mockRestore();
+  });
+});
+
 describe('sub-sessions in another workspace', () => {
   const WS_A = '/tmp/ws-a';
   const WS_B = '/tmp/ws-b';
@@ -3783,6 +5915,43 @@ describe('following up a sub-session', () => {
       sessionId,
       callerSessionId: 'caller',
     });
+
+  it('names the TTL setting when a followed-up sub-session has no live entry and no persisted row, and the TTL is on', async () => {
+    const resolve = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValue(undefined);
+    try {
+      const fake = makeFakeBridge({ notLive: ['kid'] });
+      const launcher = createSubSessionLauncher({
+        getBridge: () => fake.bridge,
+        boundWorkspace: WS,
+        getArchiveCoordinator,
+        completionTtlMs: 60_000,
+      });
+      // The session was removed: the generic lineage refusal is false for
+      // the creator and sends the caller hunting for "another workspace",
+      // so the error names the setting that removes completed
+      // sub-sessions instead.
+      await expect(followUp(launcher)).rejects.toThrow(
+        'is no longer available',
+      );
+      await expect(followUp(launcher)).rejects.toThrow(
+        'serve.subSessionCompletionTtlHours',
+      );
+      expect(fake.resumes).toEqual([]);
+      // The constraint: with the TTL off the generic refusal stands.
+      const ttlOffLauncher = createSubSessionLauncher({
+        getBridge: () => fake.bridge,
+        boundWorkspace: WS,
+        getArchiveCoordinator,
+      });
+      await expect(followUp(ttlOffLauncher)).rejects.toThrow(
+        'is not a sub-session this session created',
+      );
+    } finally {
+      resolve.mockRestore();
+    }
+  });
 
   it('first-turn: queues the prompt on its own sub-session and returns only that turn', async () => {
     const { fake, launcher } = ownChild();

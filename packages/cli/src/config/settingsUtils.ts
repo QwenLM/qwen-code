@@ -291,6 +291,9 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'outboundCorrelation', key: 'allowDynamicHeaderValues' },
   { section: 'serve', key: 'tokenQr' },
   { section: 'serve', key: 'maxSessions' },
+  // A cloned repository must not make the daemon delete the user's
+  // completed sub-session transcripts: retention is the operator's call.
+  { section: 'serve', key: 'subSessionCompletionTtlHours' },
   // A repository must not spend daemon-wide gh budget or inject prompts into
   // sessions across workspaces; the trust-gated channel alias is its path.
   { section: 'serve', key: 'sessionPrWatch' },
