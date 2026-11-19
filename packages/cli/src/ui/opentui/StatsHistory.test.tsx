@@ -12,6 +12,7 @@ import { buildHeatmapData } from '../utils/asciiCharts.js';
 import { StatsHistory, statsMonths } from './StatsHistory.js';
 import { OpenTuiStatsDialog } from './dialogs-stats-skills.js';
 import { catalogKey } from '../../test-utils/opentui-catalog.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 const mock = vi.hoisted(() => ({
   keys: [] as Array<(key: unknown) => void>,
@@ -378,6 +379,14 @@ describe('native historical statistics', () => {
     expect(monRow.slice(0, 4)).toBe('Mon ');
     expect(monRow.slice(4, 6)).toBe(heatmap.rows[0]!.cells[0]!.char);
     expect(monRow.length).toBe(4 + 2 * heatmap.totalCols);
+    let axis = '';
+    for (const label of heatmap.colLabels) {
+      axis = axis.padEnd(label.col * 2) + label.text;
+    }
+    const axisRow = [...view.container.querySelectorAll('span')]
+      .map((node) => node.textContent ?? '')
+      .find((text) => text.endsWith(axis))!;
+    expect(axisRow).toBe(' '.repeat(heatmap.rows[0]!.label.length) + axis);
   });
 
   it('hides the Projects block on an empty report', () => {
@@ -486,5 +495,79 @@ describe('native historical statistics', () => {
     mock.loading = false;
     view.rerender(<OpenTuiStatsDialog config={null} onClose={vi.fn()} />);
     expect(view.container.textContent).toContain('Sep 2026');
+  });
+
+  it('marks the selected tab for the screen reader on per-tab text nodes', () => {
+    render(<OpenTuiStatsDialog config={null} onClose={vi.fn()} />);
+    const tabIds = () =>
+      mock.layouts
+        .filter(
+          (node) =>
+            node.type === 'text' &&
+            String(node.props['id'] ?? '').endsWith('-tab'),
+        )
+        .slice(-3)
+        .map((node) => node.props['id']);
+    expect(tabIds()).toEqual([
+      'screen-reader-selected-tab',
+      'screen-reader-unselected-tab',
+      'screen-reader-unselected-tab',
+    ]);
+    act(() => {
+      press('tab');
+    });
+    expect(tabIds()).toEqual([
+      'screen-reader-unselected-tab',
+      'screen-reader-selected-tab',
+      'screen-reader-unselected-tab',
+    ]);
+  });
+
+  it('resets the paged month when the range changes its window', () => {
+    const view = render(<OpenTuiStatsDialog config={null} onClose={vi.fn()} />);
+    const heatmapWindow = () =>
+      /Activity Heatmap {2}\w+ \d+, \d{4} - \w+ \d+, \d{4}/.exec(
+        view.container.textContent ?? '',
+      )![0];
+    act(() => {
+      press('tab');
+    });
+    const current = heatmapWindow();
+    act(() => {
+      press('h');
+    });
+    expect(view.container.textContent).toContain('Sep 2026');
+    expect(heatmapWindow()).not.toBe(current);
+    act(() => {
+      press('r');
+    });
+    expect(heatmapWindow()).toBe(current);
+  });
+
+  it('localizes the chart peak and the project overflow counter', async () => {
+    const data = report();
+    data.report.projects = Array.from({ length: 6 }, (_, index) => ({
+      path: `/owned/p${index}`,
+      sessionCount: 1,
+      totalTokens: 100,
+      totalDurationMs: 1000,
+    }));
+    await setLanguageAsync('zh');
+    try {
+      const view = render(
+        <StatsHistory
+          data={data}
+          tab="activity"
+          range="all"
+          monthOffset={0}
+          width={110}
+        />,
+      );
+      const text = view.container.textContent;
+      expect(text).toContain('峰值');
+      expect(text).toContain('+1 个');
+    } finally {
+      await setLanguageAsync('en');
+    }
   });
 });

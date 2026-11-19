@@ -2,6 +2,12 @@
 
 [English](2026-11-15-opentui-stats-history.md) | [简体中文](2026-11-15-opentui-stats-history.zh-CN.md)
 
+## 验证记录——2026-11-19（切换范围重置月份）
+
+本轮合入`origin/main`（`a8f43b92`）并修复评审的Critical：循环`r`会重置月份索引，因此切换范围不会让Activity热力图停在新范围按键无法离开的月份。tab栏冲突的解决保留本移植的compact换行header，宽视图按tab逐个渲染text节点，从而把main的screen-reader选中/未选中tab id保留在presentation实际读取的节点上；历史hook fixture补上main新增的必填`userPromptCount`字段。合并后的树上构建、类型检查、lint、i18n语言包门禁与格式检查均通过。相关CLI套件通过139项测试（stats服务、原生历史、历史hook、对话框frame、对话框挂载、Settings），第二批通过144项（探针后重跑的原生历史、i18n、Ink stats标签页）。五个变异见证在各自守卫被移除时变红：切换范围重置、热力图坐标标签前缀、两处本地化调用点（`peak {{value}}`、`{{count}} more`）以及按tab的screen-reader id。
+
+Ink参照实现带有同样的陈旧偏移机制与同样的窄宽度热力图超宽（共享`buildHeatmapData`列数）；两者均延后到follow-up队列，不在本移植内单独分叉。A–D组公开leg与几何重放本轮未重跑，OpenTUI集成leg需要本runner不具备的bun；合入验收前需重跑。
+
 ## 验证记录——2026-11-16（评审修复）
 
 评审修复的源码树为 PR head 分支上的提交 `e87a0ab90c60fd7c3231f2eae6a655f713c6a01f`；本记录提交仅更新文档。该树上构建、类型检查、lint 与格式检查均通过。相关 CLI 套件通过 45 项测试（stats 服务、原生历史组件与历史 hook 三个文件）、164 项测试（对话框 frame、对话框挂载与 i18n 文件）以及 59 项 core usage-history 测试。新增与替换的回归用例在各自修复被还原时均变红（共九个变异见证，含幻影提示行与翻页方向、步长、重置）。区间基准用例现固定 TZ=UTC：修复前在 TZ=Etc/GMT+12 下失败，修复后通过。九语言包探针确认新键 `peak {{value}}` 与 `Statistics owner is unavailable.` 在每个语言包中均可加载并插值。
@@ -32,7 +38,7 @@ Group A真实基线已完成：global0.23公开场景通过（85377，0model HTT
 
 沿既有聚合语义恢复历史Activity和Efficiency。Activity包含session/时长/token汇总及差值、heatmap/streak、按月token趋势和项目；Efficiency包含cache命中率、工具成功率、延迟、工具榜单、模型明细与代码影响。保留已有Session数值和实时生成指标，不重写dashboard或历史存储。
 
-Tab / Shift+Tab在Session、Activity、Efficiency间循环。`r`沿既有范围定义循环`all → month → week → today → all`；尽管Ink原错误提示如此描述，它并不是新增的同范围retry命令。All-time Activity中Left/h移向较早实际月份，Right/l返回最新月份，边界由真实月份夹紧。复用既有文案及翻译key。加载、空历史、缺延迟字段、损坏/不可读历史及加载失败均遵循现有reader/service合同；必须区分成功空报告和真实reject。
+Tab / Shift+Tab在Session、Activity、Efficiency间循环。`r`沿既有范围定义循环`all → month → week → today → all`；尽管Ink原错误提示如此描述，它并不是新增的同范围retry命令。All-time Activity中Left/h移向较早实际月份，Right/l返回最新月份，边界由真实月份夹紧。循环`r`会把月份索引重置到最新月份，因此切换范围不会让热力图停在新范围按键无法离开的月份。复用既有文案及翻译key。加载、空历史、缺延迟字段、损坏/不可读历史及加载失败均遵循现有reader/service合同；必须区分成功空报告和真实reject。
 
 Settings嵌入宿主保留原焦点所有权：tab bar持焦时仅外层导航，进入内容后统计键才生效，Up/Escape按当前接线返回宿主。不重复处理或写设置。长表格及标签须能在实际传入高度中通过原生换行/滚动完整访问，适用时显示真实隐藏行数量；不固定裁断或虚构新导航键。
 
@@ -40,7 +46,7 @@ Settings嵌入宿主保留原焦点所有权：tab bar持焦时仅外层导航�
 
 main88首次五尺寸公开几何场景在40×18 Session失败：上边框位于第5行，提示移至第16行，底边超出18行viewport。此前120×40及80×18的tab/滚动阶段通过，20×15及40×12尚未到达。这是真实裁切，不能因此削弱完整框架识别。原先固定扣八/十行chrome，没有包含自然tab bar、范围及提示换行占用。
 
-仅原生Stats模块适配。通过公开BoxRenderable ref/onSizeChange读取外框宽度，compact判据将其与正常padding及完整正常chrome比较，因而compact自身padding变化不会反向振荡判据。宽视图保留三tab及全部范围标签；窄/短视图保留完整选中tab、当前范围及简短Tab/r/月份/PgUp/PgDn/Escape提示，并缩小padding和可选margin。compact滚动正文同时去除额外右padding，让20列下的十一格Session ID标签在既有scrollbar旁仍可完整显示。header、范围及提示改用真实word-wrap文本与既有styled span，并用既有wrappedRows对实际相同字符串计行。保留header/body之间一行分隔，滚动正文获得region剩余高度。
+仅原生Stats模块适配。通过公开BoxRenderable ref/onSizeChange读取外框宽度，compact判据将其与正常padding及完整正常chrome比较，因而compact自身padding变化不会反向振荡判据。宽视图保留三tab及全部范围标签；窄/短视图保留完整选中tab、当前范围及简短Tab/r/月份/PgUp/PgDn/Escape提示，并缩小padding和可选margin。compact滚动正文同时去除额外右padding，让20列下的十一格Session ID标签在既有scrollbar旁仍可完整显示。范围、提示与compact header仍为真实word-wrap文本与既有styled span，并用既有wrappedRows对实际相同字符串计行。宽视图header按tab逐个渲染text节点，使main的screen-reader选中/未选中tab id落在presentation实际读取的节点上。保留header/body之间一行分隔，滚动正文获得region剩余高度。
 
 十四处Row及五处SubRow消费者全部是本地Session指标。compact时完整标签和值上下堆叠；带颜色的工具/代码/时间/模型值采用可换行文本流，避免固定28列label或多box横排在20列终端隐藏值。独立Stats与Settings嵌入保留既有session、焦点和高度输入，不改共享Frame、region预留或Core。
 

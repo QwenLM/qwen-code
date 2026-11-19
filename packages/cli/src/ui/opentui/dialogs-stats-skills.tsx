@@ -244,6 +244,8 @@ export function OpenTuiStatsDialog(props: {
           (RANGE_CYCLE.indexOf(rangeRef.current) + 1) % RANGE_CYCLE.length
         ];
       rangeRef.current = next;
+      monthRef.current = 0;
+      setMonthOffset(0);
       setRange(next);
       return;
     }
