@@ -422,6 +422,8 @@ class ManagedWorkspaceAdmissionTest {
             public boolean isAvailable() { return true; }
             @Override
             public boolean isWorkspaceFilesAvailable() { return true; }
+            @Override
+            public boolean supportsInputAttachments() { return true; }
         };
         var coordinator = mock(com.alibaba.qwen.code.managedagent.session.HarnessCoordinator.class);
         ManagedAgentService admitted = new ManagedAgentService(enabled, new RequestDigests(), coordinator, harness, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
@@ -448,6 +450,7 @@ class ManagedWorkspaceAdmissionTest {
                 .isInstanceOf(ManagedAgentException.class);
         var capabilities = stopped.getWebShellSession(tenant, "actor-a", session).capabilities();
         assertThat(capabilities.workspaceTurns()).isTrue();
+        assertThat(capabilities.inputAttachments()).isTrue();
         assertThat(capabilities.foregroundShell()).isFalse();
         assertThat(capabilities.sessionClose()).isFalse();
         assertThat(capabilities.sessionDelete()).isFalse();
@@ -493,6 +496,19 @@ class ManagedWorkspaceAdmissionTest {
         assertThat(stopped.getPublicSession(tenant, "actor-a", files).capabilities().foregroundShell()).isNull();
         var fileTurn = transaction.execute(status -> stopped.submitTurn(tenant, "actor-a", "files-turn", files, input));
         assertThat(fileTurn).isNotNull();
+        // A bound Session whose Workspace files admission is off must not
+        // borrow the unbound arm: reds if the workspace()==null guard is
+        // deleted from the capability disjunct.
+        UnavailableHarnessConnector filesOffAttachments = new UnavailableHarnessConnector() {
+            @Override
+            public boolean isAvailable() { return true; }
+            @Override
+            public boolean isWorkspaceFilesAvailable() { return false; }
+            @Override
+            public boolean supportsInputAttachments() { return true; }
+        };
+        ManagedAgentService filesOff = new ManagedAgentService(disabled, new RequestDigests(), coordinator, filesOffAttachments, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        assertThat(filesOff.getWebShellSession(tenant, "actor-a", files).capabilities().inputAttachments()).isFalse();
     }
 
     @Test

@@ -301,6 +301,8 @@ public class ManagedAgentPropertiesTest {
                     "Events.materializeInterval",
                     "RuntimeBroker.childWorkspaceGitTimeout",
                     "Retention.scanDelay",
+                    "McpParking.idleDuration",
+                    "McpParking.scanDelay",
                     "Automation.scanDelay",
                     "Automation.lease",
                     "Automation.lateTolerance",
@@ -350,10 +352,10 @@ public class ManagedAgentPropertiesTest {
         }
         // The walk must not pass vacuously: extracting a group out of
         // the properties class empties it and the millisecond
-        // exceptions would go unchecked. 39 is the current field
+        // exceptions would go unchecked. 41 is the current field
         // inventory — update it in the same change that adds or
         // removes a Duration field.
-        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(39);
+        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(41);
     }
 
     @Test
@@ -693,6 +695,7 @@ public class ManagedAgentPropertiesTest {
                 "dispatch.scan-delay",
                 "events.replay-floor-interval",
                 "message-relay.scan-delay",
+                "runtime-broker.mcp-parking.scan-delay",
                 "runtime-broker.retention.scan-delay",
                 "session-resources.scan-delay",
                 "session-worktree.scan-delay",

@@ -10084,6 +10084,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       sequence: 1,
       recordedAt: '2026-07-04T00:00:00.000Z',
       changes: [],
+      // The derived count must ride the payload through the persist handler
+      // to the recorder (this suite's normalizeEventPayload mock is a
+      // pass-through; the real normalizer's count preservation is pinned in
+      // core's session-artifact-persistence.test.ts).
+      artifactCount: 3,
     };
     const snapshotPayload = {
       v: SESSION_ARTIFACT_PERSISTENCE_VERSION,

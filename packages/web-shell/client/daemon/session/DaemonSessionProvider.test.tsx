@@ -8529,9 +8529,17 @@ describe('DaemonSessionProvider', () => {
     await act(async () => {
       await requireActions(actions).loadSession('session-2', {
         workspaceCwd: '/mock-workspace',
+        artifactCountHint: 7,
       });
       await flushPromises();
     });
+
+    // The click-time hint rides the optimistic switch, keyed to the target.
+    const hinted = frames.find(
+      (frame) => frame.connection.artifactCountHint !== undefined,
+    );
+    expect(hinted?.connection.artifactCountHint).toBe(7);
+    expect(hinted?.connection.artifactCountHintSessionId).toBe('session-2');
 
     const early = frames.find(
       (frame) => frame.connection.restoredArtifacts !== undefined,
@@ -8539,6 +8547,9 @@ describe('DaemonSessionProvider', () => {
     expect(early).toBeTruthy();
     expect(early!.connection.sessionId).toBe('session-2');
     expect(early!.connection.restoredArtifactsSessionId).toBe('session-2');
+    // Authoritative data landed: the early commit retires the hint.
+    expect(early!.connection.artifactCountHint).toBeUndefined();
+    expect(early!.connection.artifactCountHintSessionId).toBeUndefined();
     // The replay has not injected yet at the early commit.
     expect(
       early!.blocks.some(
@@ -8550,6 +8561,9 @@ describe('DaemonSessionProvider', () => {
     expect(frames[frames.length - 1]!.blocks).toMatchObject([
       { kind: 'assistant', text: 'replayed transcript' },
     ]);
+    expect(
+      frames[frames.length - 1]!.connection.artifactCountHint,
+    ).toBeUndefined();
   });
 
   it('does not early-commit the artifact key when the restore has no artifacts', async () => {
@@ -8577,6 +8591,7 @@ describe('DaemonSessionProvider', () => {
     await act(async () => {
       await requireActions(actions).loadSession('session-2', {
         workspaceCwd: '/mock-workspace',
+        artifactCountHint: 7,
       });
       await flushPromises();
     });
@@ -8586,6 +8601,21 @@ describe('DaemonSessionProvider', () => {
     expect(
       frames.every((frame) => frame.connection.restoredArtifacts === undefined),
     ).toBe(true);
+    // The hint bridges the whole load window when no early commit runs, and
+    // the attach retires it once the session is bound.
+    expect(
+      frames.some(
+        (frame) =>
+          frame.connection.sessionId === 'session-2' &&
+          frame.connection.artifactCountHint === 7,
+      ),
+    ).toBe(true);
+    expect(
+      frames[frames.length - 1]!.connection.artifactCountHint,
+    ).toBeUndefined();
+    expect(
+      frames[frames.length - 1]!.connection.artifactCountHintSessionId,
+    ).toBeUndefined();
     expect(frames[frames.length - 1]!.blocks).toMatchObject([
       { kind: 'assistant', text: 'replayed transcript' },
     ]);

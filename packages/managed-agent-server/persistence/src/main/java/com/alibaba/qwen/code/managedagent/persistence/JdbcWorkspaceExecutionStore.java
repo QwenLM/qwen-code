@@ -25,6 +25,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.function.Consumer;
 
 import static com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable;
 
@@ -39,6 +40,7 @@ public class JdbcWorkspaceExecutionStore
     private final TransactionTemplate transaction;
     private final WorkspaceStorageGuard storageGuard;
     private final WorkspaceAttachmentAuthorizer authorizer;
+    private volatile Consumer<String> maintenanceBusy = storageKey -> {};
 
     com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles worktreeFiles() { return worktreeFiles; }
 
@@ -473,6 +475,11 @@ public class JdbcWorkspaceExecutionStore
         release(binding, session, false);
     }
 
+    /** Told the storage key whenever execution members refuse physical maintenance. */
+    public void onMaintenanceBusy(Consumer<String> listener) {
+        maintenanceBusy = listener;
+    }
+
     private void release(ContextBinding binding, RuntimeSessionRecord session, boolean stopped) {
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
@@ -539,6 +546,7 @@ public class JdbcWorkspaceExecutionStore
                     + " maintenance_id = ?, maintenance_generation = ? WHERE storage_key = ? AND storage_kind = 'LOCAL'"
                     + " AND (? OR member_count = 0) AND (holder_key IS NULL OR holder_key = ?)",
                     holder, maintenanceId, claimGeneration, key, preparing, holder) != 1) {
+                maintenanceBusy.accept(key);
                 throw busy();
             }
             return WorkspaceMaintenanceRecovery.recordStart(jdbc, binding, maintenanceId, claimGeneration);

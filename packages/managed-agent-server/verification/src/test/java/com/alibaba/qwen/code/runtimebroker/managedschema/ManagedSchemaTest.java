@@ -66,6 +66,7 @@ class ManagedSchemaTest {
             Map.entry("ma_read_lease", List.of("lease_id")),
             Map.entry("ma_channel_instance", List.of("tenant_id", "channel_id")),
             Map.entry("ma_channel_binding", List.of("tenant_id", "channel_id", "route_id")),
+            Map.entry("ma_pr_watch_binding", List.of("tenant_id", "channel_id", "owner", "repo", "pr_number")),
             Map.entry("ma_delivery", List.of("delivery_key")),
             Map.entry("ma_channel_segment", List.of("delivery_key", "segment_id")),
             Map.entry("ma_schedule", List.of("tenant_id", "schedule_id")),

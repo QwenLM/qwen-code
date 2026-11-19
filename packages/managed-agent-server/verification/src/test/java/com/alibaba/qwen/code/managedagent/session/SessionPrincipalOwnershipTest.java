@@ -338,8 +338,11 @@ class SessionPrincipalOwnershipTest {
                         f.service, f.store, f.harness, new ObjectMapper());
         var skills =
                 new com.alibaba.qwen.code.managedagent.catalog.ManagedSkillCatalogService(
-                        f.service, mock(
-                                com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills.class));
+                        f.service,
+                        mock(com.alibaba.qwen.code.managedagent.repository.ManagedSessionSkills.class),
+                        mock(com.alibaba.qwen.code.managedagent.catalog.ManagedSessionResourcesService.class),
+                        mock(com.alibaba.qwen.code.managedagent.repository.ExtensionPackageRepository.class),
+                        new ObjectMapper());
         var extensions =
                 new com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionManagementService(
                         f.store, f.service, records,

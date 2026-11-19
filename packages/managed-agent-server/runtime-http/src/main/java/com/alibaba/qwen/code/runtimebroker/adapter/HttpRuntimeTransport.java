@@ -1413,6 +1413,14 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                 .thenApply(ManagedMcpProtocol::definitions);
     }
 
+    @Override
+    public CompletionStage<Void> reclaimMcp(RuntimeLease lease, RuntimeSession session) {
+        byte[] request = encodeToolRequest(Map.of("protocolVersion", 1,
+                "runtimeSessionId", session.getRuntimeSessionId()), TOOL_REQUEST_LIMIT_BYTES);
+        return post(lease, ManagedMcpProtocol.RECLAIM_PATH, request, TOOL_RESULT_LIMIT_BYTES)
+                .thenApply(ignored -> null);
+    }
+
     public CompletionStage<Map<String, Object>> installExtensionPackage(RuntimeBindingRecord runtime,
             String digest, Path archive) {
         if (runtime == null || runtime.getLease() == null || digest == null || !digest.matches("[a-f0-9]{64}")) {

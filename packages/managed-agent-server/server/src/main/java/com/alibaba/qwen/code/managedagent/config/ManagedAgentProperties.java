@@ -380,6 +380,7 @@ public class ManagedAgentProperties
             throw new IllegalStateException("SSH Runtime requires Workspace files and configured nodes");
         }
         runtimeBroker.getRetention().validate();
+        runtimeBroker.getMcpParking().validate();
         long timeout = harness.getApprovalTimeout().toMillis();
         if (timeout < 1000 || timeout > 86400000) {
             throw new IllegalStateException("Hosted approval timeout must be between 1s and 24h;"
@@ -973,6 +974,7 @@ public class ManagedAgentProperties
 
         private boolean enabled;
         private final Retention retention = new Retention();
+        private final McpParking mcpParking = new McpParking();
         private String host = "127.0.0.1";
         private int port = 4182;
         private boolean allowNonLoopback;
@@ -1048,6 +1050,28 @@ public class ManagedAgentProperties
                         || scanDelay.toMillis() < 1 || batchSize < 1 || batchSize > 1000) {
                     throw new IllegalStateException("Runtime Broker retention requires positive max-age and scan-delay"
                             + " (at least 1ms), and batch-size between 1 and 1000");
+                }
+            }
+        }
+
+        /** Keeps idle Sessions' MCP connections across suspension until this idle period ends. */
+        @Getter
+        @Setter
+        public static class McpParking
+                implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
+                        .RuntimeBroker.McpParking {
+            private boolean enabled;
+            @DurationUnit(ChronoUnit.MILLIS)
+            private Duration idleDuration = Duration.ofMinutes(30);
+            private int batchSize = 100;
+            @DurationUnit(ChronoUnit.MILLIS)
+            private Duration scanDelay = Duration.ofMinutes(1);
+
+            void validate() {
+                if (idleDuration == null || idleDuration.toMillis() < 1
+                        || scanDelay == null || scanDelay.toMillis() < 1 || batchSize < 1 || batchSize > 1000) {
+                    throw new IllegalStateException("Runtime Broker MCP parking requires positive idle-duration and"
+                            + " scan-delay (at least 1ms), and batch-size between 1 and 1000");
                 }
             }
         }
