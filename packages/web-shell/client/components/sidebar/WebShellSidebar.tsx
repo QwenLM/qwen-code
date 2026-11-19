@@ -200,7 +200,10 @@ import {
   useWebShellSessions,
 } from '../../session-catalog/session-catalog-hooks';
 import { type SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
-import { hasLiveWork } from '../../session-catalog/session-live-work';
+import {
+  hasLiveWork,
+  sessionBlocksDelete,
+} from '../../session-catalog/session-live-work';
 import { useWorkspaceSessionLiveState } from '../../session-catalog/workspace-session-live-state';
 import { StandaloneRecents } from './StandaloneRecents';
 import { RecentSessions } from './RecentSessions';
@@ -2991,8 +2994,7 @@ export function WebShellSidebar({
       // only offered once nothing is running. Background work blocks any row:
       // the delete route has no idle guard, so it would kill work the row
       // advertises, and the Session Overview card already refuses it.
-      session.hasRunningBackgroundTasks !== true &&
-      (!isCurrentSession(session) || !hasLiveWork(session)) &&
+      !sessionBlocksDelete(session, isCurrentSession(session)) &&
       canShowDeleteSession(session),
     [canShowDeleteSession, isCurrentSession],
   );
@@ -5885,18 +5887,13 @@ export function WebShellSidebar({
       // Background work additionally blocks any row: the delete route has no
       // idle guard, so confirming would kill work the row says is running,
       // and the Session Overview card already refuses the same session.
-      const deleteBlockedByBackground =
-        !isCurrent && session.hasRunningBackgroundTasks === true;
-      const deleteDisabled =
-        busy ||
-        currentStandalone ||
-        (isCurrent && running) ||
-        deleteBlockedByBackground;
+      const deleteBlocked = sessionBlocksDelete(session, isCurrent);
+      const deleteDisabled = busy || currentStandalone || deleteBlocked;
       const deleteDisabledTitle = currentStandalone
         ? t('sidebar.currentStandaloneDeleteDisabled')
         : isCurrent && running
           ? t('sidebar.currentDeleteDisabled')
-          : deleteBlockedByBackground
+          : deleteBlocked
             ? t('sidebar.deleteRunningDisabled')
             : undefined;
       const showGroup = !standalone && canOrganizeSession(session, 'group');

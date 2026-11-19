@@ -20,7 +20,8 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import type { BridgeExecutionEngine } from '@qwen-code/acp-bridge/bridgeOptions';
 import type { AcpChannel, ChannelFactory } from '@qwen-code/acp-bridge/channel';
 import { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
@@ -121,6 +122,8 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
   let modelRequests: ModelRequest[];
   let bridge: AcpSessionBridge | undefined;
   let registry: ProcessRegistry;
+  let sourceEnv: NodeJS.ProcessEnv;
+  let settingsFile: string;
   let started: Record<BridgeExecutionEngine, AcpChannel[]>;
   const strayPids: number[] = [];
 
@@ -188,8 +191,9 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('No address');
     const baseUrl = `http://127.0.0.1:${address.port}/v1`;
+    settingsFile = path.join(qwenHome, 'settings.json');
     await writeFile(
-      path.join(qwenHome, 'settings.json'),
+      settingsFile,
       JSON.stringify({
         security: { auth: { selectedType: 'openai' } },
         model: { name: MODEL },
@@ -203,7 +207,7 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
         },
       }),
     );
-    const sourceEnv: NodeJS.ProcessEnv = Object.fromEntries(
+    sourceEnv = Object.fromEntries(
       Object.entries(process.env).filter(([key]) => !key.startsWith('VITEST')),
     );
     Object.assign(sourceEnv, {
@@ -270,7 +274,7 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
   }
 
   /** Sends a prompt, approving every permission the host asks for. */
-  async function prompt(sessionId: string) {
+  async function prompt(sessionId: string, updates?: SessionUpdate[]) {
     const permissions: string[] = [];
     const events = bridge!.subscribeEvents(sessionId);
     const watching = (async () => {
@@ -291,7 +295,12 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
             },
           });
         }
-        if (event.type === 'turn_complete') return;
+        if (event.type === 'session_update' && updates) {
+          updates.push((event.data as { update: SessionUpdate }).update);
+        }
+        if (event.type === 'turn_complete' || event.type === 'turn_error') {
+          return;
+        }
       }
     })();
     try {
@@ -302,7 +311,8 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
       await watching;
       return { stopReason: response.stopReason, permissions };
     } finally {
-      void watching.catch(() => undefined);
+      if (updates) await watching;
+      else void watching.catch(() => undefined);
     }
   }
 
@@ -563,6 +573,220 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     expect((await readWorker(nextOut)).pid).toBe(worker.pid);
   }, 120_000);
 
+  it('does not finish a kernel cancellation while a Managed tool is unresolved', async () => {
+    sourceEnv['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = 'acp=1';
+    sourceEnv['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] = 'acp=1';
+    const sessionId = await newSession();
+    const shellOut = path.join(workspace, 'shell.txt');
+    const sleeper = path.join(workspace, 'sleeper.pid');
+    turns.push({
+      toolCalls: [
+        {
+          name: 'run_shell_command',
+          args: recordWorker(
+            shellOut,
+            `; echo $$ > ${JSON.stringify(sleeper)}; exec sleep 120`,
+          ),
+        },
+      ],
+    });
+    const running = prompt(sessionId);
+    const finished = vi.fn();
+    void running.then(finished, finished);
+    const worker = await readWorker(shellOut);
+    const sleepPid = Number(
+      await waitFor(
+        async () =>
+          (await readFile(sleeper, 'utf8').catch(() => '')).trim() || undefined,
+      ),
+    );
+    strayPids.push(sleepPid);
+    const requestsBefore = modelRequests.length;
+    process.kill(worker.pid, 'SIGSTOP');
+    const cancelling = bridge!.cancelSession(sessionId);
+    void cancelling.catch(() => undefined);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 11_000));
+      expect(finished).not.toHaveBeenCalled();
+      expect(isAlive(sleepPid)).toBe(true);
+    } finally {
+      process.kill(worker.pid, 'SIGKILL');
+    }
+    const unknownOutcome = {
+      data: { errorKind: 'managed_runtime_outcome_unknown' },
+    };
+    await expect(running).rejects.toMatchObject(unknownOutcome);
+    await cancelling;
+    await expect(prompt(sessionId)).rejects.toMatchObject(unknownOutcome);
+    expect(modelRequests).toHaveLength(requestsBefore);
+  }, 120_000);
+
+  async function holdReadFilePostHook() {
+    const ready = path.join(workspace, 'hook.ready');
+    const release = path.join(workspace, 'hook.release');
+    const settings = JSON.parse(await readFile(settingsFile, 'utf8')) as object;
+    await writeFile(
+      settingsFile,
+      JSON.stringify({
+        ...settings,
+        hooks: {
+          PostToolUse: [
+            {
+              matcher: 'read_file',
+              hooks: [
+                {
+                  type: 'command',
+                  command:
+                    `touch ${JSON.stringify(ready)}; ` +
+                    `while [ ! -f ${JSON.stringify(release)} ]; do sleep 0.05; done; printf '{}'`,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    return { ready, release };
+  }
+
+  it('cancels after Runtime settlement without publishing pending post-tool output', async () => {
+    sourceEnv['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = 'acp=1';
+    sourceEnv['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] = 'acp=1';
+    const { ready, release } = await holdReadFilePostHook();
+    const sessionId = await newSession();
+    const file = path.join(workspace, 'input.txt');
+    const knownOutput = 'content already returned by Runtime';
+    const expectCancelledToolMessage = () => {
+      const toolMessages = modelRequests
+        .at(-1)
+        ?.messages?.filter(({ role }) => role === 'tool');
+      expect(toolMessages).toHaveLength(1);
+      expect(JSON.stringify(toolMessages)).toContain('[Operation Cancelled]');
+      expect(JSON.stringify(toolMessages)).not.toContain(knownOutput);
+    };
+    await writeFile(file, knownOutput);
+    turns.push({
+      toolCalls: [{ name: 'read_file', args: { file_path: file } }],
+    });
+    const updates: SessionUpdate[] = [];
+    const running = prompt(sessionId, updates);
+    void running.catch(() => undefined);
+    try {
+      await waitFor(() => existsSync(ready) || undefined);
+      expect(await readManagedLog(sessionId)).toContain('"tool.receipt"');
+      const cancelling = bridge!.cancelSession(sessionId);
+      void cancelling.catch(() => undefined);
+      const cancelled = vi.fn();
+      void running.then(cancelled, () => undefined);
+      await waitFor(() => cancelled.mock.calls[0]?.[0], 13_000);
+      expect((await running).stopReason).toBe('cancelled');
+      await cancelling;
+      expect(
+        updates.flatMap((update) =>
+          update.sessionUpdate === 'tool_call_update' &&
+          update._meta?.['toolName'] === 'read_file' &&
+          (update.status === 'completed' || update.status === 'failed')
+            ? [update.status]
+            : [],
+        ),
+      ).toEqual(['failed']);
+      expect(
+        updates.map((update) => update._meta?.['toolLifecycle']),
+      ).toContainEqual(
+        expect.objectContaining({
+          toolName: 'read_file',
+          phase: 'ended',
+          outcome: 'cancelled',
+          executionStatus: 'success',
+        }),
+      );
+      expect(JSON.stringify(updates)).not.toContain(knownOutput);
+      turns.push({ text: 'CONTINUED' });
+      expect((await prompt(sessionId)).stopReason).toBe('end_turn');
+      expectCancelledToolMessage();
+    } finally {
+      await writeFile(release, '');
+      await running.catch(() => undefined);
+    }
+
+    await bridge!.closeSession(sessionId);
+    await bridge!.loadSession({ sessionId, workspaceCwd: workspace });
+    turns.push({ text: 'RESTORED' });
+    expect((await prompt(sessionId)).stopReason).toBe('end_turn');
+    expectCancelledToolMessage();
+  }, 120_000);
+
+  it.each([
+    { mode: 'kernel cancellation', eventBus: 'acp=1', cancel: true },
+    { mode: 'kernel error', eventBus: 'acp=1', cancel: false },
+    { mode: 'shared error', eventBus: '0', cancel: false },
+  ])(
+    'reports an unknown outcome with a settled sibling still in a post-tool hook ($mode)',
+    async ({ eventBus, cancel }) => {
+      sourceEnv['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = 'acp=1';
+      sourceEnv['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] = eventBus;
+      const { ready, release } = await holdReadFilePostHook();
+      const sessionId = await newSession();
+      const marker = path.join(workspace, 'worker.txt');
+      turns.push(
+        {
+          toolCalls: [
+            { name: 'run_shell_command', args: recordWorker(marker) },
+          ],
+        },
+        { text: 'READY' },
+      );
+      expect((await prompt(sessionId)).stopReason).toBe('end_turn');
+      const worker = await readWorker(marker);
+      const fifo = path.join(workspace, 'wait.fifo');
+      execFileSync('mkfifo', [fifo]);
+      const file = path.join(workspace, 'fixture.txt');
+      await writeFile(file, 'fixture');
+      turns.push({
+        toolCalls: [
+          { name: 'read_file', args: { file_path: file } },
+          {
+            name: 'run_shell_command',
+            args: {
+              command: `cat ${JSON.stringify(fifo)}`,
+              description: 'Wait for the fixture',
+            },
+          },
+        ],
+      });
+      const running = prompt(sessionId);
+      const rejected = vi.fn();
+      void running.catch(rejected);
+      const unknownOutcome = {
+        data: { errorKind: 'managed_runtime_outcome_unknown' },
+      };
+      try {
+        await waitFor(() => existsSync(ready) || undefined);
+        await waitFor(
+          () =>
+            descendantArgs(worker.pid).some((args) => args.includes(fifo)) ||
+            undefined,
+        );
+        process.kill(worker.pid, 'SIGKILL');
+        const cancelling = cancel
+          ? bridge!.cancelSession(sessionId)
+          : undefined;
+        void cancelling?.catch(() => undefined);
+        const error = await waitFor(() => rejected.mock.calls[0]?.[0], 13_000);
+        expect(error).toMatchObject(unknownOutcome);
+        await cancelling;
+        const requestsBefore = modelRequests.length;
+        await expect(prompt(sessionId)).rejects.toMatchObject(unknownOutcome);
+        expect(modelRequests).toHaveLength(requestsBefore);
+      } finally {
+        if (isAlive(worker.pid)) process.kill(worker.pid, 'SIGKILL');
+        await writeFile(release, '');
+        await running.catch(() => undefined);
+      }
+    },
+    120_000,
+  );
+
   it('stops the worker and its command when the Managed child dies', async () => {
     const sessionId = await newSession();
     const shellOut = path.join(workspace, 'shell.txt');
@@ -608,6 +832,8 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     const sessionId = await newSession();
     const shellOut = path.join(workspace, 'shell.txt');
     const sleeper = path.join(workspace, 'sleeper.pid');
+    const laterWrite = path.join(workspace, 'later.txt');
+    const updates: SessionUpdate[] = [];
     turns.push({
       toolCalls: [
         {
@@ -617,9 +843,13 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
             `; echo $$ > ${JSON.stringify(sleeper)}; exec sleep 120`,
           ),
         },
+        {
+          name: 'write_file',
+          args: { file_path: laterWrite, content: 'must not run' },
+        },
       ],
     });
-    const running = prompt(sessionId);
+    const running = prompt(sessionId, updates);
     void running.catch(() => undefined);
     const worker = await readWorker(shellOut);
     const sleepPid = Number(
@@ -637,6 +867,22 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
       data: { errorKind: 'managed_runtime_outcome_unknown' },
     };
     await expect(running).rejects.toMatchObject(unknownOutcome);
+    const toolUpdates = updates.filter(
+      (update) =>
+        update.sessionUpdate === 'tool_call' ||
+        update.sessionUpdate === 'tool_call_update',
+    );
+    const runningShell = toolUpdates.find(
+      (update) =>
+        update.status === 'in_progress' &&
+        update._meta?.['toolName'] === 'run_shell_command',
+    );
+    expect(runningShell).toBeDefined();
+    const shellStatuses = toolUpdates
+      .filter(({ toolCallId }) => toolCallId === runningShell?.toolCallId)
+      .map(({ status }) => status);
+    expect(shellStatuses).not.toContain('failed');
+    expect(shellStatuses).not.toContain('completed');
     // The model was not asked to continue with an invented result, and the
     // session refuses another turn.
     expect(modelRequests).toHaveLength(requestsBefore);
@@ -644,11 +890,34 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     await expect(prompt(sessionId)).rejects.toMatchObject(unknownOutcome);
     expect(modelRequests).toHaveLength(requestsBefore);
 
+    await bridge!.closeSession(sessionId);
     // The durable form of the block: admitted before dispatch, never settled,
     // and the log answers nothing for it.
     const blockedLog = await readManagedLog(sessionId);
-    expect(blockedLog).toContain('"tool.intent"');
-    expect(blockedLog).not.toContain('"tool.receipt"');
+    const events = blockedLog
+      .trim()
+      .split('\n')
+      .map(
+        (line) =>
+          (
+            JSON.parse(line) as {
+              managedSession?: { kind: string; payload: { role?: string } };
+            }
+          ).managedSession,
+      );
+    expect(
+      events.filter((event) => event?.kind === 'tool.intent'),
+    ).toHaveLength(1);
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ kind: 'tool.receipt' }),
+    );
+    expect(events).not.toContainEqual(
+      expect.objectContaining({
+        kind: 'message.committed',
+        payload: expect.objectContaining({ role: 'tool_result' }),
+      }),
+    );
+    expect(existsSync(laterWrite)).toBe(false);
     expect(blockedLog).toContain('"durable_wait"');
   }, 120_000);
 

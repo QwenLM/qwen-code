@@ -1053,6 +1053,10 @@ export function sendBridgeError(
     const data = (err as { data?: unknown }).data;
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
+      if (kind === 'invalid_mod_row') {
+        res.status(400).json({ error: errorMessage(err), code: kind });
+        return;
+      }
       if (kind === 'auth_type_enforced') {
         res.status(403).json({ error: errorMessage(err), code: kind });
         return;

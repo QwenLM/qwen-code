@@ -92,6 +92,7 @@ import {
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
+  type BridgeModRowAnswer,
   type ServeSessionAgentsStatus,
   type ServeSessionAgentTrace,
   type ServeSessionStatsStatus,
@@ -705,6 +706,7 @@ interface ChannelInfo {
    * restore or creation lands on this channel afterwards is fenced too.
    */
   workspaceChangeFence?: number;
+  approvalModeReload: { generation: number; inFlight: number };
   /**
    * The user-language change last sent to this channel, settled either way,
    * so a session request on a new Managed channel waits for it rather than
@@ -2415,6 +2417,9 @@ const DAEMON_CONFIRM_CANCELLATION_META_KEY = 'qwen.daemon.confirmCancellation';
  * disconnect cancellation in v1 (see server.ts route comment).
  */
 const SESSION_RECAP_TIMEOUT_MS = 60_000;
+// The child answers a row ask within 60 seconds; this backstop is for a
+// wedged channel.
+const SESSION_MOD_ROW_TIMEOUT_MS = 75_000;
 const SESSION_GENERATION_TIMEOUT_MS = 65_000;
 const SESSION_BTW_STREAM_TIMEOUT_MS = 310_000;
 const GENERATION_STREAM_QUEUE_CAPACITY = 128;
@@ -4214,6 +4219,21 @@ export function createSessionControlPlane(
 
   let workspaceChangeRevision = 0;
 
+  // Track ACP settlement rather than the public timeout: a late settings
+  // reload can still change the approval mode used by a queued delegation.
+  async function trackApprovalModeReload<T>(
+    ci: ChannelInfo,
+    request: Promise<T>,
+  ): Promise<T> {
+    ci.approvalModeReload.generation++;
+    ci.approvalModeReload.inFlight++;
+    try {
+      return await request;
+    } finally {
+      ci.approvalModeReload.inFlight--;
+    }
+  }
+
   /** Sends a change to every live channel of another engine; returns the ones that did not acknowledge it. */
   async function propagateWorkspaceChange(
     change: WorkspaceChange,
@@ -4261,8 +4281,11 @@ export function createSessionControlPlane(
           params,
         );
         try {
+          const pending = raceLongLived(request, getChannelClosedReject(ci));
           const response = await withTimeout(
-            raceLongLived(request, getChannelClosedReject(ci)),
+            change.kind === 'settings'
+              ? trackApprovalModeReload(ci, pending)
+              : pending,
             timeoutMs,
             SERVE_CONTROL_EXT_METHODS.workspaceChange,
           );
@@ -5188,6 +5211,7 @@ export function createSessionControlPlane(
       overdueAbandonedNewSessions: new Set(),
       newSessionSettlementTimers: new Map(),
       newSessionCleanupFailed: false,
+      approvalModeReload: { generation: 0, inFlight: 0 },
       isQuarantined: false,
     };
     infoRef.current = info;
@@ -8414,7 +8438,11 @@ export function createSessionControlPlane(
           entry.events.lastEventId === lastEventId &&
           entry.events.replayProjectionWatermark === projectionWatermark
         ) {
-          let compactedReplay = page.events;
+          const lifecycleSnapshot = entry.events.snapshotReplay();
+          let compactedReplay = withCompactedModLogs(
+            page.events,
+            lifecycleSnapshot?.compactedTurns ?? [],
+          );
           const turnErrorEvent = entry.turnErrorEvent;
           if (turnErrorEvent) {
             // Append only while no newer turn content was journaled after
@@ -8427,15 +8455,19 @@ export function createSessionControlPlane(
             // journal holds exactly the events published since the last
             // turn boundary (the terminal itself folds into the replay
             // window), so no history scan is needed.
-            const journal = entry.events.liveJournalSnapshot() ?? [];
+            const journal = lifecycleSnapshot?.liveJournal ?? [];
             const hasNewerTurnContent = journal.some(
               isRefreshAppendTurnContent,
             );
             if (!hasNewerTurnContent) {
-              compactedReplay = [...page.events, turnErrorEvent];
+              compactedReplay = [...compactedReplay, turnErrorEvent];
             }
           }
-          const lifecycleSnapshot = entry.events.snapshotReplay();
+          const liveJournal = (
+            liveReplayMode === 'summary'
+              ? entry.events.liveJournalSnapshot('summary')
+              : lifecycleSnapshot?.liveJournal
+          )?.filter((event) => event.type === 'mod_log');
           const lifecycleReplay: BridgeEvent[] = [];
           let lifecycleReplayIncomplete =
             lifecycleSnapshot === undefined ||
@@ -8486,7 +8518,7 @@ export function createSessionControlPlane(
           }
           return {
             compactedReplay,
-            liveJournal: [],
+            liveJournal: liveJournal ?? [],
             lifecycleReplay,
             lifecycleReplayIncomplete,
             lastEventId,
@@ -8534,6 +8566,77 @@ export function createSessionControlPlane(
       return undefined;
     const recordId = (meta as Record<string, unknown>)['qwen.session.recordId'];
     return typeof recordId === 'string' ? recordId : undefined;
+  }
+
+  function withCompactedModLogs(
+    pageEvents: BridgeEvent[],
+    compactedTurns: readonly BridgeEvent[],
+  ): BridgeEvent[] {
+    const logs = compactedTurns.filter((event) => event.type === 'mod_log');
+    if (logs.length === 0) return pageEvents;
+
+    const timestamps: number[] = [];
+    for (const log of logs) {
+      const timestamp = log._meta?.['serverTimestamp'];
+      if (
+        typeof timestamp !== 'number' ||
+        !Number.isFinite(timestamp) ||
+        timestamp < (timestamps.at(-1) ?? -Infinity)
+      ) {
+        return pageEvents.concat(logs);
+      }
+      timestamps.push(timestamp);
+    }
+
+    // Anchor to the start of each persisted main user record. A wall-clock
+    // timestamp alone can't place logs within a multi-frame reply safely.
+    const result: BridgeEvent[] = [];
+    let recordId: string | undefined;
+    let recordStart = 0;
+    let pageIndex = 0;
+    let logIndex = 0;
+    let lastPromptTimestamp = -Infinity;
+    for (const [index, event] of pageEvents.entries()) {
+      const id = transcriptEventRecordId(event);
+      if (id !== recordId) {
+        recordId = id;
+        recordStart = index;
+      }
+      const update = event.data;
+      if (
+        id === undefined ||
+        recordStart < pageIndex ||
+        !isRecord(update) ||
+        update['sessionUpdate'] !== 'user_message_chunk' ||
+        !isRecord(update['_meta']) ||
+        update['_meta']['source'] !== undefined ||
+        update['_meta']['qwenAgentMessage'] !== undefined
+      ) {
+        continue;
+      }
+      const rawTimestamp = update['timestamp'];
+      const timestamp =
+        typeof rawTimestamp === 'string'
+          ? Date.parse(rawTimestamp)
+          : rawTimestamp;
+      if (
+        typeof timestamp !== 'number' ||
+        !Number.isFinite(timestamp) ||
+        timestamp <= lastPromptTimestamp
+      ) {
+        return pageEvents.concat(logs);
+      }
+      lastPromptTimestamp = timestamp;
+      for (; pageIndex < recordStart; pageIndex++) {
+        result.push(pageEvents[pageIndex]!);
+      }
+      while (logIndex < logs.length && timestamps[logIndex]! < timestamp) {
+        result.push(logs[logIndex++]!);
+      }
+      pageIndex = recordStart + 1;
+      result.push(pageEvents[recordStart]!);
+    }
+    return result.concat(pageEvents.slice(pageIndex), logs.slice(logIndex));
   }
 
   /**
@@ -14429,11 +14532,14 @@ export function createSessionControlPlane(
         method === SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan;
       const invoke = async (info: ChannelInfo) => {
         const timeout = invokeOpts?.timeoutMs ?? initTimeoutMs;
+        const pending = raceLongLived(
+          info.connection.extMethod(method, params ?? {}),
+          getChannelClosedReject(info),
+        );
         const response = await withTimeout(
-          raceLongLived(
-            info.connection.extMethod(method, params ?? {}),
-            getChannelClosedReject(info),
-          ),
+          method === SERVE_CONTROL_EXT_METHODS.workspaceReload
+            ? trackApprovalModeReload(info, pending)
+            : pending,
           timeout,
           method,
         );
@@ -14677,12 +14783,16 @@ export function createSessionControlPlane(
     captureSessionApprovalModeGuard(sessionId) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      const { approvalModeReload } = assertLivePromptEntry(sessionId, entry);
+      const reloadGeneration = approvalModeReload.generation;
       const generation = entry.approvalModePublishGeneration;
       const assertCurrent = () => {
         assertLivePromptEntry(sessionId, entry);
         if (
           entry.approvalModeRoundtripInFlight ||
-          entry.approvalModePublishGeneration !== generation
+          entry.approvalModePublishGeneration !== generation ||
+          approvalModeReload.inFlight > 0 ||
+          approvalModeReload.generation !== reloadGeneration
         ) {
           throw new Error(
             'The session approval mode changed during delegation. Retry the launch.',
@@ -15521,6 +15631,28 @@ export function createSessionControlPlane(
         originatorClientId,
         opts.planMode,
       );
+    },
+
+    async askSessionModRow(sessionId, row, _context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      assertAttachableSessionEntry(sessionId, entry);
+      const endSideRequest = beginSideRequest(entry);
+      try {
+        return (await raceLongLived(
+          withTimeout(
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionModRow,
+              { sessionId, component: row.component, props: row.props },
+            ),
+            SESSION_MOD_ROW_TIMEOUT_MS,
+            SERVE_CONTROL_EXT_METHODS.sessionModRow,
+          ),
+          getTransportClosedReject(entry),
+        )) as BridgeModRowAnswer;
+      } finally {
+        endSideRequest();
+      }
     },
 
     async generateSessionRecap(sessionId, _context) {

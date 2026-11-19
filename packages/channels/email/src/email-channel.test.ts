@@ -199,6 +199,23 @@ afterEach(async () => {
 });
 
 describe('email admission and delivery', () => {
+  it('falls back to followup when dispatchMode is unset or null and keeps steer', () => {
+    const effectiveMode = (channel: TestChannel) =>
+      (
+        channel as unknown as {
+          config: { dispatchMode?: string };
+        }
+      ).config.dispatchMode;
+
+    expect(effectiveMode(make().channel)).toBe('followup');
+    expect(effectiveMode(make({ dispatchMode: null }).channel)).toBe(
+      'followup',
+    );
+    expect(effectiveMode(make({ dispatchMode: 'steer' }).channel)).toBe(
+      'steer',
+    );
+  });
+
   it('skips history and delivers one new task with sender-only recipients and agent headers', async () => {
     append(raw('old'));
     const { channel } = make();

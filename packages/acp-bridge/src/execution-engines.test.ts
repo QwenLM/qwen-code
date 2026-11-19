@@ -6142,7 +6142,8 @@ describe('workspace change propagation', () => {
       engineChannel('legacy'),
       engineChannel('managed', { extMethodImpl: acknowledge }),
     );
-    await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const { sessionId } = await p.bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const guard = p.bridge.captureSessionApprovalModeGuard(sessionId);
     await expect(
       p.bridge.invokeWorkspaceCommand(
         SERVE_CONTROL_EXT_METHODS.workspaceReload,
@@ -6151,6 +6152,12 @@ describe('workspace change propagation', () => {
         },
       ),
     ).rejects.toBeInstanceOf(SessionNotFoundError);
+    expect(guard).toThrow(
+      'The session approval mode changed during delegation',
+    );
+    expect(() =>
+      p.bridge.captureSessionApprovalModeGuard(sessionId),
+    ).not.toThrow();
     await expect(
       p.bridge.invokeWorkspaceCommand('qwen/permissions/setRules', denyRule),
     ).rejects.toBeInstanceOf(SessionNotFoundError);

@@ -186,6 +186,15 @@ off" summary. It returns `{ sessionId, recap: string | null }`; `null` means the
 history was too short or the model failed temporarily. This endpoint is
 best-effort.
 
+### Mod Rows (`session_mod_rows` capability tag)
+
+`POST /session/:id/mod-row` asks a live session's Mods for one row the Web Shell
+draws, with body `{ component, props }` (today `AssistantMessage` with
+`{ text, isFirstOfReply }`). It answers `{ status: 'unhooked' }`,
+`{ status: 'unanswered' }` or `{ status: 'answered', props? }`; the session
+answers the same props from its row cache. See the protocol reference for the
+full contract.
+
 ### Session BTW / Side Question (`session_btw` capability tag)
 
 `POST /session/:id/btw` asks a one-off question against the session context
@@ -382,7 +391,7 @@ resets that window, including when the channel was already live.
 - `BridgeOptions.initializeTimeoutMs` (default 10s) — each of the channel factory and `initialize` handshake receives this startup budget, with their pair capped at twice it. Failed startup may additionally await one such budget for teardown. Other ACP requests retain this value as their default timeout.
 - `BridgeOptions.sessionRestoreTimeoutMs` (default 60s) — one budget for engine selection, channel readiness, remembered-language delivery, and ACP `loadSession` / `unstable_resumeSession`. The ACP request uses the remaining budget after preparation. Defaults to 60s; an explicitly configured initialize timeout can raise it, but never lower it. The deadline uses monotonic elapsed time, so system-clock corrections cannot extend or shorten it.
 - `BridgeOptions.channelIdleTimeoutMs` (unset or `0` reaps after runtime work drains, except that plain preheat is preserved for first use; a positive value or active keepalive delays reaping, and the longer delay wins).
-- Capability tags: `session_create`, `session_startup_config`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_btw_stream`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_resources`, `session_status`, `non_blocking_prompt`.
+- Capability tags: `session_create`, `session_startup_config`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_mod_rows`, `session_generation`, `session_btw`, `session_btw_stream`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_resources`, `session_status`, `non_blocking_prompt`.
 
 The implicit restore budget remains `max(initializeTimeoutMs, 60000)`, not twice the initialize timeout. At an initialize timeout of 30 seconds, the two startup phases can consume the entire 60-second restore budget; above 30 seconds, their combined bound exceeds the implicit restore budget. For slow cold starts, explicitly set `--session-restore-timeout-ms` above twice `--initialize-timeout-ms`, with additional time for engine selection, remembered-language delivery, and the ACP restore request. For example, a 40-second initialize timeout still derives a 60-second restore budget, while startup alone can take 80 seconds. An explicit restore value always wins, even when shorter.
 

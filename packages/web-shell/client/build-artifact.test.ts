@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import postcss, { type Rule } from 'postcss';
+import ts from 'typescript';
 import { FILES_MESSAGES_EN } from './components/artifacts/files-messages';
 import { LIVE_MESSAGES_EN } from './live/messages';
 import { COLLAB_MESSAGES_EN } from './components/workspace-agents/messages';
@@ -24,6 +25,36 @@ function readPackageJavascript(): string {
     .filter((fileName) => fileName.endsWith('.js'))
     .map((fileName) => readFileSync(resolve(DIST_DIR, fileName), 'utf8'))
     .join('\n');
+}
+
+function readStaticJavascript(entry: string): string {
+  const files = new Set([entry]);
+  const sources: string[] = [];
+  for (const file of files) {
+    const javascript = readFileSync(file, 'utf8');
+    sources.push(javascript);
+    const source = ts.createSourceFile(
+      file,
+      javascript,
+      ts.ScriptTarget.ESNext,
+    );
+    for (const statement of source.statements) {
+      if (
+        ts.isImportDeclaration(statement) ||
+        ts.isExportDeclaration(statement)
+      ) {
+        const specifier = statement.moduleSpecifier;
+        if (
+          specifier &&
+          ts.isStringLiteral(specifier) &&
+          specifier.text.startsWith('.')
+        ) {
+          files.add(resolve(dirname(file), specifier.text));
+        }
+      }
+    }
+  }
+  return sources.join('\n');
 }
 
 function readInjectedCss(bundle = readBundle()): string {
@@ -537,6 +568,24 @@ describe('build artifact — transcript entry (#11031)', () => {
     }
   });
 
+  it('keeps artifact-library copy and lookups in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]managed\.artifactLibrary\./);
+    expect(js).not.toContain(
+      'No artifacts have been produced in this workspace yet.',
+    );
+    expect(js).not.toContain('此工作区还没有产出产物。');
+    expect(js).not.toContain('В этом Workspace ещё нет артефактов.');
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('managed.artifactLibrary.title');
+    expect(interactive).toContain('Artifact library');
+    expect(interactive).toContain('产物库');
+    expect(interactive).toContain('Библиотека артефактов');
+  });
+
   it('keeps workspace mutations out of the read-only transcript entry', () => {
     const transcript = readTranscriptBundle();
     const packaged = readPackageJavascript();
@@ -718,6 +767,19 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(transcript).not.toContain('Недельный лимит кредитов исчерпан');
     expect(transcript).not.toContain('Вас @упомянули в комментарии');
     expect(transcript).not.toContain('週額度已用完');
+  });
+
+  it('loads translated catalogs outside the interactive entry static import graph', () => {
+    const interactive = readPackageJavascript();
+    const startup = readStaticJavascript(DIST_PATH);
+    for (const copy of [
+      '周额度已用完',
+      '週額度已用完',
+      'Недельный лимит кредитов исчерпан',
+    ]) {
+      expect(interactive).toContain(copy);
+      expect(startup).not.toContain(copy);
+    }
   });
 
   it('still carries what a transcript actually renders', () => {
