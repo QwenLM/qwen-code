@@ -91,6 +91,7 @@ import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
   computeResumedPromptCountSeed,
+  computeResumedUserTurnCount,
 } from './utils/resumeHistoryUtils.js';
 import { buildWakeRepaint } from './utils/terminal-resize-reflow.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
@@ -1269,6 +1270,7 @@ export const AppContainer = (props: AppContainerProps) => {
             resumedSessionData.conversation.messages,
             config.getSessionId(),
           ),
+          computeResumedUserTurnCount(resumedSessionData.conversation.messages),
         );
       }
 
@@ -2737,7 +2739,7 @@ export const AppContainer = (props: AppContainerProps) => {
   useContextualTips({
     streamingState,
     lastPromptTokenCount: sessionStats.lastPromptTokenCount,
-    sessionPromptCount: sessionStats.promptCount,
+    sessionPromptCount: sessionStats.userPromptCount,
     config,
     tipHistory,
     addItem: historyManager.addItem,

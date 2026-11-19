@@ -119,7 +119,7 @@ WebShell 的小写状态。绑定 Session 仍只有 Workspace 标识与 cwd，�
 `ManagedAgentServerIntegrationTest` 的假 Harness 和自己的内存 H2 数据库。两个
 测试类加载各自的 Spring 上下文，每个上下文的调度器都会轮询自己的数据库；如果共用
 数据库，一个测试的调度器会认领另一个测试的 Turn。它使用 test 作用域的
-`com.networknt:json-schema-validator`（1.5.9，与 Spring Boot 3.5 一样基于
+`com.networknt:json-schema-validator`（2.0.0，与 Spring Boot 3.5 一样基于
 Jackson 2），按 JSON Schema 2020-12 校验并开启 format 断言。schema 通过指向
 spec 的 JSON Pointer 定位，因此 `$ref` 在同一个文件内解析。
 

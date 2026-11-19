@@ -278,6 +278,47 @@ describe('ModRuntime with the real QuickJS worker', () => {
     expect(await runtime.runCommand('hello', '', signal())).toBe('1:');
   });
 
+  it('skips tool hooks on a host that raises no tool events, and says so', async () => {
+    const runtime = await ModRuntime.createGroup(
+      [
+        {
+          id: 'mod-0',
+          name: 'mod-0',
+          source: {
+            root: '/fixture',
+            entry: '/fixture/mod.js',
+            source: `export function register(on) {
+              on('tool.call', ($, e, next) => next(e));
+              on('session.start', async ($, e, next) =>
+                { $.ui.log(JSON.stringify((await $.session.version()).qwen.events.filter((name) => name.startsWith('tool.')))); return next(e); });
+            }`,
+          },
+          options: {},
+        },
+      ],
+      '/workspace',
+      (log) => logs.push(log),
+      signal(),
+      undefined,
+      null,
+      'unknown',
+      undefined,
+      undefined,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      false,
+    );
+    runtimes.push(runtime);
+    expect(runtime.hasToolHooks).toBe(false);
+    expect(logs.map((log) => log.text)).toEqual([
+      'Hooks for unsupported events will not run: tool.call',
+      '[]',
+    ]);
+  });
+
   it('isolates globals and state between plugins without Node capabilities', async () => {
     const one = await create(
       fixture(

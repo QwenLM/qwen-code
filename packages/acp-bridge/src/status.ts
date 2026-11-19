@@ -964,6 +964,12 @@ export interface ServeWorkflowPhaseVisit {
   endedAt?: number;
 }
 
+/** A phase the script declares in `meta.phases`, reached or not. */
+export interface ServeWorkflowPlannedPhase {
+  title: string;
+  detail?: string;
+}
+
 export type ServeWorkflowDispatchStatus =
   | 'queued'
   | 'running'
@@ -1155,6 +1161,13 @@ export interface ServeSessionWorkflowTaskStatus {
   isBackgrounded: boolean;
   currentPhase: string | null;
   phaseVisits: ServeWorkflowPhaseVisit[];
+  /**
+   * The phases the script declares in `meta.phases`, in order. Present from
+   * the start of the run, so a client can show phases the script has not
+   * reached yet; absent when the script declares none, and on daemons that
+   * predate the field.
+   */
+  plannedPhases?: ServeWorkflowPlannedPhase[];
   dispatches: ServeWorkflowDispatchStatusEntry[];
   agentsDispatched: number;
   agentsCompleted: number;

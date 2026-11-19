@@ -176,6 +176,9 @@ describe('POST /session/:id/worktree-branch', () => {
     await fixture.writeSidecar('');
     fixture.writeTranscript();
 
+    // The detached worktree's HEAD is the start commit the sidecar recorded;
+    // branching must carry it (and the base branch) onto the live meta.
+    const baseCommit = git(fixture.worktreeDir, 'rev-parse', 'HEAD');
     const res = await request(fixture.app)
       .post(`/session/${fixture.sessionId}/worktree-branch`)
       .send({ name: 'feat/from-detached' });
@@ -185,6 +188,8 @@ describe('POST /session/:id/worktree-branch', () => {
       slug: fixture.slug,
       path: fixture.worktreeDir,
       branch: 'feat/from-detached',
+      baseCommit,
+      baseBranch: 'main',
     });
     expect(git(fixture.worktreeDir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(
       'feat/from-detached',
@@ -201,6 +206,8 @@ describe('POST /session/:id/worktree-branch', () => {
         slug: fixture.slug,
         path: fixture.worktreeDir,
         branch: 'feat/from-detached',
+        baseCommit,
+        baseBranch: 'main',
       },
     ]);
   });
