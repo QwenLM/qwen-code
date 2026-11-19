@@ -57,32 +57,36 @@ the session instead of re-probing it each turn.
 
 Add `isTerminalQuotaError(error, classification)` next to the retry
 classification (`packages/core/src/utils/retryErrorClassification.ts`). It
-returns true exactly for the permanent-quota signals, in this order:
+returns true exactly for the permanent-quota signals. The flow is:
 
 - `classification.reason === 'qwen-oauth-free-tier-quota'` or
-  `'allocated-quota-exceeded'` (the two fail-fast quota reasons), or
-- `isQuotaExhaustedError(error)` — the reset-time quota signal, read off the
-  error message. This arm runs **before** the code arm and independent of the
-  classification reason: a 429 classifies `rate-limit` (`isRateLimitError` runs
-  before the classifier's permanence arms) and a permanent non-quota code would
-  otherwise return early, so the message must be checked first. It catches the
-  error whether it arrives raw or as the formatted fast-fail `Error`.
-- the `insufficient_quota` code (case/separator insensitive) appearing in any of
-  `classification.providerCode`, the provider fields' `providerCode` /
-  `providerType` (`getProviderFields`), the message-scraped
-  `getRateLimitErrorDetails` `providerCode` / `providerType`, or the error
-  object's own `.type`/`.code`. This is read **independent of
-  `classification.reason`**: the canonical OpenAI `429 insufficient_quota`
-  classifies `rate-limit`, never `permanent-provider-code`, so gating the code
-  arm on that reason would miss it. The provider fields cover the SDK shape that
-  puts `insufficient_quota` in `.type` with `code: null`; the scraped details
-  cover a nested body whose `type` is `insufficient_quota` beside a non-quota
-  sibling `code` (the classifier reads permanence from `details.providerType`).
-- the message and code checks above run along a **bounded cause chain** (the
-  error and up to four `cause` levels). The retry layer wraps quota errors into
-  status-less Errors: the QWEN_OAUTH free-tier replacement strips the quota
-  wording and keeps the original only as `cause`, so the signal must be read
-  through the wrap rather than off the thrown error alone.
+  `'allocated-quota-exceeded'` (the two fail-fast quota reasons) returns true.
+- `classification.providerCode` matching `insufficient_quota` (case/separator
+  insensitive) returns true. This is checked once, before the walk.
+- Otherwise walk a **bounded cause chain** (the error and up to four `cause`
+  levels); at each node, return true if `isQuotaExhaustedError(node)` (the
+  reset-time quota message) or if the `insufficient_quota` code appears in the
+  provider fields' `providerCode` / `providerType` (`getProviderFields`) or the
+  message-scraped `getRateLimitErrorDetails` `providerCode` / `providerType`.
+
+The signal is read **independent of `classification.reason`**: the canonical
+OpenAI `429 insufficient_quota` classifies `rate-limit` (`isRateLimitError` runs
+before the classifier's permanence arms), never `permanent-provider-code`, so
+gating the code check on that reason would miss it. The provider fields cover
+the SDK shape that puts `insufficient_quota` in `.type` with `code: null`; the
+scraped details cover a nested body whose `type` is `insufficient_quota` beside a
+non-quota sibling `code` (the classifier reads permanence from
+`details.providerType`). The cause walk covers the retry layer's wraps: the
+QWEN_OAUTH free-tier replacement strips the quota wording and keeps the original
+as `cause` (attached unconditionally in `retry.ts`, since the fallback's
+`retryWithBackoff` call passes no `singleAttempt`), so the signal must be read
+through the wrap rather than off the thrown error alone.
+
+**No arm returns a negative verdict** — the only negative exit is the final one
+after the walk. This is the invariant that lets a reset-time quota message under
+a permanent non-quota code still be marked terminal: a node's code test never
+masks a later node's message. Adding an early `return false` (a natural-looking
+"optimization" once the classifier has decided the reason) would break that case.
 
 Non-quota permanent errors (moderation `data_inspection_failed`, auth, billing
 other than `insufficient_quota`, malformed request) do **not** match: none of

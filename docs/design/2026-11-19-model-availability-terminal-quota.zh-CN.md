@@ -49,27 +49,33 @@ fallback；该路径在此不变。
 ### 1. 永久配额判定谓词
 
 在重试分类旁（`packages/core/src/utils/retryErrorClassification.ts`）新增
-`isTerminalQuotaError(error, classification)`。它按以下顺序恰对永久配额信号返回
-true：
+`isTerminalQuotaError(error, classification)`。它恰对永久配额信号返回 true。
+流程为：
 
 - `classification.reason === 'qwen-oauth-free-tier-quota'` 或
-  `'allocated-quota-exceeded'`（两个 fail-fast 配额 reason），或
-- `isQuotaExhaustedError(error)`——重置时间配额信号，从错误消息读取。此臂在 code
-  臂**之前**、独立于分类 reason 运行：429 分类为 `rate-limit`（`isRateLimitError`
-  先于分类器的 permanence 臂），永久非配额 code 否则会提前 return，故须先查消息。
-  无论错误以原始形状还是格式化 fast-fail `Error` 到达都能捕获。
-- `insufficient_quota` code（大小写/分隔符不敏感）出现在
-  `classification.providerCode`、provider fields 的 `providerCode`/`providerType`
-  （`getProviderFields`）、消息内解析的 `getRateLimitErrorDetails` 的
-  `providerCode`/`providerType`、或错误对象自身 `.type`/`.code` 任一处。此读取
-  **独立于 `classification.reason`**：canonical OpenAI `429 insufficient_quota`
-  分类为 `rate-limit`、绝非 `permanent-provider-code`，若把 code 臂门控在该 reason
-  上就会漏掉它。provider fields 覆盖 SDK 把 `insufficient_quota` 放在 `.type`、
-  `code: null` 的形状；解析 details 覆盖嵌套报文的 `type` 为 `insufficient_quota`
-  而同级 `code` 为非配额的形状（分类器从 `details.providerType` 读取永久性）。
-- 上述消息与 code 检查沿**有界 cause 链**运行（错误本身及至多四层 `cause`）。
-  retry 层把配额错误包装成无 status Error：QWEN_OAUTH 免费层替代错误剥去配额措辞、
-  仅以 `cause` 保留原始错误，故须穿过包装读信号，而非只读抛出错误本身。
+  `'allocated-quota-exceeded'`（两个 fail-fast 配额 reason）返回 true。
+- `classification.providerCode` 命中 `insufficient_quota`（大小写/分隔符不敏感）
+  返回 true。此检查在遍历之前一次性运行。
+- 否则沿**有界 cause 链**遍历（错误本身及至多四层 `cause`）；每个节点上，若
+  `isQuotaExhaustedError(node)`（重置时间配额消息）或 `insufficient_quota` code
+  出现在 provider fields 的 `providerCode`/`providerType`（`getProviderFields`）、
+  消息内解析的 `getRateLimitErrorDetails` 的 `providerCode`/`providerType` 任一处，
+  返回 true。
+
+此读取**独立于 `classification.reason`**：canonical OpenAI `429 insufficient_quota`
+分类为 `rate-limit`（`isRateLimitError` 先于分类器的 permanence 臂）、绝非
+`permanent-provider-code`，若把 code 检查门控在该 reason 上就会漏掉它。provider
+fields 覆盖 SDK 把 `insufficient_quota` 放在 `.type`、`code: null` 的形状；解析
+details 覆盖嵌套报文的 `type` 为 `insufficient_quota` 而同级 `code` 为非配额的形状
+（分类器从 `details.providerType` 读取永久性）。cause 遍历覆盖 retry 层的包装：
+QWEN_OAUTH 免费层替代错误剥去配额措辞、以 `cause` 保留原始错误（在 `retry.ts` 中
+无条件挂载，因为 fallback 的 `retryWithBackoff` 调用不传 `singleAttempt`），故须
+穿过包装读信号，而非只读抛出错误本身。
+
+**没有任何臂返回否定结论**——唯一的否路径是遍历结束后的最终出口。正是这一不变量
+使「永久非配额 code 之下的重置时间配额消息」仍被标记 terminal：某节点的 code 检查
+不会掩盖后续节点的消息。补上提前 `return false`（分类器已判定 reason 后看似自然的
+「优化」）会破坏该情形。
 
 非配额的永久错误（审核 `data_inspection_failed`、鉴权、`insufficient_quota`
 以外的计费、畸形请求）**不**命中：它们的 code 都不是 `insufficient_quota`，消息

@@ -643,22 +643,6 @@ export function isFallbackEligible(
   );
 }
 
-/**
- * Whether a failed request signals a permanent quota exhaustion that cannot
- * succeed until the quota resets, so the model should be skipped for the rest
- * of the session rather than re-probed each turn.
- *
- * The signal is read independent of the classification reason and through the
- * retry layer's wraps: a 429 classifies 'rate-limit' (isRateLimitError runs
- * before the permanence arms), and retry.ts replaces quota errors with
- * status-less Errors — the QWEN_OAUTH free-tier replacement strips the quota
- * wording, keeping the original only as `cause`. So the reset-time message and
- * the insufficient_quota code are read along a bounded cause chain, from every
- * source the classifier itself reads (the classification's providerCode, the
- * provider fields, the message-scraped details, and the error's own type/code).
- * Non-quota permanent errors (moderation, auth, other billing) and transient
- * capacity do not match.
- */
 const INSUFFICIENT_QUOTA_CODE = /insufficient[_-]?quota/i;
 const MAX_QUOTA_CAUSE_DEPTH = 4;
 
@@ -668,19 +652,35 @@ function hasInsufficientQuotaCode(error: unknown): boolean {
   }
   const { providerCode, providerType } = getProviderFields(error);
   const details = getRateLimitErrorDetails(error);
-  const typeOrCode =
-    (error as { type?: unknown }).type ?? (error as { code?: unknown }).code;
   return [
     providerCode,
     providerType,
     details.providerCode,
     details.providerType,
-    typeof typeOrCode === 'string' ? typeOrCode : undefined,
   ].some(
     (value) => typeof value === 'string' && INSUFFICIENT_QUOTA_CODE.test(value),
   );
 }
 
+/**
+ * Whether a failed request signals a permanent quota exhaustion that cannot
+ * succeed until the quota resets, so the model should be skipped for the rest
+ * of the session rather than re-probed each turn.
+ *
+ * The signal is read independent of the classification reason: a 429 classifies
+ * 'rate-limit' (isRateLimitError runs before the permanence arms), so the two
+ * quota reason literals and classification.providerCode are checked first, then
+ * the reset-time message and the insufficient_quota code are checked at each
+ * node of a bounded cause chain (the error plus up to four cause levels). The
+ * retry layer wraps quota errors into status-less Errors — the QWEN_OAUTH
+ * free-tier replacement strips the quota wording and keeps the original as
+ * cause — so the signal may live on a nested cause. The code is read from the
+ * provider fields and the message-scraped details, the same sources the
+ * classifier reads. No arm returns a negative verdict: a node's code test never
+ * masks a later node's reset-time message, and the only negative exit is the
+ * final one. Non-quota permanent errors (moderation, auth, other billing) and
+ * transient capacity do not match.
+ */
 export function isTerminalQuotaError(
   error: unknown,
   classification: RetryErrorClassification,

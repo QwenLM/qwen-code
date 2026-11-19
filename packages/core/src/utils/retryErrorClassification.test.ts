@@ -19,6 +19,7 @@ import {
   type RetryErrorClassificationContext,
   type RetryErrorDiagnosis,
 } from './retryErrorClassification.js';
+import { retryWithBackoff } from './retry.js';
 
 /** Asserts `error` (with `context`) classifies to a match of `expected`. */
 function expectVerdict(
@@ -1276,8 +1277,9 @@ describe('isTerminalQuotaError', () => {
   });
 
   it('matches a reset-time quota message under a permanent non-quota code (R1-1)', () => {
-    // The message arm must run before the code arm returns: a permanent
-    // non-quota code carrying reset-time quota wording is still terminal.
+    // No arm returns a negative verdict, so the non-quota billing_error code
+    // does not mask the reset-time quota message checked at the same node: a
+    // permanent non-quota code carrying reset-time quota wording is terminal.
     const error = Object.assign(
       new Error(
         'Your quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC.',
@@ -1317,6 +1319,34 @@ describe('isTerminalQuotaError', () => {
     const classification = classifyRetryError(wrapped);
     expect(classification.reason).toBe('unclassified');
     expect(isTerminalQuotaError(wrapped, classification)).toBe(true);
+  });
+
+  it('marks the free-tier replacement terminal through the real retry layer without singleAttempt (R2-1)', async () => {
+    // The fallback chain's retryWithBackoff call passes no singleAttempt, so the
+    // free-tier replacement must carry the original as cause unconditionally for
+    // the predicate to read the quota signal through the wrap.
+    const rawFreeTier = Object.assign(
+      new Error('free allocated quota exceeded'),
+      {
+        status: 429,
+        code: 'insufficient_quota',
+        type: 'insufficient_quota',
+      },
+    );
+    let thrown: unknown;
+    try {
+      await retryWithBackoff(
+        async () => {
+          throw rawFreeTier;
+        },
+        { authType: AuthType.QWEN_OAUTH },
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).cause).toBe(rawFreeTier);
+    expect(isTerminalQuotaError(thrown, classifyRetryError(thrown))).toBe(true);
   });
 
   it('reads the message-scraped providerType beside a non-quota code (R2-2)', () => {
