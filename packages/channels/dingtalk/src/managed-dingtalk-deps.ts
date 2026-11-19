@@ -48,63 +48,88 @@ async function discoverEndpoint(
     subscriptions: Array<{ type: string; topic: string }>;
   },
   signal: AbortSignal,
+  proxy?: string,
 ): Promise<{ accessToken: string; endpoint: string; ticket: string }> {
   const tokenUrl =
     `${TOKEN_URL}?appkey=${encodeURIComponent(config.clientId)}` +
     `&appsecret=${encodeURIComponent(config.clientSecret)}`;
-  // No redirect following on either leg: the token URL carries the appsecret
-  // and the gateway request carries the access token, so a redirect would
-  // hand that credential to another host. Same guard the webhook send applies.
-  const tokenResponse = await fetch(tokenUrl, { signal, redirect: 'error' });
-  if (!tokenResponse.ok) {
-    throw new Error(
-      'DingTalk endpoint discovery failed: token request refused.',
-    );
+  // Route discovery through the same resolved proxy the webhook send uses,
+  // with a per-call dispatcher destroyed afterwards. Relying on the ambient
+  // global dispatcher instead would make egress depend on who installed it:
+  // the CLI installs one, a daemon worker may not, and the SDK's axios ignored
+  // it entirely — so the same setting would mean different egress per path.
+  let dispatcher: import('undici').Dispatcher | undefined;
+  try {
+    if (proxy) {
+      const { default: undici } = await import('undici');
+      dispatcher = new undici.EnvHttpProxyAgent({
+        httpProxy: proxy,
+        httpsProxy: proxy,
+      });
+    }
+    const via = dispatcher ? { dispatcher } : {};
+    // No redirect following on either leg: the token URL carries the appsecret
+    // and the gateway request carries the access token, so a redirect would
+    // hand that credential to another host. Same guard the webhook send applies.
+    const tokenResponse = await fetch(tokenUrl, {
+      signal,
+      redirect: 'error',
+      ...via,
+    });
+    if (!tokenResponse.ok) {
+      throw new Error(
+        'DingTalk endpoint discovery failed: token request refused.',
+      );
+    }
+    const token = (await tokenResponse.json()) as { access_token?: string };
+    if (!token?.access_token) {
+      throw new Error('DingTalk endpoint discovery failed: no access token.');
+    }
+    const gatewayResponse = await fetch(GATEWAY_URL, {
+      method: 'POST',
+      signal,
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        'access-token': token.access_token,
+      },
+      body: JSON.stringify({
+        clientId: config.clientId,
+        clientSecret: config.clientSecret,
+        ua: config.ua,
+        subscriptions: config.subscriptions,
+      }),
+      redirect: 'error',
+      ...via,
+    });
+    if (!gatewayResponse.ok) {
+      throw new Error(
+        'DingTalk endpoint discovery failed: gateway request refused.',
+      );
+    }
+    const gateway = (await gatewayResponse.json()) as {
+      endpoint?: string;
+      ticket?: string;
+    };
+    if (!gateway?.endpoint || !gateway?.ticket) {
+      throw new Error(
+        'DingTalk endpoint discovery failed: no endpoint or ticket.',
+      );
+    }
+    return {
+      accessToken: token.access_token,
+      endpoint: gateway.endpoint,
+      ticket: gateway.ticket,
+    };
+  } finally {
+    await dispatcher?.destroy().catch(() => undefined);
   }
-  const token = (await tokenResponse.json()) as { access_token?: string };
-  if (!token?.access_token) {
-    throw new Error('DingTalk endpoint discovery failed: no access token.');
-  }
-  const gatewayResponse = await fetch(GATEWAY_URL, {
-    method: 'POST',
-    signal,
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-      'access-token': token.access_token,
-    },
-    body: JSON.stringify({
-      clientId: config.clientId,
-      clientSecret: config.clientSecret,
-      ua: config.ua,
-      subscriptions: config.subscriptions,
-    }),
-    redirect: 'error',
-  });
-  if (!gatewayResponse.ok) {
-    throw new Error(
-      'DingTalk endpoint discovery failed: gateway request refused.',
-    );
-  }
-  const gateway = (await gatewayResponse.json()) as {
-    endpoint?: string;
-    ticket?: string;
-  };
-  if (!gateway?.endpoint || !gateway?.ticket) {
-    throw new Error(
-      'DingTalk endpoint discovery failed: no endpoint or ticket.',
-    );
-  }
-  return {
-    accessToken: token.access_token,
-    endpoint: gateway.endpoint,
-    ticket: gateway.ticket,
-  };
 }
 
 function createStreamClient(
   settings: DingtalkSettings,
   onMessage: (messageId: string, data: string) => boolean,
+  proxy?: string,
 ): ManagedDingtalkStreamClient {
   const client = new DWClient({
     clientId: settings.clientId,
@@ -140,6 +165,7 @@ function createStreamClient(
     const discovered = await discoverEndpoint(
       client.config,
       AbortSignal.timeout(CONNECT_TIMEOUT_MS),
+      proxy,
     );
     client.config.access_token = discovered.accessToken;
     // The SDK stores the whole gateway object here even though its published
@@ -512,7 +538,8 @@ export function createManagedDingtalkDeps(
   proxy?: string,
 ): ManagedDingtalkAdapterDeps {
   return {
-    createStreamClient,
+    createStreamClient: (settings, onMessage) =>
+      createStreamClient(settings, onMessage, proxy),
     sendWebhook: (webhook, text) => sendWebhook(webhook, text, proxy),
     lock: async (directory, onCompromised) => {
       const { default: lockfile } = await import('proper-lockfile');

@@ -64,9 +64,13 @@ The discovery contract is small and stable: two URLs, two query names, four payl
 - No change to reconnect arbitration, the attempt budget value, the heartbeat retire, or the ledger.
 - No change to the frame-suppression scope or to the depth counter semantics.
 
-## Open questions
+## Egress
 
-- Whether the discovery should reuse the resolved egress proxy. The webhook send already routes through a per-send dispatcher; endpoint discovery currently goes direct via the SDK's axios. This change preserves today's behaviour (direct) rather than silently widening it.
+Moving discovery from the SDK's axios to `fetch` changes which proxy settings it honours, so this is a deliberate choice rather than a preserved behaviour.
+
+`resolveProxy` installs a **global** undici dispatcher for channel processes. `fetch` inherits it; axios never did. Left implicit, the same `settings.proxy` would therefore mean different egress depending on who installed the dispatcher — the CLI installs one, a daemon worker may not — and an environment-variable-only proxy would flip the other way, since axios reads those variables and `fetch` does not.
+
+Discovery therefore takes the resolved proxy explicitly and routes both legs through a per-call `EnvHttpProxyAgent` that is destroyed afterwards, exactly as the webhook send does. Egress no longer depends on ambient global state, and the two HTTP paths in this adapter agree. The wss upgrade is unchanged and still does not go through the proxy, so a proxy-only egress remains unable to complete a connect end to end — this change does not create that limitation and does not fix it.
 
 ## Acceptance
 

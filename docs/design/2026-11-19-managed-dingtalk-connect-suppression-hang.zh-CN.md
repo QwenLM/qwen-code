@@ -64,9 +64,13 @@ SDK（`dingtalk-stream-sdk-nodejs` 2.0.4，`dist/client.mjs`）在连接路径�
 - 不改重连仲裁、尝试预算数值、心跳回收与台账。
 - 不改帧抑制作用域与深度计数器语义。
 
-## 待定问题
+## 出口
 
-- 发现是否应复用已解析的出口代理。webhook 发送已经走逐次发送的 dispatcher，而端点发现目前经 SDK 的 axios 直连。本改动保持今天的行为（直连），不静默扩大它。
+把发现从 SDK 的 axios 换成 `fetch`，会改变它遵循哪些代理设置，因此这是一处**刻意选择**，不是「保持原行为」。
+
+`resolveProxy` 为频道进程安装的是**全局** undici dispatcher。`fetch` 会继承它，axios 从来不会。若放任其隐式生效，同一个 `settings.proxy` 就会因「谁装了 dispatcher」而意味着不同出口——CLI 会装，daemon worker 未必装；而仅有环境变量代理时方向又会反过来，因为 axios 读那些变量、`fetch` 不读。
+
+因此发现**显式**接收已解析的代理，两条腿都走一个逐次调用、用完即销毁的 `EnvHttpProxyAgent`，与 webhook 发送完全一致。出口不再依赖环境的全局状态，本适配器的两条 HTTP 路径也就此一致。wss 升级不变、仍不走代理，所以「只有代理出口」的部署本来就无法端到端完成连接——本改动既不制造该限制，也不修复它。
 
 ## 验收
 

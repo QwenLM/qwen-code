@@ -402,13 +402,15 @@ describe('managed DingTalk stream SDK wiring pins (#17173 R12)', () => {
     ).toBe(false);
   });
 
-  it('suppresses the SDK getEndpoint credential log during connect', async () => {
+  it('never runs the SDK credential log, because discovery is replaced', async () => {
     mockState.logEndpoint = true;
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const { createStreamClient } = createManagedDingtalkDeps();
     const stream = createStreamClient(SETTINGS, () => true);
     await stream.connect();
-    // The SDK logs the clientSecret inside connect; the wrapper must mute it.
+    // The double logs the clientSecret inside its own getEndpoint, as the real
+    // SDK does. The wrapper replaces that method with silent discovery, so the
+    // log must never run — not be muted after the fact (#17173 R11).
     expect(logSpy).not.toHaveBeenCalled();
     // Suppression is scoped to the attempt: logging works again afterwards.
     // eslint-disable-next-line no-console -- probing the restored console

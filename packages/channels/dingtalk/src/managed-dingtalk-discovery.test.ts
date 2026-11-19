@@ -74,7 +74,8 @@ let mode:
   | 'no-token'
   | 'no-ticket'
   | 'refused'
-  | 'gateway-refused' = 'ok';
+  | 'gateway-refused'
+  | 'transport' = 'ok';
 
 const body = (url: string) =>
   url.includes('gettoken')
@@ -112,6 +113,7 @@ beforeEach(() => {
     vi.fn(async (url: string, init?: RequestInit) => {
       calls.push({ url, init });
       if (mode === 'hang') return new Promise(() => {});
+      if (mode === 'transport') throw new TypeError('fetch failed');
       // 'refused' fails the token leg; 'gateway-refused' answers the token and
       // fails the gateway, so both refusal branches are actually reached.
       const ok =
@@ -176,7 +178,13 @@ describe('managed DingTalk endpoint discovery (#17173 R11)', () => {
     stream.disconnect();
   });
 
-  it.each(['no-token', 'no-ticket', 'refused', 'gateway-refused'] as const)(
+  it.each([
+    'no-token',
+    'no-ticket',
+    'refused',
+    'gateway-refused',
+    'transport',
+  ] as const)(
     'a %s answer rejects the first connect without leaking the secret',
     async (m) => {
       mode = m;
@@ -187,6 +195,8 @@ describe('managed DingTalk endpoint discovery (#17173 R11)', () => {
       );
       expect(message).toMatch(/check the clientId\/clientSecret and network/);
       expect(message).not.toContain(SETTINGS.clientSecret);
+      // The token URL carries the encoded form, so the raw check alone is blind.
+      expect(message).not.toContain(encodeURIComponent(SETTINGS.clientSecret));
       expect(wsState.instances).toHaveLength(0);
       stream.disconnect();
     },
@@ -196,16 +206,68 @@ describe('managed DingTalk endpoint discovery (#17173 R11)', () => {
   // deadline itself: one real timeout, at the attempt's horizon. Sharing that
   // horizon is deliberate — a shorter bound would narrow the allowance
   // discovery already had under the attempt budget.
-  it('gives discovery a real deadline at the attempt horizon', async () => {
-    const timeout = vi.spyOn(AbortSignal, 'timeout');
+  it('gives discovery the deadline the attempt itself armed, and uses it', async () => {
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const created: AbortSignal[] = [];
+    const timeout = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation((ms: number) => {
+        const signal = realTimeout(ms);
+        created.push(signal);
+        return signal;
+      });
+    const setTimer = vi.spyOn(globalThis, 'setTimeout');
     const stream = await startOpen();
+
     expect(timeout).toHaveBeenCalledTimes(1);
-    expect(timeout.mock.calls[0]![0]).toBe(CONNECT_TIMEOUT_MS);
+    const deadline = timeout.mock.calls[0]![0];
+    expect(deadline).toBe(CONNECT_TIMEOUT_MS);
+    // Comparing against this file's constant alone would let the attempt arm a
+    // different, shorter clock while discovery kept this one — a second, later
+    // deadline. Tie it to a delay the attempt actually armed.
+    expect(setTimer.mock.calls.map((c) => c[1])).toContain(deadline);
+    // And the constructed deadline must be the signal the requests carry, not
+    // one that was built and discarded.
+    expect(created).toHaveLength(1);
     expect(calls).toHaveLength(2);
     for (const call of calls) {
-      expect(call.init?.signal).toBeInstanceOf(AbortSignal);
+      expect(call.init?.signal).toBe(created[0]);
     }
-    expect(calls[0]!.init?.signal).toBe(calls[1]!.init?.signal);
+    stream.disconnect();
+  });
+
+  it('routes discovery through the resolved proxy, as the webhook send does', async () => {
+    const { createStreamClient } = createManagedDingtalkDeps(
+      'http://proxy.invalid:8080',
+    );
+    const stream = createStreamClient(SETTINGS, () => true);
+    // The proxy dispatcher loads behind a dynamic import, which does not
+    // settle under a fake clock — the webhook proxy cases run on real timers
+    // for the same reason.
+    vi.useRealTimers();
+    const connecting = stream.connect();
+    for (let i = 0; i < 500 && wsState.instances.length === 0; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+    latest().open();
+    await connecting;
+
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(
+        (call.init as { dispatcher?: unknown } | undefined)?.dispatcher,
+      ).toBeDefined();
+    }
+    stream.disconnect();
+  });
+
+  it('leaves discovery on the ambient dispatcher when no proxy is configured', async () => {
+    const stream = await startOpen();
+    for (const call of calls) {
+      expect(
+        (call.init as { dispatcher?: unknown } | undefined)?.dispatcher,
+      ).toBeUndefined();
+    }
     stream.disconnect();
   });
 
