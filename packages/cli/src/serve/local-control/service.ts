@@ -8,13 +8,16 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { createServer as createSecureServer } from 'node:https';
+import type { Socket } from 'node:net';
 import type { Application } from 'express';
 import type { SleepInhibitorHandle } from '@qwen-code/qwen-code-core';
 import { sleepInhibitor } from '@qwen-code/qwen-code-core';
 import type { MutableOriginAllowlist } from '../auth.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import { PAIRING_LISTENER_MAX_CONNECTIONS } from '../daemon-status.js';
 import type { CredentialStore } from './credentials.js';
 import { tagListener } from './listener-identity.js';
+import { enableSocketKeepalive } from '../socket-keepalive.js';
 import {
   isLanIpv4,
   isSoftwareNetwork,
@@ -29,7 +32,6 @@ import {
 
 /** Key under which the LAN origin is registered in the mutable CORS allowlist. */
 const CORS_KEY = 'local-control';
-const MAX_CONNECTIONS = 64;
 const HEADERS_TIMEOUT_MS = 10_000;
 const KEEP_ALIVE_TIMEOUT_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 30 * 60_000;
@@ -157,6 +159,7 @@ export interface LocalControlServiceDeps {
 export class LocalControlService {
   readonly #deps: LocalControlServiceDeps;
   #server: Server | undefined;
+  #sockets = new Set<Socket>();
   #token: PairingToken | undefined;
   #selected: LanCandidate | undefined;
   #port: number | undefined;
@@ -242,12 +245,15 @@ export class LocalControlService {
           this.#deps.app,
         )
       : createServer(this.#deps.app);
-    server.maxConnections = MAX_CONNECTIONS;
+    server.maxConnections = PAIRING_LISTENER_MAX_CONNECTIONS;
+    // Same keepalive policy as the primary listener: pairing clients sit
+    // behind NATs that silently drop idle flows.
+    enableSocketKeepalive(server);
     server.headersTimeout = HEADERS_TIMEOUT_MS;
     // Whole-request budget. A trickling body holds its connection slot for as
     // long as `requestTimeout` allows, and slots are consumed pre-auth: with
     // no budget an unauthenticated LAN client could hold all
-    // `MAX_CONNECTIONS` slots open indefinitely and starve the listener
+    // `PAIRING_LISTENER_MAX_CONNECTIONS` slots open indefinitely and starve the listener
     // (`headersTimeout` covers only the header phase, `keepAliveTimeout` only
     // idle sockets — a slow body is neither). 30 minutes bounds that class
     // while still covering a phone trickling a large workspace file over slow
@@ -259,6 +265,16 @@ export class LocalControlService {
     // and a request can arrive between `listen()` resolving and the next line
     // of this function running.
     tagListener(server, { kind: 'local-control' });
+
+    // closeAllConnections() does not reach sockets detached by an upgrade;
+    // track them so disable() cannot hang on a paired ACP peer that never
+    // answers close (same sweep as the primary listener and remote-access).
+    const sockets = new Set<Socket>();
+    this.#sockets = sockets;
+    server.on('connection', (socket) => {
+      sockets.add(socket);
+      socket.once('close', () => sockets.delete(socket));
+    });
 
     // Register the credential before the socket accepts anything. The origin
     // and final listener identity are installed synchronously in `listening`,
@@ -314,7 +330,7 @@ export class LocalControlService {
       this.#deps.detachWebSocket(server);
       this.#deps.credentials.revokePairingToken(token.id);
       this.#deps.originAllowlist.remove(CORS_KEY);
-      if (server.listening) await close(server);
+      if (server.listening) await close(server, sockets);
       throw error;
     }
 
@@ -400,7 +416,7 @@ export class LocalControlService {
 
     if (server) {
       this.#deps.detachWebSocket(server);
-      await close(server);
+      await close(server, this.#sockets);
     }
     return { active: false };
   }
@@ -534,12 +550,15 @@ function normalizeBindError(error: Error): Error {
   }
 }
 
-function close(server: Server): Promise<void> {
+function close(server: Server, sockets: Set<Socket>): Promise<void> {
   return new Promise((resolve) => {
     // `closeAllConnections` cuts keep-alive sockets that `close()` alone would
     // wait on indefinitely. Without it, disable() would resolve only once the
-    // phone happened to disconnect.
+    // phone happened to disconnect. Upgraded sockets are detached from that
+    // sweep, so destroy the tracked survivors as well.
     server.closeAllConnections?.();
+    for (const socket of sockets) socket.destroy();
+    sockets.clear();
     server.close(() => resolve());
   });
 }

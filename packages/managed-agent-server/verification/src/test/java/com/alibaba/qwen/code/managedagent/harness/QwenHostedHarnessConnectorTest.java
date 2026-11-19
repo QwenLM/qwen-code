@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.daemon.HarnessSessionStatus;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
+import com.alibaba.qwen.code.daemon.HostedHarnessPlacement;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
 import com.alibaba.qwen.code.daemon.MutationOutcomeUnknownException;
 import com.alibaba.qwen.code.daemon.PromptReceipt;
@@ -49,29 +50,37 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.net.URI;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BiFunction;
+import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
+import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -1095,6 +1104,7 @@ class QwenHostedHarnessConnectorTest {
         when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
         DaemonHttpException conflict = mock(DaemonHttpException.class);
         when(conflict.getStatusCode()).thenReturn(409);
+        when(conflict.getErrorCode()).thenReturn("hosted_session_already_attached");
         when(client.createSession(any())).thenThrow(conflict);
         when(client.loadSession(any())).thenReturn(attached);
         AgentStateStore sessions = mock(AgentStateStore.class);
@@ -1712,6 +1722,7 @@ class QwenHostedHarnessConnectorTest {
         HarnessSessionRef session = mock(HarnessSessionRef.class);
         DaemonHttpException conflict = mock(DaemonHttpException.class);
         when(conflict.getStatusCode()).thenReturn(409);
+        when(conflict.getErrorCode()).thenReturn("hosted_session_already_attached");
         when(capabilities.getBootId()).thenReturn(BOOT_ID);
         when(client.capabilities()).thenReturn(capabilities);
         when(client.loadSession(any(LoadHarnessSession.class)))
@@ -1726,6 +1737,45 @@ class QwenHostedHarnessConnectorTest {
 
         assertThat(attachment.bootId()).isEqualTo(BOOT_ID);
         verify(client).loadSession(any(LoadHarnessSession.class));
+        verify(client).createSession(any(CreateHarnessSession.class));
+    }
+
+    // A create's 409 is only a load fallback when it says the Session is
+    // already there. The suspension gate, a full cold-open slot and a wedged
+    // teardown share the status, and each must reach the caller with its own
+    // code: loading again spends a second admission on a wait, and behind
+    // open_busy it loads a journal the refused create never wrote.
+    @ParameterizedTest
+    @CsvSource({"hosted_session_already_attached,true",
+            "managed_session_already_exists,true",
+            "hosted_session_open_busy,false",
+            "hosted_session_closing,false",
+            "hosted_session_teardown_blocked,false",
+            "hosted_harness_quiescing,false"})
+    void onlyAnAlreadyHeldCreateConflictFallsBackToALoad(String code, boolean loads) {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef session = mock(HarnessSessionRef.class);
+        DaemonHttpException conflict = mock(DaemonHttpException.class);
+        when(conflict.getStatusCode()).thenReturn(409);
+        when(conflict.getErrorCode()).thenReturn(code);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(client.loadSession(any(LoadHarnessSession.class))).thenReturn(session);
+        when(client.createSession(any(CreateHarnessSession.class))).thenThrow(conflict);
+        when(session.getHarnessBootId()).thenReturn(BOOT_ID);
+        QwenHostedHarnessConnector connector = connector(client);
+
+        if (loads) {
+            assertThat(connector.createOrLoad("tenant-a", SESSION_ID, false).bootId())
+                    .isEqualTo(BOOT_ID);
+            verify(client).loadSession(any(LoadHarnessSession.class));
+        } else {
+            assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, false))
+                    .isSameAs(conflict);
+            verify(client, never()).loadSession(any(LoadHarnessSession.class));
+        }
         verify(client).createSession(any(CreateHarnessSession.class));
     }
 
@@ -2011,9 +2061,11 @@ class QwenHostedHarnessConnectorTest {
         when(capabilities.getBootId()).thenReturn(BOOT_ID);
         DaemonHttpException conflict = mock(DaemonHttpException.class);
         when(conflict.getStatusCode()).thenReturn(409);
+        when(conflict.getErrorCode()).thenReturn("hosted_session_already_attached");
         when(client.createSession(any(CreateHarnessSession.class))).thenThrow(conflict);
         DaemonHttpException alreadyAttached = mock(DaemonHttpException.class);
         when(alreadyAttached.getStatusCode()).thenReturn(409);
+        when(alreadyAttached.getErrorCode()).thenReturn("hosted_session_already_attached");
         when(client.loadSession(any(LoadHarnessSession.class)))
                 .thenThrow(alreadyAttached)
                 .thenReturn(attached);
@@ -2172,7 +2224,7 @@ class QwenHostedHarnessConnectorTest {
     // Workspace admission, the takeover load for a Session another process
     // attached — and loads nothing for a Session this node already holds.
     @Test
-    void aTransportWakeLoadsThroughTheNewWorkAdmissionOnce() {
+    void aTransportWakeLoadsThroughTheNewWorkAdmission() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
         HarnessSessionRef attached = mock(HarnessSessionRef.class);
@@ -2212,14 +2264,16 @@ class QwenHostedHarnessConnectorTest {
         assertThat(connector.attachedSessions()).containsExactly(
                 new HarnessConnector.AttachedSession("tenant-a", SESSION_ID));
 
-        // Held here now: a later wake loads nothing.
-        assertThat(connector.activateForWake("tenant-a", SESSION_ID)).isFalse();
-        verify(client, times(1)).loadSession(any(LoadHarnessSession.class));
+        // Under the wake fence a cached reference is stale: a later wake
+        // evicts it and recovery-loads again. Skipping Sessions a live
+        // writer holds is the fence's job, not this verb's.
+        assertThat(connector.activateForWake("tenant-a", SESSION_ID)).isTrue();
+        verify(client, times(2)).loadSession(any(LoadHarnessSession.class));
 
         // SQL recovery re-proves the generation even with that cached attachment.
         connector.recoverForWake("tenant-a", SESSION_ID);
         connector.recoverForWake("tenant-a", SESSION_ID);
-        verify(client, times(3)).loadSession(loads.capture());
+        verify(client, times(4)).loadSession(loads.capture());
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(
                 loads.getValue(), "toJson"))
                 .containsEntry("passiveManagedRuntimeRecovery", true)
@@ -2234,7 +2288,7 @@ class QwenHostedHarnessConnectorTest {
                 .hasMessageContaining("Workspace execution authority is unavailable");
         assertThatThrownBy(() -> connector.recoverForWake("tenant-a", SESSION_ID))
                 .hasMessageContaining("Workspace execution authority is unavailable");
-        verify(client, times(3)).loadSession(any(LoadHarnessSession.class));
+        verify(client, times(4)).loadSession(any(LoadHarnessSession.class));
     }
 
     @Test
@@ -2335,7 +2389,6 @@ class QwenHostedHarnessConnectorTest {
         QwenHostedHarnessConnector connector = connector(client);
         var added = new CountDownLatch(1);
         var release = new CountDownLatch(1);
-        var cleanup = new CountDownLatch(1);
         java.util.Set<Object> values = java.util.concurrent.ConcurrentHashMap.newKeySet();
         var markers = new java.util.AbstractSet<Object>() {
             @Override
@@ -2353,7 +2406,6 @@ class QwenHostedHarnessConnectorTest {
 
             @Override
             public java.util.Iterator<Object> iterator() {
-                cleanup.countDown();
                 return values.iterator();
             }
 
@@ -2370,7 +2422,6 @@ class QwenHostedHarnessConnectorTest {
             HostedHarnessGenerationException mismatch = mock(HostedHarnessGenerationException.class);
             when(mismatch.getActualBootId()).thenReturn(BOOT_ID);
             var adoption = workers.submit(() -> ReflectionTestUtils.invokeMethod(connector, "adoptGeneration", mismatch));
-            assertThat(cleanup.await(10, TimeUnit.SECONDS)).isTrue();
             adoption.get(10, TimeUnit.SECONDS);
             release.countDown();
             load.get(10, TimeUnit.SECONDS);
@@ -2397,7 +2448,6 @@ class QwenHostedHarnessConnectorTest {
         assertThat(connector.attachedSessions()).isEmpty();
         connector.recoverForWake("tenant-a", SESSION_ID);
         assertThat(connector.attachedSessions()).containsExactly(new HarnessConnector.AttachedSession("tenant-a", SESSION_ID));
-        assertThat(connector.activateForWake("tenant-a", SESSION_ID)).isFalse();
         ArgumentCaptor<LoadHarnessSession> loads = ArgumentCaptor.forClass(LoadHarnessSession.class);
         verify(client).loadSession(loads.capture());
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(loads.getValue(), "toJson"))
@@ -2708,6 +2758,7 @@ class QwenHostedHarnessConnectorTest {
         ReflectionTestUtils.setField(restarted, "client", client);
         DaemonHttpException attachedElsewhere = mock(DaemonHttpException.class);
         when(attachedElsewhere.getStatusCode()).thenReturn(409);
+        when(attachedElsewhere.getErrorCode()).thenReturn("hosted_session_already_attached");
         when(client.createSession(any())).thenThrow(attachedElsewhere);
         when(client.loadSession(any())).thenAnswer(invocation -> {
             LoadHarnessSession load = invocation.getArgument(0);
@@ -4409,6 +4460,311 @@ class QwenHostedHarnessConnectorTest {
         }
         assertThat(lock.hasQueuedThreads()).isTrue();
         return lock;
+    }
+
+    // A cached reference the Harness no longer holds (another control-plane
+    // process reopened the Session under a new client id) answers
+    // hosted_session_not_found: the verb re-attaches once and runs again on
+    // the fresh reference, which later verbs reuse.
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void vanishedAdmissionPassivelyReattachesOnceAndRetriesTheVerb(boolean vanishesAgain) {
+        var client = harnessClient();
+        var stale = mock(HarnessSessionRef.class);
+        var fresh = mock(HarnessSessionRef.class);
+        when(fresh.getHarnessBootId()).thenReturn(BOOT_ID);
+        var loads = new java.util.concurrent.atomic.AtomicInteger();
+        when(client.loadSession(any())).thenAnswer(call -> {
+            LoadHarnessSession load = call.getArgument(0);
+            if (loads.getAndIncrement() == 0) {
+                return stale;
+            }
+            if (!Boolean.TRUE.equals(ReflectionTestUtils.getField(load, "passiveManagedRuntimeRecovery"))) {
+                throw harnessRefusal(409, "hosted_session_already_attached");
+            }
+            return fresh;
+        });
+        var vanished = harnessRefusal(404, "hosted_session_not_found");
+        var body = Map.<String, Object>of("kind", "submit_input");
+        when(client.runChannelOperation(stale, body)).thenThrow(vanished);
+        when(client.runChannelOperation(fresh, body)).thenAnswer(call -> {
+            if (vanishesAgain) {
+                throw vanished;
+            }
+            return Map.of("accepted", true);
+        });
+        var connector = connector(client);
+        connector.rename("tenant-a", SESSION_ID, "initial");
+
+        if (vanishesAgain) {
+            assertThatThrownBy(() -> connector.runChannelOperation("tenant-a", SESSION_ID, body)).isSameAs(vanished);
+        } else {
+            assertThat(connector.runChannelOperation("tenant-a", SESSION_ID, body)).containsEntry("accepted", true);
+        }
+        connector.rename("tenant-a", SESSION_ID, "title");
+
+        verify(client).runChannelOperation(stale, body);
+        verify(client).runChannelOperation(fresh, body);
+        verify(client, times(2)).loadSession(any());
+        verify(client).updateSessionTitle(fresh, "title");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"404,hosted_extension_operation_not_found", "409,hosted_session_already_attached"})
+    void otherRefusalsKeepTheCachedAttachment(int status, String code) {
+        var client = harnessClient();
+        var cached = mock(HarnessSessionRef.class);
+        when(client.loadSession(any())).thenReturn(cached);
+        var refusal = harnessRefusal(status, code);
+        var body = Map.<String, Object>of("kind", "submit_input");
+        when(client.runChannelOperation(cached, body)).thenThrow(refusal);
+        var connector = connector(client);
+        connector.rename("tenant-a", SESSION_ID, "initial");
+
+        assertThatThrownBy(() -> connector.runChannelOperation("tenant-a", SESSION_ID, body)).isSameAs(refusal);
+        connector.rename("tenant-a", SESSION_ID, "next");
+
+        verify(client, times(1)).loadSession(any());
+        verify(client).updateSessionTitle(cached, "next");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted_session_closing", "workspace_busy", "managed_session_writer_conflict"})
+    void aRefusedReattachmentKeepsItsOwnClassification(String code) {
+        var client = harnessClient();
+        var stale = mock(HarnessSessionRef.class);
+        var refusedLoad = harnessRefusal(409, code);
+        when(client.loadSession(any())).thenReturn(stale).thenThrow(refusedLoad);
+        var vanished = harnessRefusal(404, "hosted_session_not_found");
+        var body = Map.<String, Object>of("kind", "submit_input");
+        when(client.runChannelOperation(stale, body)).thenThrow(vanished);
+        var connector = connector(client);
+        connector.rename("tenant-a", SESSION_ID, "initial");
+
+        assertThatThrownBy(() -> connector.runChannelOperation("tenant-a", SESSION_ID, body)).isSameAs(refusedLoad);
+
+        verify(client, times(2)).loadSession(any());
+        verify(client).runChannelOperation(stale, body);
+    }
+
+    @Test
+    void anUnknownReattachmentOutcomeSurfacesAsItself() {
+        var client = harnessClient();
+        var stale = mock(HarnessSessionRef.class);
+        var unknown = mock(MutationOutcomeUnknownException.class);
+        when(client.loadSession(any())).thenReturn(stale).thenThrow(unknown);
+        var body = Map.<String, Object>of("kind", "submit_input");
+        var vanished = harnessRefusal(404, "hosted_session_not_found");
+        when(client.runChannelOperation(stale, body)).thenThrow(vanished);
+        var connector = connector(client);
+        connector.rename("tenant-a", SESSION_ID, "initial");
+
+        assertThatThrownBy(() -> connector.runChannelOperation("tenant-a", SESSION_ID, body)).isSameAs(unknown);
+    }
+
+    // The SDK client retires attachments on its own heartbeat; the pool
+    // client must carry the connector's notice handler, and a notice for
+    // the published reference evicts it together with its recovery marker.
+    @Test
+    @SuppressWarnings("unchecked")
+    void poolClientRetirementNoticeEvictsTheRetiredReferenceAndMarker() {
+        var client = harnessClient();
+        var connector = connector(client);
+        var endpoint = new HarnessDiscovery.Endpoint(
+                "instance-a", URI.create("http://127.0.0.1:4101"), true);
+        connector.configurePool(endpoint, client, null, null);
+        ArgumentCaptor<Consumer<HarnessSessionRef>> captor =
+                ArgumentCaptor.forClass(Consumer.class);
+        verify(client).onAttachmentRetirement(captor.capture());
+        var fresh = mock(HarnessSessionRef.class);
+        when(fresh.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(fresh.getRuntimeRecovery()).thenReturn(mock(HarnessRuntimeRecovery.class));
+        when(client.loadSession(any())).thenReturn(fresh);
+        var call = new QwenHostedHarnessConnector.PoolCall("tenant-a", SESSION_ID,
+                new HostedHarnessPlacement("instance-a", BOOT_ID, 2), "w".repeat(32), false);
+        Object key = connector.withPlacement(call, () -> {
+            connector.createOrLoad("tenant-a", SESSION_ID, true, true);
+            return ReflectionTestUtils.invokeMethod(connector, "attachmentKey", "tenant-a", SESSION_ID);
+        });
+        Map<Object, HarnessSessionRef> refs =
+                (Map<Object, HarnessSessionRef>) ReflectionTestUtils.getField(connector, "attachments");
+        Set<Object> markers = (Set<Object>) ReflectionTestUtils.getField(connector, "pendingRecovery");
+        assertThat(refs.get(key)).isSameAs(fresh);
+        assertThat(markers).contains(key);
+
+        captor.getValue().accept(fresh);
+
+        assertThat(refs).isEmpty();
+        assertThat(markers).isEmpty();
+    }
+
+    // A notice can arrive after a newer reference replaced the retired one:
+    // only the exact reference retires, in both caches, and the newer
+    // attachment keeps its recovery marker.
+    @Test
+    @SuppressWarnings("unchecked")
+    void retirementNoticeForAStaleReferenceKeepsTheNewerAttachmentAndMarker() {
+        var client = harnessClient();
+        var connector = connector(client);
+        var stale = mock(HarnessSessionRef.class);
+        var fresh = mock(HarnessSessionRef.class);
+        Object key = ReflectionTestUtils.invokeMethod(connector, "attachmentKey", "tenant-a", SESSION_ID);
+        Map<Object, HarnessSessionRef> ordinary =
+                (Map<Object, HarnessSessionRef>) ReflectionTestUtils.getField(connector, "attachments");
+        Map<Object, HarnessSessionRef> management =
+                (Map<Object, HarnessSessionRef>) ReflectionTestUtils.getField(connector, "mcpManagementAttachments");
+        Set<Object> markers = (Set<Object>) ReflectionTestUtils.getField(connector, "pendingRecovery");
+        ordinary.put(key, fresh);
+        management.put(key, stale);
+        markers.add(key);
+
+        ReflectionTestUtils.invokeMethod(connector, "retireNotifiedAttachment", stale);
+
+        assertThat(ordinary.get(key)).isSameAs(fresh);
+        assertThat(markers).contains(key);
+        assertThat(management).isEmpty();
+
+        ReflectionTestUtils.invokeMethod(connector, "retireNotifiedAttachment", fresh);
+
+        assertThat(ordinary).isEmpty();
+        assertThat(markers).isEmpty();
+    }
+
+    // The createClient() ownership site carries the same notice handler
+    // as configurePool: a regression on its registration line would leave
+    // that client's retirements unnotified.
+    @Test
+    @SuppressWarnings("unchecked")
+    void createClientCarriesTheRetirementNoticeHandler() {
+        var client = harnessClient();
+        var builder = mock(HostedHarnessClient.Builder.class, RETURNS_SELF);
+        when(builder.build()).thenReturn(client);
+        try (var sdk = mockStatic(HostedHarnessClient.class, CALLS_REAL_METHODS)) {
+            sdk.when(HostedHarnessClient::builder).thenReturn(builder);
+            var connector = new QwenHostedHarnessConnector(properties(), sessions(),
+                    mock(JdbcWorkspaceExecutionStore.class));
+            assertThat(connector.createClient()).isSameAs(client);
+            ArgumentCaptor<Consumer<HarnessSessionRef>> captor =
+                    ArgumentCaptor.forClass(Consumer.class);
+            verify(client).onAttachmentRetirement(captor.capture());
+            var retired = mock(HarnessSessionRef.class);
+            Object key = ReflectionTestUtils.invokeMethod(connector, "attachmentKey", "tenant-a", SESSION_ID);
+            Map<Object, HarnessSessionRef> refs =
+                    (Map<Object, HarnessSessionRef>) ReflectionTestUtils.getField(connector, "attachments");
+            refs.put(key, retired);
+
+            captor.getValue().accept(retired);
+
+            assertThat(refs).isEmpty();
+        }
+    }
+
+    // The wake fence proved no live writer, so a cached reference is stale
+    // (a suspended Session's sealed writer leaves one behind): the wake
+    // evicts exactly that reference and its marker, then recovery-loads.
+    // The management cache holds a distinct reference (a management-only
+    // load never publishes into attachments), and it is evicted too.
+    @Test
+    @SuppressWarnings("unchecked")
+    void wakeActivationEvictsAStaleAttachmentAndLoadsUnderTheFence() {
+        var client = harnessClient();
+        var connector = connector(client);
+        var stale = mock(HarnessSessionRef.class);
+        var managementStale = mock(HarnessSessionRef.class);
+        var fresh = mock(HarnessSessionRef.class);
+        when(fresh.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(fresh.getRuntimeRecovery()).thenReturn(mock(HarnessRuntimeRecovery.class));
+        when(client.loadSession(any())).thenReturn(fresh);
+        Object key = ReflectionTestUtils.invokeMethod(connector, "attachmentKey", "tenant-a", SESSION_ID);
+        Map<Object, HarnessSessionRef> refs =
+                (Map<Object, HarnessSessionRef>) ReflectionTestUtils.getField(connector, "attachments");
+        Map<Object, HarnessSessionRef> management =
+                (Map<Object, HarnessSessionRef>) ReflectionTestUtils.getField(connector, "mcpManagementAttachments");
+        Set<Object> markers = (Set<Object>) ReflectionTestUtils.getField(connector, "pendingRecovery");
+        refs.put(key, stale);
+        management.put(key, managementStale);
+        markers.add(key);
+
+        boolean activated = connector.activateForWake("tenant-a", SESSION_ID);
+
+        assertThat(activated).isTrue();
+        assertThat(refs.get(key)).isSameAs(fresh);
+        assertThat(management).isEmpty();
+        assertThat(markers).contains(key);
+        verify(client).loadSession(any());
+    }
+
+    // A load that publishes a newer attachment while the wake evicts the
+    // stale one keeps its reference and marker; the wake reports the
+    // Session already attached and loads nothing. The publication happens
+    // inside the removal call itself, so the identity guard is asked to
+    // remove a stale reference while a newer one is already held — deleting
+    // the guard lets the wake evict the live attachment and load over it.
+    @Test
+    @SuppressWarnings("unchecked")
+    void wakeActivationKeepsAConcurrentlyPublishedAttachment() {
+        var client = harnessClient();
+        var connector = connector(client);
+        var stale = mock(HarnessSessionRef.class);
+        var fresh = mock(HarnessSessionRef.class);
+        var managementStale = mock(HarnessSessionRef.class);
+        Object key = ReflectionTestUtils.invokeMethod(connector, "attachmentKey", "tenant-a", SESSION_ID);
+        Set<Object> markers = (Set<Object>) ReflectionTestUtils.getField(connector, "pendingRecovery");
+        Map<Object, HarnessSessionRef> management =
+                (Map<Object, HarnessSessionRef>) ReflectionTestUtils.getField(connector, "mcpManagementAttachments");
+        var refs = new ConcurrentHashMap<Object, HarnessSessionRef>() {
+            @Override
+            public HarnessSessionRef computeIfPresent(Object k,
+                    BiFunction<? super Object, ? super HarnessSessionRef, ? extends HarnessSessionRef> update) {
+                super.put(k, fresh);
+                markers.add(k);
+                return super.computeIfPresent(k, update);
+            }
+        };
+        ReflectionTestUtils.setField(connector, "attachments", refs);
+        refs.put(key, stale);
+        markers.add(key);
+        management.put(key, managementStale);
+
+        boolean activated = connector.activateForWake("tenant-a", SESSION_ID);
+
+        assertThat(activated).isFalse();
+        assertThat(refs.get(key)).isSameAs(fresh);
+        assertThat(markers).contains(key);
+        assertThat(management).isEmpty();
+        verify(client, never()).loadSession(any());
+    }
+
+    // Without a cached reference the wake keeps its existing behavior:
+    // new-work admission and the takeover load.
+    @Test
+    void wakeActivationWithoutACacheLoads() {
+        var client = harnessClient();
+        var connector = connector(client);
+        var fresh = mock(HarnessSessionRef.class);
+        when(fresh.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(client.loadSession(any())).thenReturn(fresh);
+
+        boolean activated = connector.activateForWake("tenant-a", SESSION_ID);
+
+        assertThat(activated).isTrue();
+        verify(client).loadSession(any());
+    }
+
+    private static HostedHarnessClient harnessClient() {
+        var client = mock(HostedHarnessClient.class);
+        var capabilities = mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(capabilities.getFeatures()).thenReturn(List.of());
+        return client;
+    }
+
+    private static DaemonHttpException harnessRefusal(int status, String code) {
+        var refusal = mock(DaemonHttpException.class);
+        when(refusal.getStatusCode()).thenReturn(status);
+        when(refusal.getErrorCode()).thenReturn(code);
+        return refusal;
     }
 
     private static QwenHostedHarnessConnector connector(

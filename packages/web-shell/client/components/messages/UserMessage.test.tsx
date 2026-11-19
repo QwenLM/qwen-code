@@ -83,6 +83,44 @@ function findByTitle(container: HTMLElement, title: string): Element | null {
 }
 
 describe('UserMessage', () => {
+  it('names the session a message came from', () => {
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content="look at this"
+          sentFrom={{
+            type: 'source',
+            sessionId: 'caller',
+            workspaceCwd: '/work/projA',
+            title: 'Caller',
+          }}
+        />
+      </I18nProvider>,
+    );
+    expect(
+      container.querySelector('[data-web-shell-user-sent-from]')?.textContent,
+    ).toBe('From projA · Caller');
+    expect(container.textContent).toContain('look at this');
+    expect(container.querySelector('[data-web-shell-user-sent-to]')).toBeNull();
+  });
+
+  it('names the session a /send message went to', () => {
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage
+          content="look at this"
+          sentTo={{ sessionId: 'kid', workspaceCwd: '/work/projB' }}
+        />
+      </I18nProvider>,
+    );
+    expect(
+      container.querySelector('[data-web-shell-user-sent-to]')?.textContent,
+    ).toBe('To projB · Untitled session');
+    expect(
+      container.querySelector('[data-web-shell-user-sent-from]'),
+    ).toBeNull();
+  });
+
   it('renders content', () => {
     const container = render(<UserMessage content="hello world" />);
     expect(container.textContent).toContain('hello world');

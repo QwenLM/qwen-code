@@ -167,6 +167,27 @@ export const SERVE_STATUS_EXT_METHODS = {
 } as const;
 
 /**
+ * The client capability (`clientCapabilities._meta`) naming the Mod row
+ * sites a client draws. The child then runs each session's Mods on the
+ * `desktop` surface and answers `sessionModRow` for those sites.
+ */
+export const MOD_ROWS_CLIENT_CAPABILITY = 'qwen.modRows';
+
+/** The Mod row sites the Web Shell draws, which the bridge declares. */
+export const WEB_SHELL_MOD_ROW_SITES: readonly string[] = ['AssistantMessage'];
+
+/**
+ * A session's answer for one row: no hook hears its site, so the client asks
+ * no more of the session; its hooks did not answer in time or the session
+ * moved on, so it may ask again; or their answer, with `props` to draw only
+ * where they rewrote the row.
+ */
+export type BridgeModRowAnswer =
+  | { status: 'unhooked' }
+  | { status: 'unanswered' }
+  | { status: 'answered'; props?: Record<string, unknown> };
+
+/**
  * Control-plane (mutation) ACP extMethods introduced in Mutation control.
  * Distinct from `SERVE_STATUS_EXT_METHODS` so reviewers can grep mutation
  * surface independently from read-only diagnostics. Each route in
@@ -180,6 +201,11 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionSideTask: 'qwen/control/session/side_task',
   sessionForkAgent: 'qwen/control/session/fork_agent',
   sessionRecap: 'qwen/control/session/recap',
+  /**
+   * Ask a session's Mods for a transcript row the client draws. Params:
+   * `{ sessionId, component, props }`; result: `BridgeModRowAnswer`.
+   */
+  sessionModRow: 'qwen/control/session/mod_row',
   sessionGenerationStart: 'qwen/control/session/generation/start',
   sessionGenerationCancel: 'qwen/control/session/generation/cancel',
   sessionBtw: 'qwen/control/session/btw',
@@ -964,6 +990,12 @@ export interface ServeWorkflowPhaseVisit {
   endedAt?: number;
 }
 
+/** A phase the script declares in `meta.phases`, reached or not. */
+export interface ServeWorkflowPlannedPhase {
+  title: string;
+  detail?: string;
+}
+
 export type ServeWorkflowDispatchStatus =
   | 'queued'
   | 'running'
@@ -1155,6 +1187,13 @@ export interface ServeSessionWorkflowTaskStatus {
   isBackgrounded: boolean;
   currentPhase: string | null;
   phaseVisits: ServeWorkflowPhaseVisit[];
+  /**
+   * The phases the script declares in `meta.phases`, in order. Present from
+   * the start of the run, so a client can show phases the script has not
+   * reached yet; absent when the script declares none, and on daemons that
+   * predate the field.
+   */
+  plannedPhases?: ServeWorkflowPlannedPhase[];
   dispatches: ServeWorkflowDispatchStatusEntry[];
   agentsDispatched: number;
   agentsCompleted: number;

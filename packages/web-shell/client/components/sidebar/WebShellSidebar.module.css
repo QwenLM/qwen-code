@@ -1468,6 +1468,17 @@ button.livePendingSession:hover {
   animation: sidebarSpin 0.8s linear infinite;
 }
 
+/* Same amber as the background status dot, so the two markers read as one
+   state whether or not a turn is also in flight. */
+.sessionLoadingBackground {
+  border-color: color-mix(
+    in srgb,
+    var(--warning-color, #d29922) 28%,
+    transparent
+  );
+  border-top-color: var(--warning-color, #d29922);
+}
+
 .sessionActions {
   position: absolute;
   inset: 0;
@@ -1525,6 +1536,9 @@ button.livePendingSession:hover {
 
   .sessionRow:hover:not(.runningSession) .sessionGitIcon,
   .sessionRow:hover:not(.runningSession) .sessionAttention,
+  /* A background-only row is not .runningSession, so a row hover reveals the
+     actions over the busy marker; hide it like the other markers. */
+  .sessionRow:hover:not(.runningSession) .sessionLoading,
   .sessionMetaSlot:hover .sessionGitIcon,
   .sessionMetaSlot:hover .sessionLoading,
   .sessionMetaSlot:hover .sessionAttention {
@@ -2443,7 +2457,9 @@ button.livePendingSession:hover {
 }
 
 .moreMenu {
-  width: 240px;
+  width: max-content;
+  min-width: 240px;
+  max-width: min(22rem, calc(100vw - 24px));
   max-height: var(--radix-popover-content-available-height);
   overflow-y: auto;
 }
@@ -2486,10 +2502,17 @@ button.livePendingSession:hover {
   color: inherit;
   background: transparent;
   cursor: pointer;
+  text-align: start;
 }
 
-.moreMenu .footerButtonLabel {
-  display: inline;
+.moreMenu .footerButtonLabel,
+.moreMenu .collapseButton > span {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: start;
 }
 
 .moreMenu .navIcon {
@@ -2505,6 +2528,11 @@ button.livePendingSession:hover {
 
 .moreLocalFiles::after {
   content: attr(aria-label);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: start;
 }
 
 .moreMenu .version {

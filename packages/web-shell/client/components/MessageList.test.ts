@@ -1422,6 +1422,33 @@ describe('applyTurnCollapse', () => {
     expect(collapseOf(out, 1)).toBeUndefined();
   });
 
+  it('keeps both segments of a final answer split by a completion and a Mod log', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+      {
+        id: 'completion',
+        role: 'system',
+        variant: 'info',
+        source: 'background_task_completed',
+        content: 'Background task completed',
+      },
+      {
+        id: 'mod-log',
+        role: 'system',
+        variant: 'info',
+        source: 'mod_log',
+        content: '[Mod diagnostics] message',
+      },
+      makeAssistantMessage('a2'),
+    ]);
+
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual(['u1', 'tc-u1', 'a1', 'mod-log', 'a2']);
+    expect(collapseOf(out, 0)?.collapsed).toBe(true);
+  });
+
   it('folds vision bridge notices and restores them when expanded', () => {
     const items = groupParallelAgents([
       makeUserMessage('u1'),

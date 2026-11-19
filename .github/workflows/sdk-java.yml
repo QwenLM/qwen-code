@@ -1532,10 +1532,10 @@ jobs:
     # need only the bundled CLI, the server jar and a runner-private mysqld,
     # not its MySQL service. The rewritten-command arm delegates its own
     # cgroup root below. Each arm also runs when an earlier one failed.
-    # Ceilings: 29 arms × 10 + the capped cgroup delegation × 10 = 300 plus
-    # ~13 minutes for the uncapped setup steps (Checkout.. Install MySQL
-    # binaries): 313 + 2.
-    timeout-minutes: 315
+    # Ceilings: 30 arms × 10 + the capped cgroup delegation × 10 + the
+    # PR-watch bound-session rig × 10 = 320 plus ~13 minutes for the uncapped
+    # setup steps (Checkout.. Install MySQL binaries): 333 + 2.
+    timeout-minutes: 335
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
     steps:
@@ -1592,6 +1592,11 @@ jobs:
             sudo apt-get update
             sudo apt-get install --yes --no-install-recommends mysql-server mysql-client
           fi
+      - name: 'Run managed PR-watch bound-session E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-pr-watch
       - name: 'Run session owner failover E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
@@ -1621,6 +1626,15 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-loop-skill
+      # The /loop scheduled-fire arm: the same stack, but the schedule is
+      # left armed at the cron minimum cadence so the Java scanner fires the
+      # next minute slot on its own and the wake turn's framing is tied to the
+      # ledger's fired occurrence. Needs the identical prerequisites.
+      - name: 'Run /loop scheduled-fire E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-loop-fire
       - name: 'Run Harness-restart session failover E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10

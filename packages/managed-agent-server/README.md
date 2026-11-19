@@ -1323,6 +1323,7 @@ a stale `300000` keeps meaning five minutes instead of widening the
 signature-replay window to ~83 hours), the sub-second `events.batch-interval`
 and `events.materialize-interval`,
 `runtime-broker.child-workspace-git-timeout`, `runtime-broker.retention.scan-delay`,
+`runtime-broker.mcp-parking.idle-duration`, `runtime-broker.mcp-parking.scan-delay`,
 `automation.scan-delay`,
 `automation.lease`, `automation.late-tolerance` and `automation.lookback`
 — bind a suffix-less number as milliseconds. Always write the suffix (`90s`,
@@ -1784,6 +1785,8 @@ After first-stage self-service is available, enable `qwen.managed-agent.extensio
 Applications can supply Spring Beans implementing `ManagedExtensionSource` and `ExtensionArchiveStorage` from `com.alibaba:qwen-managed-agent-contracts`. Source IDs must be stable and unique; duplicate IDs fail startup. The default directory backend backs off when custom storage is present, so an embedding application using OSS does not need `extensions.artifact-directory`.
 
 The source adapter implements `id()`, `resolve(Context, Reference)` and `open(Context, Resolved)`. Resolve must authorize the trusted tenant/Actor against the requested exact business revision on every call. Return a canonical resource ID and a private archive handle; never return partial materials or substitute a current revision for a missing historical revision. `open` returns the original ZIP/tar.gz stream; Managed closes it, computes `sourceDigest` from actual bytes and compiles through Hosted `managed-package-preparation/1`. Providers enforce finite database/network timeouts within the context deadline. The resolved handle is never a public response or persisted credential.
+
+A source can also implement `ManagedSkillCatalogSource.catalog(Context)`. Each entry supplies an authorized exact Skill reference, compilation target, display name, description and `preinstall` flag. A Workspace Session with omitted or empty static skills and omitted `extensionPins` imports the defaults under the caller's existing extension permissions. Supplying `extensionPins: []` disables defaults. Failed default resolution refuses creation. Replaying an admitted request preserves its original pins. Only explicit package publication updates the Workspace catalog. The slash-command catalog shows the initial pins throughout first installation and follows the installed bundle after activation. See the [Skill defaults design](../../docs/design/2026-11-18-managed-skill-defaults.md).
 
 `ExtensionArchiveStorage` implements `validateConfiguration()`, `putIfAbsent(Key, byteLength, InputStream)` and `open(Key)`. Bind it to a private deployment-specific prefix separate from raw business packages. Include the tenant, Workspace and digest in object identity. Writes must be atomic, immutable and readable on success; identical writes may be replayed. A timeout has an unknown outcome, so adapters must not blindly retry writes. Return streams rather than signed URLs or local paths. Managed stages and verifies packages with bounded temporary files, and retains their leases through actual HTTP streaming or asynchronous Runtime upload completion. Existing execution packages remain retained; no automatic GC is added.
 

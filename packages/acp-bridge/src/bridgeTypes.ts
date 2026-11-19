@@ -14,6 +14,7 @@ import type {
   GoalControlRequest,
   GoalSnapshotV2,
   GoalStateResponse,
+  GoalStatus,
   SessionGroupPresetColor,
   SessionSourceInput,
   SessionSourcesResult,
@@ -60,6 +61,7 @@ import type {
   SessionAttachmentUploadMetadata,
 } from './sessionAttachments.js';
 import type {
+  BridgeModRowAnswer,
   ServeSessionAgentsStatus,
   ServeSessionAgentTrace,
   ServeSessionContextStatus,
@@ -396,9 +398,21 @@ export interface BridgeSpawnRequest {
   sourceId?: string;
   approvalMode?: ApprovalMode;
   /** Worktree isolation metadata, set by the daemon route before spawn. */
-  worktree?: { slug: string; path: string; branch: string };
+  worktree?: {
+    slug: string;
+    path: string;
+    branch: string;
+    baseCommit?: string;
+    baseBranch?: string;
+  };
   /** Branch metadata, set by the daemon route before spawn. */
-  branch?: { name: string; baseBranch: string };
+  branch?: { name: string; baseBranch: string; baseCommit?: string };
+  /**
+   * Start commit captured at creation for a plain session (no branch/worktree
+   * meta), set by the daemon route before spawn. The change overview's commit
+   * fallback scopes its window to `<baseCommit>..HEAD`.
+   */
+  baseCommit?: string;
   /**
    * Optional caller-supplied session id. When provided, the agent uses this
    * id instead of generating a random UUID. Must be validated at the route
@@ -536,11 +550,17 @@ export interface BridgeSession {
    */
   modelApplied?: boolean;
   /** Present when the session was created with worktree isolation. */
-  worktree?: { slug: string; path: string; branch: string };
+  worktree?: {
+    slug: string;
+    path: string;
+    branch: string;
+    baseCommit?: string;
+    baseBranch?: string;
+  };
   /** Set by the daemon route after durable worktree ownership is verified. */
   worktreeState?: 'persisted-v1';
   /** Present when the session was created with a new branch. */
-  branch?: { name: string; baseBranch: string };
+  branch?: { name: string; baseBranch: string; baseCommit?: string };
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -579,6 +599,8 @@ export interface BridgeRestoreSessionRequest {
   suppressWorktreeContextRestore?: boolean;
   /** Delay ask_user_question recovery until daemon route validation finishes. */
   deferRestoreAskUserQuestionPrompt?: boolean;
+  /** Hold cold-restored automatic work until the route reconciles cwd. */
+  deferAutomaticWorkUntilCwdRestore?: boolean;
   /**
    * Daemon-internal: session-level MCP servers for ACP `session/load` /
    * `session/resume` (see `BridgeSpawnRequest.mcpServers`). Absent means
@@ -973,7 +995,13 @@ export interface BridgeBranchSessionRequest {
 export interface BridgeSessionExecutionSnapshot {
   workspaceCwd: string;
   effectiveCwd: string;
-  worktree?: { slug: string; path: string; branch: string };
+  worktree?: {
+    slug: string;
+    path: string;
+    branch: string;
+    baseCommit?: string;
+    baseBranch?: string;
+  };
 }
 
 export interface BridgePersistedBranchedSession {
@@ -1044,6 +1072,14 @@ export interface ChangeSessionCwdRequest {
    * before and after mutating the session Config.
    */
   conversationDirectoryExpectation?: BridgeConversationDirectoryExpectation;
+  /**
+   * Daemon-internal: the caller itself owns the reset-pending admission
+   * barrier for this session (the worktree handoff arms it for the whole
+   * transfer) and may relocate while it is armed. Only the handoff route
+   * sets this; the user cd route constructs its request literally, so an
+   * external client cannot inject the flag.
+   */
+  allowWhileResetPending?: boolean;
 }
 
 export interface ChangeSessionCwdResult {
@@ -1252,6 +1288,10 @@ export interface BridgeSessionSummary {
   sourceId?: string;
   clientCount: number;
   hasActivePrompt: boolean;
+  /** Prompts admitted but not yet finished (running + queued). Flips
+   * synchronously at admission, before promptActive — covers the
+   * attachment-resolution window hasActivePrompt alone misses. */
+  pendingPromptCount?: number;
   /** Per-session active-work observation. `idle` is emitted only from a
    * fresh snapshot that covers every negotiated hold category. */
   activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
@@ -1283,14 +1323,62 @@ export interface BridgeSessionSummary {
   /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
   color?: SessionGroupPresetColor | null;
   /** Present when the session was created with worktree isolation. */
-  worktree?: { slug: string; path: string; branch: string };
+  worktree?: {
+    slug: string;
+    path: string;
+    branch: string;
+    baseCommit?: string;
+    baseBranch?: string;
+  };
   /** Present when the session was created with a new branch. */
-  branch?: { name: string; baseBranch: string };
+  branch?: { name: string; baseBranch: string; baseCommit?: string };
+  /**
+   * The HEAD captured at creation for a plain session (no branch/worktree
+   * meta) — its immutable start commit for the change overview's commit
+   * fallback. Branch/worktree sessions carry it on their meta instead.
+   */
+  baseCommit?: string;
   /**
    * GitHub PRs bound to the session, in binding order (last = latest). A
    * session can produce several PRs (stacked or follow-up work).
    */
   prs?: SessionPrInfo[];
+  /**
+   * Session artifact count, present when non-zero. Live entries carry the
+   * live public count; there, absent means ZERO — the in-memory store is
+   * authoritative, and the list merge drops a stale sidecar-derived count
+   * when the live entry omits the field — EXCEPT while
+   * `artifactCountPending` is true (see there). Persisted summaries are
+   * enriched best-effort from the artifact summary sidecar with the
+   * restorable count; there, absent means unknown (no sidecar / older
+   * daemon), not zero.
+   */
+  artifactCount?: number;
+  /**
+   * True while the session's artifact restore is still in flight: the
+   * entry is live, but its store is not hydrated yet, so `artifactCount`
+   * is omitted and MUST NOT be read as zero. The list merge keeps the
+   * sidecar-enriched count for such rows. Absent once the restore settles.
+   */
+  artifactCountPending?: boolean;
+  /**
+   * List-facing projection of the session's Goal, read from the goal
+   * sidecar on disk — present for unloaded and archived sessions too,
+   * unlike the live-only Goals listing. Absent when the session has no
+   * goal (or none journaled yet).
+   */
+  goal?: BridgeSessionGoalInfo;
+}
+
+/**
+ * The goal sidecar's wire projection: identity + lifecycle state, no
+ * budgets or spend (the Goals page remains the detail surface).
+ */
+export interface BridgeSessionGoalInfo {
+  status: GoalStatus;
+  objective: string;
+  /** ISO time of the goal's last transition. */
+  updatedAt: string;
 }
 
 /** Original event-bus cursor captured when a prompt id was first admitted. */
@@ -1332,6 +1420,12 @@ export interface SessionPrInfo {
   url: string;
   /** Snapshot of the PR's state at last bind/refresh; optional. */
   state?: 'open' | 'merged' | 'closed';
+  /**
+   * Binding provenance: `create`/`worktree` are the session's own delivery
+   * units; `review` is a PR merely mentioned in a review/verify command and is
+   * not this session's work. Absent on bindings persisted before provenance.
+   */
+  source?: 'create' | 'worktree' | 'review';
   /**
    * The job this session does for the PR (role-aware bound delivery);
    * assigned by the command-position backfill or the metadata route.
@@ -1433,8 +1527,10 @@ export interface BridgeClientRequestContext {
   onPromptDispatched?: () => void;
   /** Internal authorization check when dequeuing a prompt and before its ACP write. */
   assertCanDispatch?: () => void;
-  /** Approval mode the trusted ACP child must still have at prompt admission. */
+  /** Approval mode required for the delegated turn. */
   expectedApprovalMode?: ApprovalMode;
+  /** The live mode before the switch. Older children still enforce expectedApprovalMode. */
+  approvalModeBeforeStart?: ApprovalMode;
   /**
    * Internal model input that replaces the public prompt only inside the
    * trusted ACP child. The bridge still echoes and persists `PromptRequest`
@@ -1500,6 +1596,8 @@ export interface BridgeClientRequestContext {
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
 export const DAEMON_EXPECTED_APPROVAL_MODE_META_KEY =
   'qwen.daemon.expectedApprovalMode';
+export const DAEMON_APPROVAL_MODE_BEFORE_START_META_KEY =
+  'qwen.daemon.approvalModeBeforeStart';
 export const DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY =
   'qwen.daemon.restoreAskUserQuestion';
 export const DAEMON_RESTORE_MANAGED_APPROVAL_META_KEY =
@@ -1527,6 +1625,8 @@ export const DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY =
   'qwen.daemon.suppressRestoreAskUserQuestion';
 export const DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY =
   'qwen.daemon.suppressWorktreeContextRestore';
+export const DAEMON_DEFER_AUTOMATIC_WORK_UNTIL_CWD_RESTORE_META_KEY =
+  'qwen.daemon.deferAutomaticWorkUntilCwdRestore';
 export const DAEMON_PASSIVE_MANAGED_RUNTIME_RECOVERY_META_KEY =
   'qwen.daemon.passiveManagedRuntimeRecovery';
 export const DAEMON_ATTACHMENT_REFERENCES_META_KEY =
@@ -1988,6 +2088,8 @@ export interface BridgeBackgroundNotification {
   kind: 'agent';
   toolUseId?: string;
   label?: string;
+  fromSession?: { sessionId: string; workspaceCwd: string };
+  sentMessageContext?: string;
 }
 
 export type RuntimeMcpServerAddResult =
@@ -2147,7 +2249,13 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    */
   setSessionWorktree(
     sessionId: string,
-    worktree: { slug: string; path: string; branch: string },
+    worktree: {
+      slug: string;
+      path: string;
+      branch: string;
+      baseCommit?: string;
+      baseBranch?: string;
+    },
   ): void;
 
   /**
@@ -2157,6 +2265,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * state. No-op when the session is not live or carries no worktree.
    */
   clearSessionWorktree?(sessionId: string): void;
+
+  /**
+   * Record the immutable start commit on a live session entry that has no
+   * branch/worktree meta (a current-checkout branch session, or a worktree
+   * handed back to the local checkout). The change overview's commit fallback
+   * scopes its window to `<baseCommit>..HEAD`; without it the fallback is
+   * suppressed. No-op when the session is not live or the read failed.
+   */
+  setSessionBaseCommit?(sessionId: string, baseCommit: string): void;
 
   /**
    * Arm the worktree-reset admission barrier for a session id: while armed,
@@ -2320,6 +2437,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
    * start SSE replay so no events are missed.
    */
   getSessionLastEventId(sessionId: string): number;
+
+  getSessionPendingPermissionIds(sessionId: string): readonly string[];
 
   /**
    * Return the epoch token of this session's event bus. Regenerated on
@@ -2949,6 +3068,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     sessionId: string,
     context?: BridgeClientRequestContext,
   ): Promise<{ sessionId: string; recap: string | null }>;
+
+  /**
+   * Ask a live session's Mods for a transcript row the client draws,
+   * through `qwen/control/session/mod_row`. The child builds the row's
+   * envelope and answers once its hooks did, or once the ask timed out.
+   */
+  askSessionModRow(
+    sessionId: string,
+    row: { component: string; props: Record<string, unknown> },
+    context?: BridgeClientRequestContext,
+  ): Promise<BridgeModRowAnswer>;
 
   /**
    * Run a stateless, tool-free text generation request in the ACP child and

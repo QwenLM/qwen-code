@@ -76,3 +76,19 @@ describe('resolveManagedRuntimeBrokerBaseUrl', () => {
     },
   );
 });
+
+// Non-ASCII hosts cannot be fixture rows: the Java reader returns UNCLASSIFIED
+// for them and declaredApproximation only excuses that against an accepted
+// verdict. Pin the U-label refusal here instead.
+describe('canonical host spelling (direct cases)', () => {
+  it.each([
+    'https://例子.example:8443',
+    'https://exämple.example:8443',
+    // An unrelated punycode label must not smuggle a U-label elsewhere through.
+    'https://exämple.xn--foo:8443',
+  ])('refuses non-canonical U-label host %s', (url) => {
+    expect(() => resolveManagedRuntimeBrokerBaseUrl(url)).toThrow(
+      'Managed Runtime Broker URL is invalid.',
+    );
+  });
+});

@@ -217,7 +217,7 @@ if (config.isUnifiedAgentLoopEnabled('headless')) {
 
 The current loop stays as the `else` branch and is not refactored while the setting exists. A surface that has not moved yet ignores the setting, and the setting's description names the surfaces it covers. ACP children started by `qwen serve` read the same settings, so the daemon and Web Shell follow the setting for the ACP turns that have moved. The Web Shell settings panel lists the setting from PR 2a on.
 
-Per-surface resolution landed in #17045 (block B): the environment override wins when it addresses the surface, else the explicit setting when set, else the surface's built-in default (`true` for headless, the Ink TUI and AgentCore, `false` for every other surface). The setting is tri-state at runtime — unset is distinct from explicitly off — and its schema has no default since headless's default flipped; a settings dialog's first toggle of the unset value writes `true`. See `2026-11-12-loop-rollout-switches.md` for the resolution rules and the rollout ladder.
+Per-surface resolution landed in #17045 (block B): the environment override wins when it addresses the surface, else the explicit setting when set, else the surface's built-in default (`true` for headless, ACP, the Ink TUI and AgentCore, `false` for every other surface). The setting is tri-state at runtime — unset is distinct from explicitly off — and its schema has no default since headless's default flipped; a settings dialog's first toggle of the unset value writes `true`. See `2026-11-12-loop-rollout-switches.md` for the resolution rules and the rollout ladder.
 
 ### Headless on the shared loop (PR 1)
 
@@ -601,7 +601,6 @@ Step 2 needs:
 
 - the setting has shipped in a stable release;
 - the nightly leg that runs the surface's integration tests with the setting on has passed 14 nights in a row on main, at least 7 of them after the surface's last change to its shared path other than a fix;
-- its parity suite passes 20 runs in a row with retries off, since the nightly leg retries a failed test;
 - the surface has no open row in [Send options a host owns](#send-options-a-host-owns);
 - the release notes list its intended differences from [Compatibility](#compatibility) and how to switch back;
 - for AgentCore and ACP, the [Managed job](2026-11-14-managed-loop-ci.md) passes with the setting on.
@@ -609,7 +608,6 @@ Step 2 needs:
 Step 4 needs:
 
 - the nightly leg that runs the surface's integration tests with both settings on has passed 7 nights in a row since its step 3 and since the kernel's cancellation and bounded close merged (#17145);
-- its parity suite passes 20 runs in a row comparing the kernel off and on, with retries off;
 - for AgentCore and ACP, the Managed job passes with both settings on.
 
 A removal waits 14 days after the default it follows: a surface's step 5 after its step 2, and, once every surface has done step 5 and has had step 4 on for 14 days, the separate round and batch calls, the procedural path of `runAgentLoop` and both settings. A removal does not land while a regression attributed to the new path is open. Until a surface's step 5, setting `experimental.unifiedAgentLoop` to `false` brings its current loop back. A surface with a recorded keep-its-own decision removes only the path its migration replaced: speculation's step 5 removes its current model round, not its speculative loop or tool step ([PR 6b decision](2026-11-15-speculation-tool-step.md)).
