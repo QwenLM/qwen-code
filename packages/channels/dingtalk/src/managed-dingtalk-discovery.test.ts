@@ -73,6 +73,7 @@ let mode:
   | 'hang'
   | 'no-token'
   | 'no-ticket'
+  | 'no-endpoint'
   | 'refused'
   | 'gateway-refused'
   | 'transport' = 'ok';
@@ -84,7 +85,9 @@ const body = (url: string) =>
       : { access_token: 'tok' }
     : mode === 'no-ticket'
       ? { endpoint: 'wss://fake.invalid' }
-      : { endpoint: 'wss://fake.invalid', ticket: 'tk' };
+      : mode === 'no-endpoint'
+        ? { ticket: 'tk' }
+        : { endpoint: 'wss://fake.invalid', ticket: 'tk' };
 
 const latest = (): FakeSocket =>
   wsState.instances[wsState.instances.length - 1] as FakeSocket;
@@ -184,6 +187,7 @@ describe('managed DingTalk endpoint discovery (#17173 R11)', () => {
   it.each([
     'no-token',
     'no-ticket',
+    'no-endpoint',
     'refused',
     'gateway-refused',
     'transport',
@@ -199,7 +203,8 @@ describe('managed DingTalk endpoint discovery (#17173 R11)', () => {
       // The redacted message is a constant, so it cannot discriminate the
       // branches. The request count can: a token-side refusal must
       // short-circuit before the authenticated gateway POST goes out.
-      const gatewaySide = m === 'gateway-refused' || m === 'no-ticket';
+      const gatewaySide =
+        m === 'gateway-refused' || m === 'no-ticket' || m === 'no-endpoint';
       expect(calls).toHaveLength(gatewaySide ? 2 : 1);
       expect(message).toMatch(/check the clientId\/clientSecret and network/);
       expect(message).not.toContain(SETTINGS.clientSecret);

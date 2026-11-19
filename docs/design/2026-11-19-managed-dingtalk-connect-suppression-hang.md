@@ -60,7 +60,7 @@ The discovery contract is small and stable: two URLs, two query names, four payl
 
 ## Scope boundaries
 
-- The legacy `DingtalkAdapter` connect path keeps the existing helper and therefore keeps the same hang. It is a separate surface with its own connection manager; changing it here would double the blast radius. Out of scope here, and not yet tracked as its own item.
+- The legacy `DingtalkAdapter` connect path keeps the existing helper and therefore keeps the same hang. It is a separate surface with its own connection manager; changing it here would double the blast radius. Out of scope here, and recorded as its own residual entry on #17173.
 - No change to reconnect arbitration, the attempt budget value, the heartbeat retire, or the ledger.
 - No change to the frame-suppression scope or to the depth counter semantics.
 
