@@ -37,7 +37,10 @@ import {
   hostOffersProgram,
   isAgentProgram,
 } from './types.js';
-import type { HostProgramProbe } from '../session-agents/contract.js';
+import {
+  HOST_PROTOCOL_VERSION,
+  type HostProgramProbe,
+} from '../session-agents/contract.js';
 
 const debug = createDebugLogger('WORKSPACE_AGENTS_STORE');
 
@@ -967,10 +970,14 @@ async function prepareAgentHostReplacement(
     ];
     const { provider } = execution;
     if (
+      agent.retiredAt === undefined &&
       provider &&
       !finalHosts.some(
         (host) =>
-          hostIds.includes(host.id) && hostOffersProgram(host, provider),
+          hostIds.includes(host.id) &&
+          (host.id === replacement.id ||
+            host.protocol === HOST_PROTOCOL_VERSION) &&
+          hostOffersProgram(host, provider),
       )
     ) {
       unavailable.push(agent.id);

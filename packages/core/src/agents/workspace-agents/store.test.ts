@@ -598,7 +598,7 @@ describe('removing and replacing an Agent Host', () => {
   });
 
   it.each(['claude', 'Claude Code ACP'])(
-    'refuses all incompatible pins before either file changes, then retries with %s',
+    'refuses an incompatible disabled agent but remaps a retired one on retry with %s',
     async (provider) => {
       const old = await enroll('old', undefined, ['claude', 'codex']);
       await updateWorkspaceAgents(PROJECT_ROOT, () => [
@@ -644,7 +644,7 @@ describe('removing and replacing an Agent Host', () => {
         (failure: unknown) => failure,
       );
       expect(error).toBeInstanceOf(AgentHostReplacementProgramError);
-      expect((error as Error).message).toContain(`${ALICE.id}, ${BOB.id}`);
+      expect((error as Error).message).toContain(`agents: ${ALICE.id}.`);
       expect(isAgentHostEnrollmentRefusal(error)).toBe(true);
       expect(await fs.readFile(getAgentHostsFilePath(PROJECT_ROOT))).toEqual(
         hostsBefore,
@@ -655,12 +655,11 @@ describe('removing and replacing an Agent Host', () => {
 
       const replacement = await enrollAgentHost(PROJECT_ROOT, {
         ...input,
-        providers: [provider, 'codex'],
+        providers: [provider],
       });
       expect(replacement.secret).toBe(input.secret);
-      expect(
-        (await readWorkspaceAgents(PROJECT_ROOT)).map((a) => a.execution),
-      ).toEqual([
+      const roster = await readWorkspaceAgents(PROJECT_ROOT);
+      expect(roster.map((agent) => agent.execution)).toEqual([
         {
           mode: 'managed-host',
           hostIds: [replacement.host.id],
@@ -672,6 +671,7 @@ describe('removing and replacing an Agent Host', () => {
           provider: 'codex',
         },
       ]);
+      expect(roster[1].retiredAt).toBe(2);
       await heartbeatAgentHost(
         PROJECT_ROOT,
         replacement.host.id,
@@ -689,17 +689,24 @@ describe('removing and replacing an Agent Host', () => {
     },
   );
 
-  it.each([true, false])(
-    'uses the surviving Host authoritative probe (available=%s)',
+  it.each([true, false, undefined])(
+    'requires a compatible surviving Host on the current protocol (probe available=%s)',
     async (available) => {
       const old = await enroll('old', undefined, ['claude']);
-      const sibling = await enroll('sibling', undefined, ['claude']);
-      await heartbeatAgentHost(PROJECT_ROOT, sibling.host.id, sibling.secret, {
-        workspaceCwd: '/worker',
-        providers: ['claude'],
-        protocol: 2,
-        programs: [{ program: 'claude', available }],
-      });
+      const sibling = await enroll('sibling', undefined, ['Claude Code ACP']);
+      if (available !== undefined) {
+        await heartbeatAgentHost(
+          PROJECT_ROOT,
+          sibling.host.id,
+          sibling.secret,
+          {
+            workspaceCwd: '/worker',
+            providers: ['claude'],
+            protocol: 2,
+            programs: [{ program: 'claude', available }],
+          },
+        );
+      }
       await updateWorkspaceAgents(PROJECT_ROOT, () => [
         {
           ...ALICE,
