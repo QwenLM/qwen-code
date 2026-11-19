@@ -47,6 +47,10 @@ class GetContextRemainingInvocation extends BaseToolInvocation<
     }
     const snapshot = chat.getContextUsageSnapshot();
     const used = snapshot.promptTokens + snapshot.outputTokens;
+    // Counts recorded for a different route (a `/model` switch or an
+    // override turn) must not be presented as the current route's usage
+    // (#17320 R6-3) — treat them as unmeasured.
+    const measured = snapshot.countsMatchActiveRoute && used > 0;
     const remaining = Math.max(0, snapshot.contextWindowTokens - used);
     // The real send-path ladder, not a flat percentage: auto is
     // min(pct * window, (window - SUMMARY_RESERVE) - AUTOCOMPACT_BUFFER),
@@ -89,9 +93,25 @@ class GetContextRemainingInvocation extends BaseToolInvocation<
     const lines = [
       `Context window: ${snapshot.contextWindowTokens} tokens`,
       `Used: ${used} tokens${used === 0 ? zeroNote : estimateNote}`,
-      `Remaining window headroom: ${remaining} tokens (against the window; ${headroomToBound} until ${bindingLabel})`,
-      `Auto-compaction level: ${autoCompactAt} tokens`,
     ];
+    if (measured) {
+      // Derived figures only when a real measurement backs them: printing
+      // the whole window as free headroom on an unmeasured session is the
+      // exact falsehood the send path refuses to commit (#17320 R6-2 —
+      // the gate estimates from history instead of trusting zero counts).
+      lines.push(
+        `Remaining window headroom: ${remaining} tokens (against the window; ${headroomToBound} until ${bindingLabel})`,
+      );
+    } else if (used > 0) {
+      lines.push(
+        `Remaining window headroom: unmeasured on this model route — the counts above were recorded for the previous route and do not describe it.`,
+      );
+    } else {
+      lines.push(
+        `Remaining window headroom: unmeasured — derived figures are withheld until the first request reports counts for this route.`,
+      );
+    }
+    lines.push(`Auto-compaction level: ${autoCompactAt} tokens`);
     if (sessionLimit !== undefined && sessionLimit > 0) {
       lines.push(
         `Session token limit: ${sessionLimit} tokens — the enforced bound, not the window`,

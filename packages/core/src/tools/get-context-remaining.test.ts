@@ -15,6 +15,7 @@ function configWithChat(
     promptTokensIsEstimated: boolean;
     outputTokens: number;
     contextWindowTokens: number;
+    countsMatchActiveRoute?: boolean;
   },
   options?: {
     sessionTokenLimit?: number;
@@ -25,7 +26,10 @@ function configWithChat(
 ) {
   const chat = snapshot
     ? {
-        getContextUsageSnapshot: () => snapshot,
+        getContextUsageSnapshot: () => ({
+          countsMatchActiveRoute: true,
+          ...snapshot,
+        }),
         getHistory: () =>
           Array.from({ length: options?.historyLength ?? 0 }, () => ({})),
       }
@@ -109,6 +113,7 @@ describe('GetContextRemainingTool', () => {
             promptTokensIsEstimated: false,
             outputTokens: 1_000,
             contextWindowTokens: 128_000,
+            countsMatchActiveRoute: true,
           }),
         }),
       }),
@@ -263,6 +268,37 @@ describe('GetContextRemainingTool', () => {
     );
     expect(text).toContain('screenshots');
     expect(text).toContain('wrap up current work');
+  });
+
+  it('withholds derived figures when no measurement backs them (#17320 R6-2)', async () => {
+    const text = await runTool(
+      configWithChat({
+        promptTokens: 0,
+        promptTokensIsEstimated: true,
+        outputTokens: 0,
+        contextWindowTokens: 128_000,
+      }),
+    );
+    expect(text).toContain('unmeasured');
+    expect(text).not.toContain('Remaining window headroom: 128000');
+    // The ladder is configuration, not measurement — it still prints.
+    expect(text).toContain('Auto-compaction level: 95000 tokens');
+  });
+
+  it('flags counts recorded for a previous route instead of adopting them (#17320 R6-3)', async () => {
+    const text = await runTool(
+      configWithChat({
+        promptTokens: 77_000,
+        promptTokensIsEstimated: false,
+        outputTokens: 2_000,
+        contextWindowTokens: 128_000,
+        countsMatchActiveRoute: false,
+      }),
+    );
+    expect(text).toContain('Used: 79000 tokens');
+    expect(text).toContain('unmeasured on this model route');
+    expect(text).toContain('recorded for the previous route');
+    expect(text).not.toContain('Remaining window headroom: 49000');
   });
 
   it('ships a complete description naming every reported field', () => {

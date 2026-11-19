@@ -193,6 +193,9 @@ export const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   // Teammates also share the leader's memory state.
   ToolNames.SEARCH_MEMORY,
   ToolNames.MANAGE_MEMORY,
+  // Same base-session hazard as the subagent set: the tool reports the
+  // leader's chat through the deriveConfig prototype chain (#17320 R6-1).
+  ToolNames.GET_CONTEXT_REMAINING,
 ]);
 
 /**

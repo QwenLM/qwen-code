@@ -2592,17 +2592,30 @@ export class LlmChat {
     promptTokensIsEstimated: boolean;
     outputTokens: number;
     contextWindowTokens: number;
+    /**
+     * Whether the counts describe the session's ACTIVE route. The slots hold
+     * whatever route last reported them; on a `/model` switch (or an override
+     * turn) that route differs from the active one, and presenting its
+     * numbers as the current route's usage would certify a falsehood
+     * (#17320 R6-3).
+     */
+    countsMatchActiveRoute: boolean;
   } {
-    // Compose the existing accessors rather than reading the private slots
-    // directly: they run adoptTokenCountsForRoute() so the counts match the
-    // current route's window instead of whichever route last reported.
+    // PURE read of the single-slot counters — no adoption, so the read
+    // cannot mutate the slots, the retained per-route map, or telemetry.
+    // `tokenCountsRouteKey` names the route that recorded the counts; the
+    // caller decides what to do when it is not the active route.
+    const recordedRouteKey = this.tokenCountsRouteKey;
     return {
-      promptTokens: this.getLastPromptTokenCount(),
-      promptTokensIsEstimated: this.isLastPromptTokenCountEstimated(),
-      outputTokens: this.getLastOutputTokenCount(),
+      promptTokens: this.lastPromptTokenCount,
+      promptTokensIsEstimated: this.lastPromptTokenCountIsEstimated,
+      outputTokens: this.lastOutputTokenCount,
       contextWindowTokens:
         this.config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT,
+      countsMatchActiveRoute:
+        recordedRouteKey === undefined ||
+        recordedRouteKey === this.currentRouteKey(),
     };
   }
 

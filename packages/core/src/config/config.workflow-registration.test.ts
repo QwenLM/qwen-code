@@ -226,4 +226,16 @@ describe('Workflow anti-recursion guard', () => {
       EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.GET_CONTEXT_REMAINING),
     ).toBe(true);
   });
+
+  it('GetContextRemaining is in EXCLUDED_TOOLS_FOR_TEAMMATES', async () => {
+    // Same base-session hazard on the teammate path: an in-process
+    // teammate's Config is also built through deriveConfig, so the leader's
+    // chat would answer (#17320 R6-1).
+    const { EXCLUDED_TOOLS_FOR_TEAMMATES } = await import(
+      '../agents/runtime/agent-core.js'
+    );
+    expect(
+      EXCLUDED_TOOLS_FOR_TEAMMATES.has(ToolNames.GET_CONTEXT_REMAINING),
+    ).toBe(true);
+  });
 });
