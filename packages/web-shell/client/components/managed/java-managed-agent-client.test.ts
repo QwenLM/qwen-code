@@ -70,6 +70,64 @@ describe('JavaManagedAgentClient', () => {
     });
   });
 
+  it('queries workspace artifacts through the authenticated WebShell POST', async () => {
+    const page = { data: [], nextCursor: null, hasMore: false };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => jsonResponse(page));
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example/gateway',
+      getHeaders: () => ({ authorization: 'Bearer scoped' }),
+      fetch: fetchImpl,
+    });
+    const signal = new AbortController().signal;
+    expect(
+      await client.listWorkspaceArtifacts(
+        { workspaceId: 'ws-1', cursor: 'next', limit: 50 },
+        signal,
+      ),
+    ).toEqual(page);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      'https://product.example/gateway/api/agent/web-shell/v1/workspaces/artifacts/query',
+    );
+    expect(init?.method).toBe('POST');
+    expect(init?.signal).toBe(signal);
+    expect(new Headers(init?.headers).get('authorization')).toBe(
+      'Bearer scoped',
+    );
+    expect(JSON.parse(String(init?.body))).toEqual({
+      workspaceId: 'ws-1',
+      cursor: 'next',
+      limit: 50,
+    });
+    await client.listWorkspaceArtifacts({ workspaceId: 'ws-1' });
+    expect(JSON.parse(String(fetchImpl.mock.calls[1][1]?.body))).toEqual({
+      workspaceId: 'ws-1',
+    });
+  });
+
+  it('maps workspace artifact refusals to typed HTTP errors', async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        jsonResponse(
+          { error: { code: 'workspace_not_found', message: 'gone' } },
+          404,
+        ),
+      );
+    const client = new JavaManagedAgentClient({
+      baseUrl: 'https://product.example',
+      fetch: fetchImpl,
+    });
+    await expect(
+      client.listWorkspaceArtifacts({ workspaceId: 'ws-1' }),
+    ).rejects.toMatchObject({
+      status: 404,
+      code: 'workspace_not_found',
+    });
+  });
+
   it('mints a terminal ticket through the authenticated WebShell POST', async () => {
     const result = { ticket: 'eyJ_abc-123', expiresInSeconds: 30 };
     const fetchImpl = vi

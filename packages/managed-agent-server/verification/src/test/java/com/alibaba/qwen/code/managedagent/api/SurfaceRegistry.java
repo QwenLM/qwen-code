@@ -514,6 +514,10 @@ public enum SurfaceRegistry {
             "/api/agent/web-shell/v1/artifacts/query",
             Surface.WEBSHELL, RuleClass.READER_ACTOR,
             EnumSet.of(Capability.ARTIFACT_LIST)),
+    WEBSHELL_WORKSPACE_ARTIFACT_LIST(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/artifacts/query",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_ARTIFACT,
+            EnumSet.of(Capability.WORKSPACE_ARTIFACT_LIST)),
     WEBSHELL_WORKSPACE_LIST(Method.POST,
             "/api/agent/web-shell/v1/workspaces/query",
             Surface.WEBSHELL, RuleClass.WORKSPACE_DISCOVERY,
@@ -907,6 +911,7 @@ public enum SurfaceRegistry {
         ARTIFACT_LIST,
         ARTIFACT_GET,
         ARTIFACT_CONTENT,
+        WORKSPACE_ARTIFACT_LIST,
         WORKSPACE_CREATE,
         WORKSPACE_DIRECTORIES,
         WORKSPACE_FILES_QUERY,
@@ -1071,6 +1076,16 @@ public enum SurfaceRegistry {
          * {@code 403 artifact_content_forbidden}.
          */
         READER_ACTOR_POLICY,
+        /**
+         * Workspace-wide artifact metadata: a trusted actor ({@code 401
+         * actor_required} without one) holding a READER grant on the
+         * Workspace ({@code 404 workspace_not_found} below it, including
+         * unknown Workspaces). The page filters each row by the Session's
+         * current binding and owner-only visibility, and the deployment
+         * artifact gate answers {@code 404 artifact_not_found} when reads
+         * are off. No legacy arm: unbound Sessions never list.
+         */
+        WORKSPACE_ARTIFACT,
         /**
          * The OPERATOR families. Turn submit, Turn cancel, rename and cwd
          * change admit a caller holding OPERATOR or above on the bound
