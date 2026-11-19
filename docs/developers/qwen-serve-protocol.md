@@ -32,7 +32,7 @@ When the flag is on, the global `bearerAuth` middleware gates **every normal API
 
 **`--allow-origin <pattern>` (T2.4 [#4514](https://github.com/QwenLM/qwen-code/issues/4514)).** Browser clients hitting the daemon cross-origin are blocked by default — a request carrying an `Origin` header returns `403 {"error":"Request denied by CORS policy"}` because CLI/SDK clients never send `Origin` and the daemon treats its presence as a sign the request came from a browser context the operator has not opted into. One exception precedes the wall on a non-loopback bind with a token: a same-origin request (`Origin` equal to the direct socket scheme plus the normalized `Host` authority) is bearer-authenticated and its `Origin` stripped **on the primary listener** — with a valid bearer the route's own status follows, with a missing or invalid bearer a `401`, **except the pre-auth Web Shell document, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/mcp-app-sandbox` routes, which are served without a credential as in every other mode** — and only cross-origin or non-matching `Origin` values keep the `403` envelope. Pass `--allow-origin <pattern>` (repeatable) at boot to install an allowlist instead of the wall. Each pattern is either:
 
-- The literal `*` — admit any origin. **Risky**: boot refuses when `*` is configured but no bearer token resolves. The guard reads the _resolved_ token — `--token`, `QWEN_SERVER_TOKEN`, `--open-with-auth`'s generated loopback token, or the ephemeral bearer a non-loopback bind generates when neither configured source is present — so this refusal is loopback-only. The boot breadcrumb emits a stderr warning when `*` is in the list. **Recommendation**: pair with `--require-auth` on loopback binds so `/health` is also gated by the bearer — it's registered before the bearer middleware on loopback by default (so k8s/Compose probes can reach it without a token), and a `*` allowlist makes it reachable from any cross-origin browser. `--require-auth` still leaves the Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id`, `/plugins`, `/channels`, `/live`, `/scheduled-tasks`, `/goals`, and `/settings` document navigations) pre-auth on loopback by design — they are mounted before the bearer middleware — so under a `*` allowlist they remain readable from any cross-origin browser; `--no-web` removes that surface. On non-loopback binds the bearer is already mandatory at boot and `/health` is registered behind it. Normal API routes are bearer-gated, channel webhook ingress retains its own shared-secret gate, and Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id`, `/plugins`, `/channels`, `/live`, `/scheduled-tasks`, `/goals`, and `/settings` document navigations) remain pre-auth unless `--no-web` removes them.
+- The literal `*` — admit any origin. **Risky**: boot refuses when `*` is configured but no bearer token resolves. The guard reads the _resolved_ token — `--token`, `QWEN_SERVER_TOKEN`, `--open-with-auth`'s generated loopback token, or the ephemeral bearer a non-loopback bind generates when neither configured source is present — so this refusal is loopback-only. The boot breadcrumb emits a stderr warning when `*` is in the list. **Recommendation**: pair with `--require-auth` on loopback binds so `/health` is also gated by the bearer — it's registered before the bearer middleware on loopback by default (so k8s/Compose probes can reach it without a token), and a `*` allowlist makes it reachable from any cross-origin browser. `--require-auth` still leaves the Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id`, `/plugins`, `/channels`, `/channel-events`, `/live`, `/scheduled-tasks`, `/pr-watches`, `/goals`, and `/settings` document navigations) pre-auth on loopback by design — they are mounted before the bearer middleware — so under a `*` allowlist they remain readable from any cross-origin browser; `--no-web` removes that surface. On non-loopback binds the bearer is already mandatory at boot and `/health` is registered behind it. Normal API routes are bearer-gated, channel webhook ingress retains its own shared-secret gate, and Web Shell static assets (`/`, `/assets/*`, `/manifest.webmanifest`, `/sw.js`, and `/session/:id`, `/plugins`, `/channels`, `/channel-events`, `/live`, `/scheduled-tasks`, `/pr-watches`, `/goals`, and `/settings` document navigations) remain pre-auth unless `--no-web` removes them.
 - A canonical URL origin — `<scheme>://<host>[:<port>]`. **No trailing slash, no path, no userinfo, no query.** Boot refuses with `InvalidAllowOriginPatternError` if the entry fails the round-trip `new URL(pattern).origin === pattern`; the error message names the bad pattern and the canonical form. Strict-by-intent: silent normalization (e.g. trimming a trailing `/`) would let typos slip through and accept ambiguous input. Without a resolved token — which after generation means a loopback bind — HTTP(S) entries are limited to loopback hosts; a non-loopback browser origin requires a token because it can otherwise drive the full operator API, including code execution as the daemon user. Explicit browser-extension origins keep their existing tokenless local-automation path. Startup logs the authority granted to any tokenless allowed browser origin.
 
 Matched origins receive the standard CORS response headers on every request:
@@ -234,7 +234,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'extension_batch_activation_v2', 'extension_activation_explicit_refresh',
  'extension_state',
  'workspace_settings', 'workspace_init', 'workspace_mcp_restart',
- 'session_recap', 'session_generation', 'session_btw', 'session_btw_stream', 'session_shell_command',
+ 'session_recap', 'session_mod_rows', 'session_generation', 'session_btw', 'session_btw_stream', 'session_shell_command',
  'standalone_sessions_v1', 'standalone_session_options_v1',
  'mcp_workspace_pool', 'mcp_pool_restart',
  'require_auth', 'allow_origin', 'auth_device_flow',
@@ -765,13 +765,16 @@ Pass `?deep=1` (also accepts `?deep=true` or bare `?deep`) for a daemon-wide pro
   "activeWorkReporting": "full",
   "activeWorkStaleMs": 4200,
   "connectedClients": 2,
+  "connectedClientsMax": 204,
+  "listenerConnectedClients": 2,
+  "listenerConnectedClientsMax": 204,
   "channelAlive": true,
   "lastActivityAt": "2026-07-15T08:30:00.000Z",
   "idleSinceMs": 120000
 }
 ```
 
-`sessions`, `pendingPermissions`, and `activePrompts` are sums. `activeWork` is true when any runtime has an accepted but unsettled prompt (including a FIFO-waiting prompt), a running background Agent, a queued/in-progress Agent terminal notification, Session-managed background shell or workflow work, or a child-owned Session turn. The aggregate `session` hold covers goal and cron processing, history mutation, and queued or running Monitor continuations; foreground prompts remain daemon-owned. Running Monitors, follow-up suggestions, and external processes the shell registry can no longer track remain outside the field. It is session-scoped: channel-level work with no session attached yet — a spawn in flight, a pending restore, MCP discovery or authentication — is not counted, so `activeWork` may read false while the daemon still declines to reclaim that channel. Do not read this field as "the daemon is reclaimable"; it describes session-owned work only. `activeWorkReporting` says how much of that boolean is actually vouched for: `full` when every live session is covered by a fresh report from a child that reports all required categories, `none` when no session negotiated reporting, and `partial` for anything between — including a stale snapshot or a negotiated child that omits a required category. A snapshot older than three report intervals stops counting as coverage: it is not a report that the session is idle, so the session goes back to reading as retained, exactly as if the child had never reported. Ordinary automatic cleanup is also disabled for a negotiated-but-incomplete child; a child that does not understand `shell` or `session` cannot safely authorize conditional close according to the complete current predicate. Completely unsupported historical children retain legacy cleanup behavior, and explicit close, kill, shutdown, and channel exit remain force operations. `activeWorkStaleMs` is the age of the oldest snapshot the boolean rests on **among the covered sessions**, and is `0` when no session is covered; it is diagnostic, because freshness is already graded into `activeWorkReporting` by the daemon (only the daemon knows each channel's negotiated cadence). The grade is computed once over every managed runtime rather than per runtime and then combined — a runtime with no sessions is vacuously complete, and treating that as evidence would let an empty workspace vouch for another workspace's unreported sessions. `lastActivityAt` is the latest non-null workspace activity time and `idleSinceMs` is derived from that same snapshot. `channelAlive` means at least one managed workspace channel is live; it does not mean every workspace is healthy. `connectedClients` and the optional `rateLimitHits` remain daemon-wide counters rather than per-workspace sums.
+`sessions`, `pendingPermissions`, and `activePrompts` are sums. `activeWork` is true when any runtime has an accepted but unsettled prompt (including a FIFO-waiting prompt), a running background Agent, a queued/in-progress Agent terminal notification, Session-managed background shell or workflow work, or a child-owned Session turn. The aggregate `session` hold covers goal and cron processing, history mutation, and queued or running Monitor continuations; foreground prompts remain daemon-owned. Running Monitors, follow-up suggestions, and external processes the shell registry can no longer track remain outside the field. It is session-scoped: channel-level work with no session attached yet — a spawn in flight, a pending restore, MCP discovery or authentication — is not counted, so `activeWork` may read false while the daemon still declines to reclaim that channel. Do not read this field as "the daemon is reclaimable"; it describes session-owned work only. `activeWorkReporting` says how much of that boolean is actually vouched for: `full` when every live session is covered by a fresh report from a child that reports all required categories, `none` when no session negotiated reporting, and `partial` for anything between — including a stale snapshot or a negotiated child that omits a required category. A snapshot older than three report intervals stops counting as coverage: it is not a report that the session is idle, so the session goes back to reading as retained, exactly as if the child had never reported. Ordinary automatic cleanup is also disabled for a negotiated-but-incomplete child; a child that does not understand `shell` or `session` cannot safely authorize conditional close according to the complete current predicate. Completely unsupported historical children retain legacy cleanup behavior, and explicit close, kill, shutdown, and channel exit remain force operations. `activeWorkStaleMs` is the age of the oldest snapshot the boolean rests on **among the covered sessions**, and is `0` when no session is covered; it is diagnostic, because freshness is already graded into `activeWorkReporting` by the daemon (only the daemon knows each channel's negotiated cadence). The grade is computed once over every managed runtime rather than per runtime and then combined — a runtime with no sessions is vacuously complete, and treating that as evidence would let an empty workspace vouch for another workspace's unreported sessions. `lastActivityAt` is the latest non-null workspace activity time and `idleSinceMs` is derived from that same snapshot. `channelAlive` means at least one managed workspace channel is live; it does not mean every workspace is healthy. `connectedClients` and the optional `rateLimitHits` remain daemon-wide counters rather than per-workspace sums. `connectedClients` is the aggregate long-lived stream occupancy — every SSE surface plus ACP SSE/WebSocket connections, the same scope as the admission cap — and `connectedClientsMax` is that cap (`null` = unlimited); `listenerConnectedClients` / `listenerConnectedClientsMax` are the arriving listener's governing pair: the bound is the tighter of the aggregate cap and that listener's own clamp (the aggregate itself on the primary listener; 51 on `local-control` / `remote-access`), since a lower aggregate binds first on every listener, and `null` = unlimited; the numerator counts the population that bound governs — the daemon total when the aggregate cap binds, the listener's own streams when its clamp binds — so the pair never reads as free headroom on a listener that is already refusing. The per-surface/per-listener breakdown lives in `runtime.transport.streamOccupancy` on `/daemon/status`, while `restSseActive` there remains the REST event surface alone.
 
 Restart controllers should treat the daemon as busy when:
 
@@ -786,7 +789,7 @@ Dropping the third term makes `activeWork === false` indistinguishable from "no 
 
 These fields are an observation cache, not a restart lease: even a fresh, fully-graded, empty answer describes the moment it was sampled, and work can start immediately afterwards. The rule above lowers the risk of a wrong restart substantially but does not eliminate it — strict safety needs a prepare-restart fence that stops new work admission, confirms the drain, and only then shuts down.
 
-> ⚠️ The deep probe is **informational**, not a real liveness verification or an atomic reclaim lease. Negotiated ACP children publish channel-wide active-work snapshots on a negotiated cadence, and the daemon grades their freshness into `activeWorkReporting` — but it never kills a channel over a missing report, because one session's silence is not evidence the process died. Transport liveness and stalled-Agent detection are separate mechanisms. `connectedClients` counts REST SSE connections, not every ACP transport. Use repeated samples and graceful shutdown for idle reclamation; use authenticated `/daemon/status` for transport and per-workspace diagnostics. If any managed runtime getter throws, deep health fails closed with `503 {"status":"degraded","reason":"aggregation_failed"}` rather than returning partial totals, and the daemon log identifies the failing workspace runtime. During bootstrap, before the runtime registry is ready, it returns `503 {"status":"degraded","reason":"bootstrap"}` with `Retry-After: 1`. For listener liveness, use the default `/health` without `?deep`.
+> ⚠️ The deep probe is **informational**, not a real liveness verification or an atomic reclaim lease. Negotiated ACP children publish channel-wide active-work snapshots on a negotiated cadence, and the daemon grades their freshness into `activeWorkReporting` — but it never kills a channel over a missing report, because one session's silence is not evidence the process died. Transport liveness and stalled-Agent detection are separate mechanisms. `connectedClients` counts every long-lived stream surface (REST/agent/generation/artifact/hosted SSE plus ACP SSE/WebSocket) against the shared admission cap, not just REST SSE. Use repeated samples and graceful shutdown for idle reclamation; use authenticated `/daemon/status` for transport and per-workspace diagnostics. If any managed runtime getter throws, deep health fails closed with `503 {"status":"degraded","reason":"aggregation_failed"}` rather than returning partial totals, and the daemon log identifies the failing workspace runtime. During bootstrap, before the runtime registry is ready, it returns `503 {"status":"degraded","reason":"bootstrap"}` with `Retry-After: 1`. For listener liveness, use the default `/health` without `?deep`.
 
 **Auth:** required on non-loopback binds and when loopback is hardened with `--require-auth`. On an ordinary loopback bind (`127.0.0.0/8`, `localhost`, `::1`, `[::1]`), `/health` is registered before the bearer middleware so k8s/Compose probes inside the pod don't need to carry the token. On non-loopback (`--hostname 0.0.0.0` etc.) or hardened loopback, the route is registered after the bearer middleware and returns 401 without a valid token — otherwise an unauthenticated caller could probe arbitrary addresses to confirm a `qwen serve` exists, a low-severity info leak that combines poorly with port scanning. CORS deny + Host allowlist still apply on the ordinary-loopback exemption.
 
@@ -938,11 +941,17 @@ Response shape:
     "maxTotalSessions": 800,
     "maxPendingPromptsPerSession": 5,
     "listenerMaxConnections": 256,
+    "maxSseConnections": 204,
+    "maxSseConnectionsPerListener": {
+      "primary": 204,
+      "local-control": 51,
+      "remote-access": 51
+    },
     "eventRingSize": 8000,
     "eventRingMaxBytes": 8388608,
     "compactedReplayMaxBytes": 4194304,
     "promptDeadlineMs": null,
-    "writerIdleTimeoutMs": null,
+    "writerIdleTimeoutMs": 60000,
     "channelIdleTimeoutMs": 0,
     "sessionIdleTimeoutMs": 1800000,
     "acpConnectionCap": 64
@@ -958,6 +967,23 @@ Response shape:
     },
     "transport": {
       "restSseActive": 0,
+      "streamOccupancy": {
+        "total": 0,
+        "bySurface": {
+          "restEvents": 0,
+          "agentEvents": 0,
+          "generation": 0,
+          "artifactLibrary": 0,
+          "hostedEvents": 0,
+          "acpSse": 0,
+          "acpWs": 0
+        },
+        "byListener": {
+          "primary": 0,
+          "local-control": 0,
+          "remote-access": 0
+        }
+      },
       "acp": {
         "enabled": true,
         "connections": 0,
@@ -2871,6 +2897,22 @@ top-level session). Agents launched by the top-level session omit
 `parentAgentId` and `parentName`; clients should treat all three fields as
 optional and fall back to a flat list when they are absent.
 
+With `?includeSubSessions=true` (capability `session_sub_session_send`), the
+response also carries `subSessions`: the `sent` launches the daemon reports
+back to this session, from `POST /session/:id/sub-sessions` or from the
+model's `create_sub_session`. Each is `{ kind: "session", id, sessionId,
+workspaceCwd, label, status, startTime, endTime?, runtimeMs, byPerson,
+waitingForInput }`, where `id` is the completion's task id, `sessionId` and
+`workspaceCwd` name the target, and `status` changes from `running` to
+`completed`, `failed`, or `cancelled`. A 30-minute observation timeout
+produces `failed` and pauses while `waitingForInput` indicates a pending
+permission request or question in the target. The daemon keeps at most 20
+records per caller in memory and refuses another send while all 20 slots are
+active. A restart forgets them. When one starts, settles, or starts or stops
+waiting the daemon publishes `sub_session_task_changed` with `{ sessionId }` (the caller) on
+every session in the caller's workspace; clients filter by `sessionId` and
+re-read this route.
+
 ### `GET /session/:id/tasks/:taskId/runtime`
 
 On-demand detail for one shell task. `GET /session/:id/tasks` carries lifecycle
@@ -3087,8 +3129,9 @@ from the selected session's own MCP manager remain available.
 
 Saved view state for one Generated UI card, advertised by
 `generated_ui_state`. Both methods require a session-bound
-`X-Qwen-Client-Id` (403 otherwise) and a card id matching
-`^gc_[A-Za-z0-9_-]{16,64}$` (400 `invalid_card_id`).
+`X-Qwen-Client-Id` and a card id matching `^gc_[A-Za-z0-9_-]{16,64}$`
+(400 `invalid_card_id`). A missing client id returns 403; a malformed client
+id, or one bound to another session, returns 400 `invalid_client_id`.
 
 `GET` returns `{ "cardId", "revision", "value" }`; a card that was never saved
 has `revision: 0` and `value: null`. `PUT` takes
@@ -3924,7 +3967,7 @@ ACP-over-HTTP uses the same request and response bodies through vendor methods `
 
 ### Multi-workspace live-session routing
 
-When `multi_workspace_sessions` is advertised, live-session operations identify their workspace from the `sessionId`; clients do not add a workspace selector to the URL. In addition to the existing owner-routed lifecycle operations, this applies to `PATCH /session/:id/metadata`, `POST /session/:id/recap`, `POST /session/:id/generate`, `POST /session/:id/btw`, `POST /session/:id/btw/stream`, `DELETE /session/:id/btw/stream/:requestId`, `POST /session/:id/mid-turn-message`, `GET /session/:id/mid-turn-messages`, `POST /session/:id/mid-turn-messages/send-now`, `DELETE /session/:id/mid-turn-messages/:messageId`, `POST /session/:id/tasks/:taskId/cancel`, `POST /session/:id/goal/clear`, `POST /session/:id/continue`, `POST /session/:id/language`, `POST /session/:id/artifacts`, `DELETE /session/:id/artifacts/:artifactId`, `GET /session/:id/sources`, `POST /session/:id/sources`, `DELETE /session/:id/sources/:sourceId`, `GET /session/:id/generated-ui/state/:cardId`, and `PUT /session/:id/generated-ui/state/:cardId`. The daemon routes each request to the trusted runtime that owns the live session. An untrusted non-primary owner returns `403 untrusted_workspace`, a missing live owner returns `404 session_not_found`, and an ambiguous owner fails closed with `500 ambiguous_session_owner`.
+When `multi_workspace_sessions` is advertised, live-session operations identify their workspace from the `sessionId`; clients do not add a workspace selector to the URL. In addition to the existing owner-routed lifecycle operations, this applies to `PATCH /session/:id/metadata`, `POST /session/:id/recap`, `POST /session/:id/mod-row`, `POST /session/:id/generate`, `POST /session/:id/btw`, `POST /session/:id/btw/stream`, `DELETE /session/:id/btw/stream/:requestId`, `POST /session/:id/mid-turn-message`, `GET /session/:id/mid-turn-messages`, `POST /session/:id/mid-turn-messages/send-now`, `DELETE /session/:id/mid-turn-messages/:messageId`, `POST /session/:id/tasks/:taskId/cancel`, `POST /session/:id/goal/clear`, `POST /session/:id/continue`, `POST /session/:id/language`, `POST /session/:id/artifacts`, `DELETE /session/:id/artifacts/:artifactId`, `GET /session/:id/sources`, `POST /session/:id/sources`, `DELETE /session/:id/sources/:sourceId`, `GET /session/:id/generated-ui/state/:cardId`, and `PUT /session/:id/generated-ui/state/:cardId`. The daemon routes each request to the trusted runtime that owns the live session. An untrusted non-primary owner returns `403 untrusted_workspace`, a missing live owner returns `404 session_not_found`, and an ambiguous owner fails closed with `500 ambiguous_session_owner`.
 
 This rule is live-session-only and does not make every workspace-less session route multi-workspace-aware. Persisted or archived operations use their documented workspace-qualified routes. `POST /session/:id/branch`, `POST /session/:id/fork`, and `POST /session/:id/cd` intentionally remain primary-only and return `non_primary_session_route_not_supported` for non-primary owners.
 
@@ -4137,6 +4180,29 @@ If queued prompts are unexpected in a multi-client deployment, first confirm
 whether callers are sharing a default `sessionScope: "single"` session. For
 independent per-thread conversations, create sessions with
 `sessionScope: "thread"` so prompts serialize only within that thread.
+
+### `POST /session/:id/sub-sessions`
+
+A person sends a prompt from the page of session `:id` to a new session or any existing one, in its own workspace or another registered one (capability `session_sub_session_send`). The daemon runs it as a `sent` launch of `create_sub_session` with `:id` as the caller: the same trust and cap checks, and the same completion notification, which `:id` takes as a turn of its own. Unlike the tool, picking the workspace is the approval, so nothing is asked separately; the target keeps its own approval mode; and the delegation depth limit does not apply. As with the tool, any session but `:id` itself can be the target, keeping its own parent and source.
+
+```bash
+curl -X POST http://127.0.0.1:4170/session/$SID/sub-sessions \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Summarize the open issues","workspace":"/work/other"}'
+# → 202 {"sessionId":"…","workspaceCwd":"/work/other"}
+```
+
+- `prompt` (required): non-empty, at most the `create_sub_session` prompt limit.
+- `workspace`: a registered, trusted workspace path or id. Absent means the caller's own workspace.
+- `targetSessionId`: an existing session to send to instead of starting a new one. Pass `workspace` too when it lives in another workspace.
+
+The response carries `sessionId`, `workspaceCwd` when the session runs in another workspace, and `taskId` when the completion's task id is not the session id (a follow-up). Errors: `400` (`invalid_sub_session_prompt`, `invalid_sub_session_workspace`, `invalid_sub_session_target`), `409 sub_session_send_refused` with the launcher's reason (an untrusted or unknown workspace, an unknown session, `:id` itself as the target, a cap, or a caller that does not record its chat), `501 sub_session_send_unavailable` for a session whose runtime cannot start sub-sessions, and the usual owner-route errors (standalone sessions are refused).
+
+While the target runs, the send is listed in `GET /session/:id/tasks?includeSubSessions=true`.
+
+A destination workspace using the `consensus` permission policy returns `409 sub_session_send_refused` before launching work. Send the message directly from the destination session to use its consensus approvals.
+
+The message is written to `:id`'s conversation as an `agent_mention` record whose `_meta.qwenAgentMessage.sentTo` is `{ sessionId, workspaceCwd, title? }` (the target), without starting a turn. When the target's turn settles, `:id` receives the completion notification and runs a turn in which its model tells the person what the target replied; the notification's label is `<workspace> · <title>`, and `backgroundTask.fromSession` identifies `{ sessionId, workspaceCwd }` for the target. The prompt the target receives carries `{ type: "source", sessionId, workspaceCwd, title? }` (the caller) among `_meta.inputAnnotations` on its `user_message_chunk`, live and on replay; the model's `create_sub_session` launches carry it too. The TypeScript SDK exposes the sender on normalized delta metadata as `sourceAnnotation` and keeps `inputAnnotations` for reference annotations.
 
 ### `DELETE /session/:id`
 
@@ -4373,6 +4439,37 @@ Errors:
 - `404` — session unknown.
 
 Cancellation: **none in v1**. The route does not listen for HTTP client disconnect, no `AbortSignal` is plumbed into the bridge, and the ACP child runs the side-query to completion regardless of whether the caller has disconnected. The only ceilings are the bridge's 60s backstop timeout (`SESSION_RECAP_TIMEOUT_MS`) and the transport-closed race against ACP channel death. This is acceptable because recap is short (single-attempt, `maxOutputTokens: 300`, ~1–5s typical); a request-id-based cancel ext-method can plumb full end-to-end cancellation in a future release if the bandwidth cost ever justifies it.
+
+### `POST /session/:id/mod-row`
+
+Capability tag: `session_mod_rows`. Bridge → ACP extMethod `qwen/control/session/mod_row`.
+
+Ask a live session's Mods for a transcript row this client draws, such as a block of the model's reply (`AssistantMessage`). The bridge declares the row sites the Web Shell draws in its `initialize` client capabilities (`_meta["qwen.modRows"]`), so the child runs each session's Mods on the `desktop` surface and offers those sites to their `ui.render` hooks.
+
+Request body:
+
+```json
+{
+  "component": "AssistantMessage",
+  "props": { "text": "The block's markdown", "isFirstOfReply": true }
+}
+```
+
+The child validates the site's prop names and types. It builds the event envelope with `surface: 'desktop'` and a `requestId` derived from the component and props, so clients share a row identity. Rows render one at a time in the session's Mod queue, with a 30-second deadline per render. The session can serve a cached answer after a reload or to a second client. The route uses the non-strict mutation gate because a hook can spend model tokens with `$.model.complete`. Rendering leaves the stored conversation intact. A hook that calls `$.ui.log` publishes the usual `mod_log` SSE event.
+
+Response (200), one of:
+
+- `{ "status": "unhooked" }` — no hook in this session hears the site (Mods off, failed to load, or none hooked it). Ask the session no more for this site.
+- `{ "status": "unanswered" }` — the hooks did not answer within the child's 60 seconds, or the session changed (`/clear`) or closed during the render. Draw the row as it is and retry later if the session is still live.
+- `{ "status": "answered", "props": { … } }` — draw `props`, which the hooks rewrote; without `props`, draw the row as it is.
+
+Errors:
+
+- `400 {code: 'invalid_mod_row'}` — the body has no valid `component` string or `props` object, or the props do not match a recognized site. The ACP extension method reports invalid params for a recognized site's invalid props.
+- `400 {code: 'invalid_client_id'}` — malformed `X-Qwen-Client-Id` header.
+- `404` — session unknown or not live.
+
+An explicit session close can interrupt rendering. An HTTP disconnect leaves the request running, with a 75-second bridge backstop. The Web Shell sends one request at a time per session. ACP-over-HTTP clients have no mapping for this route.
 
 ### `POST /session/:id/generate`
 

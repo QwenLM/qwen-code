@@ -56,4 +56,14 @@ describe('approval mode choices', () => {
       expect(resolveApprovalModes(values)).toEqual([]);
     },
   );
+
+  // Host-skew pin: the vocabulary is a build-time mirror of the SDK list, so
+  // a host SDK advertising an extra mode has it dropped by the sanitizing
+  // intersection (same rule as 'bogus' above). In-repo drift is pinned by
+  // constants/approvalModes.test.ts; cross-version skew is a documented
+  // limitation, not a silent surprise.
+  it('drops modes a newer host SDK advertises beyond the mirror', () => {
+    expect(resolveApprovalModes(['plan', 'readonly'])).toEqual([]);
+    expect(resolveApprovalModes(['default', 'readonly'])).toEqual(['default']);
+  });
 });
