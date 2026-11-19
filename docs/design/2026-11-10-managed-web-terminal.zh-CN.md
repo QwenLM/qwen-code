@@ -281,10 +281,11 @@ lost-Runtime 语义。故障用例（attach 期间杀 worker、hold 准入期间
 ## 发布
 
 在启用 opt-in 之前协同部署配套的控制平面、Harness 与 Runtime 制品；
-capability digest 变更会使按旧 digest 放置的 binding 失效。终端 opt-in
-默认关闭，且独立于 Shell opt-in。既有 Session 只有在其 runtime 放置到新
-digest 且准入链通过时才获得终端；已保存的 Session 作用域不被改写。不要
-降级仍有活跃 hold 的消费者。
+capability digest 变更会使按旧 digest 放置的 binding 失效。在统一本地启动器之外，
+终端 opt-in 默认关闭，且独立于 Shell opt-in；统一本地启动器始终启用终端
+（见「准入与审批模型」）。既有 Session 只有在其 runtime 放置到新 digest 且准入链
+通过时才获得终端；已保存的 Session 作用域不被改写。不要降级仍有活跃 hold 的
+消费者。
 
 ## 风险与后续
 

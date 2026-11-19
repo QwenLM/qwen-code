@@ -262,37 +262,73 @@ describe('ManagedSurfaceDecisionsDialog', () => {
     {
       language: 'en',
       title: 'Managed capabilities',
+      description:
+        'Daemon surfaces that differ in Managed, with their current owner. Tracked makes a gap visible; it does not mean permanent exclusion.',
       search: 'Search surfaces',
       empty: 'No surfaces match this search.',
+      tracked: 'Tracked',
       trackedIn: 'Tracked in',
-      category: 'Configuration and workspace identity',
+      categories: [
+        'Configuration and workspace identity',
+        'Knowledge, Skills and extensions',
+        'Conversation editing',
+        'Files, artifacts and sources',
+        'Runtime and tooling',
+      ],
       close: 'close',
     },
     {
       language: 'zh-CN',
       title: 'Managed 功能说明',
+      description:
+        '此处列出 Managed 与 daemon 的界面差异及当前归属。「已跟踪」表示缺口可见，不表示永久排除。',
       search: '搜索界面',
       empty: '没有符合搜索条件的界面。',
+      tracked: '已跟踪',
       trackedIn: '跟踪于',
-      category: '配置与工作区身份',
+      categories: [
+        '配置与工作区身份',
+        '知识、Skills 与扩展',
+        '会话编辑',
+        '文件、产物与来源',
+        '运行时与工具',
+      ],
       close: '关闭',
     },
     {
       language: 'zh-TW',
       title: 'Managed 功能說明',
+      description:
+        '此處列出 Managed 與 daemon 的介面差異及目前歸屬。「已追蹤」表示缺口可見，不表示永久排除。',
       search: '搜尋介面',
       empty: '沒有符合搜尋條件的介面。',
+      tracked: '已追蹤',
       trackedIn: '追蹤於',
-      category: '組態與工作區身分識別',
+      categories: [
+        '設定與工作區身份',
+        '知識、Skills 與擴充',
+        '對話編輯',
+        '檔案、產物與來源',
+        '執行環境與工具',
+      ],
       close: '關閉',
     },
     {
       language: 'ru',
       title: 'Возможности Managed',
+      description:
+        'Различия интерфейсов daemon и Managed с текущим владельцем. «Отслеживается» показывает пробел, а не окончательное исключение.',
       search: 'Поиск интерфейсов',
       empty: 'Интерфейсы по этому запросу не найдены.',
+      tracked: 'Отслеживается',
       trackedIn: 'Отслеживается в',
-      category: 'Конфигурация и идентичность рабочей области',
+      categories: [
+        'Конфигурация и идентичность рабочей области',
+        'Знания, Skills и расширения',
+        'Редактирование диалога',
+        'Файлы, артефакты и источники',
+        'Среда выполнения и инструменты',
+      ],
       close: 'закрыть',
     },
   ] as const)('localizes the dialog chrome for $language', async (expected) => {
@@ -301,12 +337,29 @@ describe('ManagedSurfaceDecisionsDialog', () => {
     expect(
       portal.querySelector('[data-slot="dialog-title"]')?.textContent,
     ).toBe(expected.title);
+    expect(
+      portal.querySelector('[data-slot="dialog-description"]')?.textContent,
+    ).toBe(expected.description);
     const search = portal.querySelector<HTMLInputElement>(
       'input[type="search"]',
     )!;
     expect(search.placeholder).toBe(expected.search);
-    expect(portal.querySelector('h3')?.textContent).toBe(expected.category);
-    expect(portal.querySelector('li a')?.textContent).toBe(
+    expect(
+      [...portal.querySelectorAll('h3')].map((heading) => heading.textContent),
+    ).toEqual(expected.categories);
+    const firstRow = portal.querySelector('[data-managed-surface="settings"]')!;
+    expect(firstRow.querySelector('h4')?.textContent).toBe(
+      expected.language === 'zh-CN' ? '设置面板' : 'Settings panel',
+    );
+    expect(firstRow.querySelector('h4 + span')?.textContent).toBe(
+      expected.tracked,
+    );
+    expect(firstRow.querySelector('p')?.textContent).toBe(
+      expected.language === 'zh-CN'
+        ? 'Managed 没有会话设置界面。完整 Shell 的设置面板配置本地 daemon，而不是 Managed 会话。'
+        : 'Managed has no Session settings surface. The full-shell Settings panel configures the local daemon, not the Managed Session.',
+    );
+    expect(firstRow.querySelector('a')?.textContent).toBe(
       `${expected.trackedIn} #15084`,
     );
     expect(

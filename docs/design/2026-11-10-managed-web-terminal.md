@@ -336,10 +336,12 @@ Acceptance is binary:
 
 Deploy matching control-plane, Harness and Runtime artifacts together before
 enabling the opt-in; the capability digest change invalidates bindings placed
-against the old digest. The terminal opt-in defaults to off, independently of
-the Shell opt-in. Existing Sessions gain the terminal only when their runtime
-is placed on the new digest and the admission chain passes; saved Session
-scope is not rewritten. Do not downgrade consumers with active holds.
+against the old digest. Outside the unified local launcher, the terminal
+opt-in defaults to off, independently of the Shell opt-in; the launcher always
+enables it (see Admission and approval model). Existing Sessions gain the
+terminal only when their runtime is placed on the new digest and the admission
+chain passes; saved Session scope is not rewritten. Do not downgrade consumers
+with active holds.
 
 ## Risks and follow-up
 

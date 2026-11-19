@@ -291,7 +291,7 @@ function makeQualifiedApp(
   };
 }
 
-describe('terminal-only Mods settings', () => {
+describe('Mods settings', () => {
   it.each([
     { route: '/workspace/settings', scope: 'user', qualified: false },
     {
@@ -300,7 +300,7 @@ describe('terminal-only Mods settings', () => {
       qualified: true,
     },
   ])(
-    'keeps terminal-only Mods out of $route',
+    'serves Mods in $route, whose sessions the Web Shell draws',
     async ({ route, scope, qualified }) => {
       const { app, persistSetting } = qualified
         ? makeQualifiedApp()
@@ -310,16 +310,15 @@ describe('terminal-only Mods settings', () => {
       expect(read.status).toBe(200);
       expect(
         read.body.settings.map((setting: { key: string }) => setting.key),
-      ).not.toContain('experimental.mods');
+      ).toContain('experimental.mods');
 
       const write = await request(app).post(route).send({
         scope,
         key: 'experimental.mods',
         value: true,
       });
-      expect(write.status).toBe(400);
-      expect(write.body).toMatchObject({ code: 'disallowed_key' });
-      expect(persistSetting).not.toHaveBeenCalled();
+      expect(write.status).toBe(200);
+      expect(persistSetting).toHaveBeenCalledTimes(1);
     },
   );
 });

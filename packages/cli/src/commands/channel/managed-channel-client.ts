@@ -129,8 +129,14 @@ export class HttpManagedChannelControlPlane
     }));
   }
 
-  async receipt(deliveryId: string, receipt: ManagedReceipt): Promise<void> {
-    await this.call(
+  async receipt(
+    deliveryId: string,
+    receipt: ManagedReceipt,
+  ): Promise<Record<string, unknown>> {
+    // The control plane answers with the settled delivery view (carrying
+    // `state`); surface it so the adapter can prune a completed delivery's
+    // card progress on `delivered` (H5e, R1-4).
+    return await this.call(
       'POST',
       `/deliveries/${encodeURIComponent(deliveryId)}:receipt`,
       receipt.outcome === 'accepted'

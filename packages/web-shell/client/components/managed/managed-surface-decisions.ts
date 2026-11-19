@@ -20,13 +20,13 @@ export const MANAGED_SURFACE_CATEGORY_LABELS: Record<
   configuration: [
     'Configuration and workspace identity',
     '配置与工作区身份',
-    '組態與工作區身分識別',
+    '設定與工作區身份',
     'Конфигурация и идентичность рабочей области',
   ],
   knowledge: [
     'Knowledge, Skills and extensions',
     '知识、Skills 与扩展',
-    '知識、Skills 與擴充功能',
+    '知識、Skills 與擴充',
     'Знания, Skills и расширения',
   ],
   conversation: [
@@ -38,13 +38,13 @@ export const MANAGED_SURFACE_CATEGORY_LABELS: Record<
   files: [
     'Files, artifacts and sources',
     '文件、产物与来源',
-    '檔案、成品與來源',
+    '檔案、產物與來源',
     'Файлы, артефакты и источники',
   ],
   runtime: [
     'Runtime and tooling',
     '运行时与工具',
-    '執行階段與工具',
+    '執行環境與工具',
     'Среда выполнения и инструменты',
   ],
 };

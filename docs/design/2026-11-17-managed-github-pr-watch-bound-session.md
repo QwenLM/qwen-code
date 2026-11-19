@@ -2,8 +2,11 @@
 
 [English](2026-11-17-managed-github-pr-watch-bound-session.md) | [简体中文](2026-11-17-managed-github-pr-watch-bound-session.zh-CN.md)
 
-Status: confirmed scope; implemented in #17665, under review. Builds on the merged
-managed GitHub adapter (#17511, `2c23f72bef`).
+Status: merged in #17665 (squash commit `8a96777248`); deferred review follow-ups
+tracked in #17792. Builds on the merged managed GitHub adapter (#17511, `2c23f72bef`).
+Verification ledger (merged tree, all green): github adapter 1040 tests, core parity +
+record-sink 59, cli pr-watch funnel / channel client / capability-parity and
+hosted-harness 854, Java pr-watch + surface suites, and a 36-check real-process E2E.
 
 Confirmed decisions (2026-11-17): first slice = private-only bound injection (public
 reply, role templates, Web Shell UI deferred); **D1 = new `pr_event` input source**;

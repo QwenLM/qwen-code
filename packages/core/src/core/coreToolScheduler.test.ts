@@ -132,6 +132,7 @@ import {
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
+import { ManagedRuntimeOutcomeUnknownError } from '../services/execution-environment.js';
 import { fnResponse } from '../test-utils/model-fixtures.js';
 
 /** MockTool that self-identifies as an omni media-policy tool, so a
@@ -2924,6 +2925,153 @@ describe('CoreToolScheduler', () => {
   const modelResult = (llmContent: string, returnDisplay: string) => ({
     llmContent,
     returnDisplay,
+  });
+
+  it('waits for Managed Runtime settlement after a timeout and drains running siblings', async () => {
+    await withToolTimeoutEnv('50', async () => {
+      const onTimeout = vi.fn();
+      const loseOutcome = deferred();
+      const settleSibling = deferred();
+      const unknown = new ManagedRuntimeOutcomeUnknownError('outcome unknown');
+      const tools = new AbortController();
+      const read = new MockTool({
+        name: 'read_file',
+        kind: Kind.Read,
+        canUpdateOutput: true,
+        execute: async (params, signal) => {
+          if (params['file_path'] === 'first.ts') {
+            signal?.addEventListener('abort', onTimeout, {
+              once: true,
+            });
+            await loseOutcome.promise;
+            throw unknown;
+          }
+          await settleSibling.promise;
+          return textResult('known outcome');
+        },
+      });
+      const config = makeSchedulerConfig(makeToolRegistry(read), {
+        getApprovalMode: () => ApprovalMode.YOLO,
+        getManagedRuntimeEnvironment: () => ({
+          toolNames: new Set([read.name]),
+        }),
+      });
+      const onManagedRuntimeBatchFailed = vi.fn();
+      const onManagedRuntimeOutcomeUnknown = vi.fn((error) =>
+        tools.abort(error),
+      );
+      const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+        schedulerWithCallbacks(config, {
+          onManagedRuntimeBatchFailed,
+          onManagedRuntimeOutcomeUnknown,
+        });
+      const running = scheduler.schedule(
+        [
+          readFileRequest('first', 'first.ts', 'p'),
+          readFileRequest('sibling', 'sibling.ts', 'p'),
+        ],
+        tools.signal,
+      );
+      void running.catch(() => undefined);
+      await vi.waitFor(() => expect(onTimeout).toHaveBeenCalled());
+      loseOutcome.resolve();
+      await vi.waitFor(() =>
+        expect(onManagedRuntimeOutcomeUnknown).toHaveBeenCalledWith(
+          unknown,
+          'first',
+        ),
+      );
+      expect(onManagedRuntimeBatchFailed).not.toHaveBeenCalled();
+      settleSibling.resolve();
+      await expect(running).rejects.toBe(unknown);
+      expect(onManagedRuntimeBatchFailed).toHaveBeenCalledExactlyOnceWith(
+        unknown,
+      );
+      expect(onAllToolCallsComplete).not.toHaveBeenCalled();
+      expect(reportedCalls(onToolCallsUpdate)).not.toContainEqual(
+        expect.objectContaining({
+          request: expect.objectContaining({ callId: 'first' }),
+          response: expect.anything(),
+        }),
+      );
+    });
+  });
+
+  it('reports an unknown outcome that settles just after a successful parallel tool', async () => {
+    const previous = process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+    process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '2';
+    try {
+      const unknown = new ManagedRuntimeOutcomeUnknownError('outcome unknown');
+      const loseOutcome = deferred();
+      const checkingThird = deferred();
+      const admitThird = deferred<boolean>();
+      const executeThird = vi.fn(() => textResult('too late'));
+      const read = new MockTool({
+        name: 'read_file',
+        kind: Kind.Read,
+        execute: async (params) => {
+          if (params['file_path'] === 'second.ts') {
+            await loseOutcome.promise;
+            throw unknown;
+          }
+          if (params['file_path'] === 'third.ts') return executeThird();
+          return textResult('known outcome');
+        },
+      });
+      const config = makeSchedulerConfig(makeToolRegistry(read), {
+        getApprovalMode: () => ApprovalMode.YOLO,
+      });
+      const onManagedRuntimeBatchFailed = vi.fn();
+      const tools = new AbortController();
+      const onAllToolCallsComplete = vi.fn();
+      const onManagedRuntimeOutcomeUnknown = vi.fn((error: Error) =>
+        tools.abort(error),
+      );
+      const scheduler = makeTestScheduler(config, {
+        onManagedRuntimeOutcomeUnknown,
+        onManagedRuntimeBatchFailed,
+        onAllToolCallsComplete,
+        beforeToolLaunch: ({ request }) => {
+          if (request.callId !== 'third') return true;
+          checkingThird.resolve();
+          return admitThird.promise;
+        },
+      });
+      const settled = scheduler
+        .schedule(
+          [
+            readFileRequest('first', 'first.ts', 'p'),
+            readFileRequest('second', 'second.ts', 'p'),
+            readFileRequest('third', 'third.ts', 'p'),
+          ],
+          tools.signal,
+        )
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      await checkingThird.promise;
+      loseOutcome.resolve();
+      await vi.waitFor(() =>
+        expect(onManagedRuntimeOutcomeUnknown).toHaveBeenCalledWith(
+          unknown,
+          'second',
+        ),
+      );
+      admitThird.resolve(true);
+      await vi.waitFor(() =>
+        expect(onManagedRuntimeBatchFailed).toHaveBeenCalledExactlyOnceWith(
+          unknown,
+        ),
+      );
+      expect(await settled).toBe(unknown);
+      expect(onAllToolCallsComplete).not.toHaveBeenCalled();
+      expect(executeThird).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined)
+        delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+      else process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = previous;
+    }
   });
 
   /** Runs lone `tool` as call `callId` with empty args; returns the handles. */
@@ -8936,6 +9084,92 @@ describe('CoreToolScheduler truncated output protection', () => {
         true,
       ),
     );
+  });
+
+  it('names the output budget when the truncation carries one (#16417)', async () => {
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(approvalTool());
+    await scheduleBatch(scheduler, {
+      ...toolRequest('1', TestApprovalTool.Name, { id: 'test-budget' }, 'p1'),
+      wasOutputTruncated: true,
+      outputBudgetAtTruncation: { usedTokens: 4096, limitTokens: 8192 },
+    });
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const message = expectTruncationRejection(
+      firstBatch(onAllToolCallsComplete)[0],
+    );
+    expect(message).toContain('used 4096 of the 8192-token output limit');
+    // R3-1: usage at exactly half the limit corroborates the cut (>=), so
+    // the size-each-part guidance is present — the positive arm the
+    // far-below-limit test leaves unpinned.
+    expect(message).toContain('size each part well under');
+  });
+
+  it('rejects without budget numbers when the truncation lacks them', async () => {
+    const message = expectTruncationRejection(
+      await completeTruncationCall(
+        approvalTool(),
+        { id: 'test-no-budget' },
+        'prompt-id-no-budget',
+        true,
+      ),
+    );
+    expect(message).not.toContain('output limit');
+  });
+
+  // #16417 mutation M3: folding the budget numbers into the retry-count key
+  // would reset the count at every truncation, so the third rejection with
+  // *different* budgets would carry the budget note instead of RETRY LOOP
+  // DETECTED. This pins the stable-key invariant.
+  it('keeps RETRY LOOP DETECTED on the third truncation with different budgets (#16417)', async () => {
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(approvalTool());
+    const budgets = [
+      { usedTokens: 4096, limitTokens: 8192 },
+      { usedTokens: 5000, limitTokens: 8192 },
+      { usedTokens: 6000, limitTokens: 8192 },
+    ];
+    for (let i = 0; i < budgets.length; i++) {
+      await scheduleBatch(scheduler, {
+        ...toolRequest(
+          `${i + 1}`,
+          TestApprovalTool.Name,
+          { id: `test-loop-${i}` },
+          `prompt-loop-${i}`,
+        ),
+        wasOutputTruncated: true,
+        outputBudgetAtTruncation: budgets[i],
+      });
+      await vi.waitFor(() =>
+        expect(onAllToolCallsComplete).toHaveBeenCalledTimes(i + 1),
+      );
+    }
+    // The LAST batch's result carries the threshold directive.
+    const lastBatch = onAllToolCallsComplete.mock.calls[
+      onAllToolCallsComplete.mock.calls.length - 1
+    ]?.[0] as unknown[];
+    const message = expectTruncationRejection(lastBatch[0] as ToolCall);
+    expect(message).toContain('RETRY LOOP DETECTED');
+  });
+
+  // #16417 R1-2: when the cut landed far below the configured limit (e.g.
+  // a provider-side cut at 3K against a 64K ceiling), the "size each part
+  // well under that limit" guidance is suppressed — it would license a
+  // retry an order of magnitude too large.
+  it('omits size-each-part guidance when the cut is far below the limit (#16417)', async () => {
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(approvalTool());
+    await scheduleBatch(scheduler, {
+      ...toolRequest('1', TestApprovalTool.Name, { id: 'test-far-cut' }, 'p1'),
+      wasOutputTruncated: true,
+      outputBudgetAtTruncation: { usedTokens: 3000, limitTokens: 64000 },
+    });
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const message = expectTruncationRejection(
+      firstBatch(onAllToolCallsComplete)[0],
+    );
+    expect(message).toContain('used 3000 of the 64000-token output limit');
+    expect(message).not.toContain('size each part well under');
   });
 
   // The token-limit diagnosis being withdrawn must not withdraw the data-loss
