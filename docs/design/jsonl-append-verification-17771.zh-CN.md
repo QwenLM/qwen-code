@@ -1,0 +1,128 @@
+# Legacy JSONL 追加隔离：#17771 合入验证记录
+
+[English](./jsonl-append-verification-17771.md) | [简体中文](./jsonl-append-verification-17771.zh-CN.md)
+
+**状态：已合入（Merged）。**本文是合入后的验证账本，不是另一套追加架构的提案。
+以下结果记录的是 #17771 的验证；本次纯文档变更没有重新运行这些验证。
+
+## 状态与出处
+
+- Pull request：#17771。
+- Squash commit：`f8fa7c476f2244d5c6832fb2bb9a551882c425b3`。
+- 比对的 PR head：`78489a70bda7e0d85f203c762aaa67d28b790410`。
+- 四个变更文件均已逐文件比较该 PR head 与 squash commit 的字节内容，全部一致：
+
+```text
+packages/core/src/utils/jsonl-utils.ts
+packages/core/src/utils/jsonl-utils.test.ts
+packages/core/src/utils/debugLogger.ts
+packages/core/src/utils/debugLogger.test.ts
+```
+
+- `packages/core/src/utils/jsonl-utils.ts` 实测的 SHA-256 为
+  `9ea6a9debcb58352dec0e0b0c94c3ee533b9189d2354bbf979ac921ff2922754`。
+- PR-head checks 为 **28 passed、34 skipped、0 failed、0 cancelled、0 pending**。
+  skipped 不能作为更多平台或功能覆盖的证据。
+
+## 已交付行为
+
+以下范围以当前源码为准，而不是以较早的评审中间版本为准：
+
+- `writeLine` 和 `writeLineSync` 通过添加必需的记录分隔符，将中断产生的、未以
+  换行结束的尾部与下一条完整 JSON 记录隔离。
+- 原有残缺字节保持原位。该操作只追加，不解析、修复、重新序列化或改写历史。
+  普通 regular file 的既有字节在其他方面保持不变。
+- 无法检查 regular file 尾部时，只有 `EACCES`、`EPERM`、`EAGAIN`、满足
+  `permission === 'FileSystemRead'` 的 `ERR_ACCESS_DENIED`，以及 `win32` 上的
+  `EBUSY` 才使用保守的 `\n`。`ENOENT` 则重新打开 append handle 并检查它。其他
+  错误（包括 `EIO` 和非读取权限拒绝）直接传播，不执行该回退追加。
+- non-regular 路径不会获得临时的只读 tail-probe reader，以免消耗外部 payload。
+  实现打开真正的 `a` writer，检查已打开 handle 的类型，并通过该 writer 追加。
+- async 路径执行真正的 append，调用 `sync()` 并关闭 writer；sync 路径使用
+  `flush: true` 并关闭 append descriptor。append、同步和关闭失败不会被转成成功。
+- debug 告警的交付只由真实的 debug `fs.appendFile` 结果报告，不由前置目录操作
+  决定。抛错的 delivery observer 被单独处理，不等同于文件系统写入失败。
+
+这里不宣称跨平台或所有特殊文件上的通用行为，不宣称通用 FIFO transcript 支持，
+也不宣称通用跨进程锁协议。
+
+## 聚焦验证
+
+已记录为通过的 gate 精确如下：
+
+```bash
+cd packages/core && npx vitest run src/utils/jsonl-utils.test.ts src/utils/debugLogger.test.ts
+npm run build
+npm run typecheck
+npm run bundle
+```
+
+- 聚焦结果：**150/150 tests**，其中 `jsonl-utils.test.ts` 为 **107** 项，
+  `debugLogger.test.ts` 为 **43** 项。
+- 真实根 build、完整根 typecheck 和 CLI bundle 均以 `0` 退出。
+- 只有这些是已验证的 gate；它们不代表全仓测试运行全绿。
+
+负向变异同样重要：去掉 `previous.pending` 守卫后，async 与 sync 的
+pending-delivery 去重相关用例确实失败。恢复守卫后，聚焦集合恢复为 150/150。
+这是变异证据，而不只是声称未修改的测试通过。
+
+## 原生与故障注入证据
+
+原生测量使用 Linux 和 Node `22.23.4`。故障注入单独标明，不会被写成操作系统原生
+产生的错误。
+
+- **FIFO，原生：**四个 appender/native 场景都保留外部 payload，没有创建临时
+  tail-probe reader，并保持原生 `fsync` 错误语义。这不能证明通用 FIFO transcript
+  语义。
+- **Lease，原生：**在真实 Linux `F_SETLEASE`/`F_WRLCK` 下，旧 appender 遇到
+  `EAGAIN` 且没有追加。当前 appender 保住下一条完整记录，native control 也保持
+  预期行为。
+- **类型替换，原生时序：**`ptrace` 观察到 `stat` 成功后，将目录替换为 torn
+  regular file，结果精确为 `{"old":\n{"next":true}\n`。这只是一次实测竞态，不承诺
+  任意路径替换或并发 appender 的原子处理。
+- **Writer 清理，故障注入：**async 与 sync 的 `fstat` `EIO` 都传播错误并关闭实际
+  writer descriptor；错误本身是注入的，不声称它是自然发生的内核故障。
+- **打包后的 CLI，原生资源故障：**`dist/cli.js` 使用隔离的 `.qwen_home`、真实
+  daemon 和 mock OpenAI 运行。原始 `RLIMIT_FSIZE` breach 加上 `SIGXFSZ` 后，原有的
+  单条 **137 字节**残缺尾保持原样，下一条完整记录独立成行。没有访问真实模型。
+- 该端到端运行通过 **11/11 断言**：parent-chain gap 为 0，daemon `/load` 与
+  `/context` 均为 HTTP 200，clean recovery 无 History gap。`canContinue:false` 表示
+  没有待继续的中断任务，不表示 degraded history。
+
+## 全量运行归因
+
+大范围运行并非全绿：**43,415 passed、65 failed、30 skipped**，另有 1 个 Vitest RPC
+timeout。对这些失败进行了归因，没有将其隐藏：
+
+- **42** 个来自宿主全局 pre-push hook 拒绝临时 `/tmp` remote。
+- **2** 个是宿主负载导致的时延失败。
+- 余下四个套件在独立安装的父提交树上重跑，复现了相同的 **21 failed / 255 passed**。
+
+没有为了得到绿色结果而弱化或禁用测试、CI 检查。因此，大范围运行仍只是归因证据，
+不是全仓通过的声明。
+
+## 边界与延期工作
+
+- Windows 原生验证与 current-head macOS 验证仍未完成。早期 macOS 在 `14893f6f10`
+  的报告早于最终 writer-handle 工作，不能作为已合入实现的证据。
+- 这里不承诺通用 FIFO transcript、任意路径替换或并发 append 原子性、读取侧历史
+  抢救或 daemon 升级/重启行为。独立的读取侧工作由 #17756 跟踪。
+- 后续 issue #17852 跟踪 sink 恢复后的受界限告警、128-key eviction 后的重复告警、
+  错误文件上下文，以及精确 `sync`/`close` 生命周期、stale completion、FIFO 目标和
+  失败 append 叠加 throwing observer 的测试见证；也跟踪 Windows 与 current-head
+  macOS 原生验证。
+- `R3-1` 没有宣告 fixed。尤其不能在缺少有效 cooldown 与 failure-budget 设计时，
+  简单地在达到上限后清零 attempt counter。这些主题可以独立推进。
+
+本文只记录文档关系，不声称关闭范围更大的原始 #17747 工作。
+
+## 参考链接
+
+- [#17771](https://github.com/QwenLM/qwen-code/pull/17771) 及其
+  [squash commit](https://github.com/QwenLM/qwen-code/commit/f8fa7c476f2244d5c6832fb2bb9a551882c425b3)。
+- 证据评论：
+  [最终验证](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7007985759)、
+  [原生与端到端证据](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7008079523)、
+  [收尾与归因](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7009882478)。
+- 延期工作：[#17852](https://github.com/QwenLM/qwen-code/issues/17852)。
+- 独立读取侧工作：[#17756](https://github.com/QwenLM/qwen-code/issues/17756)。
