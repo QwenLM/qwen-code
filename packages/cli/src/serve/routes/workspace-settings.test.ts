@@ -21,6 +21,7 @@ import {
   WORKSPACE_RESTRICTED_SETTINGS,
 } from '../../config/settingsUtils.js';
 import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
+import { WorkspaceSettingsPartialPersistError } from '../workspace-service/types.js';
 import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 
@@ -226,6 +227,7 @@ function makeApp(
 function makeQualifiedApp(
   overrides: {
     ssh?: boolean;
+    trusted?: boolean;
     workspaceCwd?: string;
     invokeWorkspaceCommand?: (
       method: string,
@@ -237,6 +239,7 @@ function makeQualifiedApp(
   app.use(express.json());
   const reloadModelProviders = vi.fn().mockResolvedValue({ status: 'applied' });
   const persistSetting = vi.fn(async () => {});
+  const persistSettings = vi.fn().mockResolvedValue(undefined);
   const invokeWorkspaceCommand =
     overrides.invokeWorkspaceCommand ?? vi.fn().mockResolvedValue(undefined);
   const publishWorkspaceEvent = vi.fn();
@@ -245,7 +248,7 @@ function makeQualifiedApp(
     state: 'active',
     current: {
       runtime: {
-        trusted: true,
+        trusted: overrides.trusted ?? true,
         workspaceCwd,
         routeFileSystemFactory: overrides.ssh
           ? {
@@ -275,6 +278,7 @@ function makeQualifiedApp(
     safeBody: (req) =>
       req.body && typeof req.body === 'object' ? req.body : {},
     persistSetting,
+    persistSettings,
     workspaceRegistry: registry as unknown as Parameters<
       typeof registerWorkspaceQualifiedSettingsRoutes
     >[1]['workspaceRegistry'],
@@ -285,6 +289,7 @@ function makeQualifiedApp(
     app,
     reloadModelProviders,
     persistSetting,
+    persistSettings,
     invokeWorkspaceCommand,
     publishWorkspaceEvent,
     invalidateServeFeaturesCache,
@@ -784,6 +789,33 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).toHaveBeenCalled();
   });
 
+  it('serves visionBridgeTimeoutMs to the Web Shell and writes it at workspace scope', async () => {
+    // showInDialog: false; Web Shell's /model --vision --timeout writes it.
+    const { app, persistSetting } = makeApp();
+
+    const list = await request(app).get('/workspace/settings');
+    expect(
+      list.body.settings.some(
+        (setting: { key: string }) => setting.key === 'visionBridgeTimeoutMs',
+      ),
+    ).toBe(true);
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'visionBridgeTimeoutMs',
+      value: 60_000,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ requiresRestart: true });
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/workspace',
+      SettingScope.Workspace,
+      'visionBridgeTimeoutMs',
+      60_000,
+    );
+  });
+
   it('serves serve.maxSessions to the Web Shell and writes it at user scope only', async () => {
     // The key is showInDialog: false, so WEB_SHELL_SETTINGS is what puts it in
     // the panel; the workspace restriction still refuses a workspace write.
@@ -1278,6 +1310,118 @@ describe('POST /workspaces/:workspace/settings', () => {
         },
       }),
     );
+  });
+});
+
+describe('POST /workspaces/:workspace/settings/vision-bridge', () => {
+  const route = '/workspaces/secondary/settings/vision-bridge';
+
+  it('commits both settings to the selected workspace in one write', async () => {
+    const { app, persistSetting, persistSettings, publishWorkspaceEvent } =
+      makeQualifiedApp();
+    const model = 'openai:qwen-vl\0https://user:secret@vision.example/v1';
+    const result = await request(app)
+      .post(route)
+      .send({ model, timeoutMs: 60_000 });
+
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual({
+      key: 'visionBridgeTimeoutMs',
+      scope: 'workspace',
+      value: 60_000,
+      requiresRestart: true,
+    });
+    expect(persistSetting).not.toHaveBeenCalled();
+    expect(persistSettings).toHaveBeenCalledExactlyOnceWith(
+      '/selected-workspace',
+      [
+        { scope: SettingScope.Workspace, key: 'visionModel', value: model },
+        {
+          scope: SettingScope.Workspace,
+          key: 'visionBridgeTimeoutMs',
+          value: 60_000,
+        },
+      ],
+      expect.any(Function),
+    );
+    expect(publishWorkspaceEvent.mock.calls).toEqual([
+      [
+        {
+          type: 'settings_changed',
+          data: {
+            key: 'visionModel',
+            value: 'openai:qwen-vl\0https://vision.example/v1',
+            scope: 'workspace',
+          },
+        },
+      ],
+      [
+        {
+          type: 'settings_changed',
+          data: {
+            key: 'visionBridgeTimeoutMs',
+            value: 60_000,
+            scope: 'workspace',
+          },
+        },
+      ],
+    ]);
+  });
+
+  it.each([
+    ['missing timeout', { model: 'qwen-vl' }],
+    ['missing model', { timeoutMs: 60_000 }],
+    ['option as model', { model: '--global', timeoutMs: 60_000 }],
+    ['missing model after auth type', { model: 'openai:', timeoutMs: 60_000 }],
+    ['trailing option separator', { model: 'qwen-vl  --', timeoutMs: 60_000 }],
+    ['option after auth type', { model: 'openai:--global', timeoutMs: 60_000 }],
+    ['model too long', { model: 'm'.repeat(1_025), timeoutMs: 60_000 }],
+    ['zero timeout', { model: 'qwen-vl', timeoutMs: 0 }],
+    ['timeout too large', { model: 'qwen-vl', timeoutMs: 2_147_483_648 }],
+  ])(
+    'rejects an invalid pair without any writes (%s)',
+    async (_scenario, body) => {
+      const { app, persistSetting, persistSettings, publishWorkspaceEvent } =
+        makeQualifiedApp();
+      const result = await request(app).post(route).send(body);
+
+      expect(result.status).toBe(400);
+      expect(result.body).toMatchObject({ code: 'invalid_value' });
+      expect(persistSetting).not.toHaveBeenCalled();
+      expect(persistSettings).not.toHaveBeenCalled();
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    },
+  );
+
+  it('refuses an untrusted workspace before persisting', async () => {
+    const { app, persistSettings } = makeQualifiedApp({ trusted: false });
+    const result = await request(app)
+      .post(route)
+      .send({ model: 'qwen-vl', timeoutMs: 60_000 });
+
+    expect(result.status).toBe(403);
+    expect(result.body).toMatchObject({ code: 'untrusted_workspace' });
+    expect(persistSettings).not.toHaveBeenCalled();
+  });
+
+  it('reports a generation closed during the batch commit without broadcasting', async () => {
+    const { app, persistSettings, publishWorkspaceEvent } = makeQualifiedApp();
+    persistSettings.mockRejectedValue(
+      new WorkspaceSettingsPartialPersistError(
+        'commit refused',
+        [],
+        new WorkspaceGenerationClosedError(),
+      ),
+    );
+    const result = await request(app)
+      .post(route)
+      .send({ model: 'qwen-vl', timeoutMs: 60_000 });
+
+    expect(result.status).toBe(503);
+    expect(result.body).toMatchObject({
+      code: 'workspace_runtime_unavailable',
+    });
+    expect(publishWorkspaceEvent).not.toHaveBeenCalled();
   });
 });
 

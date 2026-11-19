@@ -2774,6 +2774,17 @@ describe('Server Config (config.ts)', () => {
     `('%s', ({ params, expected }) => {
       expect(makeConfig(params).getVisionBridgeTimeoutMs()).toBe(expected);
     });
+
+    it('updates at runtime and applies the same validation', () => {
+      const config = makeConfig({ visionBridgeTimeoutMs: 120_000 });
+      config.setVisionBridgeTimeoutMs(60_000);
+      expect(config.getVisionBridgeTimeoutMs()).toBe(60_000);
+      config.setVisionBridgeTimeoutMs(2_147_483_648);
+      expect(config.getVisionBridgeTimeoutMs()).toBeUndefined();
+      config.setVisionBridgeTimeoutMs(45_000);
+      config.setVisionBridgeTimeoutMs(undefined);
+      expect(config.getVisionBridgeTimeoutMs()).toBeUndefined();
+    });
   });
 
   describe('getShellDefaultTimeoutMs', () => {
