@@ -9,7 +9,7 @@ import {
   type MarkdownRenderContext,
   type WebShellCodeBlockRenderInfo,
 } from '../../customization';
-import { I18nProvider } from '../../i18n';
+import { I18nProvider, getTranslator } from '../../i18n';
 import { TOAST_REQUEST_EVENT, type ToastRequestDetail } from '../ToastHost';
 import { ThemeProvider } from '../../themeContext';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
@@ -22,6 +22,7 @@ import {
 import {
   isSafeHref,
   isSafeImageSrc,
+  isLocalFilesystemImageSrc,
   Markdown,
   markdownUrlTransform,
   resolveFenceLanguage,
@@ -207,6 +208,327 @@ describe('isSafeImageSrc', () => {
   });
 });
 
+describe('isLocalFilesystemImageSrc', () => {
+  it('detects POSIX absolute paths rooted at OS directories', () => {
+    expect(isLocalFilesystemImageSrc('/Users/foo/shot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('/home/foo/shot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('/tmp/shot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('/var/log/shot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('/private/var/folders/x/shot.png')).toBe(
+      true,
+    );
+    expect(isLocalFilesystemImageSrc('/Volumes/External/shot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('/mnt/c/shot.png')).toBe(true);
+  });
+
+  it('detects Windows drive-letter and UNC paths', () => {
+    expect(isLocalFilesystemImageSrc('C:\\Users\\foo\\shot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('d:/temp/shot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('\\\\server\\share\\shot.png')).toBe(true);
+    // Backslash forms arrive percent-encoded from the markdown pipeline.
+    expect(isLocalFilesystemImageSrc('C:%5CUsers%5Cfoo%5Cshot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('c:%5ctemp%5cshot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('%5C%5Cserver%5Cshare%5Cshot.png')).toBe(
+      true,
+    );
+  });
+
+  it('detects ~ home paths', () => {
+    expect(isLocalFilesystemImageSrc('~/shot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('~alice/shot.png')).toBe(true);
+  });
+
+  it('does not treat URLs and same-origin routes as filesystem paths', () => {
+    expect(isLocalFilesystemImageSrc('https://example.com/img.png')).toBe(
+      false,
+    );
+    expect(isLocalFilesystemImageSrc('/images/logo.png')).toBe(false);
+    expect(isLocalFilesystemImageSrc('//evil.com/img.png')).toBe(false);
+    expect(isLocalFilesystemImageSrc('data:image/png;base64,iVBOR')).toBe(
+      false,
+    );
+    expect(isLocalFilesystemImageSrc('img/logo.png')).toBe(false);
+    // A same-origin route whose first segment merely resembles an OS root.
+    expect(isLocalFilesystemImageSrc('/Users.png')).toBe(false);
+  });
+
+  it('returns false for empty/undefined', () => {
+    expect(isLocalFilesystemImageSrc(undefined)).toBe(false);
+    expect(isLocalFilesystemImageSrc('')).toBe(false);
+  });
+});
+
+describe('markdown image fallback', () => {
+  it('renders a local POSIX path as a chip, not a broken <img>', () => {
+    const view = renderMd('![screenshot](/Users/foo/shot.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="local-path"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('screenshot — /Users/foo/shot.png');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('renders a Windows drive path as a chip with the path the user wrote', () => {
+    // The sanitizer rejects the drive-letter scheme and the backslashes
+    // arrive percent-encoded; the chip must still show the written path,
+    // from the local-path branch, not a broken image.
+    const view = renderMd('![screenshot](C:\\Users\\foo\\shot.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="local-path"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('screenshot — C:\\Users\\foo\\shot.png');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('shows the path, not a missing-source placeholder, for a no-alt drive image', () => {
+    const view = renderMd('![](C:\\temp\\shot.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="local-path"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('C:\\temp\\shot.png');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('renders a UNC path as a local-path chip with the written path', () => {
+    // Four leading backslashes survive micromark's destination unescaping
+    // (`\\` → `\`), leaving the two-backslash UNC the user wrote.
+    const view = renderMd('![unc](\\\\\\\\server\\\\share\\\\shot.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="local-path"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('unc — \\\\server\\share\\shot.png');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('renders a ~ home path as a local-path chip', () => {
+    const view = renderMd('![shot](~/shot.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="local-path"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('shot — ~/shot.png');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('shows the path once when the alt duplicates it', () => {
+    const view = renderMd('![/Users/foo/shot.png](/Users/foo/shot.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="local-path"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('/Users/foo/shot.png');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('shows the written path, decoded, for a local path with a space', () => {
+    // The pipeline percent-encodes the whole destination before the
+    // component sees it; the chip must show the path the user wrote.
+    const view = renderMd('![shot](</Users/foo/my shot.png>)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="local-path"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('shot — /Users/foo/my shot.png');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('does not show the payload of a failed data image', () => {
+    const view = renderMd('![chart](data:image/png;base64,iVBORw0KGgo=)');
+    try {
+      const img = view.querySelector('img')!;
+      act(() => {
+        img.dispatchEvent(new Event('error'));
+      });
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="load-error"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('chart');
+      expect(chip!.textContent).not.toContain('iVBORw0KGgo');
+      expect(chip!.getAttribute('title')).not.toContain('iVBORw0KGgo');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('replaces a file: scheme with a chip instead of a broken <img>', () => {
+    const view = renderMd('![secret](file:///tmp/private.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="unsafe-src"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('secret');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('shows the localized placeholder for a no-alt unsafe chip', () => {
+    const view = renderMd('![](file:///tmp/x.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="unsafe-src"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('(missing image source)');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('localizes the no-alt placeholder from the active catalog', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'zh-CN' },
+          createElement(Markdown, { content: '![](file:///tmp/x.png)' }),
+        ),
+      );
+    });
+    try {
+      const chip = container.querySelector(
+        '[data-web-shell-image-fallback="unsafe-src"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('（缺少图片来源）');
+      expect(chip!.textContent).not.toBe(
+        getTranslator('en')('markdown.imageMissingSource'),
+      );
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
+  });
+
+  it('keeps a safe base64 data image as an <img>', () => {
+    const view = renderMd('![c](data:image/png;base64,iVBORw0KGgo=)');
+    try {
+      const img = view.querySelector('img');
+      expect(img).toBeTruthy();
+      expect(img!.getAttribute('src')).toBe(
+        'data:image/png;base64,iVBORw0KGgo=',
+      );
+      expect(view.querySelector('[data-web-shell-image-fallback]')).toBeNull();
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('degrades to a chip when the image load fails', () => {
+    const view = renderMd('![chart](https://example.com/chart.png)');
+    try {
+      const img = view.querySelector('img')!;
+      expect(img).toBeTruthy();
+      act(() => {
+        img.dispatchEvent(new Event('error'));
+      });
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="load-error"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('chart — https://example.com/chart.png');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('keeps loading a safe http image', () => {
+    const view = renderMd('![logo](https://example.com/logo.png)');
+    try {
+      const img = view.querySelector('img')!;
+      expect(img).toBeTruthy();
+      expect(img.getAttribute('src')).toBe('https://example.com/logo.png');
+      expect(view.querySelector('[data-web-shell-image-fallback]')).toBeNull();
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('keeps a same-origin asset as an <img>', () => {
+    const view = renderMd('![logo](/images/logo.png)');
+    try {
+      expect(view.querySelector('img')?.getAttribute('src')).toBe(
+        '/images/logo.png',
+      );
+      expect(view.querySelector('[data-web-shell-image-fallback]')).toBeNull();
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('retries when the src changes after a failed load', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const setRender = (content: string) =>
+      act(() => {
+        root.render(
+          createElement(
+            I18nProvider,
+            { language: 'en' },
+            createElement(Markdown, { content }),
+          ),
+        );
+      });
+    try {
+      setRender('![a](https://example.com/missing.png)');
+      const img = container.querySelector('img')!;
+      act(() => {
+        img.dispatchEvent(new Event('error'));
+      });
+      expect(
+        container.querySelector('[data-web-shell-image-fallback="load-error"]'),
+      ).toBeTruthy();
+      // A new (different) src in the same position gets a fresh <img>.
+      setRender('![b](https://example.com/other.png)');
+      expect(container.querySelector('img')!).toBeTruthy();
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
+  });
+});
+
 describe('markdownUrlTransform', () => {
   it('lets the qwen-session scheme through untouched', () => {
     expect(markdownUrlTransform('qwen-session://abc-123')).toBe(
@@ -332,11 +654,76 @@ describe('document image policy', () => {
       );
     });
 
-    expect(container.querySelector('img')?.getAttribute('src')).toBeNull();
+    // The fallback chip must not write the URL into the export DOM.
+    expect(container.querySelector('img')).toBeNull();
     expect(container.innerHTML).not.toContain('https://example.com');
 
     act(() => root.unmount());
     container.remove();
+  });
+
+  it('localizes the no-alt chip from the active catalog in document mode', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'zh-CN' },
+          createElement(
+            TranscriptRenderModeProvider,
+            { value: 'document' },
+            createElement(Markdown, {
+              content: '![](https://example.com/x.png)',
+            }),
+          ),
+        ),
+      );
+    });
+    try {
+      const chip = container.querySelector(
+        '[data-web-shell-image-fallback="unsafe-src"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toBe('（缺少图片来源）');
+      expect(container.innerHTML).not.toContain('https://example.com');
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
+  });
+
+  it('keeps a document-safe data image in the export DOM when its load fails', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          TranscriptRenderModeProvider,
+          { value: 'document' },
+          createElement(Markdown, {
+            content: '![inline-safe](data:image/png;base64,iVBORw0KGgo=)',
+          }),
+        ),
+      );
+    });
+    try {
+      const img = container.querySelector('img')!;
+      expect(img).toBeTruthy();
+      act(() => {
+        img.dispatchEvent(new Event('error'));
+      });
+      // A static export must keep the element in place: no chip swap.
+      expect(container.querySelector('img')).toBeTruthy();
+      expect(
+        container.querySelector('[data-web-shell-image-fallback]'),
+      ).toBeNull();
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
   });
 
   it('renders chart fences as static code in document mode', () => {

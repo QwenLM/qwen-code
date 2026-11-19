@@ -194,6 +194,26 @@
   display: block;
 }
 
+/* Fallback chip for images that cannot load: local filesystem paths,
+   sanitized/unsafe sources, and images whose load failed (#17452). */
+.imageFallback {
+  display: inline-block;
+  max-width: 100%;
+  margin: 1.5rem 0;
+  padding: 4px 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 0.85em;
+  color: var(--muted-foreground, var(--foreground));
+  cursor: default;
+  user-select: text;
+}
+
 .codeBlock {
   margin: 8px 0;
   min-width: 0;

@@ -194,6 +194,27 @@ export function isSafeImageSrc(
   return SAFE_HREF_SCHEMES.test(trimmed);
 }
 
+/**
+ * Local filesystem paths that can never load in a browser: Windows
+ * drive-letter and UNC paths, `~` home paths, and POSIX absolute paths
+ * rooted at well-known OS directories. `isSafeImageSrc` accepts any single
+ * leading `/` (same-origin routes), so these need an explicit check —
+ * otherwise the browser requests e.g. `/Users/foo/shot.png` against the
+ * Web Shell origin, gets a 404, and the message keeps a broken `<img>`
+ * placeholder (#17452).
+ *
+ * Backslashes arrive percent-encoded by the markdown pipeline before this
+ * predicate runs (`C:\…` → `C:%5C…`), so both the raw and the encoded
+ * separator are accepted.
+ */
+const LOCAL_FILESYSTEM_IMAGE_SRC =
+  /^(?:[A-Za-z]:(?:[\\/]|%5[cC])|%5[cC]%5[cC]|\\\\|~(?:\w+)?[/\\]|\/(?:Users|home|tmp|var|opt|private|Volumes|mnt|media|srv|data|root|etc|boot|bin|sbin|usr|lib64|lib|dev|run|proc|sys)[\\/])/i;
+
+export function isLocalFilesystemImageSrc(url: string | undefined): boolean {
+  if (!url) return false;
+  return LOCAL_FILESYSTEM_IMAGE_SRC.test(url.trim());
+}
+
 // Track last initialized theme to avoid redundant mermaid.initialize() calls.
 // mermaid.initialize() is idempotent but runs per-block; with N diagrams in a
 // transcript this saves N-1 redundant calls per render cycle.
@@ -976,11 +997,70 @@ function MarkdownLink({
 }
 
 function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
+  const { t } = useI18n();
   const renderMode = useTranscriptRenderMode();
-  const safeSrc = isSafeImageSrc(src, renderMode === 'document')
-    ? src
-    : undefined;
-  return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
+  const documentMode = renderMode === 'document';
+  const trimmedSrc = (src ?? '').trim();
+  const isLocalPath = isLocalFilesystemImageSrc(trimmedSrc);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const loadFailed = failedSrc === trimmedSrc;
+  if (isLocalPath || loadFailed || !isSafeImageSrc(trimmedSrc, documentMode)) {
+    const reason = isLocalPath
+      ? 'local-path'
+      : loadFailed
+        ? 'load-error'
+        : 'unsafe-src';
+    // Document mode (export) never writes a src — remote or local — into the
+    // DOM: the export document must not contain machine paths or URLs the
+    // viewer did not author. In chat mode the chip shows the path the user
+    // wrote: the markdown pipeline percent-encodes the whole destination
+    // before the component sees it, so it is decoded for display (a sequence
+    // decodeURIComponent rejects falls back to reversing the backslashes).
+    // Data-URI payloads are never shown: a chip must not repeat a base64
+    // blob the user never wrote.
+    let pathText = '';
+    if (!documentMode && !SAFE_IMAGE_DATA_URI.test(trimmedSrc)) {
+      try {
+        pathText = decodeURIComponent(trimmedSrc);
+      } catch {
+        // A literal `%` (e.g. `/tmp/100%.png`) makes decodeURIComponent throw.
+        pathText = trimmedSrc.replace(/%5[cC]/g, '\\');
+      }
+    }
+    // WebShellTranscript wraps I18nProvider in document mode too, so the
+    // catalog applies to both modes; the raw-key guard only covers
+    // provider-less renders, where useI18n falls back to the identity t.
+    const missingSource = t('markdown.imageMissingSource');
+    const missingLabel =
+      missingSource === 'markdown.imageMissingSource'
+        ? '(missing image source)'
+        : missingSource;
+    const text = pathText
+      ? alt && alt !== pathText
+        ? `${alt} — ${pathText}`
+        : pathText
+      : alt || missingLabel;
+    return (
+      <span
+        className={styles.imageFallback}
+        data-web-shell-image-fallback={reason}
+        title={documentMode ? undefined : text}
+      >
+        {text}
+      </span>
+    );
+  }
+  return (
+    <img
+      src={trimmedSrc}
+      alt={alt || ''}
+      className={styles.image}
+      // Interactive only: a static export must keep the element in place —
+      // the document export gate asserts the image and its src survive a
+      // failed payload decode (chat-transcript-document.test.ts).
+      onError={documentMode ? undefined : () => setFailedSrc(trimmedSrc)}
+    />
+  );
 }
 
 /**
@@ -1268,8 +1348,22 @@ export const Markdown = memo(function Markdown({
     documentMode,
     sourceComponents?.sup,
   ]);
+  // Two `src` shapes the sanitizer would blank are let through: drive-letter
+  // local paths, which `defaultUrlTransform` reads as an unknown `C:`
+  // protocol, and `SAFE_IMAGE_DATA_URI` values, which it blanks as a `data:`
+  // URL and which `MarkdownImage` renders as an `<img>`, not a chip.
+  // POSIX/`~`/UNC local paths pass the sanitizer untouched and are chipped
+  // by `MarkdownImage` itself. Scoped to `src` (link hrefs keep the
+  // sanitizer) and off in document mode, where the export DOM must not
+  // carry machine paths or inline payloads.
   const urlTransform = useMemo(
-    () => (url: string) => markdownUrlTransform(url, documentMode),
+    () => (url: string, key?: string) => {
+      if (key === 'src' && !documentMode) {
+        if (isLocalFilesystemImageSrc(url)) return url;
+        if (SAFE_IMAGE_DATA_URI.test(url.trim())) return url;
+      }
+      return markdownUrlTransform(url, documentMode);
+    },
     [documentMode],
   );
 

@@ -148,6 +148,7 @@ export const RU_PART2: Record<
     `Используется ${v?.isRuntime ? 'runtime ' : ''}модель: ${v?.modelId ?? ''}`,
   'mermaid.label': 'mermaid',
   'mermaid.errorLabel': 'mermaid (ошибка)',
+  'markdown.imageMissingSource': '(нет источника изображения)',
   'user.uploadedImage': (v) =>
     `Загруженное пользователем изображение ${v?.index ?? 1}`,
   'resume.failedToLoad': 'Не удалось загрузить сессии',
