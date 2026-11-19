@@ -12,10 +12,11 @@ import {
   redactMcpServersSetting,
   restoreRedactedMcpServersSetting,
 } from '../../config/mcp-server-secrets.js';
-import type {
-  SettingEnumOption,
-  SettingsType,
-  SettingsValue,
+import {
+  getSettingsSchema,
+  type SettingEnumOption,
+  type SettingsType,
+  type SettingsValue,
 } from '../../config/settingsSchema.js';
 import {
   getDialogSettingKeys,
@@ -39,6 +40,10 @@ import {
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import {
+  WorkspaceSettingsPartialPersistError,
+  type WorkspaceSettingsWrite,
+} from '../workspace-service/types.js';
 import {
   ACP_ROUTE_ID_PREFIX,
   parseAcpModelOption,
@@ -845,6 +850,11 @@ export function registerWorkspaceQualifiedSettingsRoutes(
   > & {
     workspaceRegistry: WorkspaceRegistry;
     invalidateServeFeaturesCache: () => void;
+    persistSettings?: (
+      workspace: string,
+      writes: WorkspaceSettingsWrite[],
+      assertGenerationOpen: () => void,
+    ) => Promise<void>;
   },
 ): void {
   const allowedKeys = getAllowedKeys(false);
@@ -1109,6 +1119,94 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         scope,
         value: publicValue,
         requiresRestart: def.requiresRestart || imageSyncFailed,
+      });
+    },
+  );
+
+  const { persistSettings } = deps;
+  if (!persistSettings) return;
+
+  app.post(
+    '/workspaces/:workspace/settings/vision-bridge',
+    deps.mutate({ strict: true }),
+    async (req: Request, res: Response) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const { model, timeoutMs } = deps.safeBody(req);
+      const schema = getSettingsSchema();
+      const modelError =
+        typeof model !== 'string' ||
+        !model.trim() ||
+        model.trimStart().startsWith('--')
+          ? 'Expected a vision model selector'
+          : validateSettingValue(schema.visionModel, model);
+      const validationError =
+        modelError ??
+        validateSettingValue(schema.visionBridgeTimeoutMs, timeoutMs);
+      if (validationError) {
+        res.status(400).json({ error: validationError, code: 'invalid_value' });
+        return;
+      }
+      const clientId = parseAndValidateWorkspaceClientId(
+        req,
+        res,
+        runtime.bridge,
+      );
+      if (clientId === null) return;
+
+      const scope = SettingScope.Workspace;
+      const assertGenerationOpen = () => runtime.generationGuard?.assertOpen();
+      const writes = [
+        { scope, key: 'visionModel', value: model },
+        { scope, key: 'visionBridgeTimeoutMs', value: timeoutMs },
+      ];
+      try {
+        await persistSettings(
+          runtime.workspaceCwd,
+          writes,
+          assertGenerationOpen,
+        );
+        assertGenerationOpen();
+      } catch (err) {
+        const cause =
+          err instanceof WorkspaceSettingsPartialPersistError ? err.cause : err;
+        if (sendGenerationClosedError(res, cause)) return;
+        writeStderrLine(
+          `qwen serve: POST /workspaces/:workspace/settings/vision-bridge persist error (workspace=${runtime.workspaceCwd}): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Failed to persist vision bridge settings',
+          code: 'persist_error',
+        });
+        return;
+      }
+
+      deps.invalidateServeFeaturesCache();
+      for (const { key, value } of writes) {
+        runtime.bridge.publishWorkspaceEvent({
+          type: 'settings_changed',
+          data: {
+            key,
+            value:
+              key === 'visionModel' && typeof value === 'string'
+                ? publicAuxModelSelectorValue(value)
+                : value,
+            scope: 'workspace',
+          },
+          ...(clientId ? { originatorClientId: clientId } : {}),
+        });
+      }
+      res.status(200).json({
+        key: 'visionBridgeTimeoutMs',
+        scope: 'workspace',
+        value: timeoutMs,
+        requiresRestart: schema.visionBridgeTimeoutMs.requiresRestart,
       });
     },
   );

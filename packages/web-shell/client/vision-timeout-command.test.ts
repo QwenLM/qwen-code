@@ -20,13 +20,23 @@ describe('extractVisionTimeout', () => {
     expect(extractVisionTimeout(input)).toEqual({ modelArg, timeout });
   });
 
+  it.each(['--vision qwen-vl', 'qwen-max what does --timeout 60 do'])(
+    'leaves %j untouched',
+    (input) => {
+      expect(extractVisionTimeout(input)).toEqual({ modelArg: input });
+    },
+  );
+
   it.each([
-    '--vision qwen-vl',
-    '--fast --timeout 60',
-    'qwen-max what does --timeout 60 do',
-    '--vision --timeouts 60',
-  ])('leaves %j untouched', (input) => {
-    expect(extractVisionTimeout(input)).toEqual({ modelArg: input });
+    ['--vision --timeout 60 --timeout abc', '--timeout'],
+    ['--vision --timeout 60 --global', '--global'],
+    ['--vision --timeouts 60', '--timeouts'],
+    ['--fast --timeout 60', '--timeout'],
+  ])('rejects an invalid option in %j', (input, invalidOption) => {
+    expect(extractVisionTimeout(input)).toEqual({
+      modelArg: input,
+      invalidOption,
+    });
   });
 });
 

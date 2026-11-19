@@ -6,21 +6,28 @@
 
 // Mirrors the CLI's `/model --vision --timeout` parsing: Web Shell handles
 // `/model --vision` on the client and writes the settings itself.
-const TIMEOUT_FLAG = /(?:^|\s)--timeout(?=\s|$)(?:\s+(?!--)(\S+))?/;
+const TIMEOUT_FLAG = /(?:^|\s)--timeout(?=[=\s]|$)(?:\s+(?!--)(\S+))?/;
 
 /**
  * Splits `--timeout <value>` out of a `/model --vision` argument string in any
- * position. Anything else is returned untouched with `timeout` undefined; a
- * flag without a value yields `timeout: ''`.
+ * position. A flag without a value yields `timeout: ''`. Reject remaining
+ * options before they can be used as the vision model selector.
  */
 export function extractVisionTimeout(modelArg: string): {
   modelArg: string;
   timeout?: string;
+  invalidOption?: string;
 } {
   const match = TIMEOUT_FLAG.exec(modelArg);
-  if (!match) return { modelArg };
-  const remaining = modelArg.replace(match[0], ' ').trim();
-  return remaining === '--vision' || remaining.startsWith('--vision ')
+  const remaining = match ? modelArg.replace(match[0], ' ').trim() : modelArg;
+  if (!/^--vision(?:\s|$)/.test(remaining)) {
+    return match && modelArg.startsWith('--')
+      ? { modelArg, invalidOption: '--timeout' }
+      : { modelArg };
+  }
+  const invalidOption = /\s(--\S+)/.exec(remaining)?.[1];
+  if (invalidOption) return { modelArg, invalidOption };
+  return match
     ? { modelArg: remaining, timeout: match[1] ?? '' }
     : { modelArg };
 }

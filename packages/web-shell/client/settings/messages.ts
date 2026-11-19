@@ -125,6 +125,7 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   // `/model --vision --timeout` writes this setting; kept here with the
   // settings strings so the transcript export drops them.
   'model.setVisionTimeout': 'Set Vision Bridge Timeout',
+  'model.invalidOption': (v) => `Invalid /model option "${v?.option ?? ''}".`,
   'model.invalidVisionTimeout': (v) =>
     `Invalid --timeout value "${v?.value ?? ''}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.`,
 };
@@ -338,6 +339,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.description.visionModel':
     '用于视觉桥接的图像能力模型。留空则自动选择。',
   'model.setVisionTimeout': '设置视觉桥接超时',
+  'model.invalidOption': (v) => `无效的 /model 选项“${v?.option ?? ''}”。`,
   'model.invalidVisionTimeout': (v) =>
     `无效的 --timeout 值 "${v?.value ?? ''}"。请使用正整数秒数，例如 60、60s 或 90000ms。`,
   'settings.label.visionBridgeTimeoutMs': '视觉桥接超时（毫秒）',

@@ -831,19 +831,12 @@ export const modelCommand: SlashCommand = {
           ),
         };
       }
-      const applyTimeout = (): string => {
-        if (timeoutMs === undefined || !settings) return '';
-        persistSetting(
-          settings,
-          'visionBridgeTimeoutMs',
-          timeoutMs,
-          scopeOverride,
-        );
-        config.setVisionBridgeTimeoutMs(timeoutMs);
-        return t('Vision bridge timeout: {{timeout}}', {
-          timeout: formatVisionTimeout(timeoutMs),
-        });
-      };
+      const timeoutLine =
+        timeoutMs === undefined
+          ? ''
+          : t('Vision bridge timeout: {{timeout}}', {
+              timeout: formatVisionTimeout(timeoutMs),
+            });
       if (!modelName && timeoutMs !== undefined) {
         if (!settings) {
           return {
@@ -852,10 +845,17 @@ export const modelCommand: SlashCommand = {
             content: t('Settings service not available.'),
           };
         }
+        persistSetting(
+          settings,
+          'visionBridgeTimeoutMs',
+          timeoutMs,
+          scopeOverride,
+        );
+        config.setVisionBridgeTimeoutMs(timeoutMs);
         return {
           type: 'message',
           messageType: 'info',
-          content: applyTimeout() + scopeSuffix,
+          content: timeoutLine + scopeSuffix,
         };
       }
       if (!modelName) {
@@ -973,10 +973,17 @@ export const modelCommand: SlashCommand = {
       const visionModel = matched.baseUrl
         ? `${qualifiedModelName}\0${matched.baseUrl}`
         : qualifiedModelName;
-      persistSetting(settings, 'visionModel', visionModel, scopeOverride);
+      if (timeoutMs === undefined) {
+        persistSetting(settings, 'visionModel', visionModel, scopeOverride);
+      } else {
+        settings.setTopLevelValues(resolveScope(settings, scopeOverride), {
+          visionModel,
+          visionBridgeTimeoutMs: timeoutMs,
+        });
+        config.setVisionBridgeTimeoutMs(timeoutMs);
+      }
       // Sync runtime Config so the vision bridge picks it up without a restart.
       config.setVisionModel(visionModel);
-      const timeoutLine = applyTimeout();
       // The pin is honored even if the model isn't image-capable (the user may
       // know better than our metadata), but warn — the bridge sends images to it.
       const visionWarning = isImageCapable(matched)

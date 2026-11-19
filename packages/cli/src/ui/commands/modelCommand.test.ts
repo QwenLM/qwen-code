@@ -1787,6 +1787,7 @@ describe('modelCommand', () => {
       } = {},
     ) {
       const setValue = vi.fn();
+      const setTopLevelValues = vi.fn();
       const setVisionModel = vi.fn();
       const setVisionBridgeTimeoutMs = vi.fn();
       const context = createMockCommandContext({
@@ -1815,10 +1816,16 @@ describe('modelCommand', () => {
               .fn()
               .mockReturnValue([{ id: 'qwen-vl-max' }, { id: 'qwen-plus' }]),
           },
-          settings: createMockSettings(setValue),
+          settings: { ...createMockSettings(setValue), setTopLevelValues },
         },
       });
-      return { context, setValue, setVisionModel, setVisionBridgeTimeoutMs };
+      return {
+        context,
+        setValue,
+        setTopLevelValues,
+        setVisionModel,
+        setVisionBridgeTimeoutMs,
+      };
     }
 
     it.each([
@@ -1870,23 +1877,26 @@ describe('modelCommand', () => {
     });
 
     it('sets the vision model and the timeout together', async () => {
-      const { context, setValue, setVisionModel, setVisionBridgeTimeoutMs } =
-        timeoutContext();
+      const {
+        context,
+        setValue,
+        setTopLevelValues,
+        setVisionModel,
+        setVisionBridgeTimeoutMs,
+      } = timeoutContext();
 
       const result = await modelCommand.action!(
         context,
         '--vision qwen-vl-max --timeout 45',
       );
 
-      expect(setValue).toHaveBeenCalledWith(
-        expect.any(String),
-        'visionModel',
-        'openai:qwen-vl-max',
-      );
-      expect(setValue).toHaveBeenCalledWith(
-        expect.any(String),
-        'visionBridgeTimeoutMs',
-        45_000,
+      expect(setValue).not.toHaveBeenCalled();
+      expect(setTopLevelValues).toHaveBeenCalledExactlyOnceWith(
+        SettingScope.User,
+        {
+          visionModel: 'openai:qwen-vl-max',
+          visionBridgeTimeoutMs: 45_000,
+        },
       );
       expect(setVisionModel).toHaveBeenCalledWith('openai:qwen-vl-max');
       expect(setVisionBridgeTimeoutMs).toHaveBeenCalledWith(45_000);
@@ -1897,8 +1907,30 @@ describe('modelCommand', () => {
       });
     });
 
+    it('leaves the active model and timeout alone when the combined save fails', async () => {
+      const {
+        context,
+        setValue,
+        setTopLevelValues,
+        setVisionModel,
+        setVisionBridgeTimeoutMs,
+      } = timeoutContext();
+      setTopLevelValues.mockImplementation(() => {
+        throw new Error('settings write failed');
+      });
+
+      await expect(
+        modelCommand.action!(context, '--vision qwen-vl-max --timeout 45'),
+      ).rejects.toThrow('settings write failed');
+
+      expect(setValue).not.toHaveBeenCalled();
+      expect(setVisionModel).not.toHaveBeenCalled();
+      expect(setVisionBridgeTimeoutMs).not.toHaveBeenCalled();
+    });
+
     it('does not write the timeout when the vision model is rejected', async () => {
-      const { context, setValue, setVisionBridgeTimeoutMs } = timeoutContext();
+      const { context, setValue, setTopLevelValues, setVisionBridgeTimeoutMs } =
+        timeoutContext();
 
       const result = await modelCommand.action!(
         context,
@@ -1907,6 +1939,7 @@ describe('modelCommand', () => {
 
       expect(result).toMatchObject({ type: 'message', messageType: 'error' });
       expect(setValue).not.toHaveBeenCalled();
+      expect(setTopLevelValues).not.toHaveBeenCalled();
       expect(setVisionBridgeTimeoutMs).not.toHaveBeenCalled();
     });
 

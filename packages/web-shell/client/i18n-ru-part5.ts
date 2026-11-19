@@ -239,6 +239,8 @@ export const RU_PART5: Record<
   'model.disabled': 'Отключено',
   'model.setVision': 'Задать модель зрения',
   'model.setVisionTimeout': 'Задать тайм-аут моста зрения',
+  'model.invalidOption': (v) =>
+    `Недопустимый параметр /model «${v?.option ?? ''}».`,
   'model.invalidVisionTimeout': (v) =>
     `Недопустимое значение --timeout "${v?.value ?? ''}". Укажите целое положительное число секунд, например 60, 60s или 90000ms.`,
   'model.switch': 'Сменить модель',

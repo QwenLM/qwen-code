@@ -1415,6 +1415,48 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('setVisionBridgeSettings', () => {
+    it('POSTs both settings through the qualified workspace route', async () => {
+      const result = {
+        key: 'visionBridgeTimeoutMs',
+        scope: 'workspace',
+        value: 60_000,
+        requiresRestart: true,
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client
+          .workspaceByCwd('/work/secondary')
+          .setVisionBridgeSettings('qwen-vl', 60_000),
+      ).resolves.toEqual(result);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/workspaces/%2Fwork%2Fsecondary/settings/vision-bridge',
+        body: '{"model":"qwen-vl","timeoutMs":60000}',
+      });
+    });
+
+    it('surfaces a missing batch route without falling back to separate writes', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(404, { error: 'Not found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client
+          .workspaceById('secondary')
+          .setVisionBridgeSettings('qwen-vl', 60_000),
+      ).rejects.toMatchObject({ status: 404 });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/secondary/settings/vision-bridge',
+      );
+    });
+  });
+
   describe('model configuration', () => {
     it('loads configured models and patches a window reset as null', async () => {
       const { fetch, calls } = recordingFetch(() =>
