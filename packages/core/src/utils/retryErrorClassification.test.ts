@@ -1347,6 +1347,10 @@ describe('isTerminalQuotaError', () => {
     expect(thrown).toBeInstanceOf(Error);
     expect((thrown as Error).cause).toBe(rawFreeTier);
     expect(isTerminalQuotaError(thrown, classifyRetryError(thrown))).toBe(true);
+    // The replacement must stay status-less: a 429 status would make
+    // isRateLimitError true (re-triggering the stream-side rate-limit loop) and
+    // isFallbackEligible true (cascading the chain past a permanent quota).
+    expect(isFallbackEligible(classifyRetryError(thrown))).toBe(false);
   });
 
   it('reads the message-scraped providerType beside a non-quota code (R2-2)', () => {
@@ -1368,5 +1372,19 @@ describe('isTerminalQuotaError', () => {
     });
     const classification = classifyRetryError(wrapped);
     expect(isTerminalQuotaError(wrapped, classification)).toBe(false);
+  });
+
+  it('reads the message-scraped providerCode on a nested cause (deferred coverage)', () => {
+    // A cause whose quota code lives only in the message body (no object
+    // .code/.type, no sibling type): getProviderFields surfaces nothing, so the
+    // signal comes from getRateLimitErrorDetails(cause).providerCode. The top
+    // classification.providerCode is empty, pinning the scraped-code arm.
+    const cause = new Error(
+      '{"error":{"code":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details."}}',
+    );
+    const wrapped = new Error('wrapper', { cause });
+    const classification = classifyRetryError(wrapped);
+    expect(classification.providerCode).toBeUndefined();
+    expect(isTerminalQuotaError(wrapped, classification)).toBe(true);
   });
 });
