@@ -54,8 +54,6 @@ export {
 import type { FunctionDeclaration } from '@google/genai';
 import { existsSync } from 'node:fs';
 import { basename } from 'node:path';
-import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-
 import { pathToFileURL } from 'node:url';
 import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
 import { MCPOAuthTokenStorage } from '../mcp/oauth-token-storage.js';
@@ -496,6 +494,28 @@ export function createMcpClient(name: string, cfg: MCPServerConfig): Client {
   );
 }
 
+/**
+ * Client-side request handlers the CLI's MCP client answers (#17316).
+ * `elicitation/create` is declined until the confirmation-bus wiring lands:
+ * a decline is protocol-correct (the server sees an explicit refusal rather
+ * than a timeout) and leaves the tool call free to surface its own error
+ * path. Exported so tests drive the real registration against a scripted
+ * transport instead of re-deriving it.
+ */
+export function registerMcpClientHandlers(
+  client: Client,
+  serverName: string,
+): void {
+  client.setRequestHandler('elicitation/create', async (request) => {
+    debugLogger.debug(
+      `MCP ELICITATION (${serverName}): declining ` +
+        `"${request.params.message}" — interactive elicitation is ` +
+        `not yet wired to the confirmation flow (#17316 follow-up).`,
+    );
+    return { action: 'decline' };
+  });
+}
+
 export function getMcpAppResourceUri(tool: {
   _meta?: Record<string, unknown>;
 }): string | undefined {
@@ -645,36 +665,11 @@ export class McpClient {
         };
       });
 
-      // MCP elicitation (#17316): servers can request structured user input
-      // mid-interaction via `elicitation/create`. The capability is declared
-      // in the handshake above; this handler receives the request. Until the
-      // confirmation-bus wiring lands, the handler declines gracefully with
-      // a log entry — a decline is protocol-correct (the server sees an
-      // explicit refusal rather than a timeout) and leaves the tool call
-      // free to surface its own error path.
-      // MCP elicitation (#17316): the Client's setRequestHandler constrains
-      // to known request methods and ElicitRequestSchema isn't in that union
-      // in this SDK version, so register through the Protocol base class
-      // which accepts any Zod schema. Until the confirmation-bus wiring
-      // lands, the handler declines gracefully — a decline is
-      // protocol-correct (the server sees an explicit refusal rather than
-      // a timeout) and leaves the tool call free to surface its own error.
-      const protocol = this.client as unknown as {
-        setRequestHandler: (
-          schema: object,
-          handler: (request: {
-            params?: { message?: string };
-          }) => Promise<{ action: string }>,
-        ) => void;
-      };
-      protocol.setRequestHandler(ElicitRequestSchema, async (request) => {
-        debugLogger.debug(
-          `MCP ELICITATION (${this.serverName}): declining ` +
-            `"${request.params?.message}" — interactive elicitation is ` +
-            `not yet wired to the confirmation flow (#17316 follow-up).`,
-        );
-        return { action: 'decline' };
-      });
+      // MCP elicitation (#17316): the capability is declared in the
+      // handshake (createMcpClient); answer `elicitation/create` requests
+      // through the same string-method registration `roots/list` above
+      // already uses.
+      registerMcpClientHandlers(this.client, this.serverName);
 
       await this.client.connect(this.transport, {
         timeout: this.serverConfig.timeout,
