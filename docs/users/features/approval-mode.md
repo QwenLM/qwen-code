@@ -136,7 +136,7 @@ Headless runs use the same startup defaults. In standard headless runs with text
 
 An explicit allow rule in `permissions.allow` or `--allowed-tools` can keep a tool available. The selected approval mode and permission rules then determine which calls can run. For example, a path-scoped allow rule can keep `edit` available, and Auto Mode can still approve ordinary workspace edits outside that rule.
 
-With `--input-format stream-json`, the host can respond to approval requests through the protocol.
+With both `--input-format stream-json` and `--output-format stream-json`, the host can respond to approval requests through the protocol.
 
 To run in Ask Permissions Mode explicitly:
 
@@ -222,9 +222,9 @@ configuration, troubleshooting, FAQ).
 - **Trusted projects**: Internal codebases where the agent should keep
   moving but you still want a guardrail on destructive shell commands and
   outbound network calls.
-- **Headless / scheduled runs**: Where Auto-Edit isn't enough (the agent
-  needs to run shell commands too) but you want safety on `rm -rf /`,
-  `curl ... | sh`, credential exfiltration, etc.
+- **Headless / scheduled runs**: For text-input runs that need shell commands,
+  explicitly keep the shell tool available, for example with a command-scoped
+  allow rule. Auto Mode then applies its normal approval rules to each call.
 
 ### How to use Auto Mode
 
