@@ -202,6 +202,14 @@ export interface HttpManagedSessionStores {
   };
   assertWritable(): Promise<void>;
   stopLocal(): Promise<void>;
+  /**
+   * Ends the writer lease's renewal timer without fencing the client. A
+   * suspension that cannot confirm its seal needs the lease to lapse so a
+   * successor generation fences the old writer, while the same client must
+   * still be able to reconcile that seal — `stopLocal()` refuses those
+   * requests too. An on-demand renewal for a commit still runs.
+   */
+  stopWriterRenewal(): void;
   quiesceOwnership(placement: HostedHarnessPlacement): Promise<void>;
   releaseOwnership(
     request: HostedHarnessReleaseRequest,
@@ -445,6 +453,7 @@ export function createHttpManagedSessionStores(
     },
     assertWritable: () => client.assertWritable(),
     stopLocal: () => client.stopLocal(),
+    stopWriterRenewal: () => client.stopWriterRenewal(),
     quiesceOwnership: (placement) => client.quiesceOwnership(placement),
     releaseOwnership: (request) => client.releaseOwnership(request),
     close: () => client.seal(),

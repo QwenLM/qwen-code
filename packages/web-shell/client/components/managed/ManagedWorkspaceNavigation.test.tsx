@@ -349,6 +349,64 @@ describe('Managed workspace navigation', () => {
     expect(group('new')).not.toBeNull();
   });
 
+  it('opens the artifact library with the workspace identity and label', async () => {
+    const openLibrary = vi.fn();
+    list.mockResolvedValue({
+      data: [workspace],
+      supported: true,
+      artifactLibrary: true,
+    });
+    await render({
+      provider: {
+        ...provider,
+        workspaceArtifacts: { listArtifacts: vi.fn() },
+        toolResults: { canDownload: false } as never,
+      },
+      onOpenArtifactLibrary: openLibrary,
+    });
+    await act(async () =>
+      group('a')
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Artifact library: Project"]',
+        )!
+        .click(),
+    );
+    expect(openLibrary).toHaveBeenCalledWith('a', 'Project');
+    expect(selectWorkspace).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['the page omits the capability', false, true, true],
+    ['the provider lacks the workspace reader', true, false, true],
+    ['the provider lacks the session reader', true, true, false],
+  ] as const)(
+    'hides the artifact library entry when %s',
+    async (_name, artifactLibrary, workspaceArtifacts, toolResults) => {
+      list.mockResolvedValue({
+        data: [workspace],
+        supported: true,
+        artifactLibrary,
+      });
+      await render({
+        provider: {
+          ...provider,
+          ...(workspaceArtifacts
+            ? { workspaceArtifacts: { listArtifacts: vi.fn() } }
+            : {}),
+          ...(toolResults
+            ? { toolResults: { canDownload: false } as never }
+            : {}),
+        },
+        onOpenArtifactLibrary: vi.fn(),
+      });
+      expect(
+        group('a').querySelector(
+          'button[aria-label="Artifact library: Project"]',
+        ),
+      ).toBeNull();
+    },
+  );
+
   it('scopes expansion preferences to the provider even for the same workspace ID', async () => {
     await render({ active: false });
     await act(async () =>

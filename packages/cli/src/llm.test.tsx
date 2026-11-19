@@ -92,6 +92,7 @@ const mockSelectTuiRenderer = vi.hoisted(() =>
   })),
 );
 const mockStartOpenTuiUI = vi.hoisted(() => vi.fn());
+const mockSetTuiRendererOfRecord = vi.hoisted(() => vi.fn());
 
 const sessionRegistryConfigStub = {
   getTargetDir: () => '/tmp/project',
@@ -362,6 +363,13 @@ vi.mock('./ui/opentui/renderer-selection.js', async (importOriginal) => {
     selectTuiRenderer: mockSelectTuiRenderer,
   };
 });
+
+// The dispatch records the renderer that actually mounted; spy on the writer
+// so deleting either record call (OpenTUI success / ink fallback) is caught.
+vi.mock('./ui/tui-renderer-of-record.js', () => ({
+  setTuiRendererOfRecord: mockSetTuiRendererOfRecord,
+  getTuiRendererOfRecord: vi.fn(() => undefined),
+}));
 
 function withLspDisabledConfig<T extends object>(
   config: T,
@@ -3307,10 +3315,27 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
     // only falls through to startInteractiveUI, proven by the post-render
     // prefetch hook inside it running.
     mockStartOpenTuiUI.mockResolvedValue(false);
+    mockSetTuiRendererOfRecord.mockClear();
 
     await main();
 
     expect(mockStartPostRenderPrefetches).toHaveBeenCalled();
+    // The fallback must record ink as the renderer of record, not leave the
+    // requested opentui on record (which would mislabel /about and /bug).
+    expect(mockSetTuiRendererOfRecord).toHaveBeenCalledWith('ink');
+    expect(mockSetTuiRendererOfRecord).not.toHaveBeenCalledWith('opentui');
+  });
+
+  it('records opentui as the renderer of record when the entry starts', async () => {
+    await interactiveMainSetup();
+    selectOpentui(false);
+    mockStartOpenTuiUI.mockResolvedValue(true);
+    mockSetTuiRendererOfRecord.mockClear();
+
+    await main();
+
+    expect(mockSetTuiRendererOfRecord).toHaveBeenCalledWith('opentui');
+    expect(mockSetTuiRendererOfRecord).not.toHaveBeenCalledWith('ink');
   });
 
   it('probes ICU on the interactive path before the UI renders', async () => {
@@ -3365,21 +3390,18 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
     expect(mockAssertFullIcuAvailable).not.toHaveBeenCalled();
   });
 
-  it('hands the screen-reader flag to the renderer gate', async () => {
+  it('passes the resolved screen-reader Config to the selected Native entry', async () => {
     await interactiveMainSetup(/* screenReader */ true);
     selectOpentui(false);
-    mockStartOpenTuiUI.mockResolvedValue(false);
-
+    mockStartOpenTuiUI.mockResolvedValue(true);
     await main();
-
-    // The gate is what keeps a screen-reader session on ink; dropping this
-    // argument would silently serve OpenTUI, which has no SR render path.
     expect(mockSelectTuiRenderer).toHaveBeenLastCalledWith(
       undefined,
       undefined,
       expect.anything(),
-      true,
     );
+    const config = mockStartOpenTuiUI.mock.calls.at(-1)![0] as Config;
+    expect(config.getScreenReader()).toBe(true);
   });
 });
 

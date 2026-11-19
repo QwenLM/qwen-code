@@ -127,6 +127,31 @@ public class SessionRecoveryService {
         if (active && !recoveryIntent(turn)) {
             return view("recovering", "turn_active", turn, false, false, cancel);
         }
+        // The persistent suspension proof (docs/design/2026-11-18-managed-
+        // suspension-recovery-view.md): the view follows durable state, never
+        // the presence or absence of a Harness cache entry. A sealed head is
+        // necessary but NOT sufficient — a load that refuses also closes the
+        // writer it just acquired, leaving the same sealed, released,
+        // current-projection head. So `ready` additionally requires the wake
+        // projection to have proved this exact revision carries no pending
+        // input, and no durable obligation to survive. Anything less falls
+        // through to the evidence-driven arms below, which stay conservative.
+        HeadRecovery head = heads.isEmpty() ? null : heads.getFirst();
+        if (!active && head != null && "SEALED".equals(head.journalState())) {
+            boolean projectionCurrent = head.activationHeadRevision() != null
+                    && head.activationHeadRevision().equals(head.journalRevision());
+            if (!projectionCurrent) {
+                return view("awaiting_evidence", "activation_projection_lagging",
+                        turn, false, false, cancel);
+            }
+            boolean wakeProven = !head.wakePending()
+                    && head.wakeHeadRevision() != null
+                    && head.wakeHeadRevision().equals(head.journalRevision());
+            if ("released".equals(head.activationPhase()) && wakeProven
+                    && !recovery.hasUnsettledWork(session.tenantId(), session.sessionId())) {
+                return view("ready", "ready", turn, true, false, false);
+            }
+        }
         RecoveryStatus evidence = evidence(session, turn);
         if (evidence == null || "recovery_evidence_unavailable".equals(evidence.reasonCode())) {
             return view(active ? "awaiting_evidence" : "operator_required",
@@ -189,6 +214,7 @@ public class SessionRecoveryService {
     private static boolean recoveryIntent(TurnRecord turn) {
         return turn != null && ACTIVE.contains(turn.status())
                 && ("CANCELLING".equals(turn.status())
+                        || TurnExecutionStore.HARNESS_RECOVERY_BLOCKED.equals(turn.errorCode())
                         || TurnExecutionStore.RUNTIME_RECOVERY_BLOCKED.equals(turn.errorCode())
                         || TurnExecutionStore.WORKFLOW_RECOVERY_BLOCKED.equals(turn.errorCode()));
     }

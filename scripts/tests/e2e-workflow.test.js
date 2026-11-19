@@ -169,6 +169,43 @@ describe('TUI product evidence', () => {
       ['component', 'integration'],
     ],
     ['packages/cli/src/dualOutput/index.ts', ['component', 'integration']],
+    [
+      'packages/cli/src/ui/opentui/MemoryDialog.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/opentui/dialogs-memory-status.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/opentui/opentui-dialog-mount.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/components/MemoryDialog.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/hooks/useLaunchEditor.ts',
+      ['component', 'input', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/commands/memoryCommand.ts',
+      ['component', 'integration'],
+    ],
+    ['packages/core/src/memory/paths.ts', ['component', 'integration']],
+    [
+      'packages/core/src/utils/memory-constants.ts',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/core/src/utils/editor.ts',
+      ['component', 'input', 'integration'],
+    ],
+    [
+      'integration-tests/interactive/tui-memory-manager.test.ts',
+      ['component', 'integration'],
+    ],
     ['packages/core/src/core/coreToolScheduler.ts', lanes.slice(0, -1)],
     ['packages/core/src/core/client.ts', lanes.slice(0, -1)],
     ['packages/cli/src/ui/opentui/live-turn.ts', lanes.slice(0, -1)],
@@ -373,6 +410,7 @@ describe('TUI product evidence', () => {
       'tui-foreground-shell',
       'tui-extension-acquisition',
       'tui-dual-output',
+      'tui-memory-manager',
     ],
   };
   it.each(
@@ -1130,8 +1168,8 @@ describe('e2e workflow', () => {
     });
 
     it.each(jobs)('%s wires the switches per arm', (job) => {
-      expect(switchEnv(job, 'current')).toEqual(['', '']);
-      expect(switchEnv(job, 'unified')).toEqual(['1', '']);
+      expect(switchEnv(job, 'current')).toEqual(['0', '0']);
+      expect(switchEnv(job, 'unified')).toEqual(['1', '0']);
       expect(switchEnv(job, 'kernel')).toEqual(['1', '1']);
     });
 
@@ -1298,6 +1336,11 @@ describe('e2e workflow', () => {
     it('keeps the Docker build environment', () => {
       expect(runStep.env.QWEN_SANDBOX).toContain("'docker'");
       expect(runStep.env.VERBOSE).toBe('true');
+      // The two matrix legs have to pin opposite arms. An empty value means
+      // "no override" and would let both legs follow the
+      // `experimental.unifiedAgentLoop` default, so the scheduled signal that
+      // gates the default flip would report green while comparing nothing.
+      expect(runStep.env.QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP).toContain("'0'");
     });
 
     it('reaps only the sandbox containers owned by its matrix job', () => {

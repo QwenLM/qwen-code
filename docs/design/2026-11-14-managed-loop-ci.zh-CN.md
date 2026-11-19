@@ -15,7 +15,7 @@
 
 ## CI 接入
 
-独立的 `managed-agent-loop.yml` 在相关 PR、main push、nightly 和手动触发时执行。两个矩阵任务分别使用本次 checkout 构建的打包 CLI，串行运行两个场景，关闭重试，不依赖 Java gate 的 `none`/`fast`/`full` 分级。仅授予读权限，无需服务密钥；PR 代码使用一次性 runner，或托管 runner 回退。
+独立的 `managed-agent-loop.yml` 在相关 PR、main push、nightly 和手动触发时执行。两个矩阵任务分别使用本次 checkout 构建的打包 CLI，串行运行两个场景，关闭重试，不依赖 Java gate 的 `none`/`fast`/`full` 分级。仅授予读权限，无需服务密钥。PR 代码按 Linux CI 泳道已在用的同一套信任规则拆分：head 位于本仓库、或作者关联为 owner / member / collaborator 的 PR 跑在常驻 x64 机群上，其余 PR 继续使用一次性池；push、schedule 与手动运行仍走 GitHub-hosted runner。两条自托管分支都无凭据，因此这是容量拆分而非新的信任边界。
 
 每个任务要求恰好两个测试通过、没有跳过项，并且两个入口都有通过的证据文件。即使失败，也上传协议请求、进程输出和实际循环日志。缺失构建产物、启动失败、退回 Legacy、缺失执行证据或测试跳过，均不能变成验证成功。
 

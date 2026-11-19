@@ -108,6 +108,18 @@ describe('custom command file contents', () => {
     return { command, context };
   }
 
+  it('submits the exact typed replacement tokens through the custom command action', async () => {
+    const args =
+      "costs $$5 and $& with $` or $'; $ARGUMENTS {{args}} !{echo ARGS}";
+    const { command, context } = setup('Review {{args}}.', args);
+    await expect(command.action!(context, args)).resolves.toEqual({
+      type: 'submit_prompt',
+      content: [{ text: `Review ${args}.` }],
+    });
+    expect(mocks.permissions).not.toHaveBeenCalled();
+    expect(mocks.execute).not.toHaveBeenCalled();
+  });
+
   it.each([
     { kind: 'string', content: 'Literal {{args}} !{echo FROM_FILE}' },
     { kind: 'object', content: literal },

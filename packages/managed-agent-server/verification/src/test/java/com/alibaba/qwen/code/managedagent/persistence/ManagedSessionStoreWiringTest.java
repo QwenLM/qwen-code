@@ -7,8 +7,6 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolic
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -32,7 +30,6 @@ import java.util.Arrays;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 class ManagedSessionStoreWiringTest {
     private final DataSource source = mock(DataSource.class);
@@ -74,7 +71,6 @@ class ManagedSessionStoreWiringTest {
             assertThat(field(target, "lifecycleAuthorization", "lifecycleSessions")).isNull();
             assertThat(field(target, "resourceReads", "publicationObjects")).isNull();
             assertThat(field(target, "commits", "toolResults")).isNull();
-            assertThat(field(target, "fencing", "csiBindings")).isNull();
             assertThat(field(target, "commits", "journalEventTransport")).isNull();
         });
     }
@@ -95,7 +91,6 @@ class ManagedSessionStoreWiringTest {
                     assertThat(field(target, "resourceReads", "publicationObjects")).isSameAs(objects);
                     assertThat(field(target, "commits", "toolResults")).isSameAs(results);
                     assertThat(field(target, "commits", "journalEventTransport")).isSameAs(transport);
-                    assertThat(field(target, "fencing", "journalEventTransport")).isSameAs(transport);
                 });
     }
 
@@ -129,24 +124,6 @@ class ManagedSessionStoreWiringTest {
                 assertThat(field(target, "lifecycleAuthorization", "lifecycleSessions")).isSameAs(present == 3 ? sessions : null);
             });
         }
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"same", "foreign", "non-jdbc"})
-    void csiRequiresTheOriginalJdbcDataSource(String kind) {
-        RuntimeBindingRepository bindings;
-        if (kind.equals("non-jdbc")) {
-            bindings = mock(RuntimeBindingRepository.class);
-        } else {
-            var jdbcBindings = mock(JdbcRuntimeBindingRepository.class);
-            when(jdbcBindings.usesDataSource(source)).thenReturn(kind.equals("same"));
-            bindings = jdbcBindings;
-        }
-        runner(false, "").withBean(RuntimeBindingRepository.class, () -> bindings).run(context -> {
-            assertThat(context).hasNotFailed();
-            Object target = AopTestUtils.getUltimateTargetObject(context.getBean(JdbcManagedSessionStore.class));
-            assertThat(field(target, "fencing", "csiBindings")).isSameAs(kind.equals("same") ? bindings : null);
-        });
     }
 
     @Test
@@ -185,9 +162,9 @@ class ManagedSessionStoreWiringTest {
                 HarnessRules rules, StorageReadPolicy reader, WriterCredentialPolicy credentials,
                 @Nullable JdbcWorkspaceExecutionStore execution, @Nullable SessionQueryStore sessions,
                 @Nullable ToolPublicationObjectStore objects, @Nullable JdbcManagedToolResultStore results,
-                @Nullable JournalEventTransport transport, @Nullable RuntimeBindingRepository bindings) {
+                @Nullable JournalEventTransport transport) {
             return new JdbcManagedSessionStore(jdbc, records, actions, rules, reader, execution, sessions,
-                    objects, results, transport, credentials, bindings, null);
+                    objects, results, transport, credentials, null);
         }
     }
 }
