@@ -4257,6 +4257,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'workflow.graph.omitted': (v) =>
     `為保證效能，執行圖已省略 ${v?.lanes ?? 0} 個階段、${v?.nodes ?? 0} 個 Agent 和 ${v?.edges ?? 0} 條連線。`,
   'workflow.noPhase': '未分階段',
+  'workflow.phase.notStarted': '未開始',
   'workflow.dispatchCount': (v) => `${v?.count ?? 0} 個排程`,
   'workflow.selectedDispatch': '已選排程',
   'workflow.dependencies': '依賴',
