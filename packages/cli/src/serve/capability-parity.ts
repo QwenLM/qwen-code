@@ -149,11 +149,12 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'surface:ARTIFACT_GET',
   },
-  workspace_artifact_library: NO_MANAGED_EQUIVALENT(
-    'no Managed workspace-wide artifact query or explicit-pair batch removal',
-  ),
+  workspace_artifact_library: {
+    standing: 'managed',
+    evidence: 'surface:WORKSPACE_ARTIFACT_LIST',
+  },
   workspace_artifact_library_stream: NO_MANAGED_EQUIVALENT(
-    'no Managed progressive workspace artifact query with session summaries',
+    'Managed workspace artifact reads are JSON cursor pages without progressive streaming or session-summary updates',
   ),
   session_sources: NO_MANAGED_EQUIVALENT('no Managed session source list'),
   generated_ui_state: NO_MANAGED_EQUIVALENT(
@@ -405,6 +406,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_github_prs: NO_MANAGED_EQUIVALENT('no Managed GitHub PRs route'),
   workspace_github_pr_files: NO_MANAGED_EQUIVALENT(
     'no Managed GitHub PR files route',
+  ),
+  workspace_git_log_exclude_refs: NO_MANAGED_EQUIVALENT(
+    'no Managed git log exclude-refs route',
   ),
   workspace_git_worktrees: NO_MANAGED_EQUIVALENT(
     'no Managed worktree management route',

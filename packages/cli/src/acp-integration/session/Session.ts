@@ -355,6 +355,7 @@ import {
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
   CHANNEL_TURN_NOTICE_META_KEY,
   CHANNEL_WORKFLOW_ORIGIN_META_KEY,
+  MID_TURN_DRAIN_BATCH,
   parseChannelWorkflowOrigin,
   type ChannelWorkflowOrigin,
 } from '@qwen-code/channel-base';
@@ -534,6 +535,10 @@ import type {
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
+import {
+  buildContinuationPromptId,
+  deriveLedgerTurnKey,
+} from './ledger-turn-key.js';
 import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result-boundary-diagnostics.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
@@ -1703,7 +1708,9 @@ const MID_TURN_KEEP_RESOLVE_TIMEOUT_MS = 2_000;
 // full drain budget.
 const ACTIVE_TURN_POLL_INTERVAL_MS = 10;
 const CHANNEL_TASK_POLL_INTERVAL_MS = 100;
-const MAX_MID_TURN_DRAIN_ITEMS = 10;
+// Shared with the ACP bridge that produces the drain response, so the
+// producer's batch and this consumer's cap cannot drift apart.
+const MAX_MID_TURN_DRAIN_ITEMS = MID_TURN_DRAIN_BATCH;
 const MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT =
   '[Attachment could not be processed]';
 const MAX_MID_TURN_RESOURCE_TEXT_LENGTH = 100_000;
@@ -5601,6 +5608,7 @@ export class Session implements SessionContext {
       ?.setLastUserPromptRecordedCallback?.(undefined);
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
     this.config.getSessionService().setSessionPrBoundCallback(undefined);
+    this.config.getSessionService().setSessionGoalChangedCallback(undefined);
     this.unsubscribeChatRecordingFailure?.();
     this.unsubscribeChatRecordingFailure = undefined;
     this.config.setSubSessionSpawner(undefined);
@@ -9857,6 +9865,7 @@ export class Session implements SessionContext {
     goalTurn?: AcpGoalTurn,
     channelTurn = false,
     onFinishReason?: (reason: string | undefined) => void,
+    isSessionTurn = true,
   ): Promise<{
     stopReason: PromptResponse['stopReason'];
     loopProtectionStopped?: boolean;
@@ -9929,7 +9938,11 @@ export class Session implements SessionContext {
         }
         const continuation = await this.#runStopContinuation(
           pendingSend,
-          promptId + '_background_result_' + ++midTurnContinuationCount,
+          buildContinuationPromptId(
+            promptId,
+            'background_result',
+            ++midTurnContinuationCount,
+          ),
           promptId,
           backgroundParts,
           false,
@@ -9939,6 +9952,7 @@ export class Session implements SessionContext {
             responseCapture,
             rejectOnLoopDetected,
             ...(onFinishReason ? { onFinishReason } : {}),
+            isSessionTurn,
             ...(goalTurn ? { goalTurn } : {}),
             ...(channelTurn ? { channelTurn: true } : {}),
             ...(interruptible
@@ -9982,7 +9996,11 @@ export class Session implements SessionContext {
           blockGoalProposalSettlement();
           const continuation = await this.#runStopContinuation(
             pendingSend,
-            promptId + '_mid_turn_' + ++midTurnContinuationCount,
+            buildContinuationPromptId(
+              promptId,
+              'mid_turn',
+              ++midTurnContinuationCount,
+            ),
             promptId,
             drained.parts,
             false,
@@ -9992,6 +10010,7 @@ export class Session implements SessionContext {
               responseCapture,
               rejectOnLoopDetected,
               ...(onFinishReason ? { onFinishReason } : {}),
+              isSessionTurn,
               ...(goalTurn ? { goalTurn } : {}),
               ...(channelTurn ? { channelTurn: true } : {}),
               ...(interruptible
@@ -10098,7 +10117,11 @@ export class Session implements SessionContext {
             blockGoalProposalSettlement();
             const continuation = await this.#runStopContinuation(
               pendingSend,
-              promptId + '_mid_turn_' + ++midTurnContinuationCount,
+              buildContinuationPromptId(
+                promptId,
+                'mid_turn',
+                ++midTurnContinuationCount,
+              ),
               promptId,
               drained.parts,
               false,
@@ -10108,6 +10131,7 @@ export class Session implements SessionContext {
                 responseCapture,
                 rejectOnLoopDetected,
                 ...(onFinishReason ? { onFinishReason } : {}),
+                isSessionTurn,
                 ...(goalTurn ? { goalTurn } : {}),
                 ...(channelTurn ? { channelTurn: true } : {}),
                 ...(interruptible
@@ -10206,8 +10230,16 @@ export class Session implements SessionContext {
       }
 
       const continuationPromptId = externalReason
-        ? promptId + '_stop_hook_' + stopHookIterationCount
-        : promptId + '_todo_stop_guard_' + guardContinuation!.attempt;
+        ? buildContinuationPromptId(
+            promptId,
+            'stop_hook',
+            stopHookIterationCount,
+          )
+        : buildContinuationPromptId(
+            promptId,
+            'todo_stop_guard',
+            guardContinuation!.attempt,
+          );
       if (externalReason && stopHookIterationCount > 1 && !guardContinuation) {
         await this.messageEmitter.emitStopHookLoop(
           stopHookIterationCount,
@@ -10244,6 +10276,7 @@ export class Session implements SessionContext {
           responseCapture,
           rejectOnLoopDetected,
           ...(onFinishReason ? { onFinishReason } : {}),
+          isSessionTurn,
           ...(goalTurn ? { goalTurn } : {}),
           ...(channelTurn ? { channelTurn: true } : {}),
           ...(interruptible
@@ -10292,6 +10325,12 @@ export class Session implements SessionContext {
       onUserInputAnswered?: () => void;
       /** Observes the continuation's own last model finish reason. */
       onFinishReason?: (reason: string | undefined) => void;
+      /**
+       * Ledger membership for the continuation sends. Defaults to true; a
+       * background notification's stop-hook/todo-guard continuation passes
+       * false so it stays out of the foreground ledger (R15 deferred).
+       */
+      isSessionTurn?: boolean;
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
@@ -10366,7 +10405,11 @@ export class Session implements SessionContext {
       const promptIdForSend =
         guardForThisSend &&
         guardForThisSend.attempt !== options.guardContinuation?.attempt
-          ? toolPromptId + '_todo_stop_guard_' + guardForThisSend.attempt
+          ? buildContinuationPromptId(
+              toolPromptId,
+              'todo_stop_guard',
+              guardForThisSend.attempt,
+            )
           : streamPromptId;
       const messageDisplay = this.#createMessageDisplayDispatcher(
         pendingSend.signal,
@@ -10391,6 +10434,7 @@ export class Session implements SessionContext {
             skipCompression:
               skipCompression || (guardForThisSend?.attempt ?? 0) > 1,
             getModelOverride: options.getModelOverride,
+            isSessionTurn: options.isSessionTurn ?? true,
             prepareBeforeCompression: guardForThisSend
               ? async () => {
                   const drained = await this.#drainMidTurnInput(
@@ -11510,6 +11554,13 @@ export class Session implements SessionContext {
       consumeInitialMemory?: boolean;
       onModelRequestDispatched?: () => void;
       promptId?: string;
+      /**
+       * Ledger membership for this send. Defaults to true (ACP is a
+       * session-turn surface); the background-notification executor passes
+       * false so a notification and its tool/stop-hook continuations neither
+       * rotate the live turn's ledger key nor read or write its marks (P2).
+       */
+      isSessionTurn?: boolean;
     } = {},
   ): Promise<AutoCompressionSendResult> {
     const llmClient = this.config.getLlmClient()!;
@@ -11680,6 +11731,12 @@ export class Session implements SessionContext {
       },
     };
     const goalPermit = goalTurnContext.getStore();
+    // Mid-turn automatic continuations rewrite the prompt id with a
+    // guard/stop-hook/background-result/mid-turn suffix; the ledger must keep
+    // the turn's base key so a continuation does not reset the turn's consumed
+    // marks. Only the ledger key is normalized — promptId keeps its prompt
+    // identity.
+    const ledgerTurnKey = deriveLedgerTurnKey(promptId);
     let sourceStream: AsyncGenerator<StreamEvent>;
     try {
       const historyPromptId = options.historyPromptId ?? options.promptId;
@@ -11688,27 +11745,28 @@ export class Session implements SessionContext {
         request,
         promptId,
         goalPermit,
-        historyPromptId !== undefined ||
-          options.onModelRequestDispatched ||
-          options.suppressedHookContext
-          ? {
-              ...(historyPromptId !== undefined
-                ? { promptId: historyPromptId }
-                : {}),
-              ...(options.onModelRequestDispatched
-                ? { onModelRequestDispatched: options.onModelRequestDispatched }
-                : {}),
-              // A compaction inside this send (LlmChat's hard-tier rescue or
-              // reactive overflow) replaces the history entry holding the
-              // block's only copy — including one this method's own rescue
-              // just appended — so LlmChat must keep the token to re-append
-              // it. Its hard-tier site skips an already-present block, which
-              // is what keeps this to one owner per send.
-              ...(options.suppressedHookContext
-                ? { suppressedHookContext: options.suppressedHookContext }
-                : {}),
-            }
-          : undefined,
+        {
+          // ACP is a genuine session-turn surface: participate in the
+          // model-availability ledger like the LlmClient/Turn path. The
+          // background-notification executor opts out (isSessionTurn: false).
+          isSessionTurn: options.isSessionTurn ?? true,
+          ...(ledgerTurnKey !== promptId ? { ledgerTurnKey } : {}),
+          ...(historyPromptId !== undefined
+            ? { promptId: historyPromptId }
+            : {}),
+          ...(options.onModelRequestDispatched
+            ? { onModelRequestDispatched: options.onModelRequestDispatched }
+            : {}),
+          // A compaction inside this send (LlmChat's hard-tier rescue or
+          // reactive overflow) replaces the history entry holding the
+          // block's only copy — including one this method's own rescue
+          // just appended — so LlmChat must keep the token to re-append
+          // it. Its hard-tier site skips an already-present block, which
+          // is what keeps this to one owner per send.
+          ...(options.suppressedHookContext
+            ? { suppressedHookContext: options.suppressedHookContext }
+            : {}),
+        },
       );
     } catch (error) {
       llmClient.discardManagedAutoMemoryRecallDelivery(memoryDelivery);
@@ -14058,6 +14116,23 @@ export class Session implements SessionContext {
           });
       });
 
+    // Goal transitions persist the goal sidecar in the child's journal
+    // hook; carry the catalog-clock mark so version-watching clients
+    // refetch the sidebar marker the same way they pick up PR bindings.
+    this.config
+      .getSessionService()
+      .setSessionGoalChangedCallback((sessionId) => {
+        void this.client
+          .extNotification('qwen/notify/session/goal-changed', {
+            v: 1,
+            sessionId,
+          })
+          .catch(() => {
+            // Best-effort: a dropped notification only delays the marker
+            // until the client's next catalog refresh.
+          });
+      });
+
     if (typeof this.config.onChatRecordingFailure === 'function') {
       this.unsubscribeChatRecordingFailure = this.config.onChatRecordingFailure(
         (event) =>
@@ -15057,6 +15132,10 @@ export class Session implements SessionContext {
               promptId,
               nextMessage.parts ?? [],
               ac.signal,
+              // A background notification is not the live session turn: keep it
+              // out of the foreground ledger for the whole notification loop,
+              // including tool and stop-hook continuations (P2).
+              { isSessionTurn: false },
             );
             if (!sendResult.responseStream) {
               this.todoStopGuard.suspend();
@@ -15237,6 +15316,12 @@ export class Session implements SessionContext {
               false,
               undefined,
               responseCapture,
+              false,
+              undefined,
+              false,
+              // A background notification's stop-hook/todo-guard continuation
+              // stays out of the foreground ledger, like its own sends (R15).
+              false,
             );
             stopReason = guardResult.stopReason;
             loopProtectionStopped = guardResult.loopProtectionStopped === true;

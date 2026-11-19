@@ -10,6 +10,7 @@ import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { useFilterInput } from '../../hooks/useFilterInput';
 import { SessionRow } from './SessionRow';
 import { useScopedSessions } from '../../hooks/useScopedSessions';
+import { hasLiveWork } from '../../session-catalog/session-live-work';
 import { useDaemonAvailability } from '../../daemon/availability-context.js';
 import { isDaemonUnavailableError } from '../../daemon/availability.js';
 
@@ -95,13 +96,11 @@ export function DeleteSessionDialog({
   );
 
   // The current session is deletable (issue #12619), but deleting the session
-  // the client is attached to tears its runtime down — match the Session
-  // Overview's idle-only policy for that case.
+  // the client is attached to tears its runtime down, so it is only offered
+  // once nothing is running — the same predicate the sidebar row reads.
   const blocksCurrentDelete = useCallback(
     (session: DaemonSessionSummary) =>
-      session.sessionId === currentSessionId &&
-      (Boolean(session.hasActivePrompt) ||
-        session.activeWorkState === 'active'),
+      session.sessionId === currentSessionId && hasLiveWork(session),
     [currentSessionId],
   );
 
@@ -124,12 +123,17 @@ export function DeleteSessionDialog({
 
   useEffect(() => {
     if (selectedIds.size === 0) return;
-    const filteredSet = new Set(filtered.map((s) => s.sessionId));
+    // Drop rows that filtered out AND rows that turned busy since they were
+    // ticked. A blocked row cannot be unchecked by hand, so leaving it in the
+    // set would show a checked, counted row that the request silently omits.
+    const keep = new Set(
+      filtered.filter((s) => !blocksCurrentDelete(s)).map((s) => s.sessionId),
+    );
     setSelectedIds((prev) => {
-      const pruned = new Set([...prev].filter((id) => filteredSet.has(id)));
+      const pruned = new Set([...prev].filter((id) => keep.has(id)));
       return pruned.size === prev.size ? prev : pruned;
     });
-  }, [filtered, selectedIds.size]);
+  }, [blocksCurrentDelete, filtered, selectedIds.size]);
 
   useEffect(() => {
     if (selectedIdx >= filtered.length && filtered.length > 0) {
@@ -160,6 +164,17 @@ export function DeleteSessionDialog({
     },
   });
 
+  // Re-evaluated at confirm time, not only on click: a row ticked while idle
+  // can start background work afterwards, and `toggleSelection` refuses to
+  // uncheck a blocked row, so the checked set alone cannot be trusted.
+  const deletableSelectedIds = useMemo(
+    () =>
+      filtered
+        .filter((s) => selectedIds.has(s.sessionId) && !blocksCurrentDelete(s))
+        .map((s) => s.sessionId),
+    [blocksCurrentDelete, filtered, selectedIds],
+  );
+
   const handleDelete = useCallback(() => {
     if (deleting) return;
     // Captured before the request: the daemon's terminal `session_closed`
@@ -168,10 +183,7 @@ export function DeleteSessionDialog({
     const attachedSessionId = currentSessionId;
 
     if (selectedIds.size > 0) {
-      const filteredSet = new Set(filtered.map((s) => s.sessionId));
-      const idsToDelete = Array.from(selectedIds).filter((id) =>
-        filteredSet.has(id),
-      );
+      const idsToDelete = deletableSelectedIds;
       if (idsToDelete.length === 0) return;
       setDeleting(true);
       deleteSessions(idsToDelete)
@@ -254,6 +266,7 @@ export function DeleteSessionDialog({
   }, [
     blocksCurrentDelete,
     currentSessionId,
+    deletableSelectedIds,
     deleteSession,
     deleteSessions,
     deleting,
@@ -268,7 +281,7 @@ export function DeleteSessionDialog({
   ]);
 
   const hasSelection = selectedIds.size > 0;
-  const canDelete = !deleting && !loading && hasSelection;
+  const canDelete = !deleting && !loading && deletableSelectedIds.length > 0;
 
   return (
     <div className={dp('picker', 'picker-in-shell')}>
