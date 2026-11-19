@@ -198,4 +198,16 @@ describe('Workflow anti-recursion guard', () => {
       true,
     );
   });
+
+  it('GetContextRemaining is in EXCLUDED_TOOLS_FOR_SUBAGENTS', async () => {
+    // The tool reports the BASE session's context numbers through
+    // deriveConfig's prototype chain, so a subagent calling it would read
+    // the parent's window, not its own (#17320 F1).
+    const { EXCLUDED_TOOLS_FOR_SUBAGENTS } = await import(
+      '../agents/runtime/agent-core.js'
+    );
+    expect(
+      EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.GET_CONTEXT_REMAINING),
+    ).toBe(true);
+  });
 });
