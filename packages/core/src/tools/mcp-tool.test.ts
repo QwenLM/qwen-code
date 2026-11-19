@@ -2548,6 +2548,48 @@ describe('DiscoveredMCPTool', () => {
       expect(ensureTool).not.toHaveBeenCalled();
     });
 
+    it('leaves a live sibling recoverable after cleaning up a failed acquire', async () => {
+      // A failed acquire of a sibling is disposed of while a live connection A
+      // shares the name. That cleanup only closes the sibling's own transport:
+      // no owner stop lands on A, so A's later unasked drop is still abort
+      // damage and gets repaired.
+      const toolName = 'literature.search_pubmed';
+      const newMockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockResolvedValueOnce(textResult('Repaired')),
+      };
+      const { config, ensureTool } = registry({
+        ensured: safeTool({ toolName, client: newMockMcpClient }),
+        extra: noTruncation,
+      });
+      let rejectCall: ((error: Error) => void) | undefined;
+      const clientA: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              rejectCall = reject;
+            }),
+        ),
+      };
+      const failedSibling = { id: 'failed-sibling' };
+      recordMCPConnectionStatus(clientA, MCPServerStatus.CONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const toolA = safeTool({ toolName, config, client: clientA });
+
+      const executePromise = exec(toolA);
+      // The sibling's failed acquire: its own transport is stopped, nothing is
+      // recorded against A and no name-wide owner stop is minted.
+      recordMCPConnectionStatus(failedSibling, MCPServerStatus.DISCONNECTED);
+      expect(isMCPServerTeardownIntent(serverName)).toBe(false);
+      // A now dies unasked; nothing covers it, so it is repairable.
+      recordMCPConnectionStatus(clientA, MCPServerStatus.DISCONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      rejectCall!(new Error('Connection closed'));
+
+      const result = await executePromise;
+      expect(result.llmContent).toEqual([{ text: 'Repaired' }]);
+      expect(ensureTool).toHaveBeenCalledWith(toolA.name);
+    });
+
     it('repairs a connection that dies unasked while its sibling shares the name', async () => {
       // Positive control for the test above: the invocation's own connection
       // was stopped by nobody, so a connection error is still eligible for

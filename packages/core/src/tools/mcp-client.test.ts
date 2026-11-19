@@ -3495,6 +3495,41 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       removeMCPServerStatus('healthy-server');
     });
 
+    it('disconnect() leaves the name-keyed stop clear when it is not deliberate', async () => {
+      // Disposing of a failed acquire closes this transport but is not an
+      // owner stop: minting the name-wide marker would veto recovery for a
+      // live sibling connection registered under the same name.
+      closableClient({ close: vi.fn().mockResolvedValue(undefined) });
+      const client = clientInWorkspace('healthy-server');
+
+      await client.connect();
+      const seen: boolean[] = [];
+      const listener = (
+        serverName: string,
+        status: MCPServerStatus | undefined,
+      ) => {
+        if (serverName !== 'healthy-server') return;
+        if (status !== MCPServerStatus.DISCONNECTED) return;
+        seen.push(isMCPServerTeardownIntent('healthy-server'));
+      };
+      addMCPStatusChangeListener(listener);
+      try {
+        await client.disconnect({ deliberate: false });
+      } finally {
+        removeMCPStatusChangeListener(listener);
+      }
+
+      expect(seen).toEqual([false]);
+      expect(isMCPServerTeardownIntent('healthy-server')).toBe(false);
+      // The status still reaches the registry; only the owner stop is absent.
+      expect(getMCPServerStatus('healthy-server')).toBe(
+        MCPServerStatus.DISCONNECTED,
+      );
+
+      // Cleanup the registry entry so this test doesn't leak.
+      removeMCPServerStatus('healthy-server');
+    });
+
     it('disconnect() terminates a Streamable HTTP session before closing the transport (issue #9944)', async () => {
       // The SDK's `transport.close()` only tears down local state; the
       // server-side session stays alive unless we send the spec's DELETE
