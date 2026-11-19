@@ -39,7 +39,17 @@ function pngDimensions(
 }
 
 function isGif(b: Uint8Array): boolean {
-  return b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46; // 'GIF'
+  // All 6 header bytes: 'GIF87a' or 'GIF89a' — matching only 'GIF' lets
+  // arbitrary text through the dimension parser (#17321 F3).
+  return (
+    b.length > 6 &&
+    b[0] === 0x47 &&
+    b[1] === 0x49 &&
+    b[2] === 0x46 &&
+    b[3] === 0x38 &&
+    (b[4] === 0x37 || b[4] === 0x39) &&
+    b[5] === 0x61
+  );
 }
 
 function gifDimensions(
