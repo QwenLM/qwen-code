@@ -12,7 +12,11 @@ import {
 import { ToolConfirmationOutcome } from './tools.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
-import type { Config, SubSessionSpawner } from '../config/config.js';
+import type {
+  Config,
+  SubSessionSpawner,
+  SubSessionWorkspaceBinding,
+} from '../config/config.js';
 
 function makeConfig(
   spawner?: SubSessionSpawner,
@@ -123,6 +127,7 @@ describe('CreateSubSessionTool', () => {
       completion: 'first-turn',
       workspace: '/repos/b',
       workspaceGeneration: 'generation-b',
+      requiresYolo: true,
     });
 
     // Leaving YOLO before the call runs brings the approval back.
@@ -132,6 +137,37 @@ describe('CreateSubSessionTool', () => {
       (await invocation.execute(new AbortController().signal)).error?.message,
     ).toContain('requires one-time approval');
     expect(spawner).toHaveBeenCalledOnce();
+  });
+
+  it('requires approval if YOLO ends while the named workspace resolves', async () => {
+    const spawner = vi.fn(async () => ({ sessionId: 'sub-1' }));
+    let resolveBinding!: (value: SubSessionWorkspaceBinding) => void;
+    const binding = new Promise<SubSessionWorkspaceBinding>((resolve) => {
+      resolveBinding = resolve;
+    });
+    const resolveWorkspace = vi.fn(() => binding);
+    let mode = ApprovalMode.YOLO;
+    const config = makeConfig(spawner);
+    config.getApprovalMode = () => mode;
+    config.getSubSessionWorkspaceResolver = () => resolveWorkspace;
+    const invocation = new CreateSubSessionTool(config).build({
+      prompt: 'summarize',
+      workspace: 'repo-b',
+    });
+
+    const result = invocation.execute(new AbortController().signal);
+    expect(resolveWorkspace).toHaveBeenCalledOnce();
+    mode = ApprovalMode.DEFAULT;
+    resolveBinding({
+      workspaceId: 'repo-b',
+      workspaceCwd: '/repos/b',
+      workspaceGeneration: 'generation-b',
+    });
+
+    expect((await result).error?.message).toContain(
+      'requires one-time approval',
+    );
+    expect(spawner).not.toHaveBeenCalled();
   });
 
   it('applies destination deny rules in YOLO mode', async () => {

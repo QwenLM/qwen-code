@@ -248,6 +248,7 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
       const res = await raceCancellation(async () => {
         let destination = this.approvedDestination;
         this.approvedDestination = undefined;
+        let requiresYolo = false;
         if (this.params.workspace !== undefined && !destination) {
           // YOLO approves the call without a prompt; the destination is
           // still resolved here so deny rules and the runtime generation hold.
@@ -257,6 +258,10 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
           }
           destination = await resolveWorkspace(this.params.workspace);
           signal.throwIfAborted();
+          if (!this.isYolo()) {
+            throw new Error('A named workspace requires one-time approval.');
+          }
+          requiresYolo = true;
         }
         if (destination) this.assertWorkspaceAllowed(destination);
         requestStarted = true;
@@ -269,6 +274,7 @@ class CreateSubSessionInvocation extends BaseToolInvocation<
             ? {
                 workspace: this.params.workspace,
                 workspaceGeneration: destination?.workspaceGeneration,
+                ...(requiresYolo ? { requiresYolo: true } : {}),
               }
             : {}),
           ...(this.params.sessionId
@@ -394,8 +400,9 @@ export class CreateSubSessionTool extends BaseDeclarativeTool<
         '## Following up\n' +
         'Set `sessionId` to send the prompt to an existing session instead ' +
         "of creating a new one; it keeps that session's context. Any session " +
-        'but this one can be named. Also set `workspace` if it is in another ' +
-        'workspace.',
+        'but this one can be named. The destination must support follow-ups ' +
+        'and have a compatible approval mode. Also set `workspace` if it is ' +
+        'in another workspace.',
       Kind.Other,
       {
         type: 'object',

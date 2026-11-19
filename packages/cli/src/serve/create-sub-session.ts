@@ -1388,34 +1388,43 @@ export function createSubSessionLauncher(
         throw new Error('This session cannot follow up a sub-session.');
       }
     }
-    if (byPerson && bridge.permissionPolicy === 'consensus') {
-      // The target starts before the side panel is attached, too late to
-      // join the approval's fixed voter set. A follow-up also registers a
-      // daemon-only client that can raise the quorum without casting a vote.
-      throw new Error(
-        'This workspace uses consensus approvals and does not support /send. Open or start the destination session and send the message there.',
-      );
-    }
     const followUpSessionId =
       info.sessionId === undefined
         ? undefined
         : normalizeSessionIdForLookup(info.sessionId);
     const reusing = followUpSessionId !== undefined;
+    if ((byPerson || reusing) && bridge.permissionPolicy === 'consensus') {
+      // The target starts before the side panel is attached, too late to
+      // join the approval's fixed voter set. A follow-up also registers a
+      // daemon-only client that can raise the quorum without casting a vote.
+      throw new Error(
+        byPerson
+          ? 'This workspace uses consensus approvals and does not support /send. Open or start the destination session and send the message there.'
+          : 'This workspace uses consensus approvals and does not support tool follow-ups. Open the destination session and send the message there.',
+      );
+    }
     const report =
       info.completion === 'sent' &&
       (notifySentCompletion || remote || reusing || byPerson)
         ? (remote?.report ?? localReport)
         : undefined;
-    if ((reusing || byPerson) && !remote && info.completion === 'sent') {
+    const localToolFollowUp = reusing && !byPerson && !remote;
+    const reportsLocalCompletion =
+      (reusing || byPerson) && !remote && info.completion === 'sent';
+    const localCallerApproval =
+      localToolFollowUp || reportsLocalCompletion
+        ? await readApprovalMode(bridge, info.callerSessionId)
+        : undefined;
+    if (
+      reportsLocalCompletion &&
+      !localCallerApproval?.canAcceptBackgroundNotifications
+    ) {
       // The completion comes back as a background turn, which the caller
       // can only take while it records its chat.
-      const callerStatus = await readApprovalMode(bridge, info.callerSessionId);
-      if (!callerStatus.canAcceptBackgroundNotifications) {
-        throw new Error(
-          'A sub-session that reports back needs chat recording in the ' +
-            'caller. Use first-turn to wait for the result.',
-        );
-      }
+      throw new Error(
+        'A sub-session that reports back needs chat recording in the ' +
+          'caller. Use first-turn to wait for the result.',
+      );
     }
 
     // Per-caller concurrency key. Always a real, bridge-authenticated session
@@ -1584,7 +1593,7 @@ export function createSubSessionLauncher(
             approvalModeBeforeStart?: ApprovalMode;
           }
         | undefined;
-      if (remote) {
+      if (remote || localToolFollowUp) {
         let childApproval = await readApprovalMode(bridge, sessionId);
         const originalMode = childApproval.mode;
         if (originalMode === undefined) {
@@ -1592,10 +1601,21 @@ export function createSubSessionLauncher(
             'The sub-session did not report its approval mode; it was not used.',
           );
         }
-        remote.assertCurrent();
-        const mode = remote.byPerson
+        const callerMode = remote?.approvalMode ?? localCallerApproval?.mode;
+        if (callerMode === undefined) {
+          throw new Error(
+            'The calling session did not report its approval mode.',
+          );
+        }
+        remote?.assertCurrent();
+        const mode = byPerson
           ? originalMode
-          : delegatedApprovalMode(remote.approvalMode, originalMode);
+          : delegatedApprovalMode(callerMode, originalMode);
+        if (localToolFollowUp && mode !== originalMode) {
+          throw new Error(
+            `Follow-up requires a compatible approval mode. The target is in "${originalMode}", but the delegated mode is "${mode}".`,
+          );
+        }
         if (!reusing && mode !== originalMode) {
           const change = await bridge.setSessionApprovalMode(sessionId, mode, {
             persist: false,
@@ -1612,7 +1632,9 @@ export function createSubSessionLauncher(
         }
         dispatchApproval = {
           assertCanDispatch() {
-            remote.assertCurrent();
+            assertLocalCurrent?.();
+            remote?.assertCurrent();
+            localCallerApproval?.assertCurrent();
             childApproval.assertCurrent();
           },
           expectedApprovalMode: mode,
@@ -2241,7 +2263,7 @@ export function createSubSessionLauncher(
     info: CreateSubSessionInfo,
     byPerson: boolean,
   ): Promise<CreateSubSessionResult> => {
-    const { workspace, workspaceGeneration, ...local } = info;
+    const { workspace, workspaceGeneration, requiresYolo, ...local } = info;
     const report = outgoingReport(info.callerSessionId);
     if (workspace === undefined)
       return run(local, undefined, undefined, byPerson, report);
@@ -2256,15 +2278,23 @@ export function createSubSessionLauncher(
     ) {
       throw new Error('The workspace target changed. Request approval again.');
     }
+    const isLocal = target.launcher === launcher;
+    const callerApproval =
+      !isLocal || requiresYolo
+        ? await readApprovalMode(bridge, info.callerSessionId)
+        : undefined;
+    if (requiresYolo && callerApproval?.mode !== ApprovalMode.YOLO) {
+      throw new Error('A named workspace requires one-time approval.');
+    }
     const assertTargetCurrent = () => {
       assertCallerCurrent();
       target.assertCurrent();
+      if (!byPerson) callerApproval?.assertCurrent();
     };
-    if (target.launcher === launcher) {
+    if (isLocal) {
       return run(local, undefined, assertTargetCurrent, byPerson, report);
     }
-    const callerApproval = await readApprovalMode(bridge, info.callerSessionId);
-    if (callerApproval.mode === undefined) {
+    if (callerApproval?.mode === undefined) {
       throw new Error(
         'This session did not report its approval mode, so it cannot run ' +
           'sub-sessions in another workspace.',
@@ -2293,11 +2323,7 @@ export function createSubSessionLauncher(
       return await target.launcher.launchForRemoteCaller(local, {
         approvalMode: callerApproval.mode,
         ...(byPerson ? { byPerson: true } : {}),
-        assertCurrent() {
-          assertTargetCurrent();
-          // A person's send does not depend on the caller's mode.
-          if (!byPerson) callerApproval.assertCurrent();
-        },
+        assertCurrent: assertTargetCurrent,
         deliverCompletion: async (notification) => {
           assertCallerCurrent();
           await deliverSentCompletion(

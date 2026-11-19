@@ -75,7 +75,9 @@ runtime at launch, the caller must request approval again. Deny rules apply to t
 the registered path, and the workspace ID. Existing permanent grants continue
 to apply to calls that omit the selector. In `yolo` mode the tool resolves the
 selector itself when the call runs, so the deny rules and the generation check
-still apply; if the session has left `yolo` by then, the call needs approval.
+still apply. The tool checks the calling mode again after resolution. The
+daemon verifies that a call without one-time approval is still in `yolo` and
+checks the caller's approval revision again before dispatch.
 
 ### Resolving the target
 
@@ -150,24 +152,22 @@ standalone session are refused.
 The first version reached only sessions the caller created, because a
 follow-up puts the caller model's text into the target as a user turn. That
 ruled out the common case of a skill handing work to a session the person
-already uses, which `/send` serves. The other guards stand: the approval for a
-named workspace outside `yolo`, the approval rule for the target's mode in
-another workspace, trust, caps, and the depth gate. Two consequences follow.
-In the caller's own workspace the target keeps its mode, so a caller in
-`default` or `plan` can prompt a `yolo` session there; the tool call itself
-still goes through the caller's permission flow. In another workspace a
-tightened mode stays on the target after the turn, so a follow-up can leave a
-person's session in a stricter mode than they chose. And two top-level
-sessions can prompt each other back and forth with `sent`, bounded only by
-the caps.
+already uses, which `/send` serves. The trust, cap, and depth checks apply to
+each follow-up. A destination using `consensus` refuses tool follow-ups before
+attaching a client, since that client would count toward approvals without
+casting votes. In another workspace a tightened mode stays on the target after
+the turn, so a follow-up can leave a person's session in a stricter mode than
+they chose. Two top-level sessions can prompt each other back and forth with
+`sent`, bounded only by the caps.
 
 **Approval.** A follow-up that names a workspace goes through everything step
-1 requires for that workspace: the one-time approval, which also names the
-session, the trust and generation checks, and the approval rule, applied to
-the target mode at admission. If the rule tightens the mode, the change
-takes effect when the follow-up starts its turn. A follow-up in the caller's
-own workspace uses the tool's usual permission flow and keeps the session's
-mode, as a new sub-session in that workspace does.
+1 requires for that workspace, including one-time approval outside `yolo`.
+The confirmation identifies the target session. The launcher compares both
+sessions' approval modes. A follow-up in the same workspace requires a
+compatible target mode that can be used as-is. In another workspace, any
+required mode change takes effect when the follow-up starts its turn. A
+mode change after admission invalidates the pending dispatch in either
+workspace.
 
 **Running the turn.** The launcher resumes the session on its workspace's
 bridge, which attaches if it is live and restores it from its transcript if
@@ -393,7 +393,9 @@ and any pending notification.
 - Unit: resolution by absolute path and id, refusal of unknown and untrusted
   targets and callers, the depth gate, target-bridge dispatch, caller-bridge
   notification delivery, named-workspace confirmation despite legacy grants,
-  no confirmation in `yolo` with deny rules still applied, live approval reads, incompatible or changed modes, and target cancellation.
+  no confirmation while the caller stays in `yolo`, deny rules still applied,
+  loss of YOLO during resolution or before dispatch, live approval reads,
+  incompatible or changed modes, and target cancellation.
 - End to end: with two trusted workspaces, start a child in B from A, read B's
   `QWEN.md` in `first-turn` mode, and verify `sent` notification delivery in A.
   Open the child link from A and verify it loads B. Naming an untrusted target
@@ -403,11 +405,12 @@ and any pending notification.
   client it attached; a `sent` follow-up to a busy session returns once
   queued, and one refused when its turn comes is reported as failed; a reaped child's lineage is read from its transcript;
   a session another session started, such as a side task, is followed up
-  with its own lineage and mode; the caller itself, an unknown session, a
-  Live caller, and a caller that cannot take a `sent` completion are refused
-  before the session is touched; a failed follow-up does not close the
-  session; a follow-up in another workspace runs on that workspace's bridge
-  under the delegated mode.
+  with its own lineage and compatible mode; an incompatible local mode
+  prevents dispatch; the caller itself, an unknown session, a Live caller,
+  a consensus destination, and a caller that cannot take a `sent` completion
+  are refused before the target session is attached; a failed follow-up
+  releases its client; a follow-up in another workspace runs on that
+  workspace's bridge under the delegated mode.
 - Step 2, end to end: follow up a child in B with `first-turn`, and again with
   `sent` after a daemon restart, and see B answer with the context of its
   earlier turns; follow up while the child runs a long turn and receive only
