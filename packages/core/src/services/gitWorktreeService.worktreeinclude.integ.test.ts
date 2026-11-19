@@ -505,4 +505,102 @@ describe('GitWorktreeService.setupWorktrees() — .worktreeinclude', () => {
       'TOKEN=abc\n',
     );
   });
+
+  it('matches a trailing-space sibling byte-exactly instead of trimming it', async () => {
+    // An unescaped `.env ` in `.gitignore` is stripped to `.env` by git's own
+    // parser. The sibling has to be escaped (`.env\\ `) so it matches only the
+    // literal name. A trimmed listing would read that record as `.env`, copy a
+    // file the destination never ignored, and let the baseline `git add --all`
+    // commit the local secret.
+    await fs.writeFile(path.join(repoRoot, '.gitignore'), '.local/\n');
+    gitIn(repoRoot, 'add', '.gitignore');
+    gitIn(repoRoot, 'commit', '-q', '-m', 'ignore local only', '--no-verify');
+    gitIn(repoRoot, 'branch', '-q', 'predates-name');
+    await fs.writeFile(
+      path.join(repoRoot, '.gitignore'),
+      '.env\n.env\\ \n.local/\n',
+    );
+    gitIn(repoRoot, 'add', '.gitignore');
+    gitIn(repoRoot, 'commit', '-q', '-m', 'ignore both names', '--no-verify');
+    await fs.writeFile(path.join(repoRoot, '.env'), 'TOKEN=abc\n');
+    await fs.writeFile(path.join(repoRoot, WORKTREE_INCLUDE_FILE), '.env*\n');
+    gitIn(repoRoot, 'add', '-f', WORKTREE_INCLUDE_FILE);
+    gitIn(repoRoot, 'commit', '-q', '-m', 'include list', '--no-verify');
+
+    const service = new GitWorktreeService(repoRoot, baseDir);
+    const result = await service.setupWorktrees({
+      sessionId: 's5',
+      sourceRepoPath: repoRoot,
+      worktreeNames: ['five'],
+      baseBranch: 'predates-name',
+    });
+    expect(result.success).toBe(true);
+
+    expect(await exists(path.join(result.worktrees[0].path, '.env'))).toBe(
+      false,
+    );
+  });
+
+  it('exempts the copied paths from the prepared-worktree rollback', async () => {
+    // The copied `.env` is not part of the dirty overlay, so without an
+    // exemption the rollback's cleanliness check reports "Worktree contains
+    // changes" and refuses forever, leaking the checkout and its branch.
+    await writeIgnoredFixtures();
+    await fs.writeFile(path.join(repoRoot, WORKTREE_INCLUDE_FILE), '.env\n');
+    gitIn(repoRoot, 'add', '-f', WORKTREE_INCLUDE_FILE);
+    gitIn(repoRoot, 'commit', '-q', '-m', 'include list', '--no-verify');
+
+    const service = new GitWorktreeService(repoRoot, baseDir);
+    const created = await service.createUserWorktree('rollback', 'main', {
+      carryDirtyState: true,
+    });
+    expect(created.success).toBe(true);
+    expect(created.carriedPaths).toContain('.env');
+
+    const base = gitIn(repoRoot, 'rev-parse', 'main').trim();
+    const removal = await service.removePreparedUserWorktree(
+      'rollback',
+      null,
+      base,
+      undefined,
+      true,
+      created.carriedPaths,
+    );
+
+    expect(removal).toMatchObject({ success: true });
+  });
+
+  it('copies from the session checkout, not the service checkout', async () => {
+    // A session that edited `.env` in its own worktree must get that value.
+    // The tracked/untracked overlay already comes from `dirtyStateSource`;
+    // the include listing and copied bytes have to follow the same root or
+    // the new worktree is a hybrid of two checkouts.
+    await writeIgnoredFixtures();
+    await fs.writeFile(path.join(repoRoot, WORKTREE_INCLUDE_FILE), '.env\n');
+    gitIn(repoRoot, 'add', '-f', WORKTREE_INCLUDE_FILE);
+    gitIn(repoRoot, 'commit', '-q', '-m', 'include list', '--no-verify');
+
+    const sessionRoot = path.join(repoParent, 'session');
+    gitIn(
+      repoRoot,
+      'worktree',
+      'add',
+      '-q',
+      sessionRoot,
+      '-b',
+      'session-branch',
+    );
+    await fs.writeFile(path.join(sessionRoot, '.env'), 'FROM_SESSION=1\n');
+
+    const service = new GitWorktreeService(repoRoot, baseDir);
+    const created = await service.createUserWorktree('source-root', 'main', {
+      carryDirtyState: true,
+      dirtyStateSource: sessionRoot,
+    });
+
+    expect(created.success).toBe(true);
+    expect(await read(path.join(created.worktree!.path, '.env'))).toBe(
+      'FROM_SESSION=1\n',
+    );
+  });
 });

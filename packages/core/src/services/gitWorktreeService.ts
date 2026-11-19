@@ -3363,7 +3363,16 @@ export class GitWorktreeService {
       // Copy the gitignored paths the repository's `.worktreeinclude` names
       // (e.g. `.env`). Same fail-open policy as hooksPath — a missing file or
       // a failed copy leaves the worktree usable, just without those files.
-      await this.copyIncludedPathsFromRepo(worktreePath);
+      // They land after the dirty capture, so they are the caller's session
+      // checkout's values, not the service checkout's; the rollback has to
+      // exempt them or it refuses the removal forever.
+      const includedPaths = await this.copyIncludedPathsFromRepo(
+        worktreePath,
+        options?.dirtyStateSource ?? this.sourceRepoPath,
+      );
+      if (includedPaths.length > 0) {
+        carriedPaths = [...(carriedPaths ?? []), ...includedPaths];
+      }
 
       const worktree: WorktreeInfo = {
         id: slug,
@@ -4183,9 +4192,12 @@ export class GitWorktreeService {
    * directly, because it copies for every worktree it creates from one
    * resolved list.
    */
-  private async copyIncludedPathsFromRepo(worktreePath: string): Promise<void> {
-    const includedPaths = await this.resolveWorktreeIncludePaths();
-    await this.copyWorktreeIncludePaths(
+  private async copyIncludedPathsFromRepo(
+    worktreePath: string,
+    sourceRoot = this.sourceRepoPath,
+  ): Promise<string[]> {
+    const includedPaths = await this.resolveWorktreeIncludePaths(sourceRoot);
+    return this.copyWorktreeIncludePaths(
       worktreePath,
       includedPaths.paths,
       includedPaths.root,
@@ -4215,7 +4227,9 @@ export class GitWorktreeService {
    * failing `ls-files` yields an empty set and the worktree is created
    * without the copies.
    */
-  private async resolveWorktreeIncludePaths(): Promise<{
+  private async resolveWorktreeIncludePaths(
+    sourceRoot = this.sourceRepoPath,
+  ): Promise<{
     paths: string[];
     root: string;
   }> {
@@ -4223,7 +4237,11 @@ export class GitWorktreeService {
     // are both anchored at the repository root — a service constructed from a
     // monorepo subdirectory would otherwise miss the file entirely and list
     // only that subdirectory's ignored files, at subdirectory-relative paths.
-    const repoRoot = (await this.getRepoTopLevel()) ?? this.sourceRepoPath;
+    const anchor =
+      sourceRoot === this.sourceRepoPath
+        ? this
+        : new GitWorktreeService(sourceRoot);
+    const repoRoot = (await anchor.getRepoTopLevel()) ?? sourceRoot;
     const includePath = path.join(repoRoot, WORKTREE_INCLUDE_FILE);
 
     let content: string;
@@ -4355,9 +4373,8 @@ export class GitWorktreeService {
           throw error;
         });
         for (const line of stdout.split('\n')) {
-          const p = line.trimEnd();
-          if (p) {
-            ignored.add(p.split('\\').join('/'));
+          if (line) {
+            ignored.add(line.split('\\').join('/'));
           }
         }
       } catch (error) {
@@ -4385,10 +4402,11 @@ export class GitWorktreeService {
       const { stdout } = await runGitCapture(repoPath, [
         ...NO_EXEC_CONFIG,
         'config',
+        '--bool',
         '--get',
         'core.ignorecase',
       ]);
-      return stdout.trim().toLowerCase() === 'true';
+      return stdout.trim() === 'true';
     } catch (error) {
       debugLogger.debug(`cannot read core.ignorecase in ${repoPath}: ${error}`);
       return false;
@@ -4417,19 +4435,20 @@ export class GitWorktreeService {
     worktreePath: string,
     relPaths: readonly string[],
     sourceRoot = this.sourceRepoPath,
-  ): Promise<void> {
+  ): Promise<string[]> {
     const tracked = await this.listTrackedPaths(worktreePath);
     const ignored = await this.listIgnoredPaths(worktreePath, relPaths);
     if (!tracked || !ignored) {
       debugLogger.warn(
         `copyWorktreeIncludePaths: destination state unavailable in ${worktreePath}; skipping the copy`,
       );
-      return;
+      return [];
     }
     const foldsCase = await this.destinationFoldsCase(worktreePath);
     const fold = (p: string) =>
       foldsCase ? p.normalize('NFC').toLowerCase() : p;
     const trackedFolded = new Set([...tracked].map(fold));
+    const copied: string[] = [];
     for (const relPath of relPaths) {
       try {
         const src = path.join(sourceRoot, relPath);
@@ -4481,6 +4500,7 @@ export class GitWorktreeService {
           continue;
         }
         await fs.copyFile(src, dst);
+        copied.push(guardedRel);
         debugLogger.debug(
           `copyWorktreeIncludePaths: copied ${relPath} into ${worktreePath}`,
         );
@@ -4490,6 +4510,7 @@ export class GitWorktreeService {
         );
       }
     }
+    return copied;
   }
 
   /**
