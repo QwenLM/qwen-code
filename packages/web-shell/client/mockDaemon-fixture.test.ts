@@ -29,6 +29,9 @@ describe('createWebShellDaemonScenario fixture ownership', () => {
     const scenario = createWebShellDaemonScenario({ sessions: fixture });
     expect(scenario.sessions).not.toBe(fixture);
     expect(scenario.sessions[0]).not.toBe(fixture[0]);
+    // Identity alone survives a clone that drops rows: the sibling cases below
+    // would throw on the missing element, but this one would stay green.
+    expect(scenario.sessions).toEqual(fixture);
   });
 
   it('keeps an in-place mutation out of the caller fixture', () => {
