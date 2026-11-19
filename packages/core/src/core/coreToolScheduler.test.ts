@@ -11486,7 +11486,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(responseText).not.toContain(wrongNotice);
   });
 
-  it.each<[string, ToolResult | Error]>([
+  it.each<[string, ToolResult | Error, string]>([
     [
       'a returned interruption',
       {
@@ -11494,14 +11494,21 @@ describe('CoreToolScheduler telemetry spans', () => {
         returnDisplay: 'Command cancelled by user.',
         interruptedBeforeCompletion: true,
       },
+      TOOL_INTERRUPTED_FOR_USER_MESSAGE,
     ],
     [
       'an abort error',
       Object.assign(new Error('Tool call aborted'), { name: 'AbortError' }),
+      TOOL_INTERRUPTED_FOR_USER_MESSAGE,
+    ],
+    [
+      'a finished result',
+      textResult('done'),
+      'its output was discarded when the user interrupted to send you a message, which follows',
     ],
   ])(
     'tells the model to read the message a tool was interrupted for (%s)',
-    async (_title, outcome) => {
+    async (_title, outcome, notice) => {
       const abortController = new AbortController();
       const { call } = await runSingleTool({
         abortController,
@@ -11514,7 +11521,7 @@ describe('CoreToolScheduler telemetry spans', () => {
 
       const completedCall = expectSettled(call, 'cancelled', 'cancelled');
       const responseText = JSON.stringify(completedCall.response.responseParts);
-      expect(responseText).toContain(TOOL_INTERRUPTED_FOR_USER_MESSAGE);
+      expect(responseText).toContain(notice);
       expect(responseText).not.toContain('User intentionally cancelled');
     },
   );

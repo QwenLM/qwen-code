@@ -41686,6 +41686,90 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await bridge.shutdown();
   });
 
+  it.each([
+    ['forwards it once the drain has answered', false],
+    ['drops it when the input is gone by then', true],
+  ])(
+    'holds a send-now request while a drain resolves attachments: %s',
+    async (_label, removeFirst) => {
+      const firstTurn = deferred<void>();
+      const order: string[] = [];
+      const handle = makeChannel({
+        promptImpl: async (req: PromptRequest) => {
+          if ((req.prompt[0] as { text?: string }).text === 'work') {
+            await firstTurn.promise;
+          }
+          return { stopReason: 'end_turn' };
+        },
+        extMethodImpl: (method) => {
+          if (method === MID_TURN_SEND_NOW_METHOD) order.push('send-now');
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const turn = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'work' }],
+      });
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      const client = { clientId: session.clientId };
+      const requests = () =>
+        handle.agent.extMethodCalls.filter(
+          (call) => call.method === MID_TURN_SEND_NOW_METHOD,
+        );
+      const resolveSpy = vi.spyOn(
+        SessionAttachmentStore.prototype,
+        'resolveContent',
+      );
+      const gate =
+        deferred<
+          Awaited<ReturnType<SessionAttachmentStore['resolveContent']>>
+        >();
+      resolveSpy.mockReturnValueOnce(gate.promise);
+      try {
+        bridge.enqueueMidTurnMessage(session.sessionId, 'first', client, 'm1');
+        const drain = handle.agentConnection
+          .extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
+            sessionId: session.sessionId,
+          })
+          .then((answer) => {
+            order.push('drain answered');
+            return answer;
+          });
+        await vi.waitFor(() => expect(resolveSpy).toHaveBeenCalled());
+        bridge.enqueueMidTurnMessage(session.sessionId, 'second', client, 'm2');
+        expect(
+          bridge.sendMidTurnMessagesNow(session.sessionId, client),
+        ).toEqual({ requested: true });
+        await new Promise((r) => setTimeout(r, 10));
+        // The drain took `first` but has not answered: the child would read a
+        // request with no drain out as `second` still being queued.
+        expect(requests()).toEqual([]);
+        if (removeFirst) {
+          expect(
+            bridge.removeMidTurnMessage(session.sessionId, 'm2', client),
+          ).toEqual({ removed: true });
+        }
+
+        gate.resolve([]);
+        await expect(drain).resolves.toMatchObject({ messages: ['first'] });
+        await new Promise((r) => setTimeout(r, 10));
+        if (removeFirst) {
+          expect(requests()).toEqual([]);
+        } else {
+          await vi.waitFor(() => expect(requests()).toHaveLength(1));
+          expect(order).toEqual(['drain answered', 'send-now']);
+        }
+      } finally {
+        resolveSpy.mockRestore();
+        firstTurn.resolve();
+        await turn;
+        await bridge.shutdown();
+      }
+    },
+  );
+
   it('logs a send-now request an older agent rejects and keeps the queue', async () => {
     const firstTurn = deferred<void>();
     const handle = makeChannel({

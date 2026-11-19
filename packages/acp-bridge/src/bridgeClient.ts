@@ -743,6 +743,10 @@ export interface BridgeClientSessionEntry {
    * `SessionEntry.settledMidTurnMessageIds`.
    */
   settledMidTurnMessageIds: string[];
+  /** Drains that took messages and have not answered the child yet. */
+  midTurnDrainsAnswering?: number;
+  /** A send-now request held until those drains have answered. */
+  sendNowAfterDrains?: () => void;
   /** Complete prompts waiting behind the currently running prompt. */
   pendingPromptList: PendingPromptEntry[];
   /**
@@ -1764,6 +1768,18 @@ export class BridgeClient implements Client {
     // Capture ownership before attachment I/O can yield to the next turn.
     const promptId = requestedPromptId ?? currentTurnMetadata(entry).promptId;
     const queuedBefore = [...entry.midTurnMessageQueue];
+    // A send-now request that arrives while this drain resolves attachments
+    // waits for its answer, so the child never sees the request ahead of a
+    // drain that did not take that request's messages.
+    entry.midTurnDrainsAnswering = (entry.midTurnDrainsAnswering ?? 0) + 1;
+    const answered = () => {
+      entry.midTurnDrainsAnswering = (entry.midTurnDrainsAnswering ?? 1) - 1;
+      const sendNow = entry.sendNowAfterDrains;
+      if (entry.midTurnDrainsAnswering > 0 || !sendNow) return;
+      entry.sendNowAfterDrains = undefined;
+      // After the answer is written, not ahead of it.
+      setImmediate(sendNow);
+    };
     // A send-now drain takes only the user's own messages: queue-only steering
     // keeps its tool-boundary delivery and the settle path its caller drives.
     const drained =
@@ -1864,6 +1880,7 @@ export class BridgeClient implements Client {
       writeStderrLine(
         `[mid-turn] session=${JSON.stringify(entry.sessionId)} drain failed, requeued ${drained.length} message(s): ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
       );
+      answered();
       throw error;
     }
     // Queue-only entries are private coordinator steering, not UI transcript.
@@ -1908,6 +1925,7 @@ export class BridgeClient implements Client {
           : `[mid-turn] session=${entry.sessionId} drained=${messages.length} echoed=${echoed.length} echo frame dropped (bus closed); reconciliation required`,
       );
     }
+    answered();
     return { messages, items, hasQueuedPrompt };
   }
 

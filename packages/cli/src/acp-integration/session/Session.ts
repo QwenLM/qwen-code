@@ -4046,12 +4046,15 @@ export class Session implements SessionContext {
     if (!pending) return;
     this.midTurnSendNowFor = pending.signal;
     this.pullForOpenResponse?.();
-    // The host sends this request only while it holds user input, and answers
-    // drains on the same ordered connection: with no drain out, the input is
-    // still with the host and is promoted when the turn ends; a drain still
-    // out brings it into this turn.
+    // The host sends this request only while it holds user input, and only
+    // once every drain that took input has answered, on the same ordered
+    // connection: with no drain out, the input is still with the host and is
+    // promoted when the turn ends; a drain still out brings it into this
+    // turn. Input a timed-out drain handed over late waits for the tool
+    // boundary, and the newer input with it, so the two stay in order.
     if (
       this.midTurnDrainsInFlight === 0 &&
+      this.midTurnRecoveredMessages.length === 0 &&
       (this.midTurnToolPhaseFor === pending.signal ||
         this.openResponseHasToolCall?.() === true)
     ) {
@@ -12416,8 +12419,11 @@ export class Session implements SessionContext {
     // them from both queues. We stash them (see the timeout branch) and
     // re-inject them here on the next batch.
     const recovered = this.#takeRecoveredMidTurnMessages();
+    this.midTurnToolPhaseFor = undefined;
 
-    if (this.midTurnDrainUnavailable) {
+    // A stopped turn takes nothing more from the host, which promotes what is
+    // still queued once the turn ends.
+    if (this.midTurnDrainUnavailable || abortSignal.aborted) {
       return {
         parts: await this.#buildMidTurnParts(recovered, abortSignal, options),
         hasQueuedPrompt: false,
@@ -12477,7 +12483,6 @@ export class Session implements SessionContext {
     // This request takes everything queued so far; a send-now request handled
     // after it goes out sets the request again.
     this.midTurnSendNowFor = undefined;
-    if (!sendNow) this.midTurnToolPhaseFor = undefined;
     let drainPromise: ReturnType<AgentSideConnection['extMethod']> | undefined;
     this.midTurnDrainsInFlight += 1;
     try {
@@ -20574,13 +20579,22 @@ export class Session implements SessionContext {
                     (!toolBuildSucceeded
                       ? ToolErrorType.INVALID_TOOL_PARAMS
                       : ToolErrorType.UNHANDLED_EXCEPTION))));
-          return earlyErrorResponse(error, toolName, {
-            status,
-            errorType,
-            executionStatus,
-            recordInvalidToolParams: !toolBuildSucceeded,
-            stopAfterPermissionCancel: nestedPermissionCancelled,
-          });
+          return earlyErrorResponse(
+            status === 'cancelled' &&
+              activeToolAbortSignal.reason === MID_TURN_SEND_NOW_ABORT_REASON
+              ? new Error(
+                  `${TOOL_INTERRUPTED_FOR_USER_MESSAGE}\n\n${error.message}`,
+                )
+              : error,
+            toolName,
+            {
+              status,
+              errorType,
+              executionStatus,
+              recordInvalidToolParams: !toolBuildSucceeded,
+              stopAfterPermissionCancel: nestedPermissionCancelled,
+            },
+          );
         }
       }); // end runInToolSpanContext
     } catch (e) {

@@ -119,11 +119,17 @@ background first and then the other tools are interrupted.
    are promoted when the turn ends, so a message is never taken and then left
    unanswered.
 5. Race: the daemon sends the request only while the queue holds user
-   messages, and it sends the request and answers drains on the same ordered
-   channel. If a drain request is in flight when the agent handles the request,
-   that drain brings the messages into the same turn, so the agent does not
-   interrupt. With no drain in flight the messages are still with the daemon,
-   and interrupting is safe. A request stays bound to its turn as today.
+   messages. While a drain that took messages is still resolving attachments
+   and has not answered, the daemon holds the request, and forwards it after
+   that answer only if the queue still holds user messages. The request and
+   drain answers travel on the same ordered channel. If a drain request is in
+   flight when the agent handles the request, that drain brings the messages
+   into the same turn, so the agent does not interrupt. With no drain in flight
+   the messages are still with the daemon, and interrupting is safe. Messages a
+   timed-out drain handed over late wait for the tool boundary; the agent does
+   not interrupt then either, and the newer messages arrive with them at the
+   boundary, in order. An interrupted turn takes nothing more from the daemon.
+   A request stays bound to its turn as today.
 6. Text already written stays; an unfinished tool call is dropped; a running
    tool is recorded as cancelled, as on Stop, but its result does not use
    Stop's "the user cancelled; await instructions; do not retry" wording: it
@@ -242,7 +248,7 @@ in that phase.
 
 | State at the click        | Today              | Target                                            |
 | ------------------------- | ------------------ | ------------------------------------------------- |
-| Model writing text        | about 15 ms        | Unchanged                                         |
+| Model writing text        | about 50 ms        | Unchanged                                         |
 | Model streaming tool args | Waits for the tool | Next turn, < 1 s (PR 1)                           |
 | Foreground shell running  | 6.1 s              | PR 1: next turn; PR 2: same turn, command running |
 | Non-backgroundable tool   | Waits for the tool | Next turn, < 1 s (PR 1)                           |

@@ -34554,6 +34554,61 @@ describe('Session', () => {
           expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
         });
 
+        it('keeps a turn calling tools while input a timed-out drain handed over waits', async () => {
+          mockToolRegistry.getTool.mockReturnValue(
+            readFileTool(
+              vi
+                .fn()
+                .mockResolvedValue({ llmContent: 'ok', returnDisplay: 'ok' }),
+            ),
+          );
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          let answerLate: ((value: unknown) => void) | undefined;
+          mockClient.extMethod = vi
+            .fn()
+            .mockImplementationOnce(
+              () =>
+                new Promise((resolve) => {
+                  answerLate = resolve;
+                }),
+            )
+            .mockResolvedValue({ messages: [] });
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(createStreamWithChunks([readFileCall]))
+            .mockResolvedValue(createEmptyStream());
+          useFakeDrainTimers();
+          try {
+            const first = startPrompt();
+            await vi.waitFor(() => expect(answerLate).toBeDefined());
+            await pastDrainTimeout();
+            await first;
+            answerLate!({ messages: ['recovered late'] });
+            await nextTick();
+          } finally {
+            vi.useRealTimers();
+          }
+          const { streaming, release, state } = openResponse([readFileCall]);
+
+          const done = startPrompt();
+          await streaming;
+          // Ending the turn would leave the late input for a later turn, after
+          // the newer input the host promotes.
+          session.sendMidTurnInputNow();
+          await nextTick();
+          expect(state.signal?.aborted).toBe(false);
+          release();
+
+          await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+          const nextMessage = vi.mocked(mockChat.sendMessageStream).mock
+            .calls[1]?.[1].message as Part[];
+          expect(nextMessage).toContainEqual({
+            text: '\n[User message received during tool execution]: recovered late',
+          });
+        });
+
         it('never interrupts a channel turn', async () => {
           mockClient.extMethod = vi
             .fn()
@@ -55407,6 +55462,32 @@ describe('Session', () => {
       expect(result.parts[0].functionResponse?.response).toEqual({
         error:
           'User intentionally cancelled this tool call. Stop and await further instructions; do not retry or work around it.\n\nBelow is the output before it was cancelled.\npartial',
+      });
+    });
+
+    it('tells the model a tool that threw when interrupted for a message to read it first', async () => {
+      const abortController = new AbortController();
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockImplementation(async () => {
+        abortController.abort('qwen:mid-turn-send-now');
+        throw Object.assign(new Error('Tool call aborted'), {
+          name: 'AbortError',
+        });
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('cancel_tool', execute),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(abortController.signal, 'prompt-send-now-throw', [
+        { id: 'send_now_throw_call', name: 'cancel_tool', args: {} },
+      ]);
+
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error:
+          'The user interrupted this tool call to send you a message, which follows. Read it before deciding whether to run the tool again.\n\nTool call aborted',
       });
     });
 

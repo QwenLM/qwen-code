@@ -901,6 +901,10 @@ interface SessionEntry {
    * normal prompt FIFO if it remains undrained at idle.
    */
   midTurnMessageQueue: MidTurnQueueEntry[];
+  /** Drains that took messages and have not answered the child yet. */
+  midTurnDrainsAnswering?: number;
+  /** A send-now request held until those drains have answered. */
+  sendNowAfterDrains?: () => void;
   /**
    * Bounded ids either handed to the ACP child or explicitly deleted.
    */
@@ -15974,18 +15978,32 @@ export function createSessionControlPlane(
       resolveTrustedClientId(entry, context?.clientId);
       // Only the user's own messages ask for this; queue-only steering keeps
       // its tool-boundary delivery unless user input travels with it.
-      if (!entry.midTurnMessageQueue.some((message) => !message.queueOnly)) {
+      const holdsUserInput = () =>
+        entry.midTurnMessageQueue.some((message) => !message.queueOnly);
+      if (!holdsUserInput()) {
         return { requested: false };
       }
-      // Best-effort: an agent without the method still drains the queue at its
-      // next tool boundary.
-      void entry.connection
-        .extMethod(MID_TURN_SEND_NOW_METHOD, { sessionId: entry.sessionId })
-        .catch((error: unknown) => {
-          writeStderrLine(
-            `[mid-turn] session=${JSON.stringify(entry.sessionId)} send-now request failed: ${JSON.stringify(extractErrorMessage(error))}`,
-          );
-        });
+      const request = () => {
+        // A drain answered meanwhile may have taken the messages.
+        if (!holdsUserInput() || byId.get(sessionId) !== entry) return;
+        // Best-effort: an agent without the method still drains the queue at
+        // its next tool boundary.
+        void entry.connection
+          .extMethod(MID_TURN_SEND_NOW_METHOD, { sessionId: entry.sessionId })
+          .catch((error: unknown) => {
+            writeStderrLine(
+              `[mid-turn] session=${JSON.stringify(entry.sessionId)} send-now request failed: ${JSON.stringify(extractErrorMessage(error))}`,
+            );
+          });
+      };
+      // The child takes a request with no drain out as proof that the host
+      // still holds the input, so a drain that is still resolving attachments
+      // answers first.
+      if ((entry.midTurnDrainsAnswering ?? 0) > 0) {
+        entry.sendNowAfterDrains = request;
+      } else {
+        request();
+      }
       return { requested: true };
     },
 

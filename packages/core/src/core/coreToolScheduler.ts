@@ -495,11 +495,23 @@ const TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE =
 export const USER_MESSAGE_INTERRUPT_ABORT_REASON = 'qwen:mid-turn-send-now';
 export const TOOL_INTERRUPTED_FOR_USER_MESSAGE =
   'The user interrupted this tool call to send you a message, which follows. Read it before deciding whether to run the tool again.';
+const TOOL_DISCARDED_FOR_USER_MESSAGE =
+  'The tool had already completed, but its output was discarded when the user interrupted to send you a message, which follows. Read it before deciding whether to run the tool again.';
+
+function interruptedForUserMessage(signal: AbortSignal): boolean {
+  return signal.reason === USER_MESSAGE_INTERRUPT_ABORT_REASON;
+}
 
 function cancelledBeforeCompletionMessage(signal: AbortSignal): string {
-  return signal.reason === USER_MESSAGE_INTERRUPT_ABORT_REASON
+  return interruptedForUserMessage(signal)
     ? TOOL_INTERRUPTED_FOR_USER_MESSAGE
     : TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE;
+}
+
+function cancelledAfterCompletionMessage(signal: AbortSignal): string {
+  return interruptedForUserMessage(signal)
+    ? TOOL_DISCARDED_FOR_USER_MESSAGE
+    : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
 }
 
 /**
@@ -6243,7 +6255,7 @@ export class CoreToolScheduler {
     let executionSettled = false;
     let execSpan: Span | undefined;
     const cancelIfFinished = (
-      message = TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+      message = cancelledAfterCompletionMessage(signal),
     ): boolean => {
       if (!this.schedulerOptions.isFinished?.()) return false;
       this.setStatusInternal(callId, 'cancelled', message, executionStatus);
@@ -6708,7 +6720,7 @@ export class CoreToolScheduler {
         // tool on user cancel) set `interruptedBeforeCompletion`.
         let cancelMessage = toolResult.interruptedBeforeCompletion
           ? cancelledBeforeCompletionMessage(signal)
-          : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
+          : cancelledAfterCompletionMessage(signal);
         if (cancelIfFinished(cancelMessage)) return;
         let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
@@ -6780,7 +6792,7 @@ export class CoreToolScheduler {
         const cancelledResponse = createCancelledResponse(
           scheduledCall.request,
           // Reached only after `execute()` settled with a result.
-          TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+          cancelledAfterCompletionMessage(signal),
           executionStatus,
           artifacts,
           preserved?.persistedOutputFiles,
@@ -7759,7 +7771,7 @@ export class CoreToolScheduler {
 
       const cancelMessage = executionThrew
         ? cancelledBeforeCompletionMessage(signal)
-        : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
+        : cancelledAfterCompletionMessage(signal);
       if (cancelIfFinished(cancelMessage)) return;
       if (aborted) {
         // PostToolUseFailure Hook (user interrupt)
@@ -7863,7 +7875,7 @@ export class CoreToolScheduler {
             // tool's own outcome is still what `executionThrew` says.
             executionThrew
               ? cancelledBeforeCompletionMessage(signal)
-              : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE,
+              : cancelledAfterCompletionMessage(signal),
             executionStatus,
             failureHookArtifacts,
           );
