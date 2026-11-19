@@ -271,7 +271,15 @@ export async function buildWorktreeSnapshotMeta(
   const skipWorktree = new Set<string>();
   const lsV = await runGit(
     worktreePath,
-    [...NO_EXEC_CONFIG, '--no-optional-locks', 'ls-files', '-v', '-z'],
+    [
+      ...NO_EXEC_CONFIG,
+      '-c',
+      'advice.sparseIndexExpanded=false',
+      '--no-optional-locks',
+      'ls-files',
+      '-v',
+      '-z',
+    ],
     undefined,
     64 * 1024 * 1024,
   );

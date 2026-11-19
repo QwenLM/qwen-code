@@ -1167,6 +1167,58 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     expect(archives(plan.sessionId)).toHaveLength(0);
   });
 
+  it('preserves an edited out-of-cone S path that became materialized (R11-2)', async () => {
+    fs.mkdirSync(path.join(repoRoot, 'cone'));
+    fs.writeFileSync(path.join(repoRoot, 'cone', 'a.txt'), 'a\n');
+    fs.mkdirSync(path.join(repoRoot, 'other'));
+    fs.writeFileSync(path.join(repoRoot, 'other', 'b.txt'), 'HEAD\n');
+    git(repoRoot, 'add', '.');
+    git(repoRoot, 'commit', '-qm', 'materialized sparse edit', '--no-verify');
+    const plan = await planFor('materialized-sparse-edit');
+    git(plan.lockKey, 'sparse-checkout', 'init', '--cone');
+    git(plan.lockKey, 'sparse-checkout', 'set', 'cone');
+    git(plan.lockKey, 'config', 'sparse.expectFilesOutsideOfPatterns', 'true');
+    const victim = path.join(plan.lockKey, 'other', 'b.txt');
+    fs.mkdirSync(path.dirname(victim), { recursive: true });
+    fs.writeFileSync(victim, 'session-only-edit\n');
+    const tag = execFileSync('git', ['ls-files', '-v', '--', 'other/b.txt'], {
+      cwd: plan.lockKey,
+      encoding: 'utf8',
+    }).trim();
+    const status = execFileSync(
+      'git',
+      [
+        'status',
+        '--porcelain',
+        '--untracked-files=all',
+        '--ignored=matching',
+        '--',
+        'other/b.txt',
+      ],
+      { cwd: plan.lockKey, encoding: 'utf8' },
+    ).trim();
+    expect(tag.startsWith('S ')).toBe(true);
+    expect(status).toBe('');
+    const before = await checkoutChangeDigestForTesting(plan.lockKey);
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    let incidentLog = '';
+    try {
+      await executeWorktreeCleanup(plan);
+    } finally {
+      incidentLog = stderrSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
+      stderrSpy.mockRestore();
+    }
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(fs.readFileSync(victim, 'utf8')).toBe('session-only-edit\n');
+    expect(await checkoutChangeDigestForTesting(plan.lockKey)).toBe(before);
+    expect(archives(plan.sessionId)).toHaveLength(0);
+    expect(incidentLog).toContain('an index flag hides a file version');
+  });
+
   it('preserves a clean tracked protected case-variant (audit capture)', async (ctx) => {
     if (!caseSensitiveFilesystem) ctx.skip();
     fs.writeFileSync(path.join(repoRoot, '.QWEN-SESSION'), 'tracked variant\n');

@@ -2,7 +2,7 @@
 
 [English](2026-11-17-worktree-retention-snapshots.md) | [简体中文](2026-11-17-worktree-retention-snapshots.zh-CN.md)
 
-- 状态：提议（#17237，继 R9-6 搬运元数据交付项之后）
+- 状态：U1–U3 已在本 PR 实现；U4/U5 仍由 #17237 跟踪。
 - 基于：`2026-11-14-web-shell-codex-worktree-parity.md` D7（快照是工作归档）、
   D3（dirty 携带），及 `2026-11-17-worktree-carry-metadata.md`（R9-6，sidecar
   `carriedEntries` 字段）。
@@ -99,8 +99,11 @@ skip-worktree 路径上的暂存编辑或新增、暂停的 merge/rebase/cherry-
 同一位置复用共享的隐藏索引位探针，它先于最后一道 pending 探测：捕获中途新设的 flag
 令 tracked 编辑在前后摘要中均不可见时，也不能仅因摘要一致就删除。
 稀疏例外通过 `git sparse-checkout check-rules` 区分合法省略与规则包含路径上的异常 S
-所隐藏的删除意图；规则探测失败时保留 checkout。
-无法从 UTF-8 输出可靠还原原始索引字节的路径同样保留，不用替代字符猜测其规则归属。
+所隐藏的删除意图。规则排除本身还不够：实体化 S 在 `sparse.expectFilesOutsideOfPatterns=true`
+让 status 保持为空时，仍可能藏有编辑内容。只有 leaf 确实不存在、且最近存在祖先为目录时才豁免；
+其他路径与探测失败都保留 checkout。`ls-files` 与 `ls-files --stage` 仅关闭已知的
+稀疏索引展开提示，其他 stderr 仍保留失败关闭行为。无法从 UTF-8 输出可靠还原原始索引字节的路径同样保留，
+不用替代字符猜测其规则归属。
 每对归档按捕获时刻唯一命名（`<sessionId>.<createdAt>.<pid>.worktree-snapshot.tar.gz`，
 头部同规则），复用同一 session UUID 不再覆盖早先快照；读取方按 `<sessionId>.*.worktree-snapshot.*`
 前缀于 sidecar 旁解析（chats 目录，归档会话为其 `archive/` 子目录——回收器写入 sidecar

@@ -300,7 +300,8 @@ export async function carriedOverlayStillHeldBySource(
     for (const stored of carriedEntries) {
       const cur = current.get(stored.path);
       if (stored.hash === null) {
-        if (cur !== undefined && cur.hash !== null) return false;
+        // A missing identity can also mean a present non-regular path.
+        if (cur === undefined || cur.hash !== null) return false;
       } else if (
         cur === undefined ||
         cur.hash === null ||
@@ -326,11 +327,56 @@ export async function carriedOverlayStillHeldBySource(
  * must refuse it — except for paths legitimately omitted by
  * `git sparse-checkout`. Those omissions are verified against Git's own
  * current rules, not inferred from core.sparseCheckout=true alone: an
- * unexpected S on an included path can hide a tracked deletion. Refusing
- * every S would instead strand clean sparse worktrees forever. Pins the
- * worktree's own `.git` (no upward discovery) and is fail-closed: any read
- * error or stderr output counts as hidden.
+ * unexpected S on an included path can hide a tracked deletion. An exempt
+ * path must also be genuinely absent, so a materialized S path is never
+ * waived. Refusing every S would instead strand legitimate sparse omissions.
+ * Pins the worktree's own `.git` (no upward discovery) and is fail-closed:
+ * only the named sparse-index expansion advice is suppressed; any other
+ * stderr output counts as hidden.
  */
+/**
+ * Only an ENOENT leaf below a directory ancestor is a genuine omission.
+ * Unreadable entries and non-directory ancestors cannot prove absence.
+ * Probes are memoized only within one enumeration.
+ */
+async function isPathProvablyAbsent(
+  repoRoot: string,
+  relativePath: string,
+  ancestorProbes: Map<string, boolean>,
+): Promise<boolean> {
+  const candidate = path.join(repoRoot, relativePath);
+  try {
+    await fs.lstat(candidate);
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return false;
+  }
+  let ancestor = path.dirname(candidate);
+  const walked: string[] = [];
+  const decide = (verdict: boolean): boolean => {
+    for (const item of walked) ancestorProbes.set(item, verdict);
+    return verdict;
+  };
+  for (;;) {
+    const memoized = ancestorProbes.get(ancestor);
+    if (memoized !== undefined) return decide(memoized);
+    try {
+      const verdict = (await fs.stat(ancestor)).isDirectory();
+      ancestorProbes.set(ancestor, verdict);
+      return decide(verdict);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        ancestorProbes.set(ancestor, false);
+        return decide(false);
+      }
+    }
+    walked.push(ancestor);
+    const parent = path.dirname(ancestor);
+    if (parent === ancestor) return false;
+    ancestor = parent;
+  }
+}
+
 export async function hasHiddenIndexBit(
   worktreePath: string,
 ): Promise<boolean> {
@@ -342,7 +388,15 @@ export async function hasHiddenIndexBit(
     // enormous index still fails closed (preserve), never deletes bare.
     const { stdout, stderr } = await runGitCapture(
       worktreePath,
-      [...NO_EXEC_CONFIG, '--no-optional-locks', 'ls-files', '-v', '-z'],
+      [
+        ...NO_EXEC_CONFIG,
+        '-c',
+        'advice.sparseIndexExpanded=false',
+        '--no-optional-locks',
+        'ls-files',
+        '-v',
+        '-z',
+      ],
       undefined,
       64 * 1024 * 1024,
     );
@@ -366,15 +420,29 @@ export async function hasHiddenIndexBit(
       }
     }
     if (skipWorktree.size > 0) {
+      // The effective value includes legacy shared local configuration,
+      // which can exist without extensions.worktreeConfig.
       const sparse = await runGitCapture(worktreePath, [
         ...NO_EXEC_CONFIG,
         'config',
-        '--bool',
+        '--type=bool',
+        '--get',
         'core.sparseCheckout',
       ])
         .then(({ stdout: out }) => out.trim())
         .catch(() => 'false');
       if (sparse !== 'true') return true;
+      // A materialized S path is never a legitimate omission, even when
+      // sparse.expectFilesOutsideOfPatterns=true keeps it out of status.
+      // Only an ENOENT leaf below a directory ancestor may be waived.
+      const omitted: string[] = [];
+      const ancestorProbes = new Map<string, boolean>();
+      for (const rel of skipWorktree) {
+        if (!(await isPathProvablyAbsent(worktreePath, rel, ancestorProbes))) {
+          return true;
+        }
+        omitted.push(rel);
+      }
       // Git's rules, not merely core.sparseCheckout=true, decide whether an
       // omitted path is legitimate. A hand-set S on an included path can
       // hide a tracked deletion from status and both cleanup digests.
@@ -405,7 +473,7 @@ export async function hasHiddenIndexBit(
         );
         child.on('error', reject);
         child.stdin?.on('error', reject);
-        child.stdin?.end(`${[...skipWorktree].join('\0')}\0`);
+        child.stdin?.end(`${omitted.join('\0')}\0`);
       });
       if (included.stderr.trim().length > 0) return true;
       const includedPaths = new Set(included.stdout.split('\0'));
@@ -486,7 +554,15 @@ export async function worktreeHasPopulatedGitlink(
     await fs.access(path.join(worktreePath, '.git'));
     const { stdout, stderr } = await runGitCapture(
       worktreePath,
-      [...NO_EXEC_CONFIG, '--no-optional-locks', 'ls-files', '--stage', '-z'],
+      [
+        ...NO_EXEC_CONFIG,
+        '-c',
+        'advice.sparseIndexExpanded=false',
+        '--no-optional-locks',
+        'ls-files',
+        '--stage',
+        '-z',
+      ],
       undefined,
       64 * 1024 * 1024,
     );
@@ -5291,29 +5367,7 @@ export class GitWorktreeService {
           if (entry[0] === 'R' || entry[0] === 'C') return false;
           if (!exempt.has(entry.slice(3))) return false;
         }
-        const hiddenIndexEntries = await worktreeGit.raw([
-          'ls-files',
-          '-v',
-          '-z',
-        ]);
-        // Same sparse-checkout carve-out as the managed gate: assume-unchanged
-        // (lowercase) always refuses; skip-worktree `S` is legitimate on
-        // out-of-cone paths when sparse-checkout is enabled, so refuse it only
-        // outside a sparse repository (otherwise every prepared worktree of a
-        // sparse repo strands).
-        let sawSkipWorktree = false;
-        for (const entry of hiddenIndexEntries.split('\0')) {
-          if (entry.length === 0) continue;
-          const tag = entry[0];
-          if (/[a-z]/.test(tag)) return false;
-          if (tag === 'S') sawSkipWorktree = true;
-        }
-        if (sawSkipWorktree) {
-          const sparse = await worktreeGit
-            .raw(['config', '--bool', 'core.sparseCheckout'])
-            .catch(() => 'false');
-          if (sparse.trim() !== 'true') return false;
-        }
+        if (await hasHiddenIndexBit(worktreePath)) return false;
         if (await hasPopulatedGitlink()) return false;
         // clean -ndx has no -z form and collapses untracked directories
         // to "dir/", which never matches the file-level carried paths.

@@ -2,7 +2,7 @@
 
 [English](2026-11-17-worktree-retention-snapshots.md) | [简体中文](2026-11-17-worktree-retention-snapshots.zh-CN.md)
 
-- Status: proposed (#17237, after the R9-6 carry-metadata deliverable)
+- Status: U1–U3 are implemented in this PR; U4/U5 remain tracked in #17237.
 - Builds on: `2026-11-14-web-shell-codex-worktree-parity.md` D7 (snapshots are
   work archives), D3 (dirty carry), and `2026-11-17-worktree-carry-metadata.md`
   (R9-6, the sidecar `carriedEntries` field).
@@ -150,9 +150,14 @@ that final pending probe: a late flag that hides a tracked edit from both
 digests cannot authorize removal merely because their values match. The
 sparse exemption uses `git sparse-checkout check-rules` to distinguish a
 legitimate omission from an unexpected S hiding a deletion in an included
-path. A failed rule probe preserves the checkout. Path bytes that cannot be
-recovered reliably from UTF-8 output also preserve, rather than guessing an
-included or excluded spelling from replacement characters.
+path. Exclusion alone is insufficient: a present S path may hide edited
+bytes when `sparse.expectFilesOutsideOfPatterns=true` keeps status empty,
+so only an actual absent path is exempt. Its leaf must be absent and its
+nearest existing ancestor must be a directory. Other paths or probe
+failures preserve the checkout. `ls-files` and `ls-files --stage` suppress
+only the known sparse-index expansion advice, not other stderr. Path bytes
+that cannot be recovered reliably from UTF-8 output also preserve, rather
+than guessing an included or excluded spelling from replacement characters.
 Each archive pair is uniquely named per capture
 (`<sessionId>.<createdAt>.<pid>.worktree-snapshot.tar.gz`, header likewise) so
 a reused session UUID can never overwrite an earlier snapshot; readers resolve

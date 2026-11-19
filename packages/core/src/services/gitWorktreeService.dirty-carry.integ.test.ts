@@ -13,7 +13,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdtempSync,
@@ -31,6 +31,7 @@ import {
   carriedOverlayStillHeldBySource,
   computeCarriedIdentities,
   worktreeHasPendingGitOperation,
+  worktreeHasPopulatedGitlink,
   worktreeHasWork,
 } from './gitWorktreeService.js';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
@@ -214,6 +215,26 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
         true,
       );
       await fs.rm(state);
+      await expect(worktreeHasPendingGitOperation(worktree.path)).resolves.toBe(
+        false,
+      );
+    },
+  );
+
+  it.each(['rebase-apply', 'sequencer'])(
+    'detects the %s paused-operation directory',
+    async (pauseDir) => {
+      const worktree = await create(`pending-${pauseDir}`);
+      const gitDir = git(worktree.path, 'rev-parse', '--git-dir');
+      const state = path.resolve(worktree.path, gitDir, pauseDir);
+      await expect(worktreeHasPendingGitOperation(worktree.path)).resolves.toBe(
+        false,
+      );
+      await fs.mkdir(state);
+      await expect(worktreeHasPendingGitOperation(worktree.path)).resolves.toBe(
+        true,
+      );
+      await fs.rm(state, { recursive: true });
       await expect(worktreeHasPendingGitOperation(worktree.path)).resolves.toBe(
         false,
       );
@@ -453,6 +474,43 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     );
     expect(removed.success).toBe(true);
     await expect(fs.lstat(wt)).rejects.toThrow();
+  });
+
+  it('prepared rollback preserves an edited materialized sparse path (R11-2)', async () => {
+    await fs.mkdir(path.join(repoRoot, 'cone'));
+    await fs.mkdir(path.join(repoRoot, 'other'));
+    await fs.writeFile(path.join(repoRoot, 'cone', 'a.txt'), 'a\n');
+    await fs.writeFile(path.join(repoRoot, 'other', 'b.txt'), 'b\n');
+    git(repoRoot, 'add', '.');
+    git(repoRoot, 'commit', '-qm', 'materialized prepared sparse path');
+    const base = git(repoRoot, 'rev-parse', 'HEAD');
+    const service = new GitWorktreeService(repoRoot);
+    const created = await service.createUserWorktree(
+      'prepared-materialized-sparse',
+      'main',
+      { detached: true, carryDirtyState: true },
+    );
+    expect(created.success).toBe(true);
+    const wt = created.worktree!.path;
+    git(wt, 'sparse-checkout', 'init', '--cone');
+    git(wt, 'sparse-checkout', 'set', 'cone');
+    git(wt, 'config', 'sparse.expectFilesOutsideOfPatterns', 'true');
+    const victim = path.join(wt, 'other', 'b.txt');
+    await fs.mkdir(path.dirname(victim), { recursive: true });
+    await fs.writeFile(victim, 'unattached-session-only\n');
+    expect(git(wt, 'ls-files', '-v', '--', 'other/b.txt')).toMatch(/^S /);
+    expect(git(wt, 'status', '--porcelain', '--', 'other/b.txt')).toBe('');
+    const removed = await service.removePreparedUserWorktree(
+      'prepared-materialized-sparse',
+      null,
+      base,
+      undefined,
+      true,
+      created.carriedPaths,
+    );
+    expect(removed.success).toBe(false);
+    expect(removed.error).toBe('Worktree contains changes');
+    expect(await read(victim)).toBe('unattached-session-only\n');
   });
 
   it('prepared rollback still refuses a non-carried file alongside the overlay', async () => {
@@ -2231,6 +2289,114 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
     await expect(worktreeHasWork(wt)).resolves.toBe(false);
   });
 
+  it('does not strand a clean sparse-index worktree because of expansion advice (R11-1)', async () => {
+    await fs.mkdir(path.join(repoRoot, 'cone'));
+    await fs.writeFile(path.join(repoRoot, 'cone', 'a.txt'), 'a\n');
+    await fs.mkdir(path.join(repoRoot, 'other'));
+    await fs.writeFile(path.join(repoRoot, 'other', 'b.txt'), 'b\n');
+    git(repoRoot, 'add', '.');
+    git(repoRoot, 'commit', '-qm', 'sparse index', '--no-verify');
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree('r11-sparse-index', 'main');
+    const wt = result.worktree!.path;
+    git(wt, 'sparse-checkout', 'init', '--cone');
+    git(wt, 'sparse-checkout', 'set', '--sparse-index', 'cone');
+    expect(git(wt, 'config', '--bool', 'index.sparse')).toBe('true');
+    const { stderr, status } = spawnSync(
+      'git',
+      ['-c', 'advice.sparseIndexExpanded=true', 'ls-files', '-v', '-z'],
+      { cwd: wt, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    expect(status).toBe(0);
+    // Git 2.53 emits this advice here (the R11 witness), while older Git
+    // may be silent. If present, the text must only be the known advice.
+    if (stderr.length > 0) {
+      expect(stderr).toContain('expanding to a full index');
+    }
+    await expect(worktreeHasPopulatedGitlink(wt)).resolves.toBe(false);
+    await expect(worktreeHasWork(wt)).resolves.toBe(false);
+    await fs.writeFile(path.join(wt, 'session-draft.txt'), 'draft\n');
+    const meta = await buildWorktreeSnapshotMeta(wt, {
+      sessionId: 'r11-sparse-index',
+      slug: 'r11-sparse-index',
+      baseCommit: git(wt, 'rev-parse', 'HEAD'),
+    });
+    expect(meta.dirty).toEqual({ tracked: 0, untracked: 1, deleted: [] });
+  });
+
+  it('allows a legacy shared sparse configuration without worktreeConfig', async () => {
+    await fs.mkdir(path.join(repoRoot, 'cone'));
+    await fs.writeFile(path.join(repoRoot, 'cone', 'a.txt'), 'a\n');
+    await fs.mkdir(path.join(repoRoot, 'other'));
+    await fs.writeFile(path.join(repoRoot, 'other', 'b.txt'), 'b\n');
+    git(repoRoot, 'add', '.');
+    git(repoRoot, 'commit', '-qm', 'shared sparse config', '--no-verify');
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree(
+      'r11-shared-sparse',
+      'main',
+    );
+    expect(result.success).toBe(true);
+    const wt = result.worktree!.path;
+    git(wt, 'sparse-checkout', 'init', '--cone');
+    git(wt, 'sparse-checkout', 'set', 'cone');
+    git(wt, 'config', 'extensions.worktreeConfig', 'false');
+    git(wt, 'config', 'core.sparseCheckout', 'true');
+    expect(git(wt, 'ls-files', '-v', '--', 'other/b.txt')).toMatch(/^S /);
+    expect(existsSync(path.join(wt, 'other', 'b.txt'))).toBe(false);
+    expect(
+      git(wt, 'config', '--type=bool', '--get', 'core.sparseCheckout'),
+    ).toBe('true');
+    const scoped = spawnSync(
+      'git',
+      ['config', '--worktree', '--type=bool', '--get', 'core.sparseCheckout'],
+      { cwd: wt, encoding: 'utf8' },
+    );
+    expect(scoped.status).not.toBe(0);
+    expect(scoped.stderr).toContain('worktreeConfig');
+    expect(
+      execFileSync('git', ['sparse-checkout', 'check-rules', '-z'], {
+        cwd: wt,
+        input: 'other/b.txt\0',
+      }),
+    ).toHaveLength(0);
+    await expect(worktreeHasWork(wt)).resolves.toBe(false);
+  });
+
+  it('refuses a present out-of-cone S path that may hide an edited file (R11-2)', async (ctx) => {
+    await fs.mkdir(path.join(repoRoot, 'cone'));
+    await fs.writeFile(path.join(repoRoot, 'cone', 'a.txt'), 'a\n');
+    await fs.mkdir(path.join(repoRoot, 'other'));
+    await fs.writeFile(path.join(repoRoot, 'other', 'b.txt'), 'b\n');
+    git(repoRoot, 'add', '.');
+    git(repoRoot, 'commit', '-qm', 'materialized sparse path', '--no-verify');
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree(
+      'r11-present-sparse',
+      'main',
+    );
+    const wt = result.worktree!.path;
+    git(wt, 'sparse-checkout', 'init', '--cone');
+    git(wt, 'sparse-checkout', 'set', 'cone');
+    git(wt, 'config', 'sparse.expectFilesOutsideOfPatterns', 'true');
+    await fs.mkdir(path.join(wt, 'other'));
+    await fs.writeFile(path.join(wt, 'other', 'b.txt'), 'session-edit\n');
+    const tag = git(wt, 'ls-files', '-v', '--', 'other/b.txt');
+    const status = git(
+      wt,
+      'status',
+      '--porcelain',
+      '--untracked-files=all',
+      '--ignored=matching',
+    );
+    if (!tag.startsWith('S ') || status !== '') {
+      // Some older Git versions clear S when an out-of-cone path materializes.
+      // That is a different, visible edit, not this review's failing shape.
+      ctx.skip();
+    }
+    await expect(worktreeHasWork(wt)).resolves.toBe(true);
+  });
+
   it('a carried edit the clean filter would normalize away still reads as work (R4-1)', async () => {
     // With a text/eol filter, hash-object (filtered) would hide a CRLF-only
     // rewrite of an already-dirty carried file; the raw-byte identity must
@@ -2568,6 +2734,23 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
         path.join(repoParent, 'gone'),
         carriedEntries,
       ),
+    ).resolves.toBe(false);
+  });
+
+  it('refuses a carried deletion when the source now holds a directory', async () => {
+    await fs.rm(path.join(repoRoot, 'tracked.txt'));
+    const { worktree, carriedEntries } = await createCarried(
+      'r96-source-directory',
+    );
+    await expect(worktreeHasWork(worktree.path, carriedEntries)).resolves.toBe(
+      false,
+    );
+    await expect(
+      carriedOverlayStillHeldBySource(repoRoot, carriedEntries, worktree.path),
+    ).resolves.toBe(true);
+    await fs.mkdir(path.join(repoRoot, 'tracked.txt'));
+    await expect(
+      carriedOverlayStillHeldBySource(repoRoot, carriedEntries, worktree.path),
     ).resolves.toBe(false);
   });
 

@@ -128,10 +128,14 @@ array.
 predicate refuses hidden index bits (`hasHiddenIndexBit`, `ls-files -v`), so the
 default no-carry path (core retention sweep, legacy sidecars, no-carry creations)
 is protected too. assume-unchanged (lowercase tag, never set by sparse-checkout)
-always refuses; skip-worktree (`S`) refuses only when `core.sparseCheckout` is
-not enabled — sparse-checkout legitimately stamps `S` on every out-of-cone path,
-so refusing it unconditionally would strand every worktree of a sparse repository
-(the prepared-worktree gate applies the same carve-out). When `carriedEntries` is
+always refuses. Skip-worktree (`S`) is exempt only for a genuinely absent,
+excluded path in a sparse checkout: the leaf must return ENOENT below a
+directory ancestor, and `sparse-checkout check-rules` must exclude it. A
+materialized `S` path, an in-scope hidden deletion, an unreadable path or a
+non-directory ancestor still refuses. The prepared-worktree gate calls this
+same predicate instead of maintaining a separate sparse carve-out. The
+`ls-files` probes suppress only the named sparse-index expansion advice; other
+stderr remains fail-closed. When `carriedEntries` is
 present, the probe is a single collapsed `status --porcelain
 --untracked-files=all --ignored=matching -z` (non-ignored untracked files stay
 file-level so a carried path matches exactly; ignored entries collapse to
@@ -202,9 +206,11 @@ unchanged in this deliverable.
   refuse capture before tar. A late shared hidden-index-bit check precedes the
   pending-operation check, which remains the final probe before removal, so a
   flag and edit hidden from status cannot authorize deletion. Its clean-sparse
-  carve-out is limited to paths actually excluded by Git's own sparse-checkout
-  rules; an unexpected S hiding an in-scope deletion is refused. Paths whose
-  original index bytes cannot be recovered from UTF-8 output also preserve.
+  carve-out is limited to absent paths actually excluded by Git's own sparse
+  rules; materialized S paths and unexpected in-scope deletions are refused.
+  Only the named sparse-index expansion advice is suppressed, never other
+  stderr. Paths whose original index bytes cannot be recovered from UTF-8
+  output also preserve.
 - A checkout with any non-carried work (a late-arriving ignored file, a populated
   directory beyond the carried files) reads as work and is snapshotted then
   deleted (P6 U3) — never deleted bare. States the snapshot cannot represent

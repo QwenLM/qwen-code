@@ -98,9 +98,11 @@ null-hash 删除，常规文件分批哈希）。计算失败使 `carriedEntries
 `worktreeHasWork` 增可选第二参数 `carriedEntries?: readonly CarriedEntry[]`。在探针之前，
 共享谓词先拒绝隐藏索引位（`hasHiddenIndexBit`，`ls-files -v`），因此缺省无携带路径
 （core 保留清扫、legacy sidecar、无携带创建）也受保护。assume-unchanged（小写标签，
-sparse-checkout 从不设置）恒拒绝；skip-worktree（`S`）仅在 `core.sparseCheckout` 未启用时
-拒绝——sparse-checkout 合法地给每个 cone 外路径打 `S`，无条件拒绝会永久 stranded 稀疏仓库
-的每个 worktree（准备好 worktree 门用同一豁免）。存在 `carriedEntries` 时，探针是单一折叠的
+sparse-checkout 从不设置）恒拒绝。skip-worktree（`S`）仅在属于稀疏检出、叶路径
+返回 ENOENT 且最近的现存祖先是目录、并被 `sparse-checkout check-rules` 排除时才豁免。
+已物化的 `S` 路径、规则内的隐藏删除、不可读路径和非目录祖先仍然拒绝；准备好 worktree
+回滚门调用同一谓词，不再维护另一套 sparse 豁免。`ls-files` 探针仅关闭指定的稀疏索引
+展开提示，其它 stderr 仍失败关闭。存在 `carriedEntries` 时，探针是单一折叠的
 `status --porcelain --untracked-files=all --ignored=matching -z`（非 ignored 的 untracked
 文件保持文件级使搬运路径精确匹配；ignored 条目折叠为目录，即基础谓词的几何，使大
 `node_modules` 不以文件级枚举而撑爆捕获缓冲），并一次性计算搬运路径的*当前*身份。
@@ -146,8 +148,9 @@ rename/copy 记录直接拒绝。非搬运条目保留现有 session-marker / di
   首次摘要在 has-work 与搬运来源分类之前取得，来源哈希期间新保存的文件不会授权无归档删除。
   移除前复核共享隐藏索引位，再复核 pending 操作，后者仍是删除前的最后一道检查。
   捕获期间新设置的 index bit 及随后编辑即使不进入 status，也不能授权删除。
-  clean-sparse 例外仅限 Git 当前 sparse-checkout 规则实际排除的路径；
-  规则包含的异常 S 隐藏删除意图时仍拒绝清理。
+  clean-sparse 例外仅限 Git 当前 sparse-checkout 规则实际排除且确实不存在的路径；
+  实体化的 S 与规则内隐藏的删除意图都继续保护。
+  `ls-files` 只关闭特定的稀疏索引展开提示，其他 stderr 仍按失败关闭处理。
   无法从 UTF-8 输出可靠还原的原始索引路径也保留 checkout。
   保护路径的大小写变体在 tar 启动前拒绝捕获。
 - 含任何非搬运工作（迟到的 ignored 文件、搬运文件之外填充的目录）的 checkout 读作工作，
