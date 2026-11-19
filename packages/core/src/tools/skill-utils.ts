@@ -110,7 +110,8 @@ export function buildMcpDependencyWarning(
   if (!skill.mcpServers || skill.mcpServers.length === 0) return '';
   const usable = new Set(Object.keys(config.getMcpServers?.() ?? {}));
   const missing: string[] = [];
-  const unusable: Array<{ name: string; reason: McpServerUnavailableReason }> = [];
+  const unusable: Array<{ name: string; reason: McpServerUnavailableReason }> =
+    [];
   for (const name of skill.mcpServers) {
     const reason = config.getMcpServerUnavailableReason?.(name);
     if (reason) {
