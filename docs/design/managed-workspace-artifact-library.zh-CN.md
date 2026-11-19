@@ -2,9 +2,11 @@
 
 [English](managed-workspace-artifact-library.md) | [简体中文](managed-workspace-artifact-library.zh-CN.md)
 
-状态：随本次变更实现；已本地验证（H2 与真实 MySQL 8.4 集成、
-surface/契约/准入/parity 门禁、web-shell 聚焦测试、build/typecheck/bundle）。
-完整 CI 验收仍待进行。
+状态：已随 #17728 合入（squash 提交 `3f7b6088d9`）。合入前已验证：H2 与真实
+MySQL 8.4 集成、surface/契约/准入/parity 门禁、web-shell 聚焦测试、
+build/typecheck/bundle、22 项变异见证矩阵、真实 Spring 启动＋真实 HTTP 准入
+探针；ci.yml 与 Managed Agent gate 在最终 PR head 全绿。延期测试加固后续见
+#17778。
 
 ## 问题与现状
 
