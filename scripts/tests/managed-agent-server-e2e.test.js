@@ -128,8 +128,40 @@ const IN_PLACE_WRITERS = new Map([
   ['Reflect', new Set(['set', 'defineProperty'])],
 ]);
 
+// The literal text of a string or untagged template node, or undefined. One
+// extractor shared by both AST scanners below: a key, a tool name and a call id
+// all mean the same thing whether they are spelled as a string or a template,
+// and two copies of this predicate drifted apart once already.
+const literalText = (node) =>
+  node !== undefined &&
+  (isStringLiteral(node) || isNoSubstitutionTemplateLiteral(node))
+    ? node.text
+    : undefined;
+
 const loopClassifierWiring = (text) => {
   const file = createSourceFile('runner.ts', text, ScriptTarget.Latest, true);
+  // Every initializer ever bound to a name, collected before the main walk so
+  // a helper call resolves to what its argument was bound to regardless of
+  // source order. The fabrication check keys on those initializers, not on the
+  // binding's spelling: a legitimate arm may name its binding anything, and
+  // requiring one canonical name reddened exactly such an arm. The map is
+  // scope-insensitive, so it keeps EVERY initializer a name was given rather
+  // than the last one: same-named bindings in different scopes then fail
+  // closed instead of silently resolving to whichever was collected last.
+  const bindingInitializers = new Map();
+  const collectBindings = (node) => {
+    if (
+      isVariableDeclaration(node) &&
+      isIdentifier(node.name) &&
+      node.initializer !== undefined
+    ) {
+      const seen = bindingInitializers.get(node.name.text) ?? new Set();
+      seen.add(node.initializer.getText(file));
+      bindingInitializers.set(node.name.text, seen);
+    }
+    forEachChild(node, collectBindings);
+  };
+  collectBindings(file);
   const definitions = [];
   const declarations = [];
   const gates = [];
@@ -171,10 +203,6 @@ const loopClassifierWiring = (text) => {
     }
     return -1;
   };
-  const literalText = (node) =>
-    isStringLiteral(node) || isNoSubstitutionTemplateLiteral(node)
-      ? node.text
-      : undefined;
   // The binding a write targets, whether the whole binding or one of its
   // members: an element write on the input re-creates the mis-answer without
   // touching any identifier the other inventories record.
@@ -259,9 +287,17 @@ const loopClassifierWiring = (text) => {
       isIdentifier(node.expression) &&
       node.expression.text === 'classifierBlockAnswer'
     ) {
+      const arg = node.arguments[0];
       helperCalls.push({
         callback: fakeCallback(node),
-        text: node.arguments[0]?.getText(file),
+        text: arg?.getText(file),
+        // What the argument was bound to. An identifier resolves to every
+        // initializer its name was given; anything else (an inline object, a
+        // computed expression) stands for itself, and an unbound name resolves
+        // to a marker — all of which must equal the lookup to pass.
+        argInitializers: isIdentifier(arg)
+          ? [...(bindingInitializers.get(arg.text) ?? new Set(['<unbound>']))]
+          : [arg?.getText(file)],
       });
     }
     if (
@@ -307,8 +343,10 @@ const loopClassifierWiring = (text) => {
     // recorded and the pin requires an inline array.
     if (
       isPropertyAssignment(node) &&
-      isIdentifier(node.name) &&
-      node.name.text === 'toolCalls'
+      // A quoted key is the same property: `{ 'toolCalls': [ …hand-built… ] }`
+      // escaped an identifier-only match, exactly as a quoted allow key did.
+      (isIdentifier(node.name) ? node.name.text : literalText(node.name)) ===
+        'toolCalls'
     ) {
       const callback = fakeCallback(node);
       if (!isArrayLiteralExpression(node.initializer)) {
@@ -436,11 +474,6 @@ const loopClassifierScope = (wiring) => {
 // the create-call id it filters by.
 const mintedIdWiring = (text) => {
   const file = createSourceFile('runner.ts', text, ScriptTarget.Latest, true);
-  const literal = (node) =>
-    node !== undefined &&
-    (isStringLiteral(node) || isNoSubstitutionTemplateLiteral(node))
-      ? node.text
-      : undefined;
   const calls = [];
   const fallbacks = [];
   const visit = (node) => {
@@ -455,7 +488,7 @@ const mintedIdWiring = (text) => {
           isVariableDeclaration(parent) && isIdentifier(parent.name)
             ? parent.name.text
             : undefined,
-        createCallId: literal(node.arguments[1]),
+        createCallId: literalText(node.arguments[1]),
       });
     }
     if (
@@ -463,7 +496,7 @@ const mintedIdWiring = (text) => {
       node.operatorToken.kind === SyntaxKind.QuestionQuestionToken &&
       isIdentifier(node.left) &&
       node.left.text === 'createdId' &&
-      literal(node.right) === 'missing-schedule-id'
+      literalText(node.right) === 'missing-schedule-id'
     ) {
       fallbacks.push(node.getText(file));
     }
@@ -3936,17 +3969,18 @@ describe('managed-agent-server e2e runner', () => {
     // The direct-fabrication route is closed file-wide too. A sibling hoisted
     // into a module-level function and returned as a whole response answers a
     // foreign side-query call id from outside every loop callback, so no
-    // loop-scoped inventory sees it. Anywhere in the runner the helper takes
-    // the looked-up properties and every `blockProperties` binding is that
-    // lookup; a schema fabricated inline in a hoisted function reddens here
-    // whatever its binding is named. Sets, not counts: a legitimate new arm
-    // following the same lookup adds no member. Fabricating the `schemaTool`
-    // lookup one level up still spells both canonically and is measured to
-    // survive — the same unbounded spelling family, whose durable fix is the
-    // executed seam tracked in #17673, not another inventory.
-    expect([...new Set(wiring.helperCalls.map((call) => call.text))]).toEqual([
-      'blockProperties',
-    ]);
+    // loop-scoped inventory sees it. Anywhere in the runner, every helper call
+    // must take a binding whose initializer IS the lookup — resolved through
+    // the binding, not matched on its name, so a legitimate arm that names its
+    // binding differently passes while a fabricated schema reddens whether it
+    // is passed inline or bound first. Sets, not counts, so a new arm adds no
+    // member. Fabricating the `schemaTool` lookup one level up still spells
+    // the initializer canonically and is measured to survive — the same
+    // unbounded spelling family, whose durable fix is the executed seam
+    // tracked in #17673, not another inventory.
+    expect([
+      ...new Set(wiring.helperCalls.flatMap((call) => call.argInitializers)),
+    ]).toEqual(['schemaTool?.function?.parameters?.properties']);
     expect([
       ...new Set(wiring.definitions.map((definition) => definition.text)),
     ]).toEqual(['schemaTool?.function?.parameters?.properties']);
@@ -4095,7 +4129,22 @@ describe('managed-agent-server e2e runner', () => {
       // A toolCalls source that is not an inline array cannot be enumerated.
       "const hoistedCalls = [{ id: 'hb2', type: 'function', function: { name: 'respond_in_schema', arguments: '{}' } }];",
       'return { toolCalls: hoistedCalls };',
+      // A quoted toolCalls key is the same property as an identifier one.
+      "return { 'toolCalls': [{ id: 'hb4', type: 'function', function: { name: 'respond_in_schema', arguments: '{}' } }] };",
       'if (body.sideQuery === true) return sideQueryResponse();',
+    ]);
+    // A legitimate arm that names its binding differently but does the same
+    // lookup and the same gating. The fabrication check resolves through the
+    // binding, so this must add no member to the file-wide initializer set —
+    // keying on the binding's spelling reddened exactly this arm.
+    const renamedArm = fakeCallback([
+      "const schemaTool = tools.find((tool) => tool.function?.name === 'respond_in_schema');",
+      'const schemaProps = schemaTool?.function?.parameters?.properties;',
+      'const decided = classifierBlockAnswer(schemaProps);',
+      'if (decided !== undefined) {',
+      "  return { toolCalls: [fakeToolCall('respond_in_schema', decided, 'renamed-arm')] };",
+      '}',
+      "return { content: 'fixture' };",
     ]);
     // A sibling hoisted out of every callback: it fabricates its own schema,
     // derives the allow through the helper and returns a WHOLE response under
@@ -4127,7 +4176,7 @@ describe('managed-agent-server e2e runner', () => {
       "return { toolCalls: [{ id: 'hb3', type: 'function', function: { name: 'respond_in_schema', arguments: '{}' } }] };",
     ]);
     const wiring = loopClassifierWiring(
-      [hoistedResponse, loopFake, unrelatedFake].join('\n'),
+      [hoistedResponse, loopFake, unrelatedFake, renamedArm].join('\n'),
     );
     const scope = loopClassifierScope(wiring);
     // The comment names both bindings and spells the allow literal and the
@@ -4167,18 +4216,46 @@ describe('managed-agent-server e2e runner', () => {
     // Six answer sites exist, but only the loop callback is in scope: the
     // unrelated arm reuses the helper, the binding names and the tool name,
     // and none of it may redden a loop pin.
-    expect(wiring.answers).toHaveLength(6);
+    expect(wiring.answers).toHaveLength(7);
     expect(scope.callbacks).toHaveLength(1);
     expect(scope.answers).toHaveLength(3);
     expect(wiring.definitions).toHaveLength(2);
     expect(wiring.declarations).toHaveLength(2);
+    // The gate inventory keys on the canonical decision name, so the renamed
+    // arm's gate on its own name is not counted; its helper call still is,
+    // which is what the fabrication resolution below exercises.
     expect(wiring.gates).toHaveLength(2);
-    expect(wiring.helperCalls).toHaveLength(4);
+    expect(wiring.helperCalls).toHaveLength(5);
     // The hoisted sibling is provably outside the loop scope — its fabricated
     // argument reaches the file-wide inventory only, which is why the pin
     // asserts the fabrication sets file-wide and not per callback.
     expect(wiring.helperCalls.map((call) => call.text)).toContain('props');
     expect(scope.helperCalls).not.toContain('props');
+    // The fabrication check resolves through the binding, so the renamed arm
+    // contributes the lookup and adds no member; only the hoisted fabrication
+    // is a second member. Keying on the binding's spelling instead would have
+    // listed 'schemaProps' as a third member and reddened a legitimate arm.
+    const renamedCall = wiring.helperCalls.find(
+      (call) => call.text === 'schemaProps',
+    );
+    expect(renamedCall.argInitializers).toEqual([
+      'schemaTool?.function?.parameters?.properties',
+    ]);
+    const initializerUnion = [
+      ...new Set(wiring.helperCalls.flatMap((call) => call.argInitializers)),
+    ];
+    // Three members: the inline fabrication, the loop fake's own fabricated
+    // conditional provenance, and the lookup. The renamed arm resolves to the
+    // lookup, so its binding name is NOT a member — which is the whole point.
+    expect(initializerUnion.sort()).toEqual(
+      [
+        "{ shouldBlock: { type: 'boolean' } }",
+        "schemaTool ? { shouldBlock: { type: 'boolean' } } : undefined",
+        'schemaTool?.function?.parameters?.properties',
+      ].sort(),
+    );
+    expect(initializerUnion).not.toContain('schemaProps');
+    expect(initializerUnion).not.toContain('props');
     expect(scope.answers.map((site) => site.callId)).not.toContain('title');
     expect(scope.answers[0].isGatedBinding).toBe(true);
     // The template-literal sibling is detected: it is neither the gated
@@ -4189,17 +4266,18 @@ describe('managed-agent-server e2e runner', () => {
     // binding, so it is visible as an answer as well as a construction site.
     expect(scope.answers[2].callId).toBe('loop-fire-quoted');
     expect(scope.answers[2].isGatedBinding).toBe(false);
-    expect(scope.schemaNameSites).toHaveLength(5);
-    expect(wiring.schemaNameSites).toHaveLength(10);
+    expect(scope.schemaNameSites).toHaveLength(6);
+    expect(wiring.schemaNameSites).toHaveLength(13);
     // A computed tool name hides the answer from every name-based inventory,
     // so it is recorded on its own and the loop pin requires none — at three
     // arguments and at two, since arity does not make the name any less hidden.
     expect(scope.dynamicToolNames).toHaveLength(2);
     // A tool call assembled without fakeToolCall is recorded whatever its
-    // name spells, including a computed one, and so is a toolCalls source that
-    // is not an inline array (its elements cannot be enumerated at all).
-    expect(scope.handBuiltToolCalls).toHaveLength(2);
-    expect(wiring.handBuiltToolCalls).toHaveLength(3);
+    // name spells, including a computed one, whether the toolCalls key is an
+    // identifier or quoted, and so is a toolCalls source that is not an inline
+    // array (its elements cannot be enumerated at all).
+    expect(scope.handBuiltToolCalls).toHaveLength(3);
+    expect(wiring.handBuiltToolCalls).toHaveLength(4);
     // The scoping of these three inventories is witnessed, not assumed: the
     // unrelated arm carries a write, a computed name and a hand-built element,
     // each of which reaches the file-wide inventory and none the loop scope.

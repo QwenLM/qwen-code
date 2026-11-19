@@ -245,6 +245,17 @@ Main was merged a fifth time (merge commit `50a39ddbc8`, zero overlap with this 
 
 A sixth merge (`114ebcc1a1`) then brought in `c5247e9727` (#17733), which touches only web-shell client files and docs — no cli, core, Java or scripts — so the harness, jar and arm evidence above carry over unchanged; the fast suites and core `tsc --build` were re-run at that head and are green (core 35/35, scripts meta 184/184). The scripts meta count grew from 183 to **184** because main added one case to `hosted-process-ci.test.js` (95 → 96); the changed file is still 88. Core is 35/35 and core `tsc --build` is clean at this head.
 
+## Round-12 review: LGTM with four deferred items, three fixed and one already disclosed
+
+Round 12 returned **"No blocking issues. LGTM!"** with four deferred items. Three are defects in guards this PR ships and are fixed here; the fourth is the limitation already recorded above.
+
+- **A quoted `toolCalls` key escaped the hand-built inventory.** Measured: `return { 'toolCalls': [ …hand-built… ] }` left that inventory at zero file-wide, exactly as a quoted allow key had before round 9 fixed it. The key match now accepts an identifier, a string or an untagged template, and the executed control carries the quoted form. Witness: reverting to an identifier-only match reddens the hand-built count.
+- **The file-wide fabrication check keyed on the binding's spelling and reddened a legitimate arm.** Measured: a third arm doing the same lookup and the same gating but naming its binding `schemaProps` was reported as a fabrication. The check now resolves the argument **through its binding** to the initializer it was given, and requires that initializer to be the lookup. The collector keeps _every_ initializer a name was ever bound to, because it is scope-insensitive: same-named bindings in different scopes then fail closed rather than silently resolving to whichever was collected last. An inline object stands for itself and an unbound name resolves to a marker, so both still redden. The control now carries a legitimate renamed arm and asserts it adds no member. Witness: keying the union on the binding's text instead lists `schemaProps` and reddens.
+- **Two AST scanners each defined their own literal-text extractor.** Hoisted to one module-level `literalText` shared by both; the duplicate in `mintedIdWiring` is gone. Witness: narrowing the shared extractor to string literals only reddens the template-literal answer site.
+- **The core parity test classifies Java routing and loop-bearing profiles by regex over Java source and Javadoc.** Already disclosed: the round-10 record states this is a drift guard, not a mechanism pin, and #17673 carries the shape-independent routing assertion as the durable fix. No new work; recorded here so the item is not silently dropped.
+
+The gate and declaration inventories still key on the canonical decision name, so a renamed arm's gate is not counted; its helper call is, which is what the fabrication resolution exercises. That is the scanner's existing design, not a change in this round.
+
 ## Open questions
 
 None blocking.
