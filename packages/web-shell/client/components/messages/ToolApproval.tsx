@@ -718,7 +718,7 @@ export function ToolApproval({
         data-web-shell-permission-option
         disabled={actionsDisabled}
         data-option-id={option.id}
-        tabIndex={!hasApprovalMenu && !isSelected ? -1 : 0}
+        tabIndex={isSelected ? 0 : -1}
         role={hasApprovalMenu ? undefined : 'radio'}
         aria-checked={hasApprovalMenu ? undefined : isSelected}
         aria-keyshortcuts={index < 9 ? String(index + 1) : undefined}

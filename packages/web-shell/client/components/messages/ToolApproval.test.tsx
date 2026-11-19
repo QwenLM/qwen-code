@@ -1727,7 +1727,8 @@ describe('ToolApproval accessibility', () => {
     // Launching the agent is the proposed next action: focus and initial
     // selection land on the one-shot allow instead of the reject button.
     expect(document.activeElement).toBe(opts[1]);
-    expect(opts[1]!.tabIndex).toBe(0);
+    // The VS Code host finds the selected action by its tab index.
+    expect(opts.map((option) => option.tabIndex)).toEqual([-1, 0]);
   });
 
   it('defaults an agent-launch dialog to Reject when no one-shot allow exists', () => {
