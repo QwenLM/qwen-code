@@ -150,7 +150,9 @@ with `runtime-broker.web-terminal` for this local deployment. Its managed proxy
 forwards this route's WebSocket upgrade through the ordinary daemon's single
 ACP upgrade dispatcher, after the existing Host and Origin checks. This route
 adds its own primary-listener and loopback restriction before daemon bearer
-verification; that restriction is not an existing shared gate. The browser and upstream relay
+verification; that restriction is not an existing shared gate. This route still
+applies the loopback Host allowlist on an authenticated non-loopback bind and
+rejects `.` and `..` as session selectors. The browser and upstream relay
 sockets share the dispatcher's shutdown cleanup. Java consumes the one-time
 terminal ticket independently of the daemon token. Managed local startup
 rejects `QWEN_SERVE_ACP_HTTP=0` because the terminal requires this dispatcher;

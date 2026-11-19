@@ -128,7 +128,9 @@ Session 的下一次生命周期 drain，因为不 sweep hold 的离开 ACTIVE �
 `runtime-broker.web-terminal`。其 managed 代理通过普通 daemon 的唯一 ACP
 upgrade 分发器，在既有 Host 与 Origin 检查之后转发该路由的 WebSocket
 upgrade。此路由自身新增 primary-listener 与 loopback 限制，再于 daemon
-bearer 校验之前接管；这项限制不是已有的共享门禁。浏览器与上游 relay socket
+bearer 校验之前接管；这项限制不是已有的共享门禁。在认证场景的非 loopback
+bind 上，本路由仍执行 loopback Host 白名单，并拒绝仅由 `.` 或 `..` 组成的
+session selector。浏览器与上游 relay socket
 共用分发器的关闭清理。Java 独立于 daemon token 消费一次性终端票。由于终端
 依赖该分发器，Managed 本地启动拒绝 `QWEN_SERVE_ACP_HTTP=0`；普通 daemon
 的 ACP 关闭行为不变。独立 Managed Web gateway 复用同一个 relay helper。普通

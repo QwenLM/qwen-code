@@ -1733,7 +1733,12 @@ export function mountAcpHttp(
           socket.destroy();
           return;
         }
-      } else if (fromLoopback && !authenticatedRemoteBind) {
+      } else if (
+        // Java terminal tickets must not inherit an authenticated bind's
+        // relaxed Host check.
+        fromLoopback &&
+        (managedTerminalUpgrade !== undefined || !authenticatedRemoteBind)
+      ) {
         const allowed = new Set([
           `localhost:${localPort}`,
           `127.0.0.1:${localPort}`,

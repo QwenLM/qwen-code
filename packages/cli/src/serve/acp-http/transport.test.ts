@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
 import { promises as fs } from 'node:fs';
 import { createServer, type Server } from 'node:http';
+import { connect } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -13025,6 +13026,49 @@ describe('ACP WebSocket transport security', () => {
     });
   }
 
+  // Raw bytes keep dot-only selectors intact instead of normalizing them away
+  // during URL parsing. This is a fixture, not an HTTP client URL factory.
+  async function rawTerminalUpgrade(
+    requestPath: string,
+    authority = `127.0.0.1:${port}`,
+  ): Promise<{ statusLine: string; clientError?: string }> {
+    return await new Promise((resolve, reject) => {
+      let data = '';
+      let clientError: string | undefined;
+      const socket = connect({ port, host: '127.0.0.1' }, () => {
+        socket.write(
+          [
+            `GET ${requestPath} HTTP/1.1`,
+            `Host: ${authority}`,
+            'Connection: Upgrade',
+            'Upgrade: websocket',
+            'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+            'Sec-WebSocket-Version: 13',
+            'Sec-WebSocket-Protocol: qwen-ws',
+            `Origin: http://127.0.0.1:${port}`,
+            '',
+            '',
+          ].join('\r\n'),
+        );
+      });
+      const timeout = setTimeout(() => {
+        socket.destroy();
+        reject(new Error('Raw terminal upgrade timed out'));
+      }, 3000);
+      socket.setEncoding('latin1');
+      socket.on('data', (chunk: string) => {
+        data += chunk;
+      });
+      socket.once('error', (error) => {
+        clientError = error.message;
+      });
+      socket.once('close', () => {
+        clearTimeout(timeout);
+        resolve({ statusLine: data.split('\r\n')[0] ?? '', clientError });
+      });
+    });
+  }
+
   function wsConnectLocalControl(
     token: string,
     headers: Record<string, string> = {},
@@ -13396,6 +13440,65 @@ describe('ACP WebSocket transport security', () => {
     );
     expect(nearMiss.code).not.toBe(101);
     expect(forward).not.toHaveBeenCalled();
+  });
+
+  it('keeps the Managed terminal Host allowlist on an authenticated non-loopback bind', async () => {
+    const forwarded: string[] = [];
+    await startServer({
+      hostname: '0.0.0.0',
+      token: 'runtime-token',
+      webShellToken: 'device-token',
+      managedTerminalUpgrade: {
+        matches: isManagedTerminalUpgradePath,
+        forward: (request, socket) => {
+          forwarded.push(request.url ?? '');
+          socket.end('HTTP/1.1 101 Switching Protocols\r\n\r\n');
+        },
+      },
+    });
+    const rejected = await rawTerminalUpgrade(
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+      'attacker.invalid',
+    );
+    expect(rejected.statusLine).toBe('HTTP/1.1 403 Forbidden');
+    expect(forwarded).toEqual([]);
+    const accepted = await rawTerminalUpgrade(
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+    );
+    expect(accepted.statusLine).toBe('HTTP/1.1 101 Switching Protocols');
+    expect(forwarded).toEqual([
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+    ]);
+  });
+
+  it('rejects dot-only Managed terminal selectors while preserving ordinary dotted selectors', async () => {
+    const forwarded: string[] = [];
+    await startServer({
+      managedTerminalUpgrade: {
+        matches: isManagedTerminalUpgradePath,
+        forward: (request, socket) => {
+          forwarded.push(request.url ?? '');
+          socket.end('HTTP/1.1 101 Switching Protocols\r\n\r\n');
+        },
+      },
+    });
+    for (const session of ['sess-1', 'tenant.v1']) {
+      const result = await rawTerminalUpgrade(
+        `/api/agent/web-shell/v1/sessions/${session}/terminal?terminalId=t1&replay=1`,
+      );
+      expect(result.statusLine).toBe('HTTP/1.1 101 Switching Protocols');
+      expect(result.clientError).toBeUndefined();
+    }
+    for (const selector of ['.', '..']) {
+      const result = await rawTerminalUpgrade(
+        `/api/agent/web-shell/v1/sessions/${selector}/terminal?terminalId=t1&replay=1`,
+      );
+      expect(result.statusLine).not.toContain('101');
+    }
+    expect(forwarded).toEqual([
+      '/api/agent/web-shell/v1/sessions/sess-1/terminal?terminalId=t1&replay=1',
+      '/api/agent/web-shell/v1/sessions/tenant.v1/terminal?terminalId=t1&replay=1',
+    ]);
   });
 
   it("rejects cross-origin WS upgrade even when allow-origin '*' is configured", async () => {

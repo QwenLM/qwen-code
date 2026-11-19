@@ -53,8 +53,8 @@ Set both `qwen.managed-agent.runtime-broker.tool-measurements=true` and `qwen.ma
 
 Move the standalone gateway's raw terminal relay into `managed-local-web.ts` and reuse it in both forms. Inject a Managed-terminal upgrade route from `server.ts` into the existing single ACP upgrade dispatcher. The route:
 
-- matches only `/api/agent/web-shell/v1/sessions/{sessionId}/terminal` on the raw, unnormalized path;
-- is primary-listener only and passes the existing Host and Origin checks;
+- matches only `/api/agent/web-shell/v1/sessions/{sessionId}/terminal` on the raw, unnormalized path and rejects `.` and `..` as session selectors;
+- is primary-listener only and passes the existing Host and Origin checks. It also applies the loopback Host allowlist on an authenticated non-loopback bind;
 - runs before daemon bearer verification because `qwen-bearer.<ticket>` belongs to Java's one-time terminal-ticket protocol, not the daemon token;
 - forwards only the WebSocket handshake headers, query and initial bytes, never browser `Authorization`, Cookie, signing or identity headers;
 - returns only the safe `qwen-ws` subprotocol and leaves every other upgrade path unchanged.

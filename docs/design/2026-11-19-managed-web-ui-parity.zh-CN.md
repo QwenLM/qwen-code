@@ -53,8 +53,8 @@ Managed Web Shell 没有解释许多 daemon 专属界面。它们的控件被隐
 
 把独立 gateway 的原始终端 relay 移到 `managed-local-web.ts`，供两种形态复用。由 `server.ts` 向现有唯一 ACP upgrade 分发器注入 Managed 终端 upgrade 路由。该路由：
 
-- 只对原始、未规范化路径 `/api/agent/web-shell/v1/sessions/{sessionId}/terminal` 做精确匹配；
-- 只允许 primary listener，并经过现有 Host 与 Origin 检查；
+- 只对原始、未规范化路径 `/api/agent/web-shell/v1/sessions/{sessionId}/terminal` 做精确匹配，并拒绝仅由 `.` 或 `..` 组成的 session selector；
+- 只允许 primary listener，并经过现有 Host 与 Origin 检查；在认证场景的非 loopback bind 上，仍执行 loopback Host 白名单；
 - 在 daemon bearer 校验前接管，因为 `qwen-bearer.<ticket>` 属于 Java 一次性终端票协议，不是 daemon token；
 - 只转发 WebSocket 握手头、query 与初始字节，绝不转发浏览器 `Authorization`、Cookie、签名或身份头；
 - 只返回安全的 `qwen-ws` 子协议，其他 upgrade 路径保持不变。
