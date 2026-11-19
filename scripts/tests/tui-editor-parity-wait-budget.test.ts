@@ -21,10 +21,7 @@ import {
   type Node,
 } from 'typescript';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  MAX_READY_PROMPT_BUDGET_MS,
-  readyPromptBudgetMs,
-} from '../../integration-tests/ready-prompt-budget.js';
+import { MAX_READY_PROMPT_BUDGET_MS } from '../../integration-tests/ready-prompt-budget.js';
 
 // A wait ceiling is invisible on a green run: the editor-parity repaints land
 // in well under a second locally, so nothing here observes #17544's CI expiry,
@@ -129,13 +126,15 @@ describe('tui-editor-parity wait ceiling (#17544)', () => {
     vi.resetModules();
   });
 
-  it('gives a mid-turn repaint the shared-pool boot stall tier in CI', async () => {
+  it('keeps the mid-turn repaint wait at the original budget, scaled for CI', async () => {
     const { WAIT_LOCAL_MS, until } = await budgetsIn(true);
     const { scaledWait } = await import(
       '../../integration-tests/interactive/wait.js'
     );
     const ciWaitMs = scaledWait(WAIT_LOCAL_MS);
-    expect(ciWaitMs).toBeGreaterThanOrEqual(readyPromptBudgetMs(SELF_HOSTED));
+    // #17544's failing waits poll client-only transitions, so a raise cannot
+    // fix them and is withdrawn; this holds the suite's original budget.
+    expect(ciWaitMs).toBe(36_000);
 
     // A case spends its boot window before the wait starts, so the pair must
     // fit the per-test default together; otherwise a stalled repaint dies as
@@ -151,8 +150,7 @@ describe('tui-editor-parity wait ceiling (#17544)', () => {
     expect(budgetImports().sort()).toEqual(['permissionsCaseOptions', 'until']);
 
     // The helper the suite really polls with, measured rather than re-spelled:
-    // wiring it to a smaller budget than WAIT_LOCAL_MS reds here. Advancing by
-    // the derived wait keeps a legitimate raise green.
+    // wiring it to a smaller budget than WAIT_LOCAL_MS reds here.
     vi.useFakeTimers();
     const start = Date.now();
     const expiry = until(() => false, 'repaint').then(
@@ -170,17 +168,18 @@ describe('tui-editor-parity wait ceiling (#17544)', () => {
     // cut reports a documented figure, and each tier runs with the ambient CI
     // stubbed the other way, so a process.env read reds here too.
     const ci = await budgetsIn(false);
-    expect(ci.permissionsCaseOptions(SELF_HOSTED)).toEqual({
-      timeout: 420_000,
+    const noAk = ci.permissionsCaseOptions(SELF_HOSTED);
+    expect(noAk).toEqual({
+      timeout: 258_000,
       retry: 0,
     });
     expect(ci.permissionsCaseOptions(SELF_HOSTED_DOCKER)).toEqual({
-      timeout: 510_000,
+      timeout: 348_000,
       retry: 0,
     });
     const local = await budgetsIn(true);
     expect(local.permissionsCaseOptions({})).toEqual({
-      timeout: 180_000,
+      timeout: 126_000,
       retry: 0,
     });
 
@@ -193,6 +192,12 @@ describe('tui-editor-parity wait ceiling (#17544)', () => {
       'permissions-clear-undo-replace-without-model',
       'permissions-second-control-c-exits-without-model',
     ]);
+    // The required no-AK gate runs this whole file in one shard inside a
+    // 20-minute step (.github/workflows/ci.yml, pinned by
+    // scripts/tests/no-ak-integration-ci.test.js), so the ceilings together
+    // must fit it: a re-raised wait reds here instead of killing that step
+    // mid-run with no per-case evidence.
+    expect(cases.length * noAk.timeout).toBeLessThanOrEqual(20 * 60_000);
     // The options ride in the second argument: an object in the third is the
     // deprecated form Vitest 4 throws on.
     for (const { call } of cases) {

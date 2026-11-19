@@ -10,10 +10,10 @@ import { createUntil, scaledWait } from './wait.js';
 // The suite's timing policy, split out so a PR-gated pin can import the
 // executed values instead of matching the suite's text.
 
-// The shared pool has stalled this CLI past 90s (#13552, #14191), so a
-// mid-turn repaint gets the boot's stall tier: createUntil scales this in
-// CI, and the old 12s capped it at 36s (#17544).
-export const WAIT_LOCAL_MS = 30_000;
+// Widening this cannot fix #17544: both failing waits poll a client-side
+// transition with no server term left to arrive, so a bigger budget only
+// moves the deadline.
+export const WAIT_LOCAL_MS = 12_000;
 
 export const until = createUntil(WAIT_LOCAL_MS);
 
