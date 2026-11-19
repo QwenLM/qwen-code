@@ -56,7 +56,7 @@ describe('HttpManagedChannelControlPlane', () => {
           ],
         },
       },
-      { status: 200, body: {} },
+      { status: 200, body: { deliveryId: 'd-1', state: 'delivered' } },
       { status: 200, body: {} },
     ]);
     await plane.register({
@@ -123,12 +123,15 @@ describe('HttpManagedChannelControlPlane', () => {
       },
     ]);
     expect(calls[2]!.url).toMatch(/\/deliveries:claim$/);
-    await plane.receipt('d-1', {
+    const settled = await plane.receipt('d-1', {
       outcome: 'accepted',
       ordinal: 0,
       providerMessageId: '<m@x>',
       acceptedAt: 5,
     });
+    // The settled delivery view is the only gate for prune-on-delivered; the
+    // producer must surface it, not discard it (R2-2). Returning {} reds this.
+    expect(settled).toMatchObject({ state: 'delivered' });
     expect(calls[3]!.url).toMatch(/\/deliveries\/d-1:receipt$/);
     expect(JSON.parse(calls[3]!.init.body as string)).toEqual({
       outcome: 'accepted',
@@ -140,6 +143,92 @@ describe('HttpManagedChannelControlPlane', () => {
     expect(JSON.parse(calls[4]!.init.body as string)).toEqual({
       outcome: 'unknown',
     });
+  });
+
+  it('injectPrEvent composes the model-facing prompt, not the raw evidence', async () => {
+    const headSha = 'a'.repeat(40);
+    const evidence = `CI failed on head ${headSha}. Failed checks: build.`;
+    const { plane, calls } = client([{ status: 200, body: {} }]);
+    await plane.injectPrEvent({
+      owner: 'Owner',
+      repo: 'Repo',
+      prNumber: 7,
+      transition: 'ci_failure',
+      headSha,
+      evidence,
+      episode: 1,
+    });
+    expect(calls[0]!.url).toMatch(/\/pr-watch:inject$/);
+    const body = JSON.parse(calls[0]!.init.body as string) as {
+      text: string;
+    };
+    expect(body.text).toContain('Owner/Repo#7');
+    expect(body.text).toContain('ci_failure');
+    expect(body.text).toContain(headSha);
+    expect(body.text).not.toContain(evidence);
+  });
+
+  it('returns the listed pr-watch bindings', async () => {
+    const { plane } = client([
+      {
+        status: 200,
+        body: {
+          bindings: [
+            {
+              owner: 'Owner',
+              repo: 'Repo',
+              prNumber: 7,
+              sessionId: 'session-1',
+              events: ['ci_failure', 'head_change'],
+            },
+          ],
+        },
+      },
+    ]);
+    await expect(plane.listPrWatchBindings()).resolves.toEqual([
+      {
+        owner: 'Owner',
+        repo: 'Repo',
+        prNumber: 7,
+        sessionId: 'session-1',
+        events: ['ci_failure', 'head_change'],
+      },
+    ]);
+  });
+
+  it('refuses a malformed pr-watch:list answer instead of reading it as empty', async () => {
+    // The adapter prunes every watch the answer omits, so coercing a bad body
+    // to `[]` would wipe each persisted baseline, fired ring and pending
+    // queue. Every shape below must throw out of the client.
+    for (const body of [
+      { bindings: null },
+      { bindings: 'Owner/Repo#7' },
+      {
+        bindings: [
+          { owner: 'Owner', repo: 'Repo', prNumber: 7, events: ['ci_failure'] },
+          { owner: 'Owner', repo: 'Repo', prNumber: 0, events: [] },
+        ],
+      },
+      {
+        bindings: [
+          { owner: 'Owner', repo: 'Repo', prNumber: 7, events: 'ci_failure' },
+        ],
+      },
+    ]) {
+      const { plane } = client([{ status: 200, body }]);
+      const refusal = await plane.listPrWatchBindings().then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect([JSON.stringify(body), refusal instanceof Error]).toEqual([
+        JSON.stringify(body),
+        true,
+      ]);
+    }
+    const { plane } = client([{ status: 200, body: {} }]);
+    await expect(plane.listPrWatchBindings()).rejects.toThrow(
+      'without a bindings array',
+    );
   });
 
   it('surfaces the server error code on a refusal', async () => {

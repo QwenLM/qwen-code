@@ -2,9 +2,9 @@
 
 [English](2026-10-25-external-hosted-workspace.md) | [简体中文](2026-10-25-external-hosted-workspace.zh-CN.md)
 
-Status: **A / step 3a / B0 / B1 / B2 implemented for the exact public external-files profile; selected files/default-approval/safe-close E2E passed. #15512 is not complete.** §14 records the current milestone and remaining gates. Builds on [phase 1](2026-10-23-external-runtime-provider.md) (`external-scratch`, accepted contract) and the earlier Aone operator-adapter rehearsal; that rehearsal is not evidence for this milestone. Nothing here weakens `external-scratch` invariants: deterministic logical handle before the first remote call, no replacement after a lost reply, no release-to-kill, Broker-side independent attestation, provider deduplication by `provisionRequestId`.
+Status: **A / step 3a / B0 / B1 / B2 implemented for the exact public external-files profile; selected files/default-approval/safe-close E2E passed. C's worker profile/capture routes and control-plane publication producer are implemented and partly verified locally (§15); the Broker dispatch/close wiring and control-plane profile selection land in the follow-up half, so the lane is not selectable end to end. #15512 is not complete.** §14 records the files milestone and remaining gates; §15 records slice C's implemented boundary and its deviation from §6. Builds on [phase 1](2026-10-23-external-runtime-provider.md) (`external-scratch`, accepted contract) and the earlier Aone operator-adapter rehearsal; that rehearsal is not evidence for this milestone. Nothing here weakens `external-scratch` invariants: deterministic logical handle before the first remote call, no replacement after a lost reply, no release-to-kill, Broker-side independent attestation, provider deduplication by `provisionRequestId`.
 
-**Reading order:** the A amendment and §§12–13 retain their historical slice boundaries, not current blanket admission refusals. §§1–11 retain the wider phase-2 goals and proposals; where they differ, the implemented contracts in §§12–14 take precedence. In particular, the new boot document, nonce/marker changes and shell/capture proposals are not claims of shipped behavior.
+**Reading order:** the A amendment and §§12–13 retain their historical slice boundaries, not current blanket admission refusals. §§1–11 retain the wider phase-2 goals and proposals; where they differ, the implemented contracts in §§12–15 take precedence. In particular, the new boot document and nonce/marker changes are still proposals, not shipped behavior: §15 explains why slice C deliberately keeps the shipped boot contract.
 
 ## Amendment: bounded slice A (2026-10-27)
 
@@ -114,6 +114,8 @@ All three changes are small, tabled extensions; reachability of a remote worker 
 
 ## 6. Worker admission: boot‑v2 in container mode (CLI)
 
+> **Slice C deviation (option A).** §6 below is still a proposal, and slice C deliberately does **not** implement it: the external foreground-Shell profile ships on the **already published** `managed-context/1` boot document and its existing `storage` member, unchanged. The new `managed-runtime-boot/2` document, `storageRef`, `mountNonce`, the control-plane-only marker and the device/inode receipt remain a later slice. Consequences are stated honestly in §15: this slice inherits the shipped boot binding proof, and does **not** add the marker/nonce defence against a stale boot replayed onto a re-materialized tree. See §15 for what that costs and what still fences it.
+
 The original proposal assumed the container boot path refused boot-v2 and proposed `ManagedRuntimeWorkerBoot` v2 admission with **storage-side checks**. This is not the implemented boot contract (see §12):
 
 - This phase introduces a **new closed boot document** — `managed-runtime-boot/2` — rather than widening the shipped `ManagedContextBoot` boot‑v2 key set. That document is parsed by an exact key‑list check (`readClosed` rejects any document whose sorted keys are not the expected sixteen), so adding a member to it would reject every shipped boot‑v2 document and every CSI v3–v6 envelope that wraps one. The new document has its own version and its own closed key list; shipped boot‑v2 parsing is unchanged, which is what makes this step inert for existing workers.
@@ -142,6 +144,8 @@ The hardest gap for remote foreground shell is evidence — who saw what, and wh
 
 Foreground shell and `monitor` remain targets, not capabilities of §14's files milestone. Background shell execution (`is_background`) is a later phase with its own evidence story.
 
+§15 implements the foreground half of this section and corrects one detail: the Broker is not a reader that also writes the control-plane publication. It is that publication's **producer**, and the two roles need different credentials — the worker holds none for the control plane. See §15.
+
 ## 8. Exact‑worker `stopDrained` and storage ownership fences
 
 Automatic close/recovery requires proof the ORIGINAL worker can no longer write:
@@ -153,6 +157,8 @@ Automatic close/recovery requires proof the ORIGINAL worker can no longer write:
 - A sandbox expiry/GONE is NOT a drain proof. A worker crash is NOT a drain proof. `release` continues to be a no‑op for this profile (phase‑1 rule — kill authority belongs to the storage's owner‑fenced stop path only).
 
 The supervisor process writes task‑lifetime receipts inside the worker's private publication directory (path bounded, secrets never inside release payloads), so an adapter restart can re‑attest drain by re‑stating receipts, not by trusting a crash.
+
+§15 implements this fence for the foreground-Shell profile and adds the one gate the files profile did not need: a Shell still in flight blocks the close before any of the three answers is consulted, because an unsettled execution cannot yet have produced its final receipt.
 
 ## 9. Operator adapter evolution (Aone, private repo)
 
@@ -288,4 +294,76 @@ The acceptance packet above is historical evidence for `dd5c2d2fb2e2665dd593b27f
 
 ### Remaining goal and gates
 
-**C remains open:** foreground `run_shell_command`, `monitor`, publication/capture and their close semantics are not done. `monitor` was in the initial §1 goal and remains a target, not a silently dropped requirement. True `LOST` recovery, Broker/adapter process-restart recovery, real concurrent ownership/recovery scenarios and real-provider acceptance remain open work, not completed or verified by this run. Full CI/fault suites, human review and acceptance/deployment gates remain pending. UI verification is pending; no viewer or screenshot success is claimed here. This closes the documentation comparison of user impact against the goal, not #15512 or the full phase-2 goal.
+**C is partly implemented and partly verified:** the worker-side external-Shell profile and capture routes, and the control-plane publication producer with its HTTP transport, have a local implementation (§15). The Broker dispatch/cancel/reconcile/close wiring and the control-plane Session profile selection are the follow-up half ([17357 B/2], #17474); until it lands no Session can select the profile through the control plane, which is also why no runtime flag gates it yet. Local verification covers the worker capture protocol over real HTTP and the producer's publication writes against the real control-plane stores on H2; see §15 "Locally verified so far" for the exact list. `monitor` and background Shell are **not** implemented; `monitor` was in the initial §1 goal and remains a target, not a silently dropped requirement. True `LOST` recovery, Broker/adapter process-restart recovery, real concurrent ownership/recovery scenarios and real-provider acceptance remain open work, not completed or verified by this run. Full CI/fault suites, human review and acceptance/deployment gates remain pending. UI verification is pending; no viewer or screenshot success is claimed here. This closes the documentation comparison of user impact against the goal, not #15512 or the full phase-2 goal.
+
+## 15. Slice C: external foreground Shell (`hosted-workspace-external-shell/1`)
+
+Status: **the worker profile/capture routes and the control-plane publication producer are implemented and verified by the local evidence listed under "Locally verified so far" at the end of this section. This PR targets `main`, so the main-filtered CI and managed-agent gates run on it. The Broker dispatch/close fences and the control-plane profile selection described below are the follow-up half (#17474); until it lands, no Session can select this profile through the control plane.** Everything below describes the code as written across the two halves, plus the local test observations explicitly enumerated there.
+
+### Boundary
+
+A new, separate profile — `hosted-workspace-external-shell/1` — declares `read_file`, `write_file`, `edit`, `glob` and a **foreground-only** `run_shell_command`. It is never a reinterpretation of `hosted-workspace-external-files/1`: that profile keeps rejecting every Shell call, and the two are distinguished by their capability digests.
+
+Its capability is its own: `sha256("managed-workspace-execution/1;external-shell/1")`, derived from the canonical string exactly as the terminal capability is, and pinned as the same hex on both sides. Both external placements still mint resource-handle version **1** today; the Shell lane is distinguished by its capability digest, which the binding and every attestation compare exactly. A separate handle version (`EXTERNAL_SHELL_HANDLE_VERSION = 2`) is declared for the follow-up half to mint; nothing mints or accepts it yet.
+
+Admission requires the `external-workspace` kind, session isolation, durable registered external storage (an ephemeral sandbox directory is refused: it cannot produce a drain proof), `captureBytes` explicitly reserved, and the negotiated feature token. There is no runtime flag for this lane yet: the Harness advertises the profile unconditionally, and the placement stays unreachable end to end because the control plane cannot select it until the follow-up half (#17474) registers it. `QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED` is the local `hosted-workspace-shell/1` switch and does not gate this profile.
+
+Still closed on this profile: background Shell (`is_background`), `monitor`, `web_fetch`, skills, hooks/extensions, MCP, child agents/workspaces/snapshots, teams, messages, session commands, plan mode, rewind, memory, automations and channels. The Harness refuses them at Session admission, the Broker refuses them again per dispatch, and the worker's own foreground-only ledger gate refuses them a third time. The three refusals are independent on purpose: any one of them alone keeps the placement honest.
+
+`READY` remains a Broker-local predicate — `state == RUNNING`, continuity `confirms`, **and** a publication readiness probe that reaches the worker's own publication protocol under the exact lease, storage revision and incarnation. The wire still carries only `RUNNING`/`STARTING`/`UNKNOWN`/`GONE`. The probe names a channel that cannot exist, so the worker's closed-lane refusal is the positive answer; a transport or identity failure is absence of evidence, never evidence that the worker is gone. Continuity `denies` is a permanent refusal; `unknown` keeps ownership and drops readiness; `GONE` is neither adopted nor replaced; provider `release` stays a no-op.
+
+### The Broker is the publication's producer
+
+This is the shape §7 assumed but did not state, and it is the reason no grant is ever installed on this worker.
+
+The external worker keeps its own capture store — it is a full `LocalShellResultCapture` over its private directory — and exposes it over `publication:begin`, `publication:read`, `publication:renew` and `publication:stop-drained`. It holds **no control-plane credential**. So the Broker takes the producer role:
+
+1. **Before dispatch**, `publication:begin` opens a worker channel and returns its channel id. The grant's own horizon bounds that channel; the binding is already reserved, so its `captureId` is fixed and the worker adopts it rather than minting one. That horizon comes from the same locked read that verifies the dispatch grant, never a second unlocked one.
+2. The Shell runs on the worker, which settles its own capture and final manifest locally.
+3. **After the result, before the execution settles**, the Broker reads the worker's blocks and publishes them into the original publication as its producer: one control-plane segment per block, sealed per stream, then a rebuilt manifest and its pages, then `finish`.
+4. Only then does it acknowledge the worker's sequences, **including each stream's empty EOF sequence**.
+5. Only a fully acknowledged channel lets `stop-drained` answer `drained`.
+
+Step 3 must precede the settle because the producer lane requires a live, non-draining binding and an unsettled execution; a retry after the settle could never publish those bytes. A failure anywhere leaves the channel unacknowledged, so the close keeps refusing instead of releasing storage whose bytes never arrived. The Harness-side result session, receipt chain and `ToolPublicationDataStore` are unchanged — the control plane's own `validateFinished` is what proves the rebuild faithful, comparing the manifest identity field by field against the reserved binding.
+
+Three contract details this lane depends on, all easy to get wrong:
+
+- **`captureId` is the reserved binding's token**, not a worker-chosen UUID. The control plane compares every finished manifest against it verbatim, and it must match `[a-z0-9_-]{1,128}`. The manifest's `invocationDigest` is likewise the binding's own **prefixed** `sha256:` wire digest; stripping the prefix would refuse every finished capture.
+- **EOF is its own empty sequence.** `acknowledgedSequence` may equal the sequence being read (that is how the last one is acknowledged) but never exceed it, so an EOF that coincided with a data block could never be acknowledged and every drain would report `undrained`.
+- **The channel horizon is renewable, the captured input is not.** The grant's horizon is `min(writer lease, activation)`, which the Harness renews, while a foreground Shell may run for up to 600 s — far longer than one lease. Each dispatch renewal therefore re-verifies the grant and pushes its current horizon on `publication:renew`, which only ever moves the horizon forward. A channel frozen at its opening horizon would close mid-command and no drain could ever complete; a renewal refusal is not claim loss, because the drain re-reads the channel and refuses honestly if it really closed. `publication:begin` stays idempotent on the captured input alone, so a recovered dispatch may offer its own current horizon.
+
+Two different bounds apply, and the binding's reservation is the tighter one. The publication reserves `captureBytes` for the whole execution, and the control-plane store refuses the first segment beyond it; that is the budget this lane actually has. Segment and page counts are structural ceilings on top of it — 1024 segments per page and 64 pages per stream. A capture that exceeds either refuses the drain rather than silently truncating, and the close then keeps refusing too.
+
+### Close and recovery
+
+The §8 fence now also runs before the three answers: a Shell execution still in flight, a `LOST` binding, or a proven absence all refuse the close when no drain receipt exists — an unsettled execution cannot have produced its final receipt, and neither an expired sandbox nor a crashed worker proves the captured bytes arrived. Recovery of the original worker is the only exit. A recovered dispatch re-runs `begin`, which is idempotent per execution, so it gets the same channel and can still move the bytes before settling.
+
+A failed drain leaves the execution `UNKNOWN`, and on this lane that state must not be settled from the worker's status. The worker's own settled envelope names its **local** manifest, so absorbing it would settle a result whose bytes never reached the control plane and let the close release storage. Reconciliation therefore refuses while the original publication is unfinished; only a finished publication (the drain's own outcome) or a recovered dispatch that completes the drain may settle the execution.
+
+That one rule has to hold on **every** arm that can settle this lane, not just reconciliation:
+
+- **The settle carries the published envelope, not the worker's.** Once the drain finishes, the execution settles with the control plane's own `/finished` result — the rebuilt manifest over the bytes actually moved. The worker's envelope names its private manifest ref, and the Harness compares the settled result against `/finished` verbatim, so settling the worker's copy would refuse every completed call.
+- **Cancel is physical, never a settle.** A cancel always reaches the worker, but its answer may not settle this lane while the publication is unfinished — a cancelled process may still have written output before the abort. The record keeps its claim and the dispatcher's move is what finishes the turn, exactly as for an uncancelled call. If the drain finished between the cancel and its answer, the settle uses the durable envelope rather than the worker's copy, for the same reason as above.
+- **The worker's proof of no start owes no drain.** A `not_started` answer with no capture is the one exception, on both the cancel and the reconciliation arm. No process ran, so no channel holds bytes and no publication will ever finish; fencing that answer would strand the record with no exit at all, because a dispatch refuses an `UNKNOWN` row and the close refuses an unsettled one. A **started** call is never exempt, whatever its capture status — only the drain's own finished publication proves those bytes arrived. The reconciliation arm reads this from the same status answer it settles with, so the exemption costs no extra worker call.
+- **A finished publication settles without the worker.** When the drain already finished but its settle did not land, reconciliation settles from that durable envelope directly instead of asking the worker for a status. That arm runs precisely when the original worker may be gone, and the worker's answer could only name its own local manifest anyway.
+- **A started call with an incomplete capture refuses instead of settling.** `finish` admits only a complete capture, so no retry can ever publish those bytes. Settling it would leave the worker reporting `capture_incomplete` for ever while the settled row let the close reach a stop it can never prove; refusing keeps the execution recoverable.
+- **A recovered dispatch whose drain already finished does not move again.** Publishing over a `FINISHED` lane would refuse, so the durable envelope already is the outcome and the settle simply lands.
+
+The worker's status is also this lane's only result path for a long command: it publishes nothing itself, so a foreground Shell that outlives the execute call's own request timeout arrives through the result poll and is then moved like any other result.
+
+### What option A costs
+
+Keeping the published boot contract means slice C inherits the shipped binding proof and does **not** add §6's `storageRef`/`mountNonce` marker defence against a stale boot document replayed onto a re-materialized tree. What still fences that case is unchanged from the files milestone: the full `ExternalStorageIdentity` tuple (provider id, physical key, registration revision) read from the durable registration record, the exact handle version, the Broker's independent attestation before every publication exchange, and the SQL physical holder. Closing the marker gap is later work, not something this slice claims.
+
+### Not done
+
+Background Shell and `monitor` are out of this slice and remain #15512 goals, not silently dropped requirements. §6's boot-v2 document, marker and nonce are not implemented.
+
+Locally verified so far:
+
+- The worker half of the capture protocol **against a real worker process over HTTP**, driven through the real attesting transport: `begin` idempotent per execution, every block read and acknowledged through its own empty EOF, an empty stderr still bounded by its EOF, a multi-block capture neither lost nor reordered (including a multi-byte character straddling a block boundary), `renew` moving the horizon only forward and outliving the original lease, the drained stop — validated by the transport's own closed-body check — refusing an unacknowledged EOF, `pending` never read as an empty block or advancing a cursor, and a foreign lease or stale incarnation never reaching the capture.
+- The producer end to end **against the real control-plane publication stores on H2** with the full reservation chain committed: a worker capture becomes a finished, read-back publication whose rebuilt manifest the store's own `validateFinished` proves faithful; multi-block captures publish segment by segment; a renewed grant extends the same channel; a failed exit code is published as the result's own outcome; an incomplete capture is refused before any block is moved; a capture beyond its reserved bytes refuses instead of publishing a short stream; a vanished worker or foreign lease never finishes a publication.
+
+The dispatch/cancel/reconciliation fences and the close/recovery arms described above belong to the follow-up half (#17474) and are verified there, not by this PR's suites.
+
+Still unrun: SpotBugs, real concurrent ownership on MySQL, and the full `mysql-integration` and Hosted/fault profiles (CI owns those). The worker stand-in implements the shipped worker's channel rules, but it is not the shipped worker: the two halves have not been run against each other in one process tree. Real-provider acceptance, UI verification, human review and deployment gates are all pending. This section records an implementation boundary and the evidence above, not full acceptance.
