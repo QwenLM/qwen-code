@@ -10,11 +10,11 @@ import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { isNodeError } from '../utils/errors.js';
 import { isWithinRoot } from '../utils/fileUtils.js';
+import { loadIgnoreRules } from '../utils/filesearch/ignore.js';
 import {
   MAX_DIRECTORY_ARTIFACT_DEPTH,
   collectRecordableWorkspaceFiles,
   pathHasSkippedDirectoryComponent,
-  shouldSkipDirectoryArtifactName,
   stripWorktreeArtifactPrefix,
 } from '../utils/workspace-artifact-directory.js';
 import {
@@ -49,7 +49,7 @@ const DESCRIPTION = `Registers a session artifact so clients can show it in an a
 
 Provide exactly one locator: workspacePath, managedId, or url. Do not use the old "path" field.
 
-For workspace files, workspacePath must be relative to the current execution directory (for example "report.csv" or "reports/summary.html") or an absolute path inside the bound workspace. Do not add workspace folder prefixes such as "w/agent/", and do not use ".." to walk up from a worktree. This tool resolves the path and verifies it stays inside the workspace. Files inside directories that the Artifacts panel hides ("node_modules", ".git", "dist", "__pycache__", and other dot-directories such as ".qwen/tmp") are rejected, because such recordings would not be visible; copy the file to a visible workspace path and record that copy instead. The ".qwen/reviews/" subtree stays recordable: code-review reports are registered there and the panel renders those artifacts. A regular file is stored as one workspace-root-relative canonical workspacePath. A directory is never stored as an artifact; each recordable file inside it is recorded separately. Word, Excel, PowerPoint, and other office documents use kind "document". A successful file result includes status=available, the canonical workspacePath, and resolvedPath. A successful directory result lists the expanded files instead of "Recorded artifact". If verification fails, the tool returns an error — do not tell the user the artifact can be opened or downloaded.`;
+For workspace files, workspacePath must be relative to the current execution directory (for example "report.csv" or "reports/summary.html") or an absolute path inside the bound workspace. Do not add workspace folder prefixes such as "w/agent/", and do not use ".." to walk up from a worktree. This tool resolves the path and verifies it stays inside the workspace. A workspace file is rejected when the Artifacts panel's file browser hides it: the check applies the workspace ignore rules (".gitignore" and ".qwenignore" at the execution directory, plus the ".git" default), and a file is hidden when a rule matches the file itself or any directory above it; copy the file to a visible workspace path and record that copy instead. The file's own name does not count, so a regular file named ".gitignore" or "dist" at the workspace root is still recordable. Two locations stay recordable even when ignored: the ".qwen/reviews/" subtree (code-review reports are registered there and the panel renders those artifacts) and the "Ask for details" deliverable ".qwen/tmp/ask-details.html". A regular file is stored as one workspace-root-relative canonical workspacePath. A directory is never stored as an artifact; each recordable file inside it is recorded separately. Word, Excel, PowerPoint, and other office documents use kind "document". A successful file result includes status=available, the canonical workspacePath, and resolvedPath. A successful directory result lists the expanded files instead of "Recorded artifact". If verification fails, the tool returns an error — do not tell the user the artifact can be opened or downloaded.`;
 
 export const ARTIFACT_TITLE_MAX_LENGTH = 200;
 export const ARTIFACT_WORKSPACE_PATH_MAX_LENGTH = 500;
@@ -178,7 +178,11 @@ class RecordArtifactInvocation extends BaseToolInvocation<
   private async expandDirectoryLocator(
     locator: WorkspaceLocatorSuccess,
   ): Promise<ToolResult> {
-    if (pathHasSkippedDirectoryComponent(locator.workspacePath)) {
+    const strippedLocator = stripWorktreeArtifactPrefix(locator.workspacePath);
+    if (
+      !isQwenReviewsPath(strippedLocator) &&
+      pathHasSkippedDirectoryComponent(locator.workspacePath)
+    ) {
       const message = [
         `Failed to record artifact: "${locator.workspacePath}" is a skipped directory and cannot be recorded.`,
         WORKSPACE_PATH_HINT,
@@ -984,25 +988,75 @@ function workspacePathCandidate(
 }
 
 /**
- * Direct file records are refused only when a *parent* directory of the file
- * is hidden from the Artifacts panel. The file's own name does not count: a
- * regular file named after a skipped directory (for example "dist") or a
- * dot-prefixed name (for example ".gitignore") is still a panel-visible
- * entry when its parent directory is visible, and the directory expansion of
- * that parent records it. The `.qwen/reviews/` subtree stays recordable: the
- * bundled /review skill registers its code-review artifact there, and the
- * panel's code-review renderer requires report paths to start with it.
+ * `.qwen/reviews` locators (the subtree itself or anything inside it) stay
+ * recordable: the bundled /review skill registers its code-review artifact
+ * there, and the panel's code-review renderer requires report paths to start
+ * with the prefix.
  */
-function fileParentsHaveSkippedDirectory(workspacePath: string): boolean {
+function isQwenReviewsPath(strippedWorkspacePath: string): boolean {
+  return (
+    strippedWorkspacePath === '.qwen/reviews' ||
+    strippedWorkspacePath.startsWith('.qwen/reviews/')
+  );
+}
+
+/**
+ * Direct file records are refused when the Artifacts panel's workspace file
+ * browser would hide the file, so `status: available` never points at an
+ * entry the user cannot find. The browser hides an entry when the workspace
+ * ignore rules (`.gitignore` and `.qwenignore` at the session's execution
+ * directory, plus the `.git` default — the same rules the serve
+ * `createWorkspaceFileSystemFactory` loads) match the file itself or any
+ * directory above it; this check applies those rules to the canonical
+ * workspace path. The file's own name does not count: a regular file named
+ * like a hidden entry (for example ".gitignore" or "dist") in a visible
+ * directory is listed by the browser, so it stays recordable as a direct
+ * record. (The directory expansion of that parent would not record it — the
+ * walk skips dot- and lock-named files — so the direct record is the only
+ * way to reach such a file.)
+ *
+ * Two product locations stay recordable even when the ignore rules hide
+ * them, because the panel serves them through dedicated artifact views
+ * instead of the file browser: the `.qwen/reviews/` subtree and the
+ * "Ask for details" deliverable `.qwen/tmp/ask-details.html` (the shipped
+ * prompt tells the side task to save it there and to record it explicitly,
+ * because write_file's auto-record skips `.qwen/tmp/`).
+ */
+const ASK_DETAILS_WORKSPACE_PATH = '.qwen/tmp/ask-details.html';
+
+function fileHiddenFromArtifactsPanel(
+  workspacePath: string,
+  cwd: string,
+): boolean {
   const stripped = stripWorktreeArtifactPrefix(workspacePath);
-  if (stripped.startsWith('.qwen/reviews/')) {
+  if (isQwenReviewsPath(stripped)) {
     return false;
   }
-  return stripped
-    .split('/')
-    .slice(0, -1)
-    .filter(Boolean)
-    .some((segment) => shouldSkipDirectoryArtifactName(segment));
+  if (stripped === ASK_DETAILS_WORKSPACE_PATH) {
+    return false;
+  }
+  const rules = loadIgnoreRules({
+    projectRoot: cwd,
+    useGitignore: true,
+    useQwenignore: true,
+    ignoreDirs: [],
+  });
+  const fileFilter = rules.getFileFilter();
+  const dirFilter = rules.getDirectoryFilter();
+  if (fileFilter(stripped) || dirFilter(stripped)) {
+    return true;
+  }
+  // The browser cannot descend into an ignored directory, so the file is
+  // invisible when any ancestor is hidden; `shouldIgnore` probes directories
+  // with a trailing slash so `foo/` patterns match them.
+  const segments = stripped.split('/').filter(Boolean);
+  for (let depth = 1; depth < segments.length; depth++) {
+    const ancestor = segments.slice(0, depth).join('/');
+    if (dirFilter(`${ancestor}/`) || fileFilter(ancestor)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 async function inspectWorkspaceCandidate(
@@ -1086,11 +1140,11 @@ async function inspectWorkspaceCandidate(
       `Failed to record artifact: "${rawPath}" could not be converted to a workspace-root-relative path.\n${WORKSPACE_PATH_HINT}`,
     );
   }
-  if (!st.isDirectory() && fileParentsHaveSkippedDirectory(workspacePath)) {
+  if (!st.isDirectory() && fileHiddenFromArtifactsPanel(workspacePath, cwd)) {
     return locatorFailure(
       ToolErrorType.INVALID_TOOL_PARAMS,
       [
-        `Failed to record artifact: "${rawPath}" is inside a directory that is not shown in the Artifacts panel (for example ".qwen/tmp", "node_modules", ".git", "dist" or "__pycache__"), so the recording would not be visible to the user.`,
+        `Failed to record artifact: "${rawPath}" is hidden from the Artifacts panel's file browser by the workspace ignore rules (.gitignore and .qwenignore at the execution directory, plus the .git default), so the recording would not be visible to the user.`,
         'Record the file at a visible workspace path instead (for example copy it to a visible directory).',
       ].join('\n'),
     );

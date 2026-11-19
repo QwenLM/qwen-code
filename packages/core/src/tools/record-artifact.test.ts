@@ -498,29 +498,51 @@ describe('RecordArtifactTool', () => {
     expectText(result, [], [RECORDED]);
   });
 
-  it('rejects a file inside .qwen/tmp instead of reporting success', async () => {
+  it('refuses a file the workspace ignore rules hide from the Artifacts panel', async () => {
     const ws = await workspace();
+    await ws.write('.gitignore', '.qwen/\nnode_modules/\nbuild/\n');
     await ws.write('.qwen/tmp/shot.png', 'png');
-
-    const result = await ws.record('Screenshot', '.qwen/tmp/shot.png');
-
-    expectFailed(result, ToolErrorType.INVALID_TOOL_PARAMS);
-    expectText(result, ['not shown in the Artifacts panel'], [RECORDED]);
-  });
-
-  it('rejects files inside other skipped directories', async () => {
-    const ws = await workspace();
     await ws.write('node_modules/pkg/index.js', 'js');
-    await ws.write('.config/report.md', 'md');
+    await ws.write('build/report.html', 'html');
 
+    const shot = await ws.record('Screenshot', '.qwen/tmp/shot.png');
+    expectFailed(shot, ToolErrorType.INVALID_TOOL_PARAMS);
+    expectText(
+      shot,
+      ['hidden from the Artifacts panel', 'ignore rules'],
+      [RECORDED],
+    );
     expectFailed(
       await ws.record('Deps file', 'node_modules/pkg/index.js'),
       ToolErrorType.INVALID_TOOL_PARAMS,
     );
     expectFailed(
-      await ws.record('Config report', '.config/report.md'),
+      await ws.record('Build report', 'build/report.html'),
       ToolErrorType.INVALID_TOOL_PARAMS,
     );
+  });
+
+  it('records panel-visible files the ignore rules do not hide', async () => {
+    const ws = await workspace();
+    await ws.write('.github/workflows/ci.yml', 'yaml');
+    await ws.write('.config/report.md', 'md');
+    await ws.write('.qwen/tmp/shot.png', 'png');
+
+    // No .gitignore/.qwenignore in this workspace, so the panel's file
+    // browser lists all three paths and the gate (which applies those rules,
+    // not a directory name list) records them.
+    expectFirst(await ws.record('CI', '.github/workflows/ci.yml'), {
+      title: 'ci.yml',
+      workspacePath: '.github/workflows/ci.yml',
+    });
+    expectFirst(await ws.record('Config report', '.config/report.md'), {
+      title: 'report.md',
+      workspacePath: '.config/report.md',
+    });
+    expectFirst(await ws.record('Screenshot', '.qwen/tmp/shot.png'), {
+      title: 'shot.png',
+      workspacePath: '.qwen/tmp/shot.png',
+    });
   });
 
   it('still records code-review reports under .qwen/reviews', async () => {
@@ -536,6 +558,53 @@ describe('RecordArtifactTool', () => {
       title: 'pr-1.json',
       workspacePath: '.qwen/reviews/pr-1.json',
     });
+  });
+
+  it('records .qwen/reviews reports even when .qwen/ is gitignored', async () => {
+    const ws = await workspace();
+    await ws.write('.gitignore', '.qwen/\n');
+    await ws.write('.qwen/reviews/pr-1.json', '{"artifactType":"code_review"}');
+
+    const result = await ws.record(
+      'Code review result',
+      '.qwen/reviews/pr-1.json',
+    );
+
+    expectFirst(result, { workspacePath: '.qwen/reviews/pr-1.json' });
+  });
+
+  it('expands the .qwen/reviews directory into its report files', async () => {
+    const ws = await workspace();
+    await ws.write('.qwen/reviews/pr-1.json', '{"artifactType":"code_review"}');
+    await ws.write('.qwen/reviews/pr-2.json', '{"artifactType":"code_review"}');
+
+    const result = await ws.record('Code reviews', '.qwen/reviews');
+
+    expectAll(result, [
+      { workspacePath: '.qwen/reviews/pr-1.json' },
+      { workspacePath: '.qwen/reviews/pr-2.json' },
+    ]);
+    expectText(result, ['Expanded directory'], [RECORDED]);
+  });
+
+  it('records the "Ask for details" deliverable even when .qwen/ is gitignored', async () => {
+    const ws = await workspace();
+    await ws.write('.gitignore', '.qwen/\n');
+    await ws.write('.qwen/tmp/ask-details.html', '<html></html>');
+    await ws.write('.qwen/tmp/v31-verify/shot.png', 'png');
+
+    // The shipped side-task prompt names this exact file, and write_file's
+    // auto-record skips .qwen/tmp/, so the explicit record must work even
+    // where `.qwen/` is ignored.
+    expectFirst(await ws.record('Details', '.qwen/tmp/ask-details.html'), {
+      workspacePath: '.qwen/tmp/ask-details.html',
+    });
+    // The exemption is the named file only: other `.qwen/tmp` files stay
+    // refused where the ignore rules hide them (issue #17453).
+    expectFailed(
+      await ws.record('Screenshot', '.qwen/tmp/v31-verify/shot.png'),
+      ToolErrorType.INVALID_TOOL_PARAMS,
+    );
   });
 
   it('accepts files whose own names look hidden but live in visible paths', async () => {
