@@ -1781,3 +1781,57 @@ describe('UiTelemetryService.getTotalOutputTokens', () => {
     },
   );
 });
+
+describe('UiTelemetryService live usage accounting', () => {
+  let service: UiTelemetryService;
+  const requests = (m: ReturnType<UiTelemetryService['getMetrics']>) =>
+    Object.values(m.models).reduce((sum, x) => sum + x.api.totalRequests, 0);
+  const prompt = (m: ReturnType<UiTelemetryService['getMetrics']>) =>
+    Object.values(m.models).reduce((sum, x) => sum + x.tokens.prompt, 0);
+
+  beforeEach(() => {
+    service = new UiTelemetryService();
+  });
+
+  it('keeps replayed history in the display aggregate but out of live usage', () => {
+    service.addReplayedEvent(apiResponse('m', 10, [100, 10, 110, 0, 0]), 's');
+    service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 's');
+
+    expect(requests(service.getMetrics())).toBe(2);
+    expect(prompt(service.getMetrics())).toBe(105);
+    expect(requests(service.getLiveMetrics())).toBe(1);
+    expect(prompt(service.getLiveMetrics())).toBe(5);
+    // The session bucket still carries the whole conversation for /stats.
+    expect(requests(service.getMetricsForSession('s'))).toBe(2);
+  });
+
+  it('matches the display aggregate field-for-field when nothing was replayed', () => {
+    service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 's');
+    service.addEvent(apiError('m', 3, 'boom'), 's');
+    service.addEvent(toolEvent(fakeToolEvent('read_file', true, 100)), 's');
+
+    expect(service.getLiveMetrics()).toEqual(service.getMetrics());
+  });
+
+  it('clears live usage on reset', () => {
+    service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 's');
+    service.reset();
+
+    expect(requests(service.getLiveMetrics())).toBe(0);
+    expect(requests(service.getMetrics())).toBe(0);
+  });
+
+  it('restores live usage when an abandoned swap is undone', () => {
+    service.addEvent(apiResponse('m', 10, [5, 2, 7, 0, 0]), 'a');
+    const snapshot = service.snapshotForReplay('b', 'a');
+    // The abandoned swap replays history and accrues a live turn of its own.
+    service.addReplayedEvent(apiResponse('m', 10, [900, 9, 909, 0, 0]), 'b');
+    service.addEvent(apiResponse('m', 10, [7, 1, 8, 0, 0]), 'b');
+    expect(prompt(service.getLiveMetrics())).toBe(12);
+
+    service.restoreFromReplaySnapshot(snapshot);
+
+    expect(prompt(service.getLiveMetrics())).toBe(5);
+    expect(prompt(service.getMetrics())).toBe(5);
+  });
+});

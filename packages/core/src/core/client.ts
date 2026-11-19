@@ -874,7 +874,7 @@ export class LlmClient {
       this.armTelemetrySwapUndo(sessionId);
       uiTelemetryService.resetSession(sessionId);
       for (const event of restoreRuntime.uiTelemetryEvents) {
-        uiTelemetryService.addEvent(event, sessionId);
+        uiTelemetryService.addReplayedEvent(event, sessionId);
       }
       this.seedRecentCompletedToolNamesFromHistory(restoreRuntime.apiHistory);
       await this.startChat(

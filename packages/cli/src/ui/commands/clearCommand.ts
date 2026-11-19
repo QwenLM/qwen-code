@@ -79,8 +79,9 @@ export const clearCommand: SlashCommand = {
       config.getBackgroundShellRegistry().abortAll();
       resetBackgroundStateForSessionSwitch(config);
 
-      // Persist current session's usage before resetting metrics
-      const metrics = uiTelemetryService.getMetrics();
+      // Persist this run's usage before resetting metrics. Replayed history
+      // belongs to the run that spent it, which already persisted its own.
+      const metrics = uiTelemetryService.getLiveMetrics();
       const hasActivity = Object.values(metrics.models).some(
         (m) => m.api.totalRequests > 0,
       );

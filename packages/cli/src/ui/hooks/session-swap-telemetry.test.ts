@@ -307,6 +307,28 @@ describe('session swap telemetry accounting (#9833)', () => {
     return { config, client, sessionService };
   }
 
+  it('a resumed session persists only its own usage, not the replayed history', async () => {
+    await establishLiveSessionA(100);
+
+    // The display aggregate legitimately carries the conversation's history.
+    expect(totalRequests()).toBe(2);
+    expect(promptTokens()).toBe(105);
+
+    // Cross-session usage history bills only the turn this run made. Billing
+    // the replay again is what made a short resume of a long conversation look
+    // like it spent the whole conversation's tokens.
+    const live = uiTelemetryService.getLiveMetrics();
+    expect(
+      Object.values(live.models).reduce(
+        (sum, m) => sum + m.api.totalRequests,
+        0,
+      ),
+    ).toBe(1);
+    expect(
+      Object.values(live.models).reduce((sum, m) => sum + m.tokens.prompt, 0),
+    ).toBe(5);
+  });
+
   it('a failed /branch restores the process-wide aggregate', async () => {
     const { config, sessionService } = await establishLiveSessionA(100);
     const preSwap = structuredClone(uiTelemetryService.getMetrics());
@@ -461,6 +483,14 @@ describe('session swap telemetry accounting (#9833)', () => {
     // replay + live); the fork's single stored event adds one more.
     expect(totalRequests()).toBe(3);
     expect(promptTokens()).toBe(205);
+    // The fork's replayed history is display-only: live usage stays the one
+    // turn this process actually made.
+    expect(
+      Object.values(uiTelemetryService.getLiveMetrics().models).reduce(
+        (sum, m) => sum + m.api.totalRequests,
+        0,
+      ),
+    ).toBe(1);
     // A later failed swap of a THIRD session must not undo this commit.
   });
 

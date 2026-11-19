@@ -428,6 +428,7 @@ const createInitialMetrics = (): SessionMetrics => ({
  */
 export interface UiTelemetryReplaySnapshot {
   readonly metrics: SessionMetrics;
+  readonly liveMetrics: SessionMetrics;
   readonly sessionId: string;
   /** Absent when the session had no bucket yet — restore removes it again. */
   readonly sessionMetrics: SessionMetrics | undefined;
@@ -454,6 +455,7 @@ export interface UiTelemetryReplaySnapshot {
 export class UiTelemetryService extends EventEmitter {
   static readonly #MAX_CLOSED_SESSIONS = 1000;
   #metrics: SessionMetrics = createInitialMetrics();
+  #liveMetrics: SessionMetrics = createInitialMetrics();
   #sessionMetrics: Map<string, SessionMetrics> = new Map();
   #sessionOutputBaselines: Map<string, number> = new Map();
   #closedSessions: Set<string> = new Set();
@@ -462,7 +464,24 @@ export class UiTelemetryService extends EventEmitter {
   #sessionStartTime: Date = new Date();
 
   addEvent(event: UiEvent, sessionId?: string) {
+    this.#record(event, sessionId, true);
+  }
+
+  /**
+   * Accumulates a stored event that a resume replayed. It counts toward the
+   * display aggregate — a resumed session's `/stats` legitimately shows the
+   * conversation's history — but not toward {@link getLiveMetrics}, because
+   * those tokens were spent by an earlier run and were already persisted then.
+   * Billing them again is what made a seven-minute resume of a long
+   * conversation look like it spent the whole conversation's tokens.
+   */
+  addReplayedEvent(event: UiEvent, sessionId?: string) {
+    this.#record(event, sessionId, false);
+  }
+
+  #record(event: UiEvent, sessionId: string | undefined, live: boolean) {
     if (!this.#accumulateEvent(this.#metrics, event)) return;
+    if (live) this.#accumulateEvent(this.#liveMetrics, event);
 
     if (sessionId && !this.#closedSessions.has(sessionId)) {
       if (!this.#sessionMetrics.has(sessionId)) {
@@ -484,6 +503,15 @@ export class UiTelemetryService extends EventEmitter {
 
   getMetrics(): SessionMetrics {
     return this.#metrics;
+  }
+
+  /**
+   * Usage this process produced itself, excluding history a resume replayed.
+   * This is what cross-session usage history persists; with no replay it is
+   * field-for-field identical to {@link getMetrics}.
+   */
+  getLiveMetrics(): SessionMetrics {
+    return this.#liveMetrics;
   }
 
   getMetricsForSession(sessionId: string): SessionMetrics {
@@ -620,6 +648,7 @@ export class UiTelemetryService extends EventEmitter {
       : undefined;
     return {
       metrics: cloneSessionMetrics(this.#metrics),
+      liveMetrics: cloneSessionMetrics(this.#liveMetrics),
       sessionId,
       sessionMetrics: sessionMetrics
         ? cloneSessionMetrics(sessionMetrics)
@@ -652,6 +681,7 @@ export class UiTelemetryService extends EventEmitter {
    */
   restoreFromReplaySnapshot(snapshot: UiTelemetryReplaySnapshot): void {
     this.#metrics = cloneSessionMetrics(snapshot.metrics);
+    this.#liveMetrics = cloneSessionMetrics(snapshot.liveMetrics);
     this.#restoreSessionState(
       snapshot.sessionId,
       snapshot.sessionMetrics,
@@ -704,6 +734,7 @@ export class UiTelemetryService extends EventEmitter {
    */
   reset(): void {
     this.#metrics = createInitialMetrics();
+    this.#liveMetrics = createInitialMetrics();
     this.#sessionMetrics.clear();
     this.#sessionOutputBaselines.clear();
     this.#closedSessions.clear();

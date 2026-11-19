@@ -1258,7 +1258,7 @@ export async function main() {
     // after /clear resets the session (reset() updates the internal timestamp).
     registerCleanup(() => {
       try {
-        const metrics = uiTelemetryService.getMetrics();
+        const metrics = uiTelemetryService.getLiveMetrics();
         const hasActivity = Object.values(metrics.models).some(
           (m) => m.api.totalRequests > 0,
         );

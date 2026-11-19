@@ -2,9 +2,10 @@
 
 [English](2026-11-19-usage-dashboard-accounting.md) | [简体中文](2026-11-19-usage-dashboard-accounting.zh-CN.md)
 
-Status: Option A implemented. Defect 1 is fixed outright; defects 2 and 3 are fixed
-for the dashboard wherever the per-request ledger covers the day. Defects 4 and 5
-remain open, and the persist-side cause of defect 2 is unchanged.
+Status: Option A implemented, and the persist side of defect 2 is fixed too.
+Defect 1 is fixed outright; defect 3 is fixed wherever the per-request ledger
+covers the day. Defects 4 and 5 remain open. Records written before this change
+stay as they are — there is no migration.
 
 ## Problem
 
@@ -31,17 +32,17 @@ Five independent defects produce the gap.
    against a provider output of 4,952,378 (+45.6%), and input + output did not sum
    to the hero total.
 
-2. **Resumed history persisted as new usage (dashboard side fixed).**
-   `persistSessionUsage` writes `uiTelemetryService.getMetrics()`, which a
+2. **Resumed history persisted as new usage (fixed).**
+   `persistSessionUsage` wrote `uiTelemetryService.getMetrics()`, which a
    session-swap replay has already filled with the resumed conversation's whole
    history. Session `4669c795-e9bc-4ae7-9a1e-1c75795cf446` covers a 7-minute window
    (01:04:23 -> 01:11:54) yet carries 45,679,298 tokens across 506 requests, and its
    per-model totals are identical to the full-history telemetry of transcript
    `df2ad8ce-e86d-49f5-80c7-6012e8736660` (6,682,231 / 5,209,415 / 30,559,974 for
    `qwen3.8-max-preview` / `gpt-6-astra` / `glm-5.3`). Every resume of that
-   conversation appends another full copy. This is the dominant term. The records
-   are still written this way; the dashboard no longer reads their tokens for a day
-   the ledger covers.
+   conversation appends another full copy. This is the dominant term. Both sides
+   are now fixed: the dashboard does not read those tokens for a day the ledger
+   covers, and a run no longer persists history it did not spend.
 
 3. **Windows attributed by session end (fixed where the ledger covers).**
    `aggregateUsage` filters on `r.timestamp` (the session's last record) and the
@@ -99,10 +100,11 @@ explicitly left the local-`today` window semantics out of scope.
 ## Scope boundaries
 
 - In scope: `usage-dashboard-service.ts`, `tokenUsageService.ts` (read path only),
-  the `usage-stats` route, and the Web Shell usage tab's output tile.
+  the `usage-stats` route, the Web Shell usage tab's output tile, and the persist
+  side (`UiTelemetryService`, the two replay sites, the two persist callers).
 - Out of scope: the `/stats` session view, whose cumulative resumed-history
-  semantics are intentional; the ledger record schema; the persist side of
-  `persistSessionUsage`; cost billing; the replay cache's scan bounds.
+  semantics are intentional; the ledger and usage-record schemas; migrating
+  records already on disk; cost billing; the replay cache's scan bounds.
 
 ## Implemented solution (Option A)
 
@@ -128,12 +130,29 @@ ledger deliberately carries none of them.
 - The output tile renders `summary.outputTokens`, which core normalizes per model
   through `outputTokenCount` (defect 1).
 
-**Rejected alternative (Option B).** Add a per-local-day breakdown to
-`UsageSummaryRecord` and persist only the current run's delta, subtracting the
-replay baseline `beginTelemetrySwap` already snapshots. It keeps a single source
-and would also fix the records themselves, but needs per-day buckets in
-`UiTelemetryService`, a record schema addition, and a degradation rule for existing
-records. It remains the natural follow-up for the persist side of defect 2.
+## Implemented solution (persist side)
+
+**A second counter that only real events feed.** `UiTelemetryService` keeps
+`#liveMetrics` alongside the display aggregate. `addEvent` feeds both;
+`addReplayedEvent` — used by the two replay sites, `replayUiTelemetryFromConversation`
+and `LlmClient.initialize()`'s restore-runtime branch — feeds only the display
+aggregate and the session bucket. `getLiveMetrics()` is what the two persist
+callers (`/clear` and the process-exit cleanup) now write.
+
+- No subtraction and no schema change: the live counter is built by the same
+  accumulator, so with no replay it is field-for-field identical to the display
+  aggregate and every existing record shape is unchanged.
+- `reset()` clears it, so each `/clear` segment bills only itself.
+- `UiTelemetryReplaySnapshot` carries it, so an aborted swap restores it too and
+  cannot leave the live counter inflated by an abandoned replay.
+- A resume that makes no request of its own now fails the callers' `hasActivity`
+  check and writes no record at all, instead of an all-history one.
+
+**Not done: a per-local-day breakdown in `UsageSummaryRecord`.** It was the other
+half of the original Option B sketch. With the ledger supplying day attribution it
+would only help days the ledger does not cover, at the cost of per-day buckets in
+telemetry, a record schema addition and a degradation rule for existing records.
+Deferred rather than built speculatively.
 
 ## Design decisions and rationale
 
@@ -185,9 +204,12 @@ records. It remains the natural follow-up for the persist side of defect 2.
   per-workspace runtime directory would aggregate that runtime's ledger next to
   global session history.
 - Defects 4 and 5 still distort the session-granular tiles and uncovered days.
-- The persisted records remain inflated, so any other consumer of
-  `loadUsageHistory` (notably the TUI cross-session view) still sees the old
-  numbers.
+- Records written before this change stay inflated, so other consumers of
+  `loadUsageHistory` (notably the TUI cross-session view) still see the old
+  numbers for that history. Only newly written records are correct.
+- The live counter is process-wide, like the display aggregate it mirrors, so a
+  long-lived process that switches sessions without `/clear` still attributes its
+  total to the last session id. That is pre-existing behavior, unchanged here.
 
 ## Validation plan
 
@@ -199,6 +221,11 @@ records. It remains the natural follow-up for the persist side of defect 2.
 - Route integration through the real loader with both sources seeded on disk.
 - Real-data A/B against an independent ledger scan on a **frozen copy** of the
   ledger, so the two arms read identical bytes.
+- Persist side: unit tests for the live counter (replay excluded, parity with no
+  replay, reset, aborted-swap restore), the real `/resume` + `/branch` harness
+  asserting display keeps history while live does not, and `/clear` asserting a
+  pure resume writes no record. Plus a two-arm probe driving the real replay and
+  persist functions from each checkout.
 - Mutation-witness each new guard, and record which suites were actually run.
 
 ## Acceptance criteria
@@ -216,13 +243,18 @@ records. It remains the natural follow-up for the persist side of defect 2.
 - Warm loads stay sub-second and the dashboard path writes nothing.
 - Measured effect on the reference history versus the previous builder: today
   -59.4%, 7 days -75.8%, 30 days -85.9% (live history, so approximate).
+- A run that resumes a long conversation persists only its own requests.
+  **Verified** by a two-arm probe using the real replay and persist functions: a
+  400-response history plus one live request persisted 401 requests / 400,000,005
+  input tokens before the change and 1 request / 5 input tokens after, while the
+  display aggregate stayed 401 / 400,000,005 in both arms.
 
 ## Open questions
 
-- Should the persist side stop writing replayed history (Option B), so the records
-  themselves become trustworthy for other consumers?
 - Should a day with partial ledger coverage fall back per model instead of being
   replaced wholesale?
+- Should existing inflated records be repaired or marked, so the TUI
+  cross-session view and the fallback path stop showing them?
 - Should daemon sessions persist usage at session end (the open question inherited
   from the replay-cache design), which would shrink the replay path?
 - Should the TUI cross-session view (`statsDataService.ts`) adopt the same
