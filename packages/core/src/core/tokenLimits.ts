@@ -420,7 +420,7 @@ function findTokenLimit(
     // catalog's dashed entry remains reachable without changing normalization.
     const alias = versionSpellingAlias(model);
     const rawNorm = model.toLowerCase().replace(/^.*\//, '');
-    if (alias && (norm !== rawNorm || rawNorm.endsWith('-exp'))) {
+    if (alias && norm !== rawNorm) {
       catalog = lookupModelCatalog(normalize(alias));
     }
   }
