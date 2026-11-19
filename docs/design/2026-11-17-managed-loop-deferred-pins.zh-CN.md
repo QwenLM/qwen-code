@@ -222,7 +222,9 @@ core 邻近面是整面跑而非抽样：`src/managed-runtime` 加 `src/skills/b
 - **`assignmentTarget` 的对象模式臂没有见证。** 控制此前只带数组模式。已补两种对象形态——属性目标（`{ x: blockProperties.shouldBlock } = …`）与 shorthand 重绑（`{ blockProperties } = …`）——两者都被重赋值库存记录。
 - **未被路由的 profile 常量未被分类。** 映射无法区分「无 creator 的 profile」与「链忘记路由的 loop-bearing profile」。Java 没有机读的 creator 声明——该事实只存在于每个常量上方的 Javadoc——故 `loopBearingProfiles` 从该散文派生 loop-bearing 集合，钉子要求它等于被路由集合，并为派生本身配合成见证。这是漂移守卫而非机制钉：改写文档可绕过它，#17673 里与形态无关的路由断言仍是持久修复。
 
-分支在本会话之外被合入 main（合并提交 `00f24627d4`）；本地树已快进到它，且该合并未改动本 PR 的任何文件。incoming 的 `7171fc776e`（#17753）恢复了 class-size 与 facade-population 两道门：`AgentSessionPolicies` 回到 779 行对 791 上限，分解清单已含 `creationToolProfile`，故**两条继承的 Java 红均已由上游解决**。本 head 上所有 CI 车道通过，含 `SDK Java (fast) / ubuntu-latest / Java 21` 与 `Managed Agent fast tier`，以及四项必需检查。
+分支在本会话之外被合入 main（合并提交 `00f24627d4`）；本地树已快进到它，且该合并未改动本 PR 的任何文件。incoming 的 `7171fc776e`（#17753）恢复了 class-size 与 facade-population 两道门：`AgentSessionPolicies` 回到 779 行对 791 上限，分解清单已含 `creationToolProfile`，故**两条继承的 Java 红均已由上游解决**。在该合并提交上测得的所有 CI 车道均通过，含 `SDK Java (fast) / ubuntu-latest / Java 21` 与 `Managed Agent fast tier`，以及四项必需检查。
+
+真实环境验证在本 head 重跑而非承接，因为第四次合并改了 12 个 Java 文件与 13 个 cli/core 文件：全量构建绿且 core 与 cli 的 dist 按构建起点时间戳断言已刷新，jar 重建，`ManagedLoopSkillTest` 以重生 sidecar 跑出 19/19，bundle 重建并断言已刷新，重建 jar 内四个 sidecar 与已提交契约逐字节相等。臂：`--loop-skill` success（session `6a36196e-b6d6-4aac-a37a-fff0b8a10795`、modelRounds 6、cron create/list/delete 均见证）；`--loop-fire` success（session `01b1b51c-cc4d-4f9b-be6c-81019be0afe6`、schedule `asch_ebf79227b1238167ff6217b3d0e052bb`、fireTrigger=scheduled、fireOutcome=fired、fireState=completed、occurrenceKey `schedule:2026-11-19T01:15:00Z`、modelRounds 5）。
 
 套件规模：core 35、scripts 元 183（改动文件 88）。
 
