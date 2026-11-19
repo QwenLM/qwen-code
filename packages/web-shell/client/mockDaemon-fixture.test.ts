@@ -83,12 +83,14 @@ describe('createWebShellDaemonScenario fixture ownership', () => {
   it('does not hand back the caller gitRemotes array', () => {
     // materializeRemotes returns the array itself, and the add/remove routes
     // splice and push it, so identity decides whether those writes reach the
-    // caller. An empty fixture still exercises the clone: ??= only fills in
-    // the default when the field is nullish.
+    // caller. The value assertion is what keeps an empty fixture meaning "no
+    // remotes": identity alone is also satisfied by undefined, which would let
+    // ??= seed the default origin row for a caller that asked for none.
     const fixture: DaemonGitRemoteInfo[] = [];
     const scenario = createWebShellDaemonScenario({ gitRemotes: fixture });
 
     expect(scenario.gitRemotes).not.toBe(fixture);
+    expect(scenario.gitRemotes).toEqual([]);
   });
 
   it('keeps a mid-turn message push out of the caller fixture', () => {
