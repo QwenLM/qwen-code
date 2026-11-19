@@ -2738,11 +2738,26 @@ describe('managed DingTalk card surfaces (H5e, #17716)', () => {
     expect(card.calls[0]!.body).toBe(seg0);
     expect(fake.sent.map((entry) => entry.text)).toEqual([seg1, seg2]);
     expect(persistedOf(adapter).cards?.['d-1']?.mode).toBe('text');
+    // The text switch drops the dead accumulated body rather than re-serialising
+    // it on every later persist (R3-1). Removing body:'' reds this.
+    expect(persistedOf(adapter).cards?.['d-1']?.body).toBe('');
     expect(
       plane.receipts.map(
         (entry) => (entry.receipt as { ordinal: number }).ordinal,
       ),
     ).toEqual([0, 1, 2]);
+    await adapter.disconnect();
+  });
+
+  it('A6b renders a first segment at exactly the card bound (deferred round-3)', async () => {
+    const { adapter, plane, fake, card } = await connectedCardAdapter();
+    const exact = 'x'.repeat(MANAGED_CARD_CONTENT_LIMIT);
+    plane.enqueue([cardDelivery('d-1', [{ ordinal: 0, text: exact }])]);
+    await adapter.tick();
+    // Exactly at the bound still fits (the check is > LIMIT, not >=).
+    expect(card.calls).toHaveLength(1);
+    expect(card.calls[0]!.body).toBe(exact);
+    expect(fake.sent).toHaveLength(0);
     await adapter.disconnect();
   });
 
@@ -3176,6 +3191,136 @@ describe('managed DingTalk card surfaces (H5e, #17716)', () => {
     // sibling stays green.
     expect(persistedOf(second).cards?.['d-1']).toBeUndefined();
     await second.disconnect();
+  });
+
+  it('R2-1b: an orphan replayed accepted+partial receipt keeps the card body (R3-2)', async () => {
+    const cwd = tempCwd();
+    const first = await connectedCardAdapter(cwd);
+    first.plane.setReceiptResponse(() => ({ state: 'partial' }));
+    const store = storeOf(first.adapter);
+    const realSave = store.save.bind(store);
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      const s = state as {
+        outbound: unknown[];
+        cards?: Record<string, unknown>;
+      };
+      if (
+        s.outbound.length === 0 &&
+        s.cards &&
+        Object.keys(s.cards).length > 0
+      ) {
+        throw new Error('disk full');
+      }
+      realSave(state);
+    });
+    first.plane.enqueue([cardDelivery('d-1', [{ ordinal: 0, text: 'alpha' }])]);
+    await first.adapter.tick();
+    spy.mockRestore();
+    expect(persistedOf(first.adapter).cards?.['d-1']).toBeDefined();
+    // Hard kill; the restart replays the accepted receipt but the answer is
+    // partial, so the orphan must KEEP the body and the next segment edits it
+    // under the same outTrackId. Pruning unconditionally reds this while R2-1
+    // and the send-path partial test stay green.
+    const plane2 = fakeControlPlane();
+    plane2.setReceiptResponse(() => ({ state: 'partial' }));
+    plane2.enqueue([cardDelivery('d-1', [{ ordinal: 1, text: 'beta' }])]);
+    const fake2 = fakeDeps();
+    const card2 = cardSink();
+    const second = new ManagedDingtalkAdapter({
+      name: 'ding-card',
+      cwd,
+      config: CARD_CONFIG,
+      controlPlane: plane2.controlPlane,
+      deps: { ...fake2.deps, sendCardSegment: card2.sendCardSegment },
+      pollLoop: false,
+    });
+    await second.connect();
+    expect(persistedOf(second).cards?.['d-1']).toBeDefined();
+    await second.tick();
+    expect(card2.calls).toHaveLength(1);
+    expect(card2.calls[0]).toMatchObject({
+      create: false,
+      body: 'alphabeta',
+      outTrackId: managedCardOutTrackId('d-1'),
+    });
+    await second.disconnect();
+  });
+
+  it('R3-3: an orphan deterministically dropped (404) prunes the card body (deferred round-3)', async () => {
+    const cwd = tempCwd();
+    const first = await connectedCardAdapter(cwd);
+    first.plane.setReceiptResponse(() => ({ state: 'partial' }));
+    const store = storeOf(first.adapter);
+    const realSave = store.save.bind(store);
+    const spy = vi.spyOn(store, 'save').mockImplementation((state: unknown) => {
+      const s = state as {
+        outbound: unknown[];
+        cards?: Record<string, unknown>;
+      };
+      if (
+        s.outbound.length === 0 &&
+        s.cards &&
+        Object.keys(s.cards).length > 0
+      ) {
+        throw new Error('disk full');
+      }
+      realSave(state);
+    });
+    first.plane.enqueue([cardDelivery('d-1', [{ ordinal: 0, text: 'alpha' }])]);
+    await first.adapter.tick();
+    spy.mockRestore();
+    expect(persistedOf(first.adapter).cards?.['d-1']).toBeDefined();
+    // Hard kill; the restart replays the accepted receipt but the delivery is
+    // gone (404 delivery_not_found), so the orphan drops the entry AND prunes
+    // the body. Removing the dropped disjunct reds this.
+    const plane2 = fakeControlPlane();
+    plane2.setReceiptError(() =>
+      Object.assign(new Error('not found'), {
+        status: 404,
+        code: 'delivery_not_found',
+      }),
+    );
+    const fake2 = fakeDeps();
+    const card2 = cardSink();
+    const second = new ManagedDingtalkAdapter({
+      name: 'ding-card',
+      cwd,
+      config: CARD_CONFIG,
+      controlPlane: plane2.controlPlane,
+      deps: { ...fake2.deps, sendCardSegment: card2.sendCardSegment },
+      pollLoop: false,
+    });
+    await second.connect();
+    expect(persistedOf(second).cards?.['d-1']).toBeUndefined();
+    await second.disconnect();
+  });
+
+  it('R3-4: a pre-send rejection prunes a retained card body (deferred round-3)', async () => {
+    const { adapter, plane, card } = await connectedCardAdapter();
+    // First segment creates the card and keeps progress (partial answer).
+    plane.setReceiptResponse(() => ({ state: 'partial' }));
+    plane.enqueue([cardDelivery('d-1', [{ ordinal: 0, text: 'alpha' }])]);
+    await adapter.tick();
+    expect(persistedOf(adapter).cards?.['d-1']).toBeDefined();
+    // A later claim of the same delivery has no usable webhook (none cached,
+    // empty in the reply context), so send() rejects before the loop; the
+    // retained card body must be pruned. Removing that prune reds this.
+    plane.enqueue([
+      {
+        deliveryId: 'd-1',
+        replyContext: {
+          conversationId: 'conv-1',
+          sessionWebhook: '',
+          senderId: 'staff-1',
+          robotCode: 'robot-app',
+        },
+        segments: [{ ordinal: 1, segmentId: 'd-1:1', text: 'beta' }],
+      },
+    ]);
+    await adapter.tick();
+    expect(card.calls).toHaveLength(1); // only the first segment's create
+    expect(persistedOf(adapter).cards?.['d-1']).toBeUndefined();
+    await adapter.disconnect();
   });
 
   it('R1-10: a configured-but-unusable template id is announced and stays text', async () => {

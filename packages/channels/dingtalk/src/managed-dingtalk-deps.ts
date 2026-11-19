@@ -448,15 +448,19 @@ type CardSegmentInput = Parameters<
  * the token endpoint without touching the Legacy client.
  */
 function createEgressFetch(proxy?: string): typeof fetch {
-  if (!proxy) return globalThis.fetch;
   return (async (input: string | URL | Request, init?: RequestInit) => {
+    // Refuse redirects on both the direct and proxied paths: following one
+    // would replay the card body and the access-token header to the redirect
+    // target (deferred round-3). The webhook send already uses redirect:'error'.
+    const guarded = { ...init, redirect: 'error' as const };
+    if (!proxy) return globalThis.fetch(input, guarded);
     const { default: undici } = await import('undici');
     const dispatcher = new undici.EnvHttpProxyAgent({
       httpProxy: proxy,
       httpsProxy: proxy,
     });
     try {
-      const proxied = { ...init, dispatcher } as RequestInit & {
+      const proxied = { ...guarded, dispatcher } as RequestInit & {
         dispatcher: import('undici').Dispatcher;
       };
       const response = await globalThis.fetch(input, proxied);

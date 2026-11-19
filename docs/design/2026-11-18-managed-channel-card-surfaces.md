@@ -36,8 +36,8 @@ exactly as they are.
 
 ## Current state
 
-Facts verified against `3d75b8ee60` and re-checked after merging `main` at
-`164bb1eb58` (the merge-base with `main` for this change). Symbol names, not
+Facts verified against the merge-base with `main` for this change and
+re-checked after each merge of `main` (latest `3612b40420`). Symbol names, not
 line numbers, anchor the sites so the census does not drift.
 
 - **The record contract forbids post-hoc edits.** `ChannelDelivery` in
@@ -188,6 +188,9 @@ second create or update.
 `ManagedChannelCapabilities { cards: boolean }`. `ManagedDingtalkAdapter`
 exposes `readonly capabilities: ManagedChannelCapabilities = { cards: true }`;
 the other adapters declare nothing and keep the text path by construction.
+DingTalk's declaration is a fixed `true`, so the gate's `cards: false` arm is a
+contract/test seam (witnessed by mutating the declaration), not a production
+toggle — it is the seam a future non-card adapter would use.
 
 Card mode engages only when all three hold: the adapter declares `cards`, the
 channel config carries a non-empty `cardTemplateId`, and the deps provide
@@ -198,9 +201,14 @@ config beside `clientId` / `clientSecret` and parsed by reusing
 the credential rule hardens in one copy. Without a usable id the adapter is
 byte-for-byte on today's text path. A configured-but-unusable id is announced
 once at construction (the fact, not the value) so "cards never appear" has a
-diagnosable cause; the refusal stays non-fatal. `cardTemplateId` is also
-declared in the DingTalk plugin's `management.fields`, so a channel editor or
-settings-API client can set it (an undeclared key is refused as not manageable).
+diagnosable cause; the refusal stays non-fatal. `cardTemplateId` is declared in
+the DingTalk plugin's `management.fields` (so a channel editor or settings-API
+client can set it) **and** in `envResolvableConfigFields` (so the runtime
+resolves a `$VAR` reference). Both lists must name it: the store keys on
+`management.fields[].envResolvable` while `parseChannelConfig` resolves only
+`envResolvableConfigFields` plus the known credential fields, so a field in only
+the first list would reach the card API as an unresolved literal and every reply
+would be terminally rejected.
 
 The capability declaration is consumed by the send gate itself, and a witness
 pins that an adapter with `cards: false` stays on text even with a template

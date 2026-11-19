@@ -22,6 +22,11 @@ export const plugin: ChannelPlugin = {
   channelType: 'dingtalk',
   displayName: 'DingTalk',
   requiredConfigFields: ['clientId', 'clientSecret'],
+  // The runtime resolves env references from this list (plus the known
+  // credential fields); the settings store keys on management.fields[].
+  // envResolvable. Both must name cardTemplateId or a $VAR template id reaches
+  // the card API unresolved and every reply is terminally rejected (R2-3).
+  envResolvableConfigFields: ['cardTemplateId'],
   supportsOutputMode: true,
   management: {
     fields: [

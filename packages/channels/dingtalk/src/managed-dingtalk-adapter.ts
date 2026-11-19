@@ -1061,6 +1061,17 @@ export class ManagedDingtalkAdapter {
       !webhook ||
       !this.senderAllowed(context?.senderId ?? '')
     ) {
+      // The delivery is rejected terminally; drop any card body it retained
+      // from earlier segments (deferred round-3). Persist best-effort so the
+      // prune is durable even though the rejection receipt may stay unreported.
+      this.pruneCardProgress(delivery.deliveryId);
+      try {
+        this.persist();
+      } catch (error) {
+        this.log(
+          `Managed DingTalk could not persist the card prune for ${delivery.deliveryId}: ${persistErrorText(error)}.`,
+        );
+      }
       // One delivery's unreportable rejection receipt must never abort the
       // claimed batch: the deliveries behind it were already moved to sending
       // server-side and would settle unknown (lost) if the tick escaped here.
@@ -1111,8 +1122,12 @@ export class ManagedDingtalkAdapter {
       } else if (card.fallback) {
         // The overflow switch is persisted so the whole tail stays text after
         // the first segment that no longer fits, in order, across a restart.
+        // The accumulated body is never read again once mode is text, so drop
+        // it rather than re-serialising up to 20 000 dead units on every later
+        // persist (R3-1). The validator still requires a string body.
         this.touchCardProgress(delivery.deliveryId, {
           ...card.fallback,
+          body: '',
           mode: 'text',
         });
       }
@@ -1260,6 +1275,7 @@ export class ManagedDingtalkAdapter {
       // produced an outcome settles unknown.
       const replay = entry.receipt ?? { outcome: 'unknown' };
       let settled: unknown;
+      let dropped = false;
       try {
         settled = await this.controlPlane.receipt(entry.deliveryId, replay);
       } catch (error) {
@@ -1292,11 +1308,15 @@ export class ManagedDingtalkAdapter {
         this.log(
           `Managed DingTalk receipt for ${entry.deliveryId} was refused (${String(status)}); it is dropped.`,
         );
+        dropped = true;
       }
       // A replayed non-accepted receipt (or a delivered one) settles the
       // delivery terminal: drop its card body so a post-restart settle does not
-      // retain it on disk (R1-4). The removal persist below carries the prune.
+      // retain it on disk (R1-4). A deterministically dropped entry is terminal
+      // too even if its replayed receipt was accepted (deferred round-3). The
+      // removal persist below carries the prune.
       if (
+        dropped ||
         replay.outcome !== 'accepted' ||
         settledDeliveryState(settled) === 'delivered'
       ) {

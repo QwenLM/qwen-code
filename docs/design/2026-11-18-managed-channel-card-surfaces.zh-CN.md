@@ -30,8 +30,8 @@ H5e 在一个 provider 上补上这个缺口，同时不另造第二条交付来
 
 ## 现状
 
-以下事实按 `3d75b8ee60` 核实，并在合入 `main`（`164bb1eb58`，本次改动与 `main`
-的 merge-base）后复核。站点用符号名锚定，不写行号，避免清单漂移。
+以下事实按本次改动与 `main` 的 merge-base 核实，并在每次合入 `main` 后复核
+（最新 `3612b40420`）。站点用符号名锚定，不写行号，避免清单漂移。
 
 - **记录契约禁止事后编辑。**
   `packages/core/src/managed-runtime/managed-channel-record.ts` 的
@@ -153,7 +153,9 @@ H5e 在一个 provider 上补上这个缺口，同时不另造第二条交付来
 `packages/channels/base/src/managed-channel.ts` 新增
 `ManagedChannelCapabilities { cards: boolean }`。`ManagedDingtalkAdapter`
 暴露 `readonly capabilities: ManagedChannelCapabilities = { cards: true }`；
-其余适配器不做声明，由构造保持文本路径。
+其余适配器不做声明，由构造保持文本路径。DingTalk 的声明是固定的 `true`，因此门的
+`cards: false` 分支是契约/测试缝（通过变异该声明来见证），不是生产开关——它是未来
+不支持卡片的适配器会用的缝。
 
 只有三者同时成立才进入卡片模式：适配器声明 `cards`、渠道配置带有非空
 `cardTemplateId`、deps 提供 `sendCardSegment`。模板 id 是运营自建的卡片模板，其
@@ -161,9 +163,12 @@ markdown 组件绑定 `content` 变量；它从渠道配置里与 `clientId` / `
 并列读取，复用 `validCredential` 解析（去首尾空白；非字符串、空值或含 CR/LF/NUL
 时拒绝），让凭证规则只在一处收紧。没有可用 id 时，适配器逐字节停在今天的文本
 路径上。配置了但不可用的 id 会在构造时播报一次（记录事实而非取值），让「卡片始终
-不出现」有可诊断的原因；该拒绝保持非致命。`cardTemplateId` 也在 DingTalk 插件的
-`management.fields` 中声明，因此渠道编辑器或 settings-API 客户端可以设置它（未声明
-的键会被拒为 not manageable）。
+不出现」有可诊断的原因；该拒绝保持非致命。`cardTemplateId` 既在 DingTalk 插件的
+`management.fields` 中声明（渠道编辑器或 settings-API 客户端可设置），**也**在
+`envResolvableConfigFields` 中声明（运行时据此解析 `$VAR` 引用）。两份清单都必须
+命名它：设置存储以 `management.fields[].envResolvable` 为准，而 `parseChannelConfig`
+只解析 `envResolvableConfigFields` 加已知凭证字段——只出现在前一份清单的字段会以
+未解析的字面量到达卡片 API，每条回复都会被终态拒绝。
 
 能力声明由发送门自身消费，并有一条见证钉住：`cards: false` 的适配器即使配了模板、
 装了卡片 deps 也走文本——声明是一道门，不是装饰。

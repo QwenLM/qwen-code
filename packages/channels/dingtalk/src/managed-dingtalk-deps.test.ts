@@ -973,6 +973,48 @@ describe('managed DingTalk card transport (H5e, #17716)', () => {
     }
   });
 
+  it('B15b proxy: a non-200 card answer keeps its status and refuses redirects (deferred round-3)', async () => {
+    vi.resetModules();
+    vi.doMock('undici', () => ({
+      default: {
+        EnvHttpProxyAgent: class {
+          async destroy() {}
+        },
+      },
+    }));
+    try {
+      const fetchDouble = vi.fn(async (url: string, init?: RequestInit) => {
+        // The egress must refuse redirects so a redirect cannot replay the card
+        // body and access-token header (deferred round-3).
+        expect((init as { redirect?: string }).redirect).toBe('error');
+        if (url.startsWith(TOKEN_PREFIX)) {
+          return new Response(
+            JSON.stringify({ access_token: 'tok-1', expires_in: 7200 }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+        return new Response(JSON.stringify({ code: 'forbidden' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      vi.stubGlobal('fetch', fetchDouble);
+      const fresh = await import('./managed-dingtalk-deps.js');
+      const deps = fresh.createManagedDingtalkDeps(
+        'http://proxy.internal:8080',
+        CREDS,
+      );
+      // The buffered re-wrap must preserve the 400 so the classifier lands
+      // definitive; dropping the status would misread it as a success.
+      await expect(deps.sendCardSegment!(CARD_INPUT)).rejects.toMatchObject({
+        definitive: true,
+      });
+    } finally {
+      vi.doUnmock('undici');
+      vi.resetModules();
+    }
+  });
+
   it('B16 token refreshes a minute early, not at expiry (R1-5)', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
