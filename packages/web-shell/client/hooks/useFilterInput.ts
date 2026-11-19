@@ -22,6 +22,8 @@ export interface UseFilterInputResult {
   filterValue: string;
   /** Spread onto the search `<input>` (carries the raw value + IME handlers). */
   inputProps: FilterInputProps;
+  /** Clears the field and the committed value (surfaces that remount). */
+  reset: () => void;
 }
 
 /**
@@ -83,6 +85,13 @@ export function useFilterInput(
     [commit],
   );
 
+  const reset = useCallback(() => {
+    composingRef.current = false;
+    committedRef.current = '';
+    setInputValue('');
+    setFilterValue('');
+  }, []);
+
   return {
     filterValue,
     inputProps: {
@@ -91,5 +100,6 @@ export function useFilterInput(
       onCompositionStart,
       onCompositionEnd,
     },
+    reset,
   };
 }

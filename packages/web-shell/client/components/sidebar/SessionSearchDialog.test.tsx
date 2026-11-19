@@ -255,6 +255,93 @@ it('resets the highlight to the first result when the query changes', async () =
   expect(rows[1].getAttribute('aria-selected')).toBe('false');
 });
 
+it('narrows the results to the workspaces whose names match the query', async () => {
+  await render();
+  await type('alpha');
+  let rows = Array.from(
+    portal.querySelectorAll<HTMLElement>('[role="option"]'),
+  );
+  expect(rows).toHaveLength(1);
+  expect(rows[0].textContent).toContain('First chat');
+
+  await type('beta');
+  rows = Array.from(portal.querySelectorAll<HTMLElement>('[role="option"]'));
+  expect(rows).toHaveLength(1);
+  expect(rows[0].textContent).toContain('Second chat');
+
+  // A query matching no workspace name is a plain session search and
+  // leaves the results untouched.
+  await type('zzz');
+  rows = Array.from(portal.querySelectorAll<HTMLElement>('[role="option"]'));
+  expect(rows).toHaveLength(2);
+});
+
+it('matches unnamed workspaces by basename and drops workspace-less rows in name mode', async () => {
+  search.entries = [
+    {
+      session: { sessionId: 'legacy', displayName: 'Legacy chat' },
+      workspaceCwd: '/tmp/legacy-api',
+    },
+    {
+      session: { sessionId: 'other', displayName: 'Other chat' },
+      workspaceCwd: '/tmp/other',
+    },
+    { session: { sessionId: 'free', displayName: 'Free chat' } },
+  ];
+  await render({
+    workspaces: [{ cwd: '/tmp/legacy-api' }, { cwd: '/tmp/other' }],
+  });
+  await type('legacy');
+  const rows = Array.from(
+    portal.querySelectorAll<HTMLElement>('[role="option"]'),
+  );
+  expect(rows).toHaveLength(1);
+  expect(rows[0].textContent).toContain('Legacy chat');
+});
+
+it('does not enter name mode on a workspace the search does not fetch', async () => {
+  search.entries = [
+    {
+      session: { sessionId: 'a1', displayName: 'Alpha chat' },
+      workspaceCwd: '/a',
+    },
+  ];
+  await render({
+    workspaces: [
+      { cwd: '/a', displayName: 'Alpha' },
+      { cwd: '/locked', displayName: 'Locked', trusted: false },
+      { cwd: '/beta', displayName: 'Beta' },
+    ],
+    qualified: false,
+    primaryWorkspaceCwd: '/a',
+  });
+  // An untrusted workspace is never in the fetch set...
+  await type('locked');
+  let rows = Array.from(
+    portal.querySelectorAll<HTMLElement>('[role="option"]'),
+  );
+  expect(rows).toHaveLength(1);
+  expect(rows[0].textContent).toContain('Alpha chat');
+  // ...nor is a secondary workspace on a daemon without qualified search.
+  await type('beta');
+  rows = Array.from(portal.querySelectorAll<HTMLElement>('[role="option"]'));
+  expect(rows).toHaveLength(1);
+  expect(rows[0].textContent).toContain('Alpha chat');
+  // A workspace the search does fetch still narrows.
+  await type('alpha');
+  rows = Array.from(portal.querySelectorAll<HTMLElement>('[role="option"]'));
+  expect(rows).toHaveLength(1);
+  expect(rows[0].textContent).toContain('Alpha chat');
+});
+
+it('confirms the narrowed row, not the filtered-out one', async () => {
+  await render();
+  await type('beta');
+  await key('Enter');
+  expect(props.onSelect).toHaveBeenCalledExactlyOnceWith(search.entries[1]);
+  expect(props.onClose).toHaveBeenCalledOnce();
+});
+
 it('suppresses the resting row hover tint while navigating by keyboard', async () => {
   await render();
   let rows = Array.from(

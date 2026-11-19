@@ -4,6 +4,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
+import { WebShellPortalRootContext } from '../portalRoot';
 import { WorkspaceSelector } from './WorkspaceSelector';
 
 let root: Root | undefined;
@@ -13,6 +14,49 @@ afterEach(async () => {
   await act(async () => root?.unmount());
   container?.remove();
 });
+
+function setFilterInput(element: HTMLInputElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLInputElement.prototype,
+    'value',
+  )!.set!;
+  act(() => {
+    setter.call(element, value);
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+
+// A real keystroke: keydown (what the menu's typeahead search listens to)
+// plus the value change + input event.
+async function typeFilterKey(
+  element: HTMLInputElement,
+  key: string,
+): Promise<void> {
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLInputElement.prototype,
+    'value',
+  )!.set!;
+  act(() => {
+    setter.call(element, element.value + key);
+    element.dispatchEvent(
+      new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }),
+    );
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  // Radix typeahead focuses the matched item on a timer.
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+}
+
+async function openMenu(element: HTMLElement): Promise<void> {
+  const trigger = element.querySelector('button')!;
+  await act(async () => {
+    trigger.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+    );
+  });
+}
 
 function renderSelector(
   overrides: Partial<React.ComponentProps<typeof WorkspaceSelector>> = {},
@@ -354,5 +398,551 @@ describe('WorkspaceSelector', () => {
     expect(document.querySelector('[role="menu"]')).toBeNull();
     expect(document.querySelector('[role="tooltip"]')).toBeNull();
     expect(document.activeElement).not.toBe(trigger);
+  });
+
+  it('renders a filter field that hides non-matching workspaces', async () => {
+    const element = renderSelector();
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    expect(filter).not.toBeNull();
+    expect(filter.placeholder).toBe('Filter workspaces…');
+    // Case-insensitive substring across all options.
+    setFilterInput(filter, 'PRI');
+    let items = [...document.querySelectorAll('[role="menuitemradio"]')];
+    expect(items.length).toBe(1);
+    expect(items[0]!.textContent).toContain('primary');
+    setFilterInput(filter, 'zzz');
+    items = [...document.querySelectorAll('[role="menuitemradio"]')];
+    expect(items.length).toBe(0);
+    expect(document.body.textContent).toContain('No workspaces match');
+  });
+
+  it('keeps keyboard focus in the filter input while typing', async () => {
+    const element = renderSelector();
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.focus();
+    });
+    expect(document.activeElement).toBe(filter);
+    // The menu runs a typeahead search on character keys; typing in the
+    // filter field must not hand focus over to a matching menu item.
+    await typeFilterKey(filter, 'p');
+    expect(document.activeElement).toBe(filter);
+    expect(filter.value).toBe('p');
+    await typeFilterKey(filter, 'r');
+    expect(document.activeElement).toBe(filter);
+    const items = [...document.querySelectorAll('[role="menuitemradio"]')];
+    expect(items.length).toBe(1);
+    expect(items[0]!.textContent).toContain('primary');
+    expect(document.activeElement).not.toBe(items[0]);
+  });
+
+  it('hands ArrowDown from the filter to the first enabled item', async () => {
+    const element = renderSelector();
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.focus();
+    });
+    // The menu only moves keyboard focus between items; typeahead covers
+    // character keys — so the selector itself hands ArrowDown to the first
+    // enabled item (the disabled "locked" entry is skipped).
+    act(() => {
+      filter.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    const primary = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ].find((entry) => entry.textContent?.includes('primary'))!;
+    expect(document.activeElement).toBe(primary);
+  });
+
+  it('hands ArrowUp from the filter to the last enabled item', async () => {
+    const element = renderSelector({
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/primary',
+          label: 'primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'second',
+          cwd: '/second',
+          label: 'second',
+          primary: false,
+          trusted: true,
+        },
+      ],
+      scratchSupported: false,
+      existingFolderSupported: false,
+    });
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.focus();
+    });
+    act(() => {
+      filter.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowUp',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    const items = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ];
+    expect(items.length).toBe(2);
+    const second = items.find((entry) =>
+      entry.textContent?.includes('second'),
+    )!;
+    expect(document.activeElement).toBe(second);
+  });
+
+  it('selects the focused item with Enter after arrow navigation', async () => {
+    const onSelectWorkspace = vi.fn();
+    const element = renderSelector({
+      workspaces: [
+        {
+          id: 'first',
+          cwd: '/first',
+          label: 'first',
+          primary: false,
+          trusted: true,
+        },
+        {
+          id: 'second',
+          cwd: '/second',
+          label: 'second',
+          primary: false,
+          trusted: true,
+        },
+      ],
+      scratchSupported: false,
+      existingFolderSupported: false,
+      onSelectWorkspace,
+    });
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.focus();
+    });
+    act(() => {
+      filter.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    const first = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ].find((entry) => entry.textContent?.includes('first'))!;
+    expect(document.activeElement).toBe(first);
+    await act(async () => {
+      first.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(onSelectWorkspace).toHaveBeenCalledExactlyOnceWith('/first');
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+  });
+
+  it('returns focus to the filter from the first enabled item on ArrowUp', async () => {
+    const element = renderSelector({
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/primary',
+          label: 'primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'second',
+          cwd: '/second',
+          label: 'second',
+          primary: false,
+          trusted: true,
+        },
+      ],
+      scratchSupported: false,
+      existingFolderSupported: false,
+    });
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.focus();
+    });
+    act(() => {
+      filter.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    const items = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ];
+    const first = items.find((entry) =>
+      entry.textContent?.includes('primary'),
+    )!;
+    expect(document.activeElement).toBe(first);
+    // There is no item above the first one, so ArrowUp goes back to the
+    // filter field instead of roving nowhere.
+    act(() => {
+      first.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowUp',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(document.activeElement).toBe(filter);
+  });
+
+  it('does not return to the filter on ArrowUp from a non-first item', async () => {
+    const element = renderSelector({
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/primary',
+          label: 'primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'second',
+          cwd: '/second',
+          label: 'second',
+          primary: false,
+          trusted: true,
+        },
+      ],
+      scratchSupported: false,
+      existingFolderSupported: false,
+    });
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.focus();
+    });
+    act(() => {
+      filter.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowUp',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    const items = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ];
+    const second = items.find((entry) =>
+      entry.textContent?.includes('second'),
+    )!;
+    expect(document.activeElement).toBe(second);
+    // ArrowUp from a non-first item stays inside the list (roving focus
+    // moves to the previous item) and must not hand focus to the filter.
+    await act(async () => {
+      second.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowUp',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    expect(document.activeElement).not.toBe(filter);
+  });
+
+  it('keeps matching host groups and drops empty ones while filtering', async () => {
+    const element = renderSelector({
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/primary',
+          label: 'qwen-code',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'remote',
+          cwd: '/srv/remote',
+          label: 'qwen-code',
+          primary: false,
+          trusted: true,
+          hostOrigin: 'https://b.example:4170',
+        },
+        {
+          id: 'other',
+          cwd: '/other',
+          label: 'other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    });
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    setFilterInput(filter, 'qwen');
+    const headers = [
+      ...document.querySelectorAll('[data-slot="dropdown-menu-label"]'),
+    ];
+    expect(headers.map((header) => header.textContent)).toEqual([
+      'Local',
+      'b.example:4170',
+    ]);
+    const items = [...document.querySelectorAll('[role="menuitemradio"]')];
+    expect(items.length).toBe(2);
+  });
+
+  it('auto-focuses the filter when the menu opens', async () => {
+    const element = renderSelector();
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    expect(filter).not.toBeNull();
+    expect(document.activeElement).toBe(filter);
+  });
+
+  it('keeps modified arrow gestures on the filter input', async () => {
+    const element = renderSelector();
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.focus();
+    });
+    // Cmd/Ctrl/Alt/Shift+arrow are text gestures: the list must not
+    // intercept them, so they reach the focused input untouched.
+    for (const modifiers of [{ metaKey: true }, { shiftKey: true }]) {
+      const event = new KeyboardEvent('keydown', {
+        key: 'ArrowDown',
+        bubbles: true,
+        cancelable: true,
+        ...modifiers,
+      });
+      act(() => {
+        filter.dispatchEvent(event);
+      });
+      expect(document.activeElement).toBe(filter);
+      expect(event.defaultPrevented).toBe(false);
+    }
+  });
+
+  it('does not move focus to a hovered row while the filter owns focus', async () => {
+    const element = renderSelector();
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.focus();
+    });
+    const primary = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ].find((entry) => entry.textContent?.includes('primary'))!;
+    const move = new MouseEvent('pointermove', {
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(move, 'pointerType', { value: 'mouse' });
+    act(() => {
+      primary.dispatchEvent(move);
+    });
+    expect(document.activeElement).toBe(filter);
+  });
+
+  it('keeps filter focus for a portalled menu when the root is a shadow root', async () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: 'open' });
+    const portal = document.createElement('div');
+    shadow.appendChild(portal);
+    const mount = document.createElement('div');
+    shadow.appendChild(mount);
+    const shadowTreeRoot = createRoot(mount);
+    act(() => {
+      shadowTreeRoot.render(
+        <I18nProvider language="en">
+          <WebShellPortalRootContext.Provider value={portal}>
+            <WorkspaceSelector
+              workspaces={[
+                {
+                  id: 'primary',
+                  cwd: '/primary',
+                  label: 'primary',
+                  primary: true,
+                  trusted: true,
+                },
+              ]}
+              scratchSupported
+              existingFolderSupported
+              onSelectWorkspace={vi.fn()}
+              onCreateScratch={vi.fn()}
+              onOpenExistingFolder={vi.fn()}
+            />
+          </WebShellPortalRootContext.Provider>
+        </I18nProvider>,
+      );
+    });
+    try {
+      const trigger = mount.querySelector('button')!;
+      await act(async () => {
+        trigger.dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+      });
+      // The menu content lands in the portal root inside the shadow tree.
+      const filter = portal.querySelector<HTMLInputElement>(
+        '[data-web-shell-ws-filter] input',
+      )!;
+      act(() => {
+        filter.focus();
+      });
+      expect(shadow.activeElement).toBe(filter);
+      const primary = [
+        ...portal.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+      ].find((entry) => entry.textContent?.includes('primary'))!;
+      const move = new MouseEvent('pointermove', {
+        bubbles: true,
+        cancelable: true,
+      });
+      Object.defineProperty(move, 'pointerType', { value: 'mouse' });
+      act(() => {
+        primary.dispatchEvent(move);
+      });
+      // document.activeElement retargets to the shadow host, so the guard
+      // must resolve from the input's own root.
+      expect(shadow.activeElement).toBe(filter);
+    } finally {
+      await act(async () => shadowTreeRoot.unmount());
+      host.remove();
+    }
+  });
+
+  it('filters remote workspaces by their host', async () => {
+    const element = renderSelector({
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/primary',
+          label: 'qwen-code',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'remote',
+          cwd: '/srv/remote',
+          label: 'other',
+          primary: false,
+          trusted: true,
+          hostOrigin: 'https://b.example:4170',
+        },
+      ],
+    });
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    setFilterInput(filter, 'b.example');
+    const items = [...document.querySelectorAll('[role="menuitemradio"]')];
+    expect(items.length).toBe(1);
+    expect(items[0]!.textContent).toContain('b.example:4170');
+  });
+
+  it('commits the filter only when the IME composition ends', async () => {
+    const element = renderSelector();
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.dispatchEvent(new Event('compositionstart', { bubbles: true }));
+    });
+    setFilterInput(filter, 'pri');
+    // The preedit is displayed but must not refilter the list yet.
+    expect(filter.value).toBe('pri');
+    expect(document.querySelectorAll('[role="menuitemradio"]').length).toBe(2);
+    act(() => {
+      filter.dispatchEvent(new Event('compositionend', { bubbles: true }));
+    });
+    const items = [...document.querySelectorAll('[role="menuitemradio"]')];
+    expect(items.length).toBe(1);
+    expect(items[0]!.textContent).toContain('primary');
+  });
+
+  it('resets the filter when the menu reopens after a filtered close', async () => {
+    const element = renderSelector();
+    const trigger = element.querySelector('button')!;
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    setFilterInput(filter, 'PRI');
+    expect(document.querySelectorAll('[role="menuitemradio"]').length).toBe(1);
+    await act(async () => {
+      trigger.dispatchEvent(new MouseEvent('pointerleave', { bubbles: true }));
+      document.body.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+      trigger.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+    // While the content is still mounted for the exit animation, the
+    // filtered list must not snap back to the full one.
+    const exiting = document.querySelector('[role="menu"]');
+    if (exiting) {
+      expect(exiting.querySelectorAll('[role="menuitemradio"]').length).toBe(1);
+    }
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    });
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+
+    await openMenu(element);
+    const reopened = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    expect(reopened.value).toBe('');
+    expect(document.querySelectorAll('[role="menuitemradio"]').length).toBe(2);
   });
 });

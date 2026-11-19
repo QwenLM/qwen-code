@@ -9,6 +9,7 @@ import {
   DaemonHttpError,
   type DaemonClient,
   type DaemonSessionSummary,
+  type DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import { sessionMatchesGitQuery, sessionMatchesSource } from './sessionSearch';
 
@@ -24,6 +25,7 @@ export interface SessionSearchOptions {
     cwd: string;
     trusted?: boolean;
     displayName?: string;
+    ssh?: DaemonWorkspaceCapability['ssh'];
   }[];
   initialSessions: readonly DaemonSessionSummary[];
   primaryWorkspaceCwd?: string;

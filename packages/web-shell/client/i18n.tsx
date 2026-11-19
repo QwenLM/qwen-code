@@ -2560,6 +2560,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.standalonePinUnavailable':
     'Pinning no-workspace sessions is not supported yet.',
   'sidebar.workspaceSelectLabel': 'Workspace',
+  'sidebar.filterWorkspaces': 'Filter workspaces…',
+  'sidebar.noWorkspacesMatch': 'No workspaces match',
   'sidebar.noWorkspace': 'No workspace',
   'sidebar.liveSessions': 'Live sessions',
   'sidebar.noWorkspaceSessions': 'No-workspace sessions',
@@ -7862,6 +7864,8 @@ const ZH: Messages = {
   'sidebar.recentSessions': '最近',
   'sidebar.standalonePinUnavailable': '暂不支持置顶无工作区会话。',
   'sidebar.workspaceSelectLabel': '工作区',
+  'sidebar.filterWorkspaces': '筛选工作区…',
+  'sidebar.noWorkspacesMatch': '没有匹配的工作区',
   'sidebar.noWorkspace': '无工作区',
   'sidebar.liveSessions': 'Live 会话',
   'sidebar.noWorkspaceSessions': '无工作区会话',

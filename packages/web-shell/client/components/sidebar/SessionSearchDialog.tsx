@@ -10,6 +10,8 @@ import {
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
+import { workspaceLabel } from '../../utils/workspace';
+import { matchesWorkspaceQuery } from '../../utils/workspaceFilter';
 import { Dialog, DialogClose, DialogContent, DialogTitle } from '../ui/dialog';
 import { Input } from '../ui/input';
 import { useSessionSearch } from './use-session-search';
@@ -65,9 +67,35 @@ export function SessionSearchDialog({
     client: customContent === undefined ? options.client : undefined,
     query,
   });
-  const activeIndex = Math.min(selected, entries.length - 1);
-  const activeId = activeIndex >= 0 ? `${id}-${activeIndex}` : undefined;
   const trimmed = query.trim();
+  // Name mode (#17142): a query that matches at least one workspace name
+  // narrows the results to that workspace's sessions; a query that matches no
+  // name (a plain session search) leaves the results untouched. The gate is
+  // restricted to the workspaces useSessionSearch actually fetches — the
+  // same trusted/qualified/primary scoping — so a name hit on an out-of-
+  // pipeline workspace cannot delete rows the search did find.
+  const searchableWorkspaces = options.workspaces.filter(
+    (workspace) =>
+      workspace.trusted !== false &&
+      (options.qualified || workspace.cwd === options.primaryWorkspaceCwd),
+  );
+  const nameMatchedWorkspaces = trimmed
+    ? searchableWorkspaces.filter((workspace) =>
+        matchesWorkspaceQuery([workspaceLabel(workspace)], trimmed),
+      )
+    : [];
+  const narrowingByWorkspaceName = nameMatchedWorkspaces.length > 0;
+  const visibleEntries = narrowingByWorkspaceName
+    ? entries.filter(
+        (entry) =>
+          entry.workspaceCwd !== undefined &&
+          nameMatchedWorkspaces.some(
+            (workspace) => workspace.cwd === entry.workspaceCwd,
+          ),
+      )
+    : entries;
+  const activeIndex = Math.min(selected, visibleEntries.length - 1);
+  const activeId = activeIndex >= 0 ? `${id}-${activeIndex}` : undefined;
 
   useEffect(() => {
     if (activeId)
@@ -111,11 +139,11 @@ export function SessionSearchDialog({
   };
 
   const { keyboardMode } = useListboxKeyboard({
-    itemCount: entries.length,
+    itemCount: visibleEntries.length,
     activeIndex,
     onActiveIndexChange: setSelected,
     onConfirm: (index) => {
-      const entry = entries[index];
+      const entry = visibleEntries[index];
       if (entry) select(entry);
     },
     enabled: customContent === undefined,
@@ -221,17 +249,23 @@ export function SessionSearchDialog({
                 aria-label={t('sidebar.searchResults')}
                 aria-busy={loading}
               >
-                {entries.map((entry, index) => {
+                {visibleEntries.map((entry, index) => {
                   const title =
                     entry.session.displayName?.trim() ||
                     t('sidebar.untitledSession');
-                  const workspaceName = entry.workspaceCwd
+                  const entryWorkspace = entry.workspaceCwd
                     ? options.workspaces.find(
                         (workspace) => workspace.cwd === entry.workspaceCwd,
-                      )?.displayName ||
-                      entry.workspaceCwd.split(/[\\/]/).filter(Boolean).pop() ||
-                      entry.workspaceCwd
-                    : t('sidebar.noWorkspace');
+                      )
+                    : undefined;
+                  const workspaceName = entryWorkspace
+                    ? workspaceLabel(entryWorkspace)
+                    : entry.workspaceCwd
+                      ? entry.workspaceCwd
+                          .split(/[\\/]/)
+                          .filter(Boolean)
+                          .pop() || entry.workspaceCwd
+                      : t('sidebar.noWorkspace');
                   return (
                     <div
                       id={`${id}-${index}`}
@@ -282,7 +316,7 @@ export function SessionSearchDialog({
                   );
                 })}
               </div>
-              {!entries.length && !failed && (
+              {!visibleEntries.length && !failed && (
                 <div
                   role="status"
                   className="flex h-60 flex-col items-center justify-center gap-3 px-6 text-center"
