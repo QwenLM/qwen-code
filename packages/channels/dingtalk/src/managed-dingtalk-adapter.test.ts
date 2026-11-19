@@ -867,7 +867,13 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.disconnect();
   });
 
-  it('keeps the recent window loadable at the shared cap (R2-1)', async () => {
+  // The fill drives 773 fsync-backed state writes, so disk latency decides the
+  // runtime: the same sequence measured 1.8ms and 17.2ms per write minutes
+  // apart on one host, and 38.8ms per write outlasts the old flat 30s (#17834).
+  // No timer or network wait here, so a generous ceiling costs no fail-fast.
+  it('keeps the recent window loadable at the shared cap (R2-1)', async (ctx) => {
+    // Pin the ceiling: a dropped third argument must fail here, not in CI.
+    expect(ctx.task.timeout).toBe(120_000);
     const cwd = tempCwd();
     const first = await connectedAdapter(cwd);
     // Drive one past the recent cap; the writer must slice to the same cap the
@@ -891,7 +897,7 @@ describe('managed DingTalk adapter outbox', () => {
     // Writer and validator share the cap, so the state still loads.
     const second = await connectedAdapter(cwd);
     await second.adapter.disconnect();
-  }, 30_000);
+  }, 120_000);
 
   it('reports a definitive webhook refusal as rejected and never resends', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
