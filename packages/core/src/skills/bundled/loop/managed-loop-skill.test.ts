@@ -92,6 +92,24 @@ function resolveJavaRouting(javaCode: string): Map<string, string> {
   return routed;
 }
 
+/** The profile constants whose own Javadoc declares a /loop creator. Java
+ * carries no machine-readable creator declaration — the fact lives only in
+ * the doc comment above each constant — so that prose is the only available
+ * oracle, and this is a drift guard rather than a mechanism pin. Classifying
+ * every constant against it means a new loop-bearing profile that
+ * forProfile() forgets to route reddens, while a creator-less profile stays
+ * unconstrained. Comments are deliberately NOT stripped here: they are the
+ * signal. */
+function loopBearingProfiles(javaCode: string): string[] {
+  return [
+    ...javaCode.matchAll(
+      /(?:\/\*\*([\s\S]*?)\*\/\s*)?public static final String (\w+)\s*=/g,
+    ),
+  ]
+    .filter((match) => /loop|cron/i.test(match[1] ?? ''))
+    .map((match) => match[2]!);
+}
+
 /** The loop.md section of a body, up to the next top-level heading. */
 function loopMdSection(body: string): string {
   const start = body.indexOf('## loop.md task-file mode');
@@ -473,6 +491,40 @@ describe('managed loop skill parity', () => {
     expect([...new Set(routed.values())].sort()).toEqual(
       [...MANAGED_LOOP_PROFILES].sort(),
     );
+    // The mapping alone cannot see a loop-bearing profile that the chain never
+    // mentions: it would simply be absent, like a creator-less one. Classify
+    // every declared constant by its own Javadoc and require the loop-bearing
+    // ones to be exactly the routed ones.
+    const profilesSource = readFileSync(
+      join(
+        here,
+        '../../../../../managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/workspace/WorkspaceToolProfiles.java',
+      ),
+      'utf8',
+    );
+    expect(loopBearingProfiles(profilesSource).sort()).toEqual(
+      [...routed.keys()].sort(),
+    );
+  });
+
+  it('the loop-bearing classification reads the doc above each constant, witnessed synthetically', () => {
+    const declarations = [
+      'public static final String FILES = "hosted-workspace-files/1";',
+      '/** Fixed-interval /loop: `files/3` plus the cron trio. */',
+      'public static final String FILES_V4 = "hosted-workspace-files/4";',
+      '/** #15076: `files/3` adds `todo_write`. */',
+      'public static final String FILES_V3 = "hosted-workspace-files/3";',
+      '/** Self-paced /loop revision: plus loop_wakeup. */',
+      'public static final String SHELL_V3 = "hosted-workspace-shell/3";',
+    ].join('\n');
+    expect(loopBearingProfiles(declarations).sort()).toEqual([
+      'FILES_V4',
+      'SHELL_V3',
+    ]);
+    // A constant with no doc at all is creator-less, not loop-bearing.
+    expect(
+      loopBearingProfiles('public static final String MCP = "x/1";'),
+    ).toEqual([]);
   });
 
   it('the routing resolution is first-match and comment-blind, witnessed on a synthetic chain', () => {
@@ -502,16 +554,24 @@ describe('managed loop skill parity', () => {
     // The trailing duplicate names an already-matched profile: first-match
     // keeps union, where last-wins would hand SHELL_V4 the cron body.
     expect(Object.fromEntries(resolveJavaRouting(chain))).toEqual(expected);
-    // Prose spelling an assignment is not a branch.
+    // A comment spelling a WHOLE branch is what witnesses the stripping: a
+    // bare `// key = "cron";` has no profile condition, so the branch regex
+    // never matches it whether or not comments are removed, and such a variant
+    // proves nothing. These prepend a complete branch that would win
+    // first-match if it were scraped, so dropping either comment form reddens.
     expect(
       Object.fromEntries(
         resolveJavaRouting(
-          chain.replace('key = "union";', 'key = "union"; // key = "cron";'),
+          `// if (WorkspaceToolProfiles.SHELL_V4.equals(profile)) { key = "cron"; }\n${chain}`,
         ),
       ),
     ).toEqual(expected);
     expect(
-      Object.fromEntries(resolveJavaRouting(`/* key = "wakeup"; */\n${chain}`)),
+      Object.fromEntries(
+        resolveJavaRouting(
+          `/* if (WorkspaceToolProfiles.SHELL_V3.equals(profile)) { key = "union"; } */\n${chain}`,
+        ),
+      ),
     ).toEqual(expected);
   });
 

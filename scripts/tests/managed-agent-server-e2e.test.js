@@ -4072,6 +4072,10 @@ describe('managed-agent-server e2e runner', () => {
       // left, and the defineProperty pair writes it in place without an
       // assignment operator at all.
       "[blockProperties] = [{ shouldBlock: { type: 'boolean' } }];",
+      // The object-pattern arm, in both property and shorthand form: the first
+      // writes a member through the pattern, the second rebinds the input.
+      "({ x: blockProperties.shouldBlock } = { x: { type: 'boolean' } });",
+      '({ blockProperties } = { blockProperties: undefined });',
       "Object.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } });",
       "Reflect.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } });",
       // A receiver that resolves to a prototype function must not crash the
@@ -4137,8 +4141,9 @@ describe('managed-agent-server e2e runner', () => {
     // key is the same property, so it is attributed to the same function.
     expect(scope.allowSites).toEqual(['(anonymous)', '(anonymous)']);
     // Every write form is recorded: the member write, the in-place calls, the
-    // delete, the alias write, the destructuring rebind and the nullish
-    // assignment — none of them rebinds an identifier the direct way.
+    // delete, the alias write, both destructuring patterns (array, object
+    // property and object shorthand) and the nullish assignment — none of them
+    // rebinds an identifier the direct way.
     expect(scope.reassignments).toEqual([
       "blockProperties['shouldBlock'] = { type: 'boolean' }",
       "Object.assign(blockProperties, { shouldBlock: { type: 'boolean' } })",
@@ -4147,6 +4152,8 @@ describe('managed-agent-server e2e runner', () => {
       "Object.defineProperties(blockProperties, { shouldBlock: { value: { type: 'boolean' } } })",
       "propsAlias['shouldBlock'] = { type: 'boolean' }",
       "[blockProperties] = [{ shouldBlock: { type: 'boolean' } }]",
+      "{ x: blockProperties.shouldBlock } = { x: { type: 'boolean' } }",
+      '{ blockProperties } = { blockProperties: undefined }',
       "Object.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } })",
       "Reflect.defineProperty(blockProperties, 'shouldBlock', { value: { type: 'boolean' } })",
       'blockAnswer ??= { shouldBlock: false }',

@@ -43,7 +43,7 @@
 
 ## 验收标准
 
-- core parity 套件绿（34 测试），含 bundled 与各 shell 的 Parsing 库存、allow-list 与调用点测试、sidecar 集合钉、Java 提供集合与 profile→key 路由映射、解析器派生的 caveat 子句、双求值器一致性，及重生 sidecar 逐字节 parity。
+- core parity 套件绿（35 测试），含 bundled 与各 shell 的 Parsing 库存、allow-list 与调用点测试、sidecar 集合钉、Java 提供集合与 profile→key 路由映射、解析器派生的 caveat 子句、双求值器一致性，及重生 sidecar 逐字节 parity。
 - scripts 元套件绿（183 测试），含 fake createdId 钉、可执行分类器收窄、可执行 minted-id 提取与被执行的分类器接线扫描器。
 - 变异见证：additive-fallback 分类器变异使非 block 方向红；deny-list 哨兵回退使新哨兵方向红；伪造 fake createdId 使其钉红；删除 Parsing 规则使库存钉红；门后 sibling fallback（第二绑定、换 call id 或手搭 tool call）使分类器接线钉红；`let` 决策在门后重赋值为内联 allow 使构造点集合红；对决策的 `??=` 改写使重赋值集合红；伪造 schema-properties 初始化式使来源集合红；caveat 上界改 N ≤ 45 使派生断言红，调低 Managed 编译器日域上界同样红；删 Java `SHELL_V3` 路由分支使路由目标集合红。含绑定名、allow 字面量与工具名的注释保持绿。各字节级还原复绿。
 - 真实打包栈 `--loop-skill` 与 `--loop-fire` 臂以重生 sidecar 绿（jar 重建）。
@@ -76,7 +76,7 @@
 
 - **N ≤ 31 多算一档（low）。** 与第二轮评审抓到的 critical 同一缺陷；由上文 N ≤ 30 修正关闭。
 - **调用点之后的 sibling fallback（覆盖缺口）。** 语句锚定计数钉看不到写在门*之后*的 fallback（`if (blockAnswer === undefined) return …allow…`）：两个计数仍为 2，而 fire fake 重新误答侧查询，只在打包臂可见。首次响应改为「数成分」——block allow 字面量与决策变量引用计数。round 3 随后证明：经 helper 在*第二个绑定*下重新推导 allow 的 sibling 两个成分都不新增，故那两条计数同样盲；且对原始源码文本计数会因注释仅提到绑定而以难定位的计数不匹配变红。两者均被 AST 接线钉取代（见 Round-3）；成分计数已移除，结构化钉不再需要为计数无歧义而改写注释。
-- **parity 计数陈旧（nit）。** PR 正文与上文验收标准改为当前套件规模（core 33、scripts 元 183）与最新真实栈 occurrence key。
+- **parity 计数陈旧（nit）。** PR 正文与上文验收标准当时被改为该轮的套件规模（core 33、scripts 元 183）与最新真实栈 occurrence key；两者此后都已增长，验收标准承载当前规模。
 
 ## Round-3 评审精化
 
@@ -161,7 +161,7 @@
 
 **一个新的对抗形态，先实测再在此关闭。** 第一个假设——sibling 提到模块级函数但仍答 loop call id——被实测推翻：域由 loop call id 派生，故这样的答案会把回调外的位置拉进域并使回调计数红，而把它作为 `toolCalls` 元素调用也会被记为手搭。真正存活的变体答**外来** call id 并返回**整个响应**，于是 loop 回调里根本没有 `toolCalls` 数组：它伪造自己的 schema、经 helper 推导 allow，而每个 loop 域内库存都保持干净。这是 round-8 域限定引入的——它所替换的 file-wide helper 调用与来源库存本会抓住它，同一探针在 hoisted 答案点名 loop call id 时即显示这一点。
 
-以两条 file-wide **集合**断言关闭：每次 `classifierBlockAnswer` 调用的实参都是那个被查找的绑定，且每个 `blockProperties` 初始化式都是该查找。用集合而非计数，故遵循同一查找的合法新臂不新增成员，round-8 的收益得以保留。被执行控制用例现携带该 hoisted 形态并证明两个方向——伪造到达 file-wide 库存，而 loop 域内库存不变。因此它的 file-wide 计数是 5 个 answer 站点、7 个工具名站点、4 次 helper 调用（round 8 在此次新增之前记的是 4、6、3）。真实 runner 上的见证：hoisted sibling 使集合断言红并点名 `props`（1 失败 / 87 通过）；字节级还原回到 88/88。
+以两条 file-wide **集合**断言关闭：每次 `classifierBlockAnswer` 调用的实参都是那个被查找的绑定，且每个 `blockProperties` 初始化式都是该查找。用集合而非计数，故遵循同一查找的合法新臂不新增成员，round-8 的收益得以保留。被执行控制用例现携带该 hoisted 形态并证明两个方向——伪造到达 file-wide 库存，而 loop 域内库存不变。此次新增后它的 file-wide 计数是 5 个 answer 站点、7 个工具名站点、4 次 helper 调用（round 8 记的是 4、6、3）；round 9 把同一控制增至 6、10、4，即已提交的值。真实 runner 上的见证：hoisted sibling 使集合断言红并点名 `props`（1 失败 / 87 通过）；字节级还原回到 88/88。
 
 这里关闭的是**直接**伪造路线，其限度是实测而非假设：若 hoisted 函数把 `schemaTool` 查找本身伪造在上一层，实参与初始化式仍都拼写为规范形，同一探针报告钉子对它**绿**。该变体属同一拼写家族——再往上伪造一层，任何拼写库存都会被满足——故记为 #17673 执行接缝的残留，不在此再加一份库存去追。
 
@@ -202,7 +202,7 @@ core 邻近面是整面跑而非抽样：`src/managed-runtime` 加 `src/skills/b
 - first-match 解析此前没有已提交的见证（只有对真实 Java 文件的本地变异）。现为顶层纯函数 `resolveJavaRouting`，由一个已提交的合成链测试执行，链上带死重复分支与两种注释形态。见证：把解析改回 last-wins 即红。
 - 两个 `Nd` 钉原迭代硬编码的 `['cron','union']`。现迭代 `FIXED_INTERVAL_PROFILES`，由携带 `CronCreate` 的已发布 body 派生，且成员本身被断言，故某个 body 失去其 creator 不会静默缩小集合。见证：把派生谓词换成 `LoopWakeup` 即红。
 
-套件规模现为 core 34、scripts 元 183（改动文件 88）。残留在种类上不变：拼写 evasion 家族仍无界——把 `schemaTool` 查找伪造在上一层仍存活——其持久修复留在 #17673。
+该轮的套件规模为 core 34、scripts 元 183（改动文件 88）。残留在种类上不变：拼写 evasion 家族仍无界——把 `schemaTool` 查找伪造在上一层仍存活——其持久修复留在 #17673。
 
 ## 第三次合并：继承的必需检查红已被上游修好
 
@@ -211,6 +211,20 @@ core 邻近面是整面跑而非抽样：`src/managed-runtime` 加 `src/skills/b
 该合并还改了 cli 与 core 的 serve 源码，故 harness 是重建而非复用：core 与 cli 的 dist 按构建起点时间戳断言已刷新，bundle 重建并断言已刷新，两条臂重跑。incoming 提交未触碰 Java，故 jar 及其逐字节相等的 sidecar 承接有效。
 
 本 head 的臂：`--loop-skill` success（session `1202cce3-c272-406b-8d29-e59d3062f85b`、modelRounds 6、cron create/list/delete 均见证）；`--loop-fire` success（session `79e11be7-0ed5-4bb2-9dee-f355f5e5e5bb`、schedule `asch_7b67f54fde2eb587c9b7bddc2474dc98`、fireTrigger=scheduled、fireOutcome=fired、fireState=completed、occurrenceKey `schedule:2026-11-18T16:06:00Z`、modelRounds 5）。
+
+## 第 10 轮评审：五条延后项，以及继承的 Java 红已被上游修好
+
+第 10 轮无 inline 发现、五条延后项。每条先实测再处置，五条全部在此关闭。
+
+- **「comment-blind」见证其实没见证剥注释。** 实测：两个已提交变体——尾随的 `// key = "cron";` 与前置的 `/* key = "wakeup"; */`——在剥与不剥下解析结果完全相同，因为分支正则要求赋值前有 profile 条件，而裸赋值注释永不匹配。它们什么都没证明。两者均替换为拼出**整条分支**的注释（行与块两种形态）；不剥时这样的注释会赢得 first-match 并把 cron body 交给 `SHELL_V4`，故去掉任一剥注释步骤现在都会红。
+- **记录说验收标准承载 core 33，而它们写的是 34。** 该 nit 是那一轮规模的历史记录；现已如此限定，验收标准承载当前规模。
+- **控制计数记为 5/7/4，而已提交断言是 6/10/4。** round 9 在该句写下之后又扩充了同一控制。该句现陈述演进（round 8：4/6/3 → 合并后审计：5/7/4 → round 9：6/10/4）并点名已提交的值。
+- **`assignmentTarget` 的对象模式臂没有见证。** 控制此前只带数组模式。已补两种对象形态——属性目标（`{ x: blockProperties.shouldBlock } = …`）与 shorthand 重绑（`{ blockProperties } = …`）——两者都被重赋值库存记录。
+- **未被路由的 profile 常量未被分类。** 映射无法区分「无 creator 的 profile」与「链忘记路由的 loop-bearing profile」。Java 没有机读的 creator 声明——该事实只存在于每个常量上方的 Javadoc——故 `loopBearingProfiles` 从该散文派生 loop-bearing 集合，钉子要求它等于被路由集合，并为派生本身配合成见证。这是漂移守卫而非机制钉：改写文档可绕过它，#17673 里与形态无关的路由断言仍是持久修复。
+
+分支在本会话之外被合入 main（合并提交 `00f24627d4`）；本地树已快进到它，且该合并未改动本 PR 的任何文件。incoming 的 `7171fc776e`（#17753）恢复了 class-size 与 facade-population 两道门：`AgentSessionPolicies` 回到 779 行对 791 上限，分解清单已含 `creationToolProfile`，故**两条继承的 Java 红均已由上游解决**。本 head 上所有 CI 车道通过，含 `SDK Java (fast) / ubuntu-latest / Java 21` 与 `Managed Agent fast tier`，以及四项必需检查。
+
+套件规模：core 35、scripts 元 183（改动文件 88）。
 
 ## 开放问题
 
