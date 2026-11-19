@@ -768,11 +768,7 @@ export async function runNonInteractive(
       limitedTurnCount++;
       const maxSessionTurns = config.getMaxSessionTurns();
       if (maxSessionTurns >= 0 && limitedTurnCount > maxSessionTurns) {
-        await failClosedActiveGoalTurn(
-          'Headless Goal stopped after the session turn limit',
-        );
-        await settleBeforeTerminalOutput();
-        await handleMaxTurnsExceededError(config);
+        await exitForSessionTurnLimit();
       }
     };
     let goalHostUnbind: (() => void) | undefined;
@@ -977,8 +973,22 @@ export async function runNonInteractive(
       ]);
       clearTimeout(timer);
     };
+    const exitForSessionTurnLimit = async (): Promise<never> => {
+      await failClosedActiveGoalTurn(
+        'Headless Goal stopped after the session turn limit',
+      );
+      await cancelWorkflowRuns();
+      await settleBeforeTerminalOutput();
+      return handleMaxTurnsExceededError(config);
+    };
     const routeAbort = async (): Promise<never> => {
       const exceeded = budgetEnforcer.getExceeded();
+      const reason: unknown = abortController.signal.reason;
+      const recoverable =
+        !exceeded &&
+        reason instanceof TurnInterruptedError &&
+        (options.recoverableCancellation === true ||
+          reason instanceof ModTurnAbortedError);
       endActiveInteraction(exceeded ? 'error' : 'cancelled', {
         ...(exceeded
           ? {
@@ -987,15 +997,17 @@ export async function runNonInteractive(
             }
           : {}),
       });
-      await failClosedActiveGoalTurn(
-        exceeded?.message ?? 'Headless Goal execution was cancelled',
-        exceeded
-          ? goalPauseReasonForRunBudget(exceeded.kind)
-          : GOAL_PAUSE_REASON_USER_INTERRUPT,
-      );
+      await Promise.all([
+        recoverable ? undefined : cancelWorkflowRuns(),
+        failClosedActiveGoalTurn(
+          exceeded?.message ?? 'Headless Goal execution was cancelled',
+          exceeded
+            ? goalPauseReasonForRunBudget(exceeded.kind)
+            : GOAL_PAUSE_REASON_USER_INTERRUPT,
+        ),
+      ]);
       await settleBeforeTerminalOutput();
       if (exceeded) {
-        await cancelWorkflowRuns();
         await handleBudgetExceededError(
           config,
           exceeded,
@@ -1009,15 +1021,7 @@ export async function runNonInteractive(
         // (vs. a useless literal "unreachable").
         throw new Error(exceeded.message);
       }
-      const reason: unknown = abortController.signal.reason;
-      if (
-        reason instanceof TurnInterruptedError &&
-        (options.recoverableCancellation === true ||
-          reason instanceof ModTurnAbortedError)
-      ) {
-        throw reason;
-      }
-      await cancelWorkflowRuns();
+      if (recoverable) throw reason;
       await handleCancellationError(config, markAbortExitCommitted);
       throw new Error('Operation cancelled.');
     };
@@ -3306,11 +3310,7 @@ export async function runNonInteractive(
               return await routeAbort();
             case 'max_session_turns':
               // The client counts turns across the whole session (#15325).
-              await failClosedActiveGoalTurn(
-                'Headless Goal stopped after the session turn limit',
-              );
-              await settleBeforeTerminalOutput();
-              return handleMaxTurnsExceededError(config);
+              return await exitForSessionTurnLimit();
             case 'next_round':
               currentMessages = [{ role: 'user', parts: result.parts ?? [] }];
               hasUnsentToolResponse = true;
@@ -3777,11 +3777,7 @@ export async function runNonInteractive(
               } else if (result.reason === 'cancelled') {
                 await routeAbort();
               } else if (result.reason === 'max_session_turns') {
-                await failClosedActiveGoalTurn(
-                  'Headless Goal stopped after the session turn limit',
-                );
-                await settleBeforeTerminalOutput();
-                await handleMaxTurnsExceededError(config);
+                await exitForSessionTurnLimit();
               }
               // A duplicate provider call raises no LoopDetected event, so the
               // turn ends as an error here, as it does on the legacy loop.
@@ -4074,14 +4070,10 @@ export async function runNonInteractive(
             });
           }
 
-          // Wait for running background agents to complete before emitting the final
-          // result. On SIGINT/SIGTERM, abort them and route through
-          // handleCancellationError — otherwise the success emitResult below would
-          // silently convert a cancellation into a completion.
+          // Wait for background work before emitting the final result.
           while (true) {
             if (abortController.signal.aborted) {
               registry.abortAll();
-              await cancelWorkflowRuns();
               // Flush queued terminal notifications before routeAbort
               // exits so stream-json consumers always see a task_notification
               // paired with every task_started.
@@ -4106,11 +4098,18 @@ export async function runNonInteractive(
             // paired with one. Monitors are different: they intentionally
             // continue in the background, so final result emission is not
             // gated on monitor lifetime.
-            // A cancelled workflow sends no completion, and a paused one
-            // would never wake an unattended run, so only running ones count.
+            // A workflow that reported completion can still be writing its
+            // snapshot and removing its checkpoint.
             if (
               !registry.hasUnfinalizedTasks() &&
               !workflowRegistry.hasRunningEntries() &&
+              !workflowRegistry
+                .list()
+                .some(
+                  ({ runId, status }) =>
+                    (status === 'completed' || status === 'failed') &&
+                    workflowRegistry.getHandle(runId),
+                ) &&
               localQueue.length === 0
             )
               break;

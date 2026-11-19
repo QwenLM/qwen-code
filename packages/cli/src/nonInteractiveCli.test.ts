@@ -3668,10 +3668,21 @@ describe('runNonInteractive', () => {
     expect(setApprovalRequestCallback).not.toHaveBeenCalled();
   });
 
-  it('waits for a background workflow and drains its completion as a turn', async () => {
+  function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((settle) => {
+      resolve = settle;
+    });
+    return { promise, resolve };
+  }
+
+  it('drains workflow completion and waits for the runner to finish persisting', async () => {
     setupMetricsMock();
-    let running = true;
-    mockWorkflowRunRegistry.hasRunningEntries.mockImplementation(() => running);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const onResultEmitted = vi.fn();
+    const { promise: completion, resolve: finishPersisting } = deferred();
+    mockWorkflowRunRegistry.hasRunningEntries.mockReturnValue(true);
+    mockWorkflowRunRegistry.getHandle.mockReturnValue({ completion });
     mockLlmClient.sendMessageStream
       .mockImplementationOnce(async function* () {
         const notify = mockWorkflowRunRegistry.setCompletionCallback.mock
@@ -3683,7 +3694,10 @@ describe('runNonInteractive', () => {
             '<task-notification>workflow done</task-notification>',
             { runId: 'wf_bg', status: 'completed' },
           );
-          running = false;
+          mockWorkflowRunRegistry.hasRunningEntries.mockReturnValue(false);
+          mockWorkflowRunRegistry.list.mockReturnValue([
+            { runId: 'wf_bg', status: 'completed' },
+          ]);
         }, 150);
         yield { type: LlmEventType.Content, value: 'Started it.' };
         yield {
@@ -3704,9 +3718,29 @@ describe('runNonInteractive', () => {
         ]),
       );
 
-    await runNonInteractive(mockConfig, mockSettings, 'run it', 'p-wf-bg');
+    try {
+      const run = runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'run it',
+        'p-wf-bg',
+        { onResultEmitted },
+      );
+      await vi.advanceTimersByTimeAsync(400);
+      const turnsBeforePersistence =
+        mockLlmClient.sendMessageStream.mock.calls.length;
+      const resultsBeforePersistence = onResultEmitted.mock.calls.length;
+      finishPersisting();
+      mockWorkflowRunRegistry.getHandle.mockReturnValue(undefined);
+      await vi.advanceTimersByTimeAsync(100);
+      await run;
+      expect(turnsBeforePersistence).toBe(2);
+      expect(resultsBeforePersistence).toBe(0);
+      expect(onResultEmitted).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
 
-    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
     expect(
       JSON.stringify(mockLlmClient.sendMessageStream.mock.calls[1]?.[0]),
     ).toContain('workflow done');
@@ -3715,42 +3749,110 @@ describe('runNonInteractive', () => {
     ).toHaveBeenLastCalledWith(undefined);
   });
 
-  it('lets a cancelled workflow record its end before an interrupt exits', async () => {
-    setupMetricsMock();
-    const order: string[] = [];
-    let settle: () => void = () => {};
-    const completion = new Promise<void>((resolve) => {
-      settle = () => {
-        order.push('settled');
-        resolve();
-      };
-    });
-    mockWorkflowRunRegistry.list.mockReturnValue([{ runId: 'wf_bg' }]);
-    mockWorkflowRunRegistry.getHandle.mockReturnValue({ completion });
-    mockWorkflowRunRegistry.abortAll.mockImplementation(() => {
-      order.push('aborted');
-      setTimeout(settle, 20);
-    });
-    vi.mocked(process.exit).mockImplementation(() => {
-      order.push('exit');
-      throw new Error('exit');
-    });
-    const controller = new AbortController();
-    mockLlmClient.sendMessageStream.mockImplementation(async function* () {
-      yield { type: LlmEventType.Content, value: 'Started it.' };
-      controller.abort();
-      yield {
-        type: LlmEventType.Finished,
-        value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
-      };
-    });
+  it.each(['interrupt', 'turn limit'] as const)(
+    'lets a cancelled workflow record its end before exit on %s',
+    async (reason) => {
+      setupMetricsMock();
+      const order: string[] = [];
+      const { promise: completion, resolve: settle } = deferred();
+      mockWorkflowRunRegistry.list.mockReturnValue([{ runId: 'wf_bg' }]);
+      mockWorkflowRunRegistry.getHandle.mockReturnValue({ completion });
+      mockWorkflowRunRegistry.abortAll.mockImplementation(() => {
+        order.push('aborted');
+        setTimeout(() => {
+          order.push('settled');
+          settle();
+        }, 20);
+      });
+      vi.mocked(process.exit).mockImplementation((code) => {
+        order.push('exit');
+        throw new Error(`process.exit(${code}) called`);
+      });
+      const controller = new AbortController();
+      if (reason === 'turn limit') {
+        vi.mocked(mockConfig.getMaxSessionTurns).mockReturnValue(0);
+      }
+      mockLlmClient.sendMessageStream.mockImplementation(async function* () {
+        yield { type: LlmEventType.Content, value: 'Started it.' };
+        controller.abort();
+        yield {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+        };
+      });
 
-    await runNonInteractive(mockConfig, mockSettings, 'run it', 'p-wf-int', {
-      abortController: controller,
-    }).catch(() => undefined);
+      await expect(
+        runNonInteractive(mockConfig, mockSettings, 'run it', 'p-wf-int', {
+          abortController: controller,
+        }),
+      ).rejects.toThrow(
+        `process.exit(${reason === 'turn limit' ? 53 : 130}) called`,
+      );
 
-    expect(order.slice(0, 3)).toEqual(['aborted', 'settled', 'exit']);
-  });
+      expect(order).toEqual(['aborted', 'settled', 'exit']);
+    },
+  );
+
+  it.each([
+    { kind: 'recoverable', recoverable: true },
+    { kind: 'terminal', recoverable: false },
+  ])(
+    'classifies a $kind interrupt during the workflow wait before cancelling',
+    async ({ recoverable }) => {
+      setupMetricsMock();
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const controller = new AbortController();
+      const { promise: waiting, resolve: enterHoldback } = deferred();
+      mockWorkflowRunRegistry.hasRunningEntries.mockImplementation(() => {
+        enterHoldback();
+        return true;
+      });
+      mockWorkflowRunRegistry.list.mockReturnValue([
+        { runId: 'wf_bg', status: 'running' },
+      ]);
+      mockWorkflowRunRegistry.getHandle.mockReturnValue({
+        completion: new Promise<never>(() => {}),
+      });
+      mockLlmClient.sendMessageStream.mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+          },
+        ]),
+      );
+
+      try {
+        const run = runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'run it',
+          'p-wf-wait',
+          {
+            abortController: controller,
+            recoverableCancellation: recoverable,
+          },
+        ).catch((error: unknown) => error);
+        await waiting;
+        controller.abort(recoverable ? new TurnInterruptedError() : undefined);
+        await vi.advanceTimersByTimeAsync(2_100);
+        const exitedWithinOneWindow = vi.mocked(process.exit).mock.calls.length;
+        await vi.advanceTimersByTimeAsync(2_000);
+
+        if (recoverable) {
+          expect(await run).toBe(130);
+          expect(process.exit).not.toHaveBeenCalled();
+          expect(mockWorkflowRunRegistry.abortAll).not.toHaveBeenCalled();
+        } else {
+          expect(await run).toEqual(new Error('process.exit(130) called'));
+          expect(exitedWithinOneWindow).toBe(1);
+          expect(mockWorkflowRunRegistry.abortAll).toHaveBeenCalledOnce();
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('prepends the recovered background agents notice on a resumed headless prompt', async () => {
     setupMetricsMock();
