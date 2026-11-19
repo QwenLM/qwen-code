@@ -43,6 +43,12 @@ status: 'implemented'
 （不做完成标记、不安装清扫定时器）。非负整数会被采用；
 其他任何值都会产生警告并回退到默认值（与
 `serve.maxConcurrentSubSessions*` 设置共享同一个整数设置 helper 的契约）。
+该键是 workspace-restricted：仅从 user、system 与 system-defaults 设置生效，
+workspace 作用域的值在合并时会被剥离并留一条启动警告——仓库的
+`.qwen/settings.json` 不得决定其用户持久化会话数据的保留时长。
+正数 TTL 会在第一次清扫时追溯生效（启动后最多五分钟）：
+所有已早于 TTL 的持久化干净完成行会被一次性删除，
+没有预演、计数或恢复。
 
 ### 哪些完成会启动时钟
 
@@ -96,9 +102,10 @@ prompt 接纳共享的 `SessionArchiveCoordinator` 守卫。通道已被占用
 子会话 transcript 变成孤儿。第一次清扫执行一次性的磁盘发现：
 遍历本 workspace 持久化的所有活动会话
 （`SessionService.listAllProjectSessionIds('active')` —— 穷尽式
-枚举；分页的 mtime 游标 `mtime < cursor` 会静默跳过与某页最后
-mtime 相同的行，这类行从此永远不会被重试），并为每个带有
-`parentSessionId` 且最后一条持久化的 turn 结果是干净完成
+枚举；不用分页的 `listSessions`，其严格的 `mtime < cursor` 过滤
+会静默跳过与某页最后 mtime 相同的行，这类行从此永远不会被重试），
+并为每个带有 `parentSessionId` 且最后一条持久化的 turn 结果
+（`turn_result` 记录，回合结算时追加）是干净完成
 （`state: 'completed'` + `stopReason: 'end_turn'`）的行重新上发
 时钟——时钟从 transcript 的 `mtime` 启动。重启路径只收割可证明
 的干净完成：最后一条 turn 是失败或取消的 transcript（以及无法
@@ -134,6 +141,10 @@ mtime 相同的行，这类行从此永远不会被重试），并为每个带�
 - 发现每次启动器生命周期只运行一次；
   当前进程生命周期内完成的 transcript 在内存中跟踪，
   无需重复扫描。
+- 正数 TTL 在第一次清扫时具有追溯性：
+  各时钟从对应 transcript 的 `mtime` 启动，
+  因此第一次清扫（启动后最多五分钟）会一次性删除
+  所有已早于 TTL 的持久化干净完成行——没有预演、没有计数、无法恢复。
 - `nonCleanTerminal` 记录集合的规模受进程生命周期内观察到的
   失败/取消回合数约束，且永不修剪（有文档说明，仅内存）。
 

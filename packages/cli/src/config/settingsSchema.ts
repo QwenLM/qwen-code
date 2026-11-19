@@ -407,7 +407,7 @@ const SETTINGS_SCHEMA = {
         default: 0,
         minimum: 0,
         description:
-          'Optional auto-cleanup of completed sub-sessions: how long a sub-session finished with a clean turn end stays in the session roster before the daemon removes it (live entry plus persisted transcript, making it not continuable). The default 0 keeps completed sub-sessions forever. A revived sub-session (a new prompt after completion) restarts the TTL from its latest activity; running sub-sessions are never removed, and sub-sessions that failed or were cancelled keep their transcripts.',
+          "Optional auto-cleanup of completed sub-sessions: how long a sub-session finished with a clean turn end stays in the session roster before the daemon removes it (live entry plus persisted transcript, making it not continuable). The default 0 keeps completed sub-sessions forever. A revived sub-session (a new prompt after completion) restarts the TTL from its latest activity; running sub-sessions are never removed, and sub-sessions that failed or were cancelled keep their transcripts. Honored from user, system, and system-defaults settings only — a workspace settings file must not decide how long its users' persisted session data survives.",
         showInDialog: false,
       },
       sessionPrWatch: {

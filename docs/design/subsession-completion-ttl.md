@@ -48,6 +48,14 @@ pre-feature behavior bit for bit (no completion marking, no sweeper
 interval). Non-negative integers are honored; anything else produces a
 warning and falls back to the default (shared contract with the
 `serve.maxConcurrentSubSessions*` settings via one integer-settings helper).
+The key is workspace-restricted: it is honored from user, system, and
+system-defaults settings only, and a workspace-scope value is stripped at
+merge time with a single boot warning — a repository's
+`.qwen/settings.json` must not decide how long its users' persisted session
+data survives. A positive TTL applies retroactively at the first sweep (up
+to five minutes after start): every persisted clean-completed row already
+older than the TTL is removed in one pass, without a dry run, a count, or a
+restore.
 
 ### Which completions arm the clock
 
@@ -151,6 +159,10 @@ live roster. A scan failure re-arms the discovery for the next sweep.
 - Discovery runs once per launcher lifetime; transcripts completed during
   the current process lifetime are tracked in memory and do not need
   re-scanning.
+- A positive TTL is retroactive at the first sweep: because each clock arms
+  from its transcript's `mtime`, the first sweep (up to five minutes after
+  start) removes, in one pass, every persisted clean-completed row already
+  older than the TTL — no dry run, no count, and no restore.
 - The `nonCleanTerminal` bookkeeping set is bounded by the number of
   observed failed/cancelled turns per process lifetime and is never pruned
   (documented, in-memory only).
