@@ -4124,6 +4124,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 const fallback = replayedWorkflowCommands;
                 replayedWorkflowCommands = undefined;
                 const snapshot = connectionRef.current.supportedCommands;
+                const { commands: observedCommands, skills: observedSkills } =
+                  connectionRef.current;
                 const applyCurrent: Dispatch<
                   SetStateAction<DaemonConnectionState>
                 > = (update) =>
@@ -4135,9 +4137,25 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     ) {
                       return current;
                     }
-                    return typeof update === 'function'
-                      ? update(current)
-                      : update;
+                    const next =
+                      typeof update === 'function' ? update(current) : update;
+                    if (
+                      current.commands === observedCommands &&
+                      current.skills === observedSkills
+                    ) {
+                      return next;
+                    }
+                    return {
+                      ...next,
+                      commands: current.commands,
+                      skills: current.skills,
+                      supportedCommands: next.supportedCommands && {
+                        ...next.supportedCommands,
+                        availableCommands:
+                          current.commands?.map(({ raw }) => raw) ?? [],
+                        availableSkills: current.skills ?? [],
+                      },
+                    };
                   });
                 void withActionTimeout(
                   activeSession.supportedCommands(),

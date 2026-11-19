@@ -13009,7 +13009,12 @@ describe('DaemonSessionProvider', () => {
     expect(settlements).toEqual([]);
   });
 
-  it.each(['success', 'both fail', 'replay read fails'] as const)(
+  it.each([
+    'success',
+    'both fail',
+    'replay read fails',
+    'live commands arrive',
+  ] as const)(
     'keeps the Workflow catalog current through SSE delta replay (%s)',
     async (reads) => {
       const disconnect = createDeferred<void>();
@@ -13027,6 +13032,7 @@ describe('DaemonSessionProvider', () => {
         workflowsEnabled: true,
         savedWorkflows: catalog,
       };
+      const recoveryRead = createDeferred<typeof status>();
       const latest = [
         ...catalog,
         { name: 'during-replay', source: 'project' as const },
@@ -13047,7 +13053,9 @@ describe('DaemonSessionProvider', () => {
       } else {
         supportedCommands.mockResolvedValueOnce(status);
       }
-      if (reads !== 'success') {
+      if (reads === 'live commands arrive') {
+        supportedCommands.mockImplementationOnce(() => recoveryRead.promise);
+      } else if (reads !== 'success') {
         supportedCommands.mockRejectedValueOnce(
           new Error('Replay read failed'),
         );
@@ -13080,6 +13088,20 @@ describe('DaemonSessionProvider', () => {
         backlogDelivered.resolve();
         await finishReplay.promise;
         yield { v: 1, type: 'replay_complete', data: { lastEventId: 6 } };
+        if (reads === 'live commands arrive') {
+          yield {
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionId: status.sessionId,
+              update: {
+                sessionUpdate: 'available_commands_update',
+                availableCommands: [{ name: 'fresh-command', description: '' }],
+                _meta: { availableSkills: ['fresh-skill'] },
+              },
+            },
+          };
+        }
         await untilAborted(opts.signal);
       });
       sdkMocks.sessions.push(
@@ -13115,10 +13137,22 @@ describe('DaemonSessionProvider', () => {
         await flushPromises();
       });
       expect(supportedCommands).toHaveBeenCalledTimes(3);
+      if (reads === 'live commands arrive') {
+        await act(async () => {
+          recoveryRead.resolve({ ...status, savedWorkflows: latest });
+          await flushPromises();
+        });
+        expect(connection?.commands?.map(({ name }) => name)).toEqual([
+          'fresh-command',
+          'fresh-skill',
+        ]);
+        expect(connection?.skills).toEqual(['fresh-skill']);
+      }
       const expected = {
         success: latest,
         'both fail': [catalog[0]],
         'replay read fails': catalog,
+        'live commands arrive': latest,
       };
       expect(connection?.supportedCommands?.savedWorkflows).toEqual(
         expected[reads],

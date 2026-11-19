@@ -12,7 +12,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { describeTree as describeTreeUnder } from '../test-utils/describe-tree.js';
 import { resetHomeEnvBootstrapForTesting } from './environment.js';
-import { readSettingsSnapshot } from './settings.js';
+import { readLiveSettingsSnapshot, readSettingsSnapshot } from './settings.js';
 
 describe('readSettingsSnapshot', () => {
   let root: string;
@@ -81,6 +81,27 @@ describe('readSettingsSnapshot', () => {
     readSettingsSnapshot(workspace, { environment, workspaceTrusted });
 
   const describeTree = () => describeTreeUnder(root);
+
+  it('resolves live placeholders from home .env without writing files or environment', () => {
+    vi.stubEnv('QWEN_SNAPSHOT_TEST_VALUE', undefined);
+    processEnvironment = { ...process.env };
+    fs.appendFileSync(
+      path.join(environment['QWEN_HOME']!, '.env'),
+      'QWEN_SNAPSHOT_TEST_VALUE=Home theme\n',
+    );
+    const theme = '${QWEN_SNAPSHOT_TEST_VALUE}';
+    fs.writeFileSync(
+      workspaceFile,
+      JSON.stringify({ $version: 4, ui: { theme } }),
+    );
+    const before = describeTree();
+
+    expect(readLiveSettingsSnapshot(workspace, true).merged.ui?.theme).toBe(
+      'Home theme',
+    );
+    expect(read().merged.ui?.theme).toBe(theme);
+    expect(describeTree()).toEqual(before);
+  });
 
   it('locates and merges the layers through the given environment', () => {
     vi.stubEnv('QWEN_HOME', path.join(root, 'elsewhere'));

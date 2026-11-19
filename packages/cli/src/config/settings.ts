@@ -1176,6 +1176,23 @@ export function readSettingsSnapshot(
   );
 }
 
+/** Read a snapshot using the running CLI's settings paths and substitutions. */
+export function readLiveSettingsSnapshot(
+  workspaceDir: string,
+  workspaceTrusted: boolean,
+): LoadedSettings {
+  return readSettingsLayers(
+    workspaceDir,
+    {
+      consumeCorruptionEnvVars: false,
+      skipLoadEnvironment: true,
+      skipWorkspaceSettings: !workspaceTrusted,
+      workspaceTrusted,
+    },
+    {},
+  );
+}
+
 /**
  * The real path of the home directory, as settings loading resolves it to tell
  * whether the workspace is the home directory. Throws when it cannot be
@@ -1188,7 +1205,7 @@ export function resolveHomeDirectory(home: string = homedir()): string {
 function readSettingsLayers(
   workspaceDir: string,
   opts: LoadSettingsOptions,
-  snapshotOf?: { readonly environment: Readonly<NodeJS.ProcessEnv> },
+  snapshotOf?: { readonly environment?: Readonly<NodeJS.ProcessEnv> },
 ): LoadedSettings {
   // A snapshot reads through the given environment and writes nothing. Every
   // step below that writes a file or `process.env` must be skipped when
@@ -1205,7 +1222,7 @@ function readSettingsLayers(
   const operatorSandbox = snapshot
     ? undefined
     : readOperatorSandboxSettings().tools?.executionSandbox;
-  const userSettingsPath = snapshot
+  const userSettingsPath = snapshotEnvironment
     ? path.join(getGlobalQwenDirLite(snapshotEnvironment), 'settings.json')
     : getUserSettingsPath();
   const qwenHomeRedirectWarning = snapshot
@@ -1564,10 +1581,12 @@ function readSettingsLayers(
   // A snapshot environment is the environment of the session hosts it
   // describes and carries the user-level `.env` values its runtime applied, so
   // it is the only source, read as a host spawned with it sees it.
-  const homeEnvFallback = snapshotOf
-    ? spawnedEnvironmentView(snapshotOf.environment)
+  const homeEnvFallback = snapshotEnvironment
+    ? spawnedEnvironmentView(snapshotEnvironment)
     : getHomeEnvFallbackVars((message) => debugLogger.warn(message));
-  const resolveOptions = { processEnvFallback: !snapshot };
+  const resolveOptions = {
+    processEnvFallback: snapshotEnvironment === undefined,
+  };
   systemSettings = resolveEnvVarsInObject(
     systemResult.settings,
     homeEnvFallback,

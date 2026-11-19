@@ -1063,7 +1063,7 @@ vi.mock('../config/settings.js', () => {
     },
     SettingScope: { User: 'User', Workspace: 'Workspace' },
     loadSettings,
-    readSettingsSnapshot: vi.fn((cwd: string) => loadSettings(cwd)),
+    readLiveSettingsSnapshot: vi.fn((cwd: string) => loadSettings(cwd)),
     reloadEnvironment: vi.fn(() => ({ updatedKeys: [], removedKeys: [] })),
   };
 });
@@ -1285,7 +1285,7 @@ import type {
 import { AgentSideConnection, RequestError } from '@agentclientprotocol/sdk';
 import {
   loadSettings,
-  readSettingsSnapshot,
+  readLiveSettingsSnapshot,
   reloadEnvironment,
   SettingScope,
 } from '../config/settings.js';
@@ -23964,7 +23964,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
-    vi.mocked(readSettingsSnapshot).mockImplementationOnce(() => {
+    vi.mocked(readLiveSettingsSnapshot).mockImplementationOnce(() => {
       throw new Error('Unreadable workspace settings');
     });
 

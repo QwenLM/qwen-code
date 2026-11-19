@@ -270,7 +270,7 @@ import { getSubscriptionStartupFallbackModel } from '../config/modelProvidersSco
 import {
   getOperatorTrustSettings,
   loadSettings,
-  readSettingsSnapshot,
+  readLiveSettingsSnapshot,
   reloadEnvironment,
   SettingScope,
 } from '../config/settings.js';
@@ -7927,10 +7927,10 @@ class QwenAgent implements Agent {
                 undefined,
                 workspace,
               ).isTrusted ?? false);
-        const { merged } = readSettingsSnapshot(workspace, {
-          environment: process.env,
+        const { merged } = readLiveSettingsSnapshot(
+          workspace,
           workspaceTrusted,
-        });
+        );
         rules = readPermissionRuleSet(merged);
         rules.allow.push(
           ...normalizeDisabledToolList(merged.tools?.allowed),
