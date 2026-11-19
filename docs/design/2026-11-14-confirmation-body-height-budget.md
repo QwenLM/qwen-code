@@ -131,11 +131,13 @@ prompt is sized:
   remainder.
 - Otherwise the destination block is capped: one row for the `URLs to fetch:`
   header, one for the hidden-count footer, and the remaining rows are filled
-  greedily with whole URLs so no destination is shown half-cut. The header is
-  dropped before a destination is, in the order header, then blank separator,
-  then nothing: a header above an empty list answers nothing, while a host is
-  the thing being authorized. The footer survives to the last row because the
-  count is the only signal that the list is longer than what is on screen. The
+  greedily with whole URLs so no destination is shown half-cut. Destinations
+  are hidden under the header while it still pays for itself; the block's own
+  chrome is handed back only when a tier leaves no whole destination under it,
+  in the order blank separator, then header, then nothing: a header above an
+  empty list answers nothing, while a host is the thing being authorized. The
+  footer survives to the last row because the count is the only signal that
+  the list is longer than what is on screen. The
   prose keeps one row for its own hidden-count footer so its loss is still
   announced, and its block is skipped when the remainder is too small to hold a
   line it would have clipped anyway: below `MINIMUM_MAX_HEIGHT` (2) there is no
