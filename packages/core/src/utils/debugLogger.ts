@@ -176,10 +176,8 @@ function writeLog(
         reportDelivery(false);
       },
     )
-    .catch(() => {
-      hasWriteFailure = true;
-      reportDelivery(false);
-    });
+    // A throwing delivery observer is not a failed filesystem append.
+    .catch(() => {});
 }
 
 /**

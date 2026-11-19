@@ -702,6 +702,92 @@ describe('writeLine / writeLineSync / write', () => {
       },
     );
 
+    it('keeps at-most-once warnings for legacy logger mocks', async () => {
+      const file = tmpFile('{"existing":');
+      const logPath = tmpPath('legacy-logger-log');
+      const warn = vi.fn();
+      const probeSpy = denyTailProbe(
+        Object.assign(new Error('read denied'), { code: 'EACCES' }),
+      );
+      vi.doMock('./debugLogger.js', () => ({
+        createDebugLogger: () => ({
+          isEnabled: () => true,
+          warn,
+        }),
+        getActiveDebugSessionLogPath: () => logPath,
+        isDebugLogFileEnabled: () => true,
+      }));
+      vi.resetModules();
+
+      try {
+        const isolated = await import('./jsonl-utils.js');
+        for (let index = 0; index < 2; index++) {
+          if (name === 'writeLine') {
+            await isolated.writeLine(file, { index });
+          } else {
+            isolated.writeLineSync(file, { index });
+          }
+        }
+        expect(warn).toHaveBeenCalledOnce();
+        expect(warn.mock.calls[0]?.[0]).toContain('Cannot inspect JSONL tail');
+        expect(fs.readFileSync(file, 'utf8')).toBe(
+          '{"existing":\n{"index":0}\n\n{"index":1}\n',
+        );
+      } finally {
+        probeSpy.mockRestore();
+        vi.doUnmock('./debugLogger.js');
+        vi.resetModules();
+      }
+    });
+
+    it('deduplicates warnings while the first delivery is pending', async () => {
+      await withDebugLog(
+        `jsonl-tail-pending-${name}`,
+        true,
+        async (logPath) => {
+          const file = tmpFile('{"existing":');
+          const probeSpy = denyTailProbe(
+            Object.assign(new Error('read denied'), { code: 'EACCES' }),
+          );
+          const appendFile = fs.promises.appendFile.bind(fs.promises);
+          let resolvePending = () => {};
+          const pending = new Promise<void>((resolve) => {
+            resolvePending = resolve;
+          });
+          let holdWarning = true;
+          const appendSpy = vi
+            .spyOn(fs.promises, 'appendFile')
+            .mockImplementation(async (...args) => {
+              if (args[0] === logPath && holdWarning) {
+                holdWarning = false;
+                await pending;
+              }
+              return appendFile(...args);
+            });
+
+          try {
+            await append(file, { index: 0 });
+            await vi.waitFor(() => {
+              expect(holdWarning).toBe(false);
+            });
+            await append(file, { index: 1 });
+            expect(tailWarnings(logPath, file)).toHaveLength(0);
+
+            resolvePending();
+            await vi.waitFor(() => {
+              expect(tailWarnings(logPath, file)).toHaveLength(1);
+            });
+            await flushDebugSink(logPath, `pending-${name}`);
+            expect(tailWarnings(logPath, file)).toHaveLength(1);
+          } finally {
+            resolvePending();
+            appendSpy.mockRestore();
+            probeSpy.mockRestore();
+          }
+        },
+      );
+    });
+
     it('warns once at a healthy debug sink after the initial sink fails', async () => {
       const sessionId = `jsonl-tail-log-sink-${name}`;
       await withDebugLog(sessionId, true, async () => {
@@ -1262,10 +1348,103 @@ describe('writeLine / writeLineSync / write', () => {
     );
 
     it.runIf(process.platform !== 'win32')(
+      'delimits a torn file created after a missing-path stat',
+      async () => {
+        const file = tmpPath('created-after-missing-stat');
+        const createAfterStat = () => {
+          fs.writeFileSync(file, '{"old":');
+        };
+        const statSpy =
+          name === 'writeLine'
+            ? (() => {
+                const stat = fs.promises.stat.bind(fs.promises);
+                return vi
+                  .spyOn(fs.promises, 'stat')
+                  .mockImplementation(async (...args) => {
+                    try {
+                      return await stat(...args);
+                    } catch (error) {
+                      if (args[0] === file) createAfterStat();
+                      throw error;
+                    }
+                  });
+              })()
+            : (() => {
+                const stat = fs.statSync.bind(fs);
+                return vi
+                  .spyOn(fs, 'statSync')
+                  .mockImplementation((...args) => {
+                    try {
+                      return stat(...args);
+                    } catch (error) {
+                      if (args[0] === file) createAfterStat();
+                      throw error;
+                    }
+                  });
+              })();
+
+        try {
+          await append(file, { next: true });
+          expect(statSpy).toHaveBeenCalledWith(file);
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"old":\n{"next":true}\n',
+          );
+        } finally {
+          statSpy.mockRestore();
+        }
+      },
+    );
+
+    it.runIf(process.platform !== 'win32')(
+      'delimits a torn file that replaces a non-regular path after stat',
+      async () => {
+        const file = tmpPath('type-replaced-after-stat');
+        fs.mkdirSync(file);
+        const replaceAfterStat = () => {
+          fs.rmdirSync(file);
+          fs.writeFileSync(file, '{"old":');
+        };
+        const statSpy =
+          name === 'writeLine'
+            ? (() => {
+                const stat = fs.promises.stat.bind(fs.promises);
+                return vi
+                  .spyOn(fs.promises, 'stat')
+                  .mockImplementation(async (...args) => {
+                    const stats = await stat(...args);
+                    if (args[0] === file) replaceAfterStat();
+                    return stats;
+                  });
+              })()
+            : (() => {
+                const stat = fs.statSync.bind(fs);
+                return vi
+                  .spyOn(fs, 'statSync')
+                  .mockImplementation((...args) => {
+                    const stats = stat(...args);
+                    if (args[0] === file) replaceAfterStat();
+                    return stats;
+                  });
+              })();
+
+        try {
+          await append(file, { next: true });
+          expect(statSpy).toHaveBeenCalledWith(file);
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"old":\n{"next":true}\n',
+          );
+        } finally {
+          statSpy.mockRestore();
+        }
+      },
+    );
+
+    it.runIf(process.platform !== 'win32')(
       'does not open a FIFO just to inspect its tail',
       async () => {
         const fifo = tmpPath('fifo-no-probe');
         execFileSync('mkfifo', [fifo]);
+        const reader = fs.openSync(fifo, tailProbeFlags);
         const asyncStatSpy = vi.spyOn(fs.promises, 'stat');
         const syncStatSpy = vi.spyOn(fs, 'statSync');
         const probeSpy = denyTailProbe(new Error('unexpected FIFO probe'));
@@ -1288,15 +1467,85 @@ describe('writeLine / writeLineSync / write', () => {
           expect(
             (name === 'writeLine' ? asyncStatSpy : syncStatSpy).mock.calls,
           ).toContainEqual([fifo]);
-          expect(appendSpy.mock.calls[0]?.[0]).toBe(fifo);
+          expect(appendSpy).toHaveBeenCalledOnce();
         } finally {
           appendSpy.mockRestore();
           probeSpy.mockRestore();
           asyncStatSpy.mockRestore();
           syncStatSpy.mockRestore();
+          fs.closeSync(reader);
         }
       },
     );
+
+    it('closes the append descriptor when fstat fails', async () => {
+      const file = tmpPath('append-stat-fails');
+      const error = Object.assign(new Error('fstat failed'), { code: 'EIO' });
+      const fstatSync = fs.fstatSync.bind(fs);
+      let descriptor: number | undefined;
+
+      if (name === 'writeLine') {
+        const open = fs.promises.open.bind(fs.promises);
+        let writer: fs.promises.FileHandle | undefined;
+        const openSpy = vi
+          .spyOn(fs.promises, 'open')
+          .mockImplementation(async (...args) => {
+            const handle = await open(...args);
+            if (args[0] === file && args[1] === 'a') {
+              writer = handle;
+              descriptor = handle.fd;
+              vi.spyOn(handle, 'stat').mockRejectedValue(error);
+              vi.spyOn(handle, 'close');
+            }
+            return handle;
+          });
+
+        try {
+          await expect(append(file, { next: true })).rejects.toMatchObject({
+            code: 'EIO',
+          });
+          expect(writer?.close).toHaveBeenCalledOnce();
+          expect(writer?.fd).toBe(-1);
+        } finally {
+          openSpy.mockRestore();
+          if (writer && writer.fd >= 0) await writer.close();
+        }
+      } else {
+        const openSync = fs.openSync.bind(fs);
+        const openSpy = vi
+          .spyOn(fs, 'openSync')
+          .mockImplementation((...args) => {
+            const result = openSync(...args);
+            if (args[0] === file && args[1] === 'a') descriptor = result;
+            return result;
+          });
+        const fstatSpy = vi
+          .spyOn(fs, 'fstatSync')
+          .mockImplementation((...args) => {
+            if (args[0] === descriptor) throw error;
+            return fstatSync(...args);
+          });
+        const closeSpy = vi.spyOn(fs, 'closeSync');
+
+        try {
+          await expect(
+            Promise.resolve().then(() => append(file, { next: true })),
+          ).rejects.toMatchObject({ code: 'EIO' });
+          expect(closeSpy).toHaveBeenCalledWith(descriptor);
+          let closeError: unknown;
+          try {
+            fstatSync(descriptor!);
+          } catch (error) {
+            closeError = error;
+          }
+          expect(closeError).toMatchObject({ code: 'EBADF' });
+        } finally {
+          fstatSpy.mockRestore();
+          closeSpy.mockRestore();
+          openSpy.mockRestore();
+        }
+      }
+    });
 
     it('does not prepend a newline to an existing empty file', async () => {
       const file = tmpFile('');

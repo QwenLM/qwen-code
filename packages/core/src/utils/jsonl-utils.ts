@@ -474,6 +474,8 @@ export async function writeLine(
       }
       let prefix = '';
       let existing: fs.promises.FileHandle | undefined;
+      let appendHandle: fs.promises.FileHandle | undefined;
+      let appendHandleReady = false;
       try {
         const fileStats = await fs.promises.stat(filePath);
         if (fileStats.isFile()) {
@@ -489,28 +491,53 @@ export async function writeLine(
             );
             prefix = bytesRead === 1 && lastByte[0] === 0x0a ? '' : '\n';
           }
+        } else {
+          // Inspect and write through the same append-only handle. A read
+          // probe is unnecessary here and could consume a FIFO's payload.
+          appendHandle = await fs.promises.open(filePath, 'a');
+          existing = appendHandle;
+          const stats = await appendHandle.stat();
+          appendHandleReady = true;
+          if (stats.isFile() && stats.size > 0) prefix = '\n';
         }
       } catch (error) {
         if (!canAppendWithoutTailInspection(filePath, error)) {
           throw error;
         }
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') prefix = '\n';
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          appendHandle = await fs.promises.open(filePath, 'a');
+          existing = appendHandle;
+          const stats = await appendHandle.stat();
+          appendHandleReady = true;
+          if (stats.isFile() && stats.size > 0) prefix = '\n';
+        } else {
+          prefix = '\n';
+        }
       } finally {
-        await existing?.close();
+        // Only a validated writer stays open for the append below.
+        if (!appendHandleReady) await existing?.close();
       }
+      const openAppender = appendHandleReady ? appendHandle : undefined;
       // flush:true fsyncs after each line so a process killed mid-write
       // doesn't leave a glued `}{` record on disk (closes #3681). On
       // Node v22/v24 strace shows string + utf8 + flush:true does fsync
       // correctly; passing a Buffer is forward-compat insurance against
       // any future C++ fast path that might bypass JS-side flush logic
       // for the string case, with no behavior delta on tested versions.
-      await fs.promises.appendFile(
-        filePath,
-        Buffer.from(prefix + line, 'utf8'),
-        {
-          flush: true,
-        },
-      );
+      // FileHandle.appendFile does not honor flush:true on this path;
+      // explicitly match the per-record fsync below it.
+      try {
+        await fs.promises.appendFile(
+          openAppender ?? filePath,
+          Buffer.from(prefix + line, 'utf8'),
+          {
+            flush: true,
+          },
+        );
+        await openAppender?.sync();
+      } finally {
+        await openAppender?.close();
+      }
     });
   } finally {
     if (fileLocks.get(filePath) === lock && !lock.isLocked()) {
@@ -546,6 +573,8 @@ export function writeLineSync(filePath: string, data: unknown): void {
   }
   let prefix = '';
   let descriptor: number | undefined;
+  let appendDescriptor: number | undefined;
+  let appendDescriptorReady = false;
   try {
     const fileStats = fs.statSync(filePath);
     if (fileStats.isFile()) {
@@ -562,18 +591,46 @@ export function writeLineSync(filePath: string, data: unknown): void {
         );
         prefix = bytesRead === 1 && lastByte[0] === 0x0a ? '' : '\n';
       }
+    } else {
+      // Inspect and write through the same append-only handle. A read probe
+      // is unnecessary here and could consume a FIFO's payload.
+      appendDescriptor = fs.openSync(filePath, 'a');
+      descriptor = appendDescriptor;
+      const stats = fs.fstatSync(appendDescriptor);
+      appendDescriptorReady = true;
+      if (stats.isFile() && stats.size > 0) prefix = '\n';
     }
   } catch (error) {
     if (!canAppendWithoutTailInspection(filePath, error)) {
       throw error;
     }
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') prefix = '\n';
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      appendDescriptor = fs.openSync(filePath, 'a');
+      descriptor = appendDescriptor;
+      const stats = fs.fstatSync(appendDescriptor);
+      appendDescriptorReady = true;
+      if (stats.isFile() && stats.size > 0) prefix = '\n';
+    } else {
+      prefix = '\n';
+    }
   } finally {
-    if (descriptor !== undefined) fs.closeSync(descriptor);
+    // Only a validated writer stays open for the append below.
+    if (!appendDescriptorReady && descriptor !== undefined) {
+      fs.closeSync(descriptor);
+    }
   }
-  fs.appendFileSync(filePath, Buffer.from(prefix + line, 'utf8'), {
-    flush: true,
-  });
+  const openAppender = appendDescriptorReady ? appendDescriptor : undefined;
+  try {
+    fs.appendFileSync(
+      openAppender ?? filePath,
+      Buffer.from(prefix + line, 'utf8'),
+      {
+        flush: true,
+      },
+    );
+  } finally {
+    if (openAppender !== undefined) fs.closeSync(openAppender);
+  }
 }
 
 /**
