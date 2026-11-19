@@ -597,6 +597,32 @@ describe('removing and replacing an Agent Host', () => {
     );
   });
 
+  it('reports every incompatible agent by ID without exposing names', async () => {
+    const old = await enroll('old', undefined, ['claude', 'codex']);
+    const firstAgent = { ...ALICE, name: 'claude-review-fixture' };
+    const secondAgent = { ...BOB, name: 'codex-review-fixture' };
+    await updateWorkspaceAgents(PROJECT_ROOT, () =>
+      [firstAgent, secondAgent].map((agent) => ({
+        ...agent,
+        execution: {
+          mode: 'managed-host',
+          hostIds: [old.host.id],
+          provider: agent.id === firstAgent.id ? 'claude' : 'codex',
+        },
+      })),
+    );
+
+    const error = await enroll('new', old.host.id, ['qwen']).catch(
+      (failure: unknown) => failure,
+    );
+    expect(error).toBeInstanceOf(AgentHostReplacementProgramError);
+    const { message } = error as Error;
+    for (const agent of [firstAgent, secondAgent]) {
+      expect(message).toContain(agent.id);
+      expect(message).not.toContain(agent.name);
+    }
+  });
+
   it.each(['claude', 'Claude Code ACP'])(
     'refuses an incompatible disabled agent but remaps a retired one on retry with %s',
     async (provider) => {
