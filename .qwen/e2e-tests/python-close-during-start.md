@@ -15,7 +15,7 @@ Issue #17493 records a real child from the official CLI 0.27.4 still alive after
 7. Let the peer acknowledge initialization, then stop reading stdin. Send a message larger than the pipe buffer and confirm a write is still buffered before closing. Close must reap the child; subsequent control calls must report exactly `Query is closed`, even if the blocked input write fails during teardown.
 8. A peer that exits non-zero before initialization must retain its original exit error, including its exit code, on repeated control calls. Repeated calls must not accumulate earlier tracebacks.
 9. A peer that exits cleanly before replying to initialization must not receive the single-turn or streaming prompt. Both input tasks must complete without a broken-pipe error.
-10. Let the peer send a permission request, wait for its callback to start, and exit cleanly. Before iteration ends, the callback must have finished cancellation and the incoming request registry must be empty, without requiring an explicit close first.
+10. Let the peer send a permission request, wait for its callback to start, and exit cleanly. Before iteration ends, the callback must have finished cancellation and the incoming request registry must be empty, without requiring an explicit close first. Repeat with the callback awaiting close in its own cleanup; the callback, iteration, and surrounding query context must all complete.
 
 ## Validation boundary
 

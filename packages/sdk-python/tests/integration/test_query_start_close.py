@@ -274,7 +274,10 @@ async def test_clean_exit_during_initialize_does_not_write_prompt(
 
 
 @pytest.mark.asyncio
-async def test_clean_exit_cancels_incoming_permission_callback(tmp_path: Path) -> None:
+@pytest.mark.parametrize("close_in_callback", [False, True])
+async def test_clean_exit_cancels_incoming_permission_callback(
+    tmp_path: Path, close_in_callback: bool
+) -> None:
     callback_started = tmp_path / "callback-started"
     peer = tmp_path / "exit_with_permission.py"
     peer.write_text(
@@ -320,6 +323,8 @@ async def test_clean_exit_cancels_incoming_permission_callback(tmp_path: Path) -
             await asyncio.Event().wait()
             return {"behavior": "deny", "message": "unreachable"}
         finally:
+            if close_in_callback:
+                await result.close()
             callback_finished.set()
 
     result = query(

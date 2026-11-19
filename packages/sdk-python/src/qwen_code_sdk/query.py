@@ -619,8 +619,14 @@ class Query:
                     await self._input_task
 
             if self._router_task is not None:
-                with contextlib.suppress(Exception):
-                    await self._router_task
+                current_task = asyncio.current_task()
+                inside_incoming = any(
+                    incoming.task is current_task
+                    for incoming in self._incoming_control_requests.values()
+                )
+                if not inside_incoming:
+                    with contextlib.suppress(Exception):
+                        await self._router_task
 
             await self._finish()
 
