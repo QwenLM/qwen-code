@@ -40,6 +40,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -2055,33 +2056,44 @@ public final class ToolPublicationDataStore {
         return verifiedStream(key, publicationId, manifestRef, expectedIdentity, streamId, true, lease, guard);
     }
 
+    record ScopedPublication(String scope, String publicationId) {
+        ScopedPublication(JsonNode key, String publicationId) {
+            this(ToolPublicationDataStore.scope(key), publicationId);
+        }
+    }
+
     void requireReferenced(JsonNode key, String publicationId, JsonNode outcomeRef, long revision, long sequence) {
-        require(referenced(referencedPublications(key, List.of(publicationId)).get(publicationId),
+        var rows = referencedPublications(Map.of(key, Set.of(publicationId)));
+        require(referenced(rows.get(new ScopedPublication(key, publicationId)),
                 outcomeRef, revision, sequence), "Publication receipt is unavailable");
     }
 
-    Map<String, Map<String, Object>> referencedPublications(JsonNode key, List<String> ids) {
-        Map<String, Map<String, Object>> result = new java.util.HashMap<>();
-        if (ids.isEmpty()) {
-            return result;
+    Map<ScopedPublication, Map<String, Object>> referencedPublications(Map<JsonNode, Set<String>> groups) {
+        if (groups.isEmpty()) {
+            return Map.of();
         }
+        List<String> predicates = new ArrayList<>();
         List<Object> arguments = new ArrayList<>();
-        arguments.add(scope(key));
-        arguments.add(text(key, "tenantId"));
-        arguments.add(text(key, "workspaceId"));
-        arguments.add(text(key, "sessionId"));
-        arguments.add(ToolPublicationRetentionStore.hash(text(key, "tenantId")));
-        arguments.add(ToolPublicationRetentionStore.hash(text(key, "sessionId")));
-        arguments.addAll(ids);
-        var rows = jdbc.query("SELECT publication_id, producer_phase, admission_resource_id,"
+        groups.forEach((key, ids) -> {
+            predicates.add("(scope_key = ? AND tenant_id = ? AND workspace_id = ? AND session_id = ?"
+                    + " AND NOT EXISTS (SELECT 1 FROM ma_session r WHERE r.tenant_key = ?"
+                    + " AND r.session_key = ? AND r.retired_at IS NOT NULL) AND publication_id IN ("
+                    + String.join(",", java.util.Collections.nCopies(ids.size(), "?")) + "))");
+            arguments.add(scope(key));
+            arguments.add(text(key, "tenantId"));
+            arguments.add(text(key, "workspaceId"));
+            arguments.add(text(key, "sessionId"));
+            arguments.add(ToolPublicationRetentionStore.hash(text(key, "tenantId")));
+            arguments.add(ToolPublicationRetentionStore.hash(text(key, "sessionId")));
+            arguments.addAll(ids);
+        });
+        var rows = jdbc.query("SELECT scope_key, publication_id, producer_phase, admission_resource_id,"
                 + " receipt_revision, receipt_sequence, CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined"
-                + " FROM ma_output_capture WHERE scope_key = ?"
-                + " AND tenant_id = ? AND workspace_id = ? AND session_id = ?"
-                + " AND NOT EXISTS (SELECT 1 FROM ma_session r"
-                + " WHERE r.tenant_key = ? AND r.session_key = ? AND r.retired_at IS NOT NULL) AND publication_id IN ("
-                + String.join(",", java.util.Collections.nCopies(ids.size(), "?")) + ")", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), arguments.toArray());
+                + " FROM ma_output_capture WHERE " + String.join(" OR ", predicates),
+                (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), arguments.toArray());
+        Map<ScopedPublication, Map<String, Object>> result = new java.util.HashMap<>();
         for (var row : rows) {
-            result.put((String) row.get("publication_id"), row);
+            result.put(new ScopedPublication((String) row.get("scope_key"), (String) row.get("publication_id")), row);
         }
         return result;
     }

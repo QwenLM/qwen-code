@@ -27,6 +27,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -37,6 +39,8 @@ import java.util.Base64;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
@@ -457,6 +461,23 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.error.code").value("workspace_not_found"));
         verify(registry, times(3)).canRead(TENANT, "reader", WORKSPACE);
+    }
+
+    @Test
+    void readsAvailabilityOnceAcrossSessionsThatShareAPublicationId() throws Exception {
+        String second = seedArtifactSession("session-2", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
+        var jdbc = spy(fixture.jdbc());
+        ReflectionTestUtils.setField(fixture.publications(), "jdbc", jdbc);
+
+        var response = page("reader", body(null, null));
+        assertThat(ids(response)).containsExactlyInAnyOrder(second, stdout.path("id").asText(), stderr.path("id").asText());
+        for (var row : response.required("data")) {
+            var artifact = row.required("artifact");
+            boolean available = !second.equals(artifact.required("id").asText());
+            assertThat(artifact.required("availability").asText()).isEqualTo(available ? "available" : "unavailable");
+            assertThat(row.required("access").required("can_read_content").booleanValue()).isEqualTo(available);
+        }
+        verify(jdbc).query(contains("FROM ma_output_capture"), any(RowMapper.class), any(Object[].class));
     }
 
     @Test
