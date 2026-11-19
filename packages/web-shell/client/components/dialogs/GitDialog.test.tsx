@@ -670,6 +670,85 @@ describe('GitDialog', () => {
     expect(workspaceGitDiff.mock.calls.length).toBeGreaterThan(1);
   });
 
+  it('drops a stale pre-image instead of committing the old name', async () => {
+    const file = (path: string, oldPath?: string) => ({
+      path,
+      oldPath,
+      added: 1,
+      removed: 0,
+      isBinary: false,
+      isUntracked: false,
+      isDeleted: false,
+      truncated: false,
+    });
+    const listing = (files: ReturnType<typeof file>[]) => ({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: files.length,
+      linesAdded: 1,
+      linesRemoved: 0,
+      files,
+      hiddenCount: 0,
+    });
+    // The snapshot shows `b.ts` renamed from `old.ts`. By the click the old
+    // name carries a different file, so the commit-time read no longer pairs
+    // the two and `old.ts` is a row of its own that the user left unchecked.
+    workspaceGitDiff
+      // The dialog reads the listing twice before the click; both pair them.
+      .mockResolvedValueOnce(listing([file('b.ts', 'old.ts')]))
+      .mockResolvedValueOnce(listing([file('b.ts', 'old.ts')]))
+      // The commit-time read no longer pairs: `old.ts` is a new unselected
+      // row, and `b.ts` is an ordinary added row.
+      .mockResolvedValue(listing([file('old.ts'), file('b.ts')]));
+    workspaceGitCommit.mockResolvedValue({ sha: 'abc1234', subject: 'x' });
+
+    mount('commit');
+    await flush();
+
+    // The snapshot holds one row, the rename's post-image.
+    expect(
+      document.body.querySelectorAll(
+        '[data-web-shell-dialog] input[type="checkbox"]',
+      ),
+    ).toHaveLength(1);
+
+    const textarea = document.body.querySelector(
+      '[data-web-shell-dialog] textarea',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set?.call(textarea, 'feat: b only');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const commitBtn = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-dialog] button',
+      ),
+    ).find(
+      (b) =>
+        b.textContent?.trim() === 'Commit' && b.getAttribute('role') !== 'tab',
+    )!;
+    await act(async () => {
+      commitBtn.click();
+    });
+    await flush();
+
+    // The old name is not one of the rows the user ticked; naming it would
+    // publish whatever now sits there in place of a deletion they never
+    // selected.
+    expect(workspaceGitCommit).toHaveBeenCalledWith(
+      'feat: b only',
+      { paths: ['b.ts'] },
+      undefined,
+      undefined,
+    );
+  });
+
   it('keeps a deliberate unselect-all across a refresh', async () => {
     const file = (path: string) => ({
       path,

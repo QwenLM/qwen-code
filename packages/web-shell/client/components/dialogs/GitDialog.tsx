@@ -474,7 +474,24 @@ export function GitDialog({
                 return;
               }
               const live = new Set(diff.files.map((file) => file.path));
-              const kept = paths.filter((p) => live.has(p));
+              // The pairing comes from the listing read just now, not from the
+              // snapshot the checklist was built on. A rename the tree no
+              // longer pairs — its old name was recreated, or the pair fell
+              // below git's similarity threshold — would otherwise forward a
+              // pre-image whose current occupant is committed in place of a
+              // deletion the user never selected rows for.
+              const oldPaths = new Map(
+                diff.files
+                  .filter((file) => file.oldPath && !live.has(file.oldPath))
+                  .map((file) => [file.path, file.oldPath as string]),
+              );
+              // The request is the rows the user ticked, re-checked against the
+              // listing read now. A path that only rode along as a rename's
+              // pre-image is not a row of its own: it comes back below only
+              // while the tree still pairs it.
+              const kept = paths.filter(
+                (p) => live.has(p) && selectedPaths.has(p),
+              );
               if (kept.length === 0) {
                 // Nothing the previous listing offered survives. Either the
                 // user cleared every row, or the tree moved on under the
@@ -490,7 +507,6 @@ export function GitDialog({
                 });
                 return;
               }
-              const oldPaths = renameOldPaths.current;
               const refreshed: string[] = [];
               for (const p of kept) {
                 refreshed.push(p);
@@ -500,7 +516,7 @@ export function GitDialog({
               }
               // Rows that appeared after the snapshot start unchecked, so they
               // stay out of this commit rather than riding along unasked.
-              if (refreshed.length < diff.files.length) {
+              if (kept.length < diff.files.length) {
                 applyCommitFiles(diff.files);
               }
               request = { paths: refreshed };
@@ -567,6 +583,7 @@ export function GitDialog({
       prBusy,
       commitListComplete,
       commitPathList,
+      selectedPaths,
       refreshCommitFiles,
       applyCommitFiles,
       t,
