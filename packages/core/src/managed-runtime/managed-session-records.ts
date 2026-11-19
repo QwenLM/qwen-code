@@ -399,7 +399,7 @@ export interface ManagedSessionEvent {
 
 export interface ManagedSessionHeader {
   readonly formatVersion: number;
-  readonly minimumReader: string;
+  readonly minimumReader?: string;
   readonly sessionKey: ManagedSessionKey;
   readonly engine: 'managed';
   readonly definitionRef: ManagedSessionDurableRef;
@@ -1811,16 +1811,18 @@ export function parseManagedSessionHeader(
     fail('header.formatVersion is not supported by this reader.');
   }
   const minimumReader = record['minimumReader'];
-  const requiredReaderVersion = managedSessionReaderVersion(minimumReader);
-  const currentReaderVersion = managedSessionReaderVersion(
-    MANAGED_SESSION_READER_CAPABILITY,
-  );
-  if (
-    requiredReaderVersion === null ||
-    currentReaderVersion === null ||
-    requiredReaderVersion > currentReaderVersion
-  ) {
-    fail('header.minimumReader is not supported by this reader.');
+  if (minimumReader !== undefined) {
+    const requiredReaderVersion = managedSessionReaderVersion(minimumReader);
+    const currentReaderVersion = managedSessionReaderVersion(
+      MANAGED_SESSION_READER_CAPABILITY,
+    );
+    if (
+      requiredReaderVersion === null ||
+      currentReaderVersion === null ||
+      requiredReaderVersion > currentReaderVersion
+    ) {
+      fail('header.minimumReader is not supported by this reader.');
+    }
   }
   if (record['engine'] !== 'managed') {
     fail('header.engine must be managed.');
@@ -1828,7 +1830,9 @@ export function parseManagedSessionHeader(
   const proof = record['baseTranscriptProof'];
   return {
     formatVersion: MANAGED_SESSION_FORMAT_VERSION,
-    minimumReader: minimumReader as string,
+    ...(minimumReader === undefined
+      ? {}
+      : { minimumReader: minimumReader as string }),
     sessionKey: assertManagedSessionKey(
       record['sessionKey'],
       'header.sessionKey',

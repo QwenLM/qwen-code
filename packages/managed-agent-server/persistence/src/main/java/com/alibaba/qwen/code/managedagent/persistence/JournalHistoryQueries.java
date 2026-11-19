@@ -308,8 +308,7 @@ final class JournalHistoryQueries {
                             || !sessionId.equals(engine.path("sessionId").asText())
                             || !"managed_session_header_v1".equals(header.path("subtype").asText())
                             || !sessionId.equals(header.path("sessionId").asText())
-                            || value.size() != 7 || value.path("formatVersion").asInt() != JournalStoreRows.STORAGE_VERSION
-                            || !"managed-session/1".equals(value.path("minimumReader").asText())
+                            || value.size() != 6 || value.path("formatVersion").asInt() != JournalStoreRows.STORAGE_VERSION
                             || !"managed".equals(value.path("engine").asText())
                             || !"hosted-harness".equals(value.path("createdBy").asText())
                             || value.has("baseTranscriptProof") || !initialScope(value, head)) {
