@@ -3,7 +3,8 @@
 [English](./jsonl-append-verification-17771.md) | [简体中文](./jsonl-append-verification-17771.zh-CN.md)
 
 **状态：已合入（Merged）。**本文是合入后的验证账本，不是另一套追加架构的提案。
-以下结果记录的是 #17771 的验证；本次纯文档变更没有重新运行这些验证。
+除下文单独标明的 CLI 出处补充验证外，以下内容是 #17771 的历史验证记录，
+而非本次纯文档变更对它们的重新验证。
 
 ## 状态与出处
 
@@ -21,8 +22,11 @@ packages/core/src/utils/debugLogger.test.ts
 
 - `packages/core/src/utils/jsonl-utils.ts` 实测的 SHA-256 为
   `9ea6a9debcb58352dec0e0b0c94c3ee533b9189d2354bbf979ac921ff2922754`。
-- PR-head checks 为 **28 passed、34 skipped、0 failed、0 cancelled、0 pending**。
-  skipped 不能作为更多平台或功能覆盖的证据。
+- 保留的历史快照包含 62 项检查，最近包含的检查完成于
+  `2026-11-19T12:54:21Z`。发布于 `2026-11-19T13:02:01Z` 的收尾评论记录了该快照中的
+  **28 passed、34 skipped、0 failed、0 cancelled、0 pending**。后续附着的自动化
+  不在这个快照内；这些不是按当前聚合重新计算的数字。skipped 不能作为更多平台或
+  功能覆盖的证据。
 
 ## 已交付行为
 
@@ -42,13 +46,15 @@ packages/core/src/utils/debugLogger.test.ts
   检查后关闭探测句柄；真正的 append 再通过 pathname 并使用 `flush: true` 执行。
   此时 `openAppender` 为 `undefined`，可选的 `openAppender?.sync()` 与
   `openAppender?.close()` 不会执行。允许列表中的 tail-read fallback 同样通过
-  pathname 追加，不获取 writer。
+  pathname 追加，不保留显式 append handle。
 - 只有因 `ENOENT` 或 non-regular 路径而实际打开、并经 `FileHandle.stat`/`fstat`
   校验的 append handle 才保持打开，供真正的 append 使用。随后 async 显式调用
   `sync()` 并关闭该 handle；sync 通过已校验的 descriptor 以 `flush: true` 追加，
   再关闭该 descriptor。append、同步和关闭失败不会被转成成功。
-- debug 告警的交付只由真实的 debug `fs.appendFile` 结果报告，不由前置目录操作
-  决定。抛错的 delivery observer 被单独处理，不等同于文件系统写入失败。
+- 无活动 debug session 或禁用文件输出时，`warnWithDelivery` 不尝试
+  `fs.appendFile`，直接报告 `delivered=false`。实际尝试 debug append 时，
+  交付只由真实的 debug `fs.appendFile` 结果报告，不由前置目录操作决定。
+  抛错的 delivery observer 被单独处理，不等同于文件系统写入失败。
 
 这里不宣称跨平台或所有特殊文件上的通用行为，不宣称通用 FIFO transcript 支持，
 也不宣称通用跨进程锁协议。
@@ -92,41 +98,65 @@ pending-delivery 去重相关用例确实失败。恢复守卫后，聚焦集合
   任意路径替换或并发 appender 的原子处理。
 - **Writer 清理，故障注入：**async 与 sync 的 `fstat` `EIO` 都传播错误并关闭实际
   writer descriptor；错误本身是注入的，不声称它是自然发生的内核故障。
-- **打包后的 CLI，原生资源故障：**`dist/cli.js` 使用隔离的 `.qwen_home`、真实
-  daemon 和 mock OpenAI 运行。原始 `RLIMIT_FSIZE` breach 加上 `SIGXFSZ` 后，原有的
+- **打包后的 CLI，原生资源故障：**`dist/cli.js` 使用隔离的 `QWEN_HOME` 和
+  `QWEN_RUNTIME_DIR`、真实 daemon 和 mock OpenAI 运行。原始 `RLIMIT_FSIZE` breach 加上 `SIGXFSZ` 后，原有的
   单条 **137 字节**残缺尾保持原样，下一条完整记录独立成行。没有访问真实模型。
 - 该端到端运行通过 **11/11 断言**：parent-chain gap 为 0，daemon `/load` 与
-  `/context` 均为 HTTP 200，clean recovery 无 History gap。`canContinue:false` 表示
-  没有待继续的中断任务，不表示 degraded history。
+  `/context` 均为 HTTP 200，clean recovery 无 History gap。`canContinue:false` 仅表示
+  没有待继续的中断任务，并不区分恢复类型；clean 与 degraded history 都可能返回
+  false。本次 clean 结论由 `kind: 'clean'`、parent-chain gap 为 0，以及没有
+  `History gap:` 提示共同支撑。
+- **CLI 出处更正与补充验证：**原 `final verification` 评论写出的完整 revision
+  `78489a70bd5a192929db2a2b6df47fad15e723ec` 无法解析为实际提交，因此无法仅凭
+  该评论确认其 11/11 与 137 字节观测属于哪个变体，也不应事后擅自选定某个父提交。
+  [独立的精确 head CLI 补测](https://github.com/QwenLM/qwen-code/pull/17853#issuecomment-7017284822)
+  使用 Node 22.23.4 在 `b0a07fb51cadce79d9c1711f510f6d49fec60d3d` 重建
+  `dist/cli.js`，并重现了这些结果。补测使用全新的临时 `QWEN_HOME` 和
+  `QWEN_RUNTIME_DIR`、真实 daemon 以及本地 mock OpenAI，没有访问真实模型。
+  四个实现/测试文件与 `f8fa7c476f2244d5c6832fb2bb9a551882c425b3` 逐字节一致，
+  因此这份新证据覆盖已交付的 writer，而不是把原始观测改认到某个父提交。
 
-## 全量运行归因
+## 扩展 core 测试运行归因
 
-大范围运行并非全绿：**43,415 passed、65 failed、30 skipped**，另有 1 个 Vitest RPC
-timeout。对这些失败进行了归因，没有将其隐藏：
+扩展的本地 core 测试运行并非全绿：**43,415 passed、65 failed、30 skipped**，另有 1 个 Vitest RPC
+timeout。这些失败按已知情形归类，并未隐藏；其中 core 对照只提供有界归因：
 
 - **42** 个来自宿主全局 pre-push hook 拒绝临时 `/tmp` remote。
 - **2** 个是宿主负载导致的时延失败。
-- 余下四个 **core** 套件在独立安装的树上重跑，该树使用先前 PR head/A/B
-  control 的完整基线 `4b2dc8a350fa7057a56c4512e0dc038802f2fce2`，复现了相同的
-  **21 failed / 255 passed**。这里是指定对照基线，不是本文档工作树的直接父提交
-  （`HEAD^`）。
+- 余下四个 **core** 套件在独立安装的树上重跑，该树使用 PR 内部较早的 head/A/B
+  control `4b2dc8a350fa7057a56c4512e0dc038802f2fce2`，复现了相同的
+  **21 failed / 255 passed**。这是 PR 中间 head，不是 PR base，也不是最终 PR head
+  的直接父提交。该对照只能比较中间 head 之后的修订，不能排除 PR base 与这个控制点
+  之间引入的失败。
 
-没有为了得到绿色结果而弱化或禁用测试、CI 检查。因此，大范围运行仍只是归因证据，
-不是全仓通过的声明。
+没有为了得到绿色结果而弱化或禁用测试、CI 检查。因此，扩展 core 测试运行仍只是
+有界归因证据，不是全仓通过或已完整排除相对 PR base 回归的声明。
 
 ## 边界与延期工作
 
 - Windows 原生验证与 current-head macOS 验证仍未完成。早期 macOS 在 `14893f6f10`
   的报告早于最终 writer-handle 工作，不能作为已合入实现的证据。
+- #17771 正文中的 Reviewer Test Plan 是旧 head 的历史记录，仍含旧的 tail-read
+  fallback 换行预期、较早的 CLI bundle `85319df31d` 和 **200 passed / 2 skipped**。
+  最终行为、计数和 bundle 出处应以最终 head 的源码和证据评论为准。这个较早祖先
+  bundle 的引用，与另一条 final-verification CLI 评论中无法解析的完整 revision
+  不是同一项。
 - 这里不承诺通用 FIFO transcript、任意路径替换或并发 append 原子性、读取侧历史
   抢救或 daemon 升级/重启行为。独立的读取侧工作由 #17756 跟踪。
+- **已接受的性能取舍：**最终 head 的复验测得，健康 regular file 每次 append 增加
+  一次 path `stat` 与 tail-probe open。在两次交错的 150 次 fsync-append 运行中，每次
+  append 的中位耗时增加为 **0.161–0.195 ms（11.0%–13.3%，async）**和
+  **0.017–0.025 ms（1.3%–1.9%，sync）**。为聚焦 correctness bugfix，接受保持
+  tail inspection 与 append 路径分离；这是有界实测，不是通用性能保证。合并句柄
+  不属于本次变更，也不属于 #17852 的诊断与原生平台跟踪范围。
 - 后续 issue #17852 跟踪 sink 恢复后的受界限告警、128-key eviction 后的重复告警、
   错误文件上下文，以及精确 `sync`/`close` 生命周期、stale completion、FIFO 目标和
   失败 append 叠加 throwing observer 的测试见证；也跟踪 Windows 与 current-head
   macOS 原生验证。
 - 两个 `R3-1` 条目并不相同。一次投递失败后，已通过同一路径的真实 debug append
-  验证 sink 恢复后恰好投递一条告警。三次失败投递耗尽终身上限后，即使 sink 随后恢复，
-  后续告警仍被终身上限抑制。预算重置/cooldown 由 #17852 延期跟踪，并未宣称修复；尤其不能在
+  验证 sink 恢复后恰好投递一条告警。三次失败投递耗尽驻留缓存条目的三次尝试预算后，
+  即使 sink 随后恢复，该条目的后续告警仍被抑制。该键被 128 项容量上限驱逐后，
+  新条目可使用新的预算重新尝试告警；这里不是进程级终身抑制。预算重置/cooldown 由 #17852 延期跟踪，并未宣称修复；尤其不能在
   缺少有效 cooldown 与 failure-budget 设计时，简单地在达到上限后清零 attempt counter。
 
 本文只记录文档关系，不声称关闭范围更大的原始 #17747 工作。
@@ -139,6 +169,7 @@ timeout。对这些失败进行了归因，没有将其隐藏：
   [最终验证](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7007985759)、
   [原生与端到端证据](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7008079523)、
   [收尾与归因](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7009882478)、
-  [R3-1 最终 head 对照复验](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7011877438)。
+  [R3-1 最终 head 对照复验](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7011877438)、
+  [精确 head 的 CLI 补充验证](https://github.com/QwenLM/qwen-code/pull/17853#issuecomment-7017284822)。
 - 延期工作：[#17852](https://github.com/QwenLM/qwen-code/issues/17852)。
 - 独立读取侧工作：[#17756](https://github.com/QwenLM/qwen-code/issues/17756)。

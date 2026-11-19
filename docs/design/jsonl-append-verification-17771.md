@@ -2,7 +2,7 @@
 
 [English](./jsonl-append-verification-17771.md) | [简体中文](./jsonl-append-verification-17771.zh-CN.md)
 
-**Status: Merged.** This is a post-merge verification ledger, not another append architecture proposal. Results below record #17771 verification; this documentation-only change does not rerun them.
+**Status: Merged.** This is a post-merge verification ledger, not another append architecture proposal. Except for the explicitly identified CLI provenance supplement below, the results below record #17771 verification rather than a rerun by this documentation-only change.
 
 ## Status and provenance
 
@@ -21,8 +21,12 @@ packages/core/src/utils/debugLogger.test.ts
 
 - The measured SHA-256 of `packages/core/src/utils/jsonl-utils.ts` was
   `9ea6a9debcb58352dec0e0b0c94c3ee533b9189d2354bbf979ac921ff2922754`.
-- PR-head checks were **28 passed, 34 skipped, 0 failed, 0 cancelled, 0 pending**.
-  Skipped checks are not evidence of additional platform or feature coverage.
+- The retained historical snapshot has 62 checks, with its latest included
+  completion at `2026-11-19T12:54:21Z`. The closeout comment published at
+  `2026-11-19T13:02:01Z` recorded **28 passed, 34 skipped, 0 failed, 0 cancelled,
+  0 pending** from that snapshot. Later automation is outside this snapshot;
+  these are not recomputed current rollup totals. Skipped checks are not
+  evidence of additional platform or feature coverage.
 
 ## Delivered behavior
 
@@ -43,16 +47,18 @@ The current source, rather than an earlier review intermediate, establishes this
   append then uses the pathname with `flush: true`. Its `openAppender` is
   `undefined`, so the optional `openAppender?.sync()` and
   `openAppender?.close()` calls do not execute. The allowlisted tail-read
-  fallbacks likewise append by pathname and do not acquire a writer.
+  fallbacks likewise append by pathname without retaining an explicit append handle.
 - Only an append handle actually opened for `ENOENT` or a non-regular path,
   and validated by `FileHandle.stat`/`fstat`, stays open for the real append.
   Async then explicitly calls `sync()` and closes that handle; sync appends
   through its validated descriptor with `flush: true` and closes that
   descriptor. Append, synchronization, and close failures are not converted
   into success.
-- Debug warning delivery is reported only by the actual debug `fs.appendFile`
-  outcome, not by a prerequisite directory operation. A throwing delivery
-  observer is handled separately and is not a filesystem write failure.
+- With no active debug session or disabled file output, `warnWithDelivery`
+  reports `delivered=false` without attempting `fs.appendFile`. Otherwise,
+  delivery follows the actual debug `fs.appendFile` outcome, not a prerequisite
+  directory operation. A throwing delivery observer is handled separately and
+  is not a filesystem write failure.
 
 This is not a claim of universal behavior across platforms or special files, generic FIFO transcript support, or a general interprocess locking protocol.
 
@@ -97,40 +103,69 @@ Native measurements used Linux with Node `22.23.4`. Fault injection is identifie
 - **Writer cleanup, injected fault:** async and sync `fstat` failures with `EIO`
   propagated the error and closed the actual writer descriptor; the error itself
   was injected, not asserted as a naturally occurring kernel failure.
-- **Bundled CLI, native resource fault:** `dist/cli.js` ran with an isolated
-  `.qwen_home`, a real daemon, and mock OpenAI. A raw `RLIMIT_FSIZE` breach plus
+- **Bundled CLI, native resource fault:** `dist/cli.js` ran with isolated
+  `QWEN_HOME` and `QWEN_RUNTIME_DIR` values, a real daemon, and mock OpenAI. A raw `RLIMIT_FSIZE` breach plus
   `SIGXFSZ` left the original single **137-byte** torn tail intact and put the
   next complete record on its own line. No real-model access occurred.
 - That end-to-end run passed **11/11 assertions**: zero parent-chain gaps, daemon
   `/load` and `/context` both HTTP 200, and clean recovery with no History gap.
-  `canContinue:false` meant no interrupted task was waiting to continue; it did
-  not mean degraded history.
+  `canContinue:false` only indicated that no interrupted task was waiting to
+  continue; it did not distinguish the recovery kind. Both clean and degraded
+  history can return false. The clean result was established by `kind: 'clean'`,
+  zero parent-chain gaps, and no `History gap:` notice.
+- **CLI provenance correction and supplement:** the cited original comment names
+  the malformed full revision `78489a70bd5a192929db2a2b6df47fad15e723ec`. Its
+  11/11 and 137-byte observations therefore lack a resolvable tested revision in
+  that publication, rather than representing a test whose ancestor we can choose
+  afterwards. The [independent exact-head CLI supplement](https://github.com/QwenLM/qwen-code/pull/17853#issuecomment-7017284822)
+  rebuilt `dist/cli.js` at `b0a07fb51cadce79d9c1711f510f6d49fec60d3d` using Node
+  22.23.4 and reproduced those outcomes. It used fresh temporary `QWEN_HOME` and
+  `QWEN_RUNTIME_DIR` values, a real daemon, and only a local mock OpenAI. The
+  four implementation/test files match `f8fa7c476f2244d5c6832fb2bb9a551882c425b3`
+  byte-for-byte, so this new evidence applies to the delivered writer without
+  reassigning the original observation to a parent revision.
 
-## Whole-run attribution
+## Expanded core sweep attribution
 
-The broad run was not green: **43,415 passed, 65 failed, 30 skipped**, plus one
-Vitest RPC timeout. Its failures were attributed rather than hidden:
+The expanded local core sweep was not green: **43,415 passed, 65 failed, 30 skipped**, plus one
+Vitest RPC timeout. Its failures were classified rather than hidden:
 
 - **42** came from the host-global pre-push hook rejecting temporary `/tmp`
   remotes.
 - **2** were host-load latency failures.
 - The remaining four **core** suites were rerun on an independently installed
-  tree at the earlier PR head/A/B control
+  tree at the intermediate PR head/A/B control
   `4b2dc8a350fa7057a56c4512e0dc038802f2fce2`. They reproduced the same
-  **21 failed / 255 passed**. This specified control is not the documentation
-  working tree's direct parent (`HEAD^`).
+  **21 failed / 255 passed**. This is a within-PR head, not the PR base or the
+  final PR head's direct parent. The comparison therefore covers revisions after
+  this intermediate head; it does not exclude failures introduced between the
+  PR base and this control.
 
-No test or CI check was weakened or disabled to obtain a green result. The broad
-run therefore remains attribution evidence, not a whole-repository pass claim.
+No test or CI check was weakened or disabled to obtain a green result. The expanded
+core sweep therefore remains bounded attribution evidence, not a whole-repository
+pass or a complete PR-base regression exclusion.
 
 ## Limits and deferred work
 
 - Native Windows and current-head macOS verification remain outstanding. The
   earlier macOS report at `14893f6f10` predates the final writer-handle work and
   is not evidence for the merged implementation.
+- The Reviewer Test Plan in #17771's body is historical. It retains the older
+  probe-fallback newline expectation, the older bundle `85319df31d`, and an old
+  **200 passed / 2 skipped** count. Use the final-head source and evidence
+  comments for the final behavior, counts, and bundle provenance. This older
+  ancestor-bundle citation is distinct from the malformed full revision in the
+  separate final-verification CLI report.
 - No general FIFO transcript guarantee, arbitrary path-replacement or concurrent
   append atomicity, read-side history salvage, or daemon upgrade/restart behavior
   is promised here. Independent read-side work is tracked in #17756.
+- **Accepted performance trade-off:** the final-head re-evaluation measured an
+  additional path `stat` and tail-probe open per healthy regular-file append.
+  In two interleaved 150 fsync-append rounds, per-append median increases were
+  **0.161–0.195 ms (11.0%–13.3%) async** and **0.017–0.025 ms (1.3%–1.9%) sync**.
+  Keeping tail inspection and append paths separate was accepted for the focused
+  correctness bugfix; this is one bounded measurement, not a universal guarantee.
+  Handle consolidation is outside its scope and #17852's diagnostic/native topics.
 - Follow-up issue #17852 tracks bounded diagnostics after sink recovery, duplicate
   warnings after 128-key eviction, error file context, and precise test witnesses
   for `sync`/`close` lifecycle, stale completion, FIFO targets, and failed append
@@ -138,8 +173,11 @@ run therefore remains attribution evidence, not a whole-repository pass claim.
   current-head macOS validation.
 - The two `R3-1` entries are distinct. After one failed delivery, sink recovery
   was verified through a real debug append at the same path to deliver exactly
-  one warning. After three failed deliveries exhaust the lifetime cap, later
-  sink recovery leaves subsequent warnings suppressed by that cap. Budget
+  one warning. After three failed deliveries exhaust a cached diagnostic
+  entry's three-attempt budget, later sink recovery leaves that entry's warnings
+  suppressed while it remains cached. Eviction under the 128-key bound can admit
+  a fresh entry with a new budget, so this is not a process-lifetime suppression
+  for that key. Budget
   reset/cooldown is
   deferred to #17852, not claimed as fixed; the attempt counter must not simply
   be cleared after the cap without a valid cooldown and failure-budget design.
@@ -155,6 +193,7 @@ the broader original #17747 work.
   [final verification](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7007985759),
   [native and end-to-end evidence](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7008079523),
   [closeout and attribution](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7009882478),
-  [final-head R3-1 re-evaluation](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7011877438).
+  [final-head R3-1 re-evaluation](https://github.com/QwenLM/qwen-code/pull/17771#issuecomment-7011877438),
+  [supplemental exact-head CLI verification](https://github.com/QwenLM/qwen-code/pull/17853#issuecomment-7017284822).
 - Deferred work: [#17852](https://github.com/QwenLM/qwen-code/issues/17852).
 - Independent read-side work: [#17756](https://github.com/QwenLM/qwen-code/issues/17756).
