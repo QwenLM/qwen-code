@@ -166,14 +166,14 @@ export interface ManagedChannelControlPlane {
    * A stable key of the registration this client talks to — the control-plane
    * base URL, tenant, channel, and the owning actor, workspace and cwd-relative.
    * A persisting adapter that needs cross-registration isolation keys its ledger
-   * by it (the WeCom adapter does), so a ledger staged for one registration is
-   * never replayed into another when the same configured entry is restarted
-   * against a different destination or owner. Binding only the tenant/channel is
-   * not enough: a new actor/workspace of the same tenant/channel must not inherit
-   * the prior owner's pending. This is a capability a persisting adapter opts
-   * into, not an invariant every sibling already satisfies — the DingTalk store
-   * still keys by name+account only and does not yet bind the registration
-   * identity (a follow-up). Optional so test doubles that do not persist may
+   * by it (the WeCom and DingTalk adapters do), so a ledger staged for one
+   * registration is never replayed into another when the same configured entry
+   * is restarted against a different destination or owner. Binding only the
+   * tenant/channel is not enough: a new actor/workspace of the same tenant/channel
+   * must not inherit the prior owner's pending. This is a capability a persisting
+   * adapter opts into, not an invariant every sibling already satisfies — the
+   * GitHub store keys by name+endpoint only and email is a separate variant, so
+   * each is its own follow-up. Optional so test doubles that do not persist may
    * omit it.
    */
   readonly destinationKey?: string;

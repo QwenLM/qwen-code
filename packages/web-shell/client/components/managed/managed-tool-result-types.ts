@@ -17,6 +17,13 @@ export type ManagedArtifactSave = (
   },
 ) => Promise<void>;
 
+export interface ManagedWorkspaceArtifactReader {
+  listArtifacts(
+    workspaceId: string,
+    options: ManagedAgentRequestOptions & { cursor?: string; limit?: number },
+  ): Promise<ManagedArtifactPage>;
+}
+
 export interface ManagedToolResultReader {
   readonly canDownload: boolean;
   getResult(
