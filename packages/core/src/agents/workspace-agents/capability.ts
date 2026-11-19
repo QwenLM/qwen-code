@@ -54,6 +54,7 @@ export const AGENT_TOOL_CLASSIFICATION = {
   [ToolNames.CRON_CREATE]: 'deny',
   [ToolNames.CRON_LIST]: 'deny',
   [ToolNames.CRON_DELETE]: 'deny',
+  [ToolNames.AUTOFIX_PR]: 'deny',
   [ToolNames.LOOP_WAKEUP]: 'deny',
   [ToolNames.CREATE_SUB_SESSION]: 'deny',
   [ToolNames.LIST_AGENTS]: 'deny',

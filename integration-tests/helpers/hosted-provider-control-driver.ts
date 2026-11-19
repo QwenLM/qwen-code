@@ -17,8 +17,9 @@ import type { ManagedToolInvocationStatus } from '@qwen-code/qwen-code-core/tool
 import {
   ManagedRuntimeBrokerClient,
   MANAGED_RUNTIME_BROKER_ROUTE_PREFIX,
-} from '../../packages/cli/src/serve/broker-managed-runtime-provider.js';
+} from '../../packages/cli/src/serve/managed-runtime-broker-client.js';
 import { waitUntil } from './hosted-harness-process.js';
+import { quotePosix } from './hosted-shell-quote.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -179,15 +180,14 @@ try {
       signal(),
     );
     const file = path.join(current.directory, 'proof.txt');
-    const quote = (value: string) => `'${value.replaceAll("'", "'\"'\"'")}'`;
     const toolName = raw ? 'edit' : 'run_shell_command';
     const input = raw
       ? { file_path: file, old_string: 'x', new_string: 'xx' }
       : {
           command:
-            quote(process.execPath) +
+            quotePosix(process.execPath) +
             ' -e ' +
-            quote("require('fs').appendFileSync('proof.txt', 'x')"),
+            quotePosix("require('fs').appendFileSync('proof.txt', 'x')"),
         };
     const payloadJson = JSON.stringify({ toolName, input });
     let prepared: {

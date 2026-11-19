@@ -50,6 +50,7 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
   private sealed = false;
   private closePending?: Promise<void>;
   private appDrain?: () => Promise<void>;
+  private readonly additionalAppDrains: Array<() => Promise<void>> = [];
   private hostDrain?: () => Promise<void>;
   private bootStarter?: () => Promise<void> | void;
   private bootPending?: Promise<void>;
@@ -112,6 +113,10 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
 
   setAppDrain(drain: () => Promise<void>): void {
     this.appDrain = drain;
+  }
+
+  addAppDrain(drain: () => Promise<void>): void {
+    this.additionalAppDrains.push(drain);
   }
 
   setBootStarter(starter: () => Promise<void> | void): void {
@@ -194,6 +199,7 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
     this.seal();
     const drains = [
       this.startDrain(this.appDrain),
+      ...this.additionalAppDrains.map((drain) => this.startDrain(drain)),
       this.startDrain(this.hostDrain),
       this.bootPending?.catch(() => undefined),
     ].filter((value): value is Promise<void> => value !== undefined);

@@ -1,4 +1,5 @@
 import { pierreResources } from './pierre-build';
+import { exceljsBrowser } from './exceljs-build';
 import { defineConfig, normalizePath, type Plugin } from 'vite';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
@@ -128,11 +129,13 @@ function injectCssModules(): Plugin {
         // keep `data-qwen-web-shell="component"` so shadow-root style adoption
         // (client/shadowDom.ts) still finds them; that reader concatenates
         // every match rather than taking the first.
-        const entry = item.facadeModuleId?.endsWith('/client/transcript.ts')
-          ? 'transcript'
-          : item.facadeModuleId?.endsWith('/client/index.tsx')
-            ? 'index'
-            : undefined;
+        const entry = item.facadeModuleId?.endsWith('/client/managed-host.tsx')
+          ? 'managed-host'
+          : item.facadeModuleId?.endsWith('/client/transcript.ts')
+            ? 'transcript'
+            : item.facadeModuleId?.endsWith('/client/index.tsx')
+              ? 'index'
+              : undefined;
         if (!entry) {
           continue;
         }
@@ -164,10 +167,22 @@ function injectCssModules(): Plugin {
 const TRANSCRIPT_STUBS = new Map(
   [
     [
+      './client/components/messages/HookStatistics.tsx',
+      './client/components/messages/HookStatistics.transcript-stub.tsx',
+    ],
+    [
+      './client/components/message-deletion-messages.ts',
+      './client/components/message-deletion-messages.transcript-stub.ts',
+    ],
+    [
       './client/trajectory/execution-messages.ts',
       './client/trajectory/execution-messages.transcript-stub.ts',
     ],
     ['./client/live/messages.ts', './client/live/messages.transcript-stub.ts'],
+    [
+      './client/browser-notifications/messages.ts',
+      './client/browser-notifications/messages.transcript-stub.ts',
+    ],
     [
       './client/mcp-app/messages.ts',
       './client/mcp-app/messages.transcript-stub.ts',
@@ -175,6 +190,10 @@ const TRANSCRIPT_STUBS = new Map(
     [
       './client/components/artifacts/files-messages.ts',
       './client/components/artifacts/files-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/artifacts/token-usage-messages.ts',
+      './client/components/artifacts/token-usage-messages.transcript-stub.ts',
     ],
     [
       './client/voice/messages.ts',
@@ -201,12 +220,43 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/messages/SelectionCopyMenu.transcript-stub.tsx',
     ],
     [
+      './client/utils/selectionClipboard.ts',
+      './client/utils/selectionClipboard.transcript-stub.ts',
+    ],
+    [
       './client/components/messages/workflow-agent-details.ts',
       './client/components/messages/workflow-agent-details.transcript-stub.ts',
     ],
     [
+      './client/components/managed/managed-lifecycle-messages.ts',
+      './client/components/managed/managed-lifecycle-messages.transcript-stub.ts',
+    ],
+    [
       './client/components/managed/managed-task-messages.ts',
       './client/components/managed/managed-task-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/managed/managed-workspace-messages.ts',
+      './client/components/managed/managed-workspace-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/managed/managed-mcp-messages.ts',
+      './client/components/managed/managed-mcp-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/managed/managed-artifact-library-messages.ts',
+      './client/components/managed/managed-artifact-library-messages.transcript-stub.ts',
+    ],
+    ['./client/i18n-zh-tw.ts', './client/i18n-zh-tw.transcript-stub.ts'],
+    ['./client/i18n-ru-part1.ts', './client/i18n-ru-part1.transcript-stub.ts'],
+    ['./client/i18n-ru-part2.ts', './client/i18n-ru-part2.transcript-stub.ts'],
+    ['./client/i18n-ru-part3.ts', './client/i18n-ru-part3.transcript-stub.ts'],
+    ['./client/i18n-ru-part4.ts', './client/i18n-ru-part4.transcript-stub.ts'],
+    ['./client/i18n-ru-part5.ts', './client/i18n-ru-part5.transcript-stub.ts'],
+    ['./client/i18n-ru-part6.ts', './client/i18n-ru-part6.transcript-stub.ts'],
+    [
+      './client/i18n-ru-remainder.ts',
+      './client/i18n-ru-remainder.transcript-stub.ts',
     ],
   ].map(([module, stub]) => [
     normalizePath(resolve(__dirname, module)),
@@ -233,11 +283,15 @@ function stubTranscriptModules(): Plugin {
 export default defineConfig(({ mode }) => ({
   plugins: [
     pierreResources(),
+    exceljsBrowser(),
     ...(mode === 'transcript' ? [stubTranscriptModules()] : []),
     react(),
     tailwindcss(),
     injectCssModules(),
   ],
+  worker: {
+    plugins: () => [exceljsBrowser()],
+  },
   resolve: {
     alias: {
       '@qwen-code/web-shell/daemon-react-sdk': resolve(
@@ -255,7 +309,12 @@ export default defineConfig(({ mode }) => ({
     jsxDev: false,
   },
   build: {
-    emptyOutDir: false,
+    // Only the managed-host pass owns its outDir, so it can safely empty it;
+    // the other passes share `dist/` with the app build.
+    emptyOutDir: mode === 'managed-host',
+    // Outside `dist/`: the app build empties that directory, which would
+    // silently delete a host bundle a maintainer had just produced.
+    outDir: mode === 'managed-host' ? 'dist-managed-host' : 'dist',
     // Same floor as the app build: the lib bundle minifies the same xterm
     // (it is not external), and Vite 5's default target lowers its logical
     // assignments into code that throws on the first mode query. Also covers
@@ -263,18 +322,21 @@ export default defineConfig(({ mode }) => ({
     target: WEB_SHELL_BUILD_TARGET,
     lib: {
       entry:
-        mode === 'transcript'
-          ? { transcript: 'client/transcript.ts' }
-          : {
-              index: 'client/index.tsx',
-              'daemon-react-sdk': 'client/daemon-react-sdk.ts',
-              'code-highlighter': 'client/code-highlighter.ts',
-            },
+        mode === 'managed-host'
+          ? { index: 'client/managed-host.tsx' }
+          : mode === 'transcript'
+            ? { transcript: 'client/transcript.ts' }
+            : {
+                index: 'client/index.tsx',
+                'daemon-react-sdk': 'client/daemon-react-sdk.ts',
+                'code-highlighter': 'client/code-highlighter.ts',
+              },
       formats: ['es'],
       fileName: (_format, entryName) => `${entryName}.js`,
     },
     rollupOptions: {
       external: (id, importer) => {
+        if (mode === 'managed-host') return false;
         // Pierre requires Shiki 3/4; keep its copy inside the lazy preview bundle.
         if (id === 'shiki') return !importer?.includes('/@pierre/');
         return [
@@ -283,6 +345,7 @@ export default defineConfig(({ mode }) => ({
           'react/jsx-dev-runtime',
           'react-dom',
           'react-dom/client',
+          'react-dom/server',
           'radix-ui',
           'lucide-react',
           'class-variance-authority',
@@ -301,9 +364,7 @@ export default defineConfig(({ mode }) => ({
           'remark-cjk-friendly',
           /^remark-cjk-friendly\//,
           'remark-gfm',
-          'remark-math',
-          'rehype-katex',
-          'mermaid',
+          'hast-util-from-html-isomorphic',
           'katex',
           /^katex\/(?!dist\/katex\.min\.css$)/,
           'codemirror',
@@ -317,6 +378,9 @@ export default defineConfig(({ mode }) => ({
     },
   },
   define: {
+    ...(mode === 'managed-host'
+      ? { 'process.env.NODE_ENV': JSON.stringify('production') }
+      : {}),
     __WEB_SHELL_VERSION__: JSON.stringify(pkg.version),
   },
 }));

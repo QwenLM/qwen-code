@@ -36,14 +36,15 @@ Workspace reader identity; the production authorization checks still run.
 2. After backup preparation, create `proof.txt.read-gate` before forwarding start.
    The worker imports `hosted-file-read-gate.mjs`; its native Edit read writes
    `proof.txt.read-entered` and waits before calling the original reader. Require
-   that marker and the regular file still containing `x`. Capture the received
-   prefixes and disconnect both observers while the private Turn is active and
-   no effect has completed.
+   that marker and the regular file still containing `x`. Wait for both observers
+   to receive creation and the committed in-progress tool update (ids 1–2), then
+   disconnect them while the private Turn is active and no effect has completed.
 3. Remove the read gate. With both observers disconnected, require one `x` to `xx`
    effect and a successful original execution and private Turn. The relay commits
    the real final assistant message, then holds the real terminal event before
-   committing its projection. The private stream projects committed messages,
-   not individual provider deltas or tool journal records.
+   committing its projection. The public ledger includes the committed completed
+   tool update and final assistant message (ids 3–4), followed by the held terminal
+   (id 5). The two lifecycle updates retain the same model call and Item identity.
 4. Reconnect each observer from its own last received id. Give the public request
    a conflicting `after=0` to pin header precedence. Wait until both catch up to
    the durable watermark, then commit the held terminal on those same connections.
@@ -51,6 +52,8 @@ Workspace reader identity; the production authorization checks still run.
    sequence and its JSON projection. Require consecutive ids, exact payloads,
    one successful terminal, expected text and private tool records, the original execution
    identity, one dispatch/effect, no cancellation and released storage ownership.
+   The transcript materializes one completed tool Item; its control events exclude
+   text and tool updates already represented by Items.
 
 All waits and HTTP calls are bounded. On failure the driver closes its streams
 and listeners; the parent fixture owns worker teardown. Cleanup must terminate

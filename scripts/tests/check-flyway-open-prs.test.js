@@ -283,7 +283,7 @@ describe('check-flyway-open-prs', () => {
   it('ignores paths outside the scanned locations, and names that claim no version', async () => {
     const { posts } = await check([
       pr(10001, [
-        'packages/managed-agent-server/src/test/resources/db/migration/V53__fixture.sql',
+        'packages/managed-agent-server/verification/src/test/resources/db/migration/V53__fixture.sql',
         sql('V53__client.sql', 'packages/sdk-java/client'),
         sql('R__repeatable_view.sql'),
         sql('V53__old.sql').replace('/migration/', '/migration_old/'),

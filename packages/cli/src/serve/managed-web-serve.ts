@@ -1,0 +1,320 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { createServer, request as httpRequest } from 'node:http';
+import type { IncomingMessage } from 'node:http';
+import type { Duplex } from 'node:stream';
+import { isAbsolute } from 'node:path';
+import express from 'express';
+import {
+  allowOriginCors,
+  bearerAuth,
+  hostAllowlist,
+  parseAllowOriginPatterns,
+} from './auth.js';
+import { mountManagedLocalWeb } from './managed-local-web.js';
+import { resolveServeToken } from './serve-token.js';
+import { isLoopbackAddress } from './loopback-binds.js';
+import {
+  installRemoteSelfOriginMiddleware,
+  installSelfOriginStripMiddleware,
+} from './server/self-origin.js';
+import { mountWebShellAssets } from './web-shell-static.js';
+import { resolveWebShellDir } from './web-shell-resolver.js';
+
+interface ManagedWebConfig {
+  apiUrl: string;
+  tenantId: string;
+  actorId: string;
+  signingKeyFile: string;
+}
+
+interface ManagedWebServeOptions {
+  configFile: string;
+  hostname: string;
+  port: number;
+  token?: string;
+  allowOrigins?: string[];
+}
+
+const TERMINAL_UPGRADE_PATH =
+  /^\/api\/agent\/web-shell\/v1\/sessions\/[A-Za-z0-9._-]+\/terminal$/;
+
+const TERMINAL_REQUEST_HEADERS = [
+  'sec-websocket-key',
+  'sec-websocket-version',
+  'sec-websocket-protocol',
+  'sec-websocket-extensions',
+];
+const TERMINAL_RESPONSE_HEADERS = [
+  'sec-websocket-accept',
+  'sec-websocket-protocol',
+  'sec-websocket-extensions',
+];
+
+/**
+ * Relays the terminal WebSocket upgrade to the control plane. The browser
+ * cannot set the gateway's bearer on an upgrade, so the terminal carries a
+ * single-use ticket in the Sec-WebSocket-Protocol subprotocol instead; the
+ * gateway forwards only the WebSocket handshake headers (never cookies or
+ * authorization) and lets the control plane consume the ticket. Every other
+ * upgrade path stays refused.
+ */
+function forwardTerminalUpgrade(
+  java: URL,
+  req: IncomingMessage,
+  socket: Duplex,
+  head: Buffer,
+  tracked: Set<Duplex>,
+): void {
+  // Track both ends (including the in-flight upgrade) so gateway shutdown can
+  // destroy them; closeAllConnections() does not reach upgraded sockets.
+  tracked.add(socket);
+  socket.once('close', () => tracked.delete(socket));
+  const headers: Record<string, string> = {
+    connection: 'Upgrade',
+    upgrade: 'websocket',
+  };
+  for (const name of TERMINAL_REQUEST_HEADERS) {
+    const value = req.headers[name];
+    if (typeof value === 'string') headers[name] = value;
+  }
+  const upstream = httpRequest(java, {
+    method: 'GET',
+    path: req.url,
+    headers,
+  });
+  // Track the upstream socket as soon as it is assigned — before the 101
+  // arrives — so shutdown destroys an in-flight upgrade's control-plane leg
+  // too, not just the browser end.
+  upstream.on('socket', (upstreamSocket) => {
+    tracked.add(upstreamSocket);
+    upstreamSocket.once('close', () => tracked.delete(upstreamSocket));
+  });
+  upstream.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
+    tracked.add(upstreamSocket);
+    upstreamSocket.once('close', () => tracked.delete(upstreamSocket));
+    const lines = [
+      'HTTP/1.1 101 Switching Protocols',
+      'Upgrade: websocket',
+      'Connection: Upgrade',
+    ];
+    for (const name of TERMINAL_RESPONSE_HEADERS) {
+      const value = upstreamRes.headers[name];
+      if (typeof value === 'string') lines.push(`${name}: ${value}`);
+    }
+    socket.write(lines.join('\r\n') + '\r\n\r\n');
+    if (upstreamHead.length > 0) socket.write(upstreamHead);
+    if (head.length > 0) upstreamSocket.write(head);
+    upstreamSocket.on('error', () => socket.destroy());
+    upstreamSocket.pipe(socket);
+    socket.pipe(upstreamSocket);
+    // After the 101 Node detaches the socket from the ClientRequest, so the
+    // outer upstream.destroy() on browser close is a no-op on this leg. An
+    // abrupt browser teardown (RST) emits 'close' without 'end', which pipe
+    // does not forward; destroy the tunnel explicitly or the control-plane
+    // relay never sees EOF and the PTY plus its durable hold leak.
+    socket.once('close', () => upstreamSocket.destroy());
+  });
+  upstream.on('response', (res) => {
+    socket.write(
+      `HTTP/1.1 ${res.statusCode ?? 502} ${res.statusMessage ?? ''}\r\n` +
+        'Connection: close\r\n\r\n',
+    );
+    res.resume();
+    socket.destroy();
+  });
+  upstream.on('error', () => socket.destroy());
+  socket.on('error', () => upstream.destroy());
+  // Shutdown destroys the tracked browser socket, which emits 'close' (not
+  // 'error'); tear down the in-flight upstream request too, or it survives
+  // close() and a late 101 is relayed to a client that no longer exists.
+  socket.once('close', () => upstream.destroy());
+  upstream.end();
+}
+
+async function readConfig(file: string): Promise<ManagedWebConfig> {
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(file, 'utf8'));
+  } catch {
+    throw new Error('Cannot read the Managed Web gateway JSON configuration.');
+  }
+  const keys = ['apiUrl', 'tenantId', 'actorId', 'signingKeyFile'];
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== keys.length ||
+    keys.some(
+      (key) =>
+        !(key in value) ||
+        typeof (value as Record<string, unknown>)[key] !== 'string',
+    )
+  ) {
+    throw new Error(
+      `Managed Web configuration requires only ${keys.join(', ')}.`,
+    );
+  }
+  const config = value as ManagedWebConfig;
+  let api: URL;
+  try {
+    api = new URL(config.apiUrl);
+  } catch {
+    throw new Error('Managed Web apiUrl must be a loopback HTTP origin.');
+  }
+  if (
+    api.protocol !== 'http:' ||
+    !isLoopbackAddress(api.hostname) ||
+    api.username ||
+    api.password ||
+    api.pathname !== '/' ||
+    api.search ||
+    api.hash
+  ) {
+    throw new Error('Managed Web apiUrl must be a loopback HTTP origin.');
+  }
+  if (
+    !/^[A-Za-z0-9._:-]{1,128}$/u.test(config.tenantId) ||
+    !/^[A-Za-z0-9._:-]{1,128}$/u.test(config.actorId)
+  ) {
+    throw new Error(
+      'Managed Web tenantId and actorId require 1-128 safe characters.',
+    );
+  }
+  if (!isAbsolute(config.signingKeyFile)) {
+    throw new Error('Managed Web signingKeyFile must be an absolute path.');
+  }
+  return config;
+}
+
+export async function runManagedWebServe(
+  options: ManagedWebServeOptions,
+  deps: { webShellDir?: string; installSignalHandlers?: boolean } = {},
+) {
+  const config = await readConfig(options.configFile);
+  const signingKey = await readFile(config.signingKeyFile, 'utf8');
+  const token = resolveServeToken(options.token);
+  if (
+    !token ||
+    Buffer.byteLength(signingKey) < 32 ||
+    token === signingKey ||
+    token === signingKey.trim()
+  ) {
+    throw new Error(
+      'Managed Web requires a non-empty browser token and an independent signing key of at least 32 bytes.',
+    );
+  }
+  if (
+    !options.hostname.trim() ||
+    !Number.isInteger(options.port) ||
+    options.port < 0 ||
+    options.port > 65535
+  ) {
+    throw new Error(
+      'Managed Web requires a hostname and a port between 0 and 65535.',
+    );
+  }
+  const webShellDir = deps.webShellDir ?? resolveWebShellDir();
+  if (!webShellDir)
+    throw new Error('Managed Web requires built Web Shell assets.');
+
+  const app = express();
+  app.disable('x-powered-by');
+  let port = options.port;
+  installSelfOriginStripMiddleware(app, () => port, options.hostname);
+  app.use(hostAllowlist(options.hostname, () => port));
+  installRemoteSelfOriginMiddleware(app, options.hostname, token);
+  app.use(
+    allowOriginCors(parseAllowOriginPatterns(options.allowOrigins ?? [])),
+  );
+
+  const assets = express();
+  mountWebShellAssets(assets, webShellDir, [], false, true);
+  app.use((req, res, next) => {
+    if (
+      (req.method === 'GET' || req.method === 'HEAD') &&
+      (['/', '/manifest.webmanifest', '/sw.js'].includes(req.path) ||
+        req.path.startsWith('/assets/'))
+    ) {
+      assets(req, res, next);
+    } else next();
+  });
+  app.use(bearerAuth(token));
+  app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+  app.get('/capabilities', (_req, res) => res.json({ mode: 'managed' }));
+  mountManagedLocalWeb(app, {
+    javaUrl: config.apiUrl,
+    signingKey,
+    tenantId: config.tenantId,
+    actorId: config.actorId,
+    productScope: `gateway:${createHash('sha256')
+      .update(JSON.stringify([config.apiUrl, config.tenantId, config.actorId]))
+      .digest('hex')}`,
+    agentId: 'qwen-code',
+    managedOnly: true,
+  });
+  app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
+
+  const server = createServer(app);
+  server.maxConnections = 256;
+  const java = new URL(config.apiUrl);
+  const upgradedSockets = new Set<Duplex>();
+  server.on('upgrade', (request, socket, head) => {
+    const path = (request.url ?? '').split('?')[0] ?? '';
+    if (TERMINAL_UPGRADE_PATH.test(path)) {
+      forwardTerminalUpgrade(java, request, socket, head, upgradedSockets);
+    } else {
+      socket.destroy();
+    }
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(options.port, options.hostname, () => {
+      server.removeListener('error', reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string')
+    throw new Error('Managed Web has no TCP listener.');
+  port = address.port;
+  let finish!: (code: number) => void;
+  const finished = new Promise<number>((resolve) => {
+    finish = resolve;
+  });
+  let closing: Promise<void> | undefined;
+  const close = (): Promise<void> => {
+    closing ??= new Promise<void>((resolve, reject) => {
+      for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const)
+        process.removeListener(signal, stop);
+      server.close((error) => {
+        finish(error ? 1 : 0);
+        if (error) reject(error);
+        else resolve();
+      });
+      server.closeAllConnections();
+      // Upgraded terminal sockets are not covered by closeAllConnections();
+      // destroy them so a connected terminal cannot block shutdown.
+      for (const socket of upgradedSockets) socket.destroy();
+      upgradedSockets.clear();
+    });
+    return closing;
+  };
+  const stop = () => {
+    void close().catch(() => {});
+  };
+  if (deps.installSignalHandlers !== false) {
+    for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const)
+      process.once(signal, stop);
+  }
+  const host = options.hostname.includes(':')
+    ? `[${options.hostname.replace(/^\[|\]$/gu, '')}]`
+    : options.hostname;
+  return { url: `http://${host}:${port}`, finished, close };
+}

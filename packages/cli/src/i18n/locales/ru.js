@@ -8,6 +8,58 @@
 // Ключ служит одновременно ключом перевода и текстом по умолчанию
 
 export default {
+  user: 'пользователь',
+  assistant: 'ассистент',
+  thinking: 'размышление',
+  task: 'задача',
+  compaction: 'сжатие',
+  info: 'информация',
+  warning: 'предупреждение',
+  retry: 'повтор',
+  'stop-hook': 'хук остановки',
+  'away-recap': 'сводка за время отсутствия',
+  'user-shell': 'команда пользователя',
+  advisor: 'советник',
+  'arena-agent': 'агент арены',
+  'arena-session': 'сессия арены',
+  goal: 'цель',
+  'Protected input': 'Защищённый ввод',
+  'Focused input. Cursor: {{position}}':
+    'Поле ввода в фокусе. Курсор: {{position}}',
+  'Unfocused input.': 'Поле ввода не в фокусе.',
+  'Focused Prompt: {{value}}': 'Строка запроса в фокусе: {{value}}',
+  'Prompt: {{value}}': 'Запрос: {{value}}',
+  'Focused Input: {{value}}': 'Ввод в фокусе: {{value}}',
+  'Input: {{value}}': 'Ввод: {{value}}',
+  'Placeholder: {{value}}': 'Подсказка: {{value}}',
+  'Cursor: {{position}}': 'Курсор: {{position}}',
+  'Selected {{value}}': 'Выбрано {{value}}',
+  'Disabled {{value}}': 'Недоступно {{value}}',
+  'Focused Toggle on: {{value}}': 'В фокусе, переключатель включён: {{value}}',
+  'Focused Toggle off: {{value}}':
+    'В фокусе, переключатель выключен: {{value}}',
+  'Toggle on: {{value}}': 'Переключатель включён: {{value}}',
+  'Toggle off: {{value}}': 'Переключатель выключен: {{value}}',
+  'Conversation cleared.': 'Беседа очищена.',
+  '{{role}}: {{value}}': '{{role}}: {{value}}',
+  'Revision {{value}}': 'Исправление {{value}}',
+  Dialog: 'Диалог',
+  'Dialog closed. Focus: prompt.': 'Диалог закрыт. Фокус: строка запроса.',
+  'Dialog closed.': 'Диалог закрыт.',
+  'Waiting for confirmation': 'Ожидание подтверждения',
+  'Working. Escape to cancel.': 'Выполняется. Escape для отмены.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'История {{start}}-{{end}} из {{total}}.',
+  'Worktree: {{value}}': 'Рабочее дерево: {{value}}',
+  'Workflow mode: on': 'Режим рабочего процесса: включён',
+  'Workflow mode: on (unavailable)':
+    'Режим рабочего процесса: включён (недоступен)',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Shift+Вверх/Вниз или PageUp/PageDown для чтения; Ctrl+Home/End для первого/последнего.',
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Включает встроенный Generated UI в поддерживаемых локальных сеансах. Перезапустите соответствующий сеанс, чтобы применить изменения.',
+
   // ============================================================================
   // Справка / Компоненты интерфейса
   // ============================================================================
@@ -100,6 +152,7 @@ export default {
   Auth: 'Аутентификация',
   Model: 'Модель',
   'Fast Model': 'Быстрая модель',
+  'Agent Loop': 'Цикл агента',
   Sandbox: 'Песочница',
   'Session ID': 'ID сессии',
   'Base URL': 'Base URL',
@@ -996,6 +1049,26 @@ export default {
     'Использование: /forget <текст воспоминания для удаления>',
   'No managed auto-memory entries matched: {{query}}':
     'Не найдено совпадающих записей автопамяти: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'Привязать pull request GitHub к этой сессии',
+  'Usage: /pr <number | url>': 'Использование: /pr <номер | url>',
+  'No PRs bound to this session.': 'К этой сессии не привязан ни один PR.',
+  'Bound PRs: {{list}}': 'Привязанные PR: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Недопустимая ссылка на PR. Использование: /pr <номер | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'Не удалось определить PR #{{number}} через gh. Укажите полный URL PR.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} привязан к этой сессии: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} уже привязан к этой сессии: {{url}}',
+  'Failed to bind PR #{{number}}.': 'Не удалось привязать PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'Не удалось привязать PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'Не удалось прочитать привязки PR этой сессии.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) недоступен или превысил время ожидания. Укажите полный URL PR для привязки без него.',
   'Consolidate managed auto-memory topic files.':
     'Консолидировать файлы тем управляемой автопамяти.',
   'Could not retrieve tool registry.':
@@ -1133,6 +1206,8 @@ export default {
   'disabled (bare mode)': 'отключен (минимальный режим)',
   'disabled (safe mode)': 'отключен (безопасный режим)',
   'disabled (disableAllHooks)': 'отключен (disableAllHooks)',
+  'disabled (not approved)': 'отключен (не одобрен)',
+  'disabled (rejected)': 'отключен (отклонён)',
   'disabled (folder not trusted)': 'отключен (папка не доверенная)',
   'disabled (turned off for this session)': 'отключен (выключен в этой сессии)',
   'Server:': 'Сервер:',
@@ -1439,6 +1514,7 @@ export default {
   Reqs: 'Запросов',
   'Input Tokens': 'Входных токенов',
   'Output Tokens': 'Выходных токенов',
+  'Output (incl. Reasoning)': 'Вывод (с рассуждением)',
   'Savings Highlight:': 'Экономия:',
   'of input tokens were served from the cache, reducing costs.':
     'входных токенов обслужено из кэша, снижая затраты.',
@@ -1820,6 +1896,8 @@ export default {
   'System prompt': 'Системная подсказка',
   'Built-in tools': 'Встроенные инструменты',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Файлы инструкций',
+  'Auto memory': 'Автопамять',
   'Memory files': 'Файлы памяти',
   Skills: 'Навыки',
   Messages: 'Сообщения',
@@ -2033,6 +2111,8 @@ export default {
   'Advisor review failed: {{error}}': 'Ошибка обзора советника: {{error}}',
   'No conversation context available for /advisor':
     'Нет контекста разговора, доступного для /advisor',
+  'No conversation context available for /btw':
+    'Нет контекста разговора, доступного для /btw',
   'Focus too long (max {{max}} chars)':
     'Фокус слишком длинный (макс. {{max}} символов)',
   'Another operation is in progress, wait for it to complete before running /advisor':
@@ -2188,6 +2268,8 @@ export default {
   out: 'вых.',
   'In/Out': 'Вх/Вых',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'Обновление до указанной версии требует автономной установки. Установите версию {{version}} вручную, используя текущий способ установки.',
   'Check for Qwen Code updates and install if available':
     'Проверить обновления Qwen Code и установить при наличии',
   'Qwen Code update available! {{current}} → {{latest}}':

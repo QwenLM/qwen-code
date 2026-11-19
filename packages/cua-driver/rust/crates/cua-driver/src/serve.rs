@@ -360,6 +360,16 @@ async fn invoke_daemon_tool(
     // the MCP policy contract now that every call passes through the daemon.
     if let Err(error) = cua_driver_core::authorization::authorize_tool_call(&tool_name, &args) {
         observe_daemon_error(observation, 1);
+        if cua_driver_contract::computer_use::is_app_call(&tool_name, &args) {
+            return DaemonResponse::ok(
+                serde_json::to_value(cua_driver_core::protocol::ToolResult::computer_use_error(
+                    "permission_denied",
+                    error.to_string(),
+                    false,
+                ))
+                .expect("serializable tool result"),
+            );
+        }
         return DaemonResponse::err(error.to_string(), 1);
     }
 
@@ -1318,8 +1328,6 @@ pub async fn run_serve(
 
     cua_driver_core::authorization::validate_startup_authorization()?;
 
-    eprintln!("Qwen Cua Driver daemon listening on {socket_path}");
-
     // Build the descriptor once and reuse it for every pipe instance. An
     // embedded host may explicitly delegate its trusted session to one exact
     // sandbox account SID; ordinary daemons remain current-user-only.
@@ -1366,28 +1374,72 @@ pub async fn run_serve(
     }
 
     let mut first_pipe = true;
+    let mut consecutive_failures = 0;
+    let mut fatal_error = None;
     loop {
+        if consecutive_failures > 0 {
+            if consecutive_failures >= PIPE_INSTANCE_FAILURE_LIMIT {
+                fatal_error = Some(anyhow::anyhow!(
+                    "named pipe {socket_path}: {consecutive_failures} consecutive pipe instance failures"
+                ));
+                break;
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(PIPE_INSTANCE_RETRY_DELAY) => {}
+                _ = &mut shutdown_rx => {
+                    eprintln!("Qwen Cua Driver daemon shutting down.");
+                    break;
+                }
+                _ = &mut parent_liveness => {
+                    eprintln!("Qwen Cua Driver embedded host closed its lifetime pipe; shutting down.");
+                    break;
+                }
+            }
+        }
+
         // All daemons use the current-user descriptor. Embedded daemons also
         // reserve the pipe name with their first instance.
         let first_pipe_instance = embedded && first_pipe;
-        let server = if sec_attrs_ptr.is_null() {
+        let created = if sec_attrs_ptr.is_null() {
             ServerOptions::new()
                 .first_pipe_instance(first_pipe_instance)
                 .create(socket_path)
-                .map_err(|e| anyhow::anyhow!("create named pipe {socket_path}: {e}"))?
         } else {
             unsafe {
                 ServerOptions::new()
                     .first_pipe_instance(first_pipe_instance)
                     .create_with_security_attributes_raw(socket_path, sec_attrs_ptr)
-                    .map_err(|e| anyhow::anyhow!("create named pipe {socket_path}: {e}"))?
             }
         };
-        first_pipe = false;
+        let server = match created {
+            Ok(server) => server,
+            Err(error) if first_pipe => {
+                fatal_error = Some(anyhow::anyhow!("create named pipe {socket_path}: {error}"));
+                break;
+            }
+            Err(error) => {
+                consecutive_failures += 1;
+                eprintln!(
+                    "Qwen Cua Driver: create named pipe {socket_path} failed ({consecutive_failures} consecutive): {error}; retrying"
+                );
+                continue;
+            }
+        };
+        if first_pipe {
+            first_pipe = false;
+            eprintln!("Qwen Cua Driver daemon listening on {socket_path}");
+        }
 
         tokio::select! {
             result = server.connect() => {
-                result.map_err(|e| anyhow::anyhow!("named pipe connect: {e}"))?;
+                if let Err(error) = result {
+                    consecutive_failures += 1;
+                    eprintln!(
+                        "Qwen Cua Driver: named pipe connect on {socket_path} failed ({consecutive_failures} consecutive): {error}; recreating the instance"
+                    );
+                    continue;
+                }
+                consecutive_failures = 0;
                 let client_process_id =
                     unsafe { named_pipe_client_process_id(server.as_raw_handle().cast()) };
                 let client_sid = unsafe {
@@ -1743,8 +1795,17 @@ pub async fn run_serve(
     sdk.shutdown()
         .await
         .map_err(|error| anyhow::anyhow!("shut down SDK runtime: {error}"))?;
-    Ok(())
+    match fatal_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
+
+#[cfg(target_os = "windows")]
+const PIPE_INSTANCE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+#[cfg(target_os = "windows")]
+const PIPE_INSTANCE_FAILURE_LIMIT: u32 = 120;
 
 #[cfg(all(test, target_os = "windows"))]
 mod named_pipe_authentication_tests {

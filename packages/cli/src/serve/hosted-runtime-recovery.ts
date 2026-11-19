@@ -5,11 +5,23 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { recordManagedToolMeasurements } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-measurements.js';
+import { parseManagedConfigInstallRecord } from '@qwen-code/qwen-code-core/managed-runtime/managed-config-install.js';
+import { expandHostedExtensionCommand } from './hosted-extension-command.js';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import {
+  getManagedExecutionDiagnostics,
+  observeManagedToolResponse,
+  type ManagedInvocationObservation,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-execution-diagnostics.js';
+import { hostedSkillDiagnostic } from './hosted-skill-diagnostics.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
+import { ManagedShellResultSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-shell-result-session.js';
+import { ResourceToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
+import type { ToolResultEnvelope } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type {
   HarnessAgentWaitRun,
   HarnessCommandWaitRun,
@@ -23,13 +35,21 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { managedChildTaskId } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-projection.js';
 import {
+  assertManagedSessionDurableRef,
   assertManagedSessionStableId,
   type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { enforceFunctionResponseBudget } from '@qwen-code/qwen-code-core/tools/tool-response-finalizer.js';
+import { hostedToolOutputBudget } from './hosted-harness-model.js';
+import { RESIDENT_WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
+import {
+  HOSTED_MEMORY_READS,
+  isHostedMemoryTool,
+} from './hosted-memory-session.js';
 import {
   convertToFunctionErrorResponse,
-  convertToFunctionResponse,
+  convertToFunctionResponse as baseFunctionResponse,
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
@@ -45,9 +65,10 @@ import {
   type HostedSkillCatalog,
 } from './hosted-skill-catalog.js';
 import {
+  HOSTED_TOOL_INPUT_ORDER,
   hostedHookOccurrenceId,
   HostedHookRecoveryRequiredError,
-  semanticInputDigest,
+  recordedToolHookFields,
   type HostedHookSession,
 } from './hosted-hook-session.js';
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
@@ -67,9 +88,12 @@ import {
   type HostedTeamSession,
 } from './hosted-team-session.js';
 import {
-  fitChildResultInline,
+  CHILD_LEDGER_TOOL_NAMES,
+  fitChildResultInline as baseFitChildResultInline,
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
   HOSTED_AGENT_WAIT_ABANDONED_TEXT,
+  HOSTED_CHILD_LEDGER_UNKNOWN_TEXT,
+  HostedToolRecoveryRequiredError,
   hostedChildBackgroundStartedText,
   hostedBroadcastCommitted,
   hostedChildRunIdFor,
@@ -78,8 +102,10 @@ import {
   hostedRouteAnswer,
   hostedTeamJoinedText,
   hostedRuntimeSessionId,
+  hostedReadRangeGuidance,
   journaledToolResultIds,
   truncateHostedGlobResponse,
+  type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
 import { parseTeamState } from '@qwen-code/qwen-code-core/managed-runtime/managed-team-record.js';
 import {
@@ -101,11 +127,20 @@ import {
 } from './hosted-file-history.js';
 import {
   HostedWorkspaceBroker,
+  HostedWorkspaceBrokerExecutionUnresolved,
+  HostedWorkspaceBrokerRejection,
+  isTerminalUnknownRejection,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
 
 /** The parked turn is not one this recovery can drive; the caller 409s. */
 export class RecoveryDeclined extends Error {}
+
+/** A temporary pool wait, distinct from a deterministic takeover decline. */
+export class HostedRecoveryQuiescingError extends Error {}
+
+/** The A6 evidence block whose pre-aborted cancel is still a terminal escape. */
+export class HostedChildLedgerRecoveryRequiredError extends HostedToolRecoveryRequiredError {}
 
 /** The states a recovery report may advertise: exactly the vocabulary the
  * hosted client's validator accepts (HostedHarnessClient's
@@ -172,7 +207,12 @@ export type HostedRecoveryDeclineReason =
   /** The checkpoint's durable bytes fail the parse/identity verdict. */
   | 'checkpoint_blocked'
   /** The recovered state still does not authorize this Turn. */
-  | 'unresolved_after_settle';
+  | 'unresolved_after_settle'
+  /** #17260: the Turn's saved public-child recovery profile belongs to a
+   * topology this Harness cannot open at all (a shell-era child profile
+   * after the move off the shell topology). No retry re-opens it, so the
+   * coordinator abandons the recovery on the first drive. */
+  | 'public_child_recovery_unsupported';
 
 export type HostedRuntimeRecoveryOutcome =
   | { readonly kind: 'recovered'; readonly turn: HostedRecoveryTurn }
@@ -225,6 +265,27 @@ function isTransientStoreBlock(
   return (
     authorization.reason === 'missing_state' &&
     authorization.message !== undefined
+  );
+}
+
+/** Broker answers that prove nothing about whether the command committed:
+ * the takeover reports the execution as unknown and re-checks it on its next
+ * pass. A transport or protocol fault is not one of these, so it still fails
+ * the load retriably instead of being read as an unknown outcome. */
+function isUnprovableExecutionAnswer(cause: unknown): boolean {
+  if (!(cause instanceof HostedWorkspaceBrokerRejection)) return false;
+  if (cause.status === 404 && cause.code === 'runtime_execution_not_found')
+    return true;
+  if (
+    cause.status === 409 &&
+    (cause.code === 'runtime_execution_evidence_unavailable' ||
+      cause.code === 'runtime_broker_execution_unknown')
+  )
+    return true;
+  return (
+    cause.status === 503 &&
+    (cause.code === 'runtime_reconciliation_required' ||
+      cause.code === 'runtime_execution_reconcile_failed')
   );
 }
 
@@ -334,6 +395,107 @@ function outcomeBytes(item: HarnessToolItem, parts: Part[]): Buffer {
   );
 }
 
+async function recoveredShellCancellationReceipt(input: {
+  session: ManagedSession;
+  promptId: string;
+  item: HarnessToolItem;
+  broker: HostedWorkspaceBroker;
+  shell: HostedShellTurnOptions;
+}): Promise<ManagedSessionDurableRef | undefined> {
+  const { session, item, broker } = input;
+  const authority = session.authority;
+  const events = authority.eventsInSequenceRange(
+    1,
+    authority.committedSequence,
+  );
+  const intent = events.find(
+    (event) =>
+      event.kind === 'tool.intent' &&
+      event.payload['executionCallId'] === item.executionCallId,
+  );
+  const argsRef = assertManagedSessionDurableRef(
+    intent?.payload['argsRef'],
+    'recovered Shell intent argsRef',
+  );
+  if (argsRef.kind !== 'managed-tool-args') return undefined;
+  const authorization = await authority.harnessRunAuthorization();
+  if (
+    authorization.status !== 'runnable' ||
+    authorization.checkpoint.identity.turnId !== input.promptId
+  )
+    throw new RecoveryDeclined();
+  const binding = authorization.checkpoint.runtime?.bindings.find(
+    (entry) => entry.executionCallId === item.executionCallId,
+  );
+  if (!binding || binding.state !== 'dispatch') throw new RecoveryDeclined();
+  const original = events.find(
+    (event) =>
+      event.kind === 'tool.receipt' &&
+      event.payload['executionCallId'] === item.executionCallId,
+  );
+  let generation: string;
+  let candidate: ToolResultEnvelope | undefined;
+  if (original) {
+    const ref = assertManagedSessionDurableRef(
+      original.payload['toolOutcomeRef'],
+      'recovered Shell receipt outcomeRef',
+    );
+    const saved = JSON.parse(
+      (await session.resources.read(ref)).toString(),
+    ) as {
+      identity?: { bindingGeneration?: unknown };
+    };
+    const storedGeneration = saved?.identity?.bindingGeneration;
+    if (typeof storedGeneration !== 'string')
+      throw new Error('Original Shell receipt binding is missing.');
+    generation = storedGeneration;
+  } else {
+    const settled = await broker.readSettledShellResult(item.executionCallId);
+    if (!settled) return undefined;
+    const capture = settled.result.capture;
+    if (
+      settled.result.executionStatus !== 'cancelled' ||
+      capture?.deliveryStatus !== 'blocked' ||
+      (!capture.manifest &&
+        (capture.captureStatus !== 'unavailable' ||
+          capture.captureReason !== 'producer_lost'))
+    )
+      return undefined;
+    generation = settled.bindingGeneration;
+    candidate = settled.result;
+  }
+  const admission = new ManagedShellResultSession(
+    session,
+    new ResourceToolResultSegmentStore(input.shell.resources),
+    generation,
+    () => input.shell.assertWritable(),
+    broker.runtimeSessionId,
+    input.shell.resources,
+  );
+  const key = authority.sessionHeader.sessionKey;
+  const receipt = await admission.acceptRecoveredCancelled(
+    {
+      reference: {
+        sessionId: broker.runtimeSessionId,
+        promptId: input.promptId,
+        callId: binding.invocationBindingId,
+        argsDigest: item.inputDigest,
+      },
+      capture: {
+        tenantId: key.tenantId,
+        sessionId: key.sessionId,
+        turnId: input.promptId,
+        executionCallId: item.executionCallId,
+        bindingGeneration: generation,
+        capturePolicy: 'complete_required',
+      },
+    },
+    item.functionCallId,
+    candidate,
+  );
+  return receipt.outcomeRef;
+}
+
 /**
  * Settles every parked Runtime execution of a cancelled turn with a cancelled
  * outcome, so the checkpoint can leave `await_runtime` and the following
@@ -356,6 +518,8 @@ export async function settleParkedTurnCancelled(input: {
    * — no stop was ever observed for them, so they journal an honest
    * unobservable outcome instead of a cancellation nobody witnessed. */
   unobserved?: ReadonlySet<string>;
+  broker?: HostedWorkspaceBroker;
+  shell?: HostedShellTurnOptions;
 }): Promise<'settled' | 'noop' | 'not-runnable'> {
   const authorization = await input.session.authority.harnessRunAuthorization();
   if (authorization.status !== 'runnable') return 'not-runnable';
@@ -403,14 +567,36 @@ export async function settleParkedTurnCancelled(input: {
         executionStatus: observed ? 'cancelled' : 'unknown',
       };
     }
-    const outcomeRef = await input.session.resources.publish(
-      'managed-tool-outcome',
-      outcomeBytes(item, parts),
+    const recovered =
+      input.broker &&
+      input.shell &&
+      item.toolName === 'run_shell_command' &&
+      !input.unobserved?.has(item.executionCallId)
+        ? await recoveredShellCancellationReceipt({
+            session: input.session,
+            promptId: input.promptId,
+            item,
+            broker: input.broker,
+            shell: input.shell,
+          })
+        : undefined;
+    const outcomeRef =
+      recovered ??
+      (await input.session.resources.publish(
+        'managed-tool-outcome',
+        outcomeBytes(item, parts),
+      ));
+    await recordManagedToolMeasurements(
+      input.session,
+      item.executionCallId,
+      outcomeRef,
+      input.broker?.toolMeasurements(item.executionCallId),
     );
+    input.broker?.releaseToolMeasurements(item.executionCallId);
     // The assistant's functionCall must meet its functionResponse in the next
     // turn's history, or providers reject the request as malformed.
     if (!journaled.has(item.functionCallId)) {
-      await input.session.sink.write({
+      await writeRecoveryRecord(input.session, {
         uuid: randomUUID(),
         parentUuid: item.modelMessageId,
         sessionId: input.sessionId,
@@ -435,8 +621,9 @@ export async function settleParkedTurnCancelled(input: {
  * knew (definitive not-found) is already stopped. A terminally abandoned
  * record is accepted without proof of a stop: the Broker fenced it
  * permanently on loss evidence, so neither cancel nor the terminal poll
- * could ever observe more — a still-reconcilable unknown fails closed
- * instead.
+ * could ever observe more. A still-reconcilable unknown may cancel its original
+ * execution; only a post-cancel settled observation witnesses its stop, and a
+ * persistent unknown still fails closed.
  */
 export async function stopParkedRuntimeExecutions(input: {
   session: ManagedSession;
@@ -490,10 +677,7 @@ export async function stopParkedRuntimeExecutions(input: {
       unobserved.add(item.executionCallId);
       throw cause;
     }
-    if (before?.state === 'unknown') {
-      unobserved.add(item.executionCallId);
-      throw new Error('Runtime execution outcome is unknown.');
-    }
+    if (before?.state === 'unknown') unobserved.add(item.executionCallId);
     if (before?.state === 'abandoned') {
       unobserved.add(item.executionCallId);
       continue;
@@ -594,23 +778,35 @@ async function answerAbandonedTurnCalls(input: {
     input.promptId,
     records,
   );
-  const owed = new Map<
-    string,
-    { name: string; messageId: string; args: unknown; mixedSkillBatch: boolean }
-  >();
+  const owed = new Map<string, { name: string; messageId: string }>();
+  const skillResponses = new Map<string, Part[]>();
   for (const record of records.filter((entry) => entry.type === 'assistant')) {
     const parts = record.message?.parts ?? [];
-    const mixedSkillBatch = parts.some(
-      (part) => part.functionCall && part.functionCall.name !== 'skill',
-    );
+    if (
+      uncommitted === 'hosted' &&
+      input.skills &&
+      parts.some(
+        (part) =>
+          part.functionCall?.name === 'skill' &&
+          !answered.has(part.functionCall.id ?? ''),
+      )
+    )
+      for (const [id, response] of await hostedSkillBatchResponses(
+        input.session,
+        input.skills,
+        input.promptId,
+        record,
+        records,
+        input.cwd,
+        input.hooks,
+      ))
+        skillResponses.set(id, response);
     for (const part of parts) {
       const call = part.functionCall;
       if (call?.id && call.name && !answered.has(call.id) && !owed.has(call.id))
         owed.set(call.id, {
           name: call.name,
           messageId: record.uuid,
-          args: call.args ?? {},
-          mixedSkillBatch,
         });
     }
   }
@@ -620,10 +816,9 @@ async function answerAbandonedTurnCalls(input: {
     // A background launch and a team tool write only to the journal, before
     // their answers: what committed is answered as committed, never as a
     // call that never ran.
-    const launched =
-      call.name === 'agent' || call.name === 'workflow'
-        ? input.children?.record(callKey)
-        : undefined;
+    const launched = CHILD_LEDGER_TOOL_NAMES.has(call.name)
+      ? input.children?.record(callKey)
+      : undefined;
     const sent =
       call.name === 'send_message'
         ? sentMessageText(input, functionCallId, callKey)
@@ -646,16 +841,15 @@ async function answerAbandonedTurnCalls(input: {
             callId: functionCallId,
           });
     let parts: Part[];
-    if (uncommitted === 'hosted' && call.name === 'skill' && input.skills) {
-      parts = await hostedSkillResponse(
-        input.session,
-        input.skills,
-        input.promptId,
-        functionCallId,
-        call.args,
-        call.mixedSkillBatch,
-        input.hooks,
-      );
+    if (isHostedMemoryTool(call.name)) {
+      if (uncommitted === 'none') continue;
+      parts = unconfirmedMemoryResponse(call.name, functionCallId);
+    } else if (
+      uncommitted === 'hosted' &&
+      call.name === 'skill' &&
+      input.skills
+    ) {
+      parts = skillResponses.get(functionCallId)!;
     } else if (planDecision !== undefined) {
       parts = convertToFunctionResponse(call.name, functionCallId, [
         { text: planDecision },
@@ -700,11 +894,22 @@ async function answerAbandonedTurnCalls(input: {
             call.name !== 'team_plan_approval' &&
             call.name !== 'send_message' &&
             !(
-              (call.name === 'agent' || call.name === 'workflow') &&
-              launched === undefined
+              CHILD_LEDGER_TOOL_NAMES.has(call.name) && launched === undefined
             )))
       )
         continue;
+      // A6: only a PRESENT ledger's missing record proves never started
+      // (admitLaunch commits before dispatch). The continue route's
+      // hosted mode refuses the family call outright — the route's catch
+      // maps the family to a retriable recovery block — while the
+      // terminating settlements ('all') keep folding, but with the
+      // unknown-outcome answer that claims nothing.
+      const ledgerUnknown =
+        CHILD_LEDGER_TOOL_NAMES.has(call.name) && input.children === undefined;
+      if (ledgerUnknown && uncommitted === 'hosted')
+        throw new HostedChildLedgerRecoveryRequiredError(
+          'Child run ledger is unavailable; the gap cannot be proven never-started.',
+        );
       // A call whose Runtime stop was never observed answers with the
       // honest unobservable outcome, never a cancellation nobody witnessed.
       const observed = !input.unobserved?.has(functionCallId);
@@ -712,31 +917,42 @@ async function answerAbandonedTurnCalls(input: {
         call.name,
         functionCallId,
         [],
-        !observed
-          ? "The Runtime execution's outcome could not be observed: the Broker fenced the record after losing its owner."
-          : committed
-            ? `The turn was interrupted after this call committed its team change, in full or in part (${input.message}); read task_list before retrying it.`
-            : `The tool call never ran: ${input.message}.`,
+        ledgerUnknown
+          ? HOSTED_CHILD_LEDGER_UNKNOWN_TEXT
+          : !observed
+            ? "The Runtime execution's outcome could not be observed: the Broker fenced the record after losing its owner."
+            : committed
+              ? `The turn was interrupted after this call committed its team change, in full or in part (${input.message}); read task_list before retrying it.`
+              : `The tool call never ran: ${input.message}.`,
       );
       const response = parts[0]?.functionResponse;
       if (!response || parts.length !== 1)
         throw new Error('Runtime result cannot be represented durably.');
       response.response = {
         ...response.response,
-        executionStatus: observed ? 'cancelled' : 'unknown',
+        executionStatus: ledgerUnknown || !observed ? 'unknown' : 'cancelled',
       };
     }
-    await input.session.sink.write({
-      uuid: randomUUID(),
-      parentUuid: call.messageId,
-      sessionId: input.sessionId,
-      timestamp: new Date().toISOString(),
-      type: 'tool_result',
-      cwd: input.cwd,
-      version: 'hosted-harness/1',
-      daemonPromptId: input.promptId,
-      message: { role: 'user', parts },
-    });
+    await writeRecoveryRecord(
+      input.session,
+      {
+        uuid: randomUUID(),
+        parentUuid: call.messageId,
+        sessionId: input.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'tool_result',
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        daemonPromptId: input.promptId,
+        message: { role: 'user', parts },
+      },
+      launched
+        ? managedChildTaskId(
+            input.sessionId,
+            launched.run.executionCallId ?? callKey,
+          )
+        : undefined,
+    );
     answeredNow += 1;
   }
   return answeredNow;
@@ -871,20 +1087,212 @@ function sentMessageText(
 /** The interruption every settle or resume route below names. */
 const INTERRUPTED_HARNESS = 'the Harness that asked was interrupted';
 
+function unconfirmedMemoryResponse(name: string, callId: string): Part[] {
+  const parts = convertToFunctionErrorResponse(
+    name,
+    callId,
+    [],
+    'The personal memory result was not durably recorded before interruption. Its outcome is unknown; do not automatically retry this operation.',
+  );
+  const response = parts[0]!.functionResponse!;
+  response.response = {
+    ...response.response,
+    status: HOSTED_MEMORY_READS.has(name) ? 'unavailable' : 'unknown',
+    executionStatus: 'unknown',
+  };
+  return parts;
+}
+
+const recoveredSuccessfulParts = new WeakSet<object>();
+const recoveredFacts = new WeakMap<object, ManagedInvocationObservation>();
+
+function convertToFunctionResponse(
+  ...args: Parameters<typeof baseFunctionResponse>
+): Part[] {
+  const parts = baseFunctionResponse(...args);
+  for (const part of parts) recoveredSuccessfulParts.add(part);
+  return parts;
+}
+
+function fitChildResultInline(
+  ...args: Parameters<typeof baseFitChildResultInline>
+): Part[] {
+  const parts = baseFitChildResultInline(...args);
+  for (const part of parts) recoveredSuccessfulParts.add(part);
+  return parts;
+}
+
+async function writeRecoveryRecord(
+  managed: ManagedSession,
+  record: ChatRecord,
+  taskId?: string,
+): Promise<void> {
+  const collector = getManagedExecutionDiagnostics(managed.authority);
+  const facts =
+    record.type === 'tool_result' && collector
+      ? (record.message?.parts ?? []).flatMap((part) => {
+          const response = part.functionResponse;
+          const fact =
+            recoveredFacts.get(part) ??
+            (response?.id ? collector.observation(response.id) : undefined);
+          if (!fact) return [];
+          const observation = structuredClone(fact);
+          if (taskId) observation.taskId = taskId;
+          if (recoveredSuccessfulParts.has(part))
+            observation.execution = 'success';
+          observeManagedToolResponse(observation, response?.response);
+          return [observation];
+        })
+      : undefined;
+  await managed.sink.write(record, facts);
+}
+
+function rememberSkillResult(
+  session: ManagedSession,
+  catalog: HostedSkillCatalog,
+  callId: string,
+  args: Record<string, unknown>,
+  origin: 'user' | 'model',
+  revision: number | undefined,
+  parts: Part[],
+): Part[] {
+  const fact = getManagedExecutionDiagnostics(session.authority)?.observation(
+    callId,
+  );
+  if (fact) {
+    fact.toolKind = 'hosted';
+    fact.admission = 'allowed';
+    fact.execution = 'success';
+    fact.skill = hostedSkillDiagnostic(catalog, args, origin, revision);
+    for (const part of parts) recoveredFacts.set(part, fact);
+  }
+  return parts;
+}
+
+function rememberSkillRefusal(
+  session: ManagedSession,
+  callId: string,
+  parts: Part[],
+  admission: 'denied' | 'invalid',
+): Part[] {
+  const fact = getManagedExecutionDiagnostics(session.authority)?.observation(
+    callId,
+  );
+  if (fact) {
+    fact.toolKind = 'hosted';
+    fact.admission = admission;
+    fact.execution = 'not_started';
+    for (const part of parts) recoveredFacts.set(part, fact);
+  }
+  return parts;
+}
+
+async function hostedSkillBatchResponses(
+  session: ManagedSession,
+  catalog: HostedSkillCatalog,
+  promptId: string,
+  assistant: ChatRecord,
+  records: readonly ChatRecord[],
+  cwd: string,
+  hooks?: HostedHookSession,
+): Promise<Map<string, Part[]>> {
+  const calls = (assistant.message?.parts ?? []).flatMap((part) =>
+    part.functionCall?.id ? [part.functionCall] : [],
+  );
+  const mixed = calls.some((call) => call.name !== 'skill');
+  const origin = assistant.clientInitiatedSkills === true ? 'user' : 'model';
+  const problems = calls.map((call) =>
+    mixed
+      ? HOSTED_SKILL_BATCH_REFUSAL
+      : catalog.validationError(call.args, origin),
+  );
+  const entries: Array<{
+    callId: string;
+    toolName: string;
+    responseParts: Part[];
+  }> = [];
+  for (const [index, call] of calls.entries()) {
+    if (call.name !== 'skill') continue;
+    const saved = records
+      .filter(
+        (record) =>
+          record.type === 'tool_result' && record.daemonPromptId === promptId,
+      )
+      .flatMap((record) => record.message?.parts ?? [])
+      .filter((part) => part.functionResponse?.id === call.id);
+    const responseParts = saved.length
+      ? saved
+      : problems.some((problem) => problem !== undefined)
+        ? rememberSkillRefusal(
+            session,
+            call.id!,
+            convertToFunctionErrorResponse(
+              'skill',
+              call.id!,
+              [],
+              problems[index] ??
+                'This tool was not executed because another call in the batch has invalid arguments. Retry the batch with corrected arguments.',
+            ),
+            problems[index] !== undefined ? 'invalid' : 'denied',
+          )
+        : await hostedSkillResponse(
+            session,
+            catalog,
+            promptId,
+            call.id!,
+            call.args ?? {},
+            origin,
+            hooks,
+          );
+    entries.push({ callId: call.id!, toolName: 'skill', responseParts });
+  }
+  return new Map(
+    enforceFunctionResponseBudget(entries, hostedToolOutputBudget(cwd)).map(
+      (entry, index) => {
+        const original = entries[index].responseParts;
+        const fact = original
+          .map((part) => recoveredFacts.get(part))
+          .find((value) => value !== undefined);
+        if (fact) {
+          const observation = structuredClone(fact);
+          observation.delivery = isDeepStrictEqual(
+            original,
+            entry.responseParts,
+          )
+            ? 'complete'
+            : 'partial';
+          if (observation.skill)
+            observation.skill.delivery = observation.delivery;
+          for (const part of entry.responseParts)
+            recoveredFacts.set(part, observation);
+        }
+        return [entry.callId, entry.responseParts];
+      },
+    ),
+  );
+}
+
 async function hostedSkillResponse(
   session: ManagedSession,
   catalog: HostedSkillCatalog,
   promptId: string,
   callId: string,
   args: unknown,
-  mixedSkillBatch: boolean,
+  origin: 'user' | 'model',
   hooks?: HostedHookSession,
 ): Promise<Part[]> {
-  const refused = (reason: string) =>
-    convertToFunctionErrorResponse('skill', callId, [], reason);
-  if (mixedSkillBatch) return refused(HOSTED_SKILL_BATCH_REFUSAL);
-  const initialProblem = catalog.validationError(args);
-  if (initialProblem) return refused(initialProblem);
+  const refused = (
+    reason: string,
+    admission: 'denied' | 'invalid' = 'denied',
+  ) =>
+    rememberSkillRefusal(
+      session,
+      callId,
+      convertToFunctionErrorResponse('skill', callId, [], reason),
+      admission,
+    );
+  const initialProblem = catalog.validationError(args, origin);
+  if (initialProblem) return refused(initialProblem, 'invalid');
   if (hooks) {
     const marker = session.authority.extensionRecord(
       'hook_execution',
@@ -907,7 +1315,18 @@ async function hostedSkillResponse(
       new TextDecoder('utf-8', { fatal: true }).decode(
         await session.resources.read(record.planRef),
       ),
-    ) as { refusedInputDigest?: unknown };
+    ) as {
+      input: Record<string, unknown>;
+      refusedInputDigest?: unknown;
+      toolInputOrder?: unknown;
+    };
+    // A Skill's PreToolUse runs on the model's input in either order, but a
+    // plan from an unknown order is no evidence of what it decided.
+    if (
+      plan.toolInputOrder !== undefined &&
+      plan.toolInputOrder !== HOSTED_TOOL_INPUT_ORDER
+    )
+      throw new HostedHookRecoveryRequiredError();
     if (plan.refusedInputDigest !== undefined) {
       const definition = JSON.parse(
         new TextDecoder('utf-8', { fatal: true }).decode(
@@ -919,14 +1338,17 @@ async function hostedSkillResponse(
       const approval = readHostedApprovalDefinition(definition);
       if (
         !approval ||
-        plan.refusedInputDigest !==
-          semanticInputDigest({
+        typeof plan.refusedInputDigest !== 'string' ||
+        !recordedToolHookFields(
+          { input: plan.input, refusedInputDigest: plan.refusedInputDigest },
+          {
             tool_name: 'skill',
             tool_input: args,
             tool_use_id: callId,
             permission_mode: approval.mode,
             prompt_id: promptId,
-          })
+          },
+        )
       )
         throw new HostedHookRecoveryRequiredError();
     } else {
@@ -970,12 +1392,83 @@ async function hostedSkillResponse(
     if (updated && typeof updated === 'object' && !Array.isArray(updated))
       args = updated;
   }
-  const problem = catalog.validationError(args);
-  return problem
-    ? convertToFunctionErrorResponse('skill', callId, [], problem)
-    : convertToFunctionResponse('skill', callId, [
-        { text: catalog.response(args) },
-      ]);
+  const problem = catalog.validationError(args, origin);
+  const command = catalog.command(args);
+  if (!problem && command) {
+    const head = session.authority.domainRecord('config_install');
+    if (!head) throw new HostedHookRecoveryRequiredError();
+    const record = parseManagedConfigInstallRecord(
+      JSON.parse(
+        (await session.resources.read(head.recordRef)).toString('utf8'),
+      ),
+    );
+    if (record.phase !== 'active') throw new HostedHookRecoveryRequiredError();
+    try {
+      const text = await expandHostedExtensionCommand({
+        session,
+        broker: {} as HostedWorkspaceBroker,
+        promptId,
+        callId,
+        revision: record.configRevision,
+        command,
+        args: String((args as Record<string, unknown>)['args'] ?? ''),
+        signal: new AbortController().signal,
+        definitionDigest: () => {
+          throw new HostedHookRecoveryRequiredError();
+        },
+        decide: async () => {
+          throw new HostedHookRecoveryRequiredError();
+        },
+        completed: async (id, _name, _input, result) => {
+          if (
+            hooks &&
+            !hooks.hasCompletedOccurrence(
+              result['executionStatus'] === 'success'
+                ? HookEventName.PostToolUse
+                : HookEventName.PostToolUseFailure,
+              id,
+            )
+          )
+            throw new HostedHookRecoveryRequiredError();
+        },
+      });
+      return rememberSkillResult(
+        session,
+        catalog,
+        callId,
+        args as Record<string, unknown>,
+        origin,
+        record.configRevision,
+        convertToFunctionResponse('skill', callId, [{ text }]),
+      );
+    } catch {
+      throw new HostedHookRecoveryRequiredError();
+    }
+  }
+  if (problem) return refused(problem, 'invalid');
+  const config = getManagedExecutionDiagnostics(session.authority)?.observation(
+    callId,
+  )
+    ? session.authority.domainRecord('config_install')
+    : undefined;
+  const revision = config
+    ? parseManagedConfigInstallRecord(
+        JSON.parse(
+          (await session.resources.read(config.recordRef)).toString('utf8'),
+        ),
+      ).configRevision
+    : undefined;
+  return rememberSkillResult(
+    session,
+    catalog,
+    callId,
+    args as Record<string, unknown>,
+    origin,
+    revision,
+    convertToFunctionResponse('skill', callId, [
+      { text: catalog.response(args) },
+    ]),
+  );
 }
 
 /**
@@ -1057,7 +1550,7 @@ export async function settleCancelledAgentWaitRuns(input: {
       HOSTED_AGENT_WAIT_ABANDONED_TEXT,
     );
     if (!journaled.has(run.functionCallId))
-      await input.managed.sink.write({
+      await writeRecoveryRecord(input.managed, {
         uuid: randomUUID(),
         parentUuid: run.modelMessageId,
         sessionId: input.sessionId,
@@ -1144,19 +1637,30 @@ export async function fillParkedRoundAgentGaps(input: {
     input.promptId,
     projected,
   );
+  const recoveredTasks = new Map<string, string>();
   const writeFold = async (parts: Part[]): Promise<void> => {
-    await input.managed.sink.write({
-      uuid: randomUUID(),
-      parentUuid: assistant.uuid,
-      sessionId: input.sessionId,
-      timestamp: new Date().toISOString(),
-      type: 'tool_result',
-      cwd: input.cwd,
-      version: 'hosted-harness/1',
-      model: 'recovered',
-      daemonPromptId: input.promptId,
-      message: { role: 'user', parts },
-    });
+    await writeRecoveryRecord(
+      input.managed,
+      {
+        uuid: randomUUID(),
+        parentUuid: assistant.uuid,
+        sessionId: input.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'tool_result',
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        model: 'recovered',
+        daemonPromptId: input.promptId,
+        message: { role: 'user', parts },
+      },
+      parts
+        .map((part) =>
+          part.functionResponse?.id
+            ? recoveredTasks.get(part.functionResponse.id)
+            : undefined,
+        )
+        .find((id) => id !== undefined),
+    );
   };
   // The fit predicate measures exactly this record shape (a uuid is always
   // 36 chars; the assistant parent is always 36; the timestamp is one ISO
@@ -1181,9 +1685,17 @@ export async function fillParkedRoundAgentGaps(input: {
   const fits = (parts: Part[]): boolean =>
     templateRecord(parts).byteLength <=
     HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
-  const mixedSkillBatch = (assistant.message?.parts ?? []).some(
-    (part) => part.functionCall && part.functionCall.name !== 'skill',
-  );
+  const skillResponses = input.skills
+    ? await hostedSkillBatchResponses(
+        input.managed,
+        input.skills,
+        input.promptId,
+        assistant,
+        projected,
+        input.cwd,
+        input.hooks,
+      )
+    : new Map<string, Part[]>();
   let filled = 0;
   for (const part of assistant.message?.parts ?? []) {
     const callId = part.functionCall?.id;
@@ -1193,19 +1705,16 @@ export async function fillParkedRoundAgentGaps(input: {
     // The journaled set gates only the fold, never the replay-safe marks —
     // both sibling arms in this diff document and follow the same rule.
     const foldOwed = !journaled.has(callId);
+    if (isHostedMemoryTool(name)) {
+      if (foldOwed) {
+        await writeFold(unconfirmedMemoryResponse(name, callId));
+        filled += 1;
+      }
+      continue;
+    }
     if (name === 'skill' && input.skills) {
       if (foldOwed) {
-        await writeFold(
-          await hostedSkillResponse(
-            input.managed,
-            input.skills,
-            input.promptId,
-            callId,
-            part.functionCall?.args ?? {},
-            mixedSkillBatch,
-            input.hooks,
-          ),
-        );
+        await writeFold(skillResponses.get(callId)!);
         filled += 1;
       }
       continue;
@@ -1233,10 +1742,50 @@ export async function fillParkedRoundAgentGaps(input: {
       }
       continue;
     }
+    // A6: an unavailable child ledger is unknown evidence, not the
+    // never-started proof a present ledger's missing record gives
+    // (admitLaunch commits before dispatch). Block, never fold "never ran".
+    // An already-journaled gap owes nothing: a replayed fill stays silent.
+    // The cancel route and the interrupted-turn settle funnel pre-abort this
+    // fill so they terminate at once; for a family call with no ledger, their
+    // exempted fold writes the unknown-outcome answer that claims nothing,
+    // never "never ran".
+    // Only the live-signal continue route blocks — its catch maps the
+    // family to a retriable recovery block.
+    if (
+      foldOwed &&
+      children === undefined &&
+      CHILD_LEDGER_TOOL_NAMES.has(name)
+    ) {
+      if (input.signal?.aborted !== true)
+        throw new HostedChildLedgerRecoveryRequiredError(
+          'Child run ledger is unavailable; the gap cannot be proven never-started.',
+        );
+      await writeFold(
+        convertToFunctionErrorResponse(
+          name,
+          callId,
+          [],
+          HOSTED_CHILD_LEDGER_UNKNOWN_TEXT,
+        ),
+      );
+      filled += 1;
+      journaled.add(callId);
+      continue;
+    }
     const admitted =
       children === undefined
         ? undefined
         : children.record(hostedChildRunIdFor(input.promptId, callId));
+    if (admitted)
+      recoveredTasks.set(
+        callId,
+        managedChildTaskId(
+          input.sessionId,
+          admitted.run.executionCallId ??
+            hostedChildRunIdFor(input.promptId, callId),
+        ),
+      );
     if (children === undefined || admitted === undefined) {
       if (foldOwed) {
         await writeFold(
@@ -1284,9 +1833,13 @@ export async function fillParkedRoundAgentGaps(input: {
           break;
         }
         const record = children.record(runId);
+        // #14387: a recovery-blocked child is an ending too — its outcome
+        // is unwitnessed, but the orphan fill must not poll forever.
         if (
           record !== undefined &&
-          (record.run.state === 'failed' || record.run.state === 'cancelled')
+          (record.run.state === 'failed' ||
+            record.run.state === 'cancelled' ||
+            record.run.state === 'recovery_blocked')
         ) {
           if (foldOwed) {
             await writeFold(
@@ -1422,7 +1975,7 @@ export async function settleCancelledCommandWaitRuns(input: {
   for (const run of input.runs) {
     const parts = await sessionCommandJournalAnswer(input.commands, run);
     if (!journaled.has(run.functionCallId))
-      await input.managed.sink.write({
+      await writeRecoveryRecord(input.managed, {
         uuid: randomUUID(),
         parentUuid: run.modelMessageId,
         sessionId: input.sessionId,
@@ -1458,6 +2011,9 @@ export async function fillParkedRoundCommandGaps(input: {
   commands: HostedSessionCommandSession;
   children?: HostedChildAgentSession;
   messages?: HostedSessionMessageSession;
+  /** The continue route passes its live signal; the pre-aborted cancel
+   * and settle callers terminate at once on the exempted fold. */
+  signal?: AbortSignal;
 }): Promise<number> {
   const authorization = await input.managed.authority
     .harnessRunAuthorization()
@@ -1491,6 +2047,43 @@ export async function fillParkedRoundCommandGaps(input: {
     if (typeof callId !== 'string' || typeof name !== 'string') continue;
     if (waitedCalls.has(callId)) continue;
     const foldOwed = !journaled.has(callId);
+    if (
+      foldOwed &&
+      input.children === undefined &&
+      CHILD_LEDGER_TOOL_NAMES.has(name)
+    ) {
+      // A6: this fill never reads the ledger, so the sibling cannot be
+      // proven never started without it. A live signal (the continue
+      // route) refuses — its catch maps the family to a retriable block;
+      // a pre-aborted caller (cancel, settle) keeps terminating, on the
+      // unknown-outcome answer that claims nothing.
+      if (input.signal?.aborted !== true)
+        throw new HostedChildLedgerRecoveryRequiredError(
+          'Child run ledger is unavailable; the gap cannot be proven never-started.',
+        );
+      await writeRecoveryRecord(input.managed, {
+        uuid: randomUUID(),
+        parentUuid: assistant.uuid,
+        sessionId: input.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'tool_result',
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        model: 'recovered',
+        daemonPromptId: input.promptId,
+        message: {
+          role: 'user',
+          parts: convertToFunctionErrorResponse(
+            name,
+            callId,
+            [],
+            HOSTED_CHILD_LEDGER_UNKNOWN_TEXT,
+          ),
+        },
+      });
+      filled += 1;
+      continue;
+    }
     const sent =
       name === 'send_message'
         ? await sentMessageText(
@@ -1505,7 +2098,9 @@ export async function fillParkedRoundCommandGaps(input: {
           )
         : undefined;
     let parts: Part[] | undefined;
-    if (sent !== undefined) {
+    if (isHostedMemoryTool(name)) {
+      parts = unconfirmedMemoryResponse(name, callId);
+    } else if (sent !== undefined) {
       parts = convertToFunctionResponse(name, callId, [{ text: sent }]);
     } else {
       parts = convertToFunctionErrorResponse(
@@ -1520,7 +2115,7 @@ export async function fillParkedRoundCommandGaps(input: {
       );
     }
     if (foldOwed) {
-      await input.managed.sink.write({
+      await writeRecoveryRecord(input.managed, {
         uuid: randomUUID(),
         parentUuid: assistant.uuid,
         sessionId: input.sessionId,
@@ -1628,7 +2223,7 @@ async function settleJournalOnlyInterruptedTurn(input: {
       // exist, and a minted never-ran would be a false terminal for work
       // the journal may actually carry.
       if (
-        (call.name === 'agent' || call.name === 'workflow') &&
+        CHILD_LEDGER_TOOL_NAMES.has(call.name) &&
         input.children === undefined
       )
         return undefined;
@@ -1683,7 +2278,7 @@ async function settleJournalOnlyInterruptedTurn(input: {
   // channel wake settle stamps (F5), so the input settles and — with
   // the park at a model-start phase — the checkpoint hands the Session
   // over to its next Turn in the same commit.
-  await input.session.sink.write({
+  await writeRecoveryRecord(input.session, {
     uuid: randomUUID(),
     parentUuid: null,
     sessionId: input.sessionId,
@@ -1740,6 +2335,7 @@ export async function settleInterruptedTurnRuntime(input: {
   promptId: string;
   brokerOptions: HostedWorkspaceBrokerOptions | undefined;
   toolProfile: boolean;
+  shell?: HostedShellTurnOptions;
   /** Caller-owned accumulator, exactly as in the takeover cancel drive: a
    * stop attempt that throws mid-poll must carry the ids it already
    * counted into the caller's retry — a reclaimed record then reads as
@@ -1832,6 +2428,8 @@ export async function settleInterruptedTurnRuntime(input: {
         cwd: input.cwd,
         promptId: input.promptId,
         unobserved: stopped.unobserved,
+        broker,
+        shell: input.shell,
       });
       // A settle that could not verify the park journaled nothing: its
       // contract names that a retry-inviting failure, never a completed
@@ -1902,6 +2500,8 @@ export async function settleInterruptedTurnRuntime(input: {
           commands: input.commands,
         });
       }
+      const settleCommandFillAbort = new AbortController();
+      settleCommandFillAbort.abort();
       await fillParkedRoundCommandGaps({
         managed: input.session,
         sessionId: input.sessionId,
@@ -1911,6 +2511,7 @@ export async function settleInterruptedTurnRuntime(input: {
         commands: input.commands,
         children: input.children,
         messages: input.messages,
+        signal: settleCommandFillAbort.signal,
       });
     }
   }
@@ -2027,6 +2628,7 @@ export async function recoverHostedRuntimeTurn(input: {
   promptId: string;
   brokerOptions: HostedWorkspaceBrokerOptions;
   passive: boolean;
+  canStart?: () => boolean;
   /** The evidence funnels of the interrupted-Turn settlement (#13847): a
    * model-start park whose open round holds only journal-only calls
    * answers them by what committed through these — the same shapes the
@@ -2307,7 +2909,17 @@ export async function recoverHostedRuntimeTurn(input: {
   if (pending.length > 0) {
     if (passive) {
       for (const item of pending) {
-        const status = await broker.status(item.executionCallId);
+        // The record may be UNKNOWN only because the dead owner never
+        // reported: ask the original Runtime once instead of reading a state
+        // nobody refreshes. A settled answer becomes observable, a terminal
+        // fence keeps its abandoned distinction, and an answer the Runtime
+        // still cannot prove stays unknown.
+        const status = await broker
+          .status(item.executionCallId, { reconcile: true })
+          .catch((cause) => {
+            if (isUnprovableExecutionAnswer(cause)) return undefined;
+            throw cause;
+          });
         // Only a still-reconcilable unknown reports as failing to account
         // for the execution; a terminally fenced abandoned record keeps its
         // distinction so the coordinator can cancel over it.
@@ -2350,11 +2962,35 @@ export async function recoverHostedRuntimeTurn(input: {
           ) as { payloadJson?: unknown };
           if (typeof stored.payloadJson !== 'string')
             throw new RecoveryDeclined();
-          const result = await broker.execute(
-            item.executionCallId,
-            stored.payloadJson,
-            new AbortController().signal,
-          );
+          if (input.canStart?.() === false)
+            throw new HostedRecoveryQuiescingError('The Harness is quiescing.');
+          const result = await broker
+            .execute(
+              item.executionCallId,
+              stored.payloadJson,
+              new AbortController().signal,
+              undefined,
+              false,
+              // A record the dead owner left UNKNOWN is reconciled once:
+              // its settled answer is journaled below, and anything still
+              // unproved is reported unknown instead of re-dispatched.
+              true,
+            )
+            .catch((cause) => {
+              if (isTerminalUnknownRejection(cause)) {
+                // Fenced permanently: the outcome can never be observed, so
+                // the report keeps it for the cancel route to settle.
+                states.set(item.executionCallId, { state: 'abandoned' });
+                return undefined;
+              }
+              if (
+                cause instanceof HostedWorkspaceBrokerExecutionUnresolved ||
+                isUnprovableExecutionAnswer(cause)
+              )
+                return undefined;
+              throw cause;
+            });
+          if (result === undefined) continue;
           let parts = toolResultParts(item, result);
           let outcome = outcomeBytes(item, parts);
           let record: ChatRecord = {
@@ -2394,7 +3030,10 @@ export async function recoverHostedRuntimeTurn(input: {
               [],
               `Tool execution settled as ${result.executionStatus}, but its output exceeds the ${HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes}-byte durable Session limit and was omitted.` +
                 (item.toolName === 'read_file'
-                  ? ' Request a smaller offset/limit range.'
+                  ? hostedReadRangeGuidance(
+                      broker.capabilityDigest ===
+                        RESIDENT_WORKSPACE_CAPABILITY_DIGEST,
+                    )
                   : ''),
             );
             const omittedResponse = omitted[0]?.functionResponse;
@@ -2417,8 +3056,15 @@ export async function recoverHostedRuntimeTurn(input: {
             'managed-tool-outcome',
             outcome,
           );
+          await recordManagedToolMeasurements(
+            session,
+            item.executionCallId,
+            outcomeRef,
+            broker.toolMeasurements(item.executionCallId),
+          );
+          broker.releaseToolMeasurements(item.executionCallId);
           if (!journaled.has(item.functionCallId)) {
-            await session.sink.write(record);
+            await writeRecoveryRecord(session, record);
           }
           await harness.resolveAwaitRuntime(item.executionCallId, outcomeRef);
           states.set(item.executionCallId, { state: 'settled' });

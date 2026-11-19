@@ -14,6 +14,7 @@ import {
   SessionArtifactAuthorizationError,
   SessionArtifactStore,
   SessionArtifactValidationError,
+  type SessionArtifactInput,
 } from './sessionArtifacts.js';
 import {
   rebuildSessionArtifactSnapshot,
@@ -43,6 +44,102 @@ describe('SessionArtifactStore', () => {
   afterEach(async () => {
     vi.useRealTimers();
     await fs.rm(workspace, { recursive: true, force: true });
+  });
+
+  it('projects persisted library metadata without snapshot/file mutations or exposing client identity', async () => {
+    const sessionId = 'library-read';
+    const persisted = {
+      ...persistedWorkspaceFile(sessionId, 'report.md'),
+      clientId: 'private-client',
+    };
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    const before = await fs.readdir(workspace);
+    const result = await store.readPersistedLibrary({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts: [persisted],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+    expect(result.artifacts).toHaveLength(1);
+    expect(result.artifacts[0]).toMatchObject({
+      id: persisted.id,
+      workspacePath: 'report.md',
+      restoreState: 'restored',
+      retention: 'restorable',
+      createdAt: persisted.createdAt,
+      updatedAt: persisted.updatedAt,
+      persistedAt: persisted.persistedAt,
+    });
+    expect(result.artifacts[0]).not.toHaveProperty('persistenceWarning');
+    expect(result.artifacts[0]).not.toHaveProperty('clientId');
+    expect(await fs.readdir(workspace)).toEqual(before);
+    expect((await store.list()).artifacts).toEqual([]);
+  });
+
+  it.each(['missing', 'changed'] as const)(
+    'marks a persisted %s file as metadata-only',
+    async (status) => {
+      const store = new SessionArtifactStore({
+        sessionId: 'library',
+        workspaceCwd: workspace,
+      });
+      const artifact = {
+        ...persistedWorkspaceFile('library', 'report.md'),
+        status,
+        retention: 'pinned' as const,
+      };
+      const result = await store.readPersistedLibrary({
+        v: 2,
+        sessionId: 'library',
+        sequence: 1,
+        artifacts: [artifact],
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      });
+      expect(result.artifacts[0]).toMatchObject({
+        retention: 'restorable',
+        status,
+        persistenceWarning: 'metadata_only_restore',
+      });
+      expect(result.warnings).toEqual([
+        expect.stringContaining('downgraded to restorable'),
+      ]);
+    },
+  );
+
+  it('keeps client ownership checks while accepting explicit workspace owner deletion', async () => {
+    const sessionId = 'library-owner';
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    const registered = await store.upsertMany([
+      {
+        title: 'Client link',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.com/report',
+        source: 'client',
+        clientId: 'owner',
+      },
+    ]);
+    const id = registered.changes[0].artifactId;
+    await expect(
+      store.remove(id, { clientId: 'other' }),
+    ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
+    await expect(
+      store.remove(id, { workspaceOwner: true }),
+    ).resolves.toMatchObject({
+      changes: [{ action: 'removed', artifactId: id }],
+    });
+    expect((await store.list()).artifacts).toEqual([]);
   });
 
   function managedIdForWorkspacePath(workspacePath: string): string {
@@ -184,6 +281,213 @@ describe('SessionArtifactStore', () => {
       return stat;
     }) as typeof fs.lstat);
   }
+
+  it('listRestored returns the current artifacts in insert order for the load response', async () => {
+    const sessionId = 's-early';
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    const urlA = 'https://example.com/alpha';
+    const urlB = 'https://example.com/beta';
+    const idA = stableSessionArtifactId(sessionId, `url:${urlA}`);
+    const idB = stableSessionArtifactId(sessionId, `url:${urlB}`);
+    const link = (id: string, url: string, title: string) => ({
+      id,
+      kind: 'link' as const,
+      storage: 'external_url' as const,
+      source: 'client' as const,
+      status: 'available' as const,
+      title,
+      url,
+      retention: 'restorable' as const,
+      clientRetained: true,
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    });
+    // The repeated identity (idA) is re-set during restore: it keeps its early
+    // Map slot but receives a later insertSeq, so Map iteration order diverges
+    // from insertSeq order. Only a real sort yields ['Beta', 'Alpha final'];
+    // dropping the sort would return the Map order ['Alpha final', 'Beta'].
+    await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts: [
+        link(idA, urlA, 'Alpha'),
+        link(idB, urlB, 'Beta'),
+        link(idA, urlA, 'Alpha final'),
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+    const restored = await store.listRestored();
+    expect(restored.map((item) => item.title)).toEqual(['Beta', 'Alpha final']);
+    expect(restored).toEqual((await store.list()).artifacts);
+  });
+
+  it('listRestored skips the workspace status refresh that list performs', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's-early-nostat',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'early.txt'), 'content');
+    await store.upsertMany([{ title: 'Early', workspacePath: 'early.txt' }]);
+
+    // Age the recorded stat past the refresh TTL so list() must re-stat.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const lstatSpy = spyOnLstatForwarding(() => {});
+    try {
+      await store.listRestored();
+      expect(lstatSpy).not.toHaveBeenCalled();
+      await store.list();
+      expect(lstatSpy).toHaveBeenCalled();
+    } finally {
+      lstatSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('count() returns the live public count synchronously, including ephemeral artifacts', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's-live-count',
+      workspaceCwd: workspace,
+    });
+    expect(store.count()).toBe(0);
+    const created = await store.upsertMany([
+      {
+        title: 'Restorable',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.com/restorable',
+        retention: 'restorable',
+      },
+      {
+        title: 'Ephemeral',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.com/ephemeral',
+        retention: 'ephemeral',
+      },
+    ]);
+    expect(store.count()).toBe(2);
+    expect(store.count()).toBe((await store.list()).artifacts.length);
+    // A monotonically growing counter would pass the additions above; the
+    // removal pins count() to the live map size, which is what the header
+    // renders.
+    await store.remove(created.changes[0]!.artifactId);
+    expect(store.count()).toBe(1);
+    expect(store.count()).toBe((await store.list()).artifacts.length);
+  });
+
+  it('stamps the restorable count on durable event payloads, excluding ephemeral artifacts', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's-event-count',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await store.upsertMany([
+      {
+        title: 'A',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.com/count-a',
+        retention: 'restorable',
+      },
+      {
+        title: 'B',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.com/count-b',
+        retention: 'restorable',
+      },
+    ]);
+    expect(events.at(-1)?.artifactCount).toBe(2);
+
+    // Ephemeral-only changes are not durable: no new event is recorded, and
+    // the restorable count stays put even though the live count grows.
+    await store.upsertMany([
+      {
+        title: 'E',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.com/count-e',
+        retention: 'ephemeral',
+      },
+    ]);
+    expect(events).toHaveLength(1);
+    expect(store.count()).toBe(3);
+
+    const restorable = (await store.list()).artifacts.find(
+      (artifact) => artifact.title === 'A',
+    );
+    await store.remove(restorable!.id);
+    expect(events.at(-1)?.artifactCount).toBe(1);
+  });
+
+  it('pins the stamped-count lag on the live-only downgrade path and its convergence', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    let calls = 0;
+    const store = new SessionArtifactStore({
+      sessionId: 's-downgrade-count',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          calls++;
+          if (calls === 2) throw new Error('disk full');
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const input = (n: string) => ({
+      title: n,
+      kind: 'link' as const,
+      storage: 'external_url' as const,
+      url: `https://example.com/downgrade-${n}`,
+      retention: 'restorable' as const,
+    });
+    // A lands in the journal (count 1).
+    await store.upsertMany([input('a')], { strict: true });
+    expect(events.at(-1)?.artifactCount).toBe(1);
+    // A's update fails to persist: the live-only downgrade keeps A
+    // ephemeral in the live map while the journal still holds it
+    // restorable. (Metadata, not title: link merges keep the existing
+    // title, so a metadata change is what makes the update durable.)
+    const downgraded = await store.upsertMany([
+      { ...input('a'), metadata: { revision: '2' } },
+    ]);
+    expect(downgraded.warnings).toEqual([
+      'artifact persistence unavailable; durable artifacts kept ephemeral',
+    ]);
+    // B's durable event stamps the LIVE restorable set: the documented
+    // best-effort lag — the journal replays A+B while the stamp says 1 —
+    // until a snapshot converges the journal or the load-time seed heals
+    // the sidecar from the rebuilt snapshot.
+    await store.upsertMany([input('b')], { strict: true });
+    expect(events.at(-1)?.artifactCount).toBe(1);
+    const rebuilt = rebuildSessionArtifactSnapshot(
+      events.map((systemPayload) => ({
+        type: 'system',
+        subtype: 'session_artifact_event',
+        systemPayload,
+      })),
+    )!;
+    expect(rebuilt.artifacts).toHaveLength(2);
+    // Re-journaling A converges the stamp with the journal again.
+    await store.upsertMany([{ ...input('a'), metadata: { revision: '3' } }], {
+      strict: true,
+    });
+    expect(events.at(-1)?.artifactCount).toBe(2);
+  });
 
   it('lists, removes, and idempotently ignores missing artifact deletes', async () => {
     const store = new SessionArtifactStore({
@@ -5033,25 +5337,38 @@ describe('SessionArtifactStore', () => {
     const durableId = created.changes[0]!.artifactId;
 
     failWrites = true;
-    await expect(
-      store.upsertMany(
-        [
-          {
-            title: 'Ephemeral published replacement',
-            storage: 'published',
-            managedId: 'published-replacement',
-            url,
-            retention: 'ephemeral',
-          },
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await expect(
+        store.upsertMany(
+          [
+            {
+              title: 'Ephemeral published replacement',
+              storage: 'published',
+              managedId: 'published-replacement',
+              url,
+              retention: 'ephemeral',
+            },
+          ],
+          { trustedPublisher: true },
+        ),
+      ).resolves.toMatchObject({
+        changes: [],
+        warnings: [
+          'artifact durable removal not persisted; live changes rolled back',
         ],
-        { trustedPublisher: true },
-      ),
-    ).resolves.toMatchObject({
-      changes: [],
-      warnings: [
-        'artifact durable removal not persisted; live changes rolled back',
-      ],
-    });
+      });
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('action=upsert_rollback'),
+      );
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('error="disk full"'),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
 
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [
@@ -5945,17 +6262,30 @@ describe('SessionArtifactStore', () => {
     );
 
     failNext = true;
-    const downgraded = await store.upsertMany([
-      {
-        title: 'Durable',
-        url: 'https://example.com/downgraded',
-        metadata: { phase: 'updated' },
-      },
-    ]);
-    expect(downgraded.changes[0]?.artifact).toMatchObject({
-      retention: 'ephemeral',
-      persistenceWarning: 'persistence_unavailable',
-    });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      const downgraded = await store.upsertMany([
+        {
+          title: 'Durable',
+          url: 'https://example.com/downgraded',
+          metadata: { phase: 'updated' },
+        },
+      ]);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('action=persist_failed'),
+      );
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('reason="disk full"'),
+      );
+      expect(downgraded.changes[0]?.artifact).toMatchObject({
+        retention: 'ephemeral',
+        persistenceWarning: 'persistence_unavailable',
+      });
+    } finally {
+      stderr.mockRestore();
+    }
 
     await store.remove(created.changes[0]!.artifactId);
 
@@ -5992,13 +6322,26 @@ describe('SessionArtifactStore', () => {
     );
 
     failNext = true;
-    await store.upsertMany([
-      {
-        title: 'Durable',
-        url: 'https://example.com/downgraded-eviction',
-        metadata: { phase: 'updated' },
-      },
-    ]);
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await store.upsertMany([
+        {
+          title: 'Durable',
+          url: 'https://example.com/downgraded-eviction',
+          metadata: { phase: 'updated' },
+        },
+      ]);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('action=persist_failed'),
+      );
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('reason="disk full"'),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
 
     await store.upsertMany(
       [{ title: 'Overflow', url: 'https://example.com/overflow' }],
@@ -9169,5 +9512,410 @@ describe('SessionArtifactStore', () => {
         },
       ],
     });
+  });
+});
+
+describe('SessionArtifactStore workspace auto-record lifecycle', () => {
+  let workspace: string;
+
+  beforeEach(async () => {
+    workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-artifacts-'));
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+    await fs.rm(workspace, { recursive: true, force: true });
+  });
+
+  const sha256 = (content: string) =>
+    createHash('sha256').update(content).digest('hex');
+
+  function createStore(sessionId: string) {
+    return new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+  }
+
+  async function writeWorkspaceFile(workspacePath: string, content: string) {
+    const filePath = path.join(workspace, workspacePath);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, content);
+  }
+
+  function fileWrite(
+    workspacePath: string,
+    toolName: string,
+    toolCallId: string,
+    extra: Partial<SessionArtifactInput> = {},
+  ): SessionArtifactInput {
+    return {
+      title: path.basename(workspacePath),
+      storage: 'workspace',
+      workspacePath,
+      source: 'tool',
+      toolName,
+      toolCallId,
+      ...extra,
+    };
+  }
+
+  it('drops an update-only write for an unknown file without inspecting it', async () => {
+    const store = createStore('auto-record-update-only-unknown');
+    await writeWorkspaceFile('src/index.ts', 'export {};\n');
+    const lstat = vi.spyOn(fs, 'lstat');
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    const result = await store.upsertMany([
+      fileWrite('src/index.ts', 'edit', 'call-1', { updateOnly: true }),
+    ]);
+
+    expect(
+      lstat.mock.calls.some(([entry]) => String(entry).endsWith('index.ts')),
+    ).toBe(false);
+    expect(result.changes).toEqual([]);
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('reason="unmatched workspace update"'),
+    );
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+  });
+
+  it('refreshes a recorded file through an update-only write', async () => {
+    const store = createStore('auto-record-update-only-known');
+    await writeWorkspaceFile('src/main.py', 'print(1)\n');
+    const recorded = await store.upsertMany([
+      fileWrite('src/main.py', 'record_artifact', 'record-1', {
+        title: 'Main script',
+      }),
+    ]);
+    const artifactId = recorded.changes[0]!.artifactId;
+
+    await writeWorkspaceFile('src/main.py', 'print(2)\n');
+    const result = await store.upsertMany([
+      fileWrite('src/main.py', 'edit', 'edit-1', { updateOnly: true }),
+    ]);
+
+    expect(result.changes).toEqual([
+      expect.objectContaining({
+        action: 'updated',
+        artifactId,
+        artifact: expect.objectContaining({
+          title: 'Main script',
+          status: 'available',
+          toolName: 'record_artifact',
+          toolCallId: 'edit-1',
+          metadata: expect.objectContaining({
+            'qwen.workspace.sha256': sha256('print(2)\n'),
+          }),
+        }),
+      }),
+    ]);
+  });
+
+  it('keeps one artifact when write_file creates a file and edit changes it', async () => {
+    const store = createStore('auto-record-write-then-edit');
+    await writeWorkspaceFile('report.html', '<p>v1</p>');
+    const created = await store.upsertMany([
+      fileWrite('report.html', 'write_file', 'write-1'),
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+
+    await writeWorkspaceFile('report.html', '<p>v2</p>');
+    const edited = await store.upsertMany([
+      fileWrite('report.html', 'edit', 'edit-1', { title: 'ignored.html' }),
+    ]);
+
+    expect(edited.changes).toEqual([
+      expect.objectContaining({
+        action: 'updated',
+        artifactId,
+        artifact: expect.objectContaining({
+          title: 'report.html',
+          toolName: 'write_file',
+          toolCallId: 'edit-1',
+          status: 'available',
+          metadata: expect.objectContaining({
+            'qwen.workspace.sha256': sha256('<p>v2</p>'),
+          }),
+        }),
+      }),
+    ]);
+    await expect(
+      store.upsertMany([fileWrite('report.html', 'edit', 'edit-1')]),
+    ).resolves.toMatchObject({ changes: [] });
+  });
+
+  it('attributes a batched create and edit of one file to the edit', async () => {
+    const store = createStore('auto-record-batched-write-then-edit');
+    await writeWorkspaceFile('report.html', '<p>v2</p>');
+
+    const result = await store.upsertMany([
+      fileWrite('report.html', 'write_file', 'write-1'),
+      fileWrite('report.html', 'edit', 'edit-1', { title: 'ignored.html' }),
+    ]);
+
+    expect(result.changes).toEqual([
+      expect.objectContaining({
+        action: 'created',
+        artifact: expect.objectContaining({
+          title: 'report.html',
+          toolName: 'write_file',
+          toolCallId: 'edit-1',
+        }),
+      }),
+    ]);
+  });
+
+  it('serializes concurrent writes to one file into a single artifact', async () => {
+    const store = createStore('auto-record-concurrent');
+    await writeWorkspaceFile('orders.csv', 'id\n1\n');
+
+    const [first, second] = await Promise.all([
+      store.upsertMany([fileWrite('orders.csv', 'write_file', 'write-1')]),
+      store.upsertMany([fileWrite('orders.csv', 'edit', 'edit-1')]),
+    ]);
+
+    expect(first.changes.map((change) => change.action)).toEqual(['created']);
+    expect(second.changes.map((change) => change.action)).toEqual(['updated']);
+    const listed = await store.list();
+    expect(listed.artifacts).toHaveLength(1);
+    expect(listed.artifacts[0]).toMatchObject({
+      toolCallId: 'edit-1',
+      status: 'available',
+    });
+  });
+
+  it.each([
+    ['hook', { source: 'hook', hookEventName: 'PostToolUse' }],
+    ['anonymous client', { source: 'client' }],
+  ] as const)(
+    're-baselines a %s artifact when an agent writes the file',
+    async (_label, owner) => {
+      const store = createStore(`auto-record-cross-source-${owner.source}`);
+      await writeWorkspaceFile('data.json', '{"v":1}');
+      const recorded = await store.upsertMany([
+        {
+          title: 'Dataset',
+          workspacePath: 'data.json',
+          toolName: 'write_file',
+          metadata: { owner: 'original' },
+          ...owner,
+        },
+      ]);
+      const artifactId = recorded.changes[0]!.artifactId;
+
+      await writeWorkspaceFile('data.json', '{"v":2}');
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(Date.now() + 6_000));
+      const result = await store.upsertMany([
+        fileWrite('data.json', 'edit', 'edit-1', {
+          metadata: { owner: 'agent', note: 'from the edit' },
+        }),
+      ]);
+
+      expect(result.changes).toEqual([
+        expect.objectContaining({ action: 'updated', artifactId }),
+      ]);
+      vi.setSystemTime(new Date(Date.now() + 6_000));
+      const [artifact] = (await store.list()).artifacts;
+      expect(artifact).toMatchObject({
+        title: 'Dataset',
+        source: owner.source,
+        status: 'available',
+        toolCallId: 'edit-1',
+        metadata: {
+          owner: 'original',
+          'qwen.workspace.sha256': sha256('{"v":2}'),
+        },
+      });
+      expect(artifact?.metadata).not.toHaveProperty('note');
+    },
+  );
+
+  it('syncs only the content of a client-owned artifact the agent edits', async () => {
+    const store = createStore('auto-record-client-owned');
+    await writeWorkspaceFile('upload/data.csv', 'a\n1\n');
+    const recorded = await store.upsertMany([
+      {
+        title: 'Uploaded data',
+        workspacePath: 'upload/data.csv',
+        source: 'client',
+        clientId: 'client-a',
+        retention: 'ephemeral',
+      },
+    ]);
+    const artifactId = recorded.changes[0]!.artifactId;
+
+    await writeWorkspaceFile('upload/data.csv', 'a,b\n1,2\n');
+    const edited = await store.upsertMany([
+      fileWrite('upload/data.csv', 'edit', 'edit-1'),
+    ]);
+
+    expect(edited.warnings).toBeUndefined();
+    expect(edited.changes).toEqual([
+      expect.objectContaining({
+        action: 'updated',
+        artifactId,
+        artifact: expect.objectContaining({
+          title: 'Uploaded data',
+          source: 'client',
+          clientRetained: true,
+          retention: 'ephemeral',
+          status: 'available',
+          toolCallId: 'edit-1',
+          sizeBytes: 8,
+          metadata: expect.objectContaining({
+            'qwen.workspace.sha256': sha256('a,b\n1,2\n'),
+          }),
+        }),
+      }),
+    ]);
+
+    const recordedByTool = await store.upsertMany([
+      fileWrite('upload/data.csv', 'record_artifact', 'record-1', {
+        title: 'Hijacked',
+      }),
+    ]);
+    expect(recordedByTool.changes).toEqual([]);
+    expect(recordedByTool.warnings).toEqual([
+      `artifact ${artifactId} is owned by a different client`,
+    ]);
+
+    await writeWorkspaceFile('upload/data.csv', 'a,b,c\n1,2,3\n');
+    const hooked = await store.upsertMany([
+      fileWrite('upload/data.csv', 'edit', 'hook-1', {
+        source: 'hook',
+        hookEventName: 'PostToolUse',
+      }),
+    ]);
+    expect(hooked.changes).toEqual([]);
+    expect(hooked.warnings).toEqual([
+      `artifact ${artifactId} is owned by a different client`,
+    ]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          title: 'Uploaded data',
+          metadata: expect.objectContaining({
+            'qwen.workspace.sha256': sha256('a,b\n1,2\n'),
+          }),
+        }),
+      ],
+    });
+  });
+
+  it('does not resurrect a deleted auto-recorded artifact on later writes', async () => {
+    const store = createStore('auto-record-no-resurrection');
+    await writeWorkspaceFile('notes.md', '# v1\n');
+    const created = await store.upsertMany([
+      fileWrite('notes.md', 'write_file', 'write-1'),
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+    await expect(store.remove(artifactId)).resolves.toMatchObject({
+      changes: [{ action: 'removed', reason: 'explicit' }],
+    });
+
+    await writeWorkspaceFile('notes.md', '# v2\n');
+    for (const toolName of ['write_file', 'edit', 'notebook_edit']) {
+      await expect(
+        store.upsertMany([fileWrite('notes.md', toolName, `${toolName}-2`)]),
+      ).resolves.toMatchObject({ changes: [] });
+    }
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+
+    const rerecorded = await store.upsertMany([
+      fileWrite('notes.md', 'record_artifact', 'record-1'),
+    ]);
+    expect(rerecorded.changes).toEqual([
+      expect.objectContaining({ action: 'created', artifactId }),
+    ]);
+  });
+
+  it.each(['edit', 'notebook_edit'])(
+    'forgets an artifact created by %s after its file is deleted',
+    async (toolName) => {
+      const store = createStore(`auto-record-vanish-${toolName}`);
+      await writeWorkspaceFile('analysis.ipynb', '{"cells":[]}');
+      const created = await store.upsertMany([
+        fileWrite('analysis.ipynb', toolName, 'call-1'),
+      ]);
+      expect(created.changes[0]?.artifactId).toEqual(expect.any(String));
+
+      await fs.rm(path.join(workspace, 'analysis.ipynb'));
+
+      await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+    },
+  );
+
+  it('keeps restored artifacts and updates the one the agent edits again', async () => {
+    const sessionId = 'auto-record-v2-compat';
+    await writeWorkspaceFile('edited.csv', 'old\n');
+    await writeWorkspaceFile('external.csv', 'external change\n');
+    const persisted = (workspacePath: string, content: string) => ({
+      id: stableSessionArtifactId(sessionId, `workspace:${workspacePath}`),
+      kind: 'file' as const,
+      storage: 'workspace' as const,
+      source: 'tool' as const,
+      status: 'available' as const,
+      title: workspacePath,
+      workspacePath,
+      sizeBytes: Buffer.byteLength(content),
+      metadata: {
+        'qwen.workspace.sha256': sha256(content),
+        'qwen.workspace.mtimeMs': 0,
+        'qwen.workspace.sizeBytes': Buffer.byteLength(content),
+      },
+      retention: 'restorable' as const,
+      clientRetained: false,
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+      persistedAt: '2026-07-04T00:00:00.000Z',
+      toolCallId: 'write-0',
+      toolName: 'write_file',
+    });
+    const artifacts = [
+      persisted('edited.csv', 'old\n'),
+      persisted('external.csv', 'original\n'),
+    ];
+    const store = createStore(sessionId);
+    await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts,
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+    expect((await store.list()).artifacts.map((a) => a.id)).toEqual(
+      artifacts.map((a) => a.id),
+    );
+
+    await writeWorkspaceFile('edited.csv', 'new\n');
+    const edited = await store.upsertMany([
+      fileWrite('edited.csv', 'edit', 'edit-1'),
+    ]);
+
+    expect(edited.changes).toEqual([
+      expect.objectContaining({
+        action: 'updated',
+        artifactId: artifacts[0]!.id,
+        artifact: expect.objectContaining({
+          status: 'available',
+          toolCallId: 'edit-1',
+        }),
+      }),
+    ]);
+    expect((await store.list()).artifacts).toEqual([
+      expect.objectContaining({ id: artifacts[0]!.id, status: 'available' }),
+      expect.objectContaining({ id: artifacts[1]!.id, status: 'changed' }),
+    ]);
   });
 });

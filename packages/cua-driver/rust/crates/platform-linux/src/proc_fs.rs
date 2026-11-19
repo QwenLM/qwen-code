@@ -140,3 +140,12 @@ mod tests {
         assert!(!super::is_process_live(pid), "reaped pid was reported live");
     }
 }
+
+pub(crate) fn process_start_time_from_stat(stat: &str) -> Option<u64> {
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}

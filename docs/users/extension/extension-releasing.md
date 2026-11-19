@@ -123,7 +123,7 @@ jobs:
 
 ## Releasing through npm registry
 
-You can publish Qwen Code extensions as scoped npm packages (e.g. `@your-org/my-extension`). This is a good fit when:
+You can publish Qwen Code extensions as scoped or unscoped npm packages (e.g. `@your-org/my-extension` or `my-extension`). This is a good fit when:
 
 - Your team already uses npm for package distribution
 - You need private registry support with existing auth infrastructure
@@ -161,7 +161,7 @@ npm publish --registry https://your-registry.com
 
 ### Installation
 
-Users install your extension using the scoped package name:
+Users install your extension using the package name:
 
 ```bash
 # Install latest version

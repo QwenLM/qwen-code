@@ -50,7 +50,6 @@ pub enum DisplayServer {
     Win32,
     Quartz,
     X11,
-    Wayland,
 }
 
 impl DisplayServer {
@@ -65,14 +64,7 @@ impl DisplayServer {
         }
         #[cfg(target_os = "linux")]
         {
-            match std::env::var("XDG_SESSION_TYPE")
-                .unwrap_or_else(|_| "x11".to_owned())
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                "wayland" => Self::Wayland,
-                _ => Self::X11,
-            }
+            Self::X11
         }
         #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         {
@@ -133,9 +125,7 @@ pub enum DriverRoute {
     LinuxAtSpiValue,
     LinuxXSendEvent,
     LinuxXTest,
-    LinuxLibei,
-    LinuxWaylandVirtualPointer,
-    LinuxCuaCompositorInject,
+
     Cdp,
     Composite,
 }
@@ -146,24 +136,6 @@ pub fn shared_web_route(
     action: &str,
     targeting: Targeting,
     delivery: Delivery,
-) -> Result<DriverRoute, String> {
-    shared_web_route_for_environment(
-        platform,
-        display_server,
-        action,
-        targeting,
-        delivery,
-        nested_inject_from_env(),
-    )
-}
-
-fn shared_web_route_for_environment(
-    platform: Platform,
-    display_server: DisplayServer,
-    action: &str,
-    targeting: Targeting,
-    delivery: Delivery,
-    nested_inject: bool,
 ) -> Result<DriverRoute, String> {
     use DriverRoute as Route;
 
@@ -226,30 +198,19 @@ fn shared_web_route_for_environment(
             Ok(Route::Composite)
         }
 
-        (Platform::Linux, DisplayServer::Wayland, Targeting::Px, _) if nested_inject =>
-        {
-            Ok(Route::LinuxCuaCompositorInject)
-        }
-        (Platform::Linux, DisplayServer::Wayland, Targeting::Px, _) => {
-            Ok(Route::LinuxWaylandVirtualPointer)
-        }
         (Platform::Linux, DisplayServer::X11, Targeting::Px, _) => {
             pointer_or_key_route(Route::LinuxXSendEvent, Route::LinuxXTest)
         }
-        (Platform::Linux, DisplayServer::Wayland, Targeting::Ax, "type_text")
-            if nested_inject =>
-        {
-            Ok(Route::LinuxCuaCompositorInject)
-        }
+
         (
             Platform::Linux,
-            DisplayServer::X11 | DisplayServer::Wayland,
+            DisplayServer::X11,
             Targeting::Ax,
             "left_click" | "child_window" | "scroll",
         ) => Ok(Route::LinuxAtSpiAction),
         (
             Platform::Linux,
-            DisplayServer::X11 | DisplayServer::Wayland,
+            DisplayServer::X11,
             Targeting::Ax,
             "type_text",
         ) => Ok(Route::LinuxAtSpiValue),
@@ -259,21 +220,10 @@ fn shared_web_route_for_environment(
             Targeting::Ax,
             "right_click" | "double_click" | "press_key" | "hotkey",
         ) => pointer_or_key_route(Route::LinuxXSendEvent, Route::LinuxXTest),
+
         (
             Platform::Linux,
-            DisplayServer::Wayland,
-            Targeting::Ax,
-            "right_click" | "double_click" | "press_key" | "hotkey",
-        ) if nested_inject => Ok(Route::LinuxCuaCompositorInject),
-        (
-            Platform::Linux,
-            DisplayServer::Wayland,
-            Targeting::Ax,
-            "right_click" | "double_click" | "press_key" | "hotkey",
-        ) => Ok(Route::LinuxWaylandVirtualPointer),
-        (
-            Platform::Linux,
-            DisplayServer::X11 | DisplayServer::Wayland,
+            DisplayServer::X11,
             Targeting::Ax,
             "editor_save",
         ) => Ok(Route::Composite),
@@ -416,10 +366,6 @@ pub fn environment_schema_supported(schema: &str) -> bool {
     matches!(schema, ENVIRONMENT_SCHEMA | ENVIRONMENT_SCHEMA_V2)
 }
 
-fn nested_inject_from_env() -> bool {
-    std::env::var_os("CUA_INJECT_SOCKET").is_some()
-}
-
 fn compositor_from_env() -> Option<String> {
     if let Ok(value) = std::env::var("CUA_E2E_COMPOSITOR") {
         if !value.trim().is_empty() {
@@ -430,23 +376,6 @@ fn compositor_from_env() -> Option<String> {
         (Platform::Windows, DisplayServer::Win32) => Some("windows-desktop".to_owned()),
         (Platform::Macos, DisplayServer::Quartz) => Some("windowserver".to_owned()),
         (Platform::Linux, DisplayServer::X11) => Some("openbox-x11".to_owned()),
-        (Platform::Linux, DisplayServer::Wayland) if nested_inject_from_env() => {
-            Some("cua-compositor-nested".to_owned())
-        }
-        (Platform::Linux, DisplayServer::Wayland) => {
-            let desktop = std::env::var("XDG_CURRENT_DESKTOP")
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            if desktop.contains("sway") {
-                Some("sway".to_owned())
-            } else if desktop.contains("gnome") {
-                Some("gnome-mutter".to_owned())
-            } else if desktop.contains("kde") || desktop.contains("plasma") {
-                Some("kwin".to_owned())
-            } else {
-                Some("wayland-unknown".to_owned())
-            }
-        }
         _ => None,
     }
 }
@@ -473,10 +402,7 @@ fn input_backends_from_env() -> Vec<String> {
             "xsend-event".to_owned(),
             "xtest".to_owned(),
         ],
-        (Platform::Linux, DisplayServer::Wayland) if nested_inject_from_env() => {
-            vec!["atspi".to_owned(), "cua-compositor-inject".to_owned()]
-        }
-        (Platform::Linux, DisplayServer::Wayland) => vec!["atspi".to_owned()],
+
         _ => Vec::new(),
     }
 }
@@ -629,9 +555,7 @@ pub fn native_background_case(
         OracleKind::ZOrder,
         OracleKind::NoLeakedInput,
     ];
-    if DisplayServer::current() != DisplayServer::Wayland {
-        oracles.push(OracleKind::Cursor);
-    }
+    oracles.push(OracleKind::Cursor);
     CaseSpec::delivered(
         native_cell_id(toolkit, action, targeting, Delivery::Background),
         toolkit,
@@ -2617,7 +2541,6 @@ mod tests {
             (Platform::Windows, DisplayServer::Win32),
             (Platform::Macos, DisplayServer::Quartz),
             (Platform::Linux, DisplayServer::X11),
-            (Platform::Linux, DisplayServer::Wayland),
         ] {
             for (action, targeting, delivery) in cells.iter().copied() {
                 shared_web_route(platform, display_server, action, targeting, delivery)
@@ -2641,43 +2564,11 @@ mod tests {
     }
 
     #[test]
-    fn nested_wayland_pixel_route_is_distinct_from_stock_wayland() {
-        let stock = shared_web_route_for_environment(
-            Platform::Linux,
-            DisplayServer::Wayland,
-            "left_click",
-            Targeting::Px,
-            Delivery::Background,
-            false,
-        );
-        let nested = shared_web_route_for_environment(
-            Platform::Linux,
-            DisplayServer::Wayland,
-            "left_click",
-            Targeting::Px,
-            Delivery::Background,
-            true,
-        );
-        assert_eq!(stock, Ok(DriverRoute::LinuxWaylandVirtualPointer));
-        assert_eq!(nested, Ok(DriverRoute::LinuxCuaCompositorInject));
-
-        let nested_text = shared_web_route_for_environment(
-            Platform::Linux,
-            DisplayServer::Wayland,
-            "type_text",
-            Targeting::Ax,
-            Delivery::Background,
-            true,
-        );
-        assert_eq!(nested_text, Ok(DriverRoute::LinuxCuaCompositorInject));
-    }
-
-    #[test]
     fn environment_v2_artifacts_remain_readable() {
         let record: EnvironmentRecord = serde_json::from_value(serde_json::json!({
             "schema": ENVIRONMENT_SCHEMA_V2,
             "platform": "linux",
-            "display_server": "wayland",
+            "display_server": "x11",
             "source_sha": null,
             "status": "ready",
             "duration_ms": 1,

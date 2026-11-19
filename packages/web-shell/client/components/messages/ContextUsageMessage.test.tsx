@@ -84,6 +84,42 @@ function render(
   return container;
 }
 
+describe('instruction and memory categories', () => {
+  it.each(['en', 'zh-CN'] as const)(
+    'renders separate categories and survives serialization (%s)',
+    (language) => {
+      const status = makeStatus(60, false);
+      status.usage.breakdown.instructionFiles = 15;
+      status.usage.instructionFiles = [{ path: 'QWEN.md', tokens: 15 }];
+      status.usage.memoryFiles = [{ path: 'auto memory', tokens: 5 }];
+      status.usage.showDetails = true;
+      expect(
+        parseContextUsageMessage(serializeContextUsageMessage(status)),
+      ).toEqual(status);
+      const container = render(status, false, undefined, language);
+      expect(container.textContent).toContain(
+        language === 'en' ? 'Instruction files' : '指令文件',
+      );
+      expect(container.textContent).toContain(
+        language === 'en' ? 'Auto memory' : '自动记忆',
+      );
+      expect(container.textContent).toContain('QWEN.md');
+      expect(container.textContent).not.toContain('Memory files');
+    },
+  );
+
+  it('preserves the legacy category without guessing file ownership', () => {
+    const status = makeStatus(60, false);
+    status.usage.memoryFiles = [{ path: 'QWEN.md', tokens: 5 }];
+    status.usage.showDetails = true;
+    const container = render(status, false);
+    expect(container.textContent).toContain('Memory files');
+    expect(container.textContent).toContain('QWEN.md');
+    expect(container.textContent).not.toContain('Auto memory');
+    expect(container.textContent).not.toContain('Instruction files');
+  });
+});
+
 describe('ContextUsageMessage', () => {
   it.each(['en', 'zh-CN'] as const)(
     'renders a large detail snapshot through the real transcript pipeline (%s)',
@@ -216,9 +252,8 @@ describe('ContextUsageMessage', () => {
     },
   );
 
-  it('shows the cached prefix, startup context and unattributed rows only when present (#12235)', () => {
+  it('shows cached prefix and startup context while ignoring legacy residuals', () => {
     const status = makeStatus(60, false);
-    // Rows still sum to the total: 20 + 10 + 5 + 5 + 12 + 8 = 60.
     Object.assign(status.usage.breakdown, {
       messages: 0,
       startupContext: 12,
@@ -228,13 +263,30 @@ describe('ContextUsageMessage', () => {
     const text = render(status).textContent;
     expect(text).toContain('Cached prefix 30 (30.0%)');
     expect(text).toContain('Startup context 12 (12.0%)');
-    expect(text).toContain('Unattributed 8 (8.0%)');
+    expect(text).not.toContain('Unattributed');
 
     const plain = render(makeStatus(60, false)).textContent;
     expect(plain).not.toContain('Cached prefix');
     expect(plain).not.toContain('Startup context');
     expect(plain).not.toContain('Unattributed');
   });
+
+  it.each(['en', 'zh-CN'] as const)(
+    'preserves category estimates above the total and hides legacy residuals (%s)',
+    (language) => {
+      const status = makeStatus(7, false);
+      Object.assign(status.usage.breakdown, { messages: 193, unattributed: 8 });
+      const container = render(status, false, undefined, language);
+      const text = container.textContent;
+      expect(text).toContain(language === 'en' ? 'Messages 193' : '消息 193');
+      expect(text).not.toContain('Unattributed');
+      expect(text).not.toContain('未归因');
+      expect(text).not.toContain('NaN');
+      expect(
+        parseContextUsageMessage(serializeContextUsageMessage(status)),
+      ).toEqual(status);
+    },
+  );
 
   it('shows an estimated history as messages when the provider total is gone (#12235)', () => {
     const status = makeStatus(0, true);
@@ -500,4 +552,67 @@ describe('ContextUsageMessage', () => {
       }
     },
   );
+
+  it('opens context file rows that carry an absolute path, and only those', () => {
+    const status = makeStatus(60, false);
+    status.usage.showDetails = true;
+    status.usage.breakdown.instructionFiles = 3;
+    status.usage.instructionFiles = [
+      { path: 'AGENTS.md', tokens: 3, absolutePath: '/workspace/AGENTS.md' },
+    ];
+    // Older producers combine real files into memoryFiles; the synthetic
+    // auto-memory aggregate has no absolute path.
+    status.usage.memoryFiles = [
+      { path: 'QWEN.md', tokens: 3, absolutePath: '/workspace/QWEN.md' },
+      { path: 'auto memory', tokens: 2 },
+    ];
+    const onOpenMemoryFile = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ContextUsageMessage
+            status={status}
+            compact
+            onOpenMemoryFile={onOpenMemoryFile}
+          />
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const openable = container.querySelector<HTMLButtonElement>(
+      'button[title="AGENTS.md"]',
+    );
+    expect(openable).not.toBeNull();
+    // Legacy memoryFiles real files are openable too.
+    expect(container.querySelector('button[title="QWEN.md"]')).not.toBeNull();
+    // The synthetic aggregate has no absolute path and stays plain text.
+    expect(container.querySelector('button[title="auto memory"]')).toBeNull();
+    expect(container.querySelector('[title="auto memory"]')?.tagName).toBe(
+      'SPAN',
+    );
+
+    act(() => openable!.click());
+    expect(onOpenMemoryFile).toHaveBeenCalledTimes(1);
+    expect(onOpenMemoryFile).toHaveBeenCalledWith(
+      status.usage.instructionFiles![0],
+    );
+  });
+
+  it('keeps context file rows non-interactive when no opener is provided', () => {
+    const status = makeStatus(60, false);
+    status.usage.showDetails = true;
+    status.usage.breakdown.instructionFiles = 3;
+    status.usage.instructionFiles = [
+      { path: 'AGENTS.md', tokens: 3, absolutePath: '/workspace/AGENTS.md' },
+    ];
+    const container = render(status, true);
+    expect(container.querySelector('button[title="AGENTS.md"]')).toBeNull();
+    expect(container.querySelector('[title="AGENTS.md"]')?.tagName).toBe(
+      'SPAN',
+    );
+  });
 });

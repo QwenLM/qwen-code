@@ -49,10 +49,12 @@ function renderSessionTab(metrics: SessionMetrics) {
       metrics,
       lastPromptTokenCount: 0,
       promptCount: 1,
+      userPromptCount: 1,
     },
     startNewSession: vi.fn(),
     getPromptCount: () => 1,
     startNewPrompt: vi.fn(),
+    recordUserPrompt: vi.fn(),
     seedPromptCount: vi.fn(),
   });
 
@@ -67,6 +69,9 @@ describe('<SessionTab /> generation metrics', () => {
       totalTtftMs: 800,
       totalGenerationDurationMs: 7000,
       totalThroughputOutputTokens: 300,
+      totalTimedGenerationDurationMs: 7000,
+      totalOutputSpeedTokens: 300,
+      totalOutputSpeedDurationMs: 7800,
       last: {
         model: 'qwen3-coder',
         ttftMs: 342,
@@ -81,22 +86,27 @@ describe('<SessionTab /> generation metrics', () => {
     expect(output).toContain('qwen3-coder');
     expect(output).toContain('342ms');
     expect(output).toContain('4.2s');
-    expect(output).toContain('44.4 tok/s');
+    expect(output).toMatch(/Output \(incl\. Reasoning\):\s+187/);
+    // 187 tokens over 342 ms + 4210 ms; 300 tokens over 800 ms + 7000 ms.
+    expect(output).toContain('41.1 tok/s');
     expect(output).toContain('400ms');
-    expect(output).toContain('42.9 tok/s');
+    expect(output).toContain('38.5 tok/s');
   });
 
   it('hides the section until a timed response exists', () => {
     expect(renderSessionTab(baseMetrics())).not.toContain('Generation Metrics');
   });
 
-  it('renders unavailable TPS for a zero generation duration', () => {
+  it('measures a single-chunk response from the request start', () => {
     const metrics = baseMetrics();
     metrics.generation = {
       timedRequests: 1,
       totalTtftMs: 100,
       totalGenerationDurationMs: 0,
       totalThroughputOutputTokens: 0,
+      totalTimedGenerationDurationMs: 0,
+      totalOutputSpeedTokens: 3,
+      totalOutputSpeedDurationMs: 100,
       last: {
         model: 'qwen3-coder',
         ttftMs: 100,
@@ -105,6 +115,29 @@ describe('<SessionTab /> generation metrics', () => {
       },
     };
 
-    expect(renderSessionTab(metrics)).toContain('—');
+    expect(renderSessionTab(metrics)).toContain('30.0 tok/s');
+  });
+
+  it('renders unavailable TPS without reported output tokens', () => {
+    const metrics = baseMetrics();
+    metrics.generation = {
+      timedRequests: 1,
+      totalTtftMs: 100,
+      totalGenerationDurationMs: 400,
+      totalThroughputOutputTokens: 0,
+      totalTimedGenerationDurationMs: 400,
+      totalOutputSpeedTokens: 0,
+      totalOutputSpeedDurationMs: 0,
+      last: {
+        model: 'qwen3-coder',
+        ttftMs: 100,
+        generationDurationMs: 400,
+        outputTokens: 0,
+      },
+    };
+
+    const output = renderSessionTab(metrics);
+    expect(output).not.toContain('tok/s');
+    expect(output).toContain('—');
   });
 });

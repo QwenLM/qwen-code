@@ -40,12 +40,15 @@ import {
 export const HOSTED_BROADCAST_POSITIONS = MANAGED_TEAM_LIMITS.maxMembers;
 
 /**
- * The Turn half of a call key. A wake turn acknowledging a child result
- * collapses to a digest, so its keys never grow across hops; every other
- * Turn keys its calls by its prompt id verbatim.
+ * The Turn half of a call key. A wake turn acknowledging a child result —
+ * an acceptance, a blocked outcome or a crash continuation — collapses to a digest, so its keys
+ * never grow across hops; every other Turn keys its calls by its prompt id
+ * verbatim.
  */
 export function hostedPromptKey(promptId: string): string {
-  return promptId.endsWith(':accept:notify')
+  return promptId.endsWith(':accept:notify') ||
+    promptId.endsWith(':blocked:notify') ||
+    promptId.startsWith('wake-recovery:')
     ? createHash('sha256').update(promptId).digest('hex').slice(0, 16)
     : promptId;
 }
@@ -729,9 +732,9 @@ export function outboundChildMessages(
  * rejected. Both name their sending call's key, so the lead's records
  * decide it: a key belongs to the Turn when it starts with `turnPrefix`,
  * `${promptKey}:`. A prefix match is exact because no other Turn's prompt
- * key extends this one past a colon: a wake turn's `:accept:notify`
- * prompt id collapses to a digest (`hostedPromptKey`), and every other
- * prompt id is assigned whole.
+ * key extends this one past a colon: a wake turn's `:accept:notify` or
+ * `:blocked:notify` prompt id collapses to a digest (`hostedPromptKey`),
+ * and every other prompt id is assigned whole.
  */
 export function givenWorkThisTurn(
   chains: HostedChildChains,

@@ -1,4 +1,4 @@
-# QQ Bot inbound media (images and videos)
+# QQ Bot inbound media (images, videos, files, and voice)
 
 [English](2026-09-27-qqbot-inbound-media.md) | [简体中文](2026-09-27-qqbot-inbound-media.zh-CN.md)
 
@@ -9,10 +9,10 @@
 ## Problem
 
 The QQ Bot channel is the only channel that cannot receive media. A user who
-sends a screenshot or a video to the bot gets no response at all: an image-only
-or video-only message is dropped before an envelope is built, and a media
-message that carries a caption still loses its attachment, so the agent answers
-as if the media had never been sent.
+sends a screenshot, a video, a document, or a voice message to the bot gets no
+response at all: a media-only message is dropped before an envelope is built,
+and a media message that carries a caption still loses its attachment, so the
+agent answers as if the media had never been sent.
 
 The repository documents this as a known gap
 (`docs/users/features/channels/overview.md:452`): "QQ Bot does not process
@@ -56,8 +56,14 @@ other media are written under `tmpdir()/channel-files/<uuid>` with mode `0600`.
    prompt text when present.
 2. A video sent to the bot is downloaded to a temporary path and the agent is
    told that path, so it can open the file with its own tools.
-3. A media-only message (no text) starts a turn instead of being dropped.
-4. Text-only behaviour is unchanged, including slash commands and group
+3. A file sent to the bot is downloaded to a temporary path and the agent is
+   told that path, with the sender's own extension preserved so the read tool
+   classifies the document instead of treating it as opaque binary.
+4. A voice message sent to the bot is downloaded to a temporary path and the
+   agent is told that path, preferring the platform's SILK-to-WAV conversion
+   over the original SILK audio when the platform offers one.
+5. A media-only message (no text) starts a turn instead of being dropped.
+6. Text-only behaviour is unchanged, including slash commands and group
    mention handling.
 
 ## Non-goals
@@ -65,34 +71,37 @@ other media are written under `tmpdir()/channel-files/<uuid>` with mode `0600`.
 - Outbound media. Sending an image or video back requires a separate upload
   call to obtain `file_info` and a `msg_type: 7` send, and QQ only allows it as
   a passive reply to a recent message. That is a separate change.
-- Voice and generic file attachments (`content_type: voice | file`). They stay
-  ignored, as today.
 - Passing video content to the model. The base contract has no video content
   part; a video is only a file path.
+- Passing audio content to the model. A voice message is only a file path too;
+  the platform's ASR text (`asr_refer_text`) is not used.
 - Media in proactive or scheduled (cron) messages.
 
 ## Proposed solution
 
 1. **Types** (`packages/channels/qqbot/src/types.ts`). Add
-   `QQMessageAttachment { url; content_type?; filename?; size?; width?;
-height? }` and `attachments?: QQMessageAttachment[]` on `QQMessageEvent`.
-   `QQGroupMessageEvent` extends `QQMessageEvent`, so it inherits the field.
+   `QQMessageAttachment { url; content_type?; voice_wav_url?; filename?; size?;
+width?; height? }` and `attachments?: QQMessageAttachment[]` on
+   `QQMessageEvent`. `QQGroupMessageEvent` extends `QQMessageEvent`, so it
+   inherits the field. `voice_wav_url` is the SILK-converted WAV URL QQ sends
+   on a `content_type: voice` attachment.
 
 2. **New download helper** (`packages/channels/qqbot/src/media.ts`).
    - `classifyQQAttachment(contentType)` maps `image/jpeg`, `image/png`,
-     `image/gif` to `image` and `video/mp4` to `video`, and returns `undefined`
-     for everything else.
+     `image/gif` to `image`, `video/mp4` to `video`, `file` to `file`, and
+     `voice` to `voice`, and returns `undefined` for everything else.
    - `downloadQQAttachment(url, maxBytes)` fetches the attachment and returns
      `{ buffer, mimeType }`, enforcing a host allowlist, a 30-second timeout,
      and the byte cap on both the declared `Content-Length` and the streamed
      total (the pattern used by `packages/channels/feishu/src/media.ts:50-93`).
-   - Limits: images at most 8 MiB, videos at most 20 MiB, at most 5 attachments
-     handled per message. Anything over a limit is skipped with one `stderr`
-     line naming the reason. The image cap bounds the inline part added to the
-     request — base64 inflates the bytes by about a third, and the bridge caps
-     inline images at 8 MB — and the video cap matches WeCom's 20 MB
-     (`packages/channels/wecom/src/WeComAdapter.ts:81`), far below QQ's 200 MB
-     hard limit.
+   - Limits: images at most 8 MiB, videos, files, and voice messages at most
+     20 MiB, at most 5 attachments handled per message. Anything over a limit is
+     skipped with one `stderr` line naming the reason. The image cap bounds the
+     inline part added to the request — base64 inflates the bytes by about a
+     third, and the bridge caps inline images at 8 MB — and the video, file, and
+     voice caps match WeCom's 20 MB
+     (`packages/channels/wecom/src/WeComAdapter.ts:81`) and QQ's own 20 MB voice
+     soft limit, far below QQ's 200 MB hard limit.
 
 3. **Adapter** (`packages/channels/qqbot/src/QQChannel.ts`).
    - A shared private `attachInboundMedia` downloads the supported attachments.
@@ -102,9 +111,19 @@ fileName }`, so an image-capable model sees the picture in the same prompt,
      written to `tmpdir()/channel-files/<uuid>/<name>`, so the prompt also
      carries the base layer's `saved to:` line and a model that cannot take
      images still has a path to work with. A video is written to the same place
-     and delivered as `{ type: 'video', filePath, mimeType, fileName }`. The
-     channel layer has no capability gate, so it cannot pick between the two
-     and serves both.
+     and delivered as `{ type: 'video', filePath, mimeType, fileName }`. A file
+     is written to the same place and delivered once as `{ type: 'file',
+filePath, mimeType, fileName }` — no inline entry, because QQ sends it as
+     `content_type: file` with no MIME type and the base contract has no generic
+     file content part. A voice message is downloaded from `voice_wav_url` when
+     the platform sends one and from `url` otherwise, written to the same place,
+     and delivered once as `{ type: 'audio', filePath, mimeType, fileName }` —
+     again no inline entry, because the base contract has no audio content part.
+     Its MIME type follows the URL that was fetched (`audio/wav` for the
+     conversion, `audio/silk` for the original) rather than the download
+     helper's result, which cannot classify a body declared as the literal
+     `voice`. The channel layer has no capability gate, so it cannot pick
+     between the two and serves both.
    - The two drop sites (`:2486`, `:2580`) are relaxed to "no text **and** no
      supported attachment". The decision needs only the presence of
      `event.attachments`, so no download is required to make it.
@@ -117,13 +136,20 @@ fileName }`, so an image-capable model sees the picture in the same prompt,
    - The on-disk name carries the extension implied by the sniffed MIME
      (`.jpg`, `.png`, `.gif`, `.mp4`), because the agent's read tool classifies
      media by extension; a sender-supplied name that is missing or misleading
-     would otherwise deliver the file as opaque binary.
+     would otherwise deliver the file as opaque binary. A `file` is the one
+     exception: QQ's `content_type` is `file`, not a MIME type, so there is
+     nothing to map from and the sender's own extension is preserved instead —
+     restricted to `[A-Za-z0-9]{1,10}`, falling back to `.bin` — because that
+     extension is the only classifier the read tool has. A voice message is the
+     other: it has no filename at all, so the stem falls back to the existing
+     `qq_<kind>` default and the extension follows the URL that was fetched
+     (`.wav` for the conversion, `.silk` for the original).
    - Nothing is reclaimed. A downloaded file stays under the OS temporary
      directory, which the system clears on its own schedule, and the adapter
      keeps no tracking state, no prompt hooks and no disconnect sweep for it.
-   - When the user's text is empty, the prompt text becomes `(image)` or
-     `(video)` and the envelope sets `syntheticText: true`, so the placeholder
-     is never recorded as quoted group history.
+   - When the user's text is empty, the prompt text becomes `(image)`,
+     `(video)`, `(file)`, or `(voice)` and the envelope sets `syntheticText:
+true`, so the placeholder is never recorded as quoted group history.
    - If media was present but nothing could be attached, the text becomes
      `(User sent media but download failed)` and the turn still runs, so the
      user is not silently ignored (the pattern at
@@ -131,8 +157,11 @@ fileName }`, so an image-capable model sees the picture in the same prompt,
 
 4. **Documentation.** Add a QQ row to the media matrix in
    `docs/users/features/channels/overview.md` and remove the "QQ Bot does not
-   process incoming media" note; add an "Images and videos" section to
-   `docs/users/features/channels/qqbot.md`.
+   process incoming media" note; expand the "Images, Videos, and Files" section
+   of `docs/users/features/channels/qqbot.md` to cover the file type, the 20 MB
+   cap, the on-disk path, voice (the `content_type: voice` type, the preference
+   for the converted WAV, its 20 MB cap, and its on-disk path), and the fact
+   that no text is needed to start a turn.
 
 ## Design decisions and rationale
 
@@ -170,6 +199,15 @@ fileName }`, so an image-capable model sees the picture in the same prompt,
 - **Videos become a file path, not base64.** QQ allows videos up to 200 MiB and
   the base contract has no video content part, so the path is the only thing the
   agent can act on.
+- **Voice becomes a file path too, preferring the platform's WAV.** QQ sends
+  `content_type: voice` with both `url` (SILK) and `voice_wav_url` (the same
+  audio converted to WAV); the conversion is preferred because it needs no
+  decoding to be read, and the original is the fallback. The attachment is
+  delivered once, by path, as `{ type: 'audio', ... }`, because the base
+  contract has no audio content part — the `voice_wav_url` field is read here
+  and nowhere else. The platform's ASR text (`asr_refer_text`) is deliberately
+  not used: surfacing a transcript instead of the audio is a separate product
+  decision.
 - **Downloaded media is not reclaimed.** An earlier revision deleted the
   directory when the turn ended and it broke the obvious follow-up: the agent
   asks whether it should read the picture, the user answers in the next turn,
@@ -178,8 +216,18 @@ fileName }`, so an image-capable model sees the picture in the same prompt,
   need for any lifetime bookkeeping — no per-message directory map, no prompt
   hooks, no disconnect sweep — and with it a class of defects that the earlier
   design's cleanup rules kept producing.
-- **Only images and videos are accepted.** This keeps the change to what was
-  asked for; voice and files would each need their own product decision.
+- **A file keeps the sender's extension; images and videos keep the sniffed
+  MIME's; voice follows the fetched URL's.** The read tool classifies by
+  extension, so for an image or a video a sender-supplied extension must never
+  win — the resolved MIME decides. A file is the opposite case: QQ reports
+  `content_type: file` with no MIME type, so there is nothing to derive an
+  extension from and the sender's own is the only classifier available. It is
+  kept after a safe-alphabet filter (`[A-Za-z0-9]{1,10}`, else `.bin`), so a
+  `.docx` does not arrive as opaque binary while a crafted name cannot inject
+  path characters. A voice message is the third case: it has no filename and its
+  body is not sniffable, so the extension follows the URL that was fetched —
+  `.wav` for the converted WAV, `.silk` for the original — and the missing stem
+  falls back to the existing `qq_voice` default.
 
 ## Platform constraints
 
@@ -187,6 +235,8 @@ fileName }`, so an image-capable model sees the picture in the same prompt,
   `{ url, filename, width, height, size, content_type }`, where `content_type`
   is one of `voice`, `image/jpeg`, `image/png`, `image/gif`, `video/mp4`,
   `file`.
+- A `content_type: voice` attachment also carries `voice_wav_url`, the
+  SILK-converted WAV URL. QQ's voice soft limit is 20 MB (hard limit 200 MB).
 - Attachment URLs are not documented as durable, so they are downloaded
   immediately rather than stored.
 - The bot receives media only for the message types it already subscribes to
@@ -246,6 +296,15 @@ not a code change in the adapter.
 - **A text-only model still cannot see the picture.** It receives the
   unsupported-image note plus the file path; anything further depends on the
   agent having another tool to process the file.
+- **File type detection is the sender's word.** QQ's `content_type: file`
+  carries no MIME type, so the on-disk extension comes from the sender's
+  filename. A sender who mislabels a file gets that extension on disk; the
+  agent still has the bytes and can inspect them.
+- **Voice is an audio file, not a transcript.** The base contract has no audio
+  content part, so the agent receives a path to a `.wav` (or `.silk`) file and
+  can act on it only through its own tools; the platform's ASR text is ignored.
+  A `.silk` file is also not playable by common tooling, which is why the
+  converted WAV is preferred whenever QQ offers one.
 
 ## Validation plan
 
@@ -253,17 +312,28 @@ not a code change in the adapter.
   `packages/channels/qqbot/src/media.test.ts`: image-only C2C; image-only group;
   caption plus image; an image produces both an inline attachment (base64 data,
   sniffed MIME, no path) and an on-disk file attachment; a video lands on disk
-  and survives the end of the prompt; an over-limit attachment is skipped and
-  logged; a failed download produces the placeholder text; `syntheticText` is
-  set; existing text-only tests stay green. The contract side is already pinned
-  by `ChannelBase.test.ts:13934` (inline image attachments are forwarded in
-  order) and `:13848` (file paths appended to the prompt), and the adapter side
-  by `WeComAdapter.test.ts:1519` and `:1675`, so the QQ tests mirror those
-  assertions rather than inventing a new shape.
+  and survives the end of the prompt; a file with a caption lands on disk once,
+  as `{ type: 'file', filePath }` with no inline entry, and keeps its `.docx`
+  extension; a file-only message starts a turn in C2C and in a group with the
+  `(file)` placeholder; a file over the 20 MB cap is skipped with one `stderr`
+  line; a voice message with `voice_wav_url` fetches that URL (not `url`), lands
+  on disk as `qq_voice.wav` with `mimeType: audio/wav` and one `{ type: 'audio',
+filePath }` attachment, and the file bytes and `0600` mode match; a voice
+  message without `voice_wav_url` falls back to `url`, `.silk`, and
+  `audio/silk`; a voice-only message starts a turn in C2C and in a group with
+  the `(voice)` placeholder; a voice message over the 20 MB cap is skipped with
+  one `stderr` line; a failed download produces the placeholder text;
+  `syntheticText` is set; existing text-only tests stay green. The contract side
+  is already pinned by `ChannelBase.test.ts:13934` (inline image attachments are
+  forwarded in order) and `:13848` (file paths appended to the prompt), and the
+  adapter side by `WeComAdapter.test.ts:1519` and `:1675`, so the QQ tests mirror
+  those assertions rather than inventing a new shape.
 - Static checks in the package: `tsc --build`, ESLint, and Prettier.
 - Live check: build the CLI from source, point the local qqbot service at that
-  build, send an image with a caption and a video to the bot, and confirm the
-  agent describes the image without reading a file and can open the video path.
+  build, send an image with a caption, a video, a document, and a voice message
+  to the bot, and confirm the agent describes the image without reading a file,
+  can open the video path, reads the document by its `.docx` path, and can open
+  the `.wav` path of the voice message.
 
 ## Acceptance criteria
 
@@ -272,12 +342,22 @@ not a code change in the adapter.
    the same bytes are also left on disk with their path in the prompt.
 2. A video sent to the bot produces a turn whose prompt names the downloaded
    path, and the file is still there afterwards.
-3. With a text-only model, the inline part degrades to the documented
+3. A file sent to the bot produces a turn whose prompt names the downloaded
+   path, the sender's extension is preserved on disk, and the turn runs even
+   when the message carries no text.
+4. A voice message sent to the bot produces a turn whose prompt names the
+   downloaded path: the converted WAV is fetched when the platform offers one
+   (`.wav`, `audio/wav`), the original SILK URL is the fallback (`.silk`,
+   `audio/silk`), the attachment is delivered once as an audio entry, and the
+   turn runs with the `(voice)` placeholder when the message carries no text.
+5. With a text-only model, the inline part degrades to the documented
    unsupported-image note while the path stays usable, instead of the media being
    silently dropped.
-4. A text-only message behaves exactly as it does today.
-5. Downloaded media is never removed by the adapter.
-6. The channel documentation no longer states that QQ ignores inbound media.
+6. A text-only message behaves exactly as it does today.
+7. Downloaded media is never removed by the adapter.
+8. The channel documentation no longer states that QQ ignores inbound media, no
+   longer says QQ does not support files, and no longer implies QQ ignores voice
+   messages.
 
 ## Open questions
 
@@ -285,5 +365,5 @@ not a code change in the adapter.
   it must be fetched immediately.
 - Whether production QQ sends the file name in `content` for image-only
   messages, or leaves it empty.
-- Whether voice transcription (`asr_refer_text` / `voice_wav_url`) should follow
-  in a later change.
+- Whether the platform's ASR transcription (`asr_refer_text`) should be surfaced
+  to the model in a later change.

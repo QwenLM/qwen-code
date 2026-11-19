@@ -41,6 +41,41 @@ describe('WorktreeExitDialog', () => {
     const { lastFrame } = render(<WorktreeExitDialog {...baseProps} />);
     expect(lastFrame()).toContain('Checking worktree status');
   });
+
+  it('ranges the new-commit count from worktreeBase, not originalHeadCommit (R5-4)', async () => {
+    // originalHeadCommit is the original checkout's HEAD (repo top); the
+    // worktree was created at worktreeBase, which may be ahead of it. The
+    // count must range from the creation base or it includes commits the
+    // worktree never had (shown on a destructive Remove button).
+    const { execFile } = await import('node:child_process');
+    const mockExec = vi.mocked(execFile);
+    mockExec.mockImplementation(((
+      _cmd: string,
+      _args: string[],
+      _opts: unknown,
+      cb: (err: null, stdout: string) => void,
+    ) => {
+      cb(null, '5\n');
+    }) as never);
+    // Drop calls recorded by earlier renders so the assertion below sees
+    // only this render's probes.
+    mockExec.mockClear();
+    try {
+      const worktreeBase = 'b'.repeat(40);
+      render(<WorktreeExitDialog {...baseProps} worktreeBase={worktreeBase} />);
+      // Let the mount effect issue its git probes.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const revListCall = mockExec.mock.calls.find(
+        (c) => Array.isArray(c[1]) && (c[1] as string[]).includes('rev-list'),
+      );
+      expect(revListCall).toBeDefined();
+      const args = revListCall![1] as string[];
+      expect(args).toContain(`${worktreeBase}..HEAD`);
+      expect(args).not.toContain(`${baseProps.originalHeadCommit}..HEAD`);
+    } finally {
+      mockExec.mockReset();
+    }
+  });
 });
 
 // NOTE: the dialog's post-load states (dirty counts, Remove label

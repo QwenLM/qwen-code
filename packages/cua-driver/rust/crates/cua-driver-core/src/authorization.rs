@@ -270,6 +270,8 @@ const DESKTOP_INPUT_OPERATIONS: &[&str] = &[
     "type_text",
     "type_text_chars",
     "press_key",
+    "key_down",
+    "key_up",
     "hotkey",
     "set_value",
     "paste",
@@ -859,6 +861,8 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "type_text"
         | "type_text_chars"
         | "press_key"
+        | "key_down"
+        | "key_up"
         | "hotkey"
         | "set_value"
         | "paste"
@@ -882,6 +886,11 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         "zoom"
         | "clipboard_read"
         | "list_apps"
+        | "get_state"
+        | "get_app"
+        | "get_ax_state"
+        | "get_screenshot"
+        | "get_ax_state_and_screenshot"
         | "list_windows"
         | "debug_window_info"
         | "check_permissions"
@@ -1153,6 +1162,8 @@ fn enforce_hard_invariants(
             | "type_text"
             | "type_text_chars"
             | "press_key"
+            | "key_down"
+            | "key_up"
             | "hotkey"
             | "set_value"
             | "paste"
@@ -1472,6 +1483,19 @@ mod tests {
         );
         assert_eq!(isolated.class, RiskClass::R1);
         assert_eq!(isolated.enforcement, RiskEnforcement::Active);
+    }
+
+    #[test]
+    fn app_observation_aliases_have_reviewed_private_content_risk() {
+        for tool in [
+            "get_state",
+            "get_app",
+            "get_ax_state",
+            "get_screenshot",
+            "get_ax_state_and_screenshot",
+        ] {
+            assert_eq!(advertised_risk_for(tool).class, RiskClass::R2, "{tool}");
+        }
     }
 
     #[test]

@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type ReactElement,
+  type ReactNode,
 } from 'react';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
@@ -30,6 +31,7 @@ import {
   sessionIssueStateLabel,
   sessionPrStateLabel,
 } from '../SessionPrStateIcon';
+import { openableSessionPrs } from '../SessionPrBadge';
 import styles from './WebShellSidebar.module.css';
 import { resolveSessionDetailsCollisionBoundary } from './sessionDetailsCollisionBoundary';
 
@@ -38,7 +40,9 @@ interface SessionDetailsTooltipProps {
   label: string;
   time: string;
   completedUnread: boolean;
+  statusLabel?: string;
   workspaceLabel?: string;
+  details?: ReactNode;
   openOnClick?: boolean;
   ownerToken?: string;
   open?: boolean;
@@ -52,7 +56,9 @@ export function SessionDetailsTooltip({
   label,
   time,
   completedUnread,
+  statusLabel,
   workspaceLabel,
+  details,
   openOnClick = false,
   ownerToken,
   open: controlledOpen,
@@ -90,10 +96,9 @@ export function SessionDetailsTooltip({
       : resolveSessionDetailsCollisionBoundary(anchorRef.current)
     : null;
   const folderPath = session.workspaceCwd;
-  const branch = session.worktree?.branch ?? session.branch?.name;
-  const prs = [...(session.prs ?? [])]
-    .reverse()
-    .filter((pr) => isExternalOpenUrl(pr.url));
+  const branch =
+    session.worktree?.branch || session.worktree?.slug || session.branch?.name;
+  const prs = openableSessionPrs([...(session.prs ?? [])].reverse());
   // Stacked PRs can close the same issue; list it once, under its newest PR.
   const seenIssueUrls = new Set<string>();
   const issues = prs
@@ -104,12 +109,19 @@ export function SessionDetailsTooltip({
         !seenIssueUrls.has(issue.url) &&
         seenIssueUrls.add(issue.url),
     );
+  // A turn in flight hides the row's background dot and the blocked states
+  // outrank it, so this status is where background work still gets named.
+  // Appended, never reordered: blocked-state precedence is pinned. The
+  // background-only arm below already names it and must not repeat it.
+  const backgroundSuffix = session.hasRunningBackgroundTasks
+    ? ` · ${t('background.running')}`
+    : '';
   const status = session.isWaitingForPermission
-    ? t('sessionsOverview.status.needsApproval')
+    ? `${t('sessionsOverview.status.needsApproval')}${backgroundSuffix}`
     : session.isWaitingForUserQuestion
-      ? t('sessionsOverview.status.askUserQuestion')
+      ? `${t('sessionsOverview.status.askUserQuestion')}${backgroundSuffix}`
       : session.hasActivePrompt
-        ? t('sidebar.running')
+        ? `${t('sidebar.running')}${backgroundSuffix}`
         : session.hasRunningBackgroundTasks
           ? t('background.running')
           : session.activeWorkState === 'active'
@@ -344,8 +356,9 @@ export function SessionDetailsTooltip({
           })}
           <div className={styles.sessionDetailsRow}>
             <RadioTowerIcon aria-hidden="true" />
-            <span>{status}</span>
+            <span>{statusLabel ?? status}</span>
           </div>
+          {details}
           <div className={styles.sessionDetailsIdRow}>
             <span
               className="!whitespace-normal break-all"

@@ -66,6 +66,7 @@ operation 模型；本变更选择接受它可见。此后 D4 已把共用命令
 | `taskId`             | `id`                  | `taskId`             | 与 `PublicSession`、`PublicAction` 一致。 |
 | （无）               | `object`              | （无）               | 新增，`agent.task`。                      |
 | `sessionId`          | `session_id`          | `sessionId`          |                                           |
+| （无）               | `child_session_id`    | `childSessionId`     | 仅 child 类型（#13746 F2）。              |
 | `kind`               | `kind`                | `kind`               | `TaskKind`，同样五个值。                  |
 | `state`              | `state`               | `state`              | `TaskState`，同样八个值。                 |
 | `definitionRevision` | `definition_revision` | `definitionRevision` | `int64`，至少为 1。                       |

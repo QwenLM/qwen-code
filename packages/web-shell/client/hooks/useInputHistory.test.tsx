@@ -9,6 +9,7 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 let root: Root | undefined;
 let container: HTMLDivElement | undefined;
 let history: ReturnType<typeof useInputHistory>;
+let renderCount = 0;
 
 function Harness({
   storageKey,
@@ -17,6 +18,7 @@ function Harness({
   storageKey: string;
   fallback?: string;
 }) {
+  renderCount++;
   history = useInputHistory(storageKey, fallback);
   return null;
 }
@@ -36,6 +38,7 @@ afterEach(() => {
   act(() => root?.unmount());
   root = undefined;
   container?.remove();
+  renderCount = 0;
   vi.restoreAllMocks();
   localStorage.clear();
 });
@@ -166,4 +169,20 @@ it('re-reads storage after a workspace switch that follows a failed save', () =>
   render('other');
   pushInputHistoryEntry('other', 'late acceptance');
   expect(history.getReverseMatches('')).toEqual(['late acceptance']);
+});
+
+it('does not re-render the host for history interactions nothing consumes', () => {
+  pushInputHistoryEntry('workspace', 'first');
+  pushInputHistoryEntry('workspace', 'second');
+  render();
+  const baseline = renderCount;
+
+  act(() => expect(history.navigateUp('draft')).toBe('second'));
+  act(() => expect(history.navigateUp('second')).toBe('first'));
+  act(() => expect(history.navigateDown()).toBe('second'));
+  act(() => expect(history.navigateDown()).toBe('draft'));
+  act(() => history.push('next'));
+  act(() => history.reset());
+
+  expect(renderCount).toBe(baseline);
 });

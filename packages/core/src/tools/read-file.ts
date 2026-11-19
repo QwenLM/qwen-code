@@ -17,6 +17,8 @@ import type {
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { getCurrentToolCallSource } from '../code-mode/tool-call-runtime.js';
+import type { ReadFileMediaLimits } from '../utils/inline-media.js';
+import { ToolErrorType } from './tool-error.js';
 
 import type { PartListUnion, FunctionDeclaration } from '@google/genai';
 import type { PermissionDecision } from '../permissions/types.js';
@@ -93,6 +95,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   constructor(
     private config: Config,
     params: ReadFileToolParams,
+    private readonly mediaLimits?: ReadFileMediaLimits,
   ) {
     super(params);
   }
@@ -142,8 +145,10 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   async execute(signal: AbortSignal): Promise<ToolResult> {
     signal.throwIfAborted();
     this.recordedStats = undefined;
+    const cacheGeneration = this.config.getFileReadCache().getClearGeneration();
     const fileSystem = this.config.getFileSystemService();
-    if (!fileSystem.withReadFile) return this.executeContent(signal);
+    if (!fileSystem.withReadFile)
+      return this.executeContent(signal, cacheGeneration);
     try {
       const result = await fileSystem.withReadFile(
         {
@@ -151,12 +156,16 @@ class ReadFileToolInvocation extends BaseToolInvocation<
           mediaDelivery: this.config.isOmniEnabled?.() ? 'omni' : 'inline',
           signal,
         },
-        (source) => this.executeContent(signal, source),
+        (source) => this.executeContent(signal, cacheGeneration, source),
       );
       signal.throwIfAborted();
       return result;
     } catch (error) {
-      if (!this.config.getFileReadCacheDisabled() && this.recordedStats) {
+      if (
+        !this.config.getFileReadCacheDisabled() &&
+        this.recordedStats &&
+        this.config.getFileReadCache().getClearGeneration() === cacheGeneration
+      ) {
         this.config.getFileReadCache().invalidate(this.recordedStats);
       }
       signal.throwIfAborted();
@@ -176,6 +185,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 
   private async executeContent(
     signal: AbortSignal,
+    cacheGeneration: number,
     source?: FileReadSource,
   ): Promise<ToolResult> {
     signal.throwIfAborted();
@@ -230,21 +240,36 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     }
     signal.throwIfAborted();
 
-    if (useFastPath && stats && isFullRead) {
+    if (
+      useFastPath &&
+      stats &&
+      this.params.pages === undefined &&
+      cache.getClearGeneration() === cacheGeneration
+    ) {
       const status = cache.check(stats);
       if (
         status.state === 'fresh' &&
         status.entry.lastReadAt !== undefined &&
-        status.entry.lastReadWasFull &&
         status.entry.lastReadCacheable &&
-        // Only quote-back if that read is still in history (issue
-        // #4239: idle microcompaction flips this off when it blanks it).
-        status.entry.readResidentInHistory &&
         (status.entry.lastWriteAt === undefined ||
           status.entry.lastReadAt > status.entry.lastWriteAt)
       ) {
-        debugLogger.debug('hit', { path: absPath });
-        return this.unchangedResult(absPath);
+        const entry = status.entry;
+        // Full reads quote the sticky whole-file view; ranged reads quote
+        // only the exact offset/limit the last read produced. Both halves
+        // require that view still in history (issue #4239: idle
+        // microcompaction disarms the resident flags when it blanks the
+        // result).
+        const hit = isFullRead
+          ? entry.lastReadWasFull && entry.readResidentInHistory
+          : entry.lastReadRangeResident &&
+            entry.lastReadRange !== undefined &&
+            entry.lastReadRange.offset === (this.params.offset ?? 0) &&
+            entry.lastReadRange.limit === (this.params.limit ?? undefined);
+        if (hit) {
+          debugLogger.debug('hit', { path: absPath });
+          return this.unchangedResult(absPath);
+        }
       }
       debugLogger.debug('miss', { path: absPath, state: status.state });
     }
@@ -260,6 +285,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         preserveUnsupportedImage: prepareForVisionBridge,
         preparePdfForVisionBridge: prepareForVisionBridge,
         signal,
+        mediaLimits: this.mediaLimits,
         readSource: source,
       },
     );
@@ -326,12 +352,27 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // a few microseconds wide. Closing it completely needs a content
     // hash on the read pipeline (deferred follow-up — see Risk
     // section in the PR description).
-    if (cacheEnabled && (result.stats ?? stats)) {
+    if (
+      cacheEnabled &&
+      (result.stats ?? stats) &&
+      cache.getClearGeneration() === cacheGeneration
+    ) {
       const cacheable = isCacheableReadResult(result);
       const recordStats: Stats = result.stats ?? stats!;
       cache.recordRead(absPath, recordStats, {
         full: isFullRead && !result.isTruncated,
         cacheable,
+        // An empty body (offset past EOF) carries only a diagnostic the
+        // model should get again, so it is never a quotable view.
+        range:
+          isFullRead ||
+          this.params.pages !== undefined ||
+          result.llmContent === ''
+            ? undefined
+            : {
+                offset: this.params.offset ?? 0,
+                limit: this.params.limit ?? undefined,
+              },
       });
       this.recordedStats = recordStats;
       // Reading into a program does not prove the full text reached history.
@@ -390,10 +431,41 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       ),
     );
 
-    return {
+    const toolResult: ToolResult = {
       llmContent,
+      // Self-managed paging may have capped this body under a threshold the
+      // scheduler never sees; re-reading just to count the dropped part is
+      // the allocation the paging avoids, so declare the raw size unknown
+      // instead of letting the scheduler measure the capped body (#13652 R5-1).
+      ...(result.isTruncated
+        ? { rawOutputSize: null, truncatedByProducer: true }
+        : {}),
       returnDisplay: this.toToolResultDisplay(result),
     };
+    if (this.mediaLimits) {
+      // Reading caps media bytes; the transport budget also includes metadata.
+      const media = normalizeParts(llmContent).filter(
+        (part) => part.inlineData !== undefined,
+      );
+      if (
+        media.length > 0 &&
+        (media.reduce(
+          (sum, part) => sum + (part.inlineData?.data?.length ?? 0),
+          0,
+        ) > this.mediaLimits.maxInlineMediaBase64Bytes ||
+          Buffer.byteLength(JSON.stringify(toolResult), 'utf8') >
+            this.mediaLimits.maxMediaResultBytes)
+      ) {
+        const message =
+          "File exceeds the inline media result byte limit. For PDFs, use 'pages' with a narrower range; otherwise use a smaller file.";
+        return {
+          llmContent: message,
+          returnDisplay: message,
+          error: { message, type: ToolErrorType.FILE_TOO_LARGE },
+        };
+      }
+    }
+    return toolResult;
   }
 
   private async transcribePdfCandidate(
@@ -542,19 +614,26 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 
   /**
    * Build the placeholder ToolResult returned when the cache indicates
-   * the file has not changed since the model last fully read it. The
-   * placeholder is intentionally explicit about its assumptions so the
-   * model can decide whether to trust it:
+   * the file has not changed since the model last read the requested view
+   * (the whole file, or the exact offset/limit). The placeholder is
+   * intentionally explicit about its assumptions so the model can decide
+   * whether to trust it:
    *
-   *  1. The full content was emitted *earlier in this conversation*.
-   *     If the conversation has been compacted, summarised, or the
-   *     model is a subagent receiving a transformed transcript, the
-   *     prior content may no longer be retrievable — the model should
-   *     re-read with explicit offset/limit in that case.
+   *  1. The content reached the conversation *earlier* — as a Read result,
+   *     but also possibly via an `@` attachment or a write_file call, so
+   *     the wording must not claim a specific tool_result. If the
+   *     conversation has been compacted, summarised, or the model is a
+   *     subagent receiving a transformed transcript, that content may no
+   *     longer be retrievable — the model should re-read with a
+   *     different offset/limit in that case.
    *  2. External mutations the cache cannot observe (shell writes via
    *     run_shell_command, MCP tool writes, other processes touching
    *     the file) will not appear here as `stale`. If the model
-   *     suspects drift, it should re-read with explicit offset/limit.
+   *     suspects drift, it should re-read with a different offset/limit.
+   *
+   * "Different" is load-bearing: a no-args Read and a repeat of the same
+   * offset/limit both satisfy the fast-path again, so only a request
+   * shape that differs from the last one escapes it.
    *
    * No `logFileOperation` is emitted on this path: the file_unchanged
    * fast-path bypasses the read pipeline entirely, and the existing
@@ -567,12 +646,11 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       makeRelative(absPath, this.config.getTargetDir()),
     );
     const llmContent =
-      `[File ${relativePath} unchanged since last read in this session — ` +
-      `the full content was provided earlier in this conversation. ` +
-      `If you cannot retrieve that prior content (e.g. after context ` +
-      `compaction) or you suspect the file was modified outside the read/edit ` +
-      `tools (shell command, MCP tool, another process), re-read with ` +
-      `explicit offset/limit to fetch current content.]`;
+      `Wasted call — file ${relativePath} unchanged since it was last read ` +
+      `in this conversation. Refer to that earlier content instead. If you ` +
+      `cannot retrieve it (e.g. after context compaction) or suspect the ` +
+      `file was modified outside the read/edit tools, re-read with a ` +
+      `different offset/limit.`;
     return {
       llmContent,
       returnDisplay: `Unchanged: ${relativePath}`,
@@ -639,7 +717,10 @@ export class ReadFileTool extends BaseDeclarativeTool<
     return Number.POSITIVE_INFINITY;
   }
 
-  constructor(private config: Config) {
+  constructor(
+    private config: Config,
+    private readonly mediaLimits?: ReadFileMediaLimits,
+  ) {
     super(
       ReadFileTool.Name,
       ToolDisplayNames.READ_FILE,
@@ -762,6 +843,6 @@ export class ReadFileTool extends BaseDeclarativeTool<
   protected createInvocation(
     params: ReadFileToolParams,
   ): ToolInvocation<ReadFileToolParams, ToolResult> {
-    return new ReadFileToolInvocation(this.config, params);
+    return new ReadFileToolInvocation(this.config, params, this.mediaLimits);
   }
 }

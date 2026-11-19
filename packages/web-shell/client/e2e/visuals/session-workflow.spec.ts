@@ -50,10 +50,10 @@ const sessionWorkflowSetting: DaemonSettingDescriptor = {
 
 // A diamond so the capture exercises what the graph exists to draw: more than
 // one layer, a node with two upstreams, and a step that unblocks two others.
-// Stable ids and dependency edges travel in `_meta.qwenTodo`, not as
-// top-level fields — `parseTodoItemsFromEntries` reads them from there, and a
-// fixture that puts `blockedBy` at the top level silently produces a plan with
-// no edges and the flat layout instead of the graph.
+// Stable ids and dependency edges travel in `_meta.qwenTodo`, and that is
+// what this capture exercises. `parseTodoItemsFromEntries` reads `blockedBy`
+// from there first and falls back to a top-level `blockedBy` when `_meta` is
+// absent — the `_meta` copy always wins when both are present.
 const todo = (
   id: string,
   content: string,

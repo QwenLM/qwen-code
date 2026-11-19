@@ -54,6 +54,16 @@
 
 /* An agent's post in the session: named like an agent reply, but kept on the
    message's own side. */
+.sentFrom {
+  min-width: 0;
+  margin-bottom: 4px;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .author {
   display: flex;
   align-items: center;
@@ -314,6 +324,11 @@
 .chatContent {
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+[data-web-shell-user-slash-command] {
+  color: var(--agent-blue-500, #4a9eff);
+  font-weight: bold;
 }
 
 .messageTag {

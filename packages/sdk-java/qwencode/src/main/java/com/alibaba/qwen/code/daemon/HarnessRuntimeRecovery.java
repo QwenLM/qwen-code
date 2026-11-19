@@ -63,6 +63,8 @@ public final class HarnessRuntimeRecovery {
                 || "await_command".equals(phase)
                 || "results_ready".equals(phase)) && !executions.isEmpty()
                 && executions.stream().allMatch(execution ->
-                        "known".equals(execution.getOutcome()));
+                        "known".equals(execution.getOutcome())
+                                || "await_runtime".equals(phase)
+                                        && "unknown".equals(execution.getOutcome()));
     }
 }

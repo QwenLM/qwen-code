@@ -537,6 +537,28 @@ describe('scripts/cli-entry.js production entry', () => {
       expect(process.env.NODE_COMPILE_CACHE).toBe('/tmp/node-compile-cache');
     });
 
+    it.each([
+      ['managed-runtime-bootstrap'],
+      ['managed-runtime-bootstrap', '--workspace-file-upload'],
+      ['managed-runtime-bootstrap-worker', '/private/runtime/resource'],
+    ])(
+      'keeps pinned %s commands in this process and skips active updates',
+      async (...args) => {
+        process.argv = ['node', 'scripts/cli-entry.js', ...args];
+        await import('../cli-entry.js?pinned-runtime');
+        expect(spawnSyncMock).not.toHaveBeenCalled();
+        expect(process.argv.slice(1)).toEqual([cliPath, ...args]);
+        expect(
+          readFileSync.mock.calls.some(([file]) =>
+            normalizePath(file).endsWith('/active.json'),
+          ),
+        ).toBe(false);
+        expect(
+          JSON.parse(process.env.QWEN_CODE_MANAGED_NPM_PIN).version,
+        ).toBeNull();
+      },
+    );
+
     it('keeps the spawned child with --expose-gc under Bun', async () => {
       Object.defineProperty(process.versions, 'bun', {
         value: '1.3.14',

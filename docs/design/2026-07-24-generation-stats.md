@@ -5,6 +5,11 @@
 > private `ttft_ms`. This document's `ApiResponseEvent.ttft_ms` data flow and
 > first-user-visible-output semantics remain unchanged; `/stats` does not
 > consume the standard first-chunk attribute.
+>
+> [Output speed over the full request](output-speed-full-request.md) (#16714)
+> later revised TPS: it divides output tokens by TTFT plus generation time, so a
+> zero generation duration still has a rate. The TPS rules below describe this
+> design as implemented for #4252.
 
 ## Context
 

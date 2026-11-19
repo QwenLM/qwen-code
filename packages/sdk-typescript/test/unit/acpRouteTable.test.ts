@@ -284,6 +284,24 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result!.mapping.method).toBe('session/set_model');
   });
 
+  it.each([
+    { configId: 'workflow_mode', value: 'off' },
+    { configId: 'reasoning_effort', value: 'high', persist: false },
+  ])(
+    'maps config options without dropping server validation fields: %j',
+    (body) => {
+      const result = matchRoute('/session/owner%2FB/config-option', 'POST');
+      expect(result?.mapping.method).toBe('session/set_config_option');
+      expect(
+        result?.mapping.extractParams(
+          result.segments,
+          { ...body, sessionId: 'forged-owner' },
+          'POST',
+        ),
+      ).toEqual({ ...body, sessionId: 'owner/B' });
+    },
+  );
+
   // ---- Vendor session extensions (_qwen/ prefix) ----------------------
 
   it('PATCH /session/:id/metadata maps to _qwen/session/update_metadata', () => {

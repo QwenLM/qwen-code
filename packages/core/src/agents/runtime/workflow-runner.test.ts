@@ -398,6 +398,29 @@ describe('WorkflowRunner', () => {
     expect(recovery).toContain(hint);
   });
 
+  // Clients draw the declared phases from the start of a run, so the entry
+  // carries the script's meta before the script reaches any phase.
+  it('registers the script meta before the first phase starts', async () => {
+    const { config, registry } = await storedConfig();
+    let release: ((value: string) => void) | undefined;
+    const handle = await startRun(config, {
+      script:
+        "export const meta = { name: 'plan', description: 'plan', phases: [{ title: 'Review', detail: 'read' }, { title: 'Fix' }] }; phase('Review'); return await agent('read');",
+      dispatch: () =>
+        new Promise<string>((resolve) => {
+          release = resolve;
+        }),
+    });
+
+    expect(registry.get(handle.runId)?.meta).toMatchObject({
+      name: 'plan',
+      phases: [{ title: 'Review', detail: 'read' }, { title: 'Fix' }],
+    });
+    await vi.waitFor(() => expect(release).toBeDefined());
+    release?.('done');
+    expect((await handle.completion).ok).toBe(true);
+  });
+
   // The Workflow tool shows the user the file a `scriptPath` or `name` call
   // loads, then hands that same read to the runner. Reading the path again
   // here would run whatever the file holds by then, not what was approved.
@@ -617,6 +640,17 @@ describe('WorkflowRunner', () => {
       controller.abort();
       releases.forEach((release) => release());
     }
+  });
+
+  it('hands the Workflow tool call id to the dispatch', async () => {
+    const { config } = configWithRegistry();
+    createProductionDispatchMock.mockReturnValue(async () => 'done');
+    const handle = await startRun(config, {
+      toolUseId: 'call_wf',
+      script: "return await agent('read');",
+    });
+    expect((await handle.completion).ok).toBe(true);
+    expect(createProductionDispatchMock.mock.calls[0]?.[6]).toBe('call_wf');
   });
 
   it('keeps an ordinary workflow on generic dispatch bounds despite review metadata', async () => {
@@ -1062,8 +1096,12 @@ describe('WorkflowRunner', () => {
   it.each([
     [true, true, false, true],
     [true, false, false, false],
-    [true, true, true, false],
+    // An ACP session (Web Shell, IDE clients) reports non-interactive, and
+    // still resumes in the background: it delivers completion too.
+    [true, false, true, true],
+    [true, true, true, true],
     [false, true, false, false],
+    [false, false, true, false],
   ])(
     'records resumeInBackground for background=%s interactive=%s zed=%s',
     async (background, interactive, zed, expected) => {
@@ -1071,6 +1109,8 @@ describe('WorkflowRunner', () => {
       Object.assign(config, {
         isInteractive: () => interactive,
         getExperimentalZedIntegration: () => zed,
+        isWorkflowsEnabled: () => true,
+        isTrustedFolder: () => true,
       });
 
       const handle = await runSettled(config, {
@@ -1127,6 +1167,58 @@ describe('WorkflowRunner', () => {
       await start.catch(() => undefined);
     }
   });
+
+  it.each([true, false])(
+    'lets cancelBackgroundRuns stop a starting run only when it is backgrounded (background=%s)',
+    async (runInBackground) => {
+      const { config, registry } = await storedConfig();
+      let finishLoad:
+        | ((saved: {
+            name: string;
+            script: string;
+            scriptPath: string;
+          }) => void)
+        | undefined;
+      resolveSavedWorkflowScriptMock.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishLoad = resolve;
+          }),
+      );
+      const start = startRun(config, {
+        scriptPath: '/tmp/review.js',
+        runInBackground,
+        dispatch: unused,
+      });
+      const saved = {
+        name: 'review',
+        script: 'return "done"',
+        scriptPath: '/tmp/review.js',
+      };
+
+      try {
+        await vi.waitFor(() =>
+          expect(resolveSavedWorkflowScriptMock).toHaveBeenCalledOnce(),
+        );
+        expect(registry.cancelBackgroundRuns(Date.now())).toHaveLength(
+          runInBackground ? 1 : 0,
+        );
+        finishLoad?.(saved);
+        if (runInBackground) {
+          await expect(start).rejects.toBeInstanceOf(
+            WorkflowStartCancelledError,
+          );
+          expect(registry.list()).toEqual([]);
+        } else {
+          await expect(start).resolves.toBeDefined();
+        }
+      } finally {
+        finishLoad?.(saved);
+        await start.catch(() => undefined);
+        registry.abortAll();
+      }
+    },
+  );
 
   it('rejects a direct resume while history mutation owns the run', async () => {
     const { config, registry } = configWithRegistry();

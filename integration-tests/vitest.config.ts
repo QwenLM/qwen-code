@@ -20,8 +20,10 @@ export default defineConfig({
     reporters: ['default'],
     include: ['**/*.test.ts'],
     exclude: [
+      '**/installed/**',
       '**/terminal-bench/*.test.ts',
       '**/hook-integration/**',
+      '**/managed-loop/**',
       '**/qwen-daemon-loadtest*',
       '**/qwen-daemon-first-output-benchmark*',
       '**/node_modules/**',

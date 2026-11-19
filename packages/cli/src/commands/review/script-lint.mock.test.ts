@@ -21,8 +21,9 @@ import {
   rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import {
   runScriptLint,
   buildToolInvocation,
@@ -31,12 +32,24 @@ import {
   type LintTool,
 } from './script-lint.js';
 
+// Spy on the real spawnSync (the default runner is injected away in these
+// tests, so the only spawn left is runScriptLint's own `git show` for the
+// merge-base config). The M15 regression needs to observe that a non-hex
+// merge base never reaches git AT ALL — git rejecting the malformed option
+// on its own is the same observable as the guard refusing it, which is
+// exactly how the guard's mutation survived (PR #16001 review, round 4).
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual, spawnSync: vi.fn(actual['spawnSync'] as never) };
+});
+
 // A per-test temp dir, set up and torn down by hooks — NOT inline `fresh()`/`clean()`
 // calls. A failing `expect` throws before any inline cleanup would run and leaks the
 // dir; `afterEach` runs regardless, so the teardown is leak-proof.
 let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'script-lint-mock-'));
+  vi.mocked(spawnSync).mockClear();
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
@@ -78,26 +91,157 @@ function setup(
   return { plan: planPath, worktree: dir };
 }
 
+/** One actionlint diagnostic in the measured 1.7.12 `-format '{{json .}}'`
+ *  shape: a JSON ARRAY of `{message, filepath, line, column, kind, snippet,
+ *  end_column}` objects — `kind`, not `error_kind`, is the class field. */
+function actionlintRunner(
+  entries: Array<{ line: number; kind: string; message?: string }>,
+): ToolRunner {
+  return (tool: LintTool): ToolRun =>
+    tool === 'actionlint'
+      ? {
+          kind: 'ok',
+          stdout: JSON.stringify(
+            entries.map((e) => ({
+              message: e.message ?? 'msg',
+              filepath: '.github/workflows/ci.yml',
+              line: e.line,
+              column: 1,
+              kind: e.kind,
+              snippet: '',
+              end_column: 2,
+            })),
+          ),
+        }
+      : { kind: 'missing' };
+}
+
 describe('runScriptLint — tool JSON normalisation (injected runner)', () => {
-  it('defers a workflow to its own `deferred` state without ever running actionlint', () => {
-    // The runner would report findings, but a workflow is deferred BEFORE it runs
-    // (actionlint's source-mapping is not yet parsed), so it lands in skipped, not
-    // checked — and the runner is never even called for it.
-    const runner = vi.fn(() => {
-      throw new Error('runner must not be called for a deferred workflow');
-    });
+  it('runs actionlint and gates its workflow-level diagnostics; the shell portion stays deferred', () => {
+    // The #15974 shape: an `expression` diagnostic (runner context in
+    // jobs.env) is a workflow-level check — it gates like any lint finding.
+    // The old whole-file deferral never ran the tool at all.
+    const runner = vi.fn(
+      actionlintRunner([
+        {
+          line: 8,
+          kind: 'expression',
+          message: 'context "runner" is not allowed here',
+        },
+      ]),
+    );
     const { plan, worktree } = setup(
       '.github/workflows/ci.yml',
       'name: CI\non: push\njobs: {}\n',
       { hunks: [{ newStart: 8, newEnd: 8 }] },
     );
     const r = runScriptLint({ plan, worktree }, runner);
-    expect(r.checked).toEqual([]);
-    // deferred (a tool limitation), not skipped — and the runner was never called.
+    // No mergeBaseSha in this plan → no base config (undefined third arg);
+    // the fourth arg is the worktree root the linter must run inside.
+    expect(runner).toHaveBeenCalledWith(
+      'actionlint',
+      expect.any(String),
+      undefined,
+      resolve(worktree),
+    );
+    expect(r.checked).toHaveLength(1);
+    expect(r.checked[0].tool).toBe('actionlint');
+    expect(r.checked[0].findings[0]).toMatchObject({
+      line: 8,
+      code: 'expression',
+      level: 'error',
+      inDiff: true,
+    });
+    expect(r.ok).toBe(false);
+    // The file is in BOTH channels: checked (workflow-level) and deferred
+    // (the embedded shell, which the invocation disables).
+    expect(r.deferred).toHaveLength(1);
     expect(r.deferred[0].tool).toBe('actionlint');
-    expect(r.deferred[0].reason).toContain('not yet supported');
+    expect(r.deferred[0].reason).toContain('ran workflow-level checks');
+    expect(r.deferred[0].reason).not.toContain('not linted');
+    expect(r.deferred[0].reasonZh).toBe(
+      'actionlint 已运行 workflow 级检查；内嵌 run: shell 延迟处理（源映射尚未支持）',
+    );
     expect(r.skipped).toEqual([]);
-    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('a clean actionlint array still discloses the shell deferral', () => {
+    const { plan, worktree } = setup(
+      '.github/workflows/ci.yml',
+      'name: CI\non: push\njobs: {}\n',
+      { hunks: [{ newStart: 1, newEnd: 3 }] },
+    );
+    const r = runScriptLint({ plan, worktree }, actionlintRunner([]));
+    expect(r.checked).toHaveLength(1);
+    expect(r.checked[0].findings).toEqual([]);
+    expect(r.deferred).toHaveLength(1);
+    expect(r.ok).toBe(true);
+  });
+
+  it('routes embedded-language kinds to the deferral, never to a finding (version-skew backstop)', () => {
+    // The integrations are disabled at invocation, so these kinds should not
+    // appear — but if a version emits them anyway, they are the deferred
+    // portion (run:-key anchors, flattened severity), not gate findings.
+    const { plan, worktree } = setup(
+      '.github/workflows/ci.yml',
+      'name: CI\non: push\njobs: {}\n',
+      { hunks: [{ newStart: 8, newEnd: 8 }] },
+    );
+    const r = runScriptLint(
+      { plan, worktree },
+      actionlintRunner([
+        { line: 8, kind: 'shellcheck' },
+        { line: 9, kind: 'pyflakes' },
+      ]),
+    );
+    expect(r.checked).toHaveLength(1);
+    expect(r.checked[0].findings).toEqual([]);
+    expect(r.deferred).toHaveLength(1);
+    expect(r.ok).toBe(true);
+  });
+
+  it.each([
+    ['a non-array root', '{"message":"oops"}'],
+    ['an entry without a line', '[{"kind":"expression","message":"m"}]'],
+    ['an entry without a kind', '[{"line":3,"message":"m"}]'],
+    ['a null entry', '[null]'],
+  ])('fails closed on %s in actionlint output', (_label, stdout) => {
+    // Dropping one malformed diagnostic could drop the blocker that makes a
+    // workflow unloadable — the whole file errors instead.
+    const { plan, worktree } = setup(
+      '.github/workflows/ci.yml',
+      'name: CI\non: push\njobs: {}\n',
+      { hunks: [{ newStart: 1, newEnd: 3 }] },
+    );
+    const r = runScriptLint(
+      { plan, worktree },
+      fixedRunner({ kind: 'ok', stdout }),
+    );
+    expect(r.checked).toEqual([]);
+    expect(r.errored).toHaveLength(1);
+    expect(r.errored[0].tool).toBe('actionlint');
+    expect(r.errored[0].reason).toContain('unparseable');
+    expect(r.ok).toBe(false);
+  });
+
+  it('an uninstalled actionlint is skipped (unreviewed), not deferred', () => {
+    // The deferral is the SHELL PORTION of a run that happened. A tool that
+    // never ran checked nothing — the same fail-closed state shellcheck gets,
+    // which the gate caps an Approve on.
+    const { plan, worktree } = setup(
+      '.github/workflows/ci.yml',
+      'name: CI\non: push\njobs: {}\n',
+      { hunks: [{ newStart: 1, newEnd: 3 }] },
+    );
+    const r = runScriptLint(
+      { plan, worktree },
+      fixedRunner({ kind: 'missing' }),
+    );
+    expect(r.checked).toEqual([]);
+    expect(r.deferred).toEqual([]);
+    expect(r.skipped).toHaveLength(1);
+    expect(r.skipped[0].tool).toBe('actionlint');
+    expect(r.skipped[0].reason).toContain('not installed');
   });
 
   it('normalises hadolint output (code + level preserved)', () => {
@@ -352,6 +496,137 @@ describe('runScriptLint — the report is bound to the diff it ran against', () 
     );
     expect(r.diffHash).toBeUndefined();
   });
+
+  it('--diff overrides the plan diff for BOTH the hash and the added-line ranges', () => {
+    // The re-anchor refresh channel (PR #16001 review): the plan stays fenced
+    // at the old head while the lint recomputes against the new head's diff.
+    // The old diff adds line 1 (the buggy line); the new diff adds line 2
+    // instead — a finding on line 1 must read as pre-existing against the NEW
+    // diff, and the report must hash the NEW diff, not the plan's.
+    const oldDiff = 'diff --git a/x.sh b/x.sh\n@@ -0,0 +1 @@\n+rm $X\n';
+    const newDiff =
+      'diff --git a/x.sh b/x.sh\n@@ -1,1 +1,2 @@\n #!/bin/bash\n+echo added\n';
+    const oldPath = join(dir, 'old.diff');
+    const newPath = join(dir, 'new.diff');
+    writeFileSync(oldPath, oldDiff);
+    writeFileSync(newPath, newDiff);
+    const { plan, worktree } = setup('x.sh', '#!/bin/bash\nrm $X\n', {
+      hunks: [{ newStart: 1, newEnd: 1 }],
+    });
+    const planObj = JSON.parse(readFileSync(plan, 'utf8'));
+    planObj.diffPathAbsolute = oldPath;
+    writeFileSync(plan, JSON.stringify(planObj));
+
+    const r = runScriptLint(
+      { plan, worktree, diff: newPath },
+      shellcheckRunner([{ line: 1, code: 2086, level: 'info' }]),
+    );
+    const expected = createHash('sha256')
+      .update(readFileSync(newPath))
+      .digest('hex');
+    expect(r.diffHash).toBe(expected);
+    // Line 1 is NOT an added line of the new diff — the range override took.
+    expect(r.checked[0].findings[0].inDiff).toBe(false);
+    expect(r.ok).toBe(true);
+  });
+
+  it('--diff with an unreadable path leaves no hash (the gate fails closed)', () => {
+    const { plan, worktree } = setup('x.sh', '#!/bin/bash\nrm $X\n', {
+      hunks: [{ newStart: 1, newEnd: 1 }],
+    });
+    const r = runScriptLint(
+      { plan, worktree, diff: join(dir, 'does-not-exist.diff') },
+      shellcheckRunner([{ line: 1, code: 2086, level: 'info' }]),
+    );
+    expect(r.diffHash).toBeUndefined();
+  });
+
+  it('an EMPTY refresh diff is a successful parse: no promotion from the old plan hunks', () => {
+    // PR #16001 review, round 3, the maintainer's exact shape: the base already
+    // carries SC2086 on line 3, the new head reverts the PR's only change, and
+    // `git diff base newHead` is exactly zero bytes. The empty diff parses to
+    // zero added ranges — a pre-existing finding must stay inDiff:false, not
+    // fall back to the OLD plan's context-inclusive hunks and become a blocker
+    // the gate accepts as fresh (the empty diff has a valid hash).
+    const emptyDiff = join(dir, 'empty.diff');
+    writeFileSync(emptyDiff, '');
+    const { plan, worktree } = setup('x.sh', '#!/bin/bash\nset -e\nrm $X\n', {
+      hunks: [{ newStart: 1, newEnd: 3 }], // old plan covers the buggy line
+    });
+    const r = runScriptLint(
+      { plan, worktree, diff: emptyDiff },
+      shellcheckRunner([{ line: 3, code: 2086, level: 'info' }]),
+    );
+    // sha256 of the empty string — a VALID hash, so the gate reads the report
+    // as fresh; the classification is what must be right.
+    expect(r.diffHash).toBe(
+      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    );
+    expect(r.checked[0].findings[0].inDiff).toBe(false);
+    expect(r.ok).toBe(true);
+  });
+
+  it('a deletions-only refresh diff also adds nothing (parsed, zero additions)', () => {
+    const delDiff = join(dir, 'del.diff');
+    writeFileSync(
+      delDiff,
+      'diff --git a/x.sh b/x.sh\n@@ -1,2 +1 @@\n #!/bin/bash\n-rm $X\n',
+    );
+    const { plan, worktree } = setup('x.sh', '#!/bin/bash\n', {
+      hunks: [{ newStart: 1, newEnd: 2 }],
+    });
+    const r = runScriptLint(
+      { plan, worktree, diff: delDiff },
+      shellcheckRunner([{ line: 1, code: 2086, level: 'info' }]),
+    );
+    expect(r.diffHash).toBeDefined();
+    expect(r.checked[0].findings[0].inDiff).toBe(false);
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe('runScriptLint — the merge-base sha fence is observable (M15)', () => {
+  // The round-3 injection test asserted only that no config reached the
+  // runner — an observable git's own option rejection produces too, so
+  // deleting the hex guard survived the suite (mutation M15). These pin the
+  // fence DIRECTLY: a non-hex merge base must never spawn git at all, while
+  // a well-shaped (but nonexistent) one must — the guard, not git, is the
+  // thing under test.
+  function planWithBase(base: unknown): { plan: string; worktree: string } {
+    const { plan, worktree } = setup(
+      '.github/workflows/ci.yml',
+      'name: CI\non: push\njobs: {}\n',
+      { hunks: [{ newStart: 1, newEnd: 3 }] },
+    );
+    const planObj = JSON.parse(readFileSync(plan, 'utf8'));
+    planObj.mergeBaseSha = base;
+    writeFileSync(plan, JSON.stringify(planObj));
+    return { plan, worktree };
+  }
+  const okRunner: ToolRunner = () => ({ kind: 'ok', stdout: '[]' });
+  const gitCalls = () =>
+    vi.mocked(spawnSync).mock.calls.filter((c) => c[0] === 'git');
+
+  it('a non-hex merge base never reaches git', () => {
+    const { plan, worktree } = planWithBase('--output=/tmp/pwned');
+    runScriptLint({ plan, worktree }, okRunner);
+    expect(gitCalls()).toHaveLength(0);
+  });
+
+  it('a hex-shaped merge base DOES reach git (positive control)', () => {
+    // 40 hex chars, no such object in the fixture's non-repo dir: git runs
+    // and fails, the config degrades to {} — but the spawn happened, so a
+    // mutation that deletes the guard cannot hide behind git's rejection.
+    const { plan, worktree } = planWithBase('a'.repeat(40));
+    runScriptLint({ plan, worktree }, okRunner);
+    expect(gitCalls()).toHaveLength(1);
+    expect(gitCalls()[0][1]).toEqual([
+      '-C',
+      worktree,
+      'show',
+      `${'a'.repeat(40)}:.github/actionlint.yaml`,
+    ]);
+  });
 });
 
 describe('buildToolInvocation — config isolation (a PR config cannot suppress its own findings)', () => {
@@ -361,6 +636,63 @@ describe('buildToolInvocation — config isolation (a PR config cannot suppress 
   it('shellcheck runs with --norc, ignoring a PR-added .shellcheckrc', () => {
     const { argv } = buildToolInvocation('shellcheck', '/w/x.sh');
     expect(argv).toContain('--norc');
+  });
+
+  it('actionlint disables the embedded integrations (the deferred portion must not depend on PATH)', () => {
+    // `-shellcheck=` / `-pyflakes=` — the same form scripts/lint.js runs. With
+    // them, the workflow-level checks give the same answer whether or not the
+    // reviewer's machine happens to have shellcheck/pyflakes installed; the
+    // shell portion is deferred uniformly. Drop them and a machine WITH
+    // shellcheck starts emitting the run:-key-anchored diagnostics the split
+    // exists to keep out of the gate.
+    const { argv } = buildToolInvocation('actionlint', '/w/ci.yml');
+    expect(argv).toContain('-shellcheck=');
+    expect(argv).toContain('-pyflakes=');
+  });
+
+  it('actionlint runs against a private neutral config, not the PR-added .github/actionlint.yaml', () => {
+    // The PR #16001 review's Critical: without -config-file, actionlint
+    // auto-loads the reviewed repo's config, and a PR-added ignore-all rule
+    // suppresses every diagnostic. The argv must carry a private mkdtemp
+    // config whose content is the explicit empty config — never a path inside
+    // the reviewed tree, never a predictable tmpdir name.
+    const { argv } = buildToolInvocation('actionlint', '/w/ci.yml');
+    const ci = argv.indexOf('-config-file');
+    expect(ci).toBeGreaterThanOrEqual(0);
+    const cfg = argv[ci + 1];
+    expect(readFileSync(cfg, 'utf8')).toBe('{}\n');
+    expect(cfg).not.toBe(join(tmpdir(), 'actionlint.yaml'));
+    if (process.platform !== 'win32') {
+      expect(statSync(dirname(cfg)).mode & 0o777).toBe(0o700);
+    }
+  });
+
+  it('actionlint private config holds the merge-base content when one is given', () => {
+    // The trust boundary (round 3): the private file copies the BASE config —
+    // maintainer-merged compatibility knowledge — never the head's. Different
+    // base contents get different private files (the cache is content-keyed).
+    const base = "self-hosted-runner:\n  labels:\n    - 'ecs-qwen'\n";
+    const { argv } = buildToolInvocation('actionlint', '/w/ci.yml', base);
+    const cfg = argv[argv.indexOf('-config-file') + 1];
+    expect(readFileSync(cfg, 'utf8')).toBe(base);
+    const other = buildToolInvocation('actionlint', '/w/ci.yml', '{}\n');
+    const cfg2 = other.argv[other.argv.indexOf('-config-file') + 1];
+    expect(cfg2).not.toBe(cfg);
+    expect(readFileSync(cfg2, 'utf8')).toBe('{}\n');
+  });
+
+  it('actionlint carries exactly the two trusted compatibility exceptions scripts/lint.js runs', () => {
+    // Custom self-hosted runner labels (the ECS fleets this repo routes to)
+    // and the environment.deployment schema lag (this repo's own workflows
+    // use the key). Reviewer-controlled constants — the PR cannot add a third.
+    const { argv } = buildToolInvocation('actionlint', '/w/ci.yml');
+    const ignores = argv
+      .map((a, i) => (a === '-ignore' ? argv[i + 1] : null))
+      .filter((a): a is string => a !== null);
+    expect(ignores).toEqual([
+      'label ".+" is unknown',
+      'unexpected key "deployment" for "environment" section',
+    ]);
   });
 
   it('drops SHELLCHECK_OPTS from the env even when the process has a hostile one set', () => {

@@ -71,7 +71,12 @@ test('message editor stays inside its bubble while resizing @smoke', async ({
       replayedCount: scenario.events.length,
     }),
   );
-  await page.getByRole('button', { name: 'Edit message', exact: true }).click();
+  await page
+    .getByRole('button', { name: 'More message actions', exact: true })
+    .hover();
+  await page
+    .getByRole('menuitem', { name: 'Edit message', exact: true })
+    .click();
   const bubble = page.locator('[data-web-shell-user-bubble]');
   const editor = bubble.getByRole('textbox', { name: 'Edit message' });
   await editor.fill('Updated question');

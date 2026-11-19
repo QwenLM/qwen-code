@@ -135,4 +135,50 @@ describe('daemon trust policy monitor', () => {
 
     expect(onSnapshot).toHaveBeenCalledTimes(1);
   });
+
+  it('invalidates on a failed read and republishes same-revision recovery', async () => {
+    const failure = new Error('unavailable');
+    const readSnapshot = vi
+      .fn<() => Promise<DaemonTrustPolicySnapshot>>()
+      .mockResolvedValueOnce(snapshot('one'))
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce(snapshot('one'));
+    const onSnapshot = vi.fn();
+    const onError = vi.fn();
+    const monitor = createDaemonTrustPolicyMonitor({
+      readSnapshot,
+      onSnapshot,
+      onError,
+      pollIntervalMs: 60_000,
+    });
+
+    await monitor.start();
+    await monitor.requestReconcile('poll');
+    expect(onError).toHaveBeenCalledWith(failure);
+    expect(onSnapshot).toHaveBeenCalledTimes(1);
+    await monitor.requestReconcile('poll');
+    expect(onSnapshot).toHaveBeenCalledTimes(2);
+    expect(onSnapshot.mock.calls[1]?.[0]).toMatchObject({ revision: 'one' });
+    monitor.stop();
+  });
+
+  it('does not invalidate after a pending read fails following stop', async () => {
+    let rejectRead!: (reason: unknown) => void;
+    const pendingRead = new Promise<DaemonTrustPolicySnapshot>((_, reject) => {
+      rejectRead = reject;
+    });
+    const onError = vi.fn();
+    const monitor = createDaemonTrustPolicyMonitor({
+      readSnapshot: () => pendingRead,
+      onSnapshot: vi.fn(),
+      onError,
+      pollIntervalMs: 60_000,
+    });
+
+    const starting = monitor.start();
+    monitor.stop();
+    rejectRead(new Error('stopped'));
+    await starting;
+    expect(onError).not.toHaveBeenCalled();
+  });
 });

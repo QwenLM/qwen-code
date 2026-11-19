@@ -50,6 +50,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_recording_degraded',
   'artifact_changed',
   'source_changed',
+  'sub_session_task_changed',
   MID_TURN_MESSAGE_INJECTED_EVENT,
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
@@ -155,6 +156,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'user_shell_result',
   'turn_complete',
   'turn_error',
+  'session_messages_deleted',
   'session_rewound',
   'session_branched',
   // A5 (#4511): synthetic side-channel snapshot yielded after
@@ -269,6 +271,7 @@ export interface DaemonPermissionForbiddenData {
 export interface DaemonModelSwitchedData {
   sessionId: string;
   modelId: string;
+  subscriptionSignedOut?: boolean;
   [key: string]: unknown;
 }
 
@@ -322,6 +325,16 @@ export type DaemonSourceChangedEvent = DaemonEventEnvelope<
 export interface DaemonArtifactChangedData {
   sessionId: string;
   change: DaemonSessionArtifactChange;
+  [key: string]: unknown;
+}
+
+/**
+ * A `sent` launch the daemon reports back to `sessionId` started or settled.
+ * A hint: re-read `GET /session/:id/tasks?includeSubSessions=true`. Fanned
+ * out to every session in the caller's workspace, so filter by `sessionId`.
+ */
+export interface DaemonSubSessionTaskChangedData {
+  sessionId: string;
   [key: string]: unknown;
 }
 
@@ -862,14 +875,30 @@ export interface DaemonTurnErrorData {
   code?: string;
   errorKind?: DaemonErrorKind | (string & {});
   loopType?: string;
+  /** Which cause stopped the turn when `loopType` covers several. */
+  loopReason?: string;
+  /** For `turn_tool_call_cap`: calls counted when the cap fired. */
+  toolCallCount?: number;
+  /** For `turn_tool_call_cap`: the limit that applied. */
+  toolCallLimit?: number;
   promptId?: string;
+  [key: string]: unknown;
+}
+
+export interface DaemonSessionMessagesDeletedData {
+  sessionId: string;
+  deletedGroupIds: string[];
+  deletedPromptIds: string[];
   [key: string]: unknown;
 }
 
 export interface DaemonSessionRewoundData {
   sessionId: string;
   promptId: string;
+  daemonPromptId?: string;
   targetTurnIndex: number;
+  /** Authoritative surviving UI prefix, with newly seeded daemon event IDs. */
+  replay?: DaemonEvent[];
   filesChanged: string[];
   filesFailed: string[];
   originatorClientId?: string;
@@ -1028,6 +1057,10 @@ export type DaemonSessionMetadataUpdatedEvent = DaemonEventEnvelope<
 export type DaemonArtifactChangedEvent = DaemonEventEnvelope<
   'artifact_changed',
   DaemonArtifactChangedData
+>;
+export type DaemonSubSessionTaskChangedEvent = DaemonEventEnvelope<
+  'sub_session_task_changed',
+  DaemonSubSessionTaskChangedData
 >;
 export type DaemonMidTurnMessageInjectedEvent = DaemonEventEnvelope<
   typeof MID_TURN_MESSAGE_INJECTED_EVENT,
@@ -1191,6 +1224,10 @@ export type DaemonTurnErrorEvent = DaemonEventEnvelope<
   'turn_error',
   DaemonTurnErrorData
 >;
+export type DaemonSessionMessagesDeletedEvent = DaemonEventEnvelope<
+  'session_messages_deleted',
+  DaemonSessionMessagesDeletedData
+>;
 export type DaemonSessionRewoundEvent = DaemonEventEnvelope<
   'session_rewound',
   DaemonSessionRewoundData
@@ -1224,6 +1261,7 @@ export type DaemonSessionEvent =
   | DaemonSessionMetadataUpdatedEvent
   | DaemonSessionRecordingDegradedEvent
   | DaemonArtifactChangedEvent
+  | DaemonSubSessionTaskChangedEvent
   | DaemonMidTurnMessageInjectedEvent
   | DaemonPendingPromptEvent
   | DaemonChannelDeliveryResultEvent
@@ -1245,6 +1283,7 @@ export type DaemonControlEvent =
   | DaemonSettingsReloadedEvent
   | DaemonMcpServerAddedEvent
   | DaemonMcpServerRemovedEvent
+  | DaemonSessionMessagesDeletedEvent
   | DaemonSessionRewoundEvent;
 
 export type DaemonStreamLifecycleEvent =
@@ -1709,6 +1748,10 @@ export function asKnownDaemonEvent(
       return isArtifactChangedData(event.data)
         ? (event as DaemonArtifactChangedEvent)
         : undefined;
+    case 'sub_session_task_changed':
+      return isRecord(event.data) && isNonEmptyString(event.data['sessionId'])
+        ? (event as DaemonSubSessionTaskChangedEvent)
+        : undefined;
     case MID_TURN_MESSAGE_INJECTED_EVENT: {
       const data = asMidTurnMessageInjectedData(event.data);
       return data
@@ -1851,6 +1894,10 @@ export function asKnownDaemonEvent(
       return isTurnErrorData(event.data)
         ? (event as DaemonTurnErrorEvent)
         : undefined;
+    case 'session_messages_deleted':
+      return isSessionMessagesDeletedData(event.data)
+        ? (event as DaemonSessionMessagesDeletedEvent)
+        : undefined;
     case 'session_rewound':
       return isSessionRewoundData(event.data)
         ? (event as DaemonSessionRewoundEvent)
@@ -1868,6 +1915,19 @@ export function asKnownDaemonEvent(
   }
 }
 
+function isSessionMessagesDeletedData(
+  value: unknown,
+): value is DaemonSessionMessagesDeletedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    Array.isArray(value['deletedGroupIds']) &&
+    value['deletedGroupIds'].every((id) => typeof id === 'string') &&
+    Array.isArray(value['deletedPromptIds']) &&
+    value['deletedPromptIds'].every((id) => typeof id === 'string')
+  );
+}
+
 function isSessionRewoundData(
   value: unknown,
 ): value is DaemonSessionRewoundData {
@@ -1876,6 +1936,21 @@ function isSessionRewoundData(
     isNonEmptyString(value['sessionId']) &&
     isNonEmptyString(value['promptId']) &&
     isFiniteNumber(value['targetTurnIndex']) &&
+    (value['replay'] === undefined ||
+      (Array.isArray(value['replay']) &&
+        value['replay'].every(
+          (event) =>
+            isRecord(event) &&
+            event['v'] === 1 &&
+            isNonEmptyString(event['type']) &&
+            event['type'] !== 'session_rewound' &&
+            'data' in event &&
+            (!isRecord(event['data']) ||
+              event['data']['sessionId'] === undefined ||
+              event['data']['sessionId'] === value['sessionId'] ||
+              (event['type'] === 'approval_mode_changed' &&
+                event['data']['persisted'] === true)),
+        ))) &&
     Array.isArray(value['filesChanged']) &&
     Array.isArray(value['filesFailed'])
   );
@@ -2025,7 +2100,7 @@ export function reduceDaemonSessionEvent(
       return {
         ...base,
         sessionId: event.data.sessionId,
-        currentModelId: event.data.modelId,
+        currentModelId: event.data.modelId || undefined,
         lastModelSwitchFailure: undefined,
       };
     case 'model_switch_failed':
@@ -2243,6 +2318,7 @@ export function reduceDaemonSessionEvent(
     // `mid_turn_message_injected` is a transient UX signal (the browser dedupes
     // its own pending queue); like these mcp/settings notices it carries no
     // reduced session-view state.
+    case 'session_messages_deleted':
     case 'mcp_server_added':
     case 'mcp_server_removed':
     case 'mcp_server_changed':
@@ -2250,6 +2326,7 @@ export function reduceDaemonSessionEvent(
     case 'extensions_changed':
     case 'artifact_changed':
     case 'source_changed':
+    case 'sub_session_task_changed':
     case MID_TURN_MESSAGE_INJECTED_EVENT:
     case PENDING_PROMPT_ADDED_EVENT:
     case PENDING_PROMPT_STARTED_EVENT:
@@ -2657,7 +2734,8 @@ function isModelSwitchedData(value: unknown): value is DaemonModelSwitchedData {
   return (
     isRecord(value) &&
     isNonEmptyString(value['sessionId']) &&
-    isNonEmptyString(value['modelId'])
+    (isNonEmptyString(value['modelId']) ||
+      (value['modelId'] === '' && value['subscriptionSignedOut'] === true))
   );
 }
 

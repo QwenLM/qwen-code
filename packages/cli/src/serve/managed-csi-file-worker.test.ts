@@ -26,11 +26,13 @@ import {
 import * as contextWorker from './managed-context-worker.js';
 import * as composer from './managed-csi-file-composer.js';
 import * as nativeReadback from './managed-csi-native-readback.js';
+import * as finalization from './managed-csi-file-finalize-protocol.js';
 import {
   CSI_FILE_HISTORY_PATH,
   type CsiFileHistoryObservation,
 } from './managed-csi-file-history-protocol.js';
 import { ManagedToolExecutor } from './managed-runtime-tool-executor.js';
+import { ManagedMonitorRegistry } from './managed-monitor-registry.js';
 import * as historyProtocol from './managed-csi-file-history-protocol.js';
 import type { ManagedCsiFileWorkerHandle } from './managed-csi-file-worker.js';
 import {
@@ -60,6 +62,7 @@ const fixture = JSON.parse(
 ) as {
   boot: unknown;
   executionBoot5: unknown;
+  finalizationBoot6: unknown;
   expectedPod: { uid: string; namespace: string; nodeName: string };
   attestationRequest: unknown;
   attestationResponse: { mount: ManagedCsiMountReceipt };
@@ -131,8 +134,384 @@ function send(
   );
 }
 
+describe('boot6 finalization HTTP with labelled Linux/composer and saved-cut seams', () => {
+  const candidate = parseManagedCsiFileBoot(fixture.finalizationBoot6);
+  const installed = nativeFixture.valid[0].request.installedContext;
+  const observation = {
+    history: {
+      ownerSessionId: candidate.identity.sessionId,
+      snapshots: [],
+      files: {},
+    },
+    storage: {
+      backupDirectory: {
+        volumeDevice: '1',
+        volumeInode: '2',
+        directoryDevice: '1',
+        directoryInode: '3',
+      },
+      retainedBackups: [],
+    },
+  };
+  const observeRequest = () =>
+    finalization.csiFileFinalizeRequest(
+      candidate,
+      installed,
+      fixture.expectedPod,
+      fixture.attestationResponse.mount,
+      {
+        operation: 'observe',
+        retirementId: fixture.drainRequest.retirementId,
+        preparedCommitSha256: 'a'.repeat(64),
+        frozenRequestSha256: null,
+        cutSha256: null,
+      },
+    );
+  const finalizeRequest = () => ({
+    ...observeRequest(),
+    operation: 'finalize',
+    frozenRequestSha256: 'b'.repeat(64),
+    cutSha256: 'c'.repeat(64),
+  });
+  async function startBound() {
+    mockMountFixture();
+    const observe = vi.fn().mockResolvedValue(observation);
+    const inventory = vi.fn().mockResolvedValue({
+      history: observation.history,
+      backend: { retained: observation.storage },
+      mount: { pendingOperations: 0 },
+    });
+    const close = vi.fn().mockResolvedValue(undefined);
+    const inspection = vi.fn().mockResolvedValue({
+      compositionClosed: true,
+      backend: {
+        closed: true,
+        blocked: false,
+        pendingOperations: 0,
+        openDescriptors: [],
+      },
+      mount: {
+        admissionClosed: true,
+        pendingOperations: 0,
+        closeFailed: false,
+        root: {
+          admissionClosed: true,
+          pendingOperations: 0,
+          fd: null,
+          device: fixture.attestationResponse.mount.rootDevice,
+          inode: fixture.attestationResponse.mount.rootInode,
+        },
+      },
+    });
+    vi.spyOn(composer, 'composeManagedCsiFiles').mockResolvedValue({
+      observe,
+      close,
+      history: { prepare: vi.fn() },
+      retirementInventory: inventory,
+      retirementCloseInspection: inspection,
+    } as unknown as Awaited<
+      ReturnType<typeof composer.composeManagedCsiFiles>
+    >);
+    const native = vi
+      .spyOn(nativeReadback, 'readCurrentCsiNative')
+      .mockResolvedValue(nativeFixture.valid[0].response);
+    worker = await startManagedRuntimeAttestationWorker(
+      candidate,
+      undefined,
+      undefined,
+      true,
+    );
+    expect(
+      (
+        await send('context', {
+          ...fixture.installationRequest,
+          context: installed,
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await send(
+          CSI_FILE_HISTORY_PATH,
+          csiFileHistoryEnvelope(candidate, installed, {
+            kind: 'csi-file-history',
+            version: 1,
+            action: 'bind',
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    return { observe, inventory, close, inspection, native };
+  }
+
+  it.each([fixture.boot, fixture.executionBoot5])(
+    'keeps the finalize route unavailable for original boot$version',
+    async (oldBoot) => {
+      mockMountFixture();
+      worker = await startManagedRuntimeAttestationWorker(
+        parseManagedCsiFileBoot(oldBoot),
+        undefined,
+        undefined,
+        true,
+      );
+      expect((await send(finalization.CSI_FILE_FINALIZE_PATH, {})).status).toBe(
+        404,
+      );
+    },
+  );
+
+  it('closes admission before joining an accepted snapshot and caches exact observation bytes', async () => {
+    const retained = await startBound();
+    let resume!: () => void;
+    retained.observe.mockImplementationOnce(
+      () => new Promise((resolve) => (resume = () => resolve(observation))),
+    );
+    const snapshot = send(
+      CSI_FILE_HISTORY_PATH,
+      csiFileHistoryEnvelope(candidate, installed, {
+        kind: 'csi-file-history',
+        version: 1,
+        action: 'snapshot',
+      }),
+    );
+    await vi.waitFor(() => expect(retained.observe).toHaveBeenCalledTimes(2));
+    const seal = vi.spyOn(ManagedToolExecutor.prototype, 'sealAdmission');
+    const observing = send(
+      finalization.CSI_FILE_FINALIZE_PATH,
+      observeRequest(),
+    );
+    await vi.waitFor(() => expect(seal).toHaveBeenCalled());
+    expect(retained.inventory).not.toHaveBeenCalled();
+    expect((await send('context', fixture.installationRequest)).status).toBe(
+      409,
+    );
+    expect((await send('attest', fixture.attestationRequest)).status).toBe(409);
+    expect(
+      (await send('context-attest', fixture.contextAttestationRequest)).status,
+    ).toBe(409);
+    resume();
+    expect((await snapshot).status).toBe(200);
+    const response = await observing;
+    expect(response.status).toBe(200);
+    const bytes = await response.text();
+    expect(JSON.parse(bytes).state).toBe('FROZEN_CANDIDATE');
+    expect(
+      await (
+        await send(finalization.CSI_FILE_FINALIZE_PATH, observeRequest())
+      ).text(),
+    ).toBe(bytes);
+    expect(retained.inventory).toHaveBeenCalledTimes(1);
+    expect(retained.close).not.toHaveBeenCalled();
+    expect(
+      (
+        await send(finalization.CSI_FILE_FINALIZE_PATH, {
+          ...observeRequest(),
+          preparedCommitSha256: 'e'.repeat(64),
+        })
+      ).status,
+    ).toBe(409);
+    expect(retained.native).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires saved CUT before cleanup and returns the first exact receipt on retry', async () => {
+    const retained = await startBound();
+    const pre = await send(
+      finalization.CSI_FILE_FINALIZE_PATH,
+      observeRequest(),
+    );
+    const preBytes = await pre.text();
+    const saved = vi
+      .spyOn(finalization, 'requireSavedCsiApplicationCut')
+      .mockImplementation(async () => {
+        expect(retained.close).not.toHaveBeenCalled();
+      });
+    const first = await send(
+      finalization.CSI_FILE_FINALIZE_PATH,
+      finalizeRequest(),
+    );
+    expect(first.status).toBe(200);
+    const receipt = await first.text();
+    expect(JSON.parse(receipt)).toMatchObject({
+      state: 'DRAINED',
+      preCutObservationSha256: createHash('sha256')
+        .update(preBytes)
+        .digest('hex'),
+    });
+    expect(saved).toHaveBeenCalledExactlyOnceWith(
+      candidate,
+      finalizeRequest(),
+      createHash('sha256').update(preBytes).digest('hex'),
+    );
+    expect(retained.close).toHaveBeenCalledTimes(1);
+    expect(retained.inspection).toHaveBeenCalledTimes(1);
+    expect(
+      await (
+        await send(finalization.CSI_FILE_FINALIZE_PATH, finalizeRequest())
+      ).text(),
+    ).toBe(receipt);
+    expect(saved).toHaveBeenCalledTimes(1);
+    expect(retained.close).toHaveBeenCalledTimes(1);
+    expect(
+      (
+        await send(finalization.CSI_FILE_FINALIZE_PATH, {
+          ...finalizeRequest(),
+          cutSha256: 'd'.repeat(64),
+        })
+      ).status,
+    ).toBe(409);
+    expect(retained.native).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['backup inode changed', 'backup membership grew'])(
+    'refuses finalization when %s after the frozen observation',
+    async (fault) => {
+      const retained = await startBound();
+      expect(
+        (await send(finalization.CSI_FILE_FINALIZE_PATH, observeRequest()))
+          .status,
+      ).toBe(200);
+      const saved = vi
+        .spyOn(finalization, 'requireSavedCsiApplicationCut')
+        .mockResolvedValue();
+      retained.inventory.mockResolvedValue({
+        history: observation.history,
+        backend: {
+          retained:
+            fault === 'backup inode changed'
+              ? {
+                  ...observation.storage,
+                  backupDirectory: {
+                    ...observation.storage.backupDirectory,
+                    directoryInode: '99',
+                  },
+                }
+              : {
+                  ...observation.storage,
+                  retainedBackups: [{ unexpected: true }],
+                },
+        },
+        mount: { pendingOperations: 0 },
+      });
+      for (let retry = 0; retry < 2; retry++)
+        expect(
+          (await send(finalization.CSI_FILE_FINALIZE_PATH, finalizeRequest()))
+            .status,
+        ).toBe(409);
+      expect(saved).toHaveBeenCalledTimes(1);
+      expect(retained.inventory).toHaveBeenCalledTimes(2);
+      expect(retained.close).not.toHaveBeenCalled();
+      expect(retained.inspection).not.toHaveBeenCalled();
+      await expect(worker!.close()).rejects.toThrow('worker close failed');
+      worker = undefined;
+    },
+  );
+
+  it('refuses changed executor state even when it remains quiescent', async () => {
+    const retained = await startBound();
+    const pre = await send(
+      finalization.CSI_FILE_FINALIZE_PATH,
+      observeRequest(),
+    );
+    expect(pre.status).toBe(200);
+    const frozen = (await pre.json()) as {
+      execution: Awaited<
+        ReturnType<ManagedToolExecutor['csiRetirementInventory']>
+      >;
+    };
+    vi.spyOn(finalization, 'requireSavedCsiApplicationCut').mockResolvedValue();
+    const inventory = vi
+      .spyOn(ManagedToolExecutor.prototype, 'csiRetirementInventory')
+      .mockResolvedValue({
+        ...frozen.execution,
+        secondary: { ...frozen.execution.secondary, providerUsed: true },
+      });
+    for (let retry = 0; retry < 2; retry++)
+      expect(
+        (await send(finalization.CSI_FILE_FINALIZE_PATH, finalizeRequest()))
+          .status,
+      ).toBe(409);
+    expect(inventory).toHaveBeenCalledTimes(1);
+    expect(retained.close).not.toHaveBeenCalled();
+    expect(retained.inspection).not.toHaveBeenCalled();
+    await expect(worker!.close()).rejects.toThrow('worker close failed');
+    worker = undefined;
+  });
+
+  it('retains a saved-cut refusal without cleanup or a replacement retry', async () => {
+    const retained = await startBound();
+    expect(
+      (await send(finalization.CSI_FILE_FINALIZE_PATH, observeRequest()))
+        .status,
+    ).toBe(200);
+    const saved = vi
+      .spyOn(finalization, 'requireSavedCsiApplicationCut')
+      .mockRejectedValue(new Error('No saved CUT'));
+    for (let retry = 0; retry < 2; retry++)
+      expect(
+        (await send(finalization.CSI_FILE_FINALIZE_PATH, finalizeRequest()))
+          .status,
+      ).toBe(409);
+    expect(saved).toHaveBeenCalledTimes(1);
+    expect(retained.close).not.toHaveBeenCalled();
+    await expect(worker!.close()).rejects.toThrow('worker close failed');
+    worker = undefined;
+  });
+
+  it('refuses a failed executor close even when its registry has no retained activity', async () => {
+    const retained = await startBound();
+    expect(
+      (await send(finalization.CSI_FILE_FINALIZE_PATH, observeRequest()))
+        .status,
+    ).toBe(200);
+    vi.spyOn(finalization, 'requireSavedCsiApplicationCut').mockResolvedValue();
+    const stopped = vi
+      .spyOn(ManagedMonitorRegistry.prototype, 'stopAll')
+      .mockRejectedValue(new Error('Monitor close failed'));
+    for (let retry = 0; retry < 2; retry++)
+      expect(
+        (await send(finalization.CSI_FILE_FINALIZE_PATH, finalizeRequest()))
+          .status,
+      ).toBe(409);
+    expect(stopped).toHaveBeenCalledTimes(1);
+    expect(retained.close).not.toHaveBeenCalled();
+    expect(retained.inspection).not.toHaveBeenCalled();
+    await expect(worker!.close()).rejects.toThrow('worker close failed');
+    worker = undefined;
+  });
+
+  it('retains failures after completed operations leave the pending set', async () => {
+    const retained = await startBound();
+    retained.observe.mockRejectedValueOnce(new Error('Snapshot failed'));
+    expect(
+      (
+        await send(
+          CSI_FILE_HISTORY_PATH,
+          csiFileHistoryEnvelope(candidate, installed, {
+            kind: 'csi-file-history',
+            version: 1,
+            action: 'snapshot',
+          }),
+        )
+      ).status,
+    ).toBe(409);
+    for (let retry = 0; retry < 2; retry++)
+      expect(
+        (await send(finalization.CSI_FILE_FINALIZE_PATH, observeRequest()))
+          .status,
+      ).toBe(409);
+    expect(retained.inventory).not.toHaveBeenCalled();
+    expect(retained.close).not.toHaveBeenCalled();
+    await expect(worker!.close()).rejects.toThrow('worker close failed');
+    worker = undefined;
+  });
+});
+
 describe('CSI2 production construction with labelled mock Linux mount', () => {
-  it.each([boot, parseManagedCsiFileBoot(fixture.executionBoot5)])(
+  it.each([
+    boot,
+    parseManagedCsiFileBoot(fixture.executionBoot5),
+    parseManagedCsiFileBoot(fixture.finalizationBoot6),
+  ])(
     'serves the boot$version construction routes and installs the fixed context without constructing tools',
     async (candidate) => {
       mockMountFixture();
@@ -178,7 +557,7 @@ describe('CSI2 production construction with labelled mock Linux mount', () => {
           await (
             await send(
               'context',
-              candidate.version === 5
+              candidate.version === 5 || candidate.version === 6
                 ? {
                     ...fixture.installationRequest,
                     context: nativeFixture.valid[0].request.installedContext,
@@ -187,7 +566,7 @@ describe('CSI2 production construction with labelled mock Linux mount', () => {
             )
           ).json(),
         ).toEqual(
-          candidate.version === 5
+          candidate.version === 5 || candidate.version === 6
             ? {
                 ...(fixture.installationResponse as Record<string, unknown>),
                 context: {

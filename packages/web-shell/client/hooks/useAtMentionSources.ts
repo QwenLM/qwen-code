@@ -104,6 +104,16 @@ export function getCached<K, V>(
 
 export interface AtMentionWorkspaceActions {
   globWorkspace?: GlobWorkspaceFn;
+  searchWorkspaceFiles?: (
+    query: string,
+    signal: AbortSignal,
+  ) => Promise<string[]>;
+  prepareFileReference?: (
+    tag: WebShellComposerTag,
+  ) => Promise<WebShellComposerTag>;
+  onFileReferenceDiscarded?: () => void;
+  scopeKey?: string;
+  filesOnly?: boolean;
   loadExtensionsStatus?: LoadExtensionsStatusFn;
   listDirectory?: ListDirectoryFn;
   loadMcpStatus?: LoadMcpStatusFn;
@@ -351,7 +361,7 @@ export function createComposerTagForItem(
       id: `file:${serialized}`,
       kind: 'file',
       value: item.description ?? item.label,
-      ...(item.fileKind ? { metadata: { fileKind: item.fileKind } } : {}),
+      metadata: { fileKind: item.fileKind, filePath: item.targetPath },
       serialized,
     };
   }
@@ -376,6 +386,19 @@ export function createFileProvider(
       const actions = getActions();
       const currentDir = normalizeDirectoryPath(getCurrentDir());
       const listDirectory = actions?.listDirectory;
+      if (query && !query.endsWith('/') && actions?.searchWorkspaceFiles) {
+        const files = await actions.searchWorkspaceFiles(query, signal);
+        return files.map(
+          (file): AtMentionItem => ({
+            id: `file:${file}`,
+            label: safeDisplayText(file),
+            targetPath: file,
+            insertText: fileReferenceInsertText(file),
+            kind: 'insert',
+            fileKind: 'file',
+          }),
+        );
+      }
       if (
         listDirectory &&
         (!query ||
@@ -410,7 +433,7 @@ export function createFileProvider(
           const uploadItem = entryQuery ? null : getUploadItem();
           return [
             ...(uploadItem ? [uploadItem] : []),
-            ...(entryQuery ? [] : [currentDirectoryItem]),
+            ...(entryQuery || actions?.filesOnly ? [] : [currentDirectoryItem]),
             ...entries.slice(0, ITEM_LIMIT).map((entry): AtMentionItem => {
               const path = joinWorkspacePath(dirPath, entry.name);
               const safeName = safeDisplayText(entry.name);
@@ -426,6 +449,7 @@ export function createFileProvider(
               }
               return {
                 id: `file:${path}`,
+                targetPath: path,
                 label: safeName,
                 description: safePath,
                 insertText: fileReferenceInsertText(path),
@@ -579,7 +603,7 @@ export function createMcpResourcesProvider(
               server.resourceCount === undefined
                 ? undefined
                 : formatResourceCount(server.resourceCount);
-            if (server.resourceCount === 0) {
+            if (server.resourceCount === 0 || !getActions()?.loadMcpResources) {
               return {
                 id: `mcp-server-ref:${server.name}`,
                 label: safeDisplayText(server.name),

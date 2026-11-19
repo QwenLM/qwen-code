@@ -14,8 +14,12 @@
 import type {
   ApprovalMode,
   DaemonBridgeTelemetryMetrics,
+  SubSessionWorkspaceBinding,
 } from '@qwen-code/qwen-code-core';
-import { MAX_SUB_SESSION_PROMPT_CHARS } from '@qwen-code/qwen-code-core/subSessionConstants';
+import {
+  MAX_SUB_SESSION_PROMPT_CHARS,
+  MAX_SUB_SESSION_WORKSPACE_CHARS,
+} from '@qwen-code/qwen-code-core/subSessionConstants';
 import type { SessionExecutionEngine } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
 import type { ChannelFactory } from './channel.js';
 import type { PermissionPolicy } from './permission.js';
@@ -28,6 +32,7 @@ import type {
   BridgeSpawnRequest,
   BridgeRestoreSessionRequest,
 } from './bridgeTypes.js';
+import type { WorkflowAncestorTrustHandler } from './workflow-ancestor-trust.js';
 
 export type BridgeExecutionEngine = SessionExecutionEngine;
 // The ACP host writes this receipt and the Bridge checks it: one definition.
@@ -350,6 +355,12 @@ export interface BridgeOptions {
    * `ringSize × average-event-size` held until the session ends.
    */
   eventRingSize?: number;
+  /**
+   * Per-session retained SSE ring byte cap, including the latest full commands
+   * snapshot. Defaults to 8 MiB. Must be a positive safe integer up to 256 MiB;
+   * there is no unlimited sentinel.
+   */
+  eventRingMaxBytes?: number;
   /**
    * Per-session cap, in serialized bytes, for the in-memory compacted replay
    * snapshot returned by `session/load` late attach. This bounds daemon heap
@@ -700,12 +711,18 @@ export interface BridgeOptions {
    * reports itself unavailable (daemon-only).
    */
   onCreateSubSession?: CreateSubSessionHandler;
+  /** Resolve the destination shown in the caller's one-time approval. */
+  onResolveSubSessionWorkspace?: ResolveSubSessionWorkspaceHandler;
   /** Handles a trusted `cron_create` request to bind a durable task to the
    * caller's currently executing daemon session. */
   onCreateCurrentSessionScheduledTask?: CurrentSessionScheduledTaskCreateHandler;
   /** Handles one child-initiated Channel delivery attempt. The bridge
    * authenticates the session and publishes the sanitized result event. */
   onChannelDelivery?: ChannelDeliveryHandler;
+  /** Resolves ancestor workflow trust from the owning daemon runtime. */
+  onWorkflowAncestorTrust?: WorkflowAncestorTrustHandler;
+  /** Live owner authorization, read immediately before forwarding a prompt. */
+  isWorkflowModeWriteAllowed?: (sessionId: string) => boolean;
 }
 
 /**
@@ -726,9 +743,9 @@ export type ClientMcpMessageSender = (
   | ((payload: unknown, context?: ClientMcpMessageContext) => Promise<unknown>)
   | undefined;
 
-/** Ceiling on a sub-session prompt arriving over `extMethod`. The child is a
+/** Ceilings on sub-session arguments arriving over `extMethod`. The child is a
  * separate process, so this trust boundary keeps its own enforcement. */
-export { MAX_SUB_SESSION_PROMPT_CHARS };
+export { MAX_SUB_SESSION_PROMPT_CHARS, MAX_SUB_SESSION_WORKSPACE_CHARS };
 
 /** Ceiling on the sub-session display name. It is a label — the launcher
  * truncates it to 60 chars for display anyway. */
@@ -751,6 +768,17 @@ export interface CreateSubSessionInfo {
   groupId?: string;
   /** Optional display name for the sub-session in the session list. */
   name?: string;
+  /**
+   * Registered workspace (absolute path or id) to run the sub-session in.
+   * Absent means the caller's workspace. Never set for scheduled-task runs.
+   */
+  workspace?: string;
+  workspaceGeneration?: string;
+  /**
+   * A sub-session the caller created earlier, in `workspace`, to send the
+   * prompt to instead of creating one. Never set for scheduled-task runs.
+   */
+  sessionId?: string;
   /** Optional immutable creator attribution for the fresh session. */
   sourceType?: string;
   /** Optional source-specific identifier paired with `sourceType`. */
@@ -768,12 +796,17 @@ export interface CreateSubSessionInfo {
  * (the sub-session's first-turn output) is present only for `'first-turn'`. */
 export interface CreateSubSessionResult {
   sessionId: string;
+  /** Canonical destination for a cross-workspace session link. */
+  workspaceCwd?: string;
   result?: string;
   stopReason?: string;
   /** Whether the parent lineage was durably written to the sub-session's
    * transcript. `false` = live-only (gone from the persisted list after a
    * daemon restart). Absent when the spawn carried no parent. */
   parentSessionPersisted?: boolean;
+  /** The task id a `sent` completion will carry, when it is not `sessionId`:
+   * one session can report several completions to the same caller. */
+  taskId?: string;
 }
 
 /** Daemon-host callback that spawns a sub-session and (for `'first-turn'`) waits
@@ -782,18 +815,28 @@ export type CreateSubSessionHandler = (
   info: CreateSubSessionInfo,
 ) => Promise<CreateSubSessionResult>;
 
+export type ResolveSubSessionWorkspaceHandler = (
+  callerSessionId: string,
+  workspace: string,
+) => SubSessionWorkspaceBinding;
+
 export interface CurrentSessionScheduledTaskCreateInfo {
   callerSessionId: string;
   promptId: string;
   cron: string;
   prompt: string;
   recurring: boolean;
+  /** Shell command run at each fire outside the model (a scheduled-task gate). */
+  gate?: string;
   assertCallerPromptActive: () => void;
 }
 
 export interface CurrentSessionScheduledTaskCreateResult {
   id: string;
   cron: string;
+  /** The gate stored with the task, or null for none: echoed so the child can
+   * tell a daemon that dropped a requested gate. */
+  gate?: string | null;
 }
 
 export type CurrentSessionScheduledTaskCreateHandler = (

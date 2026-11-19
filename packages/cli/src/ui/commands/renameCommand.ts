@@ -193,6 +193,7 @@ export const renameCommand: SlashCommand = {
           config,
           context.abortSignal ?? new AbortController().signal,
           titleDisplayTexts,
+          config.getChatRecordingService()?.getModPromptKeysForTitle?.(),
         );
       } finally {
         clearInterval(timer);

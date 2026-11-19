@@ -9,6 +9,7 @@ import path from 'node:path';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames } from './tool-names.js';
+import { ToolErrorType } from './tool-error.js';
 import {
   resolveAndValidatePath,
   formatDisplayPath,
@@ -441,6 +442,14 @@ class GrepToolInvocation extends BaseToolInvocation<
         llmContent: llmContent.trim(),
         returnDisplay: displayMessage,
         resultFilePaths,
+        // This render is already bounded, so the scheduler must not measure
+        // its own body and report it as the raw size. The pre-reduction size
+        // existed only inside the append loop that skipped it, and rebuilding
+        // the full render to count it is the allocation the limit avoids;
+        // declare it unknown instead (#13652 R2-5).
+        ...(truncatedByLineLimit || truncatedByCharLimit
+          ? { rawOutputSize: null, truncatedByProducer: true }
+          : {}),
       };
     } catch (error) {
       debugLogger.error('Error during ripgrep search operation:', error);
@@ -448,6 +457,10 @@ class GrepToolInvocation extends BaseToolInvocation<
       return {
         llmContent: `Error during grep search operation: ${errorMessage}`,
         returnDisplay: `Error: ${errorMessage}`,
+        error: {
+          message: errorMessage,
+          type: ToolErrorType.GREP_EXECUTION_ERROR,
+        },
       };
     }
   }
@@ -738,13 +751,6 @@ export class RipGrepTool extends BaseDeclarativeTool<
       (!Number.isInteger(params.limit) || params.limit <= 0)
     ) {
       return 'limit must be a positive integer';
-    }
-
-    // Validate pattern is a valid regex
-    try {
-      new RegExp(params.pattern);
-    } catch (error) {
-      return `Invalid regular expression pattern: ${params.pattern}. Error: ${getErrorMessage(error)}`;
     }
 
     // Only validate path if one is provided

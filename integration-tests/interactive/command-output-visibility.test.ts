@@ -20,6 +20,13 @@ import {
   sendAboutUntilRendered,
 } from './interactive-session.js';
 
+// Per-case ceiling with slack over the self-hosted docker leg's worst case:
+// the 180s ready-prompt budget plus the ~110s /about window (its 90s deadline
+// is checked only after a trailing 20s waitForScreen) sums to 290s of the
+// 300s default testTimeout, so a boot stall would otherwise surface as a bare
+// vitest timeout instead of the wait that overran.
+const CASE_OPTS = { timeout: 360_000 };
+
 describe('Command output visibility', () => {
   let rig: TestRig;
   let server: FakeOpenAIServer | undefined;
@@ -32,15 +39,18 @@ describe('Command output visibility', () => {
   });
 
   afterEach(async () => {
-    await session?.close();
-    session = undefined;
-    await server?.close();
-    server = undefined;
-    restoreNoProxy();
-    await rig.cleanup();
+    try {
+      await session?.close();
+    } finally {
+      session = undefined;
+      await server?.close();
+      server = undefined;
+      restoreNoProxy();
+      await rig.cleanup();
+    }
   });
 
-  it('puts a slash command transcript row on screen', async () => {
+  it('puts a slash command transcript row on screen', CASE_OPTS, async () => {
     await rig.setup('command-output-visibility', {
       settings: {
         memory: {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ManagedAgentSessionEvent } from './managed-agent-provider';
 import {
+  createManagedMessageProjector,
   managedEventsToMessages,
   mergeManagedEvents,
 } from './managed-session-messages';
@@ -9,13 +10,133 @@ import { result } from './managed-tool-result.test-fixtures';
 function event(
   id: number,
   type: ManagedAgentSessionEvent['type'],
-  data?: unknown,
+  data?: Record<string, unknown>,
   turnId = 'p1',
 ): ManagedAgentSessionEvent {
-  return { id, at: id * 100, type, sessionId: 's1', turnId, data };
+  return {
+    id,
+    at: id * 100,
+    type,
+    sessionId: 's1',
+    turnId,
+    data: type.startsWith('tool_') ? { itemId: 'item-1', ...data } : data,
+  };
 }
 
 describe('Managed transcript projection', () => {
+  it.each([
+    ['A', 'B', 'AB'],
+    ['B', 'A', 'AB'],
+    ['z', 'Z', 'Zz'],
+    ['\u{1f600}', '\ue000', '\ue000\u{1f600}'],
+  ])(
+    'keeps distinct Item identities in SQL order for %s then %s',
+    (left, right, expected) => {
+      const first = {
+        ...event(10, 'assistant_delta', { itemId: left, text: left }),
+        assembledFromItem: true,
+      };
+      const second = {
+        ...event(10, 'assistant_delta', { itemId: right, text: right }),
+        assembledFromItem: true,
+      };
+      const merged = mergeManagedEvents([first], [second], true);
+      expect(merged).toHaveLength(2);
+      expect(managedEventsToMessages(merged)).toEqual([
+        expect.objectContaining({ role: 'assistant', content: expected }),
+      ]);
+      expect(mergeManagedEvents([first], [second])).toEqual([second]);
+    },
+  );
+  it('keeps distinct Items separate even when their tool call id matches', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'tool_started', {
+          itemId: 'first',
+          toolCallId: 'shared',
+          toolName: 'read_file',
+        }),
+        event(2, 'tool_started', {
+          itemId: 'second',
+          toolCallId: 'shared',
+          toolName: 'read_file',
+        }),
+        event(3, 'tool_completed', { itemId: 'second', toolCallId: 'shared' }),
+        event(4, 'tool_completed', { itemId: 'first', toolCallId: 'shared' }),
+      ],
+      '[truncated]',
+    );
+    const tools = messages.flatMap((message) =>
+      message.role === 'tool_group' ? message.tools : [],
+    );
+    expect(tools).toMatchObject([
+      {
+        callId: 'p1:first',
+        toolCallId: 'shared',
+        status: 'completed',
+        startTime: 100,
+        endTime: 400,
+      },
+      {
+        callId: 'p1:second',
+        toolCallId: 'shared',
+        status: 'completed',
+        startTime: 200,
+        endTime: 300,
+      },
+    ]);
+  });
+
+  it('retains completed Turn duration when replayed text parts share their Item creation time', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'accepted', { prompt: [{ text: 'check' }] }),
+        event(2, 'assistant_delta', { text: 'Starting' }),
+        event(3, 'tool_started', {
+          toolCallId: 'call',
+          toolName: 'run_shell_command',
+        }),
+        event(4, 'tool_completed', { toolCallId: 'call' }),
+        { ...event(5, 'assistant_delta', { text: 'Finished' }), at: 200 },
+        event(6, 'completed', {}),
+      ],
+      '[truncated]',
+    );
+    expect(messages[0].timestamp).toBe(100);
+    expect(messages.at(-1)).toMatchObject({
+      role: 'assistant',
+      content: 'Finished',
+      timestamp: 600,
+      isStreaming: false,
+    });
+  });
+
+  it('keeps the original tool clock through repeated progress and separates commentary', () => {
+    const messages = managedEventsToMessages(
+      [
+        event(1, 'assistant_delta', { text: 'Starting' }),
+        event(2, 'tool_started', {
+          toolCallId: 'call',
+          toolName: 'run_shell_command',
+        }),
+        event(3, 'tool_started', {
+          toolCallId: 'call',
+          toolName: 'run_shell_command',
+        }),
+        event(4, 'tool_completed', { toolCallId: 'call' }),
+        event(5, 'assistant_delta', { text: 'Finished' }),
+      ],
+      '[truncated]',
+    );
+    expect(messages.map((message) => message.role)).toEqual([
+      'assistant',
+      'tool_group',
+      'assistant',
+    ]);
+    expect(messages[1]).toMatchObject({
+      tools: [{ startTime: 200, endTime: 400, status: 'completed' }],
+    });
+  });
   it('preserves existing output when a result has no preview or a shorter excerpt', () => {
     const source = { ...result, session_id: 's1', turn_id: 'p1' };
     const output = 'complete output';
@@ -189,6 +310,163 @@ describe('Managed transcript projection', () => {
     expect(
       merged.slice(0, 3).every((item, index) => item === base[index]),
     ).toBe(true);
+  });
+
+  it('folds only newly appended event payloads on a proven chain', () => {
+    let priorReads = 0;
+    const prior = {
+      ...event(1, 'assistant_delta', { text: 'A' }),
+      get data() {
+        priorReads += 1;
+        return { text: 'A' };
+      },
+    };
+    const initial = mergeManagedEvents([], [prior]);
+    const projector = createManagedMessageProjector();
+    expect(projector(initial, '[truncated]')).toMatchObject([
+      { role: 'assistant', content: 'A' },
+    ]);
+    priorReads = 0;
+
+    const appended = mergeManagedEvents(initial, [
+      event(2, 'assistant_delta', { text: 'B' }),
+    ]);
+    expect(projector(appended, '[truncated]')).toMatchObject([
+      { role: 'assistant', content: 'AB' },
+    ]);
+    expect(priorReads).toBe(0);
+  });
+
+  it('rebuilds when a later raw array carries no epoch token', () => {
+    // use-managed-session stores a full transcript snapshot's events array
+    // directly (it never passed through mergeManagedEvents), so two
+    // consecutive reads are two unregistered arrays of equal length. The
+    // projector must treat the second as unproven continuity and rebuild
+    // rather than reuse the first projection.
+    const firstRead = [event(1, 'assistant_delta', { text: 'A' })];
+    const secondRead = [event(1, 'assistant_delta', { text: 'B' })];
+    const projector = createManagedMessageProjector();
+    expect(projector(firstRead, '[truncated]')).toMatchObject([
+      { role: 'assistant', content: 'A' },
+    ]);
+    expect(projector(secondRead, '[truncated]')).toMatchObject([
+      { role: 'assistant', content: 'B' },
+    ]);
+  });
+
+  it('rebuilds a sibling append branch instead of reusing the first branch', () => {
+    const root = mergeManagedEvents(
+      [],
+      [event(1, 'accepted', { prompt: [{ text: 'prompt' }] })],
+    );
+    const firstBranch = mergeManagedEvents(root, [
+      event(2, 'assistant_delta', { text: 'first branch' }),
+    ]);
+    const secondBranch = mergeManagedEvents(root, [
+      event(3, 'assistant_delta', { text: 'second branch' }),
+    ]);
+    expect(firstBranch).toHaveLength(secondBranch.length);
+
+    const projector = createManagedMessageProjector();
+    expect(projector(firstBranch, '[truncated]')).toMatchObject([
+      { role: 'user', content: 'prompt' },
+      { role: 'assistant', content: 'first branch' },
+    ]);
+    const second = projector(secondBranch, '[truncated]');
+    expect(second).toEqual(
+      managedEventsToMessages(secondBranch, '[truncated]'),
+    );
+    expect(second).toMatchObject([
+      { role: 'user', content: 'prompt' },
+      { role: 'assistant', content: 'second branch' },
+    ]);
+  });
+
+  it('does not mutate an earlier assistant or tool snapshot after append', () => {
+    const projector = createManagedMessageProjector();
+    let events = mergeManagedEvents(
+      [],
+      [
+        event(1, 'tool_requested', {
+          toolCallId: 'call',
+          toolName: 'run_shell_command',
+        }),
+      ],
+    );
+    const before = projector(events, '[truncated]');
+    if (before[0]?.role !== 'tool_group')
+      throw new Error('expected a tool group snapshot');
+    const beforeTool = before[0].tools[0]!;
+    expect(beforeTool).toMatchObject({ status: 'pending' });
+
+    events = mergeManagedEvents(events, [
+      event(2, 'tool_started', {
+        toolCallId: 'call',
+        toolName: 'run_shell_command',
+      }),
+    ]);
+    const after = projector(events, '[truncated]');
+    if (after[0]?.role !== 'tool_group')
+      throw new Error('expected a tool group snapshot');
+    const afterTool = after[0].tools[0]!;
+    expect(afterTool).toMatchObject({ status: 'in_progress', startTime: 200 });
+    expect(before[0]).not.toBe(after[0]);
+    expect(beforeTool).not.toBe(afterTool);
+    expect(beforeTool).toMatchObject({ status: 'pending' });
+  });
+
+  it('rebuilds after replacement, overlap, prepend, or label changes', () => {
+    const sharedLast = event(2, 'completed');
+    const initial = mergeManagedEvents(
+      [],
+      [event(1, 'assistant_delta', { text: 'old' }), sharedLast],
+    );
+    const projector = createManagedMessageProjector();
+    projector(initial, '[truncated]');
+
+    // The first and last IDs remain the same and the last event object is
+    // reused, but the raw snapshot is a new chain before its tail arrives.
+    const snapshot = [event(1, 'assistant_delta', { text: 'new' }), sharedLast];
+    const appended = mergeManagedEvents(snapshot, [
+      event(3, 'assistant_delta', { text: 'tail' }),
+    ]);
+    expect(projector(appended, '[truncated]')).toEqual(
+      managedEventsToMessages(appended, '[truncated]'),
+    );
+
+    const overwritten = mergeManagedEvents(appended, [
+      event(1, 'assistant_delta', { text: 'replacement' }),
+    ]);
+    expect(projector(overwritten, '[truncated]')).toEqual(
+      managedEventsToMessages(overwritten, '[truncated]'),
+    );
+
+    const prepended = mergeManagedEvents(overwritten, [
+      event(0, 'accepted', { prompt: [{ text: 'Earlier' }] }, 'p0'),
+    ]);
+    expect(projector(prepended, '[truncated]')).toEqual(
+      managedEventsToMessages(prepended, '[truncated]'),
+    );
+
+    const labelEvents = mergeManagedEvents(
+      [],
+      [
+        event(1, 'tool_started', {
+          toolCallId: 'call',
+          toolName: 'run_shell_command',
+          input: 'partial input',
+          truncated: true,
+        }),
+      ],
+    );
+    projector(labelEvents, 'old label');
+    const relabeled = projector(labelEvents, 'new label');
+    expect(relabeled).toEqual(
+      managedEventsToMessages(labelEvents, 'new label'),
+    );
+    expect(relabeled[0]).toMatchObject({
+      tools: [{ args: { input: 'partial input\nnew label' } }],
+    });
   });
 
   it('still reorders and deduplicates an overlapping or disordered tail', () => {
@@ -748,10 +1026,7 @@ it.each([undefined, null, '', 1, ['item-1'], {}])(
       ],
       '[truncated]',
     );
-    expect(messages[0]).toMatchObject({ tools: [{ status: 'pending' }] });
-    expect(
-      messages[0].role === 'tool_group' && messages[0].tools[0].toolResult,
-    ).toBeUndefined();
+    expect(messages).toEqual([]);
   },
 );
 

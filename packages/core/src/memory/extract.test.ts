@@ -132,6 +132,149 @@ describe('auto-memory extraction', () => {
     expect(cursor.processedOffset).toBe(2);
   });
 
+  it('forwards skipped context while keeping the cursor in raw-history offsets', async () => {
+    const skippedHistory = [
+      { role: 'user', parts: [{ text: 'Prefer Chinese reviews.' }] },
+    ];
+    const history = Array.from({ length: 60 }, () => ({
+      role: 'user',
+      parts: [{ text: 'next' }],
+    }));
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history,
+      skippedHistory,
+    });
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledWith(
+      mockConfig,
+      projectRoot,
+      skippedHistory,
+      undefined,
+    );
+    const cursor = JSON.parse(
+      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+    ) as { processedOffset: number };
+    expect(cursor.processedOffset).toBe(60);
+  });
+
+  // Regression (#13004): an image-only unprocessed tail must not let the
+  // no-new-user-message early return swallow a parked supplement — the turns
+  // it holds are owed to the extractor, so the fork still runs over them and
+  // the cursor only advances after a real run.
+  it('forks over an image-only unprocessed tail when skippedHistory is parked', async () => {
+    await fs.writeFile(
+      getAutoMemoryExtractCursorPath(projectRoot),
+      JSON.stringify({
+        sessionId: 'session-1',
+        processedOffset: 3,
+        updatedAt: new Date().toISOString(),
+      }),
+    );
+    const skippedHistory = [
+      { role: 'user', parts: [{ text: 'skipped-but-real-content' }] },
+    ];
+    const history = [
+      { role: 'user', parts: [{ text: 'a' }] },
+      { role: 'user', parts: [{ text: 'b' }] },
+      { role: 'user', parts: [{ text: 'c' }] },
+      {
+        role: 'user',
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'AAA' } }],
+      },
+    ];
+    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      hasToolActivity: true,
+      systemMessage: undefined,
+    });
+
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history,
+      skippedHistory,
+    });
+
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledWith(
+      mockConfig,
+      projectRoot,
+      skippedHistory,
+      undefined,
+    );
+    const cursor = JSON.parse(
+      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+    ) as { processedOffset: number };
+    expect(cursor.processedOffset).toBe(4);
+  });
+
+  // Regression (#13004 R18-2): a close-time flush replays a parked snapshot
+  // whose history a later non-forking run already advanced the cursor past.
+  // The replay still owes its turns to the extractor, but its write must not
+  // move the project cursor backwards — the next run reads a rewound offset as
+  // unprocessed history and re-scans everything after it. A genuine
+  // post-compaction run keeps the downward move.
+  it('never rewinds the persisted cursor on a flush replay', async () => {
+    const cursorPath = getAutoMemoryExtractCursorPath(projectRoot);
+    const seedCursor = () =>
+      fs.writeFile(
+        cursorPath,
+        JSON.stringify({
+          sessionId: 'session-1',
+          processedOffset: 6,
+          updatedAt: new Date().toISOString(),
+        }),
+      );
+    const readOffset = async () =>
+      (
+        JSON.parse(await fs.readFile(cursorPath, 'utf-8')) as {
+          processedOffset: number;
+        }
+      ).processedOffset;
+    // No genuine progress, so the write falls back to startOffset — which the
+    // shrink clamp reduced to 0 because the cursor is ahead of this history.
+    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      hasToolActivity: false,
+      systemMessage: undefined,
+    });
+    const parked = Array.from({ length: 4 }, (_, i) => ({
+      role: 'user',
+      parts: [{ text: `parked ${i}` }],
+    }));
+    const skippedHistory = [{ role: 'user', parts: [{ text: 'owed' }] }];
+
+    await seedCursor();
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: parked,
+      skippedHistory,
+      flushReplay: true,
+    });
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalled();
+    expect(await readOffset()).toBe(6);
+
+    // Control: the same run without the replay marker still moves the cursor
+    // down, so the shrink clamp keeps serving a real post-compaction history.
+    await seedCursor();
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: parked,
+      skippedHistory,
+    });
+    expect(await readOffset()).toBe(0);
+  });
+
   it('skips a session mismatch without advancing the cursor', async () => {
     vi.mocked(getCacheSafeParamsSessionId)
       .mockReturnValueOnce('session-1')

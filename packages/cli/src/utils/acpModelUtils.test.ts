@@ -19,6 +19,105 @@ import {
 } from './acpModelUtils.js';
 
 describe('acpModelUtils', () => {
+  it('keeps subscription models in gateway order without changing routes or input', () => {
+    const models = [
+      {
+        id: 'runtime',
+        label: 'Runtime',
+        authType: AuthType.USE_OPENAI,
+        isRuntimeModel: true,
+        runtimeSnapshotId: '$runtime|openai|runtime',
+      },
+      { id: 'api-first', label: 'API first', authType: AuthType.USE_ANTHROPIC },
+      {
+        id: 'coder-model',
+        label: 'Legacy OAuth',
+        authType: AuthType.QWEN_OAUTH,
+      },
+      {
+        id: 'qwen4',
+        label: 'Qwen4',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+      },
+      {
+        id: 'qwen3.8-flash',
+        label: 'Flash',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+      },
+      { id: 'qwen3.8-max', label: 'Max', authType: AuthType.QWEN_SUBSCRIPTION },
+      {
+        id: 'future-second',
+        label: 'Future second',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+      },
+      { id: 'qwen3.8-max', label: 'API Max', authType: AuthType.USE_OPENAI },
+    ];
+    const original = [...models];
+    const options = buildAcpModelOptions(models);
+    expect(options.map(({ model }) => model.label)).toEqual([
+      'Qwen4',
+      'Flash',
+      'Max',
+      'Future second',
+      'Legacy OAuth',
+      'Runtime',
+      'API first',
+      'API Max',
+    ]);
+    expect(models).toEqual(original);
+    expect(
+      getCurrentAcpModelId(
+        options,
+        '$runtime|openai|runtime',
+        AuthType.USE_OPENAI,
+      ),
+    ).toBe('$runtime|openai|runtime(openai)');
+    expect(
+      resolveAcpModelOption('qwen3.8-max(qwen-subscription)', models),
+    ).toMatchObject({
+      modelId: 'qwen3.8-max',
+      authType: AuthType.QWEN_SUBSCRIPTION,
+    });
+    expect(resolveAcpModelOption('qwen3.8-max(openai)', models)).toMatchObject({
+      modelId: 'qwen3.8-max',
+      authType: AuthType.USE_OPENAI,
+    });
+  });
+
+  it('preserves ordering without an authorized membership catalog', () => {
+    const models = [
+      { id: 'api', label: 'API', authType: AuthType.USE_OPENAI },
+      {
+        id: 'qwen3.8-max',
+        label: 'Runtime Max',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        isRuntimeModel: true,
+        runtimeSnapshotId: '$runtime|qwen-subscription|max',
+      },
+      {
+        id: 'coder-model',
+        label: 'Legacy OAuth',
+        authType: AuthType.QWEN_OAUTH,
+      },
+    ];
+    expect(buildAcpModelOptions(models).map(({ model }) => model)).toEqual(
+      models,
+    );
+  });
+
+  it.each(['qwen3.8-max', 'qwen3.8-flash', 'future-model'])(
+    'does not invent missing membership models when only %s is available',
+    (id) => {
+      const models = [
+        { id: 'api', label: 'API', authType: AuthType.USE_OPENAI },
+        { id, label: 'Membership', authType: AuthType.QWEN_SUBSCRIPTION },
+      ];
+      expect(buildAcpModelOptions(models).map(({ model }) => model.id)).toEqual(
+        [id, 'api'],
+      );
+    },
+  );
+
   it('resolves fast-model ACP rows without exposing or losing endpoint identity', () => {
     const privateUrl = 'https://user:secret@two.example/v1?token=value';
     const models = [

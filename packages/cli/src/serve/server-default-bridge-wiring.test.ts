@@ -22,6 +22,7 @@ import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRes
 import { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
 import { createChildHeapPolicy } from '@qwen-code/acp-bridge/childHeapPolicy';
 import { resolveDaemonMemoryBudget } from '@qwen-code/acp-bridge/daemonMemoryBudget';
+import type { StartScheduledTaskKeepaliveOptions } from './scheduled-task-keepalive.js';
 
 const WS_BOUND = path.resolve('/work/bound');
 
@@ -55,17 +56,14 @@ function makeBridge(
 // The ecs-qwen pool runs several jobs at once; under that contention these
 // tests pass alone in milliseconds but blow the 15s ceiling without any
 // real hang. Give that pool the raised budget its other suites already use.
-const timeoutMs = isSlowTestHost() ? 60_000 : 15_000;
+const timeoutMs = isSlowTestHost() ? 60_000 : 30_000;
 vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
 describe('createServeApp default bridge wiring', () => {
-  // Every test below resets the module registry and re-imports the full
-  // serve module graph; under heavy parallel CI load that can exceed the
-  // default timeout without any real hang.
-  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
-
   afterEach(() => {
     vi.doUnmock('./acp-session-bridge.js');
+    vi.doUnmock('./scheduled-task-keepalive.js');
+    vi.doUnmock('./server/session-restore.js');
     vi.resetModules();
     vi.restoreAllMocks();
   });
@@ -292,6 +290,7 @@ describe('createServeApp default bridge wiring', () => {
       maxSessions: 7,
       maxPendingPromptsPerSession: 8,
       eventRingSize: 1234,
+      eventRingMaxBytes: 1_234_567,
       compactedReplayMaxBytes: 2_345_678,
       maxJournalEvents: 3456,
       maxJournalBytes: 4_567_890,
@@ -303,7 +302,9 @@ describe('createServeApp default bridge wiring', () => {
       ...enabled,
       experimentalPairedEngines: true,
     });
+    expect(plain.eventRingMaxBytes).toBeUndefined();
     expect(plainEnabled).toMatchObject({
+      eventRingMaxBytes: 1_234_567,
       sessionShellCommandEnabled: true,
       initializeTimeoutMs: 12_345,
       permissionResponseTimeoutMs: 56_789,
@@ -505,8 +506,23 @@ describe('createServeApp default bridge wiring', () => {
     // defaults — so boot rehydrate and keepalive revive would preempt a
     // longer in-flight restore while the non-abortable bridge restore keeps
     // running.
-    let rehydrateOpts: { loadTimeoutMs?: number } | undefined;
-    let keepaliveOpts: { reviveTimeoutMs?: number } | undefined;
+    type RestoreSession = StartScheduledTaskKeepaliveOptions['restoreSession'];
+    let rehydrateOpts:
+      | { loadTimeoutMs?: number; restoreSession?: RestoreSession }
+      | undefined;
+    let keepaliveOpts:
+      | { reviveTimeoutMs?: number; restoreSession?: RestoreSession }
+      | undefined;
+    const restoredSession = { sessionId: 'task-session' };
+    const restoreSessionCore = vi
+      .fn()
+      .mockResolvedValue({ kind: 'restored', session: restoredSession });
+    vi.doMock('./server/session-restore.js', async () => ({
+      ...(await vi.importActual<typeof import('./server/session-restore.js')>(
+        './server/session-restore.js',
+      )),
+      restoreSessionCore,
+    }));
     vi.doMock('./scheduled-task-keepalive.js', async () => {
       const actual = await vi.importActual<
         typeof import('./scheduled-task-keepalive.js')
@@ -514,13 +530,13 @@ describe('createServeApp default bridge wiring', () => {
       return {
         ...actual,
         rehydrateScheduledTaskSessions: vi.fn(
-          async (opts: { loadTimeoutMs?: number }) => {
+          async (opts: NonNullable<typeof rehydrateOpts>) => {
             rehydrateOpts = opts;
             return { attempted: 0, restored: 0, failed: 0 };
           },
         ),
         startScheduledTaskKeepalive: vi.fn(
-          (opts: { reviveTimeoutMs?: number }) => {
+          (opts: NonNullable<typeof keepaliveOpts>) => {
             keepaliveOpts = opts;
             return { stop: () => {} };
           },
@@ -538,7 +554,7 @@ describe('createServeApp default bridge wiring', () => {
     });
 
     const { createServeApp } = await import('./server.js');
-    createServeApp(
+    const app = createServeApp(
       {
         port: 0,
         hostname: '127.0.0.1',
@@ -555,6 +571,40 @@ describe('createServeApp default bridge wiring', () => {
 
     expect(rehydrateOpts?.loadTimeoutMs).toBe(expected);
     expect(keepaliveOpts?.reviveTimeoutMs).toBe(expected);
-    vi.doUnmock('./scheduled-task-keepalive.js');
+    const registry = (app.locals as { workspaceRegistry: WorkspaceRegistry })
+      .workspaceRegistry;
+    const runtime = registry.primary;
+    for (const callback of [
+      rehydrateOpts?.restoreSession,
+      keepaliveOpts?.restoreSession,
+    ]) {
+      expect(callback).toBeTypeOf('function');
+      await expect(
+        callback!({
+          sessionId: 'task-session',
+          workspaceCwd: WS_BOUND,
+          sourceType: 'scheduled_task',
+          sourceId: 'task-1',
+        }),
+      ).resolves.toBe(restoredSession);
+      expect(restoreSessionCore).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          action: 'resume',
+          runtime,
+          workspaceCwd: WS_BOUND,
+          sessionId: 'task-session',
+          restoreSource: { sourceType: 'scheduled_task', sourceId: 'task-1' },
+          assertRuntimeGenerationOpen: expect.any(Function),
+        }),
+      );
+    }
+    registry.primaryEntry.current!.guard.close();
+    await expect(
+      keepaliveOpts!.restoreSession!({
+        sessionId: 'task-session',
+        workspaceCwd: WS_BOUND,
+      }),
+    ).rejects.toMatchObject({ code: 'workspace_generation_closed' });
+    expect(restoreSessionCore).toHaveBeenCalledTimes(2);
   });
 });

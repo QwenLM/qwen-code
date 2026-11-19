@@ -1,17 +1,21 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
+  QQ_FILE_MAX_BYTES,
   QQ_IMAGE_MAX_BYTES,
   QQ_VIDEO_MAX_BYTES,
+  QQ_VOICE_MAX_BYTES,
   classifyQQAttachment,
   downloadQQAttachment,
 } from './media.js';
 
 const ALLOWED_URL = 'https://multimedia.nt.qq.com.cn/download?fileid=abc';
+const VOICE_WAV_URL = 'https://qqbot.ugcimg.cn/download?fileid=voice-wav';
 
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const JPEG_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
 const GIF_BYTES = Buffer.from([0x47, 0x49, 0x46, 0x38]);
 const MP4_BYTES = Buffer.from([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]);
+const WAV_BYTES = Buffer.from('RIFF....WAVEfmt ');
 
 function stubFetch(impl: () => Response | Promise<Response>) {
   const fetchMock = vi.fn(impl);
@@ -29,25 +33,30 @@ describe('classifyQQAttachment', () => {
     ['image/png', 'image'],
     ['image/gif', 'image'],
     ['video/mp4', 'video'],
+    ['file', 'file'],
+    ['voice', 'voice'],
   ])('classifies %s as %s', (contentType, expected) => {
     expect(classifyQQAttachment(contentType)).toBe(expected);
   });
 
-  it.each(['voice', 'file', undefined])('ignores %s', (contentType) => {
-    expect(classifyQQAttachment(contentType)).toBeUndefined();
-  });
+  it.each(['application/octet-stream', undefined])(
+    'ignores %s',
+    (contentType) => {
+      expect(classifyQQAttachment(contentType)).toBeUndefined();
+    },
+  );
 });
 
 describe('downloadQQAttachment', () => {
-  it('rejects a non-https URL before fetching', async () => {
+  it.each([
+    'http://multimedia.nt.qq.com.cn/download',
+    'http://qqbot.ugcimg.cn/download?fileid=voice-wav',
+  ])('rejects the non-https URL %s before fetching', async (url) => {
     const fetchMock = stubFetch(() => new Response(PNG_BYTES));
 
-    await expect(
-      downloadQQAttachment(
-        'http://multimedia.nt.qq.com.cn/download',
-        QQ_IMAGE_MAX_BYTES,
-      ),
-    ).rejects.toThrow('must use https');
+    await expect(downloadQQAttachment(url, QQ_IMAGE_MAX_BYTES)).rejects.toThrow(
+      'must use https',
+    );
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -57,6 +66,12 @@ describe('downloadQQAttachment', () => {
     'https://qq.com.evil.example/image.png',
     'https://multimedia.nt.qq.com.cn@evil.example/image.png',
     'https://multimedia.nt.qq.com.cn./image.png',
+    'https://evil-qqbot.ugcimg.cn/download?fileid=voice-wav',
+    'https://qqbot.ugcimg.cn.evil.example/download?fileid=voice-wav',
+    'https://qqbot.ugcimg.cn@evil.example/download?fileid=voice-wav',
+    'https://qqbot.ugcimg.cn./download?fileid=voice-wav',
+    'https://other.ugcimg.cn/download?fileid=voice-wav',
+    'https://evil.qqbot.ugcimg.cn/download?fileid=voice-wav',
   ])('rejects the non-allowlisted host in %s', async (url) => {
     const fetchMock = stubFetch(() => new Response(PNG_BYTES));
 
@@ -75,6 +90,33 @@ describe('downloadQQAttachment', () => {
     );
 
     expect(result.mimeType).toBe('image/png');
+  });
+
+  it('downloads converted-voice bytes from the exact voice CDN host', async () => {
+    const fetchMock = stubFetch(() => new Response(WAV_BYTES));
+
+    const result = await downloadQQAttachment(
+      VOICE_WAV_URL,
+      QQ_VOICE_MAX_BYTES,
+    );
+
+    expect(result.buffer.equals(WAV_BYTES)).toBe(true);
+    expect(result.mimeType).toBe('application/octet-stream');
+    expect(fetchMock).toHaveBeenCalledWith(
+      VOICE_WAV_URL,
+      expect.objectContaining({ redirect: 'error' }),
+    );
+  });
+
+  it('accepts an uppercase converted-voice host', async () => {
+    stubFetch(() => new Response(WAV_BYTES));
+
+    const result = await downloadQQAttachment(
+      'https://QQBOT.UGCIMG.CN/download?fileid=voice-wav',
+      QQ_VOICE_MAX_BYTES,
+    );
+
+    expect(result.buffer.equals(WAV_BYTES)).toBe(true);
   });
 
   it('rejects a non-ok response with its status', async () => {
@@ -174,6 +216,22 @@ describe('downloadQQAttachment', () => {
 
     const result = await downloadQQAttachment(ALLOWED_URL, QQ_VIDEO_MAX_BYTES);
 
+    expect(result.mimeType).toBe('application/octet-stream');
+  });
+
+  it('keeps a declared file type as opaque bytes under the file cap', async () => {
+    const bytes = Buffer.from('PK\u0003\u0004docx-ish bytes');
+    stubFetch(
+      () => new Response(bytes, { headers: { 'content-type': 'file' } }),
+    );
+
+    const result = await downloadQQAttachment(
+      ALLOWED_URL,
+      QQ_FILE_MAX_BYTES,
+      'file',
+    );
+
+    expect(result.buffer.equals(bytes)).toBe(true);
     expect(result.mimeType).toBe('application/octet-stream');
   });
 });
