@@ -546,7 +546,13 @@ export class ManagedGithubAdapter {
         // any claims it held are stranded. Name the inbound and outbound
         // consequences separately so an outbound-only strand does not report
         // lost inbound comments, and a quiescent 0/0 legacy reports no loss.
-        const pendingLabel = legacy.readable ? legacy.pending : 'unknown';
+        // The pending count folds in the legacy watch.prs queues (R3-1): those
+        // detected-but-undelivered transitions are stranded work too, so a
+        // legacy holding only a queued PR-watch event must not render as a
+        // quiescent "0 pending".
+        const pendingLabel = legacy.readable
+          ? legacy.pending + legacy.watchPending
+          : 'unknown';
         const outboundLabel = legacy.readable ? legacy.outbound : 'unknown';
         // The "fresh window" loss claims only hold when the loaded ledger has no
         // watermark of its own. On a roll-forward after a rollback the keyed
@@ -562,6 +568,14 @@ export class ManagedGithubAdapter {
           if (legacy.pending > 0 && freshWindow)
             consequence +=
               ' Its staged-but-unadmitted claims are stranded; the fresh notification window does not re-list them.';
+          // The queued PR-watch transitions are dropped regardless of the
+          // notification window (R3-1): the fresh ledger re-baselines
+          // watch.prs empty and only re-pins still-failing heads, so a queued
+          // transition is neither replayed nor re-derived. Name that loss even
+          // when the legacy staged no inbound pending/outbound.
+          if (legacy.watchPending > 0)
+            consequence +=
+              ' Its queued PR-watch transitions were dropped; the fresh ledger only re-baselines, so they are neither replayed nor re-derived.';
           if (legacy.outbound > 0)
             consequence +=
               ' Its un-receipted outbound segments were dropped, so their delivery status is unknown.';
@@ -582,14 +596,32 @@ export class ManagedGithubAdapter {
         cursor: { lastProcessedAt: null, dispatchedComments: [] },
         pending: [],
         outbound: [],
-        // Carry only the legacy durable episode counters into the fresh keyed
-        // ledger (R2-2): the admission ledger is permanent, so restarting the
-        // counter would re-derive an already-admitted input id and dedupe a
-        // genuine post-upgrade recurrence. watch.prs re-baselines silently.
-        ...(legacy?.episodes
-          ? { watch: { prs: {}, episodes: legacy.episodes } }
-          : {}),
       };
+      // Carry the durable episode counters into WHATEVER state was loaded
+      // (R3-1), not only a fresh object: the admission ledger is permanent, so
+      // restarting the counter would re-derive an already-admitted input id and
+      // dedupe a genuine post-upgrade recurrence. The counters are entry-scoped
+      // — merged Math.max per key from every ledger in the entry directory
+      // (live legacy, keyed ledgers, and the .stranded-* archives) — so they
+      // survive the first start's archive of the legacy and a roll-forward over
+      // an existing keyed ledger. watch.prs re-baselines silently; the queued
+      // transitions are NOT adopted (cross-ownership replay).
+      const entryEpisodes = this.store.entryWatchEpisodes();
+      if (entryEpisodes) {
+        const watch = this.state.watch ?? { prs: {} };
+        const merged: Record<string, number> = { ...(watch.episodes ?? {}) };
+        for (const [key, value] of Object.entries(entryEpisodes)) {
+          merged[key] = Math.max(merged[key] ?? 0, value);
+        }
+        const capped: Record<string, number> = {};
+        for (const key of Object.keys(merged).slice(
+          0,
+          MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT,
+        )) {
+          capped[key] = merged[key]!;
+        }
+        this.state.watch = { ...watch, episodes: capped };
+      }
       if (this.state.pending.some((entry) => entry.held)) {
         this.instanceStalled = true;
         this.state.instanceRefusals = Math.max(

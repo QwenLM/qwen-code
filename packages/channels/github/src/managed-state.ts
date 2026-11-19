@@ -12,6 +12,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -391,24 +392,24 @@ export class ManagedGithubStateStore {
         path: string;
         pending: number;
         outbound: number;
+        watchPending: number;
         readable: boolean;
         watermark: string | null;
-        episodes: Record<string, number> | undefined;
       }
     | undefined {
     const legacyPath = join(this.directory, 'managed-state.json');
     if (!existsSync(legacyPath)) return undefined;
     let pending = 0;
     let outbound = 0;
+    let watchPending = 0;
     let readable = true;
     let watermark: string | null = null;
-    let episodes: Record<string, number> | undefined;
     try {
       const value = JSON.parse(readFileSync(legacyPath, 'utf8')) as {
         pending?: unknown[];
         outbound?: unknown[];
         cursor?: { lastProcessedAt?: unknown };
-        watch?: { episodes?: unknown };
+        watch?: { prs?: unknown };
       } | null;
       const pendingList = value?.pending;
       const outboundList = value?.outbound;
@@ -421,29 +422,20 @@ export class ManagedGithubStateStore {
       // legacy staged no pending/outbound (R1-4).
       const lastProcessedAt = value?.cursor?.lastProcessedAt;
       watermark = typeof lastProcessedAt === 'string' ? lastProcessedAt : null;
-      // The durable per-PR episode counters are the one part of the legacy
-      // watch state the fresh ledger carries (R2-2): the admission ledger is
-      // permanent, so restarting the counter would re-derive an already-admitted
-      // input id and silently dedupe a genuine post-upgrade recurrence. The
-      // counter is monotone and the input id already binds tenant/channel, so
-      // carrying it only errs toward a new id. Sanitize to the validator's bound
-      // (safe integers >= 1, capped) so the carried state passes the next load().
-      const rawEpisodes = value?.watch?.episodes;
-      if (
-        !!rawEpisodes &&
-        typeof rawEpisodes === 'object' &&
-        !Array.isArray(rawEpisodes)
-      ) {
-        const carried: Record<string, number> = {};
-        for (const [key, entry] of Object.entries(rawEpisodes).slice(
-          0,
-          MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT,
-        )) {
-          if (Number.isSafeInteger(entry) && (entry as number) >= 1) {
-            carried[key] = entry as number;
-          }
+      // The legacy watch.prs queue holds detected-but-undelivered transitions
+      // (R3-1). The fresh ledger re-baselines watch.prs empty and does NOT
+      // adopt them — injecting one registration's detected events under
+      // another is the cross-ownership replay the keying prevents — so they
+      // are stranded work. Count the PR entries whose queue is non-empty so
+      // the notice names that loss instead of a quiescent "0 pending". The
+      // durable episode counters are carried separately, entry-scoped, by
+      // entryWatchEpisodes().
+      const rawPrs = value?.watch?.prs;
+      if (!!rawPrs && typeof rawPrs === 'object' && !Array.isArray(rawPrs)) {
+        for (const entry of Object.values(rawPrs)) {
+          const queue = (entry as { pending?: unknown } | null)?.pending;
+          if (Array.isArray(queue) && queue.length > 0) watchPending += 1;
         }
-        if (Object.keys(carried).length > 0) episodes = carried;
       }
     } catch {
       // A corrupt or unreadable legacy still strands; flag it so the caller
@@ -454,10 +446,67 @@ export class ManagedGithubStateStore {
       path: legacyPath,
       pending,
       outbound,
+      watchPending,
       readable,
       watermark,
-      episodes,
     };
+  }
+
+  /**
+   * The entry-scoped durable PR-watch episode counters, merged across every
+   * ledger this entry directory holds: the live legacy, each registration's
+   * identity-keyed ledger, and the `.stranded-*` archives (R3-1). The
+   * admission ledger is permanent and keyed without a registration
+   * discriminant, so the counters must outlive the legacy archive:
+   * registration A adopts them and archives the legacy, then registration B
+   * must still resume them rather than restart at 0 and re-derive an
+   * already-admitted input id (a silently deduped recurrence). Reading the
+   * archives — not just the live legacy — is what makes the carry survive the
+   * first start's rename. `Math.max` per key only errs toward a new id (the
+   * input id already binds tenant/channel), and the result is sanitized to the
+   * validator's bound (safe integers >= 1, capped at
+   * MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT) so the merged state passes the next
+   * load(). Best-effort: an unreadable or corrupt sibling is skipped, never a
+   * startup failure. Returns undefined when no ledger carries counters.
+   */
+  entryWatchEpisodes(): Record<string, number> | undefined {
+    let names: string[];
+    try {
+      names = readdirSync(this.directory);
+    } catch {
+      return undefined;
+    }
+    const merged: Record<string, number> = {};
+    for (const name of names) {
+      // The legacy ledger, the identity-keyed ledgers, and the legacy archives
+      // — never an in-flight <uuid>.tmp or the lock metadata.
+      if (!/^managed-state(-[0-9a-f]{16})?\.json(\.stranded-.+)?$/.test(name)) {
+        continue;
+      }
+      let value: unknown;
+      try {
+        value = JSON.parse(readFileSync(join(this.directory, name), 'utf8'));
+      } catch {
+        continue;
+      }
+      const raw = (value as { watch?: { episodes?: unknown } } | null)?.watch
+        ?.episodes;
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+      for (const [key, entry] of Object.entries(raw)) {
+        if (Number.isSafeInteger(entry) && (entry as number) >= 1) {
+          merged[key] = Math.max(merged[key] ?? 0, entry as number);
+        }
+      }
+    }
+    const keys = Object.keys(merged);
+    if (keys.length === 0) return undefined;
+    // Re-cap to the validator's bound; overflow evicts the oldest keys (the
+    // same bounded-state tradeoff the live watermark map uses).
+    const capped: Record<string, number> = {};
+    for (const key of keys.slice(0, MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT)) {
+      capped[key] = merged[key]!;
+    }
+    return capped;
   }
 
   /**

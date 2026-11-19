@@ -2793,6 +2793,148 @@ describe('managed GitHub adapter registration-identity isolation', () => {
     await adapter.disconnect();
   });
 
+  it('a second registration resumes the entry-scoped episode counters after the first archives the legacy (R3-1)', async () => {
+    const cwd = tempCwd();
+    const mk = (destinationKey: string) => {
+      const journal: string[] = [];
+      const plane = fakeControlPlane(journal, destinationKey);
+      const fake = fakeDeps(journal);
+      const watch = fakePrWatchPlane(journal);
+      const adapter = new ManagedGithubAdapter({
+        name: 'gh-1',
+        cwd,
+        config: CONFIG,
+        controlPlane: plane.controlPlane,
+        deps: { ...fake.deps, prWatchControlPlane: watch.plane },
+        pollLoop: false,
+      });
+      return { adapter, fake, watch };
+    };
+    const a = mk('cp|tenant-a|chan-1|actor|ws|.');
+    const dir = dirname(a.adapter.stateFile);
+    // The legacy ran as registration B and admitted episode 5 for owner/repo#7.
+    seedLegacy(dir, {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: { prs: {}, episodes: { 'owner/repo#7': 5 } },
+    });
+    // Registration A starts first: adopts the counters and archives the legacy.
+    await a.adapter.connect();
+    expect(readState(a.adapter).watch?.episodes).toEqual({ 'owner/repo#7': 5 });
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(false);
+    await a.adapter.disconnect();
+    // Registration B starts on a fresh ledger AFTER the archive. The counters
+    // must survive entry-scoped (read from the archive / sibling ledger), not
+    // restart at 0 and re-derive the already-admitted episode-1 id.
+    const b = mk('cp|tenant-b|chan-1|actor|ws|.');
+    await b.adapter.connect();
+    expect(readState(b.adapter).watch?.episodes).toEqual({ 'owner/repo#7': 5 });
+    b.watch.setBindings([
+      binding({
+        owner: 'owner',
+        repo: 'repo',
+        prNumber: 7,
+        events: ['merge_conflict'],
+      }),
+    ]);
+    await b.adapter.tick(); // baseline clean (first observation, silent)
+    b.fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await b.adapter.tick(); // merge_conflict recurrence on the same head
+    expect(b.watch.injected).toHaveLength(1);
+    // Today the carry is fresh-only and the legacy is archived, so B restarts
+    // at episode 1 — the id B already admitted, silently deduped.
+    expect(b.watch.injected[0]!.episode).toBe(6);
+    await b.adapter.disconnect();
+  });
+
+  it('a roll-forward merges the legacy episode counters into the loaded keyed ledger (R3-1)', async () => {
+    const cwd = tempCwd();
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await first.adapter.connect();
+    // The keyed ledger already carries its own counter and a cursor.
+    seedState(first.adapter, (s) => {
+      s.cursor.lastProcessedAt = '2026-11-19T08:00:00Z';
+      s.watch = { prs: {}, episodes: { 'owner/repo#7': 2 } };
+    });
+    await first.adapter.disconnect();
+    // A rollback stages a legacy with a higher counter for the same PR and a
+    // counter for another PR. The merge must resume the max, not discard the
+    // legacy counters because a keyed ledger was loaded.
+    seedLegacy(dirname(first.adapter.stateFile), {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: { prs: {}, episodes: { 'owner/repo#7': 5, 'owner/repo#8': 3 } },
+    });
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await second.adapter.connect();
+    expect(readState(second.adapter).watch?.episodes).toEqual({
+      'owner/repo#7': 5,
+      'owner/repo#8': 3,
+    });
+    await second.adapter.disconnect();
+  });
+
+  it('a legacy with queued PR-watch transitions names that count, not a quiescent 0 pending (R3-1)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    const dir = dirname(adapter.stateFile);
+    seedLegacy(dir, {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: {
+        prs: {
+          'owner/repo#9': {
+            headSha: 'sha-h',
+            pending: [
+              {
+                key: 'prw:ci_failure:owner/repo#9:sha-h:1',
+                episode: 1,
+                owner: 'owner',
+                repo: 'repo',
+                prNumber: 9,
+                transition: 'ci_failure',
+                headSha: 'sha-h',
+                evidence: 'CI failing',
+                detectedAt: '2026-11-19T09:00:00Z',
+              },
+            ],
+          },
+        },
+      },
+    });
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    // The queued transition is stranded work: name it, not a quiescent 0.
+    expect(stranded[0]).toContain('1 pending');
+    expect(stranded[0]).not.toContain('0 pending');
+    expect(stranded[0]).toContain('queued PR-watch transitions were dropped');
+    // NOT adopted: the fresh ledger carries no queued PR-watch entries (it
+    // re-baselines on the first tick) rather than injecting one registration's
+    // detected events under another. watch is absent here because the legacy
+    // held no episode counters to carry.
+    expect(readState(adapter).watch?.prs ?? {}).toEqual({});
+    await adapter.disconnect();
+  });
+
   it('a roll-forward over a keyed ledger with a cursor does not claim a skipped window', async () => {
     const cwd = tempCwd();
     const lines: string[] = [];
@@ -2805,16 +2947,16 @@ describe('managed GitHub adapter registration-identity isolation', () => {
       s.cursor.lastProcessedAt = '2026-11-19T08:00:00Z';
     });
     await first.adapter.disconnect();
-    // A rollback stages a legacy with a later watermark T1 > T0.
+    // A rollback stages a legacy with a later watermark T1 > T0 and one pending
+    // claim, so the inbound "does not re-list" clause is reachable and only the
+    // freshWindow gate suppresses it (R3-2: a pending-less fixture made the
+    // assertion vacuous).
     seedLegacy(dirname(first.adapter.stateFile), {
-      version: 1,
-      generation: 1,
+      ...legacyState(1, 0),
       cursor: {
         lastProcessedAt: '2026-11-19T09:00:00Z',
         dispatchedComments: [],
       },
-      pending: [],
-      outbound: [],
     });
     lines.length = 0;
     const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
@@ -2830,6 +2972,11 @@ describe('managed GitHub adapter registration-identity isolation', () => {
     // (R1-4 fix-induced).
     expect(stranded[0]).not.toContain('were never listed');
     expect(stranded[0]).not.toContain('does not re-list');
+    // Positive: the strand is still reported with its pending count even though
+    // no fresh-window loss clause fires. Removing `&& freshWindow` would emit
+    // "does not re-list" here and red the negative assertion above.
+    expect(stranded[0]).toContain('1 pending');
+    expect(stranded[0]).toContain('is stranded and not replayed');
     await second.adapter.disconnect();
   });
 });
