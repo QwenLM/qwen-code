@@ -3826,6 +3826,12 @@ export interface DaemonWorkflowPhaseVisit {
   endedAt?: number;
 }
 
+/** A phase the script declares in `meta.phases`, reached or not. */
+export interface DaemonWorkflowPlannedPhase {
+  title: string;
+  detail?: string;
+}
+
 export type DaemonWorkflowDispatchStatus =
   | 'queued'
   | 'running'
@@ -3986,6 +3992,13 @@ export interface DaemonSessionWorkflowTaskStatus {
   isBackgrounded: boolean;
   currentPhase: string | null;
   phaseVisits: DaemonWorkflowPhaseVisit[];
+  /**
+   * The phases the script declares in `meta.phases`, in order. Present from
+   * the start of the run, so a client can show phases the script has not
+   * reached yet; absent when the script declares none, and on daemons that
+   * predate the field.
+   */
+  plannedPhases?: DaemonWorkflowPlannedPhase[];
   dispatches: DaemonWorkflowDispatchStatusEntry[];
   agentsDispatched: number;
   agentsCompleted: number;
@@ -5064,6 +5077,28 @@ export interface DaemonSessionRecapResult {
   sessionId: string;
   recap: string | null;
 }
+
+/**
+ * A transcript row a client draws, for the session's Mods to rewrite:
+ * `component` names the site, and `props` are the ones the row draws with
+ * (for `AssistantMessage`: `{ text, isFirstOfReply }`).
+ */
+export interface DaemonModRow {
+  component: string;
+  props: Record<string, unknown>;
+}
+
+/**
+ * A session's answer for one row. `unhooked`: no hook hears the site in this
+ * session, so ask it no more. `unanswered`: the hooks did not answer in time
+ * or the session moved on; ask again later. `answered`: draw `props` where
+ * the hooks rewrote the row, and the row's own props otherwise.
+ * Pre-flight `caps.features.session_mod_rows` before asking.
+ */
+export type DaemonModRowAnswer =
+  | { status: 'unhooked' }
+  | { status: 'unanswered' }
+  | { status: 'answered'; props?: Record<string, unknown> };
 
 export type DaemonSessionBtwStreamEvent =
   | { v: 1; type: 'answer' | 'done'; requestId: string; answer: string }

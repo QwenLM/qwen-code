@@ -22,6 +22,7 @@ export const workspacePackageNames = new Set([
   '@qwen-code/channel-generic-webhook',
   '@qwen-code/channel-github',
   '@qwen-code/channel-gitlab',
+  '@qwen-code/channel-msteams',
   '@qwen-code/channel-plugin-example',
   '@qwen-code/channel-qqbot',
   '@qwen-code/channel-telegram',

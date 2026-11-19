@@ -12,6 +12,8 @@ The classic and preview installers are separate routes. Before this batch both p
 
 ## Goals and boundaries
 
+> Historical screen-reader contract: the Ink fallback/strict rejection and unwired-helper descriptions below record the earlier design and evidence. For the candidate in [PR #17500](https://github.com/QwenLM/qwen-code/pull/17500), the [Native screen-reader wiring design](2026-11-17-native-screen-reader-wiring.md) supersedes those specific restrictions within its stated scope. This does not claim that the unmerged candidate is available on main or supersede the historical results or other distribution/platform limits.
+
 Keep OpenTUI 0.5.10 and shipping Bun 1.4.4. Keep Node as npm launcher and package-manager interpreter, the existing supervised handoff, current default Ink, screen-reader fallback and existing updater ownership. Do not introduce a runtime selector, global Bun requirement, startup download, new publishing family, general test framework, Windows npm private-Bun support, or musl support.
 
 Deliver permanent actual-layout acceptance, a bounded preview failure-preservation fix, linked test plans, and exact-source/artifact receipts as one coherent review batch. Every delivery PR must remain at or below 6000 added plus deleted lines against its actual base. Do not delete unique assertions or split each platform or scenario into a separate PR to meet that limit.

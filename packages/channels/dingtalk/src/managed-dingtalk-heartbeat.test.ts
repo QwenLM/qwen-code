@@ -76,15 +76,17 @@ const SETTINGS = {
   pollInterval: 2_000,
 };
 
-// DWClient.reconnectInterval / DWClient.heartbeat_interval
-// (dingtalk-stream-sdk-nodejs 2.0.4, dist/client.mjs — both private fields);
-// a dependency bump that changes either must change these with it
-// (#17462 R2-1).
-const SDK_RECONNECT_MS = 1_000;
+// DWClient.heartbeat_interval (dingtalk-stream-sdk-nodejs 2.0.4,
+// dist/client.mjs — a private field); a dependency bump that changes it must
+// change this with it (#17462 R2-1). Reconnect is no longer the SDK's: the
+// wrapper owns it with autoReconnect off (#17173 R11), so the advance below
+// uses the wrapper's RECONNECT_RETRY_MS, not DWClient.reconnectInterval.
+const RECONNECT_RETRY_MS = 5_000;
 const SDK_HEARTBEAT_MS = 8_000;
 
 const latestSocket = (): FakeSocket =>
   wsState.instances[wsState.instances.length - 1] as FakeSocket;
+const socketCount = (): number => wsState.instances.length;
 
 beforeEach(() => {
   wsState.instances.length = 0;
@@ -111,12 +113,21 @@ describe('managed DingTalk heartbeat timer cleanup (#17173 R5)', () => {
     // Exactly one active timer: the heartbeat interval of the open socket.
     expect(vi.getTimerCount()).toBe(1);
 
-    // Network drop: the SDK schedules its autoReconnect but does not clear
-    // the interval; the wrapper's close listener must retire it.
+    // Network drop: the SDK no longer reconnects (autoReconnect is off) but it
+    // still does not clear the interval; the wrapper's close listener retires
+    // it and arms the single retry.
     latestSocket().emit('close');
-    expect(vi.getTimerCount()).toBe(1); // only the reconnect timeout remains
+    // Only the wrapper's reconnect timeout remains.
+    expect(vi.getTimerCount()).toBe(1);
 
-    await vi.advanceTimersByTimeAsync(SDK_RECONNECT_MS); // the reconnect attempt runs
+    // Nothing may reconnect before that timeout: waiting the full interval
+    // would also be satisfied by the SDK's own faster chain, so the case would
+    // pass with this PR reverted.
+    await vi.advanceTimersByTimeAsync(RECONNECT_RETRY_MS - 1);
+    expect(socketCount()).toBe(1);
+    expect(vi.getTimerCount()).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1); // the reconnect attempt runs
     await vi.advanceTimersByTimeAsync(0);
     const replacement = latestSocket();
     replacement.open();
@@ -144,9 +155,12 @@ describe('managed DingTalk heartbeat timer cleanup (#17173 R5)', () => {
     await connecting;
     expect(vi.getTimerCount()).toBe(1);
 
-    // First drop: socket B replaces socket A.
+    // First drop: socket B replaces socket A, and only on the wrapper's own
+    // schedule — the same bound as the case above.
     latestSocket().emit('close');
-    await vi.advanceTimersByTimeAsync(SDK_RECONNECT_MS);
+    await vi.advanceTimersByTimeAsync(RECONNECT_RETRY_MS - 1);
+    expect(socketCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
     await vi.advanceTimersByTimeAsync(0);
     const socketB = latestSocket();
     socketB.open();
@@ -157,7 +171,7 @@ describe('managed DingTalk heartbeat timer cleanup (#17173 R5)', () => {
     // on the first socket) leaks B's interval into C here — the count would
     // be 2, and the leaked interval would survive disconnect.
     socketB.emit('close');
-    await vi.advanceTimersByTimeAsync(SDK_RECONNECT_MS);
+    await vi.advanceTimersByTimeAsync(RECONNECT_RETRY_MS);
     await vi.advanceTimersByTimeAsync(0);
     const socketC = latestSocket();
     socketC.open();
