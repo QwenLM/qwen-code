@@ -67,7 +67,7 @@ worker 已停止不能证明缺失输出已发布。未知输出继续阻塞；�
 
 ## 验证与发布
 
-Harness 默认声明 `hosted-workspace-shell/1` 的 v2 能力。显式设置 `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` 会替换完整列表；空值禁用 v2。MCP 验收通过后才加入 `hosted-workspace-mcp/1`。启动时拒绝不支持或重复的条目。publication 对象内容在最终 SQL 事务前校验；事务内复核不可变回执/catalog 身份、资源终态与停止证明。
+Harness 默认声明 `hosted-workspace-files/1,hosted-workspace-shell/1` 的 v2 能力。显式设置 `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` 会替换完整列表；空值禁用 v2。MCP 验收通过后才加入 `hosted-workspace-mcp/1`。启动时拒绝不支持或重复的条目。publication 对象内容在最终 SQL 事务前校验；事务内复核不可变回执/catalog 身份、资源终态与停止证明。
 
 验证计划覆盖精确协商、files v2、external-files v1、关闭新执行后的清理、actor 幂等与权限、活跃 Turn 拒绝、phase/claim fencing 和 DRAINING 冷恢复。Shell 覆盖前台、后台、Monitor、持久旧 hold、停止时最后输出和已知失败/未知输出。MCP 覆盖 stdio/HTTP/SSE、多 revision、Hook-only owner、release ACK 丢失、worker 死亡与未知业务效果。
 

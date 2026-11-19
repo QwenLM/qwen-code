@@ -67,7 +67,7 @@ Source changes are concentrated in `packages/cli/src/serve/`, `packages/sdk-java
 
 ## Validation and rollout
 
-Harness v2 advertisement defaults to `hosted-workspace-shell/1`. An explicit `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` value replaces the complete list; an empty value disables v2. Add `hosted-workspace-mcp/1` only after MCP validation. Unsupported or duplicate entries are refused at startup. Publication object bytes are verified before entering the final SQL transaction; that transaction rechecks immutable receipt/catalog identities, resource terminal states and stop proofs.
+Harness v2 advertisement defaults to `hosted-workspace-files/1,hosted-workspace-shell/1`. An explicit `QWEN_HOSTED_LIFECYCLE_V2_PROFILES` value replaces the complete list; an empty value disables v2. Add `hosted-workspace-mcp/1` only after MCP validation. Unsupported or duplicate entries are refused at startup. Publication object bytes are verified before entering the final SQL transaction; that transaction rechecks immutable receipt/catalog identities, resource terminal states and stop proofs.
 
 The validation plan covers exact negotiation, files v2 compatibility, external-files v1 compatibility, execution-disabled cleanup, actor idempotency and authorization, active Turn refusal, phase/claim fencing and DRAINING cold attachment. Shell checks include foreground, background, Monitor, durable old holds, final output during stop and known failure versus unknown output. MCP checks include stdio/HTTP/SSE, multiple revisions, Hook-only owner, lost release acknowledgement, dead worker and unknown business effects.
 

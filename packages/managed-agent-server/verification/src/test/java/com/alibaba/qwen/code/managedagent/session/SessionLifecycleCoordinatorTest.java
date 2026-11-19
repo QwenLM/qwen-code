@@ -476,10 +476,13 @@ class SessionLifecycleCoordinatorTest {
                         new StoreModels.SessionLineage(session, session,
                                 "run-1", 1))
                 .sessionId());
+        // D3: ordinary files closes on lifecycle v2 now; the cascade claim
+        // tagging is protocol-independent (any active lifecycle claim tags
+        // the child updates), so the witness rides v2.
         String operation = transactions.execute(ignored -> protocolOne
                 ? store.beginWorkspaceLifecycle("tenant", session,
                         OperationKind.DELETE, "owner", "a".repeat(64),
-                        "delete", "digest", true, 1)
+                        "delete", "digest", true, 2)
                         .operation().operationId()
                 : store.beginWorkspaceClose("tenant", session, "owner",
                         "a".repeat(64), "close", "digest", true)
