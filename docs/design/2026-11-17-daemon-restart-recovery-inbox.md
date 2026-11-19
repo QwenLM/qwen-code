@@ -111,6 +111,11 @@ addition to the metadata scan. The scan can only classify prompts whose latest
 record is inside that bounded tail; an `in_flight` record older than the tail
 is not recovered by this scan (fail closed).
 
+When creation metadata has no source, the fallback also requires every
+non-empty JSONL record in the bounded transcript tail to parse. An invalid or
+torn record, including one truncated before the `session_source` subtype, is
+indeterminate metadata rather than evidence of an ordinary source-less session.
+
 Before emitting an item, the route checks the runtime's in-memory session
 summary and omits a session whose prompt is active or queued. That check does
 not load the session; it keeps a live turn from being mislabeled as a restart

@@ -799,6 +799,48 @@ describe('POST /sessions/recovery/continue', () => {
     expect(fixture.bridge.continueSession).not.toHaveBeenCalled();
   });
 
+  it('refuses a session whose source record is torn before its subtype', async () => {
+    const fixture = makeFixture();
+    fixture.seed([inFlight('p1', Date.now())]);
+    const transcriptPath = path.join(
+      path.dirname(
+        fixture.sessionService.getPromptLedgerPath(fixture.sessionId),
+      ),
+      `${fixture.sessionId}.jsonl`,
+    );
+    const history = Array.from({ length: 9 }, (_, index) =>
+      JSON.stringify({
+        uuid: `history-${index}`,
+        parentUuid: null,
+        sessionId: fixture.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: fixture.runtime.workspaceCwd,
+        version: '1.0.0',
+        message: { role: 'user', parts: [{ text: 'history' }] },
+      }),
+    ).join('\n');
+    writeFileSync(
+      transcriptPath,
+      `${history}\n{"type":"system","subtype":"se`,
+      {
+        encoding: 'utf8',
+        flag: 'a',
+      },
+    );
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery/continue')
+      .send(requestBody(fixture));
+
+    expect(response.body.results[0]).toMatchObject({
+      status: 'not_continuable',
+      code: 'metadata_unreadable',
+    });
+    expect(restoreMocks.restoreSessionCore).not.toHaveBeenCalled();
+    expect(fixture.bridge.continueSession).not.toHaveBeenCalled();
+  });
+
   it('rejects a generation that becomes stale at the dispatch fence', async () => {
     const fixture = makeFixture();
     fixture.seed([inFlight('p1', Date.now())]);

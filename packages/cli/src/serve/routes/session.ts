@@ -11447,7 +11447,7 @@ export function registerSessionRoutes(
         if (peek[0] !== 0x0a) lines.shift();
       }
       for (const line of lines) {
-        if (!line.includes('"subtype":"session_source"')) continue;
+        if (line === '') continue;
         try {
           JSON.parse(line);
         } catch {

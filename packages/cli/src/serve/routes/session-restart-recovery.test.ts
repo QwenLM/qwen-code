@@ -324,6 +324,42 @@ describe('POST /sessions/recovery', () => {
     expect(response.body.workspaces[0].items).toEqual([]);
   });
 
+  it('omits a session whose source record is torn before its subtype', async () => {
+    const fixture = makeFixture();
+    const hidden = randomUUID();
+    fixture.seed(hidden, [inFlight('p1', Date.now())]);
+    const transcriptPath = path.join(
+      path.dirname(fixture.sessionService.getPromptLedgerPath(hidden)),
+      `${hidden}.jsonl`,
+    );
+    const history = Array.from({ length: 9 }, (_, index) =>
+      JSON.stringify({
+        uuid: `history-${index}`,
+        parentUuid: null,
+        sessionId: hidden,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: fixture.runtime.workspaceCwd,
+        version: '1.0.0',
+        message: { role: 'user', parts: [{ text: 'history' }] },
+      }),
+    ).join('\n');
+    writeFileSync(
+      transcriptPath,
+      `${history}\n{"type":"system","subtype":"se`,
+      {
+        encoding: 'utf8',
+        flag: 'a',
+      },
+    );
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery')
+      .send({ workspaces: [fixture.runtime.workspaceId] });
+
+    expect(response.body.workspaces[0].items).toEqual([]);
+  });
+
   it('reads source metadata only for recovery candidates', async () => {
     const metadataRead = vi.spyOn(
       SessionService.prototype,
