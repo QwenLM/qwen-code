@@ -316,6 +316,25 @@ describe('shell result presentation', () => {
     expect(container.querySelector('.lucide-circle-x')).toBeNull();
   });
 
+  it('keeps shell result paths left-to-right in an RTL transcript', () => {
+    const directory = '/workspace/project';
+    const outputFile = '/tmp/output.txt';
+    const transcript = render(
+      tool('', {
+        rawOutput: result({ directory, outputFiles: [outputFile] }),
+      }),
+      true,
+    );
+    transcript.dir = 'rtl';
+    const values = Array.from(transcript.querySelectorAll('dd'));
+    expect(values.find((value) => value.textContent === directory)?.dir).toBe(
+      'ltr',
+    );
+    expect(values.find((value) => value.textContent === outputFile)?.dir).toBe(
+      'ltr',
+    );
+  });
+
   it('keeps long-running notices outside output and copies stdout only', async () => {
     render(
       tool('model text', {

@@ -782,10 +782,12 @@ describe('ToolApproval accessibility', () => {
       content: [{ type: 'text', text: warnings }],
       rawInput: { command: 'ls -la', description: 'List files' },
     });
+    container!.dir = 'rtl';
     const warningPre = Array.from(container!.querySelectorAll('pre')).find(
       (el) => el.textContent!.includes('Runs outside the workspace'),
     )!;
     expect(warningPre).toBeTruthy();
+    expect(warningPre.dir).toBe('ltr');
     const rendered = warningPre.textContent!;
     expect(rendered).not.toContain('\u202e');
     expect(rendered).not.toContain('\u001b');

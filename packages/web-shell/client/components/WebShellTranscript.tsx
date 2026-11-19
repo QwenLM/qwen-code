@@ -34,10 +34,10 @@ import { ErrorBoundary } from './ErrorBoundary';
 import { MessageList } from './MessageList';
 import { RootErrorFallback } from './RootErrorFallback';
 import {
-  getTranslator,
   I18nProvider,
   languageDirection,
   normalizeLanguage,
+  useTranslator,
   type WebShellLanguage,
 } from '../i18n';
 import { transcriptBlocksToLocalizedMessages } from '../adapters/localizedMessages';
@@ -177,7 +177,7 @@ function WebShellTranscriptContent({
     !documentMode && (collapseCompletedTurns ?? true);
   const effectiveMarkdownTableMode = documentMode ? 'basic' : markdownTableMode;
   const resolvedLanguage = resolveLanguage(language);
-  const t = useMemo(() => getTranslator(resolvedLanguage), [resolvedLanguage]);
+  const t = useTranslator(resolvedLanguage);
   const messages = useMemo(
     () => transcriptBlocksToLocalizedMessages(blocks, t, documentMode),
     [blocks, documentMode, t],

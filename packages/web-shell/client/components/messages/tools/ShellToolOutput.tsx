@@ -332,7 +332,7 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
               {result && (
                 <>
                   <dt>{t('shell.result.directory')}</dt>
-                  <dd>{sanitizeControlChars(result.directory)}</dd>
+                  <dd dir="ltr">{sanitizeControlChars(result.directory)}</dd>
                 </>
               )}
               {result?.exitCode != null &&
@@ -347,7 +347,9 @@ export function ShellToolOutput({ tool }: { tool: ACPToolCall }) {
               {result && result.outputFiles.length > 0 && (
                 <>
                   <dt>{t('shell.result.outputFiles')}</dt>
-                  <dd>{sanitizeControlChars(result.outputFiles.join('\n'))}</dd>
+                  <dd dir="ltr">
+                    {sanitizeControlChars(result.outputFiles.join('\n'))}
+                  </dd>
                 </>
               )}
               {result?.pid && (

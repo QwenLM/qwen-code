@@ -67,6 +67,7 @@ import {
 } from '../utils/assistantFeedback';
 import { MessageItem } from './MessageItem';
 import { Checkbox } from './ui/checkbox';
+import { streamingTailUpdatePosition } from './streaming-tail';
 import type { MessageDeletionControls } from '../hooks/useMessageDeletion';
 import { summaryRunFirstMemberId, summaryRunId } from './summaryRunId';
 import type { SessionContentGenerator } from './messages/AssistantMessage';
@@ -220,44 +221,6 @@ export interface MessageListProps {
   onToolResultOpen?: (itemId: string) => void;
   onError?: (error: unknown, fallback: string) => void;
   generateContent?: SessionContentGenerator;
-}
-
-function isStreamingTailContentOnlyUpdate(
-  previous: readonly Message[] | undefined,
-  current: readonly Message[],
-): boolean {
-  if (!previous || previous.length !== current.length || current.length === 0) {
-    return false;
-  }
-  for (let i = 0; i < current.length - 1; i += 1) {
-    if (previous[i] !== current[i]) return false;
-  }
-  const before = previous[previous.length - 1];
-  const after = current[current.length - 1];
-  if (
-    before.id !== after.id ||
-    before.role !== after.role ||
-    (after.role !== 'assistant' && after.role !== 'thinking') ||
-    (before.role !== 'assistant' && before.role !== 'thinking') ||
-    before.isStreaming !== true ||
-    after.isStreaming !== true
-  ) {
-    return false;
-  }
-  if (before.role === 'assistant' && after.role === 'assistant') {
-    if (
-      typeof before.content !== 'string' ||
-      typeof after.content !== 'string'
-    ) {
-      return false;
-    }
-    return (
-      before.branchRecordId === after.branchRecordId &&
-      before.usage === after.usage &&
-      Boolean(before.content.trim()) === Boolean(after.content.trim())
-    );
-  }
-  return before.role === 'thinking' && after.role === 'thinking';
 }
 
 function sameIdentities(
@@ -504,8 +467,9 @@ function mergeCompactToolGroups(
 function updateCompactStreamingThinkingTail(
   messages: readonly Message[],
   tail: DaemonThinkingMessage,
+  tailPosition: number,
 ): Message[] | undefined {
-  const group = messages[messages.length - 1];
+  const group = messages.at(tailPosition);
   if (
     group?.role !== 'tool_group' ||
     summaryRunFirstMemberId(group.id) === undefined ||
@@ -523,7 +487,7 @@ function updateCompactStreamingThinkingTail(
     isStreaming: true,
   };
   const result = messages.slice();
-  result[result.length - 1] = {
+  result[result.length + tailPosition] = {
     ...group,
     thoughts,
     ...(group.id === summaryRunId(tail.id)
@@ -882,6 +846,9 @@ function findAnswerStartIndex(
   for (let i = answerIdx - 1; i > start; i--) {
     const item = items[i]!;
     if (item.type !== 'message') break;
+    if (item.message.role === 'system' && item.message.source === 'mod_log') {
+      continue;
+    }
     if (
       item.message.role === 'system' &&
       item.message.source === 'background_task_completed'
@@ -3194,7 +3161,7 @@ export const MessageList = memo(
     // identity. An abandoned render cannot advance it, so its cache writes are
     // rejected by the next committed render.
     const previousMessagesRef = useRef<Message[] | undefined>(undefined);
-    const streamingTailContentOnly = isStreamingTailContentOnlyUpdate(
+    const streamingTailPosition = streamingTailUpdatePosition(
       previousMessagesRef.current,
       messages,
     );
@@ -3227,23 +3194,27 @@ export const MessageList = memo(
     );
     const mergedMessages = useMemo(() => {
       const cached = mergedMessagesCache.current;
-      const tail = messages[messages.length - 1];
       let value: Message[] | undefined;
       if (
-        streamingTailContentOnly &&
+        streamingTailPosition &&
         cached?.sourceMessages === previousMessagesRef.current &&
         cached?.compactMode === compactMode &&
         cached.pendingApproval === pendingApproval
       ) {
+        const tail = messages.at(streamingTailPosition);
         if (
           tail?.role === 'assistant' &&
-          cached.value[cached.value.length - 1]?.id === tail.id
+          cached.value.at(streamingTailPosition)?.id === tail.id
         ) {
           value = cached.value.slice();
-          value[value.length - 1] = tail;
+          value[value.length + streamingTailPosition] = tail;
         } else if (tail?.role === 'thinking') {
           value = compactMode
-            ? updateCompactStreamingThinkingTail(cached.value, tail)
+            ? updateCompactStreamingThinkingTail(
+                cached.value,
+                tail,
+                streamingTailPosition,
+              )
             : splitStandaloneToolGroups(messages);
         }
       }
@@ -3364,7 +3335,7 @@ export const MessageList = memo(
       messages,
       pendingApproval,
       sessionKey,
-      streamingTailContentOnly,
+      streamingTailPosition,
     ]);
     useLayoutEffect(() => {
       const pending = pendingSettledMessagesRef.current;
@@ -3393,10 +3364,9 @@ export const MessageList = memo(
     >(undefined);
     const displayItems = useMemo(() => {
       const cached = displayItemsCache.current;
-      const tail = mergedMessages[mergedMessages.length - 1];
       let value: DisplayItem[] | undefined;
       if (
-        streamingTailContentOnly &&
+        streamingTailPosition &&
         isResponding &&
         cached?.sourceMessages === previousMessagesRef.current &&
         cached?.compactMode === compactMode &&
@@ -3406,13 +3376,15 @@ export const MessageList = memo(
         cached.turnArtifacts === turnArtifacts &&
         cached.turnScheduledTasks === turnScheduledTasks
       ) {
-        const previousTail = cached.value[cached.value.length - 1];
+        const tail = mergedMessages.at(streamingTailPosition);
+        const previousTail = cached.value.at(streamingTailPosition);
         if (
+          tail &&
           previousTail?.type === 'message' &&
           previousTail.message.id === tail.id
         ) {
           value = cached.value.slice();
-          value[value.length - 1] = {
+          value[value.length + streamingTailPosition] = {
             ...previousTail,
             message: tail,
           };
@@ -3439,7 +3411,7 @@ export const MessageList = memo(
     }, [
       mergedMessages,
       messages,
-      streamingTailContentOnly,
+      streamingTailPosition,
       compactMode,
       pendingApproval,
       isResponding,
@@ -3761,7 +3733,7 @@ export const MessageList = memo(
       const cached = finalAssistantTurnIdsCache.current;
       let value: ReadonlyMap<string, string>;
       if (
-        streamingTailContentOnly &&
+        streamingTailPosition &&
         isResponding &&
         cached?.sourceMessages === previousMessagesRef.current &&
         cached?.isResponding === isResponding &&
@@ -3787,7 +3759,7 @@ export const MessageList = memo(
     }, [
       displayItems,
       messages,
-      streamingTailContentOnly,
+      streamingTailPosition,
       gateBackgroundAgentStatus,
       isResponding,
       latestTurnAwaitsAgentSummary,
@@ -3888,7 +3860,7 @@ export const MessageList = memo(
         sourceReferences,
       ] as const;
       const cached = sourcesByTurnCache.current;
-      return streamingTailContentOnly &&
+      return streamingTailPosition &&
         isResponding &&
         cached &&
         cached.sourceMessages === previousMessagesRef.current &&
@@ -3907,7 +3879,7 @@ export const MessageList = memo(
       workspaceCwd,
       sourceSessionId,
       sourceReferences,
-      streamingTailContentOnly,
+      streamingTailPosition,
       isResponding,
     ]);
     useLayoutEffect(() => {
@@ -4150,14 +4122,15 @@ export const MessageList = memo(
         paginatedExpandedTurns,
       ] as const;
       const cached = visibleItemsCache.current;
-      const currentTail = displayItems[displayItems.length - 1];
+      const currentTail = displayItems.at(streamingTailPosition ?? -1);
       if (
-        streamingTailContentOnly &&
+        streamingTailPosition &&
         isResponding &&
         cached &&
         cached.sourceMessages === previousMessagesRef.current &&
         sameIdentities(cached.dependencies, dependencies) &&
-        currentTail?.type === 'message'
+        currentTail?.type === 'message' &&
+        currentTail.message === mergedMessages.at(streamingTailPosition)
       ) {
         const key = getDisplayItemVirtualKey(currentTail);
         let index = -1;
@@ -4276,7 +4249,7 @@ export const MessageList = memo(
       return value;
     }, [
       displayItems,
-      streamingTailContentOnly,
+      streamingTailPosition,
       collapseOverrides,
       isResponding,
       activeTurnStartedAt,

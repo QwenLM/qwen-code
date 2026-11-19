@@ -76,9 +76,12 @@ describe('Live Voice messages', () => {
   // static import graph reaches the composer from the transcript entry even
   // though tree shaking removes it — so that half of the guard lives in
   // build-artifact.test.ts. This half keeps the strings from drifting back
-  // into the dictionary the transcript does embed.
-  it('are defined only here, not back in the main dictionary', () => {
-    const dictionary = readFileSync(join(CLIENT_DIR, 'i18n.tsx'), 'utf8');
-    expect(LIVE_KEY.test(dictionary)).toBe(false);
-  });
+  // into the catalogs the transcript embeds.
+  it.each(['i18n.tsx', 'i18n-zh-cn.ts'])(
+    'are defined outside the embedded catalog in %s',
+    (filename) => {
+      const dictionary = readFileSync(join(CLIENT_DIR, filename), 'utf8');
+      expect(dictionary).not.toMatch(LIVE_KEY);
+    },
+  );
 });

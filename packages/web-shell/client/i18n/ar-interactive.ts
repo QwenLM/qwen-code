@@ -1,6 +1,6 @@
 import { arPlural } from '../utils/plural.js';
 import type { ArMessageValue } from './ar-transcript.js';
-import { WEB_SHELL_LANGUAGES } from './languages.js';
+import { WEB_SHELL_LANGUAGES } from '../i18n-language.js';
 
 /**
  * Arabic translations for interactive Web Shell surfaces (composers, panels,

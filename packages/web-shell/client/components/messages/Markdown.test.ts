@@ -242,7 +242,7 @@ describe('qwen-session:// links', () => {
     // Without `urlTransform`, react-markdown rewrites every non-http(s)/mailto
     // href to '' before `components.a` runs, so the interception branch never
     // fires and the link renders as an inert anchor.
-    const c = renderMd('[🧵 abc12345](qwen-session://abc12345-full-id)');
+    const c = renderMd('[abc12345](qwen-session://abc12345-full-id)');
     const a = c.querySelector('a')!;
     expect(a).toBeTruthy();
     expect(a.getAttribute('role')).toBe('button');
@@ -264,7 +264,7 @@ describe('qwen-session:// links', () => {
     const seen: unknown[] = [];
     const handler = (e: Event) => seen.push((e as CustomEvent).detail);
     window.addEventListener('qwen:open-session', handler);
-    const c = renderMd(`[🧵 abc12345](qwen-session://${target})`);
+    const c = renderMd(`[abc12345](qwen-session://${target})`);
     act(() => {
       c.querySelector('a')!.dispatchEvent(
         new MouseEvent('click', { bubbles: true, cancelable: true }),

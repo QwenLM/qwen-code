@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import postcss, { type Rule } from 'postcss';
+import ts from 'typescript';
 import { FILES_MESSAGES_EN } from './components/artifacts/files-messages';
 import { LIVE_MESSAGES_EN } from './live/messages';
 import { COLLAB_MESSAGES_EN } from './components/workspace-agents/messages';
@@ -26,6 +27,36 @@ function readPackageJavascript(): string {
     .filter((fileName) => fileName.endsWith('.js'))
     .map((fileName) => readFileSync(resolve(DIST_DIR, fileName), 'utf8'))
     .join('\n');
+}
+
+function readStaticJavascript(entry: string): string {
+  const files = new Set([entry]);
+  const sources: string[] = [];
+  for (const file of files) {
+    const javascript = readFileSync(file, 'utf8');
+    sources.push(javascript);
+    const source = ts.createSourceFile(
+      file,
+      javascript,
+      ts.ScriptTarget.ESNext,
+    );
+    for (const statement of source.statements) {
+      if (
+        ts.isImportDeclaration(statement) ||
+        ts.isExportDeclaration(statement)
+      ) {
+        const specifier = statement.moduleSpecifier;
+        if (
+          specifier &&
+          ts.isStringLiteral(specifier) &&
+          specifier.text.startsWith('.')
+        ) {
+          files.add(resolve(dirname(file), specifier.text));
+        }
+      }
+    }
+  }
+  return sources.join('\n');
 }
 
 function readInjectedCss(bundle = readBundle()): string {
@@ -684,9 +715,7 @@ describe('build artifact — transcript entry (#11031)', () => {
     // Transcript-reachable Arabic must survive the split: stubbing
     // ar-transcript.ts would strip the exported document's UI copy while
     // the absence assertions below still pass.
-    expect(transcript).toContain(
-      AR_TRANSCRIPT_MESSAGES['subscription.loginRequired'],
-    );
+    expect(transcript).toContain(AR_TRANSCRIPT_MESSAGES['footnotes.preview']);
     expect(Object.keys(AR_INTERACTIVE_MESSAGES).length).toBeGreaterThan(500);
     for (const key of [
       'subscription.entryDescription',
@@ -756,6 +785,22 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(transcript).not.toContain('Недельный лимит кредитов исчерпан');
     expect(transcript).not.toContain('Вас @упомянули в комментарии');
     expect(transcript).not.toContain('週額度已用完');
+  });
+
+  it('loads translated catalogs outside the interactive entry static import graph', () => {
+    const interactive = readPackageJavascript();
+    const startup = readStaticJavascript(DIST_PATH);
+    const translations = [
+      '周额度已用完',
+      '週額度已用完',
+      'Недельный лимит кредитов исчерпан',
+      'ما الذي تود فعله؟',
+      'معاينة المرجع',
+    ];
+    expect(translations.filter((copy) => !interactive.includes(copy))).toEqual(
+      [],
+    );
+    expect(translations.filter((copy) => startup.includes(copy))).toEqual([]);
   });
 
   it('still carries what a transcript actually renders', () => {

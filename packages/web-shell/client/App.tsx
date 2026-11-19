@@ -505,12 +505,13 @@ import { useSessionArtifactsChange } from './hooks/useSessionArtifactsChange';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
   I18nProvider,
-  getTranslator,
+  type getTranslator,
   isRtlLanguage,
   languageDirection,
   languageSettingToWebShellLanguage,
   languageLabel,
   normalizeLanguage,
+  useTranslator,
   WEB_SHELL_LANGUAGES,
   type WebShellLanguage,
 } from './i18n';
@@ -3905,7 +3906,7 @@ export function App({
         ? getInitialLanguage()
         : normalizeLanguage(providedLanguage),
   );
-  const t = useMemo(() => getTranslator(selectedLanguage), [selectedLanguage]);
+  const t = useTranslator(selectedLanguage);
   const syncNotificationLanguage =
     useBrowserNotificationSettings()?.syncLanguage;
   useLayoutEffect(() => {
