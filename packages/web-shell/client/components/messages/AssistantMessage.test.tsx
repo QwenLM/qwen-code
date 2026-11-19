@@ -6,6 +6,7 @@ import TurndownService from 'turndown';
 import { WebShellCustomizationProvider } from '../../customization';
 import { getTranslator, I18nProvider } from '../../i18n';
 import { getSelectedReplyContent } from '../../utils/selectionClipboard';
+import type { SessionContentGenerator } from './AssistantMessage';
 import { WebShellPortalRootContext } from '../../portalRoot';
 import styles from './AssistantMessage.module.css';
 import {
@@ -43,7 +44,7 @@ afterEach(() => {
 
 function render(
   node: ReactNode,
-  language: 'en' | 'zh-CN' = 'en',
+  language: 'en' | 'zh-CN' | 'zh-TW' = 'en',
   renderMode: TranscriptRenderMode = 'interactive',
   documentExpanded = true,
 ): HTMLElement {
@@ -168,6 +169,42 @@ describe('AssistantMessage thinking logic', () => {
     const container = renderCompletedThinking(999, 'zh-CN');
 
     expect(container.textContent).toContain('思考片刻');
+  });
+
+  it('offers the zh-TW thought translation and asks for Traditional Chinese', async () => {
+    const prompts: string[] = [];
+    const generateContent: SessionContentGenerator = async function* (prompt) {
+      prompts.push(prompt);
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'r1',
+        seq: 0,
+        text: '譯文',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'r1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+        inputTokens: 1,
+        outputTokens: 1,
+      };
+    };
+    const container = render(
+      <ThinkingMessage
+        content="zh-TW thought to translate"
+        timestamp={0}
+        generateContent={generateContent}
+      />,
+      'zh-TW',
+    );
+    const button =
+      container.querySelector<HTMLButtonElement>('button[title="翻譯"]');
+    expect(button).not.toBeNull();
+    await act(async () => button?.click());
+    expect(prompts[0]).toContain('into Traditional Chinese');
   });
 
   it('keeps the duration while thinking is running', () => {

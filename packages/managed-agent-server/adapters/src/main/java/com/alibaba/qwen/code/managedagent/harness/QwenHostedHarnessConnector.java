@@ -662,6 +662,24 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         return error;
     }
 
+    /**
+     * Whether a create's 409 says the Session is already there, which a
+     * passive re-take answers. Keyed on the code, never on the bare status:
+     * the same 409 also carries a closing suspension gate, a full cold-open
+     * slot, a quiescing instance and a wedged teardown. Loading again behind
+     * one of those spends a second admission on a wait the caller must see,
+     * and behind {@code hosted_session_open_busy} it loads a Session whose
+     * journal the refused create never wrote.
+     */
+    private static boolean alreadyHeld(DaemonHttpException error) {
+        if (error.getStatusCode() != 409) {
+            return false;
+        }
+        String code = error.getErrorCode();
+        return "hosted_session_already_attached".equals(code)
+                || "managed_session_already_exists".equals(code);
+    }
+
     private Attachment doCreateOrLoad(String tenantId, String sessionId,
             boolean loadExisting, boolean passiveManagedRuntimeRecovery,
             boolean actionResponse) {
@@ -1712,12 +1730,29 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     @Override
     public boolean activateForWake(String tenantId, String sessionId) {
         try {
-            // An attachment held here is not this verb's to evict: a wake
-            // only accelerates, and a stale entry is repaired by the paths
-            // that own it.
-            if (attachments.containsKey(attachmentKey(tenantId,
-                    sessionId))) {
-                return false;
+            AttachmentKey key = attachmentKey(tenantId, sessionId);
+            HarnessSessionRef observed = attachments.get(key);
+            if (observed != null) {
+                // The caller reaches this verb only when the SQL wake fence
+                // shows no live writer, so a reference cached here is stale:
+                // a suspended Session's sealed writer leaves one behind
+                // until its owning path repairs it, and reporting "already
+                // attached" would strand the wake on the slow SQL scan.
+                // Remove exactly the observed reference and its marker; a
+                // concurrent load that published a newer attachment keeps
+                // it, and the recheck below then reports it attached. The
+                // management cache is published separately (a management-only
+                // load returns before the attachments publish), so its entries
+                // never alias the reference observed above: evict its own
+                // observed reference under the same per-key identity rule.
+                HarnessSessionRef observedManagement = mcpManagementAttachments.get(key);
+                removeAttachment(key, observed);
+                if (observedManagement != null) {
+                    mcpManagementAttachments.remove(key, observedManagement);
+                }
+                if (attachments.containsKey(key)) {
+                    return false;
+                }
             }
             // The relay verbs' new-work order: the Workspace checks, then a
             // Session a prior control-plane process attached re-attaches
@@ -1796,7 +1831,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 // The Harness still holds the Session this control plane
                 // attached before it restarted: re-take it passively, the
                 // way the other cold attachments re-acquire a live one.
-                if (error.getStatusCode() != 409) {
+                if (!alreadyHeld(error)) {
                     throw error;
                 }
                 createOrLoad(tenantId, sessionId, true, true);
@@ -1830,7 +1865,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 // bound (a peer's create, or this one's lost answer):
                 // re-take it passively, the way the channel attachment
                 // does.
-                if (error.getStatusCode() != 409) {
+                if (!alreadyHeld(error)) {
                     throw error;
                 }
                 createOrLoad(tenantId, sessionId, true, true);
@@ -1979,7 +2014,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
             return client().createSession(builder.build());
         } catch (DaemonHttpException error) {
-            if (error.getStatusCode() != 409) {
+            if (!alreadyHeld(error)) {
                 throw error;
             }
             return load(session, passiveManagedRuntimeRecovery, false, false, mcpManagementOnly);
