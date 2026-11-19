@@ -68,6 +68,10 @@
       "en": "The embedded Runtime Broker: its private HTTP listener for the Hosted Harness, the provisioner that places and recovers the Runtime workers that run Hosted tools, their Workspace mounts and isolation, and the keys that encrypt the Runtime credentials it persists.",
       "zh": "内嵌 Runtime Broker：包括面向 Hosted Harness 的私有 HTTP 监听器、放置并恢复执行 Hosted 工具的 Runtime worker 的 provisioner、worker 的 Workspace 挂载与隔离方式，以及加密其持久化 Runtime 凭据的密钥。"
     },
+    "qwen.managed-agent.runtime-broker.mcp-parking": {
+      "en": "Keeps the MCP connections of idle suspended Sessions alive for reuse on reopen, and reclaims them after an idle period.",
+      "zh": "让空闲挂起 Session 的 MCP 连接保持存活以便重开时复用，并在空闲一段时间后回收。"
+    },
     "qwen.managed-agent.runtime-broker.retention": {
       "en": "Database cleanup of old terminal Runtime records (tool executions, Runtime Sessions and bindings), run in bounded batches on a dedicated scheduler.",
       "zh": "在独立调度线程上按有限批次清理数据库中已终结的旧 Runtime 记录（工具执行、Runtime Session 和绑定）。"
@@ -640,6 +644,22 @@
     "qwen.managed-agent.runtime-broker.provisioner": {
       "en": "The installed factory kind that places Runtime workers: `local-process` (local Node.js workers), `ssh-process` (registered SSH Workspaces), `static` (a preconfigured worker), or `external-scratch` or `external-workspace` (an operator-run HTTP provider). A trusted additional provider may register its own kind. With the Broker enabled, missing or duplicate kinds fail before resources are created. Embedding hosts must explicitly include the selected backend artifact.",
       "zh": "放置 Runtime worker 所用的已安装工厂 kind：`local-process`（本机 Node.js worker）、`ssh-process`（已注册 SSH Workspace）、`static`（预配置 worker）、`external-scratch` 或 `external-workspace`（运维方 HTTP provider）。其他可信 provider 可以注册自己的 kind。Broker 启用时，缺失或重复的 kind 在创建资源前拒绝。嵌入服务须显式添加所选后端产物。"
+    },
+    "qwen.managed-agent.runtime-broker.mcp-parking.batch-size": {
+      "en": "How many Runtime Sessions one reclamation tick may examine. Must be between 1 and 1000; checked at startup even while parking is off.",
+      "zh": "每轮回收最多检查的 Runtime Session 数。取值须在 1 到 1000 之间；即使未启用 park 也会在启动时校验，越界则启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.mcp-parking.enabled": {
+      "en": "Whether suspended Sessions keep their MCP connections and storage membership until reclamation. Off keeps draining them on every suspension. Takes effect only with `qwen.managed-agent.runtime-broker.enabled`, and never applies to external storage.",
+      "zh": "挂起的 Session 是否保留其 MCP 连接和存储成员资格直到被回收。关闭时每次挂起都照常 drain。仅在启用 `qwen.managed-agent.runtime-broker.enabled` 时生效，且从不适用于外部存储。"
+    },
+    "qwen.managed-agent.runtime-broker.mcp-parking.idle-duration": {
+      "en": "How long a Session must stay suspended before its parked MCP connections are closed and its storage membership is handed back. Physical maintenance on the same storage reclaims sooner. A suffix-less number binds as milliseconds. Must be at least `1ms`; checked at startup even while parking is off.",
+      "zh": "Session 须保持挂起多久，其 parked MCP 连接才会被关闭、存储成员资格才会被交还。同一存储上的物理维护会提前触发回收。不带单位的数字按毫秒绑定。不得小于 `1ms`；即使未启用 park 也会在启动时校验，越界则启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.mcp-parking.scan-delay": {
+      "en": "How long the reclamation job waits after one tick finishes before it starts the next. A suffix-less number binds as milliseconds. Must be at least `1ms`; checked at startup even while parking is off.",
+      "zh": "回收任务在一轮结束后等待多久再开始下一轮。不带单位的数字按毫秒绑定。不得小于 `1ms`；即使未启用 park 也会在启动时校验，越界则启动时拒绝。"
     },
     "qwen.managed-agent.runtime-broker.retention.batch-size": {
       "en": "How many records one retention tick may handle: it caps the bindings scanned, the child records scanned and the total rows deleted per tick. Must be between 1 and 1000; checked at startup even while retention is off.",

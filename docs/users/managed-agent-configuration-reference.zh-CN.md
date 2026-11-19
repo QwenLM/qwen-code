@@ -297,6 +297,17 @@ tool publication 与 Session 资源 / journal 冷存储共用的通用 Aliyun OS
 | `workspace-id` | `QWEN_MANAGED_AGENT_WORKSPACE_ID` | 字符串 | *（空）* | Broker 默认 Workspace 的 ID，未绑定已登记 Workspace 的 Session 与 Session Store 共用它。使用 `local-process` 时，留空则取规范化后 `qwen.managed-agent.runtime-broker.workspace-cwd` 的 SHA-256 前 16 个十六进制字符，显式设置的值必须与之相同；其他 provisioner 必须显式设置。启用 Hosted Harness 和 Session Store 时，与 `qwen.managed-agent.session-store.workspace-id` 不一致则启动时拒绝。已有 Session 后不要修改，因为未绑定的 Session 依据它解析 Store 作用域。 |
 | `workspace-mounts` | — | YAML 列表 | *（空）* | 管理员挂载的 Workspace 存储根目录，在配置文件（YAML）中以列表设置，每项包含 `tenant-id`、`storage-id` 和 `root`。每个 `root` 必须是已存在的规范化目录；各根目录不得重叠或互为别名，同一租户与存储的组合只能出现一次。要求 `local-process` provisioner；否则或与外部 provisioner 同时使用时，启动时拒绝。共享同一数据库的所有 Broker 必须使用相同的列表。 |
 
+## `qwen.managed-agent.runtime-broker.mcp-parking`
+
+让空闲挂起 Session 的 MCP 连接保持存活以便重开时复用，并在空闲一段时间后回收。
+
+| 属性 | 环境变量 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `batch-size` | `QWEN_MANAGED_AGENT_MCP_PARKING_BATCH_SIZE` | 整数 | `100` | 每轮回收最多检查的 Runtime Session 数。取值须在 1 到 1000 之间；即使未启用 park 也会在启动时校验，越界则启动时拒绝。 |
+| `enabled` | `QWEN_MANAGED_AGENT_MCP_PARKING_ENABLED` | 布尔 | `false` | 挂起的 Session 是否保留其 MCP 连接和存储成员资格直到被回收。关闭时每次挂起都照常 drain。仅在启用 `qwen.managed-agent.runtime-broker.enabled` 时生效，且从不适用于外部存储。 |
+| `idle-duration` | `QWEN_MANAGED_AGENT_MCP_PARKING_IDLE_DURATION` | 时长 | `30m` | Session 须保持挂起多久，其 parked MCP 连接才会被关闭、存储成员资格才会被交还。同一存储上的物理维护会提前触发回收。不带单位的数字按毫秒绑定。不得小于 `1ms`；即使未启用 park 也会在启动时校验，越界则启动时拒绝。 |
+| `scan-delay` | `QWEN_MANAGED_AGENT_MCP_PARKING_SCAN_DELAY` | 时长 | `1m` | 回收任务在一轮结束后等待多久再开始下一轮。不带单位的数字按毫秒绑定。不得小于 `1ms`；即使未启用 park 也会在启动时校验，越界则启动时拒绝。 |
+
 ## `qwen.managed-agent.runtime-broker.retention`
 
 在独立调度线程上按有限批次清理数据库中已终结的旧 Runtime 记录（工具执行、Runtime Session 和绑定）。
