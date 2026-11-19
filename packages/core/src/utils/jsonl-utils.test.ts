@@ -618,7 +618,7 @@ describe('writeLine / writeLineSync / write', () => {
         await withDebugLog(sessionId, fileOutputEnabled, async () => {
           const file = tmpFile('{"existing":');
           const sessionLookup = vi
-            .spyOn(debugLogger, 'getActiveDebugSessionId')
+            .spyOn(debugLogger, 'getActiveDebugSessionLogPath')
             .mockImplementation(() => {
               throw new Error('unexpected debug session lookup');
             });

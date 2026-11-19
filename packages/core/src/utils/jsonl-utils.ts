@@ -25,16 +25,12 @@ import * as nodeConstants from 'node:constants';
 import fs from 'node:fs';
 import path from 'node:path';
 import { atomicWriteFileSync } from './atomicFileWrite.js';
-// Storage already belongs to this module's runtime graph through debugLogger;
-// its resolver keeps dedupe keyed to the logger's exact destination.
-// eslint-disable-next-line architecture/no-core-utils-upward-import
-import { Storage } from '../config/storage.js';
 import readline from 'node:readline';
 import { finished } from 'node:stream/promises';
 import { Mutex } from 'async-mutex';
 import {
   createDebugLogger,
-  getActiveDebugSessionId,
+  getActiveDebugSessionLogPath,
   isDebugLogFileEnabled,
 } from './debugLogger.js';
 
@@ -374,12 +370,9 @@ function canAppendWithoutTailInspection(
   // Preserve append-only files when the tail cannot be read, but expose that
   // tail inspection was skipped without flooding every subsequent line.
   if (!debugLogger.isEnabled() || !isDebugLogFileEnabled()) return true;
-  const debugSessionId = getActiveDebugSessionId();
-  if (debugSessionId === null) return true;
-  const diagnosticKey = JSON.stringify([
-    filePath,
-    Storage.getDebugLogPath(debugSessionId),
-  ]);
+  const debugLogPath = getActiveDebugSessionLogPath();
+  if (debugLogPath === null) return true;
+  const diagnosticKey = JSON.stringify([filePath, debugLogPath]);
   if (!diagnosedTailReadFailures.has(diagnosticKey)) {
     if (diagnosedTailReadFailures.size >= MAX_DIAGNOSED_TAIL_READ_FAILURES) {
       const oldest = diagnosedTailReadFailures.values().next().value;

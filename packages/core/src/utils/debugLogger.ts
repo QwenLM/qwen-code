@@ -65,8 +65,11 @@ function getActiveSession(): DebugLogSession | null {
   return globalSession;
 }
 
-export function getActiveDebugSessionId(): string | null {
-  return getActiveSession()?.getSessionId() ?? null;
+export function getActiveDebugSessionLogPath(): string | null {
+  const activeSessionId = getActiveSession()?.getSessionId();
+  return activeSessionId === undefined
+    ? null
+    : Storage.getDebugLogPath(activeSessionId);
 }
 
 function ensureDebugDirExists(): Promise<void> {
