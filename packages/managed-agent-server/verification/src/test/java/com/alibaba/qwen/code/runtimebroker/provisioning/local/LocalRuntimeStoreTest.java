@@ -54,15 +54,15 @@ class LocalRuntimeStoreTest {
 
     @org.junit.jupiter.api.condition.EnabledOnOs(org.junit.jupiter.api.condition.OS.MAC)
     @Test
-    void nativeMacIdentityAndTrustedRebootRefusal(@org.junit.jupiter.api.io.TempDir Path directory) {
+    void nativeMacIdentitySupportsOptInTrustedReboot(@org.junit.jupiter.api.io.TempDir Path directory) throws Exception {
         var identity = LocalRuntimeStore.HostIdentity.current();
         assertEquals("macos", identity.pidNamespace());
         assertEquals("macos", identity.timeNamespace());
         assertEquals(identity, LocalRuntimeStore.HostIdentity.current());
-        IllegalStateException error = assertThrows(IllegalStateException.class,
-                () -> LocalProcessRuntimeProvisioner.durable(List.of("must-not-run"), directory,
-                        new HttpRuntimeTransport(), true));
-        assertTrue(error.getMessage().contains("trusted-local-reboot-recovery=false"));
+        try (var provider = LocalProcessRuntimeProvisioner.durable(List.of("must-not-run"), directory.toRealPath(),
+                new HttpRuntimeTransport(), true)) {
+            assertTrue(Files.isDirectory(directory));
+        }
     }
 
     @Test

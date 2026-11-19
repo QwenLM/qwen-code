@@ -13,6 +13,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { ComposerWorkspaceProvider } from '../../hooks/useComposerWorkspace.js';
 import type {
   DaemonBrand,
   DaemonCapabilities,
@@ -506,7 +507,9 @@ export function DaemonWorkspaceProvider({
       value={client ? availability : undefined}
     >
       <DaemonWorkspaceContext.Provider value={contextValue}>
-        {children}
+        <ComposerWorkspaceProvider value={contextValue}>
+          {children}
+        </ComposerWorkspaceProvider>
       </DaemonWorkspaceContext.Provider>
     </DaemonAvailabilityContext.Provider>
   );

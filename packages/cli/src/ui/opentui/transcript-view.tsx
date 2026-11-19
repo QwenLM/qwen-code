@@ -16,7 +16,15 @@
  * silent no-op, which the composition-root contract forbids.
  */
 
-import { useEffect, useMemo, useRef, useState, type ErrorInfo } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ErrorInfo,
+} from 'react';
 import { useRenderer } from '@opentui/react';
 import type { Renderable, ScrollBoxRenderable } from '@opentui/core';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
@@ -63,8 +71,12 @@ import {
   type TranscriptWindow,
 } from './transcript-window.js';
 import { assistantMarkdownForRender } from './markdown-heal.js';
+import { wrappedRows } from './dialogs-core.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import type { ModAssistantMessageInput } from '@qwen-code/qwen-code-core/mods/render-tree.js';
+import type {
+  ModAssistantMessageInput,
+  ModThinkingInput,
+} from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { useModRow } from '../hooks/use-mod-row.js';
 import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { formatInlineToolArgsJson } from '../components/messages/ToolMessage.js';
@@ -107,6 +119,7 @@ function goalColor(color: GoalCardColor): string {
 }
 
 export interface TranscriptViewProps {
+  screenReader?: boolean;
   items: readonly LiveHistoryItem[];
   /** Width budget for ANSI grids / wrapping (defaults to a safe 80). */
   availableWidth?: number;
@@ -143,7 +156,7 @@ export interface TranscriptViewProps {
   /**
    * The main transcript's Mod rows: the config whose Mods may rewrite a
    * complete reply block, and the session the items belong to. Left out by
-   * the session preview and the quit screen.
+   * the session preview.
    */
   modRows?: { config: Config; sessionId: string };
 }
@@ -170,6 +183,15 @@ function itemMarginTop(kind: LiveHistoryItem['kind']): number {
 /** Stands in for "pinned to the last row" before the first frame reports a
  *  real offset; `computeTranscriptWindow` clamps it to the bottom. */
 const ANCHOR_BOTTOM = Number.MAX_SAFE_INTEGER;
+
+/** The range row the screen-reader transcript paints below its last item. */
+function historyRangeText(start: string, end: string, total: string): string {
+  return t('History items {{start}}-{{end}} of {{total}}', {
+    start,
+    end,
+    total,
+  });
+}
 
 const transcriptLogger = createDebugLogger('OPEN_TUI_TRANSCRIPT');
 
@@ -215,12 +237,21 @@ function findScrollHost(node: Renderable | null): ScrollBoxRenderable | null {
   return null;
 }
 
-function sameWindow(a: TranscriptWindow, b: TranscriptWindow): boolean {
+function sameWindow(
+  a: TranscriptWindow,
+  b: TranscriptWindow,
+  screenReader: boolean,
+): boolean {
   return (
     a.start === b.start &&
     a.end === b.end &&
     a.topPad === b.topPad &&
-    a.bottomPad === b.bottomPad
+    a.bottomPad === b.bottomPad &&
+    // Only the screen-reader announcement reads the span, so comparing it in
+    // graphical mode re-renders the mounted slice on scroll steps that leave
+    // the mount itself unchanged.
+    (!screenReader ||
+      (a.visibleStart === b.visibleStart && a.visibleEnd === b.visibleEnd))
   );
 }
 
@@ -234,6 +265,11 @@ function itemKey(item: LiveHistoryItem): string {
 interface MountedNode {
   item: LiveHistoryItem;
   node: Renderable;
+}
+
+interface ThoughtVisibility {
+  visible: ReadonlySet<ModThinkingInput>;
+  register: (input: ModThinkingInput) => () => void;
 }
 
 /** The rows Yoga laid out, or `undefined` for a node not laid out yet.
@@ -267,6 +303,9 @@ function useTranscriptWindow(
   items: readonly LiveHistoryItem[],
   availableTerminalHeight: number,
   initialAnchor: 'top' | 'bottom',
+  trackThinkingVisibility: boolean,
+  screenReader: boolean,
+  trailingRows: number,
 ) {
   const renderer = useRenderer();
   const rootRef = useRef<Renderable | null>(null);
@@ -290,11 +329,14 @@ function useTranscriptWindow(
   const enteredRef = useRef(new Map<string, number>());
   const offsetsRef = useRef<number[]>([0]);
   const itemsRef = useRef(items);
+  const trailingRowsRef = useRef(trailingRows);
   const mountedRef = useRef<TranscriptWindow>({
     start: 0,
     end: 0,
     topPad: 0,
     bottomPad: 0,
+    visibleStart: 0,
+    visibleEnd: 0,
   });
   /** `rows: 0` means no scroll host has reported a viewport yet, so the height
    *  prop is the fallback — read every render, which keeps a host-less pane
@@ -304,6 +346,22 @@ function useTranscriptWindow(
     rows: 0,
   });
   const [revision, setRevision] = useState(0);
+  const expandedThoughts = useRef(new Map<string, ModThinkingInput>());
+  const [visibleThoughts, setVisibleThoughts] = useState<
+    ReadonlySet<ModThinkingInput>
+  >(() => new Set());
+  const registerThought = useCallback(
+    (input: ModThinkingInput) => {
+      const expanded = expandedThoughts.current;
+      expanded.set(input.requestId, input);
+      renderer?.requestRender();
+      return () => {
+        if (expanded.get(input.requestId) === input)
+          expanded.delete(input.requestId);
+      };
+    },
+    [renderer],
+  );
 
   const offsets = useMemo(() => {
     const measured = heightsRef.current;
@@ -321,12 +379,14 @@ function useTranscriptWindow(
 
   itemsRef.current = items;
   offsetsRef.current = offsets;
+  trailingRowsRef.current = trailingRows;
 
   const win = computeTranscriptWindow({
     itemCount: items.length,
     offsets,
     scrollTop: scrollRef.current.top,
     viewportRows: scrollRef.current.rows || availableTerminalHeight,
+    trailingRows,
   });
   // Recorded here rather than in the frame handler: the render body is what
   // mounts a window, so it is also what can say which items the move pulled in
@@ -381,14 +441,51 @@ function useTranscriptWindow(
         offsets: offsetsRef.current,
         scrollTop: top,
         viewportRows: rows,
+        trailingRows: trailingRowsRef.current,
       });
-      return !sameWindow(next, mountedRef.current);
+      return !sameWindow(next, mountedRef.current, screenReader);
+    };
+
+    // The mounted window includes overscan. Use the laid-out rows to decide
+    // which thoughts may start a Mod render, even when scrolling leaves the
+    // mounted window unchanged.
+    const syncVisibleThoughts = (
+      host: ScrollBoxRenderable,
+      afterLayout: boolean,
+    ) => {
+      if (!trackThinkingVisibility) return;
+      const top = host.viewport.y;
+      const bottom = top + (laidOutRows(host.viewport) ?? 0);
+      const next = new Set<ModThinkingInput>();
+      if (bottom > top) {
+        for (const { item, node } of nodesRef.current.values()) {
+          if (item.kind !== 'thinking') continue;
+          const input = expandedThoughts.current.get(item.id);
+          if (!input) continue;
+          const height = laidOutRows(node) ?? 0;
+          if (height > 0 && node.y < bottom && node.y + height > top) {
+            next.add(input);
+          }
+        }
+      }
+      setVisibleThoughts((previous) => {
+        // A scrollbar change can use the previous layout to withdraw rows.
+        // Only a frame can confirm that a newly expanded row is visible.
+        const visible = afterLayout
+          ? next
+          : new Set([...previous].filter((input) => next.has(input)));
+        return previous.size === visible.size &&
+          [...visible].every((input) => previous.has(input))
+          ? previous
+          : visible;
+      });
     };
 
     const onScroll = () => {
       const found = locate();
       if (!found) return;
       if (syncWindow(found.root, found.host)) setRevision((value) => value + 1);
+      syncVisibleThoughts(found.host, false);
     };
 
     const onFrame = () => {
@@ -457,6 +554,7 @@ function useTranscriptWindow(
           if (from < tail && to < tail) host.scrollTop = to;
         }
         changed = syncWindow(found.root, host) || changed;
+        syncVisibleThoughts(host, true);
       }
       if (changed) setRevision((value) => value + 1);
     };
@@ -466,9 +564,13 @@ function useTranscriptWindow(
       renderer.off('frame', onFrame);
       bar?.off('change', onScroll);
     };
-  }, [renderer]);
+  }, [renderer, trackThinkingVisibility, screenReader]);
 
-  return { rootRef, nodesRef, win };
+  const thoughtVisibility: ThoughtVisibility = {
+    visible: visibleThoughts,
+    register: registerThought,
+  };
+  return { rootRef, nodesRef, win, thoughtVisibility };
 }
 
 type ToolPresentationRow = Extract<LiveHistoryItem, { kind: 'tool' }>;
@@ -551,6 +653,7 @@ function projectCompactToolGroups(
 }
 
 export function OpenTuiTranscriptView({
+  screenReader = false,
   items,
   availableWidth = 80,
   availableTerminalHeight = 24,
@@ -567,16 +670,27 @@ export function OpenTuiTranscriptView({
 }: TranscriptViewProps) {
   const visibleItems = useMemo(
     () =>
-      projectCompactToolGroups(
-        items.filter(
-          (item) =>
-            !item.canonicalOnly && isHistoryItemVisibleAfterRestore(item),
-        ),
-        thoughtsExpanded,
-        showToolCallArgs,
-        showToolCallDetails,
-      ),
-    [items, thoughtsExpanded, showToolCallArgs, showToolCallDetails],
+      screenReader
+        ? items.filter(
+            (item) =>
+              !item.canonicalOnly && isHistoryItemVisibleAfterRestore(item),
+          )
+        : projectCompactToolGroups(
+            items.filter(
+              (item) =>
+                !item.canonicalOnly && isHistoryItemVisibleAfterRestore(item),
+            ),
+            thoughtsExpanded,
+            showToolCallArgs,
+            showToolCallDetails,
+          ),
+    [
+      items,
+      thoughtsExpanded,
+      showToolCallArgs,
+      showToolCallDetails,
+      screenReader,
+    ],
   );
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
   const awaitingItem = visibleItems.findLast(
@@ -586,10 +700,26 @@ export function OpenTuiTranscriptView({
       !item.done &&
       item.id === awaitingCallId,
   );
-  const { rootRef, nodesRef, win } = useTranscriptWindow(
+  const helpText = t(
+    'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.',
+  );
+  // The range and help rows share the scroll content the sticky pin rests at
+  // the end of, so the bottom clamp pays for the rows they actually paint at
+  // the content budget. The range row's own numbers come out of the window, so
+  // its widest form — every number as wide as the total — pays for its wrap.
+  const total = String(visibleItems.length);
+  const trailingRows =
+    screenReader && visibleItems.length > 0
+      ? wrappedRows(historyRangeText(total, total, total), availableWidth) +
+        wrappedRows(helpText, availableWidth)
+      : 0;
+  const { rootRef, nodesRef, win, thoughtVisibility } = useTranscriptWindow(
     visibleItems,
     availableTerminalHeight,
     initialAnchor,
+    modRows !== undefined,
+    screenReader,
+    trailingRows,
   );
   return (
     <box
@@ -606,6 +736,7 @@ export function OpenTuiTranscriptView({
         return (
           <box
             key={key}
+            id={screenReader ? `screen-reader-item-${key}` : undefined}
             flexDirection="column"
             marginTop={itemMarginTop(item.kind)}
             ref={(el) => {
@@ -626,6 +757,7 @@ export function OpenTuiTranscriptView({
                 terminalHeight={availableTerminalHeight}
                 width={availableWidth}
                 thoughtsExpanded={thoughtsExpanded}
+                thoughtVisibility={thoughtVisibility}
                 showToolCallArgs={showToolCallArgs}
                 showTimestamps={showTimestamps}
                 showToolCallDetails={showToolCallDetails}
@@ -647,6 +779,18 @@ export function OpenTuiTranscriptView({
         );
       })}
       <box height={win.bottomPad} flexShrink={0} />
+      {screenReader && visibleItems.length > 0 && (
+        <>
+          <text id="screen-reader-history-window">
+            {historyRangeText(
+              String(win.visibleStart + 1),
+              String(win.visibleEnd),
+              total,
+            )}
+          </text>
+          <text id="screen-reader-history-help">{helpText}</text>
+        </>
+      )}
     </box>
   );
 }
@@ -657,6 +801,7 @@ function TranscriptItem({
   terminalHeight,
   width,
   thoughtsExpanded,
+  thoughtVisibility,
   showToolCallArgs,
   showTimestamps,
   showToolCallDetails,
@@ -670,6 +815,7 @@ function TranscriptItem({
   terminalHeight: number;
   width: number;
   thoughtsExpanded: boolean;
+  thoughtVisibility: ThoughtVisibility;
   showToolCallArgs: boolean;
   showTimestamps: boolean;
   showToolCallDetails: boolean;
@@ -698,6 +844,8 @@ function TranscriptItem({
           item={item}
           allExpanded={thoughtsExpanded}
           mouseTracking={mouseTracking}
+          modRows={modRows}
+          thoughtVisibility={thoughtVisibility}
         />
       );
     case 'tool':
@@ -892,10 +1040,14 @@ function ThinkingRow({
   item,
   allExpanded,
   mouseTracking,
+  modRows,
+  thoughtVisibility: { register, visible },
 }: {
   item: LiveThinkingItem;
   allExpanded: boolean;
   mouseTracking: boolean;
+  modRows?: TranscriptViewProps['modRows'];
+  thoughtVisibility: ThoughtVisibility;
 }) {
   const [clickedOpen, setClickedOpen] = useState(false);
   // ink resolves a thought as the global ctrl+O toggle or its own clicked-open
@@ -907,7 +1059,33 @@ function ThinkingRow({
     item.durationMs ??
     (item.startedAt === undefined ? undefined : Date.now() - item.startedAt);
   const meta = thinkingMeta(item.done, expanded, durationMs, mouseTracking);
-  const body = item.text.trimEnd();
+  const text = item.text.trimEnd();
+  // The Mods can rewrite how a complete, expanded block is drawn. The item
+  // keeps its original text. Ctrl+O needs a fresh visibility sample even
+  // when a clicked-open thought stays expanded, since its neighbors can grow.
+  const modInput = useMemo<ModThinkingInput | undefined>(
+    () =>
+      modRows && item.done && (allExpanded || clickedOpen) && text.trim()
+        ? {
+            surface: 'terminal',
+            component: 'Thinking',
+            requestId: item.id,
+            props: { text },
+          }
+        : undefined,
+    [modRows, item.done, item.id, allExpanded, clickedOpen, text],
+  );
+  useLayoutEffect(
+    () => (modInput ? register(modInput) : undefined),
+    [modInput, register],
+  );
+  const modProps = useModRow(
+    modRows?.config,
+    modRows?.sessionId,
+    modInput,
+    modInput !== undefined && visible.has(modInput),
+  );
+  const body = modProps?.text ?? text;
   return (
     <box
       flexDirection="column"

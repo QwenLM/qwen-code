@@ -1580,6 +1580,27 @@ describe('loadCliConfig', () => {
     expect(provider).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['unifiedAgentLoop', 'isUnifiedAgentLoopEnabled'],
+    ['eventBusAgentLoop', 'isEventBusAgentLoopEnabled'],
+  ] as const)(
+    'derives %s from settings with the override variable unset',
+    async (setting, getter) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+      vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+      // The Hosted Harness is off by default for both switches.
+      const defaults = await loadCliConfig({}, argv);
+      expect(defaults[getter]('hosted')).toBe(false);
+      const enabled = await loadCliConfig(
+        { experimental: { [setting]: true } },
+        argv,
+      );
+      expect(enabled[getter]('hosted')).toBe(true);
+    },
+  );
+
   it('derives folderTrust from settings and defaults it to false', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -3376,6 +3397,44 @@ describe('loadCliConfig', () => {
     expect(mockConfigConstructorParams).toHaveBeenCalledWith(
       expect.objectContaining({
         unifiedAgentLoopEnabled: false,
+      }),
+    );
+  });
+
+  it('propagates the model availability tracking opt-in and opt-out', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig(
+      { experimental: { modelAvailabilityTracking: true } },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: true,
+      }),
+    );
+
+    await loadCliConfig(
+      { experimental: { modelAvailabilityTracking: false } },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: false,
+      }),
+    );
+  });
+
+  it('leaves the model availability tracking setting unset by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: undefined,
       }),
     );
   });

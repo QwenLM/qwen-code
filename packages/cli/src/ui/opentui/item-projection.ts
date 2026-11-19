@@ -144,6 +144,7 @@ export function projectAbout(systemInfo: Record<string, unknown>): string {
   const modelVersion = String(systemInfo['modelVersion'] ?? '');
   addField('Model', modelVersion);
   addField('Fast Model', String(systemInfo['fastModel'] ?? '') || modelVersion);
+  addField('Agent Loop', String(systemInfo['agentLoop'] ?? ''));
   addField('Session ID', String(systemInfo['sessionId'] ?? ''));
   addField('Sandbox', String(systemInfo['sandboxEnv'] ?? ''));
   const proxy = systemInfo['proxy'] as string | undefined;

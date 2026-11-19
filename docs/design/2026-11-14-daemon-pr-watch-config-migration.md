@@ -2,18 +2,22 @@
 
 [English](2026-11-14-daemon-pr-watch-config-migration.md) | [简体中文](2026-11-14-daemon-pr-watch-config-migration.zh-CN.md)
 
-Status: proposed. This is the increment the master design
-([PR state transitions](2026-11-04-daemon-pr-state-transitions.md), §6 and §7)
-calls **PR B**. Every code citation below was read at `bbdca16b52`
-(`origin/main`), the commit this branch starts from.
+Status: implemented — landed as #17214 on 2026-11-14. This is the increment the
+master design ([PR state transitions](2026-11-04-daemon-pr-state-transitions.md),
+§6 and §7) calls **PR B**. Every code citation below was read at `bbdca16b52`
+(`origin/main`), the commit this branch started from, so the line numbers
+describe that tree rather than today's. The body below describes the increment as
+designed at that commit; it landed as #17214, removing the internal switch and the
+adapter's state detection.
 
-PR A is complete: nine PRs are merged (#16577, #16590, #16611, #16656, #16732,
-#16810, #16834, #16847, #17032). The daemon owns the watch store, observation,
-drain, shared admission and restore, and deps provisioning. The internal switch
-`SESSION_PR_WATCH_OBSERVATION_ENABLED` is still `false`
-(`packages/cli/src/serve/server/session-pr-refresh.ts:82`), so production
-behaviour is unchanged and the GitHub channel adapter still does all the
-watching.
+PR A was already complete when this increment began: nine PRs merged (#16577,
+#16590, #16611, #16656, #16732, #16810, #16834, #16847, #17032), giving the daemon
+the watch store, observation, drain, shared admission and restore, and deps
+provisioning. At that point the internal switch
+`SESSION_PR_WATCH_OBSERVATION_ENABLED` was still `false`, so production behaviour
+was unchanged and the GitHub channel adapter still did all the watching. This
+increment removed that switch — enablement is now deps presence — and the
+adapter no longer detects PR-state transitions.
 
 ## Problem
 
@@ -143,8 +147,8 @@ push-ledger coordinate uses `host` with the port and `www.` stripped
   later product decision; this increment keeps the default off.
 - Changing the CI predicate, the transition rules, the drain's locking, the
   restore concurrency or the delivery envelope. PR A settled those.
-- A `review_decision` transition, Aone parity, or a manual-push ledger (master
-  design open questions 3, 4 and 5).
+- A `review_decision` transition, Aone parity, or a manual-push ledger (the
+  three questions the master design still leaves open).
 - Rewriting the comment lane, its budget hooks or its ETag cache.
 
 ## Proposed changes
@@ -310,11 +314,14 @@ increment promises not to make more expensive.
 
 ### 8. The deprecation surface
 
-`connect()` accepts `prWatchEvents` and the `watch:*` keys, logs exactly one
-warning naming `sessionPrWatch`, and runs no state detection. The validation that
-throws today (`normalizePrWatchEvents`, `GithubAdapter.ts:882-914`, reached
-through `:982-987` and `:2093-2096`) becomes a warning for these keys only; the
-notification-reason keys keep their current validation.
+`connect()` accepts `prWatchEvents`, the `watch:*` keys, and the now-inert
+`prWatchLimit` / `prWatchBudgetReserve`, logs exactly one warning naming
+`sessionPrWatch` and all four keys, and runs no state detection. The validation that
+threw at that commit became a warning for these keys only — `normalizePrWatchEvents`
+(`GithubAdapter.ts:882-914`, reached through `:982-987` and `:2093-2096`) for the two
+event keys, and `validateBoundSessionConfig` (`:921`, knob checks at `:931-936`,
+`:958-963` and `:972-981`) for the two limit knobs. The notification-reason keys kept
+their validation.
 
 Because the descriptor has no deprecated field, the deprecation is expressed in
 the field description and a type-level `@deprecated`, and the Web Shell editor
@@ -390,7 +397,8 @@ scans are accepted as-is.
    (`GithubAdapter.ts:9178-9189`). This repository cancels superseded runs
    routinely, so core's predicate will fire `ci_failure` on some of them.
    Keeping one definition is what PR A already shipped, and excluding them
-   would require enumerating rollup contexts instead of reading `rollup.state`.
+   would require enumerating rollup contexts and special-casing those conclusions,
+   instead of reading each entry's own state or conclusion.
    The recurring noise is accepted explicitly under **Decisions and open
    questions** below.
 9. **The setting is operator-only.** It spends daemon-wide `gh` budget and

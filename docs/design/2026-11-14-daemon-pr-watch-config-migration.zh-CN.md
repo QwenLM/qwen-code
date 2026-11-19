@@ -2,15 +2,17 @@
 
 [English](2026-11-14-daemon-pr-watch-config-migration.md) | [简体中文](2026-11-14-daemon-pr-watch-config-migration.zh-CN.md)
 
-状态：提案。本增量即母设计（[PR 状态跃迁](2026-11-04-daemon-pr-state-transitions.md)
+状态：已实现 —— 于 2026-11-14 以 #17214 落地。本增量即母设计（[PR 状态跃迁](2026-11-04-daemon-pr-state-transitions.zh-CN.md)
 §6 与 §7）所称的 **PR B**。下文每条代码引用都读自 `bbdca16b52`（`origin/main`），
-也就是本分支的起点提交。
+也就是本分支的起点提交，因此行号描述的是那棵树而非今天的树。下文按该增量在那个提交上
+当时的设计描述；它已以 #17214 落地，移除了内部开关与适配器的状态检测。
 
-PR A 已完成：九个 PR 已合入（#16577、#16590、#16611、#16656、#16732、#16810、
-#16834、#16847、#17032）。daemon 已拥有 watch store、观测、drain、共享 admission
-与 restore，以及 deps 装配。内部开关 `SESSION_PR_WATCH_OBSERVATION_ENABLED` 仍为
-`false`（`packages/cli/src/serve/server/session-pr-refresh.ts:82`），因此生产行为
-未变，PR 监视仍全部由 GitHub 渠道适配器承担。
+本增量开工时 PR A 已完成：九个 PR 已合入（#16577、#16590、#16611、#16656、#16732、
+#16810、#16834、#16847、#17032），使 daemon 拥有 watch store、观测、drain、共享
+admission 与 restore，以及 deps 装配。那时内部开关
+`SESSION_PR_WATCH_OBSERVATION_ENABLED` 仍为 `false`，因此生产行为未变，PR 监视仍全部
+由 GitHub 渠道适配器承担。本增量移除了该开关——启用现在即 deps 存在性——适配器也不再
+检测 PR 状态跃迁。
 
 ## 问题
 
@@ -115,7 +117,7 @@ listen」。该签名目前只覆盖 base-URL 列表。
 
 - 默认打开 watch。母设计决策 7 把这留作后续产品决策；本增量保持默认关闭。
 - 改动 CI 谓词、跃迁规则、drain 的加锁、restore 并发或投递信封。这些由 PR A 定案。
-- `review_decision` 跃迁、Aone 对等、手工推送账本（母设计 open questions 3、4、5）。
+- `review_decision` 跃迁、Aone 对等、手工推送账本（母设计仍开放的三个问题）。
 - 重写 comment 车道、其预算钩子或其 ETag 缓存。
 
 ## 提议的改动
@@ -242,10 +244,12 @@ host 按 watch identity 的口径归并（裸 hostname、不带端口），因�
 
 ### 8. 弃用面
 
-`connect()` 接受 `prWatchEvents` 与 `watch:*` 键，恰好记录一条点名 `sessionPrWatch`
-的告警，且不跑状态检测。今天抛错的校验（`normalizePrWatchEvents`，
-`GithubAdapter.ts:882-914`，经 `:982-987` 与 `:2093-2096` 抵达）仅对这些键改为告警；
-通知原因键保持现有校验。
+`connect()` 接受 `prWatchEvents`、`watch:*` 键，以及已失效的 `prWatchLimit` /
+`prWatchBudgetReserve`，恰好记录一条点名 `sessionPrWatch` 与这四个键的告警，
+且不跑状态检测。在那个提交上抛错的校验仅对这些键改为了告警——两个事件键经
+`normalizePrWatchEvents`（`GithubAdapter.ts:882-914`，经 `:982-987` 与 `:2093-2096`
+抵达），两个 limit 旋钮经 `validateBoundSessionConfig`（`:921`，旋钮校验在
+`:931-936`、`:958-963` 与 `:972-981`）。通知原因键保持了原有校验。
 
 由于 descriptor 没有弃用字段，弃用通过字段描述与类型层 `@deprecated` 表达，Web Shell
 编辑器则如对待 `senderPolicy` 那样在保存时继续保留这些键。用户页的配置表、状态 watch
@@ -308,7 +312,8 @@ listing 在同一 tick 稍后才跑）。drain 的扫描继续独立，沿用其
    「a superseded run's cancellation is not a CI failure of this head」
    （`GithubAdapter.ts:9178-9189`）。本仓库经常取消被取代的 run，因此 core 的谓词
    会在其中一些上触发 `ci_failure`。保留单一定义正是 PR A 已发布的形状，而排除它们
-   需要枚举 rollup contexts 而不是读 `rollup.state`。这份反复出现的噪声已在下方
+   需要枚举 rollup contexts 并对这些结论做特判，而不是读取每个条目自己的 state 或
+   conclusion。这份反复出现的噪声已在下方
    **决策与待定问题**里被明确接受。
 9. **该设置是 operator-only。** 它花费 daemon 全局的 `gh` 预算并向跨 workspace 的会话
    注入提示词，因此一个仓库不得为整个 daemon 打开它；受信任门控的别名才是按 workspace

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ManagedPackageSkill } from './managed-package.js';
 import { parseMarkdownCommand } from '../utils/markdown-command.js';
 import { parseSkillContent } from '../skills/skill-load.js';
 
@@ -30,3 +31,28 @@ export function parseManagedSkillContent(content: string, file: string) {
     );
   return parseSkillContent(content, file);
 }
+
+export function extensionInstructionText(
+  body: string,
+  extensionId: string,
+): string {
+  return body
+    .replaceAll('${extensionPath}', `extension://${extensionId}`)
+    .replaceAll('${CLAUDE_PLUGIN_ROOT}', `extension://${extensionId}`);
+}
+
+export function managedSkillCatalogEntry(
+  skill: ManagedPackageSkill,
+  extensionId: string,
+) {
+  return {
+    name: skill.name,
+    description: skill.description,
+    body: extensionInstructionText(skill.body, extensionId),
+    model_invocable: skill.model_invocable,
+    user_invocable: skill.user_invocable,
+    asset_directory: `extension://${extensionId}/${skill.assetDirectory.replace(/\/$/u, '')}/`,
+  };
+}
+
+export const MANAGED_SKILL_BODY_MAX_BYTES = 512 * 1024;

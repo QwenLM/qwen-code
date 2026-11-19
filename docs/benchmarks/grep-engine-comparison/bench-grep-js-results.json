@@ -1,0 +1,40 @@
+{
+  "results": [
+    {
+      "pattern": "common word",
+      "strategy": "main:JS fallback (globStream+readFile)",
+      "median_ms": 49361.2,
+      "min_ms": 49361.2,
+      "max_ms": 49361.2,
+      "files_searched": 165575,
+      "matches": 1079867
+    },
+    {
+      "pattern": "identifier regex",
+      "strategy": "main:JS fallback (globStream+readFile)",
+      "median_ms": 50642.1,
+      "min_ms": 50642.1,
+      "max_ms": 50642.1,
+      "files_searched": 165576,
+      "matches": 1020
+    },
+    {
+      "pattern": "absent string",
+      "strategy": "main:JS fallback (globStream+readFile)",
+      "median_ms": 49731.5,
+      "min_ms": 49731.5,
+      "max_ms": 49731.5,
+      "files_searched": 165576,
+      "matches": 4
+    }
+  ],
+  "scope": {
+    "git_grep_files": 7237,
+    "rg_files_hidden_gitignore": 7147,
+    "system_grep_files": 78624
+  },
+  "scope_note": "These three counts are NOT the same measurement and must not be compared pairwise. git_grep_files is `git grep --untracked -l -E --ignore-case -e function`, i.e. case-insensitive files-with-matches. rg_files_hidden_gitignore is `rg --hidden -l` with the VCS globs and no -i, i.e. case-sensitive; that is why it reads 90 files below git grep. The same-configuration rg value recorded in bench-grep-results.json is 7228 under -i, leaving a 9-file delta against git grep that this PR does not reconcile. system_grep_files counts files MATCHING under the pre-fix recursive argv, not files walked; the walked count is files_searched on each result row, so reading 78624 against 165575 as a scan ratio is wrong.",
+  "samples_note": "No per-sample arrays were retained for this run: min_ms == median_ms == max_ms on every row, so these three figures are single runs, not medians of five. bench-grep-results.json's provenance originally claimed this file retained full samples; it does not.",
+  "comparison_note": "Historical single-run values only. The original harness and exact tree state were not retained sufficiently to reconcile the 165575 reads with the later independent 37071-entry enumeration. The before/after JS ratios are not a controlled speedup measurement; do not infer reduced enumeration from them.",
+  "date": "2026-11-17T05:14:27.985Z"
+}

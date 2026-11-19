@@ -40,6 +40,7 @@ import {
 } from '../outbound-dynamic-headers.js';
 import { isResponsesReasoningSignature } from '../../utils/thoughtUtils.js';
 import { retryContext } from '../../utils/retryContext.js';
+import { markRequestDispatched } from '../loggingContentGenerator/request-dispatch.js';
 
 const debugLogger = createDebugLogger('GEMINI');
 
@@ -363,6 +364,7 @@ export class LlmContentGenerator implements ContentGenerator {
       config: this.buildGenerateContentConfig(request),
     };
     const telemetryAttempt = reportLlmRequest(finalRequest);
+    markRequestDispatched();
     const stream = await this.models.generateContentStream(finalRequest);
     return observeLlmStream(stream, telemetryAttempt);
   }

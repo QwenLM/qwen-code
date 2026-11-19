@@ -424,6 +424,11 @@ export function OpentuiRewindSelector(props: OpentuiRewindSelectorProps) {
               return (
                 <box
                   key={turn.id}
+                  id={
+                    selected
+                      ? 'screen-reader-selected-turn'
+                      : 'screen-reader-unselected-turn'
+                  }
                   flexDirection="row"
                   marginBottom={last || layout.compact ? 0 : 1}
                 >
@@ -476,7 +481,15 @@ export function OpentuiRewindSelector(props: OpentuiRewindSelectorProps) {
                     : '  ';
               const label = optionLabel(actualIndex);
               return (
-                <box key={option.key} flexDirection="row">
+                <box
+                  key={option.key}
+                  id={
+                    selected
+                      ? 'screen-reader-selected-rewind-option'
+                      : 'screen-reader-unselected-rewind-option'
+                  }
+                  flexDirection="row"
+                >
                   <text
                     fg={selected ? C.accent : C.text}
                     attributes={selected ? 1 : undefined}

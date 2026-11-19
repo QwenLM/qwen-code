@@ -303,6 +303,7 @@ export const configCommand: SlashCommand = {
       const newValue = nextBooleanSettingValue(
         currentValue,
         getDefaultValue(key),
+        def.unsetToggleValue,
       );
       try {
         context.services.settings.setValues([
