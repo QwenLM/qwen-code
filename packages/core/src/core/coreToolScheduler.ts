@@ -5689,37 +5689,36 @@ export class CoreToolScheduler {
     );
     const executing = new Set<Promise<void>>();
     const admitted: ScheduledToolCall[] = [];
+    let failure: { error: unknown } | undefined;
     const launchAdmitted = () => {
       for (const call of admitted.splice(0)) {
-        const p = this.executeSingleToolCall(call, signal).finally(() => {
-          executing.delete(p);
-        });
-        executing.add(p);
+        const execution = this.executeSingleToolCall(call, signal)
+          .catch((error: unknown) => {
+            failure ??= { error };
+          })
+          .finally(() => {
+            executing.delete(execution);
+          });
+        executing.add(execution);
       }
     };
 
-    try {
-      for (const call of calls) {
-        if (
-          this.schedulerOptions.beforeToolLaunch &&
-          (await this.launchRefused(call))
-        ) {
-          continue;
-        }
-        admitted.push(call);
-        if (executing.size + admitted.length >= maxConcurrency) {
-          launchAdmitted();
-          await Promise.race(executing);
-        }
+    for (const call of calls) {
+      if (failure) break;
+      const refused =
+        this.schedulerOptions.beforeToolLaunch &&
+        (await this.launchRefused(call));
+      if (failure) break;
+      if (refused) continue;
+      admitted.push(call);
+      if (executing.size + admitted.length >= maxConcurrency) {
+        launchAdmitted();
+        await Promise.race(executing);
       }
-      launchAdmitted();
-      await Promise.all(executing);
-    } catch (error) {
-      if (error instanceof ManagedRuntimeOutcomeUnknownError) {
-        await Promise.allSettled(executing);
-      }
-      throw error;
     }
+    if (!failure) launchAdmitted();
+    await Promise.all(executing);
+    if (failure) throw failure.error;
   }
 
   private async executeSingleToolCall(

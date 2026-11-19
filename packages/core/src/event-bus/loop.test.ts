@@ -913,49 +913,83 @@ describe('runAgentLoop on the event bus when its signal aborts', () => {
     }
   });
 
-  it('bounds cancellation while onRoundEnd is waiting', async () => {
+  it('keeps a required tool batch pending past the cancellation cap', async () => {
     vi.useFakeTimers();
     try {
       const abort = new AbortController();
-      let enterRoundEnd!: () => void;
-      const roundEnded = new Promise<void>(
-        (resolve) => (enterRoundEnd = resolve),
-      );
-      let release!: () => void;
-      const waiting = new Promise<void>((resolve) => (release = resolve));
-      const executor = { run: vi.fn(makeExecutor().run) };
+      const held = heldExecutor();
       const running = runAgentLoop({
-        ...options(
-          [[toolCall]],
-          {
-            onRoundEnd: () => {
-              enterRoundEnd();
-              return waiting;
-            },
-          },
-          { signal: abort.signal, executor },
-        ),
+        ...options([[toolCall]], makeHost().host, {
+          signal: abort.signal,
+          executor: held.executor,
+          keepCancelledResults: true,
+        }),
         useEventBus: true,
+        waitForToolSettlementOnCancel: true,
       });
-      await roundEnded;
-      abort.abort();
       const settled = vi.fn();
       void running.then(settled);
-      await vi.advanceTimersByTimeAsync(CANCEL_SETTLEMENT_CAP_MS - 1);
+      await held.started;
+      abort.abort();
+      await vi.advanceTimersByTimeAsync(CANCEL_SETTLEMENT_CAP_MS + 1);
       expect(settled).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(1);
-      expect(settled).toHaveBeenCalledWith({
-        reason: 'cancelled',
-        rounds: 1,
-        turn: {},
-      });
-      release();
-      await vi.advanceTimersByTimeAsync(0);
-      expect(executor.run).not.toHaveBeenCalled();
+      held.settle();
+      const result = await running;
+      expect(result.reason).toBe('cancelled');
+      expect(result.responses?.map(({ callId }) => callId)).toEqual(['c1']);
+      expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
     }
   });
+
+  it.each([false, true])(
+    'bounds cancellation while onRoundEnd is waiting (require tool settlement: %s)',
+    async (waitForToolSettlementOnCancel) => {
+      vi.useFakeTimers();
+      try {
+        const abort = new AbortController();
+        let enterRoundEnd!: () => void;
+        const roundEnded = new Promise<void>(
+          (resolve) => (enterRoundEnd = resolve),
+        );
+        let release!: () => void;
+        const waiting = new Promise<void>((resolve) => (release = resolve));
+        const executor = { run: vi.fn(makeExecutor().run) };
+        const running = runAgentLoop({
+          ...options(
+            [[toolCall]],
+            {
+              onRoundEnd: () => {
+                enterRoundEnd();
+                return waiting;
+              },
+            },
+            { signal: abort.signal, executor },
+          ),
+          useEventBus: true,
+          waitForToolSettlementOnCancel,
+        });
+        await roundEnded;
+        abort.abort();
+        const settled = vi.fn();
+        void running.then(settled);
+        await vi.advanceTimersByTimeAsync(CANCEL_SETTLEMENT_CAP_MS - 1);
+        expect(settled).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        expect(settled).toHaveBeenCalledWith({
+          reason: 'cancelled',
+          rounds: 1,
+          turn: {},
+        });
+        release();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(executor.run).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('ends a run whose batch does not settle within the cap, and its host hears nothing after', async () => {
     vi.useFakeTimers();

@@ -20,7 +20,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import type { BridgeExecutionEngine } from '@qwen-code/acp-bridge/bridgeOptions';
 import type { AcpChannel, ChannelFactory } from '@qwen-code/acp-bridge/channel';
@@ -122,6 +122,7 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
   let modelRequests: ModelRequest[];
   let bridge: AcpSessionBridge | undefined;
   let registry: ProcessRegistry;
+  let sourceEnv: NodeJS.ProcessEnv;
   let started: Record<BridgeExecutionEngine, AcpChannel[]>;
   const strayPids: number[] = [];
 
@@ -204,7 +205,7 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
         },
       }),
     );
-    const sourceEnv: NodeJS.ProcessEnv = Object.fromEntries(
+    sourceEnv = Object.fromEntries(
       Object.entries(process.env).filter(([key]) => !key.startsWith('VITEST')),
     );
     Object.assign(sourceEnv, {
@@ -568,6 +569,54 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     );
     expect((await prompt(sessionId)).stopReason).toBe('end_turn');
     expect((await readWorker(nextOut)).pid).toBe(worker.pid);
+  }, 120_000);
+
+  it('does not finish a kernel cancellation while a Managed tool is unresolved', async () => {
+    sourceEnv['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = 'acp=1';
+    sourceEnv['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] = 'acp=1';
+    const sessionId = await newSession();
+    const shellOut = path.join(workspace, 'shell.txt');
+    const sleeper = path.join(workspace, 'sleeper.pid');
+    turns.push({
+      toolCalls: [
+        {
+          name: 'run_shell_command',
+          args: recordWorker(
+            shellOut,
+            `; echo $$ > ${JSON.stringify(sleeper)}; exec sleep 120`,
+          ),
+        },
+      ],
+    });
+    const running = prompt(sessionId);
+    const finished = vi.fn();
+    void running.then(finished, finished);
+    const worker = await readWorker(shellOut);
+    const sleepPid = Number(
+      await waitFor(
+        async () =>
+          (await readFile(sleeper, 'utf8').catch(() => '')).trim() || undefined,
+      ),
+    );
+    strayPids.push(sleepPid);
+    const requestsBefore = modelRequests.length;
+    process.kill(worker.pid, 'SIGSTOP');
+    const cancelling = bridge!.cancelSession(sessionId);
+    void cancelling.catch(() => undefined);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 11_000));
+      expect(finished).not.toHaveBeenCalled();
+      expect(isAlive(sleepPid)).toBe(true);
+    } finally {
+      process.kill(worker.pid, 'SIGKILL');
+    }
+    const unknownOutcome = {
+      data: { errorKind: 'managed_runtime_outcome_unknown' },
+    };
+    await expect(running).rejects.toMatchObject(unknownOutcome);
+    await cancelling;
+    await expect(prompt(sessionId)).rejects.toMatchObject(unknownOutcome);
+    expect(modelRequests).toHaveLength(requestsBefore);
   }, 120_000);
 
   it('stops the worker and its command when the Managed child dies', async () => {

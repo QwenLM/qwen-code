@@ -73,6 +73,12 @@ export class ConversationHandler {
         // The handlers stop at the cancelled signal; a run they have not
         // settled within the cap ends here, and its late work is dropped.
         state.settleTimer ??= setTimeout(() => {
+          if (
+            state.input.waitForToolSettlementOnCancel &&
+            state.toolBatchRunning
+          ) {
+            return;
+          }
           this.finish(state, {
             reason: 'cancelled',
             rounds: (state.round ?? 0) + 1,

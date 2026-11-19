@@ -30,6 +30,7 @@ export interface SharedLoopRoundOptions {
   deferRecording: boolean;
   /** Run the round on the event-bus kernel. */
   useEventBus: boolean;
+  waitForToolSettlementOnCancel?: boolean;
   onModelEvent: NonNullable<AgentLoopHost['onModelEvent']>;
 }
 
@@ -108,6 +109,7 @@ export function startSharedLoopRound(
     keepCancelledResults: true,
     deferRecording: options.deferRecording,
     useEventBus: options.useEventBus,
+    waitForToolSettlementOnCancel: options.waitForToolSettlementOnCancel,
     executor: {
       run: (requests, signal, hooks) =>
         taken?.executor.run(requests, taken.toolSignal ?? signal, hooks) ??
