@@ -126,6 +126,11 @@ public class ManagedAgentConfiguration {
             @org.springframework.beans.factory.annotation.Qualifier("managedJdbcTemplate") org.springframework.jdbc.core.JdbcTemplate jdbc) {
         return new com.alibaba.qwen.code.managedagent.persistence.JdbcChannelSegmentRepository(jdbc);
     }
+    @org.springframework.context.annotation.Bean
+    public com.alibaba.qwen.code.managedagent.contracts.persistence.PrWatchInjectionRepository managedPrWatchInjections(
+            @org.springframework.beans.factory.annotation.Qualifier("managedJdbcTemplate") org.springframework.jdbc.core.JdbcTemplate jdbc) {
+        return new com.alibaba.qwen.code.managedagent.persistence.JdbcPrWatchInjectionRepository(jdbc);
+    }
 
     @org.springframework.context.annotation.Bean
     public com.alibaba.qwen.code.managedagent.model.RequestDigests managedRequestDigests() {

@@ -421,6 +421,7 @@ vi.mock('../core/client.js', () => ({
     initialize: vi.fn().mockResolvedValue(undefined),
     isInitialized: vi.fn().mockReturnValue(true),
     setTools: vi.fn(),
+    clearBackgroundInteractionPromptIds: vi.fn(),
   })),
 }));
 
@@ -4771,6 +4772,32 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('resets the availability ledger on a session swap, including a same-id resume (P2)', async () => {
+      const config = await initConfig({}, LEGACY_SKIP_ALL_INIT);
+      const service = config.getModelAvailabilityService();
+      service.beginTurn('A########2');
+      service.markRetryOncePerTurn('fallback-b');
+      service.consumeStickyAttempt('fallback-b');
+      expect(service.snapshot('fallback-b').available).toBe(false);
+
+      // A same-id resume replaces the conversation; the reused prompt id must
+      // not inherit the outgoing turn's consumed mark.
+      config.startNewSession(config.getSessionId());
+      const fresh = config.getModelAvailabilityService();
+      expect(fresh).not.toBe(service);
+      expect(fresh.snapshot('fallback-b').available).toBe(true);
+    });
+
+    it('clears the background prompt-id registry at the session boundary (P2)', async () => {
+      const config = await initConfig({}, LEGACY_SKIP_ALL_INIT);
+      const clear = vi.spyOn(
+        config.getLlmClient(),
+        'clearBackgroundInteractionPromptIds',
+      );
+      config.startNewSession(config.getSessionId());
+      expect(clear).toHaveBeenCalled();
+    });
+
     it('clears loaded Skill state at the session boundary', async () => {
       const config = await initConfig({}, LEGACY_SKIP_ALL_INIT);
       const clearLoadedSkills = stubSkillTool(config);
@@ -7478,6 +7505,45 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    describe('modelAvailabilityTracking', () => {
+      it('defaults to off', () => {
+        expect(makeConfig().isModelAvailabilityTrackingEnabled()).toBe(false);
+      });
+
+      it('honors the constructor parameter', () => {
+        expect(
+          makeConfig({
+            modelAvailabilityTracking: true,
+          }).isModelAvailabilityTrackingEnabled(),
+        ).toBe(true);
+        expect(
+          makeConfig({
+            modelAvailabilityTracking: false,
+          }).isModelAvailabilityTrackingEnabled(),
+        ).toBe(false);
+      });
+
+      it('returns one stable lazily-created service instance per Config', () => {
+        const config = makeConfig({ modelAvailabilityTracking: true });
+        const first = config.getModelAvailabilityService();
+        expect(first).toBeDefined();
+        expect(config.getModelAvailabilityService()).toBe(first);
+        // Per-Config ownership, not a process-global singleton: an independently
+        // constructed Config must not share the ledger.
+        expect(
+          makeConfig({
+            modelAvailabilityTracking: true,
+          }).getModelAvailabilityService(),
+        ).not.toBe(first);
+        // A derived Config (deriveConfig = Object.create(base)) deliberately
+        // shares the session's ledger through the prototype chain once the
+        // session has created it — the load-bearing prototype-view contract,
+        // not a leak. Ledger membership is gated per send (isSessionTurn), so
+        // background rounds on a derived Config do not touch the live turn.
+        expect(deriveConfig(config).getModelAvailabilityService()).toBe(first);
+      });
+    });
+
     describe('isUnifiedAgentLoopEnabled', () => {
       beforeEach(() => {
         vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
@@ -10116,6 +10182,7 @@ describe('Server Config (config.ts)', () => {
       '.worktree.json',
       '.pr.json',
       '.title.json',
+      '.branch.json',
       '.artifacts.json',
       '.goal.json',
     ]);

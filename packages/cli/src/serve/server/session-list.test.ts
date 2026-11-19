@@ -15,6 +15,8 @@ import {
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { SESSION_TRANSCRIPT_MAX_INDEX_BYTES } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import { createWorktreeSessionMarkerExclusive } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
+import { writeWorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
@@ -31,6 +33,7 @@ import {
 const abortHarness = vi.hoisted(() => ({
   controller: undefined as AbortController | undefined,
   reads: 0,
+  beforeRead: undefined as (() => Promise<void>) | undefined,
 }));
 
 vi.mock(
@@ -48,6 +51,7 @@ vi.mock(
       ) => {
         abortHarness.reads += 1;
         if (abortHarness.reads === 2) abortHarness.controller?.abort();
+        await abortHarness.beforeRead?.();
         return mod.readSessionArtifactSummarySidecarAsync(filePath, options);
       },
     };
@@ -69,6 +73,7 @@ describe('merged session catalog pagination', () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     abortHarness.controller = undefined;
+    abortHarness.beforeRead = undefined;
     await fs.rm(directory, { recursive: true, force: true });
   });
 
@@ -117,6 +122,75 @@ describe('merged session catalog pagination', () => {
       bridge: { listWorkspaceSessions: list } as unknown as AcpSessionBridge,
     };
   }
+
+  it.each([undefined, 'organized'] as const)(
+    'reads sidecars only for the selected page (%s)',
+    async (view) => {
+      const first = summary(2);
+      const second = summary(1);
+      const live = summary(0);
+      await persist(first);
+      await persist(second);
+      const { bridge } = bridgeFor([live]);
+      const options = { size: 1, ...(view ? { view } : {}) };
+      const readOptions = { runtimeBaseDir, paginateMerged: true };
+      const worktree = vi.spyOn(
+        SessionService.prototype,
+        'getWorktreeSessionPathForArchiveState',
+      );
+      const pr = vi.spyOn(
+        SessionService.prototype,
+        'getPrSessionPathForArchiveState',
+      );
+      const artifact = vi.spyOn(
+        SessionService.prototype,
+        'getArtifactSummaryPathForArchiveState',
+      );
+
+      const firstPage = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        options,
+        readOptions,
+      );
+      expect(firstPage.sessions.map((row) => row.sessionId)).toEqual([
+        first.sessionId,
+      ]);
+      for (const reader of [worktree, pr, artifact]) {
+        expect(reader.mock.calls).toEqual([[first.sessionId, 'active']]);
+      }
+
+      const secondPage = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { ...options, cursor: firstPage.nextCursor },
+        readOptions,
+      );
+      const lastPage = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { ...options, cursor: secondPage.nextCursor },
+        readOptions,
+      );
+      expect(secondPage.sessions.map((row) => row.sessionId)).toEqual([
+        second.sessionId,
+      ]);
+      expect(lastPage.sessions.map((row) => row.sessionId)).toEqual([
+        live.sessionId,
+      ]);
+      expect(lastPage.nextCursor).toBeUndefined();
+      const persistedReads = [
+        [first.sessionId, 'active'],
+        [second.sessionId, 'active'],
+      ];
+      expect(worktree.mock.calls).toEqual(persistedReads);
+      expect(artifact.mock.calls).toEqual(persistedReads);
+      expect(pr.mock.calls).toEqual([
+        ...persistedReads,
+        [live.sessionId, 'active'],
+      ]);
+    },
+  );
 
   it.each([undefined, 'organized'] as const)(
     'sorts the complete set by question time before paging (%s)',
@@ -868,6 +942,189 @@ describe('merged session catalog pagination', () => {
         updatedAt: '2026-11-17T00:00:00.000Z',
       });
 
+    it.each([undefined, 'organized'] as const)(
+      'preserves sidecar values and live precedence across deferred pages (%s)',
+      async (view) => {
+        const sessions = [summary(2), summary(1)];
+        for (const session of sessions) {
+          await persist(session);
+          await writeArtifactSummarySidecar(session, sidecarBody(99));
+        }
+        const { bridge } = bridgeFor(
+          sessions.map((session) => ({ ...session, artifactCount: 3 })),
+        );
+        const options = { size: 1, ...(view ? { view } : {}) };
+        const readOptions = { runtimeBaseDir, paginateMerged: true };
+        const first = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          options,
+          readOptions,
+        );
+        expect(first.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: sessions[0]!.sessionId,
+            artifactCount: 3,
+          }),
+        ]);
+        expect(first.nextCursor).toEqual(expect.any(String));
+        const second = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          { ...options, cursor: first.nextCursor },
+          readOptions,
+        );
+        expect(second.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: sessions[1]!.sessionId,
+            artifactCount: 3,
+          }),
+        ]);
+        expect(second.nextCursor).toBeUndefined();
+      },
+    );
+
+    it.each([undefined, 'organized'] as const)(
+      'reads all deferred sidecar values from the archive directory (%s)',
+      async (view) => {
+        const archived = summary(0);
+        await persist(archived, archived.createdAt, true);
+        await writeArtifactSummarySidecar(archived, sidecarBody(5), true);
+        const chats = path.join(
+          new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+          'chats',
+          'archive',
+        );
+        const worktreePath = path.join(directory, 'archived-worktree');
+        await fs.mkdir(worktreePath);
+        await createWorktreeSessionMarkerExclusive(
+          worktreePath,
+          archived.sessionId,
+        );
+        await writeWorktreeSession(
+          path.join(chats, `${archived.sessionId}.worktree.json`),
+          {
+            slug: 'archived-worktree',
+            worktreePath,
+            worktreeBranch: 'topic',
+            originalCwd: workspaceCwd,
+            workspaceCwd,
+            originalBranch: 'main',
+            originalHeadCommit: 'source-sha',
+            worktreeBase: 'base-sha',
+          },
+        );
+        const pr = {
+          number: 17738,
+          url: 'https://github.com/QwenLM/qwen-code/pull/17738',
+          createdAt: archived.createdAt,
+          state: 'merged',
+        };
+        await fs.writeFile(
+          path.join(chats, `${archived.sessionId}.pr.json`),
+          JSON.stringify({ prs: [pr] }),
+        );
+        const { bridge } = bridgeFor([]);
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          { archiveState: 'archived', ...(view ? { view } : {}) },
+          { runtimeBaseDir, paginateMerged: true },
+        );
+        expect(result.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: archived.sessionId,
+            artifactCount: 5,
+            worktree: {
+              slug: 'archived-worktree',
+              path: worktreePath,
+              branch: 'topic',
+              baseCommit: 'base-sha',
+              baseBranch: 'main',
+            },
+            prs: [
+              expect.objectContaining({
+                number: pr.number,
+                url: pr.url,
+                state: 'merged',
+              }),
+            ],
+          }),
+        ]);
+      },
+    );
+
+    it.each([undefined, 'organized'] as const)(
+      'isolates cancellation while sharing a deferred sidecar read (%s)',
+      async (view) => {
+        const session = summary(0);
+        await persist(session);
+        await writeArtifactSummarySidecar(session, sidecarBody(7));
+        const { bridge, list } = bridgeFor([]);
+        function deferred() {
+          let resolve!: () => void;
+          const promise = new Promise<void>((done) => {
+            resolve = done;
+          });
+          return { promise, resolve };
+        }
+        const started = deferred();
+        const release = deferred();
+        const joined = deferred();
+        const controller = new AbortController();
+        const healthyController = new AbortController();
+        const addListener = healthyController.signal.addEventListener.bind(
+          healthyController.signal,
+        );
+        vi.spyOn(
+          healthyController.signal,
+          'addEventListener',
+        ).mockImplementation((...args) => {
+          addListener(...args);
+          // The first request is already blocked in enrichment. After the
+          // second live overlay, its next abort listener belongs to the
+          // shared sidecar wait, rather than the earlier catalog scan.
+          if (args[0] === 'abort' && list.mock.calls.length === 2)
+            joined.resolve();
+        });
+        abortHarness.reads = 0;
+        abortHarness.beforeRead = async () => {
+          started.resolve();
+          await release.promise;
+        };
+        const options = { size: 1, ...(view ? { view } : {}) };
+        const readOptions = { runtimeBaseDir, paginateMerged: true };
+        const cancelled = listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          options,
+          { ...readOptions, signal: controller.signal },
+        );
+        const cancelledOutcome = cancelled.then(
+          () => {
+            throw new Error('Expected the cancelled request to reject');
+          },
+          (error: unknown) => error,
+        );
+        await started.promise;
+        const healthy = listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          options,
+          { ...readOptions, signal: healthyController.signal },
+        );
+        try {
+          await joined.promise;
+          controller.abort();
+          expect(await cancelledOutcome).toMatchObject({ name: 'AbortError' });
+        } finally {
+          release.resolve();
+        }
+        expect((await healthy).sessions[0]?.artifactCount).toBe(7);
+        expect(abortHarness.reads).toBe(1);
+      },
+    );
+
     it('enriches a cold session with the restorable count from the sidecar', async () => {
       const cold = summary(0);
       await persist(cold);
@@ -1041,7 +1298,7 @@ describe('merged session catalog pagination', () => {
       expect(hit?.session.artifactCount).toBe(3);
     });
 
-    it('rejects when the signal aborts mid-scan, after the first sidecar read', async () => {
+    it('rejects when the signal aborts during page enrichment', async () => {
       const first = summary(0);
       const second = summary(1);
       const third = summary(2);
@@ -1063,23 +1320,18 @@ describe('merged session catalog pagination', () => {
           { runtimeBaseDir, signal: abortHarness.controller.signal },
         ),
       ).rejects.toMatchObject({ name: 'AbortError' });
-      // The third session discriminates the per-iteration abort checks
-      // from the post-enrichment one: without the loop-top/catch checks
-      // the swallowed abort lets the scan read a third sidecar before
-      // the later check rejects.
+      // The request stops at the interrupted row.
       expect(abortHarness.reads).toBe(2);
 
-      // A scan interrupted mid-way must not cache a snapshot: the next
-      // request re-scans (three more sidecar reads). A synchronous scan
-      // never calls the async reader, so it never observes the abort,
-      // completes the page, and serves the retry from the cache.
+      // The first row's sidecars completed before cancellation. Keep that
+      // result and read the interrupted and unvisited rows on retry.
       const retry = await listWorkspaceSessionsForResponse(
         bridge,
         workspaceCwd,
         { view: 'organized' },
         { runtimeBaseDir },
       );
-      expect(abortHarness.reads).toBe(5);
+      expect(abortHarness.reads).toBe(4);
       expect(
         retry.sessions.map((session) => session.artifactCount).sort(),
       ).toEqual([3, 4, 5]);
@@ -1243,6 +1495,143 @@ describe('merged session catalog pagination', () => {
         objective: 'ship it',
         updatedAt: new Date(1_700_000_000_000).toISOString(),
       });
+    });
+  });
+});
+
+describe('worktree sidecar enrichment (R3-1)', () => {
+  let directory: string;
+  let workspaceCwd: string;
+  let runtimeBaseDir: string;
+
+  beforeEach(async () => {
+    directory = await fs.mkdtemp(path.join(os.tmpdir(), 'session-wt-enrich-'));
+    workspaceCwd = path.join(directory, 'workspace');
+    runtimeBaseDir = path.join(directory, 'runtime');
+    await fs.mkdir(workspaceCwd);
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  it('reads worktree.baseCommit from worktreeBase, not originalHeadCommit, for restart survivors', async () => {
+    // enrichWorktreeSidecars is the sole producer of worktree meta for sessions
+    // listed after a daemon restart. worktreeBase is the worktree's own base;
+    // originalHeadCommit is the source checkout's HEAD (differs for a worktree
+    // created from a sibling managed worktree). The precedence must prefer
+    // worktreeBase, and baseBranch comes from originalBranch.
+    const sessionId = '00000000-0000-4000-8000-000000000001';
+    const chats = path.join(
+      new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+      'chats',
+    );
+    await fs.mkdir(chats, { recursive: true });
+    await fs.writeFile(
+      path.join(chats, `${sessionId}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${sessionId}-user`,
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date(Date.UTC(2026, 0, 1)).toISOString(),
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'stored prompt' }] },
+        cwd: workspaceCwd,
+      })}\n`,
+    );
+    const worktreeDir = path.join(
+      workspaceCwd,
+      '.qwen',
+      'worktrees',
+      'my-task',
+    );
+    await fs.mkdir(worktreeDir, { recursive: true });
+    await createWorktreeSessionMarkerExclusive(worktreeDir, sessionId);
+    await writeWorktreeSession(path.join(chats, `${sessionId}.worktree.json`), {
+      slug: 'my-task',
+      worktreePath: worktreeDir,
+      worktreeBranch: 'worktree-my-task',
+      originalCwd: workspaceCwd,
+      workspaceCwd,
+      originalBranch: 'main',
+      originalHeadCommit: 'source-sha',
+      worktreeBase: 'base-sha',
+    });
+    const bridge = {
+      listWorkspaceSessions: vi.fn(() => []),
+    } as unknown as AcpSessionBridge;
+
+    const result = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      {},
+      { runtimeBaseDir },
+    );
+
+    const row = result.sessions.find((s) => s.sessionId === sessionId);
+    expect(row?.worktree).toMatchObject({
+      baseCommit: 'base-sha',
+      baseBranch: 'main',
+    });
+  });
+
+  it('falls back to originalHeadCommit for a legacy sidecar with no worktreeBase', async () => {
+    // Every released daemon writes originalHeadCommit (required) and no
+    // worktreeBase (optional). The sibling above sets both, so it cannot see
+    // the legacy fallback arm: dropping `|| sidecar.originalHeadCommit` from
+    // the enrichment would leave it green. This sidecar omits worktreeBase
+    // entirely, so baseCommit must come from originalHeadCommit.
+    const sessionId = '00000000-0000-4000-8000-000000000002';
+    const chats = path.join(
+      new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+      'chats',
+    );
+    await fs.mkdir(chats, { recursive: true });
+    await fs.writeFile(
+      path.join(chats, `${sessionId}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${sessionId}-user`,
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date(Date.UTC(2026, 0, 1)).toISOString(),
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'stored prompt' }] },
+        cwd: workspaceCwd,
+      })}\n`,
+    );
+    const worktreeDir = path.join(
+      workspaceCwd,
+      '.qwen',
+      'worktrees',
+      'legacy-task',
+    );
+    await fs.mkdir(worktreeDir, { recursive: true });
+    await createWorktreeSessionMarkerExclusive(worktreeDir, sessionId);
+    await writeWorktreeSession(path.join(chats, `${sessionId}.worktree.json`), {
+      slug: 'legacy-task',
+      worktreePath: worktreeDir,
+      worktreeBranch: 'worktree-legacy-task',
+      originalCwd: workspaceCwd,
+      workspaceCwd,
+      originalBranch: 'main',
+      originalHeadCommit: 'legacy-sha',
+    });
+    const bridge = {
+      listWorkspaceSessions: vi.fn(() => []),
+    } as unknown as AcpSessionBridge;
+
+    const result = await listWorkspaceSessionsForResponse(
+      bridge,
+      workspaceCwd,
+      {},
+      { runtimeBaseDir },
+    );
+
+    const row = result.sessions.find((s) => s.sessionId === sessionId);
+    expect(row?.worktree).toMatchObject({
+      baseCommit: 'legacy-sha',
+      baseBranch: 'main',
     });
   });
 });

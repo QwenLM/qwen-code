@@ -96,7 +96,7 @@ The trusted channel adapter surface on the internal listener and the lease on ou
 | Property | Variable | Type | Default | Description |
 | --- | --- | --- | --- | --- |
 | `claim-lease` | `QWEN_MANAGED_AGENT_CHANNELS_CLAIM_LEASE` | duration | `10m` | How long a channel adapter's claim on an outbound delivery stays valid without a receipt. Once it lapses, the reconcile pass records the delivery's outcome as unknown and never resends it automatically. A plain number is seconds. |
-| `enabled` | `QWEN_MANAGED_AGENT_CHANNELS_ENABLED` | boolean | `false` | Whether the trusted channel adapter routes under `/internal/managed-channels/` (register, disconnect, inbound events, delivery claims, receipts and resends) are served. They authenticate by the tenant header alone, so startup refuses it unless `qwen.managed-agent.internal-server.port` sets a separate internal listener. |
+| `enabled` | `QWEN_MANAGED_AGENT_CHANNELS_ENABLED` | boolean | `false` | Whether the trusted channel adapter routes under `/internal/managed-channels/` (register, disconnect, inbound events, delivery claims, receipts and resends, and PR-watch binding create/list/retire plus private PR-event injection) are served. They authenticate by the tenant header alone, so startup refuses it unless `qwen.managed-agent.internal-server.port` sets a separate internal listener. |
 | `scan-delay` | — | duration | `30s` | How long the channel reconcile pass waits between runs; each run settles up to 50 outbound delivery claims older than `qwen.managed-agent.channels.claim-lease` as unknown. Accepts a duration such as `30s`; a plain number is milliseconds. |
 
 ## `qwen.managed-agent.client-files`
