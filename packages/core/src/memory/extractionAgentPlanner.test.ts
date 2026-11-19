@@ -160,6 +160,9 @@ describe('runAutoMemoryExtractionByAgent', () => {
     expect(systemPrompt).toContain(
       'Add a success requirement only when the user explicitly requires it',
     );
+    expect(systemPrompt).toContain(
+      'Keep a rule and all the conditions and exceptions that govern it in the same file',
+    );
   });
 
   it('strips runtime reminders and hidden reasoning from inherited history', async () => {
