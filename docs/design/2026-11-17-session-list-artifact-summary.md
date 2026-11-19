@@ -177,9 +177,13 @@ clicked, using the list data the sidebar already holds.
   through the shared helper that owns the size probe, the auxiliary read,
   ownership, the shape gate and the seed: the read is capped at the same
   64 MiB as the library mutation read with the same inclusive boundary
-  (exactly 64 MiB seeds, above skips, a failed size probe skips); a
-  refusal withholds both the count and the restore payload's snapshot
-  (never deliver from a non-authoritative read). Sessions with a
+  (exactly 64 MiB seeds, above skips, a failed size probe skips). The size
+  and shape gates are sidecar-COUNT policies only: when the helper declines
+  (an oversized journal, or rewound-away conversation records beside a
+  metadata-only active chain) the load funnel falls back to a payload-only
+  rebuild, so the restore payload still carries the active-branch artifacts
+  while the sidecar stays untouched; the empty-message refusal is the
+  artifact-only shape no restore path can open. Sessions with a
   conversation keep the selective read's zero-extra-I/O contract (pinned
   by a read spy) and are not seeded on the daemon funnel: their count
   arrives via the recorder stamp and the CLI load funnel, so a daemon-only
