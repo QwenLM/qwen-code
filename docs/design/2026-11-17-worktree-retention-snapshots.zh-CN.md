@@ -96,6 +96,11 @@ skip-worktree 路径上的暂存编辑或新增、暂停的 merge/rebase/cherry-
 因为 tar 会归档它们。marker 临时文件豁免仅限根路径。不运行 `git diff`，故 textconv 不执行。
 自动保存在 tar 写入期间改写字节或重定向链接时，漂移触发保留而非删除归档覆盖不到的工作。
 移除前重新探测 pending 操作，以拒绝元数据检查后新启动的操作，即使文件字节与 HEAD 未变。
+同一位置复用共享的隐藏索引位探针，它先于最后一道 pending 探测：捕获中途新设的 flag
+令 tracked 编辑在前后摘要中均不可见时，也不能仅因摘要一致就删除。
+稀疏例外通过 `git sparse-checkout check-rules` 区分合法省略与规则包含路径上的异常 S
+所隐藏的删除意图；规则探测失败时保留 checkout。
+无法从 UTF-8 输出可靠还原原始索引字节的路径同样保留，不用替代字符猜测其规则归属。
 每对归档按捕获时刻唯一命名（`<sessionId>.<createdAt>.<pid>.worktree-snapshot.tar.gz`，
 头部同规则），复用同一 session UUID 不再覆盖早先快照；读取方按 `<sessionId>.*.worktree-snapshot.*`
 前缀于 sidecar 旁解析（chats 目录，归档会话为其 `archive/` 子目录——回收器写入 sidecar

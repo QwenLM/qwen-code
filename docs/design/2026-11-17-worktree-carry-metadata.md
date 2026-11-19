@@ -199,7 +199,12 @@ unchanged in this deliverable.
   instead of deleting. The first digest is taken before the has-work and
   carried-source classification, so a new file saved during source hashing
   cannot authorize a snapshot-free deletion. Protected-path case variants
-  refuse capture before tar.
+  refuse capture before tar. A late shared hidden-index-bit check precedes the
+  pending-operation check, which remains the final probe before removal, so a
+  flag and edit hidden from status cannot authorize deletion. Its clean-sparse
+  carve-out is limited to paths actually excluded by Git's own sparse-checkout
+  rules; an unexpected S hiding an in-scope deletion is refused. Paths whose
+  original index bytes cannot be recovered from UTF-8 output also preserve.
 - A checkout with any non-carried work (a late-arriving ignored file, a populated
   directory beyond the carried files) reads as work and is snapshotted then
   deleted (P6 U3) — never deleted bare. States the snapshot cannot represent

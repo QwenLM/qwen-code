@@ -145,7 +145,14 @@ root-level only. An autosave rewriting bytes or retargeting a link mid-tar
 therefore preserves instead of deleting work the archive could not cover. A
 fresh pending-operation probe immediately before removal also refuses
 operations launched after the metadata check, even when file bytes and HEAD
-have not changed.
+have not changed. The shared sparse-aware hidden-index probe runs just before
+that final pending probe: a late flag that hides a tracked edit from both
+digests cannot authorize removal merely because their values match. The
+sparse exemption uses `git sparse-checkout check-rules` to distinguish a
+legitimate omission from an unexpected S hiding a deletion in an included
+path. A failed rule probe preserves the checkout. Path bytes that cannot be
+recovered reliably from UTF-8 output also preserve, rather than guessing an
+included or excluded spelling from replacement characters.
 Each archive pair is uniquely named per capture
 (`<sessionId>.<createdAt>.<pid>.worktree-snapshot.tar.gz`, header likewise) so
 a reused session UUID can never overwrite an earlier snapshot; readers resolve

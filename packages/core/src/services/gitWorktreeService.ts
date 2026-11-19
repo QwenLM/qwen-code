@@ -323,14 +323,13 @@ export async function carriedOverlayStillHeldBySource(
  * Whether the index hides any path's worktree changes from `git status` via
  * an assume-unchanged (lowercase tag) or skip-worktree (`S`) bit. Such a bit
  * lets a session edit read clean, so a predicate gating a destructive sink
- * must refuse it — with one exception: `git sparse-checkout` legitimately
- * stamps skip-worktree on every out-of-cone path (and a linked worktree
- * inherits the sparse index), so refusing `S` unconditionally would strand
- * every worktree of a sparse repository forever. assume-unchanged is never
- * set by sparse-checkout, so it always refuses; skip-worktree refuses only
- * when sparse-checkout is not enabled. Pins the worktree's own `.git` (no
- * upward discovery) and is fail-closed: any read error or stderr output
- * counts as hidden.
+ * must refuse it — except for paths legitimately omitted by
+ * `git sparse-checkout`. Those omissions are verified against Git's own
+ * current rules, not inferred from core.sparseCheckout=true alone: an
+ * unexpected S on an included path can hide a tracked deletion. Refusing
+ * every S would instead strand clean sparse worktrees forever. Pins the
+ * worktree's own `.git` (no upward discovery) and is fail-closed: any read
+ * error or stderr output counts as hidden.
  */
 export async function hasHiddenIndexBit(
   worktreePath: string,
@@ -353,14 +352,20 @@ export async function hasHiddenIndexBit(
       );
       return true;
     }
-    let sawSkipWorktree = false;
+    const skipWorktree = new Set<string>();
     for (const entry of stdout.split('\0')) {
       if (entry.length === 0) continue;
       const tag = entry[0];
       if (/[a-z]/.test(tag)) return true;
-      if (tag === 'S') sawSkipWorktree = true;
+      if (tag === 'S') {
+        const relativePath = entry.slice(2);
+        // A replacement character cannot reliably recover the original path
+        // bytes. Git could therefore disagree about directory inclusion.
+        if (relativePath.includes('\uFFFD')) return true;
+        skipWorktree.add(relativePath);
+      }
     }
-    if (sawSkipWorktree) {
+    if (skipWorktree.size > 0) {
       const sparse = await runGitCapture(worktreePath, [
         ...NO_EXEC_CONFIG,
         'config',
@@ -370,6 +375,43 @@ export async function hasHiddenIndexBit(
         .then(({ stdout: out }) => out.trim())
         .catch(() => 'false');
       if (sparse !== 'true') return true;
+      // Git's rules, not merely core.sparseCheckout=true, decide whether an
+      // omitted path is legitimate. A hand-set S on an included path can
+      // hide a tracked deletion from status and both cleanup digests.
+      const included = await new Promise<{
+        stdout: string;
+        stderr: string;
+      }>((resolve, reject) => {
+        const child = execFile(
+          'git',
+          [
+            ...NO_EXEC_CONFIG,
+            '--no-optional-locks',
+            'sparse-checkout',
+            'check-rules',
+            '-z',
+          ],
+          {
+            cwd: worktreePath,
+            env: gitEnv(),
+            timeout: 30_000,
+            maxBuffer: 64 * 1024 * 1024,
+            encoding: 'utf8',
+          },
+          (error, stdout, stderr) => {
+            if (error) reject(error);
+            else resolve({ stdout, stderr });
+          },
+        );
+        child.on('error', reject);
+        child.stdin?.on('error', reject);
+        child.stdin?.end(`${[...skipWorktree].join('\0')}\0`);
+      });
+      if (included.stderr.trim().length > 0) return true;
+      const includedPaths = new Set(included.stdout.split('\0'));
+      for (const rel of skipWorktree) {
+        if (includedPaths.has(rel)) return true;
+      }
     }
     return false;
   } catch (error) {

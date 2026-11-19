@@ -18,6 +18,7 @@ import {
   readWorktreeSessionStrict,
   WORKTREE_SESSION_FILE,
   worktreeBranchForSlug,
+  hasHiddenIndexBit,
   worktreeHasPendingGitOperation,
   worktreeHasPopulatedGitlink,
   worktreeHasWork,
@@ -691,6 +692,15 @@ export async function executeWorktreeCleanup(
     logWorktreeCleanupPreserve(
       sessionId,
       'checkout changed during cleanup (or its change digest is unreadable)',
+    );
+    return;
+  }
+  // An index bit set during capture can hide a tracked edit from every
+  // content digest. The shared probe keeps the clean-sparse carve-out.
+  if (await hasHiddenIndexBit(plan.lockKey)) {
+    logWorktreeCleanupPreserve(
+      sessionId,
+      'hidden index bit appeared during cleanup',
     );
     return;
   }

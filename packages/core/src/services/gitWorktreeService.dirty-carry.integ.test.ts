@@ -2211,6 +2211,26 @@ describe('worktreeHasWork — carried overlay exemption (R9-6)', () => {
     await expect(worktreeHasWork(wt)).resolves.toBe(true);
   });
 
+  it('a clean non-cone sparse omission does not look like hidden work', async () => {
+    await fs.mkdir(path.join(repoRoot, 'cone'));
+    await fs.writeFile(path.join(repoRoot, 'cone', 'a.txt'), 'a\n');
+    await fs.mkdir(path.join(repoRoot, 'other'));
+    await fs.writeFile(path.join(repoRoot, 'other', 'b.txt'), 'b\n');
+    git(repoRoot, 'add', '.');
+    git(repoRoot, 'commit', '-qm', 'non-cone sparse', '--no-verify');
+    const service = new GitWorktreeService(repoRoot);
+    const result = await service.createUserWorktree(
+      'r96-sparse-noncone',
+      'main',
+    );
+    expect(result.success).toBe(true);
+    const wt = result.worktree!.path;
+    git(wt, 'sparse-checkout', 'init', '--no-cone');
+    git(wt, 'sparse-checkout', 'set', '--no-cone', '/cone/');
+    expect(git(wt, 'ls-files', '-v')).toContain('S other/b.txt');
+    await expect(worktreeHasWork(wt)).resolves.toBe(false);
+  });
+
   it('a carried edit the clean filter would normalize away still reads as work (R4-1)', async () => {
     // With a text/eol filter, hash-object (filtered) would hide a CRLF-only
     // rewrite of an already-dirty carried file; the raw-byte identity must

@@ -375,6 +375,76 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     ).toBe('saved-now\n');
   });
 
+  it('preserves a hidden edit before a bare carried-only deletion', async () => {
+    fs.writeFileSync(path.join(repoRoot, 'victim.txt'), 'clean-at-gate\n');
+    git(repoRoot, 'add', 'victim.txt');
+    git(repoRoot, 'commit', '-qm', 'bare hidden-index fixture', '--no-verify');
+    fs.writeFileSync(
+      path.join(repoRoot, 'large-carry.bin'),
+      randomBytes(256 * 1024 * 1024),
+    );
+    const plan = await carriedPlan('carried-hidden-bare-edit', true);
+    const beforeDigest = await checkoutChangeDigestForTesting(plan.lockKey);
+    let sourceStarted!: () => void;
+    let releaseSource!: () => void;
+    const started = new Promise<void>((resolve) => {
+      sourceStarted = resolve;
+    });
+    const resume = new Promise<void>((resolve) => {
+      releaseSource = resolve;
+    });
+    sourceHashGate.active = {
+      source: repoRoot,
+      started: sourceStarted,
+      resume,
+    };
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    let incidentLog = '';
+    const cleanup = executeWorktreeCleanup(plan);
+    try {
+      await started;
+      git(
+        plan.lockKey,
+        'update-index',
+        '--assume-unchanged',
+        '--',
+        'victim.txt',
+      );
+      fs.writeFileSync(
+        path.join(plan.lockKey, 'victim.txt'),
+        'hidden-bare-edit\n',
+      );
+    } finally {
+      releaseSource();
+      sourceHashGate.active = undefined;
+      try {
+        await cleanup;
+      } finally {
+        incidentLog = stderrSpy.mock.calls
+          .map((call) => String(call[0]))
+          .join('');
+        stderrSpy.mockRestore();
+      }
+    }
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(archives(plan.sessionId)).toHaveLength(0);
+    expect(incidentLog).toContain('hidden index bit appeared during cleanup');
+    expect(await checkoutChangeDigestForTesting(plan.lockKey)).toBe(
+      beforeDigest,
+    );
+    expect(
+      execFileSync('git', ['ls-files', '-v', '--', 'victim.txt'], {
+        cwd: plan.lockKey,
+        encoding: 'utf8',
+      }).startsWith('h '),
+    ).toBe(true);
+    expect(fs.readFileSync(path.join(plan.lockKey, 'victim.txt'), 'utf8')).toBe(
+      'hidden-bare-edit\n',
+    );
+  });
+
   it('collects a carried-only checkout when the sidecar records the overlay (R9-6)', async () => {
     const plan = await carriedPlan('carried-collect', true);
 
@@ -846,8 +916,20 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     'nested-disposable',
     'nested-tmp',
     'nested-repository',
+    'hidden-index',
     'bisect',
   ] as const)('preserves late audit state during capture: %s', async (kind) => {
+    if (kind === 'hidden-index') {
+      fs.writeFileSync(path.join(repoRoot, 'victim.txt'), 'clean-at-gate\n');
+      git(repoRoot, 'add', 'victim.txt');
+      git(
+        repoRoot,
+        'commit',
+        '-qm',
+        'clean hidden-index fixture',
+        '--no-verify',
+      );
+    }
     const plan = await planFor(`late-${kind}`);
     if (kind === 'nested-disposable') {
       fs.appendFileSync(path.join(plan.lockKey, '.gitignore'), 'private/\n');
@@ -902,14 +984,38 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
           path.join(plan.lockKey, 'embedded', 'draft.txt'),
           'after\n',
         );
+      } else if (kind === 'hidden-index') {
+        git(
+          plan.lockKey,
+          'update-index',
+          '--assume-unchanged',
+          '--',
+          'victim.txt',
+        );
+        fs.writeFileSync(
+          path.join(plan.lockKey, 'victim.txt'),
+          'MID-CAPTURE-EDIT\n',
+        );
       } else {
         git(plan.lockKey, 'bisect', 'start');
       }
     });
+    const beforeHiddenIndexDigest =
+      kind === 'hidden-index'
+        ? await checkoutChangeDigestForTesting(plan.lockKey)
+        : null;
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    let incidentLog = '';
     try {
       await executeWorktreeCleanup(plan);
     } finally {
+      incidentLog = stderrSpy.mock.calls
+        .map((call) => String(call[0]))
+        .join('');
       late.stop();
+      stderrSpy.mockRestore();
     }
     expect(late.edited()).toBe(true);
     expect(archives(plan.sessionId)).toHaveLength(1);
@@ -935,6 +1041,20 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
           'utf8',
         ),
       ).toBe('after\n');
+    } else if (kind === 'hidden-index') {
+      expect(
+        execFileSync('git', ['ls-files', '-v', '--', 'victim.txt'], {
+          cwd: plan.lockKey,
+          encoding: 'utf8',
+        }).startsWith('h '),
+      ).toBe(true);
+      expect(incidentLog).toContain('hidden index bit appeared during cleanup');
+      expect(await checkoutChangeDigestForTesting(plan.lockKey)).toBe(
+        beforeHiddenIndexDigest,
+      );
+      expect(
+        fs.readFileSync(path.join(plan.lockKey, 'victim.txt'), 'utf8'),
+      ).toBe('MID-CAPTURE-EDIT\n');
     } else {
       const gitDir = execFileSync('git', ['rev-parse', '--git-dir'], {
         cwd: plan.lockKey,
@@ -944,6 +1064,107 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
         fs.existsSync(path.resolve(plan.lockKey, gitDir, 'BISECT_START')),
       ).toBe(true);
     }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'preserves a hidden sparse deletion with non-UTF-8 directory bytes',
+    async (ctx) => {
+      const badName = Buffer.from('c\xffne', 'latin1');
+      const sourceDir = Buffer.concat([
+        Buffer.from(`${repoRoot}${path.sep}`),
+        badName,
+      ]);
+      const sourceFile = Buffer.concat([sourceDir, Buffer.from('/victim.txt')]);
+      try {
+        fs.mkdirSync(sourceDir);
+        fs.writeFileSync(sourceFile, 'original\n');
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'EILSEQ' || code === 'EINVAL' || code === 'ENOTSUP') {
+          ctx.skip();
+        }
+        throw error;
+      }
+      git(repoRoot, 'add', '-A');
+      git(repoRoot, 'commit', '-qm', 'non-UTF-8 sparse fixture', '--no-verify');
+      const plan = await planFor('sparse-nonutf8-deletion');
+      git(plan.lockKey, 'sparse-checkout', 'init', '--cone');
+      execFileSync('git', ['sparse-checkout', 'set', '--stdin'], {
+        cwd: plan.lockKey,
+        input: Buffer.concat([badName, Buffer.from('\n')]),
+        stdio: 'pipe',
+      });
+      const relative = Buffer.concat([badName, Buffer.from('/victim.txt')]);
+      const victim = Buffer.concat([
+        Buffer.from(`${plan.lockKey}${path.sep}`),
+        relative,
+      ]);
+      fs.unlinkSync(victim);
+      execFileSync(
+        'git',
+        ['update-index', '--skip-worktree', '-z', '--stdin'],
+        {
+          cwd: plan.lockKey,
+          input: Buffer.concat([relative, Buffer.from('\0')]),
+          stdio: 'pipe',
+        },
+      );
+      expect(
+        execFileSync('git', ['ls-files', '-v', '-z', '--', 'c*'], {
+          cwd: plan.lockKey,
+          stdio: 'pipe',
+        }).equals(
+          Buffer.concat([Buffer.from('S '), relative, Buffer.from('\0')]),
+        ),
+      ).toBe(true);
+      expect(
+        execFileSync('git', ['sparse-checkout', 'check-rules', '-z'], {
+          cwd: plan.lockKey,
+          input: Buffer.from(`${relative.toString('utf8')}\0`, 'utf8'),
+        }),
+      ).toHaveLength(0);
+      expect(
+        execFileSync('git', ['status', '--porcelain'], {
+          cwd: plan.lockKey,
+          encoding: 'utf8',
+        }),
+      ).toBe('');
+      const before = await checkoutChangeDigestForTesting(plan.lockKey);
+      await executeWorktreeCleanup(plan);
+      expect(fs.existsSync(plan.lockKey)).toBe(true);
+      expect(fs.existsSync(victim)).toBe(false);
+      expect(await checkoutChangeDigestForTesting(plan.lockKey)).toBe(before);
+      expect(archives(plan.sessionId)).toHaveLength(0);
+    },
+  );
+
+  it('preserves a tracked deletion hidden by skip-worktree in sparse checkout', async () => {
+    fs.writeFileSync(path.join(repoRoot, 'victim.txt'), 'delete-intent\n');
+    git(repoRoot, 'add', 'victim.txt');
+    git(repoRoot, 'commit', '-qm', 'hidden deletion fixture', '--no-verify');
+    const plan = await planFor('sparse-hidden-deletion');
+    git(plan.lockKey, 'sparse-checkout', 'init', '--cone');
+    git(plan.lockKey, 'sparse-checkout', 'set', '.');
+    git(plan.lockKey, 'update-index', '--skip-worktree', '--', 'victim.txt');
+    fs.unlinkSync(path.join(plan.lockKey, 'victim.txt'));
+    expect(
+      execFileSync('git', ['ls-files', '-v', '--', 'victim.txt'], {
+        cwd: plan.lockKey,
+        encoding: 'utf8',
+      }).startsWith('S '),
+    ).toBe(true);
+    expect(
+      execFileSync('git', ['status', '--porcelain'], {
+        cwd: plan.lockKey,
+        encoding: 'utf8',
+      }),
+    ).toBe('');
+    const before = await checkoutChangeDigestForTesting(plan.lockKey);
+    await executeWorktreeCleanup(plan);
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(fs.existsSync(path.join(plan.lockKey, 'victim.txt'))).toBe(false);
+    expect(await checkoutChangeDigestForTesting(plan.lockKey)).toBe(before);
+    expect(archives(plan.sessionId)).toHaveLength(0);
   });
 
   it('preserves a clean tracked protected case-variant (audit capture)', async (ctx) => {
