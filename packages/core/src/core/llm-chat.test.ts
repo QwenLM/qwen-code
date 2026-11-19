@@ -111,7 +111,11 @@ import {
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
 import { clampOutputTokensToWindow } from './tokenLimits.js';
-import { getAutoMemorySnapshot } from '../memory/request-context.js';
+import {
+  EMPTY_AUTO_MEMORY_CATALOG,
+  findLatestAutoMemorySnapshot,
+  getAutoMemorySnapshot,
+} from '../memory/request-context.js';
 import {
   isSystemReminderContent,
   SYSTEM_REMINDER_OPEN,
@@ -3435,6 +3439,35 @@ describe('LlmChat', async () => {
       mockStream(textStream('after compression'));
       await sendDrain('continue', 'memory-reseed');
       expect(snapshots(requestAt(5).contents as Content[])).toHaveLength(1);
+    });
+
+    it('sends no startup catalog, supersedes removed entries, and reseeds after resume', async () => {
+      let catalog = EMPTY_AUTO_MEMORY_CATALOG;
+      mockConfig.getAutoMemoryContext = () => catalog;
+      const send = async (id: string) => {
+        mockStream(textStream('done'));
+        await sendDrain(id, id);
+        const calls = vi.mocked(mockContentGenerator.generateContentStream).mock
+          .calls;
+        return findLatestAutoMemorySnapshot(
+          calls.at(-1)?.[0].contents as Content[],
+        );
+      };
+
+      expect(await send('fresh-empty')).toBeUndefined();
+
+      catalog = '- [Fresh entry](topic.md)';
+      expect((await send('with-entry'))?.text).toContain(catalog);
+
+      catalog = EMPTY_AUTO_MEMORY_CATALOG;
+      const cleared = await send('deleted-last-entry');
+      expect(cleared?.text).toContain('supersedes all earlier memory catalogs');
+      expect(cleared?.text).toContain(EMPTY_AUTO_MEMORY_CATALOG);
+      chat.setHistory(structuredClone(chat.getHistory()));
+      expect(await send('resume-while-empty')).toEqual(cleared);
+
+      catalog = '- [Fresh entry](topic.md)';
+      expect((await send('restored-entry'))?.text).toContain(catalog);
     });
 
     it('records a snapshot only after successful assembly and deduplicates later sends', async () => {

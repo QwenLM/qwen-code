@@ -2203,6 +2203,7 @@ export class LlmClient {
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.lastDeliveredMemoryTreeRevision = undefined;
     try {
+      await this.config.getSkillManager?.()?.notifyConfigChanged();
       await this.refreshSystemInstruction();
       await this.setTools({ skipHistoryReveal: true });
       logMemoryRecallModeTransition(
@@ -2217,6 +2218,7 @@ export class LlmClient {
     } catch (error) {
       this.config.rollbackMemoryRecallTransition(transition);
       try {
+        await this.config.getSkillManager?.()?.notifyConfigChanged();
         await this.refreshSystemInstruction();
         await this.setTools({ skipHistoryReveal: true });
       } catch (rollbackError) {

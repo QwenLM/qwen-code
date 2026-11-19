@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   appendAutoMemoryContext,
   appendAutoMemorySnapshot,
+  EMPTY_AUTO_MEMORY_CATALOG,
   getAutoMemorySnapshot,
   withoutAutoMemorySnapshots,
 } from './request-context.js';
@@ -38,6 +39,28 @@ describe('retained memory snapshots', () => {
     expect(getAutoMemorySnapshot(history, 'A')).toEqual(first);
     expect(history[0].parts?.slice(-2)).toEqual([first, second]);
     expect(getAutoMemorySnapshot([user], 'A')).toEqual(first);
+  });
+
+  it('omits an empty startup and clears a previously delivered catalog across resume', () => {
+    const history: Content[] = [{ role: 'user', parts: [{ text: 'first' }] }];
+    expect(
+      getAutoMemorySnapshot(history, EMPTY_AUTO_MEMORY_CATALOG),
+    ).toBeUndefined();
+    expect(appendAutoMemoryContext(history, EMPTY_AUTO_MEMORY_CATALOG)).toBe(
+      history,
+    );
+
+    const populated = getAutoMemorySnapshot(history, catalog)!;
+    appendAutoMemorySnapshot(history, populated);
+    const cleared = getAutoMemorySnapshot(history, EMPTY_AUTO_MEMORY_CATALOG)!;
+    expect(cleared.text).toContain('supersedes all earlier memory catalogs');
+    expect(cleared.text).toContain(EMPTY_AUTO_MEMORY_CATALOG);
+    appendAutoMemorySnapshot(history, cleared);
+    const resumed = structuredClone(history);
+    expect(
+      getAutoMemorySnapshot(resumed, EMPTY_AUTO_MEMORY_CATALOG),
+    ).toBeUndefined();
+    expect(getAutoMemorySnapshot(resumed, catalog)).toEqual(populated);
   });
 
   it('filters only marked parts and removes snapshot-only entries without mutating history', () => {

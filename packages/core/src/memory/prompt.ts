@@ -7,6 +7,7 @@
 import { wrapSystemReminder } from '../core/environmentContext.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
+import { EMPTY_AUTO_MEMORY_CATALOG } from './request-context.js';
 import {
   describeDroppedIndexEntries,
   formatIndexEntry,
@@ -18,6 +19,8 @@ import {
   parseIndexEntry,
   trimIndexToBudgetDetailed,
 } from './index-budget.js';
+
+export const MEMORY_POLICY_SKILL_NAME = 'memory-policy';
 
 const DIR_EXISTS_GUIDANCE =
   'This directory already exists — write to it directly with the write_file tool (do not run mkdir or check for its existence).';
@@ -609,12 +612,34 @@ export function buildResidentAutoMemoryPrompt(
     '',
     'Keep one fact or rule per file. Before writing a new memory, check whether an existing one in any of your memory directories should be updated instead, and remove memories that turn out to be wrong.',
     '',
-    '## Using memory',
-    '- Read memory when it seems relevant or the user refers to earlier work, and always when they ask you to check, recall, or remember.',
-    '- If the user says to *ignore* or *not use* memory, act as if MEMORY.md were empty: do not apply, cite, or mention what it holds.',
-    '- A memory records what was true when it was written. Before relying on it, and before recommending a file, function, or flag it names, check the current state; when they conflict, trust what you see now and update or remove the memory.',
+    ...RESIDENT_RECALL_RULES,
   ];
   return lines.join('\n');
+}
+
+const RESIDENT_RECALL_RULES = [
+  '## Using memory',
+  '- Read memory when it seems relevant or the user refers to earlier work, and always when they ask you to check, recall, or remember.',
+  '- If the user says to *ignore* or *not use* memory, act as if MEMORY.md were empty: do not apply, cite, or mention what it holds.',
+  '- A memory records what was true when it was written. Before relying on it, and before recommending a file, function, or flag it names, check the current state; when they conflict, trust what you see now and update or remove the memory.',
+];
+
+export function buildLeanAutoMemoryPrompt(
+  memoryDir: string,
+  userSection: UserAutoMemorySection,
+  teamSection: TeamAutoMemorySection | undefined,
+): string {
+  return [
+    '# auto memory',
+    '',
+    CATALOG_DATA_NOTE,
+    '',
+    ...buildAutoMemoryTierLines(memoryDir, userSection, teamSection),
+    '',
+    ...RESIDENT_RECALL_RULES,
+    '',
+    `When the user explicitly asks you to remember, update, or forget a memory, load the \`${MEMORY_POLICY_SKILL_NAME}\` skill to apply the full rules before changing memory files.`,
+  ].join('\n');
 }
 
 export { MAX_MANAGED_AUTO_MEMORY_INDEX_LINES };
@@ -625,6 +650,14 @@ export function buildAutoMemoryIndexContext(
   userSection?: UserAutoMemorySection,
   teamSection?: TeamAutoMemorySection,
 ): string {
+  if (
+    !indexContent?.trim() &&
+    !userSection?.indexContent?.trim() &&
+    !teamSection?.indexContent?.trim()
+  ) {
+    return EMPTY_AUTO_MEMORY_CATALOG;
+  }
+
   // The index text is repo-writable file content; `wrapSystemReminder` escapes
   // nested reminder tags so it cannot close the envelope early and promote the
   // rest to un-framed user-role text.

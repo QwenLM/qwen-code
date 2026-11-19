@@ -573,6 +573,15 @@ describe('SkillManager', () => {
       ]);
     });
 
+    it('resolves the same cached winner as the invocation path for a shadowed name', async () => {
+      expect(manager.getCachedSkill('skill1')).toBeUndefined();
+      expect(fs.readdir).not.toHaveBeenCalled();
+      await manager.listSkills();
+      const winner = manager.getCachedSkill('skill1');
+      expect(winner?.level).toBe('project');
+      expect(await manager.loadSkill('skill1')).toBe(winner);
+    });
+
     it('reads the committed cache without triggering discovery', async () => {
       expect(manager.getCachedSkills()).toBeNull();
       expect(fs.readdir).not.toHaveBeenCalled();

@@ -56,6 +56,12 @@ import {
 const debugLogger = createDebugLogger('SKILL_MANAGER');
 const SKILLS_CONFIG_DIR = 'skills';
 const SKILL_MANIFEST_FILE = 'SKILL.md';
+const SKILL_LEVEL_PRECEDENCE = [
+  'project',
+  'user',
+  'extension',
+  'bundled',
+] as const;
 
 // Skills have a fixed layout (<skill-name>/SKILL.md), so depth 2 is enough to
 // detect any change. This keeps chokidar out of heavy subtrees like node_modules
@@ -303,6 +309,23 @@ export class SkillManager {
     return this.collectCachedSkills(level);
   }
 
+  /** Resolves the cached winner using the same precedence as loadSkill(). */
+  getCachedSkill(name: string, level?: SkillLevel): SkillConfig | undefined {
+    for (const candidate of level ? [level] : SKILL_LEVEL_PRECEDENCE) {
+      const skill = this.skillsCache
+        ?.get(candidate)
+        ?.find(
+          (entry) =>
+            entry.name === name &&
+            (candidate !== 'bundled' ||
+              name !== 'generated-ui' ||
+              this.config.isSkillEnabled(entry)),
+        );
+      if (skill) return skill;
+    }
+    return undefined;
+  }
+
   /** Whether missing entries in the current cache might be discovery failures. */
   hasDiscoveryErrors(): boolean {
     return this.discoveryHasErrors;
@@ -316,9 +339,7 @@ export class SkillManager {
   private collectCachedSkills(level?: SkillLevel): SkillConfig[] {
     const skills: SkillConfig[] = [];
     const seenNames = new Set<string>();
-    const levelsToCheck: SkillLevel[] = level
-      ? [level]
-      : ['project', 'user', 'extension', 'bundled'];
+    const levelsToCheck = level ? [level] : SKILL_LEVEL_PRECEDENCE;
 
     // Collect skills from each level (precedence: project > user > extension > bundled)
     for (const level of levelsToCheck) {
@@ -383,37 +404,15 @@ export class SkillManager {
       return skill;
     }
 
-    // Try project level first
-    const projectSkill = await this.findSkillByNameAtLevel(name, 'project');
-    if (projectSkill) {
-      debugLogger.debug(`Found skill ${name} at project level`);
-      return projectSkill;
+    for (const candidate of SKILL_LEVEL_PRECEDENCE) {
+      const skill = await this.findSkillByNameAtLevel(name, candidate);
+      if (skill) {
+        debugLogger.debug(`Found skill ${name} at ${candidate} level`);
+        return skill;
+      }
     }
-
-    // Try user level
-    const userSkill = await this.findSkillByNameAtLevel(name, 'user');
-    if (userSkill) {
-      debugLogger.debug(`Found skill ${name} at user level`);
-      return userSkill;
-    }
-
-    // Try extension level
-    const extensionSkill = await this.findSkillByNameAtLevel(name, 'extension');
-    if (extensionSkill) {
-      debugLogger.debug(`Found skill ${name} at extension level`);
-      return extensionSkill;
-    }
-
-    // Try bundled level (lowest precedence)
-    const bundledSkill = await this.findSkillByNameAtLevel(name, 'bundled');
-    if (bundledSkill) {
-      debugLogger.debug(`Found skill ${name} at bundled level`);
-    } else {
-      debugLogger.debug(
-        `Skill ${name} not found at any level (checked: project, user, extension, bundled)`,
-      );
-    }
-    return bundledSkill;
+    debugLogger.debug(`Skill ${name} not found at any level`);
+    return null;
   }
 
   /**
@@ -1274,18 +1273,7 @@ export class SkillManager {
   ): Promise<SkillConfig | null> {
     await this.ensureLevelCache(level);
 
-    const levelSkills = this.skillsCache?.get(level) || [];
-
-    // Find the skill with matching name
-    return (
-      levelSkills.find(
-        (skill) =>
-          skill.name === name &&
-          (level !== 'bundled' ||
-            name !== 'generated-ui' ||
-            this.config.isSkillEnabled(skill)),
-      ) || null
-    );
+    return this.getCachedSkill(name, level) ?? null;
   }
 
   /**

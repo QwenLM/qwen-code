@@ -10,6 +10,11 @@ import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../core/environmentContext.js';
 
 export { AUTO_MEMORY_SNAPSHOT_METADATA } from '../core/environmentContext.js';
 
+// An empty legacy catalog can clear a previously sent snapshot. An empty
+// string, by contrast, suppresses legacy catalogs for this request.
+export const EMPTY_AUTO_MEMORY_CATALOG =
+  '<system-reminder>\nThe auto-memory catalog is empty.\n</system-reminder>';
+
 /**
  * The newest marked catalog snapshot in `contents`, scanning back to the last
  * entry that carries one. Shared by the live request path and transcript
@@ -32,10 +37,12 @@ export function getAutoMemorySnapshot(
   catalog: string,
 ): Part | undefined {
   if (!catalog) return undefined;
+  const latest = findLatestAutoMemorySnapshot(contents);
+  if (catalog === EMPTY_AUTO_MEMORY_CATALOG && !latest) return undefined;
   const text =
     'Current memory catalog (full snapshot; supersedes all earlier memory catalogs):\n' +
     catalog;
-  if (findLatestAutoMemorySnapshot(contents)?.text === text) return undefined;
+  if (latest?.text === text) return undefined;
   return { text, partMetadata: { [AUTO_MEMORY_SNAPSHOT_METADATA]: true } };
 }
 
@@ -68,7 +75,7 @@ export function appendAutoMemoryContext(
   contents: Content[],
   catalog: string,
 ): Content[] {
-  if (!catalog) return contents;
+  if (!catalog || catalog === EMPTY_AUTO_MEMORY_CATALOG) return contents;
   const last = contents.at(-1);
   // The catalog is request-only: stored history never reproduces it. Mark it
   // as a trailing volatile part so the provider cache passes anchor their

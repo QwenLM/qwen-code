@@ -151,7 +151,7 @@ import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
-import { ToolNames } from '../tools/tool-names.js';
+import { ToolDisplayNames, ToolNames } from '../tools/tool-names.js';
 import { forgetAutofixPrSession } from '../tools/autofix-pr-grants.js';
 import {
   ToolMode,
@@ -182,7 +182,14 @@ import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
-import { clearCollectedSkillEntriesCache } from '../tools/skill-utils.js';
+import {
+  resolveBundledReferenceRoute,
+  toolSearchBridgeSentence,
+} from '../skills/bundled-reference.js';
+import {
+  clearCollectedSkillEntriesCache,
+  skillModelInvocationBlock,
+} from '../tools/skill-utils.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import {
   authoredSkillName,
@@ -456,7 +463,9 @@ import {
 } from '../memory/metadata-migration.js';
 import {
   buildAutoMemoryIndexContext,
+  buildLeanAutoMemoryPrompt,
   buildResidentAutoMemoryPrompt,
+  MEMORY_POLICY_SKILL_NAME,
   buildStructuredAutoMemoryPrompt,
 } from '../memory/prompt.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
@@ -3169,6 +3178,7 @@ export class Config {
 
   /** Stable managed-memory policy, separate from the changing catalog. */
   private autoMemoryPrompt = '';
+  private leanAutoMemoryPrompt = '';
   private autoMemoryContext = '';
   private memoryRecallMode: MemoryRecallMode = 'legacy';
   private memoryCorpusRevision = '';
@@ -5877,11 +5887,6 @@ export class Config {
       const managedAutoMemoryIndex =
         managedAutoMemoryIndexRead?.content ?? null;
       const userAutoMemoryIndex = userAutoMemoryIndexRead?.content ?? null;
-      // Always surface the user-level section so the main assistant knows the
-      // dir exists and can route ad-hoc "remember this cross-project" saves
-      // there. When empty the prompt builder emits a "MEMORY.md is currently
-      // empty" placeholder — the same shape the per-project layer has used
-      // since day one — so the cost is one extra index header.
       this.setUserMemory(memoryContent);
       const memoryDir = getAutoMemoryRoot(this.getProjectRoot());
       const userSection = {
@@ -5908,6 +5913,11 @@ export class Config {
           teamSection,
         );
         this.autoMemoryPrompt = buildResidentAutoMemoryPrompt(
+          memoryDir,
+          userSection,
+          teamSection,
+        );
+        this.leanAutoMemoryPrompt = buildLeanAutoMemoryPrompt(
           memoryDir,
           userSection,
           teamSection,
@@ -8888,6 +8898,14 @@ export class Config {
     // `authoredName` is absent whenever the two spellings are the same.
     if (
       skill.level === 'bundled' &&
+      skill.name === MEMORY_POLICY_SKILL_NAME &&
+      (!this.getManagedAutoMemoryEnabled() ||
+        this.memoryRecallMode !== 'legacy')
+    ) {
+      return false;
+    }
+    if (
+      skill.level === 'bundled' &&
       skill.name === 'generated-ui' &&
       !this.getBundledGeneratedUiStatus().enabled
     ) {
@@ -9819,7 +9837,39 @@ export class Config {
 
   /** Managed-memory policy for the system prompt, without legacy indexes. */
   getAutoMemoryPrompt(): string {
-    return this.autoMemoryPrompt;
+    if (
+      !this.autoMemoryPrompt ||
+      !this.leanAutoMemoryPrompt ||
+      this.memoryRecallMode !== 'legacy'
+    ) {
+      return this.autoMemoryPrompt;
+    }
+
+    const manager = this.getSkillManager();
+    const skill = manager?.getCachedSkill(MEMORY_POLICY_SKILL_NAME);
+    const registry = this.getToolRegistry();
+    if (
+      !manager ||
+      skill?.level !== 'bundled' ||
+      !registry ||
+      skillModelInvocationBlock(this, manager, skill)
+    ) {
+      return this.autoMemoryPrompt;
+    }
+
+    const route = resolveBundledReferenceRoute(this, MEMORY_POLICY_SKILL_NAME);
+    if (route === 'skill-via-tool-search') {
+      return `${this.leanAutoMemoryPrompt} ${toolSearchBridgeSentence(ToolDisplayNames.SKILL)}`;
+    }
+    if (route !== 'skill') {
+      return this.autoMemoryPrompt;
+    }
+    if (this.getToolMode() === ToolMode.CodeModeOnly) {
+      return registry.getTool(ToolNames.EXEC)
+        ? `${this.leanAutoMemoryPrompt} In Code Mode, call \`tools.skill({ skill: "memory-policy" })\`.`
+        : this.autoMemoryPrompt;
+    }
+    return this.leanAutoMemoryPrompt;
   }
 
   /** Latest legacy catalog; scoped maintenance configs suppress it. */

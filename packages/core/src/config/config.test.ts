@@ -259,6 +259,7 @@ vi.mock('../tools/tool-registry', () => {
   ToolRegistryMock.prototype.discoverAllTools = vi.fn();
   ToolRegistryMock.prototype.getAllTools = vi.fn(() => []); // Mock methods if needed
   ToolRegistryMock.prototype.getAllToolNames = vi.fn(() => []);
+  ToolRegistryMock.prototype.isPermissionDeferred = vi.fn(() => false);
   ToolRegistryMock.prototype.getTool = vi.fn();
   ToolRegistryMock.prototype.getFunctionDeclarations = vi.fn(() => []);
   // PR 14b fix (codex round 4): per-instance manager stub so the
@@ -461,6 +462,8 @@ vi.mock('../skills/skill-manager.js', () => {
     .mockResolvedValue(undefined);
   SkillManagerMock.prototype.stopWatching = vi.fn();
   SkillManagerMock.prototype.listSkills = vi.fn().mockResolvedValue([]);
+  SkillManagerMock.prototype.getCachedSkill = vi.fn();
+  SkillManagerMock.prototype.isSkillActive = vi.fn(() => true);
   SkillManagerMock.prototype.addChangeListener = vi.fn();
   SkillManagerMock.prototype.removeChangeListener = vi.fn();
   // Path-conditional skill activation hook (called from
@@ -9208,21 +9211,84 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
-  // Every reader gets the same policy: the main session and a subagent's
-  // derived Config, whether or not that subagent may use the Skill tool.
-  it('sends the resident policy to the session and to a derived Config', async () => {
+  it('uses the short policy only when the effective bundled Skill can be invoked', async () => {
     const config = makeConfig();
     loadProjectRules();
-
+    await config.initialize({ ...SKIP_ALL_INIT, skipSkillManager: false });
     await config.refreshHierarchicalMemory();
 
-    const policy = config.getAutoMemoryPrompt();
-    expect(policy).toContain('## Types and where they go');
-    expect(policy).not.toContain('<types>');
-    expect(policy).not.toContain('load the `auto-memory` skill');
-    const subagent = deriveConfig(config);
-    subagent.getSkillManager = () => null;
-    expect(subagent.getAutoMemoryPrompt()).toBe(policy);
+    const fallback = config.getAutoMemoryPrompt();
+    expect(fallback).toContain('## Types and where they go');
+
+    const manager = config.getSkillManager()!;
+    const official: SkillConfig = {
+      name: 'memory-policy',
+      description: 'File-based memory policy',
+      level: 'bundled',
+      filePath: '/bundle/memory-policy/SKILL.md',
+      body: 'Writer contract',
+    };
+    expect(
+      makeConfig({ enableManagedAutoMemory: false }).isSkillEnabled(official),
+    ).toBe(false);
+
+    vi.mocked(manager.getCachedSkill).mockReturnValue(official);
+    expect(config.getAutoMemoryPrompt()).toBe(fallback);
+
+    const registry = config.getToolRegistry();
+    const toolNames = vi.mocked(registry.getAllToolNames);
+    toolNames.mockReturnValue([ToolNames.SKILL]);
+    try {
+      const lean = config.getAutoMemoryPrompt();
+      expect(lean).toContain('load the `memory-policy` skill');
+      expect(lean).not.toContain('usage_scenarios:');
+      expect(lean.length).toBeLessThan(fallback.length / 2);
+
+      const subagent = deriveConfig(config);
+      subagent.getSkillManager = () => null;
+      expect(subagent.getAutoMemoryPrompt()).toBe(fallback);
+
+      vi.spyOn(config, 'getDisabledSkillNames').mockReturnValue(
+        new Set(['memory-policy']),
+      );
+      expect(config.getAutoMemoryPrompt()).toBe(fallback);
+      vi.mocked(config.getDisabledSkillNames).mockRestore();
+
+      vi.mocked(manager.getCachedSkill).mockReturnValueOnce({
+        ...official,
+        disableModelInvocation: true,
+      });
+      expect(config.getAutoMemoryPrompt()).toBe(fallback);
+
+      vi.mocked(manager.getCachedSkill).mockReturnValueOnce({
+        ...official,
+        level: 'project',
+      });
+      expect(config.getAutoMemoryPrompt()).toBe(fallback);
+
+      const isPermissionDeferred = vi.mocked(registry.isPermissionDeferred);
+      isPermissionDeferred.mockReturnValue(true);
+      try {
+        expect(config.getAutoMemoryPrompt()).toBe(fallback);
+        toolNames.mockReturnValue([
+          ToolNames.SKILL,
+          ToolNames.TOOL_SEARCH,
+          ToolNames.TOOL_CALL,
+        ]);
+        expect(config.getAutoMemoryPrompt()).toContain(
+          'review its schema with `tool_search` and then invoke it with `tool_call`',
+        );
+      } finally {
+        isPermissionDeferred.mockReturnValue(false);
+      }
+
+      Object.assign(config, { memoryRecallMode: 'structured' });
+      expect(config.isSkillEnabled(official)).toBe(false);
+      expect(config.getAutoMemoryPrompt()).toBe(fallback);
+    } finally {
+      toolNames.mockReturnValue([]);
+      vi.mocked(manager.getCachedSkill).mockReturnValue(undefined);
+    }
   });
 
   it('delivers each memory tier in the request catalog while keeping indexes out of the policy', async () => {
@@ -10716,7 +10782,7 @@ describe('Server Config (config.ts)', () => {
         'MEMORY.md is currently empty',
       );
       expect(config.getAutoMemoryContext()).toContain(
-        'MEMORY.md is currently empty',
+        'The auto-memory catalog is empty.',
       );
     }
   });

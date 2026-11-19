@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
+import { EMPTY_AUTO_MEMORY_CATALOG } from './request-context.js';
 import { buildManagedAutoMemoryIndex } from './indexer.js';
 import {
   INDEX_TRUNCATION_NOTICE,
@@ -14,6 +17,7 @@ import {
   MAX_INDEX_LINE_CHARS,
 } from './index-budget.js';
 import {
+  buildLeanAutoMemoryPrompt,
   buildManagedAutoMemoryPrompt,
   buildResidentAutoMemoryPrompt,
   buildStructuredAutoMemoryPrompt,
@@ -1152,6 +1156,17 @@ describe('managed auto-memory prompt helpers', () => {
     expect(MEMORY_METADATA_ITEM_BOUNDS).toContain('double-quote every');
   });
 
+  it('represents blank indexes with the empty catalog state', () => {
+    expect(
+      buildAutoMemoryIndexContext(
+        '/project',
+        '  ',
+        { memoryDir: '/user', indexContent: null },
+        { memoryDir: '/team', indexContent: '' },
+      ),
+    ).toBe(EMPTY_AUTO_MEMORY_CATALOG);
+  });
+
   it('carries the user and team tiers through the request-tail catalog', () => {
     // The session policy is built with includeIndexes: false, so this
     // catalog is the only channel for the USER and TEAM indexes.
@@ -1282,6 +1297,44 @@ describe("the main session's resident auto-memory policy", () => {
     ['verifying before recommending', 'check the current state'],
   ])('keeps %s', (_what, anchor) => {
     expect(resident).toContain(anchor);
+  });
+
+  it('retains recall and routing in the lean policy, with the write schema in the bundled Skill', () => {
+    const lean = buildLeanAutoMemoryPrompt(PROJECT_DIR, USER, TEAM);
+    const skill = readFileSync(
+      new URL('../skills/bundled/memory-policy/SKILL.md', import.meta.url),
+      'utf8',
+    );
+
+    for (const text of [
+      PROJECT_DIR,
+      USER.memoryDir,
+      TEAM.memoryDir,
+      'ignore',
+      'check the current state',
+      'load the `memory-policy` skill',
+    ]) {
+      expect(lean).toContain(text);
+    }
+    expect(lean).not.toContain('usage_scenarios:');
+    for (const category of AUTO_MEMORY_TREE_CATEGORIES) {
+      expect(skill).toContain('`' + category + '`');
+    }
+    for (const field of [
+      'name',
+      'description',
+      'type',
+      'category',
+      'keywords',
+      'usage_scenarios',
+    ]) {
+      expect(skill).toMatch(new RegExp('^   ' + field + ':', 'm'));
+    }
+    expect(skill).toContain('leave the TEAM index and Git alone');
+    expect(skill).toContain(
+      'first ' + MAX_MANAGED_AUTO_MEMORY_INDEX_LINES + ' lines',
+    );
+    expect(skill).toContain('- "deterministic test fixtures"');
   });
 
   it('leaves out the detailed type guidance', () => {
