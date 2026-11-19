@@ -27,7 +27,7 @@ import { atomicWriteFileSync } from './atomicFileWrite.js';
 import readline from 'node:readline';
 import { finished } from 'node:stream/promises';
 import { Mutex } from 'async-mutex';
-import { createDebugLogger } from './debugLogger.js';
+import { createDebugLogger, isDebugLogFileEnabled } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('JSONL');
 
@@ -335,6 +335,8 @@ export async function read<T = unknown>(
  */
 const ensuredDirs = new Set<string>();
 const diagnosedTailReadFailures = new Set<string>();
+const MAX_DIAGNOSED_TAIL_READ_FAILURES = 128;
+const tailProbeFlags = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK;
 
 function canAppendWithoutTailInspection(
   filePath: string,
@@ -352,11 +354,19 @@ function canAppendWithoutTailInspection(
   }
 
   // Preserve append-only files when the tail cannot be read, but expose that
-  // the delimiter repair was skipped without flooding every subsequent line.
-  if (!diagnosedTailReadFailures.has(filePath)) {
+  // tail inspection was skipped without flooding every subsequent line.
+  if (
+    debugLogger.isEnabled() &&
+    isDebugLogFileEnabled() &&
+    !diagnosedTailReadFailures.has(filePath)
+  ) {
+    if (diagnosedTailReadFailures.size >= MAX_DIAGNOSED_TAIL_READ_FAILURES) {
+      const oldest = diagnosedTailReadFailures.values().next().value;
+      if (oldest !== undefined) diagnosedTailReadFailures.delete(oldest);
+    }
     diagnosedTailReadFailures.add(filePath);
     debugLogger.warn(
-      `Cannot inspect JSONL tail in ${filePath}; appending without delimiter repair:`,
+      `Cannot inspect JSONL tail in ${filePath}; appending with a conservative newline separator:`,
       error,
     );
   }
@@ -393,17 +403,23 @@ export async function writeLine(
       let prefix = '';
       let existing: fs.promises.FileHandle | undefined;
       try {
-        existing = await fs.promises.open(filePath, 'r');
-        const { size } = await existing.stat();
-        if (size > 0) {
+        existing = await fs.promises.open(filePath, tailProbeFlags);
+        const stats = await existing.stat();
+        if (stats.isFile() && stats.size > 0) {
           const lastByte = Buffer.allocUnsafe(1);
-          const { bytesRead } = await existing.read(lastByte, 0, 1, size - 1);
+          const { bytesRead } = await existing.read(
+            lastByte,
+            0,
+            1,
+            stats.size - 1,
+          );
           prefix = bytesRead === 1 && lastByte[0] === 0x0a ? '' : '\n';
         }
       } catch (error) {
         if (!canAppendWithoutTailInspection(filePath, error)) {
           throw error;
         }
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') prefix = '\n';
       } finally {
         await existing?.close();
       }
@@ -456,17 +472,18 @@ export function writeLineSync(filePath: string, data: unknown): void {
   let prefix = '';
   let descriptor: number | undefined;
   try {
-    descriptor = fs.openSync(filePath, 'r');
-    const { size } = fs.fstatSync(descriptor);
-    if (size > 0) {
+    descriptor = fs.openSync(filePath, tailProbeFlags);
+    const stats = fs.fstatSync(descriptor);
+    if (stats.isFile() && stats.size > 0) {
       const lastByte = Buffer.allocUnsafe(1);
-      const bytesRead = fs.readSync(descriptor, lastByte, 0, 1, size - 1);
+      const bytesRead = fs.readSync(descriptor, lastByte, 0, 1, stats.size - 1);
       prefix = bytesRead === 1 && lastByte[0] === 0x0a ? '' : '\n';
     }
   } catch (error) {
     if (!canAppendWithoutTailInspection(filePath, error)) {
       throw error;
     }
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') prefix = '\n';
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor);
   }
