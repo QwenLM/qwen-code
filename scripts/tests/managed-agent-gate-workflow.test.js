@@ -297,33 +297,24 @@ describe('Managed Agent gate triggers', () => {
 });
 
 describe('Managed Agent gate required check', () => {
-  const name = (event, tier, touched) =>
-    evaluate(gate.jobs.gate.name, {
-      github: github(event),
-      needs: { scope: { outputs: { tier, touched } } },
-    });
+  const name = () => gate.jobs.gate.name;
 
   it.each([
-    ['pull_request', 'none', 'false', 'Managed Agent gate'],
-    ['pull_request', 'fast', 'true', 'Managed Agent fast tier'],
-    ['pull_request_review', 'full', 'true', 'Managed Agent gate'],
-    [
-      'pull_request_review',
-      'none',
-      'true',
-      'Managed Agent review (no full run)',
-    ],
-    ['pull_request_review', 'none', 'false', 'Managed Agent gate'],
-    ['push', 'fast', 'true', 'Managed Agent gate'],
-    ['merge_group', 'fast', 'true', 'Managed Agent gate'],
+    ['pull_request', 'none', 'false'],
+    ['pull_request', 'fast', 'true'],
+    ['pull_request_review', 'full', 'true'],
+    ['pull_request_review', 'none', 'true'],
+    ['pull_request_review', 'none', 'false'],
+    ['push', 'fast', 'true'],
+    ['merge_group', 'fast', 'true'],
     // A failed tier selection leaves the outputs empty and must still
     // report, and fail, under the required name.
-    ['pull_request', '', '', 'Managed Agent gate'],
-    ['pull_request_review', '', '', 'Managed Agent gate'],
+    ['pull_request', '', ''],
+    ['pull_request_review', '', ''],
   ])(
-    '%s with tier %j, touched %j reports as %s',
-    (event, tier, touched, expected) => {
-      expect(name(event, tier, touched)).toBe(expected);
+    '%s with tier %j, touched %j keeps the stable required name',
+    (event, tier, touched) => {
+      expect(name(event, tier, touched)).toBe('Managed Agent gate');
     },
   );
 
@@ -360,8 +351,9 @@ describe('Managed Agent gate required check', () => {
   );
 
   // A review that is not an approval can never select a tier above `none`
-  // (Choose the tier), so starting a run for it buys two runner slots and
-  // publishes a check nothing reads. Both jobs must skip instead.
+  // (Choose the tier), so starting a run for it buys two runner slots only to
+  // repeat a no-suite result. Both jobs skip; the fixed job name still leaves
+  // a consistently named skipped check without taking a runner.
   it.each(['commented', 'changes_requested'])(
     'a %s review starts no job',
     (state) => {
@@ -581,7 +573,7 @@ describe('Managed Agent gate tier selection', () => {
         FAKE_FULL: '42',
       }),
     ).toBe('tier=none');
-    // An unaffected-change pass from the PR push run is no full run.
+    // A fast-tier or unaffected-change pass from the PR push run is no full run.
     expect(
       tier({ ...approve, FAKE_URLS: url(42), FAKE_EVENTS: '42=pull_request:' }),
     ).toBe('tier=full');
@@ -604,8 +596,8 @@ describe('Managed Agent gate tier selection', () => {
         FAKE_FULL: '42',
       }),
     ).toBe('tier=full');
-    // A review run that reported the required name without running the
-    // callee (an untouched classification) is no coverage either.
+    // Fast-tier PR runs and untouched reviews now share the required name,
+    // but only an approval run with the full callee is coverage.
     expect(
       tier({
         ...approve,

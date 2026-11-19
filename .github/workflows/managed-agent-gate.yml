@@ -265,23 +265,19 @@ jobs:
       ref: '${{ needs.scope.outputs.sha }}'
       tier: '${{ needs.scope.outputs.tier }}'
 
-  # Only a full run, an unaffected change, or a push/merge group reports the
-  # required name. A touched pull request therefore shows the required check
-  # as expected until its first approval's full run reports it; the most
-  # recently updated check of a name is the one branch protection reads.
+  # Keep the required-check context stable across fast, full, untouched and
+  # skipped runs. The selected tier remains visible in the SDK Java job name
+  # and in this job's summary instead of moving between check-run names.
   gate:
-    name: >-
-      ${{ (needs.scope.outputs.tier == 'full' || needs.scope.outputs.touched != 'true' ||
-      (github.event_name != 'pull_request' && github.event_name != 'pull_request_review')) && 'Managed Agent gate' ||
-      needs.scope.outputs.tier == 'fast' && 'Managed Agent fast tier' || 'Managed Agent review (no full run)' }}
+    name: 'Managed Agent gate'
     needs:
       - 'scope'
       - 'suite'
     # A cancelled PR run must release concurrency even if scope was cancelled
     # before choosing a tier. Full runs and main/merge-group cancellations
     # still report. A review that is not an approval, or one submitted after
-    # the pull request closed, skips with `scope` above: reporting a tier it
-    # never selected would only add a green check.
+    # the pull request closed, skips with `scope` above rather than spending a
+    # runner to repeat a no-suite result; its fixed skipped-check name is stable.
     if: "${{ always() && (github.event_name != 'pull_request_review' || (github.event.review.state == 'approved' && github.event.pull_request.state == 'open')) && (github.event_name != 'pull_request' || needs.scope.outputs.tier == 'full' || !cancelled()) }}"
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5

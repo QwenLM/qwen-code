@@ -85,35 +85,36 @@ matches. Changes outside the scope still reach the nightly run.
 
 ### Required check
 
-The `gate` job reports the tier result for every run the workflow starts. Its
-name is computed:
+The `gate` job always reports under the required-check name
+`Managed Agent gate`. Its conclusion and the `SDK Java (<tier>)` job distinguish
+the selected tier instead of moving it into the check name:
 
-| Event                 | Scope                           | Name                                 |
-| --------------------- | ------------------------------- | ------------------------------------ |
-| any                   | untouched                       | `Managed Agent gate` (pass)          |
-| `pull_request`        | touched                         | `Managed Agent fast tier`            |
-| `pull_request_review` | touched, full run               | `Managed Agent gate`                 |
-| `pull_request_review` | touched, no full run            | `Managed Agent review (no full run)` |
-| `pull_request_review` | not an approval, or a closed PR | all jobs skip; no gate check         |
-| `push`, `merge_group` | touched                         | `Managed Agent gate`                 |
-| any                   | tier selection failed           | `Managed Agent gate` (fail)          |
+| Event                 | Scope                           | Result                         |
+| --------------------- | ------------------------------- | ------------------------------ |
+| any                   | untouched                       | pass without Java              |
+| `pull_request`        | touched                         | fast-tier result               |
+| `pull_request_review` | touched, full run               | full-tier result               |
+| `pull_request_review` | touched, no full run            | pass; no new full run selected |
+| `pull_request_review` | not an approval, or a closed PR | all jobs skip                  |
+| `push`, `merge_group` | touched                         | fast-tier result               |
+| any                   | tier selection failed           | fail                           |
 
 A review that is not an approval, or one submitted after its pull request
 closed, starts no job: GitHub still creates the run, but it can never select a
 tier above `none` — or the check it would report no longer gates anything —
 so both `scope` and `gate` skip and it finishes in seconds without taking a
-runner. The run still lists one skipped check per job, and `gate`'s name is
-reported as its unevaluated expression, so no check named `Managed Agent gate`
-or `Managed Agent review (no full run)` appears. It used to report
-`Managed Agent review (no full run)` — a green check no rule reads.
+runner. The fixed job name still gives its skipped check the stable
+`Managed Agent gate` context.
 
-Branch protection reads the most recently updated check of a name. A touched
-PR therefore shows `Managed Agent gate` as expected until the full run on its
-head reports it, and only a full run, or a failure, can report that name for
-it. Check runs need no write token, so the gate works for fork PRs.
+The ruleset can therefore require one context for every PR. A touched PR's
+fast-tier result satisfies that check before its first approval; approval still
+starts the full suite, which reports its result under the same name. Check runs
+need no write token after GitHub allows the workflow run. A first-time
+contributor's run can remain `action_required` until a maintainer approves it,
+so no gate check exists before that approval.
 
 A superseded fast tier is neutral, not red: when a newer push cancels a pull
-request's in-flight run, the gate reports `Managed Agent fast tier` as a
+request's in-flight run, the gate reports `Managed Agent gate` as a
 warning-level pass. Every other cancellation stays failing — a cancelled full
 run, so the next approval retries the suite instead of deduping against a
 green check, and a push or merge-group cancellation, because nothing there
@@ -324,29 +325,30 @@ query. Main's required checks live in ruleset `main`, not in legacy branch
 protection, and adding the name there must not disturb its two-approval and
 dismiss-on-push rules.
 
-Only step 3's single name is needed. The computed name is deliberate, not a
-defect to fix first: a touched PR shows `Managed Agent gate` as expected until
-its first approval's full run reports it, and the ruleset already requires two
-approvals, so waiting for that approval is the enforcement rather than a
-deadlock. Adding `Managed Agent fast tier` as well would instead block every PR
-that does not touch these paths, which never reports that name.
+Only step 3's single name is needed. The fixed name is deliberate: fast, full,
+untouched and skipped runs all report `Managed Agent gate`, so the ruleset can
+require it without blocking on a tier-specific context. A fast-tier pass can
+satisfy the required check; the first approval still starts the full suite for
+deeper verification. Do not add the retired `Managed Agent fast tier` or
+`Managed Agent review (no full run)` contexts to the ruleset.
 
 ## Validation
 
 - `scripts/tests/managed-agent-gate-workflow.test.js` evaluates the path
-  matcher, the check-name and concurrency expressions, the fast matrix, and
-  runs the tier-selection and report scripts against a stub `gh`.
+  matcher, the stable check name and concurrency expressions, the fast matrix,
+  and runs the tier-selection and report scripts against a stub `gh`.
 - The existing SDK Java, Hosted, failure-issue, finalize and runner-routing
   meta-tests pin the changed contracts, including that an approval of a fork
   PR stays on hosted runners.
-- After merge: a touched PR shows `Managed Agent fast tier` on push and
-  `Managed Agent gate` after its first approval; an untouched PR shows a
-  passing `Managed Agent gate` within a minute.
+- After merge: a touched PR shows its fast-tier result as `Managed Agent gate`
+  on push and its full-tier result under the same name after its first
+  approval; an untouched PR shows a passing `Managed Agent gate` within a
+  minute.
 
 ## Acceptance criteria
 
-- A touched PR cannot report a passing `Managed Agent gate` without a full run
-  on its current head.
+- A touched PR reports its fast-tier result as `Managed Agent gate` on push and
+  its full-tier result under the same name after its first approval.
 - An untouched PR reports a passing `Managed Agent gate` without running Java.
 - A second approval of the same head does not start a second full run after a
   pass.

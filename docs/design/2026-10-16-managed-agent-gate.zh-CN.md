@@ -72,32 +72,31 @@ helper 与配置、`sdk-java.yml` 运行的脚本，以及门禁自身文件。P
 
 ### 必需检查
 
-`gate` job 为工作流启动的每次运行报告层级结果。它的名字是计算出来的：
+`gate` job 始终使用必需检查名 `Managed Agent gate`。它的结论和
+`SDK Java (<tier>)` job 用来区分所选层级，不再把层级放进 check 名字：
 
-| 事件                  | 范围                     | 名字                                 |
-| --------------------- | ------------------------ | ------------------------------------ |
-| 任意                  | 未改到                   | `Managed Agent gate`（通过）         |
-| `pull_request`        | 改到                     | `Managed Agent fast tier`            |
-| `pull_request_review` | 改到，跑了全量           | `Managed Agent gate`                 |
-| `pull_request_review` | 改到，未跑全量           | `Managed Agent review (no full run)` |
-| `pull_request_review` | 非 approve，或 PR 已关闭 | 所有 job 跳过，不生成 gate check     |
-| `push`、`merge_group` | 改到                     | `Managed Agent gate`                 |
-| 任意                  | 层级选择失败             | `Managed Agent gate`（失败）         |
+| 事件                  | 范围                     | 结果                     |
+| --------------------- | ------------------------ | ------------------------ |
+| 任意                  | 未改到                   | 不跑 Java，直接通过      |
+| `pull_request`        | 改到                     | fast 层级结果            |
+| `pull_request_review` | 改到，跑了全量           | 全量层级结果             |
+| `pull_request_review` | 改到，未跑全量           | 通过；未选择新的全量运行 |
+| `pull_request_review` | 非 approve，或 PR 已关闭 | 所有 job 跳过            |
+| `push`、`merge_group` | 改到                     | fast 层级结果            |
+| 任意                  | 层级选择失败             | 失败                     |
 
 非 approve 的 review，以及 PR 关闭后才提交的 review，都不启动任何 job：GitHub 仍会
 创建这次运行，但它永远选不到 `none` 以上的层级——或者它要报告的检查已经不再门禁任何
-东西——因此 `scope` 与 `gate` 都跳过，运行在几秒内结束且不占用 runner。运行里仍会为
-每个 job 列出一条 skipped check，而 `gate` 的名字显示为未求值的表达式，因此不会出现
-名为 `Managed Agent gate` 或 `Managed Agent review (no full run)` 的 check。它以前会
-报告 `Managed Agent review (no full run)`——一条没有任何规则读取的绿色 check。
+东西——因此 `scope` 与 `gate` 都跳过，运行在几秒内结束且不占用 runner。固定的 job 名
+仍让它的 skipped check 使用稳定的 `Managed Agent gate` context。
 
-分支保护读取同名检查中最近一次更新的那个。因此改到路径的 PR 会一直显示
-`Managed Agent gate` 为 Expected，直到其 head 上的全量运行报告它；对这类 PR，只有
-全量运行（或失败）能报告这个名字。check run 不需要写权限 token，所以门禁对 fork PR
-同样有效。
+因此 ruleset 可以对每个 PR 要求同一个 context。改到路径的 PR 在首个 approve 前由
+fast 层级结果满足这项检查；approve 仍会启动全量套件，并以同一个名字报告结果。GitHub
+允许工作流运行后，check run 不需要写权限 token。首次贡献者的运行可能保持
+`action_required`，直到维护者批准；批准前不会生成门禁 check。
 
 被取代的 fast 层级是中性的、而非红色：当新的 push 取消 pull request 正在进行的运行时，
-门禁把 `Managed Agent fast tier` 报告为警告级通过。其他取消仍然失败——全量运行的取消
+门禁把 `Managed Agent gate` 报告为警告级通过。其他取消仍然失败——全量运行的取消
 如此，下一个 approve 才能重试套件，而不是对着一个绿色 check 去重；push 与 merge group
 臂上的取消也如此，因为那里不会取消正在进行的运行，取消意味着超时或人工停止。
 
@@ -266,24 +265,24 @@ Hosted 泳道：
 个查询会得到不同的分母。main 的必需检查位于 ruleset `main`，而不是旧的 branch
 protection；在那里添加名字时不得扰动它「两个 approve」与「push 后作废」这两条规则。
 
-第 3 步只需要那一个名字。计算出来的名字是刻意设计，不是需要先修的缺陷：碰了这些路径的
-PR 会显示 `Managed Agent gate` 为 expected，直到它首个 approve 的全量运行报出该名字，
-而 ruleset 本来就要求两个 approve，所以「等这个 approve」正是强制手段而不是死锁。若把
-`Managed Agent fast tier` 也加进去，反过来会卡住每一个不碰这些路径、因而从不报告该名字
-的 PR。
+第 3 步只需要那一个名字。固定名字是刻意设计：fast、全量、未改到与 skipped 运行都报告
+`Managed Agent gate`，ruleset 因而可以要求它，而不必等待某个层级专用的 context。fast
+层级通过即可满足必需检查；首个 approve 仍会启动全量套件做更深入的验证。不要把已废弃的
+`Managed Agent fast tier` 或 `Managed Agent review (no full run)` context 加入 ruleset。
 
 ## 验证
 
-- `scripts/tests/managed-agent-gate-workflow.test.js` 求值路径匹配、检查名与并发组表达式、
+- `scripts/tests/managed-agent-gate-workflow.test.js` 求值路径匹配、稳定检查名与并发组表达式、
   fast 矩阵，并用桩 `gh` 运行层级选择和结果报告脚本。
 - 现有 SDK Java、Hosted、失败上报、finalize 与 runner 路由元测试钉住了被修改的契约，
   包括 approve fork PR 时仍留在托管 runner。
-- 合入后：改到路径的 PR push 后显示 `Managed Agent fast tier`，首个 approve 后显示
-  `Managed Agent gate`；未改到的 PR 一分钟内显示通过的 `Managed Agent gate`。
+- 合入后：改到路径的 PR push 后以 `Managed Agent gate` 显示 fast 层级结果，首个 approve
+  后以同一个名字显示全量结果；未改到的 PR 一分钟内显示通过的 `Managed Agent gate`。
 
 ## 验收标准
 
-- 改到路径的 PR，在当前 head 没有全量运行时，不能报告通过的 `Managed Agent gate`。
+- 改到路径的 PR push 后以 `Managed Agent gate` 报告 fast 层级结果，首个 approve 后以
+  同一个名字报告全量结果。
 - 未改到路径的 PR 不跑 Java 即报告通过的 `Managed Agent gate`。
 - 同一 head 全量通过后，第二个 approve 不会再启动一次全量。
 - 夜间、手动和发布运行仍执行全部 11 项。
