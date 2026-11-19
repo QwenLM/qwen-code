@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_000;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_046;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -158,8 +158,9 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_000;
 // additions raises the measurement to 2,148,696, so the warning sits 104
 // above that figure and the ceiling 904 above it. Workspace-lock scoping,
 // capped-result retry guidance, and stale-callback invalidation then add 220
-// bytes, bringing the current tree to 2,148,976. The warning sits 24 above
-// that measurement, while the existing ceiling retains 624 bytes of headroom.
+// bytes, bringing that tree to 2,148,976. This merge's artifact-library stub
+// registration adds 46 bytes, for 2,149,022 measured bytes. The warning sits
+// 24 above that measurement, while the existing ceiling retains 578 bytes.
 //
 // The workspace artifact library copy (nine keys across three locales) is
 // interactive-only: managed-artifact-library-messages.transcript-stub.ts
