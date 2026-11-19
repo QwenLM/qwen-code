@@ -1342,8 +1342,12 @@ describe('SessionService - artifact summary sidecar', () => {
     };
     writeTranscript([title, { ...artifactEventRecord([a]), parentUuid: null }]);
 
-    await service.loadSession(SESSION_ID);
+    const loaded = await service.loadSession(SESSION_ID);
 
+    // The size gate is a count policy: the sidecar is not written, but the
+    // restore payload still carries the artifact (R9-1 payload fallback),
+    // matching the sibling above-cap decline test.
+    expect(loaded?.artifactSnapshot?.artifacts).toHaveLength(1);
     expect(readSessionArtifactSummarySidecar(sidecarPath)).toBeUndefined();
     statSpy.mockRestore();
   });
@@ -1635,6 +1639,9 @@ describe('SessionService - artifact summary sidecar', () => {
     });
 
     expect(projection?.runtime.sourcesUnavailable).toBe(true);
+    // The refusal gates the sidecar write only: the projection still
+    // delivers the artifacts its index parsed (the torn line is dropped).
+    expect(projection?.runtime.artifactSnapshot?.artifacts).toHaveLength(2);
     expect(readSessionArtifactSummarySidecar(sidecarPath)?.artifactCount).toBe(
       5,
     );
