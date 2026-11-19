@@ -19,6 +19,7 @@ import type {
   ServerLlmStreamEvent,
   SessionMetrics,
   WorkflowApprovalRequestCallback,
+  WorkflowRunCompletionCallback,
 } from '@qwen-code/qwen-code-core';
 import type { CLIMessage, CLIUserMessage } from './nonInteractive/types.js';
 import {
@@ -274,6 +275,14 @@ describe('runNonInteractive', () => {
     hasUnfinalizedTasks: ReturnType<typeof vi.fn>;
     abortAll: ReturnType<typeof vi.fn>;
   };
+  let mockWorkflowRunRegistry: {
+    setCompletionCallback: ReturnType<typeof vi.fn>;
+    setApprovalRequestCallback: ReturnType<typeof vi.fn>;
+    hasRunningEntries: ReturnType<typeof vi.fn>;
+    list: ReturnType<typeof vi.fn>;
+    getHandle: ReturnType<typeof vi.fn>;
+    abortAll: ReturnType<typeof vi.fn>;
+  };
   let mockMonitorRegistry: {
     setNotificationCallback: ReturnType<typeof vi.fn>;
     setRegisterCallback: ReturnType<typeof vi.fn>;
@@ -348,6 +357,15 @@ describe('runNonInteractive', () => {
       setRegisterCallback: vi.fn(),
       getAll: vi.fn().mockReturnValue([]),
       hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+      abortAll: vi.fn(),
+    };
+
+    mockWorkflowRunRegistry = {
+      setCompletionCallback: vi.fn(),
+      setApprovalRequestCallback: vi.fn(),
+      hasRunningEntries: vi.fn().mockReturnValue(false),
+      list: vi.fn().mockReturnValue([]),
+      getHandle: vi.fn(),
       abortAll: vi.fn(),
     };
 
@@ -433,6 +451,7 @@ describe('runNonInteractive', () => {
         .fn()
         .mockReturnValue(mockBackgroundTaskRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue(mockWorkflowRunRegistry),
       // Phase C: headless --resume reads the resumed session + sidecar to
       // restore worktree context. These tests don't exercise resume, so
       // return undefined to short-circuit the helper.
@@ -3583,10 +3602,8 @@ describe('runNonInteractive', () => {
 
   it('registers and clears the stream-json workflow approval channel', async () => {
     setupMetricsMock();
-    const setApprovalRequestCallback = vi.fn();
-    mockConfig.getWorkflowRunRegistry = vi.fn().mockReturnValue({
-      setApprovalRequestCallback,
-    });
+    const setApprovalRequestCallback =
+      mockWorkflowRunRegistry.setApprovalRequestCallback;
     const handleWorkflowApproval = vi.fn().mockResolvedValue(undefined);
     const controlService = {
       permission: { handleWorkflowApproval },
@@ -3632,10 +3649,8 @@ describe('runNonInteractive', () => {
 
   it('does not register a workflow approval channel in plain headless mode', async () => {
     setupMetricsMock();
-    const setApprovalRequestCallback = vi.fn();
-    mockConfig.getWorkflowRunRegistry = vi.fn().mockReturnValue({
-      setApprovalRequestCallback,
-    });
+    const setApprovalRequestCallback =
+      mockWorkflowRunRegistry.setApprovalRequestCallback;
     mockLlmClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents([
         {
@@ -3651,6 +3666,90 @@ describe('runNonInteractive', () => {
     await runNonInteractive(mockConfig, mockSettings, 'test', 'p-headless');
 
     expect(setApprovalRequestCallback).not.toHaveBeenCalled();
+  });
+
+  it('waits for a background workflow and drains its completion as a turn', async () => {
+    setupMetricsMock();
+    let running = true;
+    mockWorkflowRunRegistry.hasRunningEntries.mockImplementation(() => running);
+    mockLlmClient.sendMessageStream
+      .mockImplementationOnce(async function* () {
+        const notify = mockWorkflowRunRegistry.setCompletionCallback.mock
+          .calls[0]?.[0] as WorkflowRunCompletionCallback | undefined;
+        expect(notify).toBeTypeOf('function');
+        setTimeout(() => {
+          notify?.(
+            'Background workflow "review" completed.',
+            '<task-notification>workflow done</task-notification>',
+            { runId: 'wf_bg', status: 'completed' },
+          );
+          running = false;
+        }, 150);
+        yield { type: LlmEventType.Content, value: 'Started it.' };
+        yield {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+        };
+      })
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: LlmEventType.Content, value: 'It finished.' },
+          {
+            type: LlmEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 0 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(mockConfig, mockSettings, 'run it', 'p-wf-bg');
+
+    expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(
+      JSON.stringify(mockLlmClient.sendMessageStream.mock.calls[1]?.[0]),
+    ).toContain('workflow done');
+    expect(
+      mockWorkflowRunRegistry.setCompletionCallback,
+    ).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it('lets a cancelled workflow record its end before an interrupt exits', async () => {
+    setupMetricsMock();
+    const order: string[] = [];
+    let settle: () => void = () => {};
+    const completion = new Promise<void>((resolve) => {
+      settle = () => {
+        order.push('settled');
+        resolve();
+      };
+    });
+    mockWorkflowRunRegistry.list.mockReturnValue([{ runId: 'wf_bg' }]);
+    mockWorkflowRunRegistry.getHandle.mockReturnValue({ completion });
+    mockWorkflowRunRegistry.abortAll.mockImplementation(() => {
+      order.push('aborted');
+      setTimeout(settle, 20);
+    });
+    vi.mocked(process.exit).mockImplementation(() => {
+      order.push('exit');
+      throw new Error('exit');
+    });
+    const controller = new AbortController();
+    mockLlmClient.sendMessageStream.mockImplementation(async function* () {
+      yield { type: LlmEventType.Content, value: 'Started it.' };
+      controller.abort();
+      yield {
+        type: LlmEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+      };
+    });
+
+    await runNonInteractive(mockConfig, mockSettings, 'run it', 'p-wf-int', {
+      abortController: controller,
+    }).catch(() => undefined);
+
+    expect(order.slice(0, 3)).toEqual(['aborted', 'settled', 'exit']);
   });
 
   it('prepends the recovered background agents notice on a resumed headless prompt', async () => {

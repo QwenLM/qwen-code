@@ -159,6 +159,13 @@ const restoredBackgroundAgentSessions = new WeakMap<Config, Set<string>>();
 const STRUCTURED_SHUTDOWN_HOLDBACK_MS = 500;
 
 /**
+ * How long an exiting run waits for cancelled workflows to record their end.
+ * A runner that settles in time removes its checkpoint, so the run reads as
+ * cancelled rather than interrupted by a crash.
+ */
+const WORKFLOW_CANCEL_SETTLE_MS = 2_000;
+
+/**
  * The memory-wait window for a one-shot run whose caller supplied no stop
  * signal (the `llm.tsx` shape). Mirrors the stream-JSON session's
  * `EOF_MEMORY_WAIT_TIMEOUT_MS`; each drain arms its own window.
@@ -954,6 +961,22 @@ export async function runNonInteractive(
     const markAbortExitCommitted = (): void => {
       abortExitCommitted = true;
     };
+    const cancelWorkflowRuns = async (): Promise<void> => {
+      const workflows = config.getWorkflowRunRegistry();
+      const settling = workflows
+        .list()
+        .flatMap((entry) => workflows.getHandle(entry.runId)?.completion ?? []);
+      workflows.abortAll();
+      if (settling.length === 0) return;
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        Promise.allSettled(settling),
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, WORKFLOW_CANCEL_SETTLE_MS);
+        }),
+      ]);
+      clearTimeout(timer);
+    };
     const routeAbort = async (): Promise<never> => {
       const exceeded = budgetEnforcer.getExceeded();
       endActiveInteraction(exceeded ? 'error' : 'cancelled', {
@@ -972,6 +995,7 @@ export async function runNonInteractive(
       );
       await settleBeforeTerminalOutput();
       if (exceeded) {
+        await cancelWorkflowRuns();
         await handleBudgetExceededError(
           config,
           exceeded,
@@ -993,6 +1017,7 @@ export async function runNonInteractive(
       ) {
         throw reason;
       }
+      await cancelWorkflowRuns();
       await handleCancellationError(config, markAbortExitCommitted);
       throw new Error('Operation cancelled.');
     };
@@ -1831,6 +1856,18 @@ export async function runNonInteractive(
         });
       });
 
+      // A background workflow reports back the same way: its completion
+      // drains as a turn, and the run waits for it below.
+      const workflowRegistry = config.getWorkflowRunRegistry();
+      workflowRegistry.setCompletionCallback((displayText, modelText, meta) => {
+        localQueue.push({
+          displayText,
+          modelText,
+          sendMessageType: SendMessageType.Notification,
+          todoWorkChainId: meta.todoWorkChainId,
+        });
+      });
+
       const monitorRegistry = config.getMonitorRegistry();
       if (options.captureMonitorNotifications !== false) {
         // One-shot headless runs capture monitor notifications locally so any
@@ -1954,6 +1991,7 @@ export async function runNonInteractive(
           GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
         );
         registry.abortAll();
+        await cancelWorkflowRuns();
         // `abortAll()` marks each task `cancelled` synchronously, but
         // the matching `task_notification` is emitted later by the
         // task's natural handler. Hold back briefly (capped at
@@ -1997,6 +2035,7 @@ export async function runNonInteractive(
           'Headless Goal stopped after loop detection',
         );
         registry.abortAll();
+        await cancelWorkflowRuns();
         flushQueuedNotificationsToSdk(localQueue);
         finalizeOneShotMonitors();
 
@@ -4042,6 +4081,7 @@ export async function runNonInteractive(
           while (true) {
             if (abortController.signal.aborted) {
               registry.abortAll();
+              await cancelWorkflowRuns();
               // Flush queued terminal notifications before routeAbort
               // exits so stream-json consumers always see a task_notification
               // paired with every task_started.
@@ -4066,7 +4106,13 @@ export async function runNonInteractive(
             // paired with one. Monitors are different: they intentionally
             // continue in the background, so final result emission is not
             // gated on monitor lifetime.
-            if (!registry.hasUnfinalizedTasks() && localQueue.length === 0)
+            // A cancelled workflow sends no completion, and a paused one
+            // would never wake an unattended run, so only running ones count.
+            if (
+              !registry.hasUnfinalizedTasks() &&
+              !workflowRegistry.hasRunningEntries() &&
+              localQueue.length === 0
+            )
               break;
             await new Promise((r) => setTimeout(r, 100));
           }
@@ -4319,6 +4365,7 @@ export async function runNonInteractive(
       const reg = config.getBackgroundTaskRegistry();
       reg.setNotificationCallback(undefined);
       reg.setRegisterCallback(undefined);
+      config.getWorkflowRunRegistry().setCompletionCallback(undefined);
       const monReg = config.getMonitorRegistry();
       // In one-shot (non-Session) runs, abort all running monitors so their
       // piped stdio refs don't keep the Node event loop alive after the result
