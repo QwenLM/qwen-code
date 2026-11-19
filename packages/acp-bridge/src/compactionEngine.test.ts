@@ -209,6 +209,7 @@ type ChunkIdentity = {
   subagentType?: string;
   sourceRecordIds?: string[];
   agent?: unknown;
+  backgroundTurn?: unknown;
   promptId?: string;
   originatorClientId?: string;
   sessionId?: string;
@@ -223,7 +224,8 @@ function withIdentity(
     identity.parentToolCallId !== undefined ||
     identity.subagentType !== undefined ||
     identity.sourceRecordIds !== undefined ||
-    identity.agent !== undefined
+    identity.agent !== undefined ||
+    identity.backgroundTurn !== undefined
   ) {
     update['_meta'] = {
       ...(identity.parentToolCallId === undefined
@@ -233,6 +235,9 @@ function withIdentity(
         ? {}
         : { subagentType: identity.subagentType }),
       ...(identity.agent === undefined ? {} : { agent: identity.agent }),
+      ...(identity.backgroundTurn === undefined
+        ? {}
+        : { backgroundTurn: identity.backgroundTurn }),
       ...(identity.sourceRecordIds === undefined
         ? {}
         : {
@@ -871,6 +876,14 @@ describe('TurnBoundaryCompactionEngine', () => {
   });
 
   describe('liveJournal (incomplete turn)', () => {
+    const backgroundTurn = {
+      turnId: 'background-a',
+      taskId: 'task-a',
+      kind: 'shell',
+      sourceTurnId: 'source-a',
+      startedAt: 1000,
+    } as const;
+
     it('merges consecutive text chunks for live replay', () => {
       const engine = new TurnBoundaryCompactionEngine();
       engine.ingest(makeThoughtChunk(1, 'Let me '));
@@ -888,6 +901,45 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(snap.liveJournal.map((event) => event.id)).toEqual([2, 4]);
       expect(snap.lastEventId).toBe(4);
     });
+
+    it.each([
+      ['message', makeTextChunk],
+      ['thought', makeThoughtChunk],
+    ])(
+      'merges background-turn %s chunks in full, summary, and compacted replay',
+      (_kind, makeChunk) => {
+        const engine = new TurnBoundaryCompactionEngine();
+        for (const [id, text] of ['first ', 'second ', 'third'].entries()) {
+          engine.ingest(
+            withIdentity(makeChunk(id + 1, text), { backgroundTurn }),
+          );
+        }
+
+        const expectMerged = (events: BridgeEvent[]) => {
+          expect(events).toHaveLength(1);
+          expect(extractTexts(events)).toEqual(['first second third']);
+          expect(events[0]?.id).toBe(3);
+          expect(events[0]).toMatchObject({
+            data: { update: { _meta: { backgroundTurn } } },
+          });
+        };
+        expectMerged(engine.snapshot().liveJournal);
+        expectMerged(engine.snapshot('summary').liveJournal);
+
+        engine.ingest(makeTurnComplete(4));
+        const terminal = engine.snapshot();
+        expect(terminal.compactedTurns.map((event) => event.type)).toEqual([
+          'session_update',
+          'turn_complete',
+        ]);
+        expectMerged(
+          terminal.compactedTurns.filter(
+            (event) => event.type === 'session_update',
+          ),
+        );
+        expect(terminal.liveJournal).toEqual([]);
+      },
+    );
 
     it('preserves tool boundaries in live replay', () => {
       const engine = new TurnBoundaryCompactionEngine();
@@ -911,6 +963,13 @@ describe('TurnBoundaryCompactionEngine', () => {
         name: 'sourceRecordIds',
         first: { sourceRecordIds: ['record-a'] },
         second: { sourceRecordIds: ['record-b'] },
+      },
+      {
+        name: 'backgroundTurn',
+        first: { backgroundTurn },
+        second: {
+          backgroundTurn: { ...backgroundTurn, turnId: 'background-b' },
+        },
       },
       {
         name: 'promptId',
@@ -1000,6 +1059,37 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(snap.liveJournal).toHaveLength(2);
       expect(extractTexts(snap.liveJournal)).toEqual(['first', 'second']);
       expect(snap.liveJournal.map((event) => event.id)).toEqual([1, 2]);
+    });
+
+    it('keeps chunks with invalid backgroundTurn metadata discrete', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      const invalidBackgroundTurn = { turnId: 'background-a' };
+      const first = withIdentity(makeThoughtChunk(1, 'first'), {
+        backgroundTurn: invalidBackgroundTurn,
+      });
+      const second = withIdentity(makeThoughtChunk(2, 'second'), {
+        backgroundTurn: invalidBackgroundTurn,
+      });
+      engine.ingest(first);
+      engine.ingest(second);
+
+      expect(engine.snapshot().liveJournal).toEqual([first, second]);
+      expect(engine.snapshot('summary').liveJournal).toEqual([first, second]);
+    });
+
+    it('keeps chunks with unmodeled backgroundTurn fields discrete', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      const first = withIdentity(makeTextChunk(1, 'first'), {
+        backgroundTurn: { ...backgroundTurn, extension: 'retain-me' },
+      });
+      const second = withIdentity(makeTextChunk(2, 'second'), {
+        backgroundTurn,
+      });
+      engine.ingest(first);
+      engine.ingest(second);
+
+      expect(engine.snapshot().liveJournal).toEqual([first, second]);
+      expect(engine.snapshot('summary').liveJournal).toEqual([first, second]);
     });
 
     it.each([
