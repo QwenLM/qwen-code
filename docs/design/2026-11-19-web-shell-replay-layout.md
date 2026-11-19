@@ -8,10 +8,12 @@ A full transcript replay can mount many virtual rows with Markdown tables in a s
 
 ## Changes
 
-- Set the message list's virtual overscan to 15 rows. Keep the enhanced table renderer and the existing threshold for virtualization.
+- Default the message list's virtual overscan to 15 rows on each side of the viewport. Hosts can pass an optional `overscan` prop to `WebShell`, `WebShellWithProviders`, or `WebShellTranscript` to tune how many extra rows are mounted. A value of `0` disables the extra rows. The existing threshold still determines when virtualization starts.
 - When following the latest messages, use cached or estimated heights on the initial virtual row ref. Use ResizeObserver to obtain the real size. Keep normal measurement when reading history, restoring a prepended page, locating a message, or running without ResizeObserver.
 - Restore an enhanced table's scroll position on mount when a fullscreen transition has saved it. A new table already starts at the initial position.
 
 ## Verification
 
 Replay the same recorded transcript with the production build. Dispatch keys during the longest frame while the editor is focused and editable. Verify that all those keys reach the DOM and the slowest takes less than 700 ms. Check fast scrolling, loading an older page with its viewport anchor preserved, search navigation, and the enhanced table's fullscreen scroll and focus restoration.
+
+In a virtualized transcript, verify that omitting `overscan` retains the 15-row buffer and passing `overscan={0}` or `overscan={6}` changes the number of extra rows without changing which rows are visible.

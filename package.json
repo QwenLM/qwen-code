@@ -23,6 +23,7 @@
     "packages/channels/email",
     "packages/channels/gitlab",
     "packages/channels/aone",
+    "packages/channels/msteams",
     "packages/channels/plugin-example",
     "integrations/external-context",
     "integrations/external-context-mem0",

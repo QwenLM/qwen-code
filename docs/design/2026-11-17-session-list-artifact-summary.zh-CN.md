@@ -103,7 +103,54 @@
   会话（journal 记录早于 sidecar）与 fork 的首次打开，并在任何带外 journal
   编辑后重新播种。零数量会治愈已存在的陈旧 sidecar（一次失败的尽力零写入
   不能留下永久幻影计数），但不会为无产物会话新建；数量相等时跳过写入，
-  暖 load 不新增写盘；部分读取的 transcript 绝不播种。播种还要求 journal
+  暖 load 不新增写盘；部分读取的 transcript 绝不播种。播种在空对话早退
+  之前执行，因此带元数据的 side-records 会话（首个 prompt 之前注册的产物——
+  生产形状，因为每个 daemon 会话都带 `session_source` 记录）即使没有可加载
+  的对话，也在首次打开时获得数量。播种只对能重建出至少一条消息的 transcript
+  生效：纯 artifact-only transcript 重建不出任何消息，没有任何恢复路径能打开
+  它（`loadSession` 返回 undefined、投影 undefined），在那里写计数等于展示
+  冷打开永远交付不了的集合——诚实的状态是没有 sidecar。形状门陈述助手所需
+  的属性——完全没有对话轮次、每条记录都是 system 元数据——而不是枚举子类型，
+  因此产品在首个 prompt 之前写下的每条创建期记录（`session_source`、
+  `session_model`、标题……）都让它保持为真；它刻意不写成
+  `!records.some(isTranscriptConversationRecord)`——那个判定把创建期元数据
+  算作对话记录。load 漏斗按真正的对话轮次分派
+  （`messages.some((m) => m.type !== 'system')`）：元数据也会重建出消息，
+  且原始记录未经校验，所以 `messages.length` 与原始数组形状都不能判定
+  「有对话」。只有带 user/assistant/tool_result 轮次的 transcript 走无上限
+  播种——它的读取就是 load 本身，恢复载荷的内嵌快照不能依赖 sidecar 上限。
+  其余一律走共享助手：形状门拒绝混合原始数组（元数据旁有校验器丢弃的记录），
+  空消息拒绝覆盖 artifact-only 形状——从空活跃集播种会把正确计数治愈成零。
+  daemon/ACP 恢复漏斗经 `readRestoreProjection` 选择性读取、从不调用
+  `loadSession`。对「投影定义且 apiHistory 为空」，它计数该投影实际交付的
+  集合——`runtime.artifactSnapshot.artifacts` 经共享可恢复谓词过滤——并把
+  已有 sidecar 治愈到该计数，且受与 load 播种相同的权威门约束：读取不完整
+  （`sourceReadComplete`——与 load 播种门控同一信号；`sourcesUnavailable`
+  更宽，还会标记损坏的 sources 快照，而那并不收窄产物交付）、历史链断裂
+  （`historyGaps`）、损坏的产物 journal
+  （`artifactJournalWarnings`——reader 从重建中穿出，即使没有快照存活）都
+  不得覆盖正确计数。三个写者共用一个交付集合定义：transcript 从未有过对话
+  轮次（每条记录都是 system 元数据）时，侧记录选择器纳入全部 artifact 记录，
+  于是投影交付、load 漏斗的整份重建、recorder 的注册盖章三者一致——挂非尾
+  元数据的事件（recorder 以 `updateActiveTail: false` 写标题与重锚 source）
+  被每条路径交付，而非一处计入、无人交付。文件中任何位置存在对话记录（即使
+  已 rewind 出活跃链）都保持活跃段选择，排除被弃分支。
+  投影缺失不是恢复候选（下游没有任何路径为它携带 artifactSnapshot）。投影
+  漏斗完全不付出辅助读取——reader 已经索引过 transcript。load 漏斗的无对话
+  播种走共享助手，由它持有尺寸探测、辅助读取、归属校验、形状门与播种：读取
+  与库变更读取同样以 64 MiB 为上限、同样的包含边界（正好 64 MiB 播种、超过
+  跳过、尺寸探测失败跳过）。尺寸门与形状门只是 sidecar 计数策略：助手拒绝时
+  （超上限 journal，或元数据活跃链旁存在 rewind 弃去的对话记录）load 漏斗回退
+  到只构建载荷的重建，恢复载荷仍携带活跃分支产物而 sidecar 保持不变；空消息
+  拒绝对应任何恢复路径都打不开的 artifact-only 形状。有对话的会话保持选择性
+  读取的零额外 I/O 契约（由读取 spy 钉住），
+  且不在 daemon 漏斗播种：其计数来自 recorder 盖章与 CLI load 漏斗，因此仅经
+  daemon 首开一个无 sidecar 的 legacy 对话会话，在下一个产物事件之前不显示
+  计数——这是 #17518 既有的限制，作为跟进项跟踪，而非本播种覆盖的形状。
+  load 漏斗经同一个播种方法播种；库守卫共用形状谓词与记录组合助手，而非
+  播种方法；投影漏斗共用交付集合定义（侧记录选择器与可恢复谓词），计数自身
+  交付而非调用播种方法。
+  播种还要求 journal
   具备权威性：无历史链缺口（断链会把 artifact 事件孤儿化出活跃分支而少计），
   且无记录级损坏警告——与库变更守卫同一判定
   （`hasDisqualifyingArtifactJournalWarning`）；单产物级跳过仍被容忍。两处
@@ -209,6 +256,8 @@
 - `packages/acp-bridge/src/bridgeTypes.ts`（`BridgeSessionSummary`）。
 - `packages/sdk-typescript/src/daemon/types.ts`（`DaemonSessionSummary`）。
 - `packages/cli/src/serve/server/session-list.ts`（增强、合并规则）。
+- `packages/cli/src/serve/acp-http/dispatch.ts`（ACP session/list 投影
+  数量与恢复中标记）。
 - `packages/web-shell/client/daemon/session/types.ts`（connection 字段、
   action 选项）。
 - `packages/web-shell/client/daemon/session/actions.ts`（乐观 hint、清空）。
@@ -243,14 +292,32 @@
   保留与 fork 剥离；recording-service sidecar 写入（带/不带数量的 event、
   snapshot，两条路径的先 journal 后 sidecar 顺序，无计数旧事件保留已有
   sidecar）；load 播种及其权威性门（历史链缺口、含变更级丢弃的记录级损坏
-  警告、被容忍的单产物级跳过、全拒绝日志被播种与库守卫同样拒绝），active
+  警告、被容忍的单产物级跳过、全拒绝日志被播种与库守卫同样拒绝、
+  side-records-only 会话在空对话早退之前及经 daemon 恢复投影漏斗播种、
+  创建期 `session_model` 元数据在两个漏斗都被形状门接纳、共享上限在 load
+  漏斗有钉子——超过上限跳过播种、正好上限播种、尺寸探测失败跳过——且有对话
+  的 load 播种保持无上限（投影漏斗不付出 stat/读取/上限，计数自身交付）、
+  携带不可校验记录（未知 type、非法身份）
+  的无对话 transcript 被两个漏斗拒绝而非把正确计数治愈成零——含创建期元数据
+  在被丢弃记录旁重建出消息的变体（分派按真正对话轮次）、没有任何恢复路径能
+  打开的 artifact-only transcript 被两个漏斗都不写 sidecar、投影缺失不付出
+  辅助读取、助手的空记录与外项目守卫、投影漏斗的部分读取经穿线的未完整读
+  标记被拒绝（两个漏斗）、投影漏斗在相同权威门下计数自身交付（损坏/拒绝
+  journal 保持正确计数；部分读取保持；陈旧 sidecar 治愈到交付；计数可恢复
+  子集；等计数跳写）、非尾父 journal 的投影/load 重建/删除重计共用一个交付
+  集合定义（两漏斗得到同一 sidecar 值；删除幸存者计数等于投影交付）、投影
+  漏斗两个分支都不付出辅助读取、generated_ui_state-only journal 是合法库
+  删除目标、有对话会话不被投影读取触碰），active
   与 archived 两态、event 与 snapshot（fork）记录、按冷启动可恢复集合计数
   （无快照 published file 定位符经 bridge/core 共享谓词排除、真正预览快照
   保留）；库删除更新（可恢复
-  幸存者算术，单个与批量、请求批次含陈旧 id）；
-  archive/delete/冲突处理；工作目录搬迁；store `count()` 含删除后递减；
+  幸存者算术，单个与批量、请求批次含陈旧 id、无快照 published file 定位符
+  排除、带 `session_model` 的无对话 transcript 是合法删除目标）；
+  archive/delete/冲突处理（含 kept 侧无 sidecar 的形状）；工作目录搬迁；
+  store `count()` 含删除后递减；
   `toSessionSummary` 携带/省略与恢复中标记（`artifactCountPending` 保持行
-  可见、合并保留 sidecar 计数、rewind 恢复抛错时清理）；ACP 边界把盖章
+  可见、合并保留 sidecar 计数、rewind 恢复抛错时清理、共享通道上按会话
+  键控）；ACP 边界把盖章
   数量带到 recorder、ACP
   session/list 投影携带数量与标记；全部
   列表路径的增强（含扫描中途 abort 的逐次检查与被中断扫描不进缓存、单会话
