@@ -14613,6 +14613,13 @@ export function createSessionControlPlane(
       );
     },
 
+    async getSessionWakeupStatus(sessionId) {
+      return requestSessionStatus(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionWakeupStatus,
+      );
+    },
+
     async getSessionSupportedCommandsStatus(sessionId) {
       return requestSessionStatus(
         sessionId,

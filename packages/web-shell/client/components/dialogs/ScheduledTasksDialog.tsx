@@ -20,11 +20,13 @@ import {
   MessagesSquareIcon,
   PencilIcon,
   PlayIcon,
+  TimerIcon,
   Trash2Icon,
 } from 'lucide-react';
 import {
   useWorkspaceActions,
   type DaemonAutofixPrWatch,
+  type DaemonLoopWakeup,
   type DaemonScheduledTask,
   type DaemonScheduledTaskRun,
 } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -43,6 +45,7 @@ import { useI18n } from '../../i18n';
 import { useWebShellPortalRoot } from '../../portalRoot';
 import { getComposerTagIconUrl } from '../../utils/composerTag';
 import { cssUrlValue } from '../../utils/cssUrlVar';
+import { formatClockTime } from '../../utils/formatDateTime';
 import { getModelDisplayName } from '../../utils/modelDisplay';
 import { workspaceLabel, workspaceLabelForCwd } from '../../utils/workspace';
 import { WorkspacePill } from '../WorkspacePill';
@@ -200,6 +203,13 @@ interface ScheduledTasksDialogProps {
   /** The daemon advertises `autofix_pr_watches`: the card of an
    * `/autofix-pr` watch's task shows the watch's state, and can stop it. */
   autofixPrWatchesAvailable?: boolean;
+  /** Pending one-shot loop wakeups (session-only, not persisted tasks),
+   * aggregated by the App from the daemon's `GET /scheduled-tasks` `wakeups`
+   * field; an older daemon without the field yields an empty map. */
+  loopWakeups?: Map<string, DaemonLoopWakeup>;
+  /** Session names to join onto wakeup rows by session id; absent ids fall
+   * back to the id's first characters. */
+  loopWakeupSessionNames?: Map<string, string>;
   onError: (error: unknown, fallback: string) => void;
 }
 
@@ -667,6 +677,8 @@ export function ScheduledTasksDialog({
   deliveryAvailable = false,
   observedContactsAvailable = false,
   autofixPrWatchesAvailable = false,
+  loopWakeups,
+  loopWakeupSessionNames,
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
@@ -731,6 +743,29 @@ export function ScheduledTasksDialog({
     autofixPrWatchesAvailable && hasWatchTask,
     watchWorkspaceIds,
   );
+  // Loop-wakeup rows expire on their own: the map is only refreshed by the
+  // App's poll, so a fired (or stale) wakeup would keep rendering "next tick"
+  // until the next fetch without a local clock. The 1s tick runs only while a
+  // pending wakeup is still in the future — an open dialog with none stays
+  // static.
+  const [wakeupNow, setWakeupNow] = useState(() => Date.now());
+  const hasFutureWakeup = useMemo(
+    () =>
+      loopWakeups !== undefined &&
+      Array.from(loopWakeups.values()).some((w) => w.fireAtMs > wakeupNow),
+    [loopWakeups, wakeupNow],
+  );
+  useEffect(() => {
+    if (!hasFutureWakeup) return;
+    const interval = setInterval(() => setWakeupNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, [hasFutureWakeup]);
+  const wakeupRows = useMemo(() => {
+    if (!loopWakeups) return [];
+    return Array.from(loopWakeups.values())
+      .filter((w) => w.fireAtMs > wakeupNow)
+      .sort((a, b) => a.fireAtMs - b.fireAtMs);
+  }, [loopWakeups, wakeupNow]);
   const [stoppingWatch, setStoppingWatch] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -2476,6 +2511,39 @@ export function ScheduledTasksDialog({
           );
         })}
       </div>
+
+      {/* Session-only one-shot wakeups are not tasks: they expire on their
+       * own (the 1s tick above), so they get a quiet section below the
+       * durable list rather than task cards. */}
+      {wakeupRows.length > 0 && (
+        <div
+          className={styles.loopWakeupsSection}
+          data-testid="scheduled-tasks-loop-wakeups"
+        >
+          <div className={styles.loopWakeupsHeading}>
+            {t('scheduledTasks.loopWakeups')}
+          </div>
+          {wakeupRows.map((wakeup) => (
+            <div key={wakeup.sessionId} className={styles.loopWakeupRow}>
+              <TimerIcon className={styles.loopWakeupIcon} aria-hidden="true" />
+              <span className={styles.loopWakeupName} title={wakeup.sessionId}>
+                {loopWakeupSessionNames?.get(wakeup.sessionId) ??
+                  wakeup.sessionId.slice(0, 8)}
+              </span>
+              <span className={styles.loopWakeupNext}>
+                {t('scheduledTasks.loopWakeupNextTick', {
+                  time: formatClockTime(wakeup.fireAtMs),
+                })}
+              </span>
+              <span className={styles.loopWakeupPrompt}>
+                {wakeup.prompt.length > 120
+                  ? `${wakeup.prompt.slice(0, 120)}…`
+                  : wakeup.prompt}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

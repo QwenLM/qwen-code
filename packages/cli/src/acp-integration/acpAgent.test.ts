@@ -16095,6 +16095,75 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('exposes the session pending loop wakeup via the wakeup_status ext method', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const longPrompt = 'a'.repeat(300);
+    Object.assign(innerConfig, {
+      getCronScheduler: vi.fn().mockReturnValue({
+        getPendingWakeup: vi.fn().mockReturnValue({
+          id: 'lw-1',
+          fireAtMs: 12_000,
+          createdAt: 5_000,
+          prompt: longPrompt,
+          todoWorkChainId: 'chain-1',
+        }),
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    // The prompt is truncated to its first 200 chars on the session side;
+    // the prefix must be preserved byte-for-byte.
+    const wakeup = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionWakeupStatus,
+      { sessionId },
+    );
+    expect(wakeup).toEqual({
+      v: 1,
+      sessionId,
+      pendingWakeup: {
+        id: 'lw-1',
+        fireAtMs: 12_000,
+        createdAt: 5_000,
+        prompt: longPrompt.slice(0, 200),
+        todoWorkChainId: 'chain-1',
+      },
+    });
+
+    // A session without an armed wakeup reports null, not an error.
+    Object.assign(innerConfig, {
+      getCronScheduler: vi.fn().mockReturnValue({
+        getPendingWakeup: vi.fn().mockReturnValue(null),
+      }),
+    });
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionWakeupStatus, {
+        sessionId,
+      }),
+    ).resolves.toEqual({ v: 1, sessionId, pendingWakeup: null });
+
+    // Missing/invalid sessionId is rejected like the sibling status methods.
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionWakeupStatus, {}),
+    ).rejects.toThrow('Invalid or missing sessionId');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('loads persisted workflow snapshots into the session task history', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);

@@ -474,6 +474,7 @@ import {
   type ServeWorkspaceToolStatus,
   type ServeWorkspaceToolsStatus,
   type ServeSessionContextUsageStatus,
+  type ServeSessionWakeupStatus,
   type ServeSessionStatsStatus,
   type ServeHookConfig,
   type ServeHookEntry,
@@ -9536,6 +9537,29 @@ class QwenAgent implements Agent {
     };
   }
 
+  private async buildSessionWakeupStatus(
+    sessionId: string,
+  ): Promise<ServeSessionWakeupStatus> {
+    const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
+    const pending = config.getCronScheduler().getPendingWakeup();
+    return {
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      pendingWakeup: pending
+        ? {
+            id: pending.id,
+            fireAtMs: pending.fireAtMs,
+            createdAt: pending.createdAt,
+            prompt: pending.prompt.slice(0, 200),
+            ...(pending.todoWorkChainId
+              ? { todoWorkChainId: pending.todoWorkChainId }
+              : {}),
+          }
+        : null,
+    };
+  }
+
   private async buildSessionSupportedCommandsStatus(
     sessionId: string,
   ): Promise<ServeSessionSupportedCommandsStatus> {
@@ -10692,6 +10716,18 @@ class QwenAgent implements Agent {
         return (await this.buildSessionContextUsageStatus(
           sessionId,
           params['detail'] === true,
+        )) as unknown as Record<string, unknown>;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionWakeupStatus: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return (await this.buildSessionWakeupStatus(
+          sessionId,
         )) as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.sessionSupportedCommands: {

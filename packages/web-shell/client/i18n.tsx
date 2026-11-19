@@ -2167,6 +2167,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'scheduledTasks.sessionScopedSnapshot':
     'This is a session-scoped scheduled task. Showing the snapshot from when it was created.',
   'scheduledTasks.empty': 'No scheduled tasks yet. Create one to get started.',
+  'scheduledTasks.loopWakeups': 'Pending loop wakeups (session-only)',
+  'scheduledTasks.loopWakeupNextTick': (v) => `next tick ${v?.time ?? ''}`,
   'scheduledTasks.create': 'Create',
   'scheduledTasks.creating': 'Creating…',
   'scheduledTasks.cancel': 'Cancel',
@@ -2773,6 +2775,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
 
   'sidebar.daemonStatus': 'Daemon Status',
   'sidebar.scheduledTasks': 'Scheduled Tasks',
+  'sidebar.loopWakeup': (v) => `Loop: next tick ${v?.time ?? ''}`,
   'sidebar.workflows': 'Workflows',
   'sidebar.goals': 'Goals',
   'sidebar.prWatches': 'PR watches',
@@ -4413,6 +4416,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'status.mode': 'Approval mode',
   'chat.scrollToBottom': 'Scroll to bottom',
   'chatHeader.toggleEnvironment': 'Toggle environment information',
+  'chatHeader.loopNextTick': (v) => `Loop · next tick ${v?.time ?? ''}`,
   'chatHeader.toggleRightPanel': 'Toggle right panel',
   'chatHeader.openArtifacts': (v) => `Artifacts (${v?.count ?? 0})`,
   'environment.title': 'Environment',
@@ -7496,6 +7500,8 @@ const ZH: Messages = {
   'scheduledTasks.sessionScopedSnapshot':
     '这是一个会话内定时任务，下面显示的是创建时的快照。',
   'scheduledTasks.empty': '还没有定时任务，创建一个开始吧。',
+  'scheduledTasks.loopWakeups': '待处理的循环唤醒（仅当前会话）',
+  'scheduledTasks.loopWakeupNextTick': (v) => `下次触发 ${v?.time ?? ''}`,
   'scheduledTasks.create': '创建',
   'scheduledTasks.creating': '创建中…',
   'scheduledTasks.cancel': '取消',
@@ -8052,6 +8058,7 @@ const ZH: Messages = {
 
   'sidebar.daemonStatus': 'Daemon 状态',
   'sidebar.scheduledTasks': '定时任务',
+  'sidebar.loopWakeup': (v) => `循环：下次触发 ${v?.time ?? ''}`,
   'sidebar.workflows': '工作流',
   'sidebar.goals': '目标',
   'sidebar.prWatches': 'PR 监视',
@@ -9562,6 +9569,7 @@ const ZH: Messages = {
   'status.mode': '审批模式',
   'chat.scrollToBottom': '回到底部',
   'chatHeader.toggleEnvironment': '切换环境信息',
+  'chatHeader.loopNextTick': (v) => `循环 · 下次触发 ${v?.time ?? ''}`,
   'chatHeader.toggleRightPanel': '切换右侧扩展区',
   'chatHeader.openArtifacts': (v) => `产物（${v?.count ?? 0}）`,
   'environment.title': '环境信息',

@@ -194,6 +194,7 @@ import type {
   ServeSessionStatsStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
+  ServeSessionWakeupStatus,
   ServeWorkspaceEnvStatus,
   ServeWorkspaceExtensionsStatus,
   ServeWorkspaceHooksStatus,
@@ -1211,6 +1212,7 @@ interface FakeBridgeOpts {
     sessionId: string,
     opts?: { detail?: boolean },
   ) => Promise<ServeSessionContextUsageStatus>;
+  sessionWakeupImpl?: (sessionId: string) => Promise<ServeSessionWakeupStatus>;
   sessionSupportedCommandsImpl?: (
     sessionId: string,
   ) => Promise<ServeSessionSupportedCommandsStatus>;
@@ -1553,6 +1555,7 @@ interface FakeBridge extends AcpSessionBridge {
   }>;
   sessionContextCalls: string[];
   sessionContextUsageCalls: string[];
+  sessionWakeupCalls: string[];
   sessionSupportedCommandsCalls: string[];
   sessionStatsCalls: string[];
   sessionTasksCalls: string[];
@@ -2086,6 +2089,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       formattedText: 'Context usage: 1000/200000 tokens',
     }));
   const sessionContextUsageCalls: string[] = [];
+  const sessionWakeupImpl =
+    opts.sessionWakeupImpl ??
+    (async (sessionId) => ({
+      v: 1 as const,
+      sessionId,
+      pendingWakeup: null,
+    }));
+  const sessionWakeupCalls: string[] = [];
   const sessionSupportedCommandsImpl =
     opts.sessionSupportedCommandsImpl ??
     (async (sessionId) => ({
@@ -2497,6 +2508,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     extensionEvents,
     sessionContextCalls,
     sessionContextUsageCalls,
+    sessionWakeupCalls,
     sessionSupportedCommandsCalls,
     sessionStatsCalls,
     sessionTasksCalls,
@@ -2820,6 +2832,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionContextUsageStatus(sessionId, opts) {
       sessionContextUsageCalls.push(sessionId);
       return sessionContextUsageImpl(sessionId, opts);
+    },
+    async getSessionWakeupStatus(sessionId) {
+      sessionWakeupCalls.push(sessionId);
+      return sessionWakeupImpl(sessionId);
     },
     async getSessionSupportedCommandsStatus(sessionId) {
       sessionSupportedCommandsCalls.push(sessionId);

@@ -61,6 +61,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type {
+  AcpSessionBridge,
   BridgeClientRequestContext,
   CloseSessionOpts,
 } from '@qwen-code/acp-bridge';
@@ -197,6 +198,13 @@ export interface ScheduledTaskTarget {
   workspaceCwd: string;
   runtimeBaseDir?: string;
   bridge?: ScheduledTasksSessionBridge;
+  /**
+   * Live bridge for reading sessions' pending loop wakeups. Unlike `bridge`
+   * (gated on resident task-session management), this is set whenever the
+   * workspace runtime has an ACP child, so wakeups stay visible with
+   * task-session management off.
+   */
+  wakeupsBridge?: AcpSessionBridge;
   cleanupSession?: (sessionId: string) => Promise<unknown>;
   assertGenerationOpen?: () => void;
   activity?: ConversationRuntimeActivityGate;
@@ -797,6 +805,16 @@ interface ScheduledTaskView {
   gateStatus: CronGateStatus | null;
 }
 
+/** On-the-wire shape of a session's pending loop wakeup. Session-only state
+ * (never persisted); `prompt` is truncated to 200 chars on the session side. */
+export interface ScheduledTaskWakeupView {
+  sessionId: string;
+  fireAtMs: number;
+  createdAt: number;
+  prompt: string;
+  todoWorkChainId?: string;
+}
+
 const GATE_REQUIRES_RECURRING_MESSAGE =
   'A gate needs a recurring task: a one-shot whose gate prints nothing would be consumed with nothing delivered';
 
@@ -848,6 +866,50 @@ function toView(task: DurableCronTask): ScheduledTaskView {
       typeof task.gate === 'string' && task.gate.length > 0 ? task.gate : null,
     gateStatus: task.gateStatus ?? null,
   };
+}
+
+/**
+ * Aggregates the pending loop wakeups of the workspace's live sessions for
+ * the `GET /scheduled-tasks` response. Wakeups are session-only state, so a
+ * session that dies mid-aggregation is skipped (the route still answers 200
+ * with the rest), and a bridge-less target (unbound embedding, or no live
+ * runtime) simply reports none.
+ */
+async function collectLoopWakeups(
+  bridge: AcpSessionBridge | undefined,
+  workspaceCwd: string,
+): Promise<ScheduledTaskWakeupView[]> {
+  if (!bridge) return [];
+  const summaries = bridge.listWorkspaceSessions(workspaceCwd);
+  const wakeups: ScheduledTaskWakeupView[] = [];
+  let skipped = 0;
+  for (let i = 0; i < summaries.length; i += 8) {
+    const chunk = summaries.slice(i, i + 8);
+    const settled = await Promise.allSettled(
+      chunk.map((summary) => bridge.getSessionWakeupStatus(summary.sessionId)),
+    );
+    settled.forEach((result, idx) => {
+      const pending =
+        result.status === 'fulfilled' ? result.value.pendingWakeup : null;
+      if (result.status === 'rejected') skipped += 1;
+      if (pending === null) return;
+      wakeups.push({
+        sessionId: chunk[idx].sessionId,
+        fireAtMs: pending.fireAtMs,
+        createdAt: pending.createdAt,
+        prompt: pending.prompt,
+        ...(pending.todoWorkChainId
+          ? { todoWorkChainId: pending.todoWorkChainId }
+          : {}),
+      });
+    });
+  }
+  if (skipped > 0) {
+    writeStderrLine(
+      `qwen serve: GET scheduled-tasks: skipped ${skipped} session(s) whose wakeup status could not be read`,
+    );
+  }
+  return wakeups;
 }
 
 // Same validation cron_create runs: parseCron rejects malformed syntax,
@@ -940,7 +1002,14 @@ function registerScheduledTaskCrudRoutes(
           readCronTasks(target.workspaceCwd),
         );
         if (!requireOpenGeneration(target, res)) return;
-        res.status(200).json({ v: 1, tasks: tasks.map(toView) });
+        const wakeups = await collectLoopWakeups(
+          target.wakeupsBridge,
+          target.workspaceCwd,
+        );
+        // The aggregation round-trips to the ACP child — the generation may
+        // have closed while it was in flight.
+        if (!requireOpenGeneration(target, res)) return;
+        res.status(200).json({ v: 1, tasks: tasks.map(toView), wakeups });
       } catch (err) {
         if (sendActivityGateError(res, err)) return;
         // A malformed/corrupt file throws (fix-or-delete contract) rather than
@@ -2268,6 +2337,9 @@ export function registerScheduledTasksRoutes(
         // bound task must always have something to keep it resident + rehydrate
         // it — the same gate the qualified surface enforces below.
         bridge: bridge === undefined ? undefined : (runtime?.bridge ?? bridge),
+        // Not gated on task-session management: wakeups are visible whenever
+        // the runtime has a live ACP child.
+        wakeupsBridge: runtime?.bridge,
         ...(runtime?.generationGuard
           ? {
               assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
@@ -2354,6 +2426,8 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
         // Mirror the primary surface: only bind a session when management is on,
         // so a bound task always has something to keep it resident + rehydrate it.
         bridge: manageScheduledTaskSessions ? runtime.bridge : undefined,
+        // Not gated on task-session management, same as the primary surface.
+        wakeupsBridge: runtime.bridge,
         ...(runtime.generationGuard
           ? {
               assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),

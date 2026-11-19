@@ -4,6 +4,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider, type WebShellLanguage } from '../i18n';
+import { formatClockTime } from '../utils/formatDateTime';
 import { ChatContextHeader } from './ChatContextHeader';
 
 // The QR entry reads the workspace connection from context.
@@ -270,6 +271,30 @@ describe('ChatContextHeader', () => {
     expect(
       view.querySelector('[data-testid="chat-header-workspace"]')?.tagName,
     ).toBe('SPAN');
+  });
+
+  it("shows the open session's pending loop wakeup chip", () => {
+    const fireAt = Date.now() + 60_000;
+    const view = mount({ loopNextTickAt: fireAt });
+    const chip = view.querySelector<HTMLElement>(
+      '[data-testid="chat-header-loop-wakeup"]',
+    );
+    const label = `Loop · next tick ${formatClockTime(fireAt)}`;
+    expect(chip).not.toBeNull();
+    expect(chip?.textContent).toBe(label);
+    expect(chip?.getAttribute('title')).toBe(label);
+  });
+
+  it('hides the loop-wakeup chip for a past tick or an unknown one', () => {
+    const past = mount({ loopNextTickAt: Date.now() - 1_000 });
+    expect(
+      past.querySelector('[data-testid="chat-header-loop-wakeup"]'),
+    ).toBeNull();
+
+    const unknown = mount();
+    expect(
+      unknown.querySelector('[data-testid="chat-header-loop-wakeup"]'),
+    ).toBeNull();
   });
 
   it('shows the artifacts entry with its count and opens the panel on click', () => {

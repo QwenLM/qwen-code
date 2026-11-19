@@ -98,6 +98,32 @@ interface StubBridge {
     sourceType?: string;
     sourceId?: string;
   };
+  listWorkspaceSessions(workspaceCwd: string): Array<{
+    sessionId: string;
+    workspaceCwd: string;
+  }>;
+  getSessionWakeupStatus(sessionId: string): Promise<{
+    v: 1;
+    sessionId: string;
+    pendingWakeup: null | {
+      id: string;
+      fireAtMs: number;
+      createdAt: number;
+      prompt: string;
+      todoWorkChainId?: string;
+    };
+  }>;
+  wakeupBySession: Map<
+    string,
+    {
+      id: string;
+      fireAtMs: number;
+      createdAt: number;
+      prompt: string;
+      todoWorkChainId?: string;
+    }
+  >;
+  wakeupFailSessions: Set<string>;
   liveSessions: Map<
     string,
     {
@@ -146,6 +172,8 @@ function makeStubBridge(): StubBridge {
     markSessionCatalogChanged: vi.fn(),
     failNext: false,
     liveSessions: new Map(),
+    wakeupBySession: new Map(),
+    wakeupFailSessions: new Set(),
     async spawnOrAttach(req) {
       if (bridge.failNext) {
         bridge.failNext = false;
@@ -200,6 +228,25 @@ function makeStubBridge(): StubBridge {
       const summary = bridge.liveSessions.get(sessionId);
       if (!summary) throw new SessionNotFoundError(sessionId);
       return summary;
+    },
+    listWorkspaceSessions(workspaceCwd) {
+      return [...bridge.liveSessions.values()]
+        .filter((summary) => summary.workspaceCwd === workspaceCwd)
+        .map((summary) => ({
+          sessionId: summary.sessionId,
+          workspaceCwd: summary.workspaceCwd,
+        }));
+    },
+    async getSessionWakeupStatus(sessionId) {
+      if (bridge.wakeupFailSessions.has(sessionId)) {
+        throw new Error(`session ${sessionId} no longer exists`);
+      }
+      const pending = bridge.wakeupBySession.get(sessionId);
+      return {
+        v: 1 as const,
+        sessionId,
+        pendingWakeup: pending ? { ...pending } : null,
+      };
     },
   };
   return bridge;
@@ -456,7 +503,7 @@ describe('scheduled-tasks routes', () => {
   it('returns an empty list initially', async () => {
     const res = await request(h.app).get('/scheduled-tasks');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ v: 1, tasks: [] });
+    expect(res.body).toEqual({ v: 1, tasks: [], wakeups: [] });
   });
 
   it('creates a task (normalized view) and lists it', async () => {
@@ -3375,6 +3422,101 @@ describe('scheduled-tasks routes', () => {
     expect(patch.status).toBe(200);
     expect(patch.body.cron).toBe('30 8 * * *');
     expect(patch.body.enabled).toBe(false); // still disabled
+  });
+
+  it('reports pending loop wakeups of live sessions; tasks format unchanged', async () => {
+    await teardown(h);
+    h = await makeHarness(true);
+    await seedTask({
+      id: 't1',
+      cron: '0 9 * * *',
+      prompt: 'digest',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+    });
+    addLiveSession(h.bridge, 'sess-a', h.workspace);
+    addLiveSession(h.bridge, 'sess-b', h.workspace);
+    h.bridge.wakeupBySession.set('sess-b', {
+      id: 'lw-1',
+      fireAtMs: 1_700_000_060_000,
+      createdAt: 1_700_000_000_000,
+      prompt: 'check the docker slot',
+      todoWorkChainId: 'chain-1',
+    });
+
+    const res = await request(h.app).get('/scheduled-tasks');
+    expect(res.status).toBe(200);
+    // tasks: the same toView array as before wakeups existed.
+    expect(res.body.tasks).toHaveLength(1);
+    expect(res.body.tasks[0]).toMatchObject({
+      id: 't1',
+      cron: '0 9 * * *',
+      prompt: 'digest',
+      recurring: true,
+      enabled: true,
+    });
+    // wakeups: fields 1:1 from the session-side status.
+    expect(res.body.wakeups).toEqual([
+      {
+        sessionId: 'sess-b',
+        fireAtMs: 1_700_000_060_000,
+        createdAt: 1_700_000_000_000,
+        prompt: 'check the docker slot',
+        todoWorkChainId: 'chain-1',
+      },
+    ]);
+  });
+
+  it('skips a session that dies mid-aggregation (200, not 500)', async () => {
+    await teardown(h);
+    h = await makeHarness(true);
+    addLiveSession(h.bridge, 'sess-a', h.workspace);
+    addLiveSession(h.bridge, 'sess-b', h.workspace);
+    h.bridge.wakeupBySession.set('sess-a', {
+      id: 'lw-a',
+      fireAtMs: 1_700_000_060_000,
+      createdAt: 1_700_000_000_000,
+      prompt: 'still alive',
+    });
+    h.bridge.wakeupFailSessions.add('sess-b');
+
+    const res = await request(h.app).get('/scheduled-tasks');
+    expect(res.status).toBe(200);
+    expect(res.body.wakeups).toEqual([
+      {
+        sessionId: 'sess-a',
+        fireAtMs: 1_700_000_060_000,
+        createdAt: 1_700_000_000_000,
+        prompt: 'still alive',
+      },
+    ]);
+    // One debug line for the whole call, naming the skip count.
+    expect(stderrLines.some((line) => line.includes('skipped 1 session'))).toBe(
+      true,
+    );
+  });
+
+  it('reports wakeups: [] when no live sessions exist', async () => {
+    await teardown(h);
+    h = await makeHarness(true);
+    const res = await request(h.app).get('/scheduled-tasks');
+    expect(res.status).toBe(200);
+    expect(res.body.wakeups).toEqual([]);
+  });
+
+  it('reports wakeups: [] for a target without a wakeups bridge', async () => {
+    // The default harness has no runtime -> wakeupsBridge is undefined.
+    addLiveSession(h.bridge, 'sess-a', h.workspace);
+    h.bridge.wakeupBySession.set('sess-a', {
+      id: 'lw-a',
+      fireAtMs: 1_700_000_060_000,
+      createdAt: 1_700_000_000_000,
+      prompt: 'never queried',
+    });
+    const res = await request(h.app).get('/scheduled-tasks');
+    expect(res.status).toBe(200);
+    expect(res.body.wakeups).toEqual([]);
   });
 });
 

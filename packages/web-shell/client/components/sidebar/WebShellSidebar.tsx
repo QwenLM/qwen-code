@@ -34,6 +34,7 @@ import {
   useConnection,
   useWorkspace,
   useWorkspaceActions,
+  type DaemonLoopWakeup,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   STANDALONE_SESSIONS_CAPABILITY,
@@ -61,6 +62,7 @@ import {
   FolderKanbanIcon,
   ActivityIcon,
   CalendarClockIcon,
+  TimerIcon,
   GitPullRequestIcon,
   ChevronDownIcon,
   ChevronRightIcon,
@@ -124,7 +126,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '../ui/popover';
-import { formatDateTime } from '../../utils/formatDateTime';
+import { formatClockTime, formatDateTime } from '../../utils/formatDateTime';
 import {
   BindSessionPrDialog,
   type BindSessionPrPayload,
@@ -584,6 +586,9 @@ interface WebShellSidebarProps {
   onOpenManagedSessions?: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
+  /** Pending loop wakeups by session id (one shared poll owned by the App).
+   * A row whose session has a not-yet-fired wakeup shows a timer marker. */
+  loopWakeups?: Map<string, DaemonLoopWakeup>;
   /** Opens the PR watches page; absent when the daemon does not list
    * `/autofix-pr` watches (`autofix_pr_watches`). */
   onOpenPrWatches?: () => void;
@@ -1247,6 +1252,7 @@ export function WebShellSidebar({
   onOpenManagedSessions,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
+  loopWakeups,
   onOpenPrWatches,
   onOpenWorkflows,
   onOpenGoals,
@@ -5555,6 +5561,20 @@ export function WebShellSidebar({
           <CalendarClockIcon aria-label={t('sidebar.scheduledTasks')} />
         </span>
       ) : null;
+      const loopWakeupAt = loopWakeups?.get(session.sessionId)?.fireAtMs;
+      const loopWakeupLabel =
+        loopWakeupAt !== undefined && loopWakeupAt > Date.now()
+          ? t('sidebar.loopWakeup', { time: formatClockTime(loopWakeupAt) })
+          : undefined;
+      const loopWakeupMarker = loopWakeupLabel ? (
+        <span
+          className={styles.sessionSourceIcon}
+          data-web-shell-loop-wakeup
+          title={loopWakeupLabel}
+        >
+          <TimerIcon aria-label={loopWakeupLabel} />
+        </span>
+      ) : null;
       const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
       // Completed goals render no marker, matching the Goals listings' filter.
       const hasGoalMarker = hasVisibleGoal(session.goal);
@@ -5656,6 +5676,7 @@ export function WebShellSidebar({
               }
             >
               {scheduledTaskMarker}
+              {loopWakeupMarker}
               {gitIcon && (
                 <span className={styles.sessionGitIcon}>{gitIcon}</span>
               )}
@@ -6096,6 +6117,7 @@ export function WebShellSidebar({
                 }
               >
                 {scheduledTaskMarker}
+                {loopWakeupMarker}
                 {attention && (
                   <span
                     className={cx(
@@ -6439,6 +6461,7 @@ export function WebShellSidebar({
       startRename,
       splitSessionIds,
       t,
+      loopWakeups,
     ],
   );
 

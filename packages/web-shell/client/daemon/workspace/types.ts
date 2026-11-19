@@ -402,6 +402,17 @@ export interface DaemonScheduledTask {
   workspaceCwd?: string;
 }
 
+/** A session's pending loop wakeup (`/loop`), aggregated by the daemon into
+ * `GET /scheduled-tasks`. Session-only state: lost when the session ends.
+ * `prompt` is truncated to its first 200 characters on the session side. */
+export interface DaemonLoopWakeup {
+  sessionId: string;
+  fireAtMs: number;
+  createdAt: number;
+  prompt: string;
+  todoWorkChainId?: string;
+}
+
 export interface DaemonCreateScheduledTaskRequest {
   cron: string;
   prompt: string;
@@ -804,6 +815,10 @@ export interface DaemonWorkspaceActions
   // every trusted workspace and threads each task's `workspaceId` back into the
   // mutations.
   listScheduledTasks(workspaceId?: string): Promise<DaemonScheduledTask[]>;
+  /** The pending loop wakeups (`/loop`) of the workspace's live sessions,
+   * aggregated by the daemon into the same `GET /scheduled-tasks` payload.
+   * An older daemon without the `wakeups` field yields `[]`. */
+  fetchScheduledTaskWakeups(workspaceId?: string): Promise<DaemonLoopWakeup[]>;
   createScheduledTask(
     req: DaemonCreateScheduledTaskRequest,
     workspaceId?: string,

@@ -158,3 +158,24 @@ button.workspaceIcon {
     animation: none;
   }
 }
+
+/* The open session's pending loop wakeup: a compact "Loop · next tick" chip
+   beside the title. Muted by default; it carries its own tooltip. */
+.loopChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 8px;
+  padding: 2px 8px;
+  border: 1px solid var(--border-color, #d0d7de);
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--muted-color, #57606a);
+  white-space: nowrap;
+}
+
+.loopChip svg {
+  width: 12px;
+  height: 12px;
+}

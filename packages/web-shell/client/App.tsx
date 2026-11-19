@@ -365,6 +365,7 @@ import {
 } from './components/artifacts/turnOutputSelectors';
 import { artifactDisplayName } from './components/artifacts/artifactUtils';
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
+import { useLoopWakeups } from './hooks/useLoopWakeups';
 import { usePrefersReducedMotion } from './hooks/usePrefersReducedMotion';
 import {
   clearSplitSessions,
@@ -15323,6 +15324,37 @@ export function App({
     () => (projectFeaturesAvailable ? loadedWorkspaceSettings : []),
     [loadedWorkspaceSettings, projectFeaturesAvailable],
   );
+  // Pending one-shot loop wakeups (session-only). Single source for the
+  // scheduled-tasks page section, the sidebar badge and the open-session
+  // header chip. Gated on `experimental.cron` (the same switch as the loop
+  // tool, daemon-defaulted on), resolved before the first poll, and failing
+  // closed on a settings error.
+  const loopWakeupsEnabled =
+    !workspaceSettingsState.error &&
+    workspaceSettingsState.status !== undefined &&
+    workspaceSettings.find((setting) => setting.key === 'experimental.cron')
+      ?.values.effective !== false;
+  const loopWakeupWorkspaceIds = useMemo(
+    () => [
+      undefined,
+      ...ordinaryWorkspaces
+        .filter((entry) => !entry.primary && entry.trusted)
+        .map((entry) => entry.id),
+    ],
+    [ordinaryWorkspaces],
+  );
+  const loopWakeups = useLoopWakeups(
+    loopWakeupsEnabled,
+    loopWakeupWorkspaceIds,
+  );
+  // Wakeup rows are keyed by session id; the only name the App knows without
+  // an extra fetch is the open session's — everything else falls back to the
+  // id's first characters in the dialog.
+  const loopWakeupSessionNames = useMemo(() => {
+    const summary = currentSessionSummary;
+    if (!summary?.displayName) return undefined;
+    return new Map([[summary.sessionId, summary.displayName]]);
+  }, [currentSessionSummary]);
   const availableApprovalModes = useApprovalModes(
     activeWorkspaceCwd,
     allowedApprovalModes,
@@ -24696,6 +24728,7 @@ export function App({
                     closeMobileDrawer();
                     openScheduledTasks();
                   }}
+                  loopWakeups={loopWakeups}
                   onOpenWorkflows={() => {
                     closeMobileDrawer();
                     openWorkflows();
@@ -25051,6 +25084,11 @@ export function App({
                             hostOrigin={focusedHostOrigin}
                           />
                         ) : undefined
+                      }
+                      loopNextTickAt={
+                        connection.sessionId
+                          ? loopWakeups.get(connection.sessionId)?.fireAtMs
+                          : undefined
                       }
                       content={
                         titleHeaderItemVisible && !isChatEmptyState
@@ -25669,6 +25707,8 @@ export function App({
                         'workspace_channel_observed_contacts',
                       )}
                       autofixPrWatchesAvailable={prWatchesAvailable}
+                      loopWakeups={loopWakeups}
+                      loopWakeupSessionNames={loopWakeupSessionNames}
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
                         // creation chat doesn't pile onto the current
