@@ -118,6 +118,14 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // review of its own change to one reviewer with no reverse audit. CI
   // welds it as a real step env, never a file.
   'QWEN_REVIEW_AUTOMATIC',
+  // The execution sandbox policy (commands/review/lib/sandboxed-exec.ts
+  // `sandboxPolicy`) is an operator decision: it decides whether the reviewed
+  // repository's install/build/test run contained, with the review's
+  // credentials outside the boundary. Same class as the prebuild switch, and
+  // for the same reason — the read-time check cannot see file-sourcing across
+  // a process boundary, so a repository must not be able to write the key into
+  // the environment at all, not merely be ignored when it does.
+  'QWEN_REVIEW_SANDBOX',
   // QWEN_TLS_INSECURE (and NODE_TLS_REJECT_UNAUTHORIZED, which it mirrors)
   // disable TLS certificate verification for all outbound API connections. A
   // project `.env` must never enable either — that would let an untrusted repo

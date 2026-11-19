@@ -80,6 +80,7 @@ import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
   sendConversationRuntimeUnavailable,
+  sendDaemonDrainingError as sendActivityGateError,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
@@ -770,21 +771,6 @@ async function runWithScheduledTaskTarget<T>(
       ? fn()
       : Storage.runWithResolvedRuntimeBaseDir(target.runtimeBaseDir, fn);
   return (await result) as Awaited<T>;
-}
-
-function sendActivityGateError(res: Response, error: unknown): boolean {
-  if (
-    !error ||
-    typeof error !== 'object' ||
-    (error as { code?: unknown }).code !== 'daemon_draining'
-  ) {
-    return false;
-  }
-  res.status(503).json({
-    error: 'The daemon is draining and no longer accepts work.',
-    code: 'daemon_draining',
-  });
-  return true;
 }
 
 /** On-the-wire task shape — normalizes the optional on-disk fields so the

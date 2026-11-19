@@ -654,6 +654,30 @@ describe('SessionOverviewPanel', () => {
     expect(workspaceClient.archiveSessionsData).not.toHaveBeenCalled();
   });
 
+  it('disables cleanup for a session whose only activity is background work', () => {
+    // The card grades this session idle, so the grade alone would offer both
+    // destructive actions while the sidebar refuses them.
+    sessionsState.sessions = [
+      session('background-only', {
+        displayName: 'Background task',
+        clientCount: 1,
+        hasActivePrompt: false,
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      }),
+    ];
+    render();
+    expect(rowTitles()).toEqual(['Background task']);
+    for (const action of ['Archive', 'Delete']) {
+      expect(rowActionButton(rows()[0]!, action).disabled).toBe(true);
+    }
+    act(() => click(selectAllCheckbox()));
+    expect(footerButton('Archive')!.disabled).toBe(true);
+    expect(footerButton('Delete')!.disabled).toBe(true);
+    expect(workspaceClient.archiveSessionsData).not.toHaveBeenCalled();
+    expect(workspaceClient.deleteSessionsData).not.toHaveBeenCalled();
+  });
+
   it.each(['FEATURE/TOPIC', '1234', '#1234', 'SESSION-SEARCH'])(
     'searches branch, PR and ID metadata: %s',
     (query) => {
@@ -1455,6 +1479,22 @@ describe('SessionOverviewPanel', () => {
       );
     }
     expect(rows()[1]?.querySelector('[data-web-shell-session-git]')).toBeNull();
+  });
+
+  it('falls back to the worktree slug when the branch is empty', () => {
+    // A detached managed worktree reports branch:''; the slug must display
+    // explicitly (an absent branch would not distinguish || from ??).
+    sessionsState.sessions = [
+      session('s1', {
+        displayName: 'One',
+        worktree: { slug: 'detached-slug', path: '/wt/one', branch: '' },
+      }),
+    ];
+    render();
+    const titleCell = titleTrigger(rows()[0]!).closest('td');
+    expect(
+      titleCell?.querySelector('[data-web-shell-session-git]')?.textContent,
+    ).toBe('detached-slug');
   });
 
   it('does not open the session when a PR badge is clicked', async () => {

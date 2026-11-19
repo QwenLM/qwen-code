@@ -19,7 +19,8 @@ export type AgentLoopSurface =
   | 'ink'
   | 'opentui'
   | 'agent-core'
-  | 'speculation';
+  | 'speculation'
+  | 'hosted';
 
 export const AGENT_LOOP_SURFACES: readonly AgentLoopSurface[] = [
   'headless',
@@ -28,19 +29,22 @@ export const AGENT_LOOP_SURFACES: readonly AgentLoopSurface[] = [
   'opentui',
   'agent-core',
   'speculation',
+  'hosted',
 ];
 
 // Each switch has its own default table so a rollout flip of the unified
 // default for one surface cannot also flip the event-bus default. A rollout
-// PR flips one entry of one table at a time; until then every surface stays
-// on its legacy loop unless the setting or the environment says otherwise.
+// PR flips one entry of one table at a time; a surface whose entry is still
+// false stays on its legacy loop unless the setting or the environment says
+// otherwise.
 export const UNIFIED_SURFACE_DEFAULTS: Record<AgentLoopSurface, boolean> = {
-  headless: false,
+  headless: true,
   acp: false,
-  ink: false,
+  ink: true,
   opentui: false,
-  'agent-core': false,
+  'agent-core': true,
   speculation: false,
+  hosted: false,
 };
 
 export const EVENT_BUS_SURFACE_DEFAULTS: Record<AgentLoopSurface, boolean> = {
@@ -50,6 +54,7 @@ export const EVENT_BUS_SURFACE_DEFAULTS: Record<AgentLoopSurface, boolean> = {
   opentui: false,
   'agent-core': false,
   speculation: false,
+  hosted: false,
 };
 
 function isSurface(name: string): name is AgentLoopSurface {
@@ -140,4 +145,30 @@ export function resolveAgentLoopSwitch(options: {
   if (override !== undefined) return override;
   if (options.setting !== undefined) return options.setting;
   return options.surfaceDefault;
+}
+
+/**
+ * The loop path a surface resolves to: its own legacy loop, the shared agent
+ * loop, or the event-bus kernel. Derived from the same two switches the
+ * surface reads, so the reported path cannot drift from the path taken.
+ */
+export type AgentLoopPath = 'legacy' | 'shared' | 'kernel';
+
+const entryLogger = createDebugLogger('LOOP');
+
+/**
+ * Records the loop path a surface resolved to at its loop entry, including
+ * the legacy path, which otherwise logs nothing. Most surfaces log once per
+ * turn; ink and opentui read the switch per model round, so they log per
+ * round. The wording is deliberately distinct from the shared-loop
+ * round/batch markers the parity suites count, so this line cannot inflate
+ * their counts.
+ */
+export function logAgentLoopEntry(
+  config: { getAgentLoopPath?: (surface: AgentLoopSurface) => AgentLoopPath },
+  surface: AgentLoopSurface,
+): void {
+  const path = config.getAgentLoopPath?.(surface);
+  if (path === undefined) return;
+  entryLogger.debug(`${surface} ${path}`);
 }

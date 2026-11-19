@@ -508,6 +508,11 @@ public class SurfaceAdmissionAcceptanceTest {
                 expect(entry, STRANGER, 404, "session_not_found");
                 expect(entry, READER, 403, "artifact_content_forbidden");
             }
+            case WORKSPACE_ARTIFACT -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "workspace_not_found");
+                expect(entry, READER, 200, null);
+            }
             case OPERATOR -> {
                 expect(entry, STRANGER, 404, "session_not_found");
                 String code = entry.capabilities().contains(
@@ -616,7 +621,7 @@ public class SurfaceAdmissionAcceptanceTest {
             }
             case SESSION_OPTIONS ->
                 expect(entry, null, 401, "actor_required");
-            case INTERNAL_OPERATOR -> expect(entry, null, 403, "external_storage_registration_denied");
+            case INTERNAL_OPERATOR -> expect(entry, null, 403, "operator_credential_required");
             case INTERNAL_WRITER ->
                 expectInternal(entry);
             default -> throw new AssertionError(
@@ -1123,6 +1128,76 @@ public class SurfaceAdmissionAcceptanceTest {
                         .value("artifact_not_found"));
     }
 
+    // The workspace page filters rows by each Session's current visibility:
+    // owner-only hides a non-owner's rows, deleting statuses hide them, and
+    // archived Sessions keep theirs. The grant stays the outer gate.
+    @Test
+    public void workspaceArtifactListFiltersRowsBySessionVisibility() throws Exception {
+        java.util.function.Function<String, MockHttpServletRequestBuilder> query = actor ->
+                post("/api/agent/web-shell/v1/workspaces/artifacts/query")
+                        .header(TenantContextFilter.HEADER, ARTIFACT_TENANT)
+                        .principal(actor(ARTIFACT_TENANT, actor))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"workspaceId\":\"" + ARTIFACT_WORKSPACE + "\"}");
+        var listed = mvc.perform(query.apply(READER))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.hasMore").value(false))
+                .andReturn();
+        assertThat(listed.getResponse().getContentAsString()).contains(artifactId);
+        assertThat(JSON.readTree(listed.getResponse().getContentAsString())
+                .path("data").get(0).path("artifact").path("session_id").asText())
+                .isEqualTo(ARTIFACT_SESSION);
+        var original = jdbc.queryForMap("SELECT owner_only, owner_actor_key, status"
+                + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                ARTIFACT_TENANT, ARTIFACT_SESSION);
+        try {
+            jdbc.update("UPDATE ma_session SET owner_only = 1, owner_actor_key = ?"
+                    + " WHERE tenant_id = ? AND session_id = ?",
+                    new com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor(
+                            ARTIFACT_TENANT, OWNER).getActorId()
+                            .getBytes(StandardCharsets.UTF_8),
+                    ARTIFACT_TENANT, ARTIFACT_SESSION);
+            mvc.perform(query.apply(READER))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data").isEmpty());
+            assertThat(mvc.perform(query.apply(OWNER))
+                    .andExpect(status().isOk())
+                    .andReturn().getResponse().getContentAsString())
+                    .contains(artifactId);
+            jdbc.update("UPDATE ma_session SET owner_only = 0, owner_actor_key = NULL,"
+                    + " status = 'DELETING' WHERE tenant_id = ? AND session_id = ?",
+                    ARTIFACT_TENANT, ARTIFACT_SESSION);
+            mvc.perform(query.apply(OWNER))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data").isEmpty());
+            jdbc.update("UPDATE ma_session SET status = 'DELETED'"
+                    + " WHERE tenant_id = ? AND session_id = ?",
+                    ARTIFACT_TENANT, ARTIFACT_SESSION);
+            mvc.perform(query.apply(OWNER))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data").isEmpty());
+            jdbc.update("UPDATE ma_session SET status = 'ARCHIVED'"
+                    + " WHERE tenant_id = ? AND session_id = ?",
+                    ARTIFACT_TENANT, ARTIFACT_SESSION);
+            assertThat(mvc.perform(query.apply(OWNER))
+                    .andExpect(status().isOk())
+                    .andReturn().getResponse().getContentAsString())
+                    .contains(artifactId);
+        } finally {
+            jdbc.update("UPDATE ma_session SET owner_only = ?, owner_actor_key = ?,"
+                    + " status = ? WHERE tenant_id = ? AND session_id = ?",
+                    original.get("owner_only"), original.get("owner_actor_key"),
+                    original.get("status"), ARTIFACT_TENANT, ARTIFACT_SESSION);
+        }
+        mvc.perform(post("/api/agent/web-shell/v1/workspaces/artifacts/query")
+                        .header(TenantContextFilter.HEADER, ARTIFACT_TENANT)
+                        .principal(actor(ARTIFACT_TENANT, READER))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"workspaceId\":\"workspace-missing\"}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("workspace_not_found"));
+    }
+
     // The owner column, not the creator column, decides: with the two
     // deliberately different for once, lifecycle and respond both follow
     // owner_actor_key, and the original creator is refused.
@@ -1481,6 +1556,7 @@ public class SurfaceAdmissionAcceptanceTest {
             int status, String code) throws Exception {
         String headerTenant = entry.ruleClass() == RuleClass.READER_ACTOR
                 || entry.ruleClass() == RuleClass.READER_ACTOR_POLICY
+                || entry.ruleClass() == RuleClass.WORKSPACE_ARTIFACT
                         ? ARTIFACT_TENANT : tenant;
         MockHttpServletRequestBuilder request = requestFor(entry, actor,
                 headerTenant);
@@ -1511,7 +1587,8 @@ public class SurfaceAdmissionAcceptanceTest {
     private MockHttpServletRequestBuilder requestFor(SurfaceRegistry entry,
             String actor, String headerTenant) {
         boolean artifactArm = entry.ruleClass() == RuleClass.READER_ACTOR
-                || entry.ruleClass() == RuleClass.READER_ACTOR_POLICY;
+                || entry.ruleClass() == RuleClass.READER_ACTOR_POLICY
+                || entry.ruleClass() == RuleClass.WORKSPACE_ARTIFACT;
         String session = artifactArm ? ARTIFACT_SESSION : bound;
         Map<String, String> variables = new LinkedHashMap<>();
         variables.put("sessionId", session);
@@ -1535,7 +1612,8 @@ public class SurfaceAdmissionAcceptanceTest {
                         : entry.surface() == Surface.PUBLIC
                                 ? pendingActionPublic : pendingActionWeb
                 : pendingAction);
-        variables.put("workspaceId", "ws");
+        variables.put("workspaceId", entry.ruleClass() == RuleClass.WORKSPACE_ARTIFACT
+                ? ARTIFACT_WORKSPACE : "ws");
         variables.put("worktreeId", "worktree-probe");
         variables.put("extensionId", "ext_11111111-1111-4111-8111-111111111111");
         variables.put("packageRevision", "1");
@@ -1806,6 +1884,7 @@ public class SurfaceAdmissionAcceptanceTest {
             case ARTIFACT_GET -> "{\"sessionId\":\"" + session
                     + "\",\"artifactId\":\"" + artifactId + "\"}";
             case ARTIFACT_LIST -> "{\"sessionId\":\"" + session + "\"}";
+            case WORKSPACE_ARTIFACT_LIST -> "{\"workspaceId\":\"" + ARTIFACT_WORKSPACE + "\"}";
             case WORKSPACE_CREATE -> "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
             case WORKSPACE_FILES_QUERY -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"directory\":\".\"}";
             case WORKSPACE_FILES_READ -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"path\":\"file.txt\",\"expectedScopeRevision\":\"revision\"}";

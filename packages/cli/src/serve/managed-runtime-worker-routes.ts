@@ -22,6 +22,7 @@ import {
 } from './managed-csi-worker.js';
 import { MANAGED_SHELL_PUBLISHER_ROUTE } from './managed-shell-publisher.js';
 import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
+import { EXTERNAL_PUBLICATION_ROUTES } from './managed-external-publication.js';
 import {
   isMeasuredWorkspaceCapability,
   MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST,
@@ -103,6 +104,10 @@ export function resolveManagedRuntimeWorkerRoutePlan(
           ]
         : []),
       ...(mode.publisher ? MANAGED_TOOL_RESULT_ROUTES : []),
+      // The main listener serves the same publication channels as the
+      // dedicated publication listener (#15685's shared-channel contract);
+      // the gate must admit what the mount registers.
+      ...(input.publication ? EXTERNAL_PUBLICATION_ROUTES : []),
       ...(input.sshRoute ? [input.sshRoute] : []),
       ...(input.remotePublishers ? [MANAGED_SHELL_PUBLISHER_ROUTE] : []),
       ...(mode.installRoute ? [PUBLICATION_INSTALL_ROUTE] : []),

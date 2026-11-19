@@ -696,17 +696,19 @@ test('a permanently failing pending create exposes a discard path @smoke', async
     .click();
 
   await expect(
-    page.getByText('The previous message was not confirmed as submitted', {
-      exact: false,
-    }),
+    page
+      .locator('[data-web-shell-message-list] pre')
+      .filter({ hasText: 'permanent failure' }),
   ).toBeVisible();
   await expect(composer).toHaveAttribute('contenteditable', 'false');
 
+  // Retry alone cannot resolve a permanent failure, so the conversation also
+  // offers Discard: it is the only way back to the single copy of the draft.
   await page.getByRole('button', { name: 'Discard this request' }).click();
   await expect(
-    page.getByText('The previous message was not confirmed as submitted', {
-      exact: false,
-    }),
+    page
+      .locator('[data-web-shell-message-list] pre')
+      .filter({ hasText: 'permanent failure' }),
   ).toBeHidden();
   await expect(composer).toHaveAttribute('contenteditable', 'true');
   await expect(composer).toHaveText('Fragile draft');

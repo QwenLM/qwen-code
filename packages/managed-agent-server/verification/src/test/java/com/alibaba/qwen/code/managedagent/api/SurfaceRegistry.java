@@ -514,6 +514,10 @@ public enum SurfaceRegistry {
             "/api/agent/web-shell/v1/artifacts/query",
             Surface.WEBSHELL, RuleClass.READER_ACTOR,
             EnumSet.of(Capability.ARTIFACT_LIST)),
+    WEBSHELL_WORKSPACE_ARTIFACT_LIST(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/artifacts/query",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_ARTIFACT,
+            EnumSet.of(Capability.WORKSPACE_ARTIFACT_LIST)),
     WEBSHELL_WORKSPACE_LIST(Method.POST,
             "/api/agent/web-shell/v1/workspaces/query",
             Surface.WEBSHELL, RuleClass.WORKSPACE_DISCOVERY,
@@ -604,6 +608,10 @@ public enum SurfaceRegistry {
             "/internal/managed-workspaces/v1/storage:register-external",
             Surface.INTERNAL, RuleClass.INTERNAL_OPERATOR,
             EnumSet.of(Capability.EXTERNAL_STORAGE_REGISTER)),
+    INTERNAL_EXTERNAL_WORKSPACE_MATERIALIZE(Method.POST,
+            "/internal/managed-workspaces/v1/workspace:materialize-external",
+            Surface.INTERNAL, RuleClass.INTERNAL_OPERATOR,
+            EnumSet.of(Capability.EXTERNAL_WORKSPACE_MATERIALIZE)),
     INTERNAL_APPROVAL_QUERY(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}/approval:query",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
@@ -867,6 +875,7 @@ public enum SurfaceRegistry {
         SESSION_ACTIVITY_STATS, SESSION_ACTIVITY,
         SESSION_WORKTREE,
         EXTERNAL_STORAGE_REGISTER,
+        EXTERNAL_WORKSPACE_MATERIALIZE,
         USER_MESSAGE_QUERY, USER_MESSAGE_COMMAND, STORE_USER_MESSAGE_CLAIM,
         SESSION_CREATE,
         SESSION_LIST,
@@ -902,6 +911,7 @@ public enum SurfaceRegistry {
         ARTIFACT_LIST,
         ARTIFACT_GET,
         ARTIFACT_CONTENT,
+        WORKSPACE_ARTIFACT_LIST,
         WORKSPACE_CREATE,
         WORKSPACE_DIRECTORIES,
         WORKSPACE_FILES_QUERY,
@@ -1066,6 +1076,16 @@ public enum SurfaceRegistry {
          * {@code 403 artifact_content_forbidden}.
          */
         READER_ACTOR_POLICY,
+        /**
+         * Workspace-wide artifact metadata: a trusted actor ({@code 401
+         * actor_required} without one) holding a READER grant on the
+         * Workspace ({@code 404 workspace_not_found} below it, including
+         * unknown Workspaces). The page filters each row by the Session's
+         * current binding and owner-only visibility, and the deployment
+         * artifact gate answers {@code 404 artifact_not_found} when reads
+         * are off. No legacy arm: unbound Sessions never list.
+         */
+        WORKSPACE_ARTIFACT,
         /**
          * The OPERATOR families. Turn submit, Turn cancel, rename and cwd
          * change admit a caller holding OPERATOR or above on the bound

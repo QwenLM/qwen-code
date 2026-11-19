@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.service;
 
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.DelegatingBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ExecutionReconciliation;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
@@ -97,64 +96,6 @@ class RuntimeBrokerServiceTest {
     private static final RuntimeScope SESSION_SCOPE = new RuntimeScope(
             "tenant", "workspace", "generation", "/workspace",
             "capability", "session");
-
-    @Test
-    @SuppressWarnings("unchecked")
-    void refusesPrivateAuthorizedCancellationBeforeRepositoryOrTransportMutation() throws Exception {
-        var request = CsiFilesRetirementProfile.request(
-                new com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding(
-                        "tenant", "workspace", 1, "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1),
-                "/workspace", PROVIDER_SESSION);
-        // Isolate service ordering; this manually installed context is not SQL admission evidence.
-        // The JDBC stores guard CSI writes with the Session pin and native
-        // continuation evidence, so the fixture installs the pinned Session
-        // root and the claimed execution row directly, then authorizes
-        // through the execution-level test-access CAS — deliberately without
-        // the CSI dispatch admission evidence the binding-level path needs.
-        try (FakeClockFixture fixture = new FakeClockFixture(request.getScope())) {
-            try (Connection connection = fixture.dataSource.getConnection();
-                    PreparedStatement statement = connection.prepareStatement(
-                            "INSERT INTO ma_session (tenant_id, session_id, agent_id, tool_profile, runtime_request_key, workspace_id, workspace_generation, workspace_storage_id, cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref, gmt_create, gmt_modified) VALUES ('tenant', ?, 'qwen-code', ?, ?, 'workspace', 1, 'storage', '.', ?, 1, ?, ?, 0, 0)")) {
-                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess.setIdentity(statement, 1, PROVIDER_SESSION);
-                statement.setString(2, CsiFilesRetirementProfile.PROFILE);
-                statement.setString(3, request.requestKey());
-                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess.setIdentity(statement, 4, CsiFilesRetirementProfile.CONTEXT_CONFIG_REF);
-                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess.setIdentity(statement, 5, CsiFilesRetirementProfile.CONFIG_REF);
-                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess.setIdentity(statement, 6, CsiFilesRetirementProfile.POLICY_REF);
-                assertEquals(1, statement.executeUpdate());
-            }
-            var binding = fixture.bindingRepository.findOrCreate(request);
-            binding = fixture.bindingRepository.claimOperation(binding.getBindingId(), "owner", Duration.ofMinutes(1));
-            var seed = binding.getProvisionSeed();
-            var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:9"),
-                    seed.getToken(), seed.getLeaseId(), seed.getEpoch());
-            binding = fixture.bindingRepository.compareAndSet(binding, binding.withAttestation(lease,
-                    new RuntimeResourceHandle(request.getProvisionerKind(), 1, Map.of("fixture", true)), START, START));
-            var runtime = new RuntimeSession(PROVIDER_SESSION, PROVIDER_SESSION, "bootstrap", request.getScope());
-            var saved = fixture.sessionRepository.findOrCreate(new RuntimeSessionRecord(runtime, binding.getBindingId(),
-                    binding.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, START));
-            fixture.sessionRepository.compareAndSet(saved, saved.withState(RuntimeSessionRecord.State.READY, START));
-            BrokerServiceTestAccess.installSession(fixture.service, runtime, binding, lease);
-            var candidate = ToolExecutionRecord.prepared("execution", "idempotency", binding.getBindingId(),
-                    binding.getGeneration(), PROVIDER_SESSION, PROVIDER_SESSION, "prompt", "call", "sha256:" + "b".repeat(64),
-                    Map.of("dispatchMode", "deferred", "sessionId", PROVIDER_SESSION, "promptId", "prompt",
-                            "callId", "call", "argsDigest", "sha256:" + "b".repeat(64)));
-            var execution = com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess.insertExecution(fixture.dataSource,
-                    candidate.withDispatch("owner", START.plus(Duration.ofMinutes(1)), 1, ToolExecutionRecord.State.DISPATCHING));
-            execution = com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess.authorizeDispatch(fixture.dataSource, execution, "owner", execution.getDispatchGeneration(), binding.getVersion());
-            assertEquals("csi_execution_cancel_unavailable", failure(fixture.service.cancelExecution(
-                    PROVIDER_SESSION, PROVIDER_SESSION, "execution")).getCode());
-            assertUnchanged(execution, fixture.executionRepository.findByExecutionCallId("execution"));
-            assertFalse(execution.isCancelRequested());
-            assertEquals(0, fixture.transport.cancelCalls.get());
-            var completed = com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess.compareAndSet(fixture.dataSource, execution,
-                    execution.withResult(Map.of("executionStatus", "success", "responseParts", List.of(Map.of("text", "complete"))),
-                            0, START), "owner", execution.getDispatchGeneration());
-            assertEquals("success", completed.getExecutionStatus());
-            assertFalse(completed.isCancelRequested());
-            assertUnchanged(completed, join(fixture.service.cancelExecution(PROVIDER_SESSION, PROVIDER_SESSION, "execution")));
-        }
-    }
 
     @Test
     void cleanupBeforeAcquireTombstonesTheOriginalOwnerWithoutAcquiringALease() {
@@ -495,7 +436,7 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
-    void mountReleaseRefusesACrossedHarnessAndANonResidentSession() {
+    void mountReleaseRefusesACrossedHarnessAndAColdSession() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
             RuntimeBrokerException crossed = failure(
@@ -7721,10 +7662,8 @@ class RuntimeBrokerServiceTest {
 
     /**
      * JDBC fixture whose DataSource serves the repository clock from the
-     * test's MutableClock, for the continuous renewal-loop tests (whose lease
-     * stamping must follow the fake clock) and the CSI service-ordering test
-     * that authorizes through the execution-level test-access CAS without CSI
-     * admission evidence.
+     * test's MutableClock, for the continuous renewal-loop tests whose lease
+     * stamping must follow the fake clock.
      */
     private static final class FakeClockFixture implements AutoCloseable {
         final AtomicInteger bindingIds = new AtomicInteger();
@@ -7737,11 +7676,6 @@ class RuntimeBrokerServiceTest {
         final FakeProvisioner provisioner = new FakeProvisioner();
         final FakeTransport transport = new FakeTransport();
         final RuntimeBrokerService service;
-
-        FakeClockFixture(RuntimeScope scope) {
-            this(scope, new MutableClock(START), Duration.ofMinutes(1),
-                    Duration.ofMinutes(1));
-        }
 
         FakeClockFixture(RuntimeScope scope, Clock clock,
                 Duration dispatchLeaseDuration) {

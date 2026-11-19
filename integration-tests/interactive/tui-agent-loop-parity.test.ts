@@ -463,8 +463,8 @@ describe('normalize', () => {
     const shellText = (pid: number, output = 'queue-now') =>
       `Command: echo ${output} && node -e "setTimeout(() => {}, 5000)"\n` +
       'Directory: (root)\n' +
-      `Output: ${output}\n` +
-      'Error: (none)\n' +
+      `Output (stdout and stderr combined): ${output}\n` +
+      'Execution Error: (none)\n' +
       'Exit Code: 0\n' +
       'Signal: (none)\n' +
       `Process Group PGID: ${pid}`;
@@ -508,21 +508,21 @@ describe('normalize', () => {
       output?: string,
     ) =>
       normalize(shellRecord(pid, output), '/workspace', '/scratch', volatile);
-    expect(shellText(99).length % 4).toBe(0);
+    expect(shellText(999).length % 4).toBe(0);
     // Without the scenario's keys the counts follow the pid's width; with
     // them the records compare, while the PGID text is scrubbed either way.
-    expect(normalizedShell(99)).not.toEqual(normalizedShell(100));
-    expect(JSON.stringify(normalizedShell(99))).toContain(
+    expect(normalizedShell(999)).not.toEqual(normalizedShell(1000));
+    expect(JSON.stringify(normalizedShell(999))).toContain(
       'Process Group PGID: <PGID>',
     );
-    expect(normalizedShell(99, FOREGROUND_SHELL_VOLATILE)).toEqual(
-      normalizedShell(100, FOREGROUND_SHELL_VOLATILE),
+    expect(normalizedShell(999, FOREGROUND_SHELL_VOLATILE)).toEqual(
+      normalizedShell(1000, FOREGROUND_SHELL_VOLATILE),
     );
     // A real output difference still compares unequal, so widening the keys
     // to 'output' cannot quietly retire what the scenario detects. The
     // replacement keeps the length, leaving the text as the only difference.
-    expect(normalizedShell(99, FOREGROUND_SHELL_VOLATILE)).not.toEqual(
-      normalizedShell(99, FOREGROUND_SHELL_VOLATILE, 'queue-noX'),
+    expect(normalizedShell(999, FOREGROUND_SHELL_VOLATILE)).not.toEqual(
+      normalizedShell(999, FOREGROUND_SHELL_VOLATILE, 'queue-noX'),
     );
   });
 });

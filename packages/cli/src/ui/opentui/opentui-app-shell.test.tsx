@@ -2422,6 +2422,84 @@ describe('OpenTuiApp shell wiring', () => {
     });
   });
 
+  it.each([true, false])(
+    'routes history keys only for screen-reader=%s without moving composer focus',
+    async (screenReader) => {
+      const view = renderApp({ screenReader });
+      await settle();
+      const scroll = view.container.querySelector('scrollbox')!;
+      const scrollBy = vi.fn();
+      const scrollTo = vi.fn();
+      Object.defineProperties(scroll, {
+        viewport: { value: { height: 18 }, configurable: true },
+        scrollHeight: { value: 900, configurable: true },
+        scrollBy: { value: scrollBy, configurable: true },
+        scrollTo: { value: scrollTo, configurable: true },
+      });
+      for (const [name, shift, ctrl] of [
+        ['up', true, false],
+        ['down', true, false],
+        ['pageup', false, false],
+        ['pagedown', false, false],
+        ['home', false, true],
+        ['end', false, true],
+      ] as const) {
+        const key = {
+          name,
+          shift,
+          ctrl,
+          preventDefault: vi.fn(),
+          stopPropagation: vi.fn(),
+        };
+        act(() => mocks.state.keyboardHandlers.at(-1)!(key));
+        expect(key.preventDefault).toHaveBeenCalledTimes(screenReader ? 1 : 0);
+      }
+      expect(scrollBy.mock.calls).toEqual(
+        screenReader ? [[-1], [1], [-18], [18]] : [],
+      );
+      expect(scrollTo.mock.calls).toEqual(screenReader ? [[0], [900]] : []);
+      expect(mocks.state.inputProps?.['focus']).toBe(true);
+    },
+  );
+
+  it('keeps modal keys out of screen-reader history scrolling', async () => {
+    const view = renderApp({ screenReader: true });
+    await settle();
+    const scroll = view.container.querySelector('scrollbox')!;
+    const scrollBy = vi.fn();
+    Object.defineProperties(scroll, {
+      viewport: { value: { height: 18 }, configurable: true },
+      scrollBy: { value: scrollBy, configurable: true },
+    });
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'help' },
+    };
+    await submit('/help');
+    act(() =>
+      mocks.state.keyboardHandlers.at(-1)!({
+        name: 'pageup',
+        preventDefault: vi.fn(),
+        stopPropagation: vi.fn(),
+      }),
+    );
+    expect(scrollBy).not.toHaveBeenCalled();
+  });
+
+  it('passes the builtin quit invocation identity to the entry', async () => {
+    const onQuit = vi.fn();
+    renderApp({ onQuit });
+    await settle();
+    const messages = [{ type: 'user', text: '/quit', id: 1 }] as never;
+    mocks.state.handleResult = {
+      kind: 'quit',
+      messages,
+      invocationItemId: 42,
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/quit');
+    expect(onQuit).toHaveBeenCalledExactlyOnceWith(messages, 42);
+  });
+
   it('reaches the entry seam on a quit outcome', async () => {
     const onQuit = vi.fn();
     renderApp({ onQuit });
