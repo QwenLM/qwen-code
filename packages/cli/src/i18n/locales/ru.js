@@ -50,6 +50,10 @@ export default {
   'Working. Escape to cancel.': 'Выполняется. Escape для отмены.',
   'History items {{start}}-{{end}} of {{total}}':
     'История {{start}}-{{end}} из {{total}}.',
+  'Worktree: {{value}}': 'Рабочее дерево: {{value}}',
+  'Workflow mode: on': 'Режим рабочего процесса: включён',
+  'Workflow mode: on (unavailable)':
+    'Режим рабочего процесса: включён (недоступен)',
   'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
     'Shift+Вверх/Вниз или PageUp/PageDown для чтения; Ctrl+Home/End для первого/последнего.',
   'Generated UI': 'Generated UI',

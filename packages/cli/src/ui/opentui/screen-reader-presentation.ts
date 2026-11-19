@@ -13,7 +13,10 @@ import {
   TextareaRenderable,
   type Renderable,
 } from '@opentui/core';
-import type { ScreenReaderOutputWriter } from './a11y-screen-reader.js';
+import {
+  hardWrap,
+  type ScreenReaderOutputWriter,
+} from './a11y-screen-reader.js';
 import { markdownToPlainText } from './a11y-plain-text.js';
 import { cpLen } from '../utils/textUtils.js';
 import { getCurrentLanguage, t } from '../../i18n/index.js';
@@ -84,10 +87,23 @@ function controlRows(node: Renderable): ControlRow[] {
     // One row owned by the tagged box, so the whole preview rides the replace
     // lane: the picker mounts a fresh subtree per Space press, and per-row
     // owners would append a conversation to the scrollback on every peek.
+    // Each part keeps only the rows it paints. The writer erases just the
+    // lines it wrote last, so a block taller than the pane scrolls its head
+    // into the scrollback, where no erase reaches; the parts' laid-out heights
+    // sum to the pane's, and none is wider than the terminal the writer wraps
+    // at, so the joined block stays inside what one erase can clear.
     const value = node
       .getChildren()
-      .flatMap(controlRows)
-      .map((row) => row.text)
+      .map((child) => {
+        const text = controlRows(child)
+          .map((row) => row.text)
+          .join('\n');
+        return hardWrap(text, child.width)
+          .split('\n')
+          .slice(0, child.height)
+          .join('\n');
+      })
+      .filter((part) => part.trim() !== '')
       .join('\n');
     return value.trim() ? [{ owner: node, text: value }] : [];
   }

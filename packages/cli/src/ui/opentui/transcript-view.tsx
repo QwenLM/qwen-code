@@ -71,6 +71,7 @@ import {
   type TranscriptWindow,
 } from './transcript-window.js';
 import { assistantMarkdownForRender } from './markdown-heal.js';
+import { wrappedRows } from './dialogs-core.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type {
   ModAssistantMessageInput,
@@ -183,9 +184,14 @@ function itemMarginTop(kind: LiveHistoryItem['kind']): number {
  *  real offset; `computeTranscriptWindow` clamps it to the bottom. */
 const ANCHOR_BOTTOM = Number.MAX_SAFE_INTEGER;
 
-/** The range and help rows the screen-reader transcript paints below its last
- *  item, inside the scroll content the sticky pin rests at the end of. */
-const SCREEN_READER_TRAILING_ROWS = 2;
+/** The range row the screen-reader transcript paints below its last item. */
+function historyRangeText(start: string, end: string, total: string): string {
+  return t('History items {{start}}-{{end}} of {{total}}', {
+    start,
+    end,
+    total,
+  });
+}
 
 const transcriptLogger = createDebugLogger('OPEN_TUI_TRANSCRIPT');
 
@@ -299,6 +305,7 @@ function useTranscriptWindow(
   initialAnchor: 'top' | 'bottom',
   trackThinkingVisibility: boolean,
   screenReader: boolean,
+  trailingRows: number,
 ) {
   const renderer = useRenderer();
   const rootRef = useRef<Renderable | null>(null);
@@ -322,6 +329,7 @@ function useTranscriptWindow(
   const enteredRef = useRef(new Map<string, number>());
   const offsetsRef = useRef<number[]>([0]);
   const itemsRef = useRef(items);
+  const trailingRowsRef = useRef(trailingRows);
   const mountedRef = useRef<TranscriptWindow>({
     start: 0,
     end: 0,
@@ -371,14 +379,14 @@ function useTranscriptWindow(
 
   itemsRef.current = items;
   offsetsRef.current = offsets;
+  trailingRowsRef.current = trailingRows;
 
   const win = computeTranscriptWindow({
     itemCount: items.length,
     offsets,
     scrollTop: scrollRef.current.top,
     viewportRows: scrollRef.current.rows || availableTerminalHeight,
-    trailingRows:
-      screenReader && items.length > 0 ? SCREEN_READER_TRAILING_ROWS : 0,
+    trailingRows,
   });
   // Recorded here rather than in the frame handler: the render body is what
   // mounts a window, so it is also what can say which items the move pulled in
@@ -433,10 +441,7 @@ function useTranscriptWindow(
         offsets: offsetsRef.current,
         scrollTop: top,
         viewportRows: rows,
-        trailingRows:
-          screenReader && itemsRef.current.length > 0
-            ? SCREEN_READER_TRAILING_ROWS
-            : 0,
+        trailingRows: trailingRowsRef.current,
       });
       return !sameWindow(next, mountedRef.current, screenReader);
     };
@@ -695,12 +700,26 @@ export function OpenTuiTranscriptView({
       !item.done &&
       item.id === awaitingCallId,
   );
+  const helpText = t(
+    'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.',
+  );
+  // The range and help rows share the scroll content the sticky pin rests at
+  // the end of, so the bottom clamp pays for the rows they actually paint at
+  // the content budget. The range row's own numbers come out of the window, so
+  // its widest form — every number as wide as the total — pays for its wrap.
+  const total = String(visibleItems.length);
+  const trailingRows =
+    screenReader && visibleItems.length > 0
+      ? wrappedRows(historyRangeText(total, total, total), availableWidth) +
+        wrappedRows(helpText, availableWidth)
+      : 0;
   const { rootRef, nodesRef, win, thoughtVisibility } = useTranscriptWindow(
     visibleItems,
     availableTerminalHeight,
     initialAnchor,
     modRows !== undefined,
     screenReader,
+    trailingRows,
   );
   return (
     <box
@@ -763,17 +782,13 @@ export function OpenTuiTranscriptView({
       {screenReader && visibleItems.length > 0 && (
         <>
           <text id="screen-reader-history-window">
-            {t('History items {{start}}-{{end}} of {{total}}', {
-              start: String(win.visibleStart + 1),
-              end: String(win.visibleEnd),
-              total: String(visibleItems.length),
-            })}
-          </text>
-          <text id="screen-reader-history-help">
-            {t(
-              'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.',
+            {historyRangeText(
+              String(win.visibleStart + 1),
+              String(win.visibleEnd),
+              total,
             )}
           </text>
+          <text id="screen-reader-history-help">{helpText}</text>
         </>
       )}
     </box>

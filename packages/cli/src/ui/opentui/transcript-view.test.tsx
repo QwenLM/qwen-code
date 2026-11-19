@@ -179,6 +179,7 @@ import {
 } from './item-projection.js';
 import { ToolCallStatus, type HistoryItem } from '../types.js';
 import { MAX_MOUNTED_ITEMS } from './transcript-window.js';
+import { wrappedRows } from './dialogs-core.js';
 import { EventEmitter } from 'node:events';
 import {
   Renderable,
@@ -1557,6 +1558,70 @@ describe('OpenTuiTranscriptView scroll host', () => {
       view.unmount();
     }
   });
+
+  it.each([76, 80])(
+    'announces the range that fits the viewport at a %i-column content budget',
+    (width) => {
+      // A zero-margin kind: the row model charges the laid-out box plus its
+      // margin, so one row is what the model and the paint agree on.
+      const items = Array.from({ length: 40 }, (_, index) => ({
+        kind: 'info' as const,
+        id: `u${index}`,
+        text: `TURN_${String(index).padStart(4, '0')}`,
+      }));
+      // The shell hands the view its content budget: the terminal width less
+      // the root's own two-column margins. The 77-character help sentence
+      // paints two rows at 76 columns and one at 80.
+      const help =
+        'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.';
+      const view = mountHosted({
+        items,
+        rows: Array.from({ length: items.length }, () => 1),
+        screenReader: true,
+        viewportRows: 10,
+        width,
+        itemRows: (text) =>
+          /TURN_\d+/.test(text)
+            ? 1
+            : text.startsWith('History items')
+              ? 1
+              : text === help
+                ? wrappedRows(help, width)
+                : undefined,
+      });
+      try {
+        // Measure every turn so the row table is uniform, as a settled
+        // session's is, then rest on the shell's bottom pin.
+        view.jump(0);
+        view.frame();
+        view.jump(Number.MAX_SAFE_INTEGER);
+        view.frame();
+        expect(
+          view.container.querySelector('[data-id="screen-reader-history-help"]')
+            ?.textContent,
+        ).toBe(help);
+        // Where the pin actually rests: the scroll content carries the trailing
+        // rows below the last item, so the viewport starts that many rows down.
+        view.host.scrollTop =
+          view.host.scrollHeight - view.host.viewport.height;
+        const visible = view
+          .visibleLines()
+          .map((line) => /TURN_(\d+)/.exec(line))
+          .filter((match): match is RegExpExecArray => match !== null)
+          .map((match) => Number(match[1]));
+        expect(visible.length).toBeGreaterThan(0);
+        expect(
+          view.container.querySelector(
+            '[data-id="screen-reader-history-window"]',
+          )?.textContent,
+        ).toBe(
+          `History items ${visible[0] + 1}-${visible.at(-1)! + 1} of ${items.length}`,
+        );
+      } finally {
+        view.unmount();
+      }
+    },
+  );
 
   it('does not re-render the mounted slice for a span-only scroll step outside screen-reader mode', () => {
     const items = Array.from({ length: 40 }, (_, index) => ({

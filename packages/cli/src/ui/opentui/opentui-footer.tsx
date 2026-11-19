@@ -351,15 +351,19 @@ export function OpenTuiFooter({
           [
             'footer-worktree',
             activeWorktree && !settings.merged.ui?.hideBuiltinWorktreeIndicator
-              ? `Worktree: ${activeWorktree.branch || 'detached HEAD'} (${activeWorktree.slug})`
+              ? t('Worktree: {{value}}', {
+                  value: `${activeWorktree.branch || 'detached HEAD'} (${activeWorktree.slug})`,
+                })
               : '',
           ],
           [
             'footer-workflow',
             workflowMode?.requested
-              ? workflowMode.effective
-                ? 'Workflow mode: on'
-                : 'Workflow mode: on (unavailable)'
+              ? t(
+                  workflowMode.effective
+                    ? 'Workflow mode: on'
+                    : 'Workflow mode: on (unavailable)',
+                )
               : '',
           ],
           // The pause glyph is a visual marker; speech takes the mode label.

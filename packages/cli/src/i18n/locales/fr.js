@@ -48,6 +48,9 @@ export default {
   'Working. Escape to cancel.': 'Traitement en cours. Échap pour annuler.',
   'History items {{start}}-{{end}} of {{total}}':
     'Historique {{start}}-{{end}} sur {{total}}.',
+  'Worktree: {{value}}': 'Arbre de travail : {{value}}',
+  'Workflow mode: on': 'Mode workflow : activé',
+  'Workflow mode: on (unavailable)': 'Mode workflow : activé (indisponible)',
   'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
     'Maj+Haut/Bas ou Page précédente/suivante pour lire ; Ctrl+Début/Fin pour le premier/dernier élément.',
   'Generated UI': 'Generated UI',

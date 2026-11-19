@@ -49,6 +49,9 @@ export default {
   'Working. Escape to cancel.': '處理中。按 Escape 取消。',
   'History items {{start}}-{{end}} of {{total}}':
     '歷史記錄 {{start}}-{{end}}，共 {{total}} 筆。',
+  'Worktree: {{value}}': '工作樹：{{value}}',
+  'Workflow mode: on': '工作流模式：已開啟',
+  'Workflow mode: on (unavailable)': '工作流模式：已開啟（不可用）',
   'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
     '按 Shift+上/下或 PageUp/PageDown 閱讀歷史；按 Ctrl+Home/End 跳至最早/最新。',
   "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":

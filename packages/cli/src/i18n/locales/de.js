@@ -50,6 +50,9 @@ export default {
   'Working. Escape to cancel.': 'Wird ausgeführt. Escape zum Abbrechen.',
   'History items {{start}}-{{end}} of {{total}}':
     'Verlaufseinträge {{start}}-{{end}} von {{total}}.',
+  'Worktree: {{value}}': 'Arbeitsbaum: {{value}}',
+  'Workflow mode: on': 'Workflow-Modus: ein',
+  'Workflow mode: on (unavailable)': 'Workflow-Modus: ein (nicht verfügbar)',
   'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
     'Umschalt+Auf/Ab oder BildAuf/BildAb zum Lesen; Strg+Pos1/Ende für ersten/neuesten Eintrag.',
   'Generated UI': 'Generated UI',

@@ -48,6 +48,10 @@ export default {
   'Working. Escape to cancel.': 'En curs. Escape per cancel·lar.',
   'History items {{start}}-{{end}} of {{total}}':
     'Historial {{start}}-{{end}} de {{total}}.',
+  'Worktree: {{value}}': 'Arbre de treball: {{value}}',
+  'Workflow mode: on': 'Mode de flux de treball: activat',
+  'Workflow mode: on (unavailable)':
+    'Mode de flux de treball: activat (no disponible)',
   'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
     'Maj+Amunt/Avall o PageUp/PageDown per llegir; Ctrl+Home/End per al primer/més recent.',
   'Generated UI': 'Generated UI',

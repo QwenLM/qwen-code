@@ -49,6 +49,9 @@ export default {
   'Working. Escape to cancel.': '処理中。Escape でキャンセル。',
   'History items {{start}}-{{end}} of {{total}}':
     '履歴 {{start}}-{{end}} / {{total}} 件。',
+  'Worktree: {{value}}': 'ワークツリー: {{value}}',
+  'Workflow mode: on': 'ワークフローモード: オン',
+  'Workflow mode: on (unavailable)': 'ワークフローモード: オン（利用不可）',
   'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
     'Shift+上下または PageUp/PageDown で履歴を読み、Ctrl+Home/End で最初/最新へ移動。',
   'Generated UI': 'Generated UI（生成 UI）',

@@ -997,6 +997,52 @@ describe('OpenTuiFooter', () => {
     ).toBe('model-x');
   });
 
+  it('localizes the screen-reader worktree and workflow rows', async () => {
+    const { setLanguageAsync } = await import('../../i18n/index.js');
+    await setLanguageAsync('zh');
+    try {
+      const { container } = render(
+        <Footer
+          config={fakeConfig({
+            getWorkflowMode: () => ({
+              requested: true,
+              available: false,
+              effective: false,
+            }),
+          })}
+          streaming={false}
+          screenReader
+          activeWorktree={{
+            slug: 'issue-123',
+            branch: '',
+            path: '/worktree',
+            originalCwd: '/repo',
+            originalBranch: 'main',
+            originalHeadCommit: 'abc',
+          }}
+          statusLine={{
+            lines: ['model-x'],
+            useThemeColors: false,
+            respectUserColors: false,
+            hideContextIndicator: true,
+          }}
+        />,
+      );
+      const worktree =
+        container.querySelector('[data-id="screen-reader-footer-worktree"]')
+          ?.textContent ?? '';
+      const workflow =
+        container.querySelector('[data-id="screen-reader-footer-workflow"]')
+          ?.textContent ?? '';
+      expect(worktree).toContain('issue-123');
+      expect(worktree).not.toContain('Worktree:');
+      expect(workflow).not.toBe('');
+      expect(workflow).not.toContain('Workflow mode:');
+    } finally {
+      await setLanguageAsync('en');
+    }
+  });
+
   it('routes a command-sourced status line to the live lane, not the scrollback', () => {
     const { container } = render(
       <Footer

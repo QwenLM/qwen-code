@@ -83,7 +83,7 @@ import {
   ScreenReaderPresentation,
   readScreenReaderControls,
 } from './screen-reader-presentation.js';
-import { ScreenReaderOutputWriter } from './a11y-screen-reader.js';
+import { ScreenReaderOutputWriter, hardWrap } from './a11y-screen-reader.js';
 import { foldLiveEvent, type LiveAssistantItem } from './live-session-model.js';
 import { setLanguageAsync } from '../../i18n/index.js';
 
@@ -94,6 +94,8 @@ function text(value: string) {
     id: '',
     isDestroyed: false,
     children: [],
+    width: 80,
+    height: 24,
   }) as TextBufferRenderable;
   return node;
 }
@@ -104,6 +106,8 @@ function box(children: Renderable[]) {
     visible: true,
     id: '',
     isDestroyed: false,
+    width: 80,
+    height: 24,
   }) as Renderable;
 }
 
@@ -1320,5 +1324,40 @@ describe('screen-reader semantic presentation', () => {
     dialog.children = [preview()];
     events.emit('frame');
     expect(appendStatic.mock.calls.map(([value]) => value)).toEqual(['Dialog']);
+  });
+
+  it('bounds the session preview to the pane rows the writer can erase', () => {
+    const events = new EventEmitter();
+    // The pane clips what overruns it, but the writer erases only the lines it
+    // wrote last: a block taller than the terminal scrolls its head into the
+    // scrollback, where no erase reaches. The parts are laid out as the picker
+    // lays them out — a title row, the transcript body taking the remainder,
+    // and the action hint below it.
+    const part = (children: Renderable[], height: number) => {
+      const node = box(children);
+      Object.assign(node, { width: 80, height });
+      return node;
+    };
+    const pane = part(
+      [
+        part([text('Session Preview')], 1),
+        part([text('x'.repeat(2000))], 8),
+        part([text('Enter to resume · Esc to back')], 1),
+      ],
+      10,
+    );
+    pane.id = 'screen-reader-live-preview';
+    const writer = new ScreenReaderOutputWriter(
+      () => {},
+      () => 80,
+    );
+    const updateDynamic = vi.spyOn(writer, 'updateDynamic');
+    const presentation = new ScreenReaderPresentation(writer);
+    presentation.observeFrames(events, () => box([pane]));
+    events.emit('frame');
+    const [value] = updateDynamic.mock.calls.at(-1)!;
+    expect(hardWrap(value, 80).split('\n')).toHaveLength(10);
+    expect(value.startsWith('Session Preview')).toBe(true);
+    expect(value.endsWith('Enter to resume · Esc to back')).toBe(true);
   });
 });
