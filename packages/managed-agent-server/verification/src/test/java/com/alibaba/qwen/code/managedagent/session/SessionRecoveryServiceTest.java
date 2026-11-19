@@ -59,10 +59,12 @@ class SessionRecoveryServiceTest {
         // The obligation projections the sealed-head proof reads. Empty by
         // default: a cleanly suspended Session owes nothing.
         jdbc.execute("CREATE TABLE ma_turn (tenant_id VARCHAR, session_id VARCHAR, status VARCHAR)");
-        jdbc.execute("CREATE TABLE ma_session_record (tenant_id VARCHAR, session_id VARCHAR,"
+        // The record and ref arms are keyed by session_scope_key, the prefix
+        // every index on those tables leads with.
+        jdbc.execute("CREATE TABLE ma_session_record (session_scope_key VARCHAR,"
                 + " record_kind VARCHAR, runtime_state VARCHAR)");
-        jdbc.execute("CREATE TABLE ma_resource_ref (resource_key VARCHAR, tenant_id VARCHAR,"
-                + " session_id VARCHAR, owner_kind VARCHAR)");
+        jdbc.execute("CREATE TABLE ma_resource_ref (resource_key VARCHAR,"
+                + " session_scope_key VARCHAR, owner_kind VARCHAR)");
         jdbc.execute("CREATE TABLE ma_resource (resource_key VARCHAR, state VARCHAR)");
         when(sessions.requireReadableSession("tenant", "actor", "session")).thenReturn(session);
         when(store.findLatestTurns("tenant", List.of("session"))).thenReturn(Map.of());
@@ -145,11 +147,12 @@ class SessionRecoveryServiceTest {
         sealCleanly();
         switch (obligation) {
             case "turn" -> jdbc.update("INSERT INTO ma_turn VALUES ('tenant', 'session', 'RUNNING')");
-            case "runtime" -> jdbc.update("INSERT INTO ma_session_record VALUES"
-                    + " ('tenant', 'session', 'DOMAIN', 'ready')");
+            case "runtime" -> jdbc.update("INSERT INTO ma_session_record VALUES (?, 'DOMAIN', 'ready')",
+                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session"));
             default -> {
                 jdbc.update("INSERT INTO ma_resource VALUES ('debt', 'REFERENCED')");
-                jdbc.update("INSERT INTO ma_resource_ref VALUES ('debt', 'tenant', 'session', 'HOSTED_CLEANUP')");
+                jdbc.update("INSERT INTO ma_resource_ref VALUES ('debt', ?, 'HOSTED_CLEANUP')",
+                        com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session"));
             }
         }
         var recovery = service.query("tenant", "actor", "session");
@@ -162,9 +165,10 @@ class SessionRecoveryServiceTest {
         sealCleanly();
         // A terminal run projects a null runtime_state, and a confirmed debt
         // drops its REFERENCED ref: neither is owed work any more.
-        jdbc.update("INSERT INTO ma_session_record VALUES ('tenant', 'session', 'DOMAIN', NULL)");
+        var scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session");
+        jdbc.update("INSERT INTO ma_session_record VALUES (?, 'DOMAIN', NULL)", scope);
         jdbc.update("INSERT INTO ma_resource VALUES ('debt', 'RELEASED')");
-        jdbc.update("INSERT INTO ma_resource_ref VALUES ('debt', 'tenant', 'session', 'HOSTED_CLEANUP')");
+        jdbc.update("INSERT INTO ma_resource_ref VALUES ('debt', ?, 'HOSTED_CLEANUP')", scope);
         var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.state()).isEqualTo("ready");
         assertThat(recovery.nextTurnAllowed()).isTrue();

@@ -278,6 +278,36 @@ describe('Turn', () => {
         onModelRequestDispatched: dispatched,
       });
     });
+    it('forwards isSessionTurn and ledgerTurnKey to the chat send options (R15)', async () => {
+      // Interior link of the ledger-key hop: Turn must forward the sender's
+      // membership flag and the Goal run's fresh turn key to LlmChat, or the
+      // headless runtime Goal boundary never reaches the ledger.
+      const isolated = new Turn(
+        { sendMessageStream: mockSendMessageStream } as unknown as LlmChat,
+        'goal-prompt',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+        'goal-prompt/goal/goal-runtime:t1',
+      );
+      for await (const event of isolated.run(
+        'test-model',
+        [{ text: 'hello' }],
+        new AbortController().signal,
+      )) {
+        expect(event).toBeDefined();
+      }
+      expect(mockSendMessageStream.mock.lastCall?.[4]).toEqual({
+        isSessionTurn: true,
+        ledgerTurnKey: 'goal-prompt/goal/goal-runtime:t1',
+      });
+    });
     it('should yield content events for text parts', async () => {
       const reqParts: Part[] = [{ text: 'Hi' }];
       const events = await run(
@@ -325,8 +355,68 @@ describe('Turn', () => {
         }),
         'prompt-id-1',
         undefined,
-        { promptId: 'stable-prompt-id', retractDeliveredOutputOnRetry: true },
+        {
+          promptId: 'stable-prompt-id',
+          retractDeliveredOutputOnRetry: true,
+        },
       );
+    });
+
+    it('forwards isExplicitRetry and isSessionTurn to the chat send options', async () => {
+      // client.ts passes the explicit-Retry flag as Turn's 10th positional
+      // argument and ledger membership as the 11th; pin both slots so a
+      // constructor reorder cannot misroute them.
+      turn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+        } as unknown as LlmChat,
+        'prompt-id-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+        false,
+      );
+      await run([textChunk('Hello')]);
+
+      // Distinct values pin the slot mapping: swapping the two adjacent
+      // boolean declarations would emit { isSessionTurn: true } instead.
+      expect(mockSendMessageStream.mock.lastCall?.[4]).toEqual({
+        isExplicitRetry: true,
+      });
+
+      turn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+        } as unknown as LlmChat,
+        'prompt-id-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        true,
+      );
+      await run([textChunk('Hello')]);
+
+      expect(mockSendMessageStream.mock.lastCall?.[4]).toEqual({
+        isSessionTurn: true,
+      });
     });
 
     it('should preserve ordered image parts in content events', async () => {

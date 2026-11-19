@@ -997,6 +997,15 @@ public final class ApiModels {
     public record WebShellArtifactQueryRequest(@NotBlank String sessionId,
             String cursor, Integer limit) { }
 
+    public record WebShellWorkspaceArtifactQueryRequest(@NotBlank String workspaceId,
+            String cursor, Integer limit) {
+        @JsonAnySetter
+        public void rejectUnknown(String name, JsonNode value) {
+            throw new IllegalArgumentException(
+                    "Unknown workspace artifact query request field: " + name);
+        }
+    }
+
     public record WebShellTaskQueryRequest(@NotBlank String sessionId,
             String cursor, Integer limit) {
     }

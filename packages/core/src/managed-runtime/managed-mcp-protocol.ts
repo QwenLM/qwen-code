@@ -72,6 +72,7 @@ export interface ManagedMcpConfigure extends OperationIdentity, ServerIdentity {
 export interface ManagedMcpDiscover extends OperationIdentity, ServerIdentity {
   readonly kind: 'mcp-discover';
   readonly connectionGeneration: number;
+  readonly revalidate?: true;
   readonly grant: OperationGrant;
 }
 
