@@ -89,14 +89,13 @@ export interface DaemonChatIntents {
    * Apply decision evidence to the request's active (non-terminal) approval or
    * question attempt, freezing currency when the evidence arrives even though
    * the attempt's operation id is not yet bound (its POST is still in flight).
-   * When `attemptId` is given it must match the attempt's recorded identity;
-   * without it the correlation is request-level. No active matching attempt is
-   * a no-op, so a late event for a finished attempt is not retained.
+   * The daemon decision event names only the request, so the correlation is
+   * request-level. No active matching attempt is a no-op, so a late event for a
+   * finished attempt is not retained.
    */
   settleDecisionRequest(
     requestId: string,
     witness: OutcomeWitness,
-    attemptId?: string,
   ): IntentResult | undefined;
   /**
    * Give an attempt whose admission can never be confirmed (a thrown transport
@@ -329,12 +328,11 @@ export function createDaemonChatIntents(): DaemonChatIntents {
       if (!intent) return undefined;
       return settleIntent(intent, witness);
     },
-    settleDecisionRequest(requestId, witness, attemptId) {
+    settleDecisionRequest(requestId, witness) {
       // Route decision evidence to the request's active (non-terminal) attempt
       // rather than a stale bound id, so an in-flight retry's evidence is not
-      // applied to the previous terminal attempt. When the event carries an
-      // attempt discriminator it must match; without one the correlation is
-      // request-level (the daemon decision event names only the request).
+      // applied to the previous terminal attempt. The daemon decision event
+      // names only the request, so the correlation is request-level.
       let active: TrackedIntent | undefined;
       for (const intent of tracked) {
         if (
@@ -345,12 +343,6 @@ export function createDaemonChatIntents(): DaemonChatIntents {
         }
         if (intent.operation.target.requestId !== requestId) continue;
         if (isTerminal(intent.operation.state)) continue;
-        if (
-          attemptId !== undefined &&
-          intent.operation.target.attemptId !== attemptId
-        ) {
-          continue;
-        }
         active = intent;
       }
       if (!active) return undefined;

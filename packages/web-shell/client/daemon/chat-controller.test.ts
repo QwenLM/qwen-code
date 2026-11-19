@@ -118,7 +118,7 @@ function harness(overrides?: Partial<DaemonChatControllerDeps>) {
       return next.deferred;
     },
     holdSubmit() {
-      const next = submitTransports[submitTransports.length - 1];
+      const next = submitTransports.shift();
       if (!next) throw new Error('no submit transport in flight');
       return next;
     },
@@ -550,6 +550,9 @@ describe('daemon controller: in-flight and racing correlation', () => {
     const h = harness();
     h.emitCurrency('r1', true);
     const first = h.controller.respondApproval('r1', 'allow');
+    // The dispatch records the pending row before the POST resolves, so the
+    // refusal is decided by the live (pending) attempt itself.
+    expect(opsOf(h.controller, 'approval')[0]?.state).toBe('pending');
     const second = await h.controller.respondApproval('r1', 'deny');
     expect(second.admission).toBe('rejected');
     h.resolvePermission();
@@ -576,28 +579,17 @@ describe('daemon controller: in-flight and racing correlation', () => {
     ).toBe(true);
   });
 
-  it('a replayed decision for a finished attempt does not establish a retry', async () => {
+  it('a decision settles the active attempt and a late duplicate is a no-op', async () => {
     const h = harness();
     h.emitCurrency('r1', true);
     const first = h.controller.respondApproval('r1', 'allow');
     h.resolvePermission();
     await first;
-    const firstAttemptId = opsOf(h.controller, 'approval')[0]?.target.attemptId;
+    h.emitDecision({ requestId: 'r1', applied: true });
+    expect(opsOf(h.controller, 'approval')[0]?.state).toBe('established');
+    // A late/replayed event for the now-terminal attempt cannot re-settle it.
     h.emitDecision({ requestId: 'r1', applied: false });
-    const retry = h.controller.respondApproval('r1', 'allow');
-    h.resolvePermission();
-    await retry;
-    h.emitDecision({
-      requestId: 'r1',
-      applied: true,
-      attemptId: firstAttemptId,
-    });
-    // Retention lists non-terminal rows before terminal ones, so locate the
-    // retry by its attempt identity rather than by position.
-    const retryOp = opsOf(h.controller, 'approval').find(
-      (o) => o.target.attemptId !== firstAttemptId,
-    );
-    expect(retryOp?.state).toBe('unsettled');
+    expect(opsOf(h.controller, 'approval')[0]?.state).toBe('established');
   });
 
   it('a rejected decision dispatch leaves no evidence for the next attempt', async () => {
@@ -633,7 +625,9 @@ describe('daemon controller: in-flight and racing correlation', () => {
     h.emitCurrency('r1', true);
     h.resolvePermission();
     await pending;
-    expect(opsOf(h.controller, 'approval')[0]?.state).not.toBe('established');
+    // Single delivery while superseded: never established, and given the
+    // failed terminal exit so it does not leak a permanent non-terminal row.
+    expect(opsOf(h.controller, 'approval')[0]?.state).toBe('failed');
   });
 
   it('decision evidence delivered during the POST is applied once admission resolves', async () => {
@@ -648,7 +642,9 @@ describe('daemon controller: in-flight and racing correlation', () => {
 
   it('an orphan decision creates nothing and cannot certify a later attempt', async () => {
     const h = harness();
-    h.emitDecision({ requestId: 'rX', applied: true });
+    // Same request id the later attempt will use: an orphan event with no
+    // active attempt must not be retained to certify it.
+    h.emitDecision({ requestId: 'r1', applied: true });
     expect(h.controller.operations).toHaveLength(0);
     h.emitCurrency('r1', true);
     const pending = h.controller.respondApproval('r1', 'allow');
@@ -731,10 +727,16 @@ describe('daemon controller: in-flight and racing correlation', () => {
     const result = await pending;
     expect(result.outcome).toBe('established');
     expect(h.controller.phase).toBe('idle');
+    // A live turn behind the finished one: the cancel must target the live
+    // turn, not bind the dead finished prompt at the queue head.
+    const live = h.controller.submit(input);
+    h.admitSubmit('pL');
+    await live;
     const cancel = h.controller.cancel();
     h.resolveCancel();
-    const cancelResult = await cancel;
-    expect(cancelResult.outcome).not.toBe('established');
+    await cancel;
+    h.emitPrompt({ promptId: 'pL', outcome: 'cancelled' });
+    expect(opsOf(h.controller, 'cancel')[0]?.state).toBe('established');
   });
 
   it('a cancel whose target turn completes on its own is failed, not established', async () => {
@@ -773,6 +775,9 @@ describe('daemon controller: in-flight and racing correlation', () => {
     h.resolvePermission();
     const result = await second;
     expect(result.admission).toBe('accepted');
+    // The retry is not just admitted: it can still be certified.
+    h.emitDecision({ requestId: 'r1', applied: true });
+    expect(opsOf(h.controller, 'approval')[0]?.state).toBe('established');
   });
 
   it('a thrown cancel does not latch cancelling after the turn terminal', async () => {
@@ -787,17 +792,69 @@ describe('daemon controller: in-flight and racing correlation', () => {
     expect(h.controller.phase).not.toBe('cancelling');
   });
 
-  it('a thrown submit after admission does not latch running nor leave a cancel target', async () => {
+  it('a thrown submit after admission keeps the confirmed turn cancellable', async () => {
     const h = harness();
     const submit = h.controller.submit(input);
     const t = h.holdSubmit();
     t.onAdmitted('p1');
     t.deferred.reject(new Error('x'));
     await submit;
+    // The submit row takes the abandon exit (client cannot confirm admission),
+    // but onAdmitted confirmed the turn, so it stays a live cancel target.
     expect(h.controller.phase).not.toBe('running');
     const cancel = h.controller.cancel();
     h.resolveCancel();
-    const result = await cancel;
-    expect(result.outcome).not.toBe('established');
+    await cancel;
+    h.emitPrompt({ promptId: 'p1', outcome: 'cancelled' });
+    expect(opsOf(h.controller, 'cancel')[0]?.state).toBe('established');
+    expect(h.controller.phase).not.toBe('cancelling');
+  });
+
+  it('two overlapping cancels on a rejected prompt both terminalize', async () => {
+    const h = harness();
+    const submit = h.controller.submit(input);
+    const deferred = h.startSubmit('p1');
+    const cancel1 = h.controller.cancel();
+    const cancel2 = h.controller.cancel();
+    deferred.resolve('rejected');
+    await submit;
+    h.resolveCancel();
+    const r1 = await cancel1;
+    h.resolveCancel();
+    const r2 = await cancel2;
+    expect(r1.outcome).toBe('failed');
+    expect(r2.outcome).toBe('failed');
+    expect(h.controller.phase).not.toBe('cancelling');
+  });
+
+  it('a thrown question POST gives the question an exit and stays answerable', async () => {
+    const h = harness();
+    const first = h.controller.respondQuestion('q1', [
+      { questionId: 'q1', value: 'a' },
+    ]);
+    h.rejectQuestion();
+    await first;
+    const second = h.controller.respondQuestion('q1', [
+      { questionId: 'q1', value: 'b' },
+    ]);
+    h.resolveQuestion();
+    const result = await second;
+    expect(result.admission).toBe('accepted');
+    h.emitDecision({ requestId: 'q1', applied: true });
+    expect(opsOf(h.controller, 'question')[0]?.state).toBe('established');
+  });
+
+  it('a second question dispatch while one is live is refused', async () => {
+    const h = harness();
+    const first = h.controller.respondQuestion('q1', [
+      { questionId: 'q1', value: 'a' },
+    ]);
+    const second = await h.controller.respondQuestion('q1', [
+      { questionId: 'q1', value: 'b' },
+    ]);
+    expect(second.admission).toBe('rejected');
+    h.resolveQuestion();
+    await first;
+    expect(opsOf(h.controller, 'question')).toHaveLength(1);
   });
 });
