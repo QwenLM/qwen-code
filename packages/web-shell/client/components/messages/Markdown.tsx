@@ -1023,10 +1023,13 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
     // copy extraction keeps its pre-fallback semantics (empty alt stays empty
     // and the raw-markdown fallback still fires); the turndown rule reads the
     // src attribute to rebuild the image reference for selection markdown
-    // copy. The src attribute is document-mode-gated like displaySrc.
+    // copy. The src attribute is document-mode-gated like displaySrc. The
+    // accessible name keeps the alt description the replaced img exposed.
     return (
       <span
         className={styles.imageFallback}
+        role="img"
+        aria-label={alt || text}
         data-markdown-image-alt={alt || ''}
         data-markdown-image-src={documentMode ? undefined : src}
       >

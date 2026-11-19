@@ -442,21 +442,18 @@ describe('markdown image fallback', () => {
   it('exposes the alt text to plain-text extraction like the img it replaces', () => {
     const view = renderMd('![screenshot](/Users/foo/shot.png)');
     try {
-      expect(
-        view
-          .querySelector('[class*="imageFallback"]')
-          ?.getAttribute('data-markdown-image-alt'),
-      ).toBe('screenshot');
+      const chip = view.querySelector('[class*="imageFallback"]');
+      expect(chip?.getAttribute('data-markdown-image-alt')).toBe('screenshot');
+      expect(chip?.getAttribute('role')).toBe('img');
+      expect(chip?.getAttribute('aria-label')).toBe('screenshot');
     } finally {
       cleanup(view);
     }
     const empty = renderMd('![](/Users/foo/shot.png)');
     try {
-      expect(
-        empty
-          .querySelector('[class*="imageFallback"]')
-          ?.getAttribute('data-markdown-image-alt'),
-      ).toBe('');
+      const chip = empty.querySelector('[class*="imageFallback"]');
+      expect(chip?.getAttribute('data-markdown-image-alt')).toBe('');
+      expect(chip?.getAttribute('aria-label')).toBe('/Users/foo/shot.png');
     } finally {
       cleanup(empty);
     }
