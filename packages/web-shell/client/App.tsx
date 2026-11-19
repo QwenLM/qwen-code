@@ -23906,6 +23906,7 @@ export function App({
   const artifactPanelSharedProps = {
     onSelectTurnCallsPrompt: openTurnCalls,
     artifacts: artifactPanelArtifacts,
+    sessionArtifacts: artifacts,
     onOpenArtifact: openArtifactPanel,
     tabs: lockedWorkspaceCwd
       ? artifactPanelTabs.filter(

@@ -581,6 +581,7 @@ describe('ArtifactPanel context usage tabs', () => {
 describe('ArtifactPanel artifacts list tab', () => {
   function renderPanel(props: {
     artifacts: readonly DaemonSessionArtifact[];
+    sessionArtifacts?: readonly DaemonSessionArtifact[];
     onOpenArtifact?: (artifactId: string) => void;
     loading?: boolean;
   }) {
@@ -593,6 +594,7 @@ describe('ArtifactPanel artifacts list tab', () => {
         <I18nProvider language="en">
           <ArtifactPanel
             artifacts={props.artifacts}
+            sessionArtifacts={props.sessionArtifacts}
             onOpenArtifact={props.onOpenArtifact}
             loading={props.loading}
             tabs={[
@@ -655,6 +657,23 @@ describe('ArtifactPanel artifacts list tab', () => {
     const tab = container.querySelector('[role="tab"][title="Artifacts"]');
     expect(tab).not.toBeNull();
     expect(tab!.querySelector('.lucide-package')).not.toBeNull();
+  });
+
+  it('lists only the session artifacts, matching the header count, not pane extras', () => {
+    const paneExtra = {
+      ...artifact,
+      id: 'pane-extra',
+      workspacePath: 'pane.html',
+    };
+    const container = renderPanel({
+      artifacts: [artifact, paneExtra],
+      sessionArtifacts: [artifact],
+    });
+    expect(
+      container.querySelectorAll('[data-testid="artifacts-list"] li'),
+    ).toHaveLength(1);
+    expect(container.textContent).toContain('report.md');
+    expect(container.textContent).not.toContain('pane.html');
   });
 });
 

@@ -474,6 +474,12 @@ const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
 interface ArtifactPanelProps {
   contextUsageControls?: Readonly<Record<string, ContextUsageControls>>;
   artifacts: readonly DaemonSessionArtifact[];
+  /**
+   * The session's own artifacts, matching the header count badge. The list tab
+   * renders these rather than the panel-wide merged collection (which also
+   * carries pane/open-time extras used for preview-tab icon lookup).
+   */
+  sessionArtifacts?: readonly DaemonSessionArtifact[];
   /** Open an artifact preview tab from the artifacts list tab. */
   onOpenArtifact?: (artifactId: string) => void;
   tabs: readonly ArtifactPanelTab[];
@@ -719,6 +725,7 @@ function WorkspaceFilesPane({
 export function ArtifactPanel({
   contextUsageControls,
   artifacts,
+  sessionArtifacts,
   onOpenArtifact,
   tabs,
   activeTabId,
@@ -1897,7 +1904,7 @@ export function ArtifactPanel({
         ) : activeTab.kind === 'artifacts' ? (
           <ArtifactsListPanel
             key={activeTab.id}
-            artifacts={artifacts}
+            artifacts={sessionArtifacts ?? artifacts}
             loading={loading}
             onOpenArtifact={onOpenArtifact}
           />
