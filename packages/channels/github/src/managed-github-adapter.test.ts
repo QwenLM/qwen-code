@@ -2967,6 +2967,44 @@ describe('managed GitHub adapter registration-identity isolation', () => {
     await second.adapter.disconnect();
   });
 
+  it('the at-cap carry overflow is logged, never silent (R8)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await first.adapter.connect();
+    seedState(first.adapter, (s) => {
+      const episodes: Record<string, number> = {};
+      for (let i = 0; i < MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT; i++) {
+        episodes[`loaded/repo#${i}`] = 1;
+      }
+      s.watch = { prs: {}, episodes };
+    });
+    await first.adapter.disconnect();
+    seedLegacy(dirname(first.adapter.stateFile), {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: {
+        prs: {},
+        episodes: { 'carried/repo#1': 7, 'carried/repo#2': 8 },
+      },
+    });
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await second.adapter.connect();
+    // No room: both carried counters overflow, and the overflow is logged.
+    expect(
+      lines.some((l) => l.includes('episode carry: 2 counter(s) not carried')),
+    ).toBe(true);
+    const episodes = readState(second.adapter).watch!.episodes!;
+    expect(episodes['carried/repo#1']).toBeUndefined();
+    expect(episodes['loaded/repo#0']).toBe(1);
+    await second.adapter.disconnect();
+  });
+
   it('the carry never lowers a counter below its prs baseline (R7-2)', async () => {
     const cwd = tempCwd();
     const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');

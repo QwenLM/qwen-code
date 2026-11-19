@@ -38,8 +38,9 @@
 - `packages/channels/base/src/managed-channel.ts` —— `destinationKey` 注释：点名 WeCom、DingTalk 与 GitHub 为绑定者；email 仍为后续。
 - `packages/channels/github/src/managed-state.ts` —— 存储构造函数：条目键控目录 + 身份键控账本文件；`load()` 拆臂；`strandedLegacyLedger()`（pending/outbound/`watchPending`/水位/readable）+ `archiveStrandedLegacy()` + `entryWatchEpisodes()`（跨旧账本、键控账本与归档的条目作用域 `Math.max` 合并）。
 - `packages/channels/github/src/managed-github-adapter.ts` —— 传 `destinationKey` 给存储；`connect()` 滞留通知（pending 计数并入 `watchPending`，附排队迁移丢失子句）+ 把条目作用域 episode 合并进加载态 + 延迟归档 + 归档路径日志。
-- `packages/channels/github/src/managed-state.test.ts` —— 更新文件路径期望；加键控、隔离、滞留与损坏旧账本见证；`entryWatchEpisodes()` 净化、归档存活、兄弟 `Math.max` 合并与重新裁剪见证；`watchPending` 计数见证。
-- `packages/channels/github/src/managed-github-adapter.test.ts` —— `fakeControlPlane` 加 `destinationKey`；加目的地/工作区隔离、共享锁与滞留诊断见证；双注册 episode 恢复（episode 6 而非被去重的 1）、回滚后再升级 episode 合并、排队 PR-watch 通知计数见证。
+- `packages/channels/github/src/managed-state.test.ts` —— 更新文件路径期望；加键控、隔离、滞留与损坏旧账本见证；`entryWatchEpisodes()` 净化（含非安全整数）、归档存活、兄弟 `Math.max` 合并（两种读取顺序）、不裁剪的携带来源、仅存 prs 基线的携带、越过不可读来源继续的见证；`watchPending` 计数 + unknown 回执出站见证。
+- `packages/channels/github/src/managed-github-adapter.test.ts` —— `fakeControlPlane` 加 `destinationKey`；加目的地/工作区隔离、共享锁与滞留诊断见证；双注册 episode 恢复（episode 6 而非被去重的 1）、回滚后再升级 episode 合并、排队 PR-watch 通知计数见证，以及非破坏性携带见证（上限处自己的计数保留、有空位才加入被携带计数、基线下限、溢出打日志）。
+- `scripts/run-managed-pr-watch-e2e.mjs` —— `stateFile()` 发现身份键控存活账本（精确 16 进制匹配、旧账本回退）；场景 P3 的替换控制面复用 cp1 端口，使崩溃重启是同一目的地（账本文件按目的地键控），保住幂等重驱动可达。
 - `docs/design/2026-11-16-managed-channel-github-adapter.md`（及中文版）—— 「State and ownership」更新为条目键控目录 + `managed-state-<sha256(destinationKey)[:16]>.json`，注明 `managed-state.json` 为升级前文件、归档为 `.stranded-<uuid>`，并链接本设计文档。
 - `docs/design/2026-11-18-managed-dingtalk-registration-identity.md`（及中文版）—— 修正「GitHub 仅按 name+endpoint 键控、为剩余后续」的过时表述。
 - 本设计文档及其中文版。

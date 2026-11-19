@@ -639,25 +639,21 @@ export class ManagedGithubAdapter {
       if (entryEpisodes) {
         const watch = this.state.watch ?? { prs: {} };
         const episodes: Record<string, number> = { ...(watch.episodes ?? {}) };
-        // R7-2: the seed is `watch.episodes?.[key] ?? previous?.episode ?? 0`,
-        // so a watermark SHADOWS the prs baseline. A carried value must never
-        // sit below that baseline or the next recurrence rewinds to an
-        // already-admitted id. Raise any existing watermark to its baseline.
-        for (const [key, entry] of Object.entries(watch.prs)) {
-          if (entry.episode !== undefined && episodes[key] !== undefined) {
-            episodes[key] = Math.max(episodes[key]!, entry.episode);
-          }
-        }
         // R7-1: the carry is NON-DESTRUCTIVE — persist() writes this map back
         // over the loaded ledger, so evicting the loaded registration's own
         // counters would lose them permanently. Keep every own counter; raise
         // existing ones and add carried ones only while there is room, each
         // floored at the prs baseline so a stale archive can never lower the
-        // effective seed. Iterate sorted so the result is independent of the
-        // directory enumeration order. At the hard bound, overflow carried
-        // counters are bounded-and-accepted (the same tradeoff as the live
-        // watermark eviction): their source files persist and are re-read next
-        // start, but they are NOT promised a slot this start.
+        // effective seed (R7-2: the seed `episodes ?? prs.episode ?? 0` lets a
+        // watermark shadow the baseline; entryWatchEpisodes already carries the
+        // loaded prs baselines, so flooring here is the single guard needed).
+        // Iterate sorted so the result is independent of the directory
+        // enumeration order. At the hard bound, overflow carried counters are
+        // bounded-and-accepted (the same tradeoff as the live watermark
+        // eviction): their source files persist and are re-read next start, but
+        // they are NOT promised a slot this start — and the overflow is logged,
+        // never silent.
+        let overflow = 0;
         for (const key of Object.keys(entryEpisodes).sort()) {
           const baseline = watch.prs[key]?.episode;
           const carried = entryEpisodes[key]!;
@@ -669,7 +665,14 @@ export class ManagedGithubAdapter {
             Object.keys(episodes).length < MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT
           ) {
             episodes[key] = value;
+          } else {
+            overflow += 1;
           }
+        }
+        if (overflow > 0) {
+          this.log(
+            `Managed GitHub episode carry: ${overflow} counter(s) not carried this start (the loaded ledger holds the ${MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT}-counter cap); their sources persist and are re-read next start.`,
+          );
         }
         this.state.watch = { ...watch, episodes };
       }
