@@ -277,6 +277,10 @@ core 邻近面是整面跑而非抽样：`src/managed-runtime` 加 `src/skills/b
 
 关于这次运行的两点精确说明。链运行期间唯一的未提交改动是元测试文件，它不是构建、jar、bundle 或任一条臂的输入——allow 站点修复只动测试，故臂证据覆盖它。而上面那些真实 runner 注入是在链**结束之后**做的、并字节级还原，故没有任一条臂跑在被变异的 runner 上。
 
+core 邻近面在本 head 整面跑而非抽样：`src/managed-runtime` 加 `src/skills/bundled/loop` 为 **88 文件 / 4187 测试全绿**。合并还按消费方而非仅按文件重叠核查过：76 个 incoming 测试文件中无一引用本 PR 所改的面——`package.json` 的唯一命中是未改动的 `test:e2e:managed-loop-skill` 脚本定义——故合并不引入 base/head 测试交互。delta 中每个生产与资产文件都 prettier 净。
+
+**本 head 的 CI：必需检查链上一条继承红，已按实测归因。** 落定为 28 通过 / 2 失败 / 40 跳过，两条失败是同一根因——`Linux unit tests (shard 1/2)` 与由它派生的汇总 job `Test (ubuntu-latest, Node 22.x)`（后者是必需检查）。其余三项必需检查通过。失败是 `packages/cli/src/i18n/mustTranslateKeys.test.ts › covers every English locale key in ru`，`AssertionError: expected [ …(7) ] to deeply equal []`，缺的七个键全是 vision-bridge-timeout 文案。它来自 main 的 `ed8a4045ba`（#17830），该提交经第九次合并成为本 head 的祖先且在 `origin/main` 上；本 delta 触碰 i18n 或 vision 文件 0 个；`packages/cli/src/i18n/locales/ru.js` 与整个 `packages/cli/src/i18n` 目录在本 head 与 `origin/main` 之间逐字节相同；这些键在 `ru.js` 中不存在（0 命中）、在 `en.js` 中存在（2 命中）；且在本 head 本地复现（`1 failed | 21 passed (22)`）。它在 CI 两次重试与本地运行中确定性失败，故按 deflake 约定属真 bug 而非非确定性——不重跑、不稳化。两个开放的上游 PR 恰好改该文件（#17857、#17858），均 MERGEABLE 且在等评审，故此处不重复修复：姿态是等任一落地、合并 main 并复跑，与继承的 `web-templates` 预算红（main 在 #17746 修好）一致。归因评论 `issuecomment-7015384854`。
+
 ## 开放问题
 
 无阻塞项。
