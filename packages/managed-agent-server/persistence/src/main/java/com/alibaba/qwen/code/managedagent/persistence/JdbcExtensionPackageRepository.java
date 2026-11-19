@@ -21,12 +21,14 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.TreeMap;
 
 @org.springframework.stereotype.Repository
@@ -35,6 +37,7 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
     private static final TypeReference<List<String>> KEYS = new TypeReference<>() { };
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
+    private final TransactionTemplate readTransaction;
     private final ObjectMapper json;
     private final SecretProtector secrets;
     public JdbcExtensionPackageRepository(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
@@ -42,6 +45,9 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
             @Qualifier("managedAgentObjectMapper") ObjectMapper json, ObjectProvider<SecretProtector> secrets) {
         this.jdbc = jdbc;
         this.transaction = new TransactionTemplate(manager);
+        this.readTransaction = new TransactionTemplate(manager);
+        this.readTransaction.setReadOnly(true);
+        this.readTransaction.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
         this.json = json;
         this.secrets = secrets.getIfAvailable();
     }
@@ -389,6 +395,24 @@ public class JdbcExtensionPackageRepository implements ExtensionPackageRepositor
                 (row, index) -> decode(row.getString(1), StandaloneSkill.class),
                 packageKey(tenant, workspace, pin.extensionId(), pin.packageRevision()), pin.packageDigest());
         return rows.isEmpty() ? null : rows.getFirst();
+    }
+
+    public Optional<Package> findLatestCatalogPackage(String tenant, String workspace, String extensionId) {
+        return readTransaction.execute(status -> {
+            String scopeKey = scope(tenant, workspace);
+            var ids = jdbc.queryForList("SELECT DISTINCT extension_id FROM ma_extension_package WHERE scope_key = ?"
+                            + " AND state = 'PUBLISHED' AND is_catalog_listed = TRUE LIMIT 257", String.class, scopeKey);
+            if (ids.size() > 256) {
+                throw new ManagedAgentException(409, "extension_catalog_too_large",
+                        "The Workspace extension catalog exceeds 256 extensions.");
+            }
+            return jdbc.query("SELECT package_revision, package_digest, manifest_json, byte_length, source_json"
+                            + " FROM ma_extension_package WHERE scope_key = ? AND extension_id = ?"
+                            + " AND state = 'PUBLISHED' AND is_catalog_listed = TRUE ORDER BY package_revision DESC LIMIT 1",
+                    (row, index) -> new Package(new Pin(extensionId, row.getLong(1), row.getString(2), null),
+                            decode(row.getString(3), Manifest.class), row.getLong(4), decodeSource(row.getString(5))),
+                    scopeKey, extensionId).stream().findFirst();
+        });
     }
 
     public List<Package> list(String tenant, String workspace) {
