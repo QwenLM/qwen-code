@@ -24,7 +24,7 @@ export interface OmniTokenEstimate {
 
 const AUDIO_TOKENS_PER_SECOND = 7;
 /** Pixels per visual token: 32×32 patch, 2 pixels per patch cell. */
-const VISUAL_PIXELS_PER_TOKEN = 32 * 32 * 2;
+export const VISUAL_PIXELS_PER_TOKEN = 32 * 32 * 2;
 
 /** Positive, finite number — rejects 0, negatives, NaN and Infinity. */
 function usable(value: number | undefined): value is number {

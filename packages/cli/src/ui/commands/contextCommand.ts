@@ -42,6 +42,10 @@ import {
   getAutoMemorySnapshot,
   withoutAutoMemorySnapshots,
 } from '@qwen-code/qwen-code-core/memory/request-context.js';
+import {
+  estimatePartChars,
+  TOKEN_TO_CHAR_RATIO,
+} from '@qwen-code/qwen-code-core/services/compactionInputSlimming.js';
 import { t } from '../../i18n/index.js';
 import * as path from 'node:path';
 import { getSanitizedExtensionDisplayName } from '../../utils/extension-mention.js';
@@ -278,8 +282,8 @@ function measureStartupPrelude(prelude: Content[]): StartupPreludeCost {
  * `@google/genai` schema; see `coreToolScheduler.createFunctionResponsePart`),
  * and `JSON.stringify`ing the whole part would bill that raw base64 as ASCII
  * text, greatly inflating the conversation estimate. Nested
- * media is charged at the flat per-image budget core uses for the same carrier
- * (`estimatePartChars` in `compactionInputSlimming`).
+ * media is charged through the same resolution-aware estimator core uses
+ * for the carrier (`estimatePartChars` in `compactionInputSlimming`).
  */
 function estimateFunctionResponseTokens(
   part: Part,
@@ -298,7 +302,9 @@ function estimateFunctionResponseTokens(
   if (Array.isArray(nested)) {
     for (const inner of nested as Part[]) {
       if (inner.inlineData || inner.fileData) {
-        tokens += imageTokenEstimate;
+        tokens += Math.ceil(
+          estimatePartChars(inner, imageTokenEstimate) / TOKEN_TO_CHAR_RATIO,
+        );
       } else if (typeof inner.text === 'string') {
         tokens += estimateContextTextTokens(inner.text);
       }
@@ -350,7 +356,7 @@ interface ConversationBilling {
  * Content estimate of the conversation after the startup prelude. A part whose
  * cost another category already owns is skipped here: tracked skill bodies and
  * tail skill-listing reminders are both billed under `skills`. Top-level media
- * is charged at the same flat per-image budget as the nested carrier: a pasted
+ * is charged through the same resolution-aware estimator as the nested carrier:
  * screenshot is the ordinary shape, and leaving it uncounted would hide it from
  * `freeSpace` and `tierTokens`, which read this estimate.
  */
@@ -367,7 +373,12 @@ function estimateConversationTokens(
         if (billing.billedListingTexts.has(part.text)) continue;
         tokens += estimateContextTextTokens(part.text);
       } else if (part.inlineData || part.fileData) {
-        tokens += billing.imageTokenEstimate;
+        // Same resolution-aware estimator core uses (#17315): derive from
+        // image dimensions when parseable, honor the flat estimate otherwise.
+        tokens += Math.ceil(
+          estimatePartChars(part, billing.imageTokenEstimate) /
+            TOKEN_TO_CHAR_RATIO,
+        );
       } else if (part.functionCall) {
         tokens += estimateContextTextTokens(JSON.stringify(part.functionCall));
       } else if (part.functionResponse) {

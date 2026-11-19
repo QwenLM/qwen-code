@@ -7,7 +7,9 @@
 import type { Content, Part } from '@google/genai';
 import type { ChatCompressionSettings } from '../config/config.js';
 import type { InputModalities } from '../core/contentGenerator.js';
+import { VISUAL_PIXELS_PER_TOKEN } from '../omni/estimation.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { parseImageDimensions } from '../utils/image-dimensions.js';
 
 /**
  * Prepares `historyToCompress` for the side-query summary model by
@@ -205,14 +207,28 @@ function resolveBoolean(
  * `estimateContentChars` and by the slimming module's own budget
  * accounting. Binary parts get a fixed budget (in chars) derived from
  * the configured token estimate; this keeps base64 payloads from
- * skewing compression size estimation or token-budget math.
+ * skewing compression size estimation or token-budget math. Binary parts
+ * carry the configured flat estimate when the header does not parse (or a
+ * `imageTokenFloor` is supplied, as the transport guard does), and the
+ * resolution-derived charge when it does.
  */
 export function estimatePartChars(
   part: Part,
   imageTokenEstimate: number,
+  imageTokenFloor?: number,
 ): number {
   if (part.inlineData || part.fileData) {
-    return imageTokenEstimate * TOKEN_TO_CHAR_RATIO;
+    let tokens = estimateInlineImageTokens(part, imageTokenEstimate);
+    // The transport guard prices kept images at no less than the resolved
+    // flat estimate: the resolution charge can be LOWER than what the
+    // provider actually transports, and under-subtracting there is the
+    // non-retryable 400 this budget exists to prevent (#17321 F2). The
+    // compression estimators pass no floor — for them the resolution
+    // charge is the whole point.
+    if (imageTokenFloor !== undefined) {
+      tokens = Math.max(tokens, imageTokenFloor);
+    }
+    return tokens * TOKEN_TO_CHAR_RATIO;
   }
   if (typeof part.text === 'string') {
     return part.text.length;
@@ -234,7 +250,7 @@ export function estimatePartChars(
     const nested = getFunctionResponseParts(part);
     if (nested) {
       for (const inner of nested) {
-        total += estimatePartChars(inner, imageTokenEstimate);
+        total += estimatePartChars(inner, imageTokenEstimate, imageTokenFloor);
       }
     }
     // Add a small fixed floor for the wrapper metadata (id, name) so a
@@ -259,14 +275,166 @@ export function getFunctionResponseParts(part: Part): Part[] | undefined {
   return Array.isArray(fr?.parts) ? (fr.parts as Part[]) : undefined;
 }
 
+/**
+ * Token estimate for an inline image (#17315): when the
+ * base64 payload carries a parseable image header, charge the patch-grid
+ * formula the omni pipeline already uses (pixels / VISUAL_PIXELS_PER_TOKEN)
+ * so a small screenshot and a 4K diagram stop costing the same flat 1600.
+ * Anything unparseable — other binary kinds, fileData without bytes —
+ * keeps the configured flat estimate.
+ */
+function estimateInlineImageTokens(
+  part: Part,
+  resolvedTokenEstimate: number,
+): number {
+  // An explicitly configured estimate (env `QWEN_IMAGE_TOKEN_ESTIMATE` or
+  // `chatCompression.imageTokenEstimate`) is an override — it must keep
+  // having an effect. Resolution-derived costing runs only when the
+  // resolved value IS the default, so any other number is the user's
+  // deliberate answer (#17321 maintainer call).
+  if (resolvedTokenEstimate !== DEFAULT_IMAGE_TOKEN_ESTIMATE) {
+    return resolvedTokenEstimate;
+  }
+  const inline = part.inlineData;
+  if (!inline?.data || !inline.mimeType?.startsWith('image/')) {
+    return resolvedTokenEstimate;
+  }
+  try {
+    const buffer = Buffer.from(inline.data, 'base64');
+    const bytes = new Uint8Array(
+      buffer.buffer,
+      buffer.byteOffset,
+      buffer.byteLength,
+    );
+    // Animated payloads (multi-frame GIF, animated WebP) bill the flat
+    // estimate until frame counting lands: a 60-frame GIF at the static
+    // formula would be a 27x regression in the unsafe direction
+    // (#17321 maintainer call).
+    if (isPotentiallyAnimated(bytes, inline.mimeType)) {
+      return resolvedTokenEstimate;
+    }
+    const dimensions = parseImageDimensions(bytes);
+    if (!dimensions) return resolvedTokenEstimate;
+    return Math.ceil(
+      (dimensions.width * dimensions.height) / VISUAL_PIXELS_PER_TOKEN,
+    );
+  } catch {
+    return resolvedTokenEstimate;
+  }
+}
+
+/**
+ * Conservative animation check: every GIF (frame counting needs a real
+ * parser), a PNG carrying an acTL chunk (APNG), and a WebP with the VP8X
+ * ANIM flag. Anything else — static PNG/WebP included — continues on the
+ * resolution path. Keyed on magic bytes, never the mime label.
+ */
+function isPotentiallyAnimated(bytes: Uint8Array, mime: string): boolean {
+  // Keyed on magic bytes, not the mime label (#17321 F3): a text file
+  // labeled image/gif must not reach the GIF parser, and a PNG must be
+  // checked for APNG animation chunks regardless of the label.
+  if (isGifBytes(bytes)) {
+    // GIF is always flat: counting image descriptors (0x2C) by byte scan
+    // is wrong in both directions. Frame counting needs a real parser
+    // (#17321 R1-1).
+    return true;
+  }
+  if (isPngBytes(bytes)) {
+    // APNG has an acTL (animation control) chunk before IDAT — a
+    // structural marker, not a heuristic. Without it, a PNG is static
+    // and takes the resolution path (#17321 F1). Metadata chunks before
+    // acTL are legal and unbounded, so the scan covers the whole
+    // pre-IDAT region — a 1 KiB window would miss acTL behind a large
+    // tEXt chunk (#17321 F1 residual).
+    const limit = bytes.length;
+    for (let i = 8; i < limit - 4; i++) {
+      if (
+        bytes[i] === 0x61 &&
+        bytes[i + 1] === 0x63 &&
+        bytes[i + 2] === 0x54 &&
+        bytes[i + 3] === 0x4c // 'acTL'
+      ) {
+        return true;
+      }
+      // Stop at IDAT — acTL must appear before the image data.
+      if (
+        bytes[i] === 0x49 &&
+        bytes[i + 1] === 0x44 &&
+        bytes[i + 2] === 0x41 &&
+        bytes[i + 3] === 0x54 // 'IDAT'
+      ) {
+        return false;
+      }
+    }
+    return false;
+  }
+  if (isWebPBytes(bytes)) {
+    // VP8X flags byte at payload offset 0: bit 1 (value 2) is ANIM —
+    // a real bit in the header, not a heuristic. Keyed on the RIFF/WEBP
+    // magic, not the mime label, so a mislabeled animated WebP is still
+    // billed flat (#17321 F1 residual).
+    if (bytes.length > 20) {
+      const tag = String.fromCharCode(
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
+      );
+      if (tag === 'VP8X') {
+        return (bytes[20] & 0x02) !== 0;
+      }
+    }
+    return false;
+  }
+  // Mime-level fallback for formats without magic-byte checks above.
+  return mime === 'image/gif';
+}
+
+function isGifBytes(b: Uint8Array): boolean {
+  return (
+    b.length > 6 &&
+    b[0] === 0x47 &&
+    b[1] === 0x49 &&
+    b[2] === 0x46 && // 'GIF'
+    b[3] === 0x38 && // '8'
+    (b[4] === 0x37 || b[4] === 0x39) && // '7' or '9'
+    b[5] === 0x61 // 'a'
+  );
+}
+
+function isPngBytes(b: Uint8Array): boolean {
+  return (
+    b.length > 8 &&
+    b[0] === 0x89 &&
+    b[1] === 0x50 &&
+    b[2] === 0x4e &&
+    b[3] === 0x47 // PNG sig
+  );
+}
+
+function isWebPBytes(b: Uint8Array): boolean {
+  return (
+    b.length > 12 &&
+    b[0] === 0x52 &&
+    b[1] === 0x49 &&
+    b[2] === 0x46 &&
+    b[3] === 0x46 && // 'RIFF'
+    b[8] === 0x57 &&
+    b[9] === 0x45 &&
+    b[10] === 0x42 &&
+    b[11] === 0x50 // 'WEBP'
+  );
+}
+
 export function estimateContentChars(
   content: Content,
   imageTokenEstimate: number,
+  imageTokenFloor?: number,
 ): number {
   if (!content.parts) return 0;
   let total = 0;
   for (const part of content.parts) {
-    total += estimatePartChars(part, imageTokenEstimate);
+    total += estimatePartChars(part, imageTokenEstimate, imageTokenFloor);
   }
   return total;
 }
