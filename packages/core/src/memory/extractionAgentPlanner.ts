@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { realpathSync } from 'node:fs';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
@@ -22,7 +23,7 @@ import {
   getAutoMemoryRoot,
   getUserAutoMemoryRoot,
 } from './paths.js';
-import type { AutoMemoryType } from './types.js';
+import { AUTO_MEMORY_TYPES, type AutoMemoryType } from './types.js';
 import {
   scanAutoMemoryTopicDocuments,
   scanUserAutoMemoryTopicDocuments,
@@ -30,7 +31,10 @@ import {
 } from './structured-scan.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
-import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
+import {
+  createMemoryScopedAgentConfig,
+  isManagedMemoryIndexPath,
+} from './memory-scoped-agent-config.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
 import {
   formatDateForContext,
@@ -47,7 +51,7 @@ const EXTRACTION_AGENT_SYSTEM_PROMPT = [
   'The recent conversation history is already in your context. Analyze only that recent conversation and use it to update persistent managed memory.',
   '',
   'Rules:',
-  '- Read existing memory files first to avoid creating duplicates.',
+  '- Check the existing memory list for duplicates and read candidate files before updating them.',
   '- When editing an existing memory file, preserve its existing emphasis delimiter style (`_text_` or `*text*`); do not mix styles for italic emphasis within a file. For new files, follow the format reference and keep emphasis style consistent within each file.',
   '- Keep a blank line before and after lists.',
   '- Extract only durable facts stated by the user.',
@@ -84,6 +88,7 @@ export interface AutoMemoryExtractionExecutionResult {
   systemMessage?: string;
   hasToolActivity: boolean;
   extractorEngaged?: boolean;
+  failure?: { error: unknown; reconcileAll?: boolean };
 }
 
 /**
@@ -212,15 +217,14 @@ function buildTaskPrompt(
     '- You have a limited turn budget. `edit` requires a prior `read_file` of the same file, so the efficient strategy is: first issue all reads in parallel for every file you might update; then issue all `write_file`/`edit` calls in parallel. Do not interleave reads and writes across multiple turns.',
     '- You MUST only use content from the recent conversation history in your context plus the current managed memory files.',
     '- Do not inspect repository code, git history, or unrelated files.',
-    `- Treat files under the top-level \`${AUTO_MEMORY_PINNED_DIRNAME}/\` directory in either managed memory root as protected read-only records. You may read them to avoid duplicates, but never modify, overwrite, rename, merge into, or delete them, and do not intentionally remove their valid entries from \`${AUTO_MEMORY_INDEX_FILENAME}\`.`,
+    `- Treat files under the top-level \`${AUTO_MEMORY_PINNED_DIRNAME}/\` directory in either managed memory root as protected read-only records. You may read them to avoid duplicates, but never modify, overwrite, rename, merge into, or delete them.`,
     '- Prefer updating an existing writable memory file over creating a duplicate. Check both directories for an existing entry before creating a new one.',
     '- Keep one durable memory per file under `user/`, `feedback/`, `project/`, or `reference/` inside the chosen directory.',
     '',
     '## How to save memories',
     '',
-    '**Step 1** — write or update the memory file itself, in the directory chosen by the type `<scope>`, using the required frontmatter format.',
-    `**Step 2** — update the \`${AUTO_MEMORY_INDEX_FILENAME}\` in the SAME directory where you wrote the file (\`${userMemoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\` for USER memory, \`${projectMemoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\` for PROJECT memory). The index is one line per entry: \`- [Title](relative/path.md) — one-line hook\`. Never write memory content directly into the index.`,
-    '- If you create or delete a memory file, also update the managed memory index in the SAME directory.',
+    'Write or update the topic files in the directory chosen by each type `<scope>`, using the required frontmatter format. Finish after the topic writes.',
+    `The runtime regenerates \`${AUTO_MEMORY_INDEX_FILENAME}\` after your writes. Do not edit or write either root index. Read it only if needed for deduplication.`,
     '- If nothing durable should be saved, make no file changes.',
     '',
     '## Existing memory files (across both directories)',
@@ -239,64 +243,60 @@ function buildTaskPrompt(
 function touchedTopicsFromFilePaths(
   filePaths: string[],
   projectRoot: string,
+  writesOnly = false,
 ): {
   topics: AutoMemoryType[];
   touchedProjectScope: boolean;
   touchedUserScope: boolean;
 } {
-  // Use startsWith against the directly-retrieved roots (rather than the
-  // isAutoMemPath helper, which calls into paths.ts internals and would
-  // bypass module-level mocks in extractionAgentPlanner.test.ts). This
-  // also keeps the routing decision symmetric across both scopes.
-  const projectRootDir = getAutoMemoryRoot(projectRoot);
-  const userRootDir = getUserAutoMemoryRoot();
-  // Canonicalize separators to `/` on BOTH sides before the prefix check.
-  // On Windows the roots are backslash-native (`C:\Users\foo\...\memory`)
-  // while filesTouched (populated from raw model tool-call arguments)
-  // commonly comes back forward-slash-normalized — `startsWith` against
-  // the raw roots would miss those writes entirely. Also guards against
-  // the inverse direction and the historical `/foo/memory` vs
-  // `/foo/memory-other/...` collision: the character after the root must
-  // be `/` so files inside (never AT) the root match exactly one prefix.
-  const canon = (s: string): string => s.replace(/\\/g, '/');
-  const isUnderRoot = (canonP: string, canonRoot: string): boolean => {
-    if (!canonP.startsWith(canonRoot)) return false;
-    return canonP.charAt(canonRoot.length) === '/';
+  // Receipts contain the tool argument. Resolve aliases to the actual store,
+  // then normalize both separator styles for Windows tool calls.
+  const canon = (value: string): string => value.replace(/\\/g, '/');
+  const realPath = (value: string): string => {
+    try {
+      return canon(realpathSync(value));
+    } catch {
+      return canon(value);
+    }
   };
-  const canonProject = canon(projectRootDir);
-  const canonUser = canon(userRootDir);
+  const roots = [
+    { scope: 'project', path: getAutoMemoryRoot(projectRoot) },
+    { scope: 'user', path: getUserAutoMemoryRoot() },
+  ].map(({ scope, path }) => ({
+    scope,
+    literal: canon(path),
+    resolved: realPath(path),
+  }));
   const topicSet = new Set<AutoMemoryType>();
-  let touchedProjectScope = false;
-  let touchedUserScope = false;
+  const touchedScopes = new Set<string>();
 
-  for (const p of filePaths) {
-    const canonP = canon(p);
-    let canonRoot: string | undefined;
-    if (isUnderRoot(canonP, canonProject)) {
-      canonRoot = canonProject;
-      touchedProjectScope = true;
-    } else if (isUnderRoot(canonP, canonUser)) {
-      canonRoot = canonUser;
-      touchedUserScope = true;
-    } else {
+  for (const filePath of filePaths) {
+    const resolved = realPath(filePath);
+    const literal = canon(filePath);
+    const resolvedRoot = roots.find((root) =>
+      resolved.startsWith(root.resolved + '/'),
+    );
+    const root =
+      resolvedRoot ??
+      roots.find((root) => literal.startsWith(root.literal + '/'));
+    if (!root) continue;
+    const rel = resolvedRoot
+      ? resolved.slice(root.resolved.length + 1)
+      : literal.slice(root.literal.length + 1);
+    if (
+      writesOnly &&
+      (rel === AUTO_MEMORY_INDEX_FILENAME || !rel.endsWith('.md'))
+    ) {
       continue;
     }
-    // +1 to also strip the `/` we just checked for.
-    const rel = canonP.slice(canonRoot.length + 1);
+    touchedScopes.add(root.scope);
     const segment = rel.split('/')[0] as AutoMemoryType;
-    if (
-      segment === 'user' ||
-      segment === 'feedback' ||
-      segment === 'project' ||
-      segment === 'reference'
-    ) {
-      topicSet.add(segment);
-    }
+    if (AUTO_MEMORY_TYPES.includes(segment)) topicSet.add(segment);
   }
   return {
     topics: [...topicSet],
-    touchedProjectScope,
-    touchedUserScope,
+    touchedProjectScope: touchedScopes.has('project'),
+    touchedUserScope: touchedScopes.has('user'),
   };
 }
 
@@ -421,6 +421,7 @@ export async function runAutoMemoryExtractionByAgent(
   const userMemoryRoot = getUserAutoMemoryRoot();
   const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {
     protectPinnedMemory: true,
+    protectMemoryIndexes: true,
     // Same read confinement the two sibling memory agents pass for this
     // read-only-memory job (remember.ts, user-dream-agent-planner.ts). The task
     // prompt already forbids inspecting repository code; without this the
@@ -452,32 +453,49 @@ export async function runAutoMemoryExtractionByAgent(
     ],
     extraHistory,
     abortSignal,
-  });
+  }).catch((error: unknown) => ({ status: 'rejected' as const, error }));
 
-  if (result.status !== 'completed') {
-    // No cancelled arm: this planner passes no abortSignal, so
-    // runForkedAgent cannot resolve 'cancelled' here.
-    throw new Error(
-      terminateReasonMessage(
-        result.terminateReason,
-        'Extraction agent did not complete successfully',
-      ),
-    );
+  if (result.status === 'rejected') {
+    // A thrown fork does not return receipts, including when it rejects after
+    // a write. The caller can still reconcile both stores from disk.
+    return {
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      hasToolActivity: false,
+      failure: { error: result.error, reconcileAll: true },
+    };
   }
 
   const { topics, touchedProjectScope, touchedUserScope } =
-    touchedTopicsFromFilePaths(result.filesWritten ?? [], projectRoot);
+    touchedTopicsFromFilePaths(result.filesWritten ?? [], projectRoot, true);
   const accessed = touchedTopicsFromFilePaths(
     [...(result.filesRead ?? []), ...(result.filesWritten ?? [])],
     projectRoot,
   );
+  const extractorEngaged =
+    accessed.touchedProjectScope || accessed.touchedUserScope;
 
   return {
     touchedTopics: topics,
     touchedProjectScope,
     touchedUserScope,
-    hasToolActivity: result.filesTouched.length > 0,
-    extractorEngaged: accessed.touchedProjectScope || accessed.touchedUserScope,
+    ...(result.status !== 'completed' && {
+      failure: {
+        error: new Error(
+          terminateReasonMessage(
+            result.terminateReason,
+            'Extraction agent did not complete successfully',
+          ),
+        ),
+      },
+    }),
+    hasToolActivity:
+      extractorEngaged ||
+      result.filesTouched.some(
+        (filePath) => !isManagedMemoryIndexPath(filePath, projectRoot),
+      ),
+    extractorEngaged,
     systemMessage:
       topics.length > 0
         ? `Managed auto-memory updated: ${topics.map((t) => `${t}.md`).join(', ')}`

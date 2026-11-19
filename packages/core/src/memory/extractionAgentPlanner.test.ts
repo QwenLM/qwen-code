@@ -110,7 +110,7 @@ describe('runAutoMemoryExtractionByAgent', () => {
     ]);
   });
 
-  it('derives touchedTopics from filesTouched and returns systemMessage', async () => {
+  it('derives touchedTopics from write receipts and returns systemMessage', async () => {
     const result = await extract(['/tmp/auto-memory/user/prefs.md']);
 
     expect(result).toEqual({
@@ -821,8 +821,19 @@ describe('runAutoMemoryExtractionByAgent', () => {
       'Prefer updating an existing writable memory file',
     );
     expect(call?.taskPrompt).toContain(
-      'do not intentionally remove their valid entries from `MEMORY.md`',
+      'The runtime regenerates `MEMORY.md` after your writes.',
     );
+  });
+
+  it('passes index protection only for the extraction agent', async () => {
+    await extract([]);
+    const permissionManager = forkedCall()?.config.getPermissionManager?.();
+    await expect(
+      permissionManager!.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: '/tmp/user-memory/MEMORY.md',
+      }),
+    ).resolves.toBe('deny');
   });
 
   it('does not advertise unregistered tools to the extraction agent', async () => {
@@ -847,30 +858,65 @@ describe('runAutoMemoryExtractionByAgent', () => {
     ).rejects.toThrow('no cache-safe params');
   });
 
-  it('throws when the agent fails to complete', async () => {
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'failed',
-      terminateReason: 'timeout',
-      filesTouched: [],
-    });
-
-    await expect(
-      runAutoMemoryExtractionByAgent(mockConfig, '/tmp/project'),
-    ).rejects.toThrow('timeout');
-  });
-
-  it('words the stop reason instead of passing the mode token through', async () => {
-    // The case above feeds a free-form reason, which passes through by
-    // design, so only this one fails if the conversion is reverted.
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'failed',
+  it.each([
+    {
+      status: 'failed' as const,
       terminateReason: 'MAX_TURNS',
-      filesTouched: [],
-    });
+      message: 'Agent stopped: maximum turns reached.',
+    },
+    {
+      status: 'cancelled' as const,
+      terminateReason: 'CANCELLED',
+      message: 'Extraction agent did not complete successfully',
+    },
+  ])(
+    'returns successful body writes when the fork is $status',
+    async ({ status, terminateReason, message }) => {
+      vi.mocked(runForkedAgent).mockResolvedValue({
+        status,
+        terminateReason,
+        filesTouched: [
+          '/tmp/auto-memory/project/arch.md',
+          '/tmp/user-memory/feedback/prefs.md',
+        ],
+        filesWritten: ['/tmp/auto-memory/project/arch.md'],
+      });
 
-    await expect(
-      runAutoMemoryExtractionByAgent(mockConfig, '/tmp/project'),
-    ).rejects.toThrow('Agent stopped: maximum turns reached.');
+      const result = await runAutoMemoryExtractionByAgent(
+        mockConfig,
+        '/tmp/project',
+      );
+      expectScopes(result, ['project'], { project: true, user: false });
+      expect(result.failure?.error).toEqual(new Error(message));
+    },
+  );
+
+  it.each([false, true])(
+    'counts an index-only run as progress only with a successful read (%s)',
+    async (readIndex) => {
+      const index = '/tmp/auto-memory/MEMORY.md';
+      vi.mocked(runForkedAgent).mockResolvedValue({
+        status: 'completed',
+        filesTouched: [index],
+        filesRead: readIndex ? [index] : [],
+        filesWritten: [],
+      });
+
+      const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+      expect(result.hasToolActivity).toBe(readIndex);
+      expect(result.touchedTopics).toEqual([]);
+    },
+  );
+
+  it('requests full reconciliation if the fork rejects without receipts', async () => {
+    const error = new Error('model stream interrupted');
+    vi.mocked(runForkedAgent).mockRejectedValue(error);
+
+    const result = await runAutoMemoryExtractionByAgent(
+      mockConfig,
+      '/tmp/project',
+    );
+    expect(result.failure).toEqual({ error, reconcileAll: true });
   });
 
   it('ignores non-memory file paths in filesTouched', async () => {
