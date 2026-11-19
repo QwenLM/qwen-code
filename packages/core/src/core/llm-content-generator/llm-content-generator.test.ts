@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { LlmContentGenerator } from './llm-content-generator.js';
+import { observeRequestDispatch } from '../loggingContentGenerator/request-dispatch.js';
 import { GoogleGenAI } from '@google/genai';
 import type { GenerateContentConfig, Part } from '@google/genai';
 import type { Config } from '../../config/config.js';
@@ -356,6 +357,22 @@ describe('LlmContentGenerator', () => {
     expect(mockReportLlmChunk).toHaveBeenCalledWith(telemetryAttempt, {
       responseId: '1',
     });
+  });
+
+  it('reports the request dispatch before the SDK call', async () => {
+    mockGoogleGenAI.models.generateContentStream.mockResolvedValue(
+      streamOf({ responseId: '1' }),
+    );
+    const onDispatch = vi.fn();
+
+    await observeRequestDispatch(onDispatch, () =>
+      generator.generateContentStream(flashReq(), 'prompt-id'),
+    );
+
+    expect(onDispatch).toHaveBeenCalledTimes(1);
+    expect(onDispatch.mock.invocationCallOrder[0]).toBeLessThan(
+      mockGoogleGenAI.models.generateContentStream.mock.invocationCallOrder[0],
+    );
   });
 
   it('forwards stream return without pre-consuming the SDK stream', async () => {

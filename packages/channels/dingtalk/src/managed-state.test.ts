@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  MANAGED_CARD_PROGRESS_LIMIT,
   MANAGED_DINGTALK_PENDING_LIMIT,
   ManagedDingtalkStateStore,
   RECENT_LIMIT,
@@ -265,6 +266,67 @@ describe('validManagedDingtalkState', () => {
           Array.from({ length: WEBHOOK_LIMIT + 1 }, (_, i) => [
             `conv-${i}`,
             `https://example.invalid/hook-${i}`,
+          ]),
+        ),
+      }),
+    ).toBe(false);
+  });
+
+  it('accepts a state without cards (backward compatibility) and a valid card map', () => {
+    expect(validManagedDingtalkState(baseState())).toBe(true);
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        cards: {
+          'd-1': { outTrackId: 'qwen-managed-x', body: 'hello', mode: 'card' },
+          'd-2': { outTrackId: 'qwen-managed-y', body: '', mode: 'text' },
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a bad card map', () => {
+    const entry = { outTrackId: 'qwen-managed-x', body: 'b', mode: 'card' };
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        cards: [] as unknown as Record<string, typeof entry>,
+      }),
+    ).toBe(false);
+    expect(
+      validManagedDingtalkState({ ...baseState(), cards: { '': entry } }),
+    ).toBe(false);
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        cards: { 'd-1': { ...entry, outTrackId: '' } },
+      }),
+    ).toBe(false);
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        cards: { 'd-1': { ...entry, body: 5 as unknown as string } },
+      }),
+    ).toBe(false);
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        cards: { 'd-1': { ...entry, mode: 'stream' as 'card' } },
+      }),
+    ).toBe(false);
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        cards: { 'd-1': null as unknown as typeof entry },
+      }),
+    ).toBe(false);
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        cards: Object.fromEntries(
+          Array.from({ length: MANAGED_CARD_PROGRESS_LIMIT + 1 }, (_, i) => [
+            `d-${i}`,
+            entry,
           ]),
         ),
       }),
