@@ -234,6 +234,11 @@ describe('localizeToolDisplayName', () => {
           !KEEP_ENGLISH.has(name) && localizeToolDisplayName(name) === name,
       );
       expect(untranslated).toEqual([]);
+
+      const badges = Object.values(ToolDisplayNames)
+        .filter((name) => !KEEP_ENGLISH.has(name))
+        .map((name) => localizeToolDisplayName(name));
+      expect(new Set(badges).size).toBe(badges.length);
     },
   );
 

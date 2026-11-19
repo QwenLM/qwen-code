@@ -6,6 +6,7 @@ import { FILES_MESSAGES_EN } from './components/artifacts/files-messages';
 import { LIVE_MESSAGES_EN } from './live/messages';
 import { COLLAB_MESSAGES_EN } from './components/workspace-agents/messages';
 import { AR_INTERACTIVE_MESSAGES } from './i18n/ar-interactive';
+import { AR_TRANSCRIPT_MESSAGES } from './i18n/ar-transcript';
 
 const DIST_DIR = resolve(__dirname, '../dist');
 const DIST_PATH = resolve(DIST_DIR, 'index.js');
@@ -662,6 +663,12 @@ describe('build artifact — transcript entry (#11031)', () => {
       '',
     );
     const interactive = readPackageJavascript();
+    // Transcript-reachable Arabic must survive the split: stubbing
+    // ar-transcript.ts would strip the exported document's UI copy while
+    // the absence assertions below still pass.
+    expect(transcript).toContain(
+      AR_TRANSCRIPT_MESSAGES['subscription.loginRequired'],
+    );
     expect(Object.keys(AR_INTERACTIVE_MESSAGES).length).toBeGreaterThan(500);
     for (const key of [
       'subscription.entryDescription',

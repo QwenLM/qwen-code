@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type TranslationValue = string | string[];
+export type TranslationValue =
+  | string
+  | string[]
+  | ((params?: Record<string, string>) => string);
 export type TranslationDict = Record<string, TranslationValue>;
 
 export function getTranslationModuleExport(

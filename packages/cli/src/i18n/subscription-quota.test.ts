@@ -31,7 +31,7 @@ describe('subscription quota i18n', () => {
     ],
     [
       'ar',
-      'لقد استنفدت رصيدك الأسبوعي ومن المتوقع إعادة تعيين رصيدك خلال يوم واحد و2 ساعات. يمكنك الانتظار أو تشغيل /upgrade للحصول على رصيد إضافي.',
+      'لقد استنفدت رصيدك الأسبوعي ومن المتوقع إعادة تعيين رصيدك خلال يوم واحد وساعتين. يمكنك الانتظار أو تشغيل /upgrade للحصول على رصيد إضافي.',
     ],
   ])(
     'uses the %s catalog for the complete notice',
@@ -63,7 +63,7 @@ describe('subscription quota i18n', () => {
     [
       'ar',
       'ساعة واحدة',
-      '2 أيام وساعة واحدة',
+      'يومين وساعة واحدة',
       'لقد استنفدت رصيدك. يُرجى المحاولة مرة أخرى بعد إعادة التعيين.',
     ],
   ])(
@@ -92,4 +92,16 @@ describe('subscription quota i18n', () => {
       ).toBe(fallback);
     },
   );
+
+  it('inflects Arabic quota counts through the CLDR plural forms', async () => {
+    await initializeI18n('ar');
+    expect(t('{{count}} days', { count: '2' })).toBe('يومين');
+    expect(t('{{count}} hours', { count: '2' })).toBe('ساعتين');
+    expect(t('{{count}} days', { count: '3' })).toBe('3 أيام');
+    expect(t('{{count}} hours', { count: '10' })).toBe('10 ساعات');
+    expect(t('{{count}} days', { count: '11' })).toBe('11 يوماً');
+    expect(t('{{count}} hours', { count: '99' })).toBe('99 ساعة');
+    expect(t('{{count}} days', { count: '100' })).toBe('100 يوم');
+    expect(t('{{count}} hours', { count: '100' })).toBe('100 ساعة');
+  });
 });

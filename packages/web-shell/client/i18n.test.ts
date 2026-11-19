@@ -773,11 +773,18 @@ describe('web-shell ru locale', () => {
   it('lists every shipped language in the /language error and usage copy', () => {
     // The /language gate, help and completions derive from WEB_SHELL_LANGUAGES;
     // the error/usage copy must carry the same set, in every locale.
+    const en = getTranslator('en');
     for (const language of WEB_SHELL_LANGUAGES) {
       const t = getTranslator(language);
       expect(t('language.invalid')).toContain('en, zh-CN, zh-TW, ru, ar');
       expect(t('language.usage')).toContain('en|zh-CN|zh-TW|ru|ar');
       expect(t('language.usage')).toContain('[--project|--global]');
+      if (language !== 'en') {
+        // The EN copy derives from the same list, so containment alone is
+        // satisfied by the fallback; each locale must carry its own copy.
+        expect(t('language.invalid')).not.toBe(en('language.invalid'));
+        expect(t('language.usage')).not.toBe(en('language.usage'));
+      }
     }
   });
 
@@ -847,6 +854,18 @@ describe('web-shell ru locale', () => {
     expect(t('goal.tokensOfBudget', { used: 10, budget: 20 })).toBe(
       '10 / 20 رمز',
     );
+  });
+
+  it('labels the cached-token figure with the cache term, not the timer', () => {
+    const t = getTranslator('ar');
+    expect(
+      t('tokenUsage.bar.detailTokens', {
+        total: 9,
+        input: 5,
+        cached: 3,
+        output: 4,
+      }),
+    ).toBe('الإجمالي 9 · الإدخال 5 (الذاكرة المؤقتة 3) · الإخراج 4');
   });
 
   it('localizes activity grouping options in Russian', () => {

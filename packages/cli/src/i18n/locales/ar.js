@@ -6,6 +6,23 @@
 
 // Arabic translations for Qwen Code CLI
 
+// CLDR Arabic cardinal forms. The quota notice interpolates these after
+// خلال, a genitive slot, so the dual is يومين/ساعتين — the same forms the
+// Web Shell catalog uses for the same sentence.
+function arPlural(count, zero, one, two, few, many, other) {
+  const value = Number(count);
+  if (!Number.isFinite(value)) return other;
+  if (value === 0) return zero;
+  if (value === 1) return one;
+  if (value === 2) return two;
+  const mod100 = value % 100;
+  if (Number.isInteger(value)) {
+    if (mod100 >= 3 && mod100 <= 10) return few;
+    if (mod100 >= 11 && mod100 <= 99) return many;
+  }
+  return other;
+}
+
 export default {
   "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
     'لقد استنفدت رصيدك الأسبوعي{{reset}}. يمكنك الانتظار أو تشغيل /upgrade للحصول على رصيد إضافي.',
@@ -17,9 +34,31 @@ export default {
     ' ومن المتوقع إعادة تعيين رصيدك خلال {{time}}',
   '{{days}} and {{hours}}': '{{days}} و{{hours}}',
   '1 day': 'يوم واحد',
-  '{{count}} days': '{{count}} أيام',
+  '{{count}} days': (params) => {
+    const c = params?.count ?? '0';
+    return arPlural(
+      c,
+      '0 أيام',
+      'يوم واحد',
+      'يومين',
+      `${c} أيام`,
+      `${c} يوماً`,
+      `${c} يوم`,
+    );
+  },
   '1 hour': 'ساعة واحدة',
-  '{{count}} hours': '{{count}} ساعات',
+  '{{count}} hours': (params) => {
+    const c = params?.count ?? '0';
+    return arPlural(
+      c,
+      '0 ساعات',
+      'ساعة واحدة',
+      'ساعتين',
+      `${c} ساعات`,
+      `${c} ساعة`,
+      `${c} ساعة`,
+    );
+  },
   Retry: 'إعادة المحاولة',
   'Connecting…': 'جارٍ الاتصال…',
   'Loading models from provider…': 'جارٍ تحميل النماذج من المزوّد…',
@@ -232,7 +271,7 @@ export default {
   'toolDisplayName.ListAgents': 'سرد الوكلاء',
   'toolDisplayName.TaskCreate': 'إنشاء مهمة',
   'toolDisplayName.TaskUpdate': 'تحديث مهمة',
-  'toolDisplayName.TaskList': 'قائمة المهام',
+  'toolDisplayName.TaskList': 'قائمة الأعمال',
   'toolDisplayName.TaskStop': 'إيقاف مهمة',
   'toolDisplayName.TeamCreate': 'إنشاء فريق',
   'toolDisplayName.TeamDelete': 'حذف فريق',

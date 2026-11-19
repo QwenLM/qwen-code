@@ -277,5 +277,5 @@ export const TOKEN_USAGE_MESSAGES_AR: Record<string, TokenUsageMessage> = {
   'tokenUsage.bar.tokens': (v) => `${v?.count ?? 0} رمز`,
   'tokenUsage.bar.cacheHit': (v) => `إصابة التخزين المؤقت ${v?.percent ?? 0}%`,
   'tokenUsage.bar.detailTokens': (v) =>
-    `الإجمالي ${v?.total ?? 0} · الإدخال ${v?.input ?? 0} (المؤقت ${v?.cached ?? 0}) · الإخراج ${v?.output ?? 0}`,
+    `الإجمالي ${v?.total ?? 0} · الإدخال ${v?.input ?? 0} (الذاكرة المؤقتة ${v?.cached ?? 0}) · الإخراج ${v?.output ?? 0}`,
 };

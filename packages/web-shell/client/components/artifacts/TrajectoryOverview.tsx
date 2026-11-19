@@ -279,7 +279,7 @@ export function TrajectoryOverview({
   onRangeChange,
   onModeChange,
 }: TrajectoryOverviewProps) {
-  const { t, language } = useI18n();
+  const { t, language, isRtl } = useI18n();
   const clock = model?.mode === 'clock';
   // What the status line says after the reader's last action. A switch of
   // mode lays the axis out afresh and drops any zoom, so it is the switch that
@@ -315,11 +315,19 @@ export function TrajectoryOverview({
   );
 
   /** Where along the track a pointer is, clamped to the track's ends. */
-  const fractionAt = useCallback((clientX: number): number => {
-    const rect = plotRef.current?.getBoundingClientRect();
-    if (!rect || rect.width <= 0) return 0;
-    return clamp01((clientX - rect.left) / rect.width);
-  }, []);
+  const fractionAt = useCallback(
+    (clientX: number): number => {
+      const rect = plotRef.current?.getBoundingClientRect();
+      if (!rect || rect.width <= 0) return 0;
+      // The axis zero sits at the inline start: the right edge under RTL.
+      return clamp01(
+        isRtl
+          ? (rect.right - clientX) / rect.width
+          : (clientX - rect.left) / rect.width,
+      );
+    },
+    [isRtl],
+  );
 
   /** The domain point under a pointer, through the current viewport. */
   const msAt = useCallback(
@@ -386,7 +394,9 @@ export function TrajectoryOverview({
       if (Math.abs(dx) > Math.abs(dy)) {
         // A sideways swipe on a trackpad pans, once there is anywhere to go.
         const { start, length } = currentView();
-        changed = width > 0 && panBy(start, length, (dx / width) * length);
+        changed =
+          width > 0 &&
+          panBy(start, length, ((isRtl ? -dx : dx) / width) * length);
       } else if (dy !== 0) {
         const fraction = fractionAt(event.clientX);
         changed = zoomBy(
@@ -399,7 +409,7 @@ export function TrajectoryOverview({
     };
     plot.addEventListener('wheel', onWheel, { passive: false });
     return () => plot.removeEventListener('wheel', onWheel);
-  }, [hasModel, currentView, fractionAt, msAt, panBy, zoomBy]);
+  }, [hasModel, currentView, fractionAt, isRtl, msAt, panBy, zoomBy]);
 
   // A row selected in the table, or from the keyboard, may be one the zoomed
   // strip is not showing. Its span is the strip's only record of where that
@@ -470,10 +480,14 @@ export function TrajectoryOverview({
       // Below the drag threshold a right press is still a click.
       if (!pan.panned && Math.abs(dx) < DRAG_THRESHOLD_PX) return;
       const width = plotRef.current?.getBoundingClientRect().width ?? 0;
-      // Dragging right brings earlier time into view.
+      // Dragging toward the inline end brings earlier time into view.
       if (
         width > 0 &&
-        panBy(pan.start, pan.length, (-dx / width) * pan.length) &&
+        panBy(
+          pan.start,
+          pan.length,
+          ((isRtl ? dx : -dx) / width) * pan.length,
+        ) &&
         !pan.panned
       ) {
         pan.panned = true;
@@ -551,7 +565,7 @@ export function TrajectoryOverview({
   // measured at a third of the frame time with a thousand spans. These
   // resolve against the fixed-width track, so rounding them is harmless.
   const domainStyle: CSSProperties = {
-    left: percent(vLength > 0 ? -(vStart / vLength) * 100 : 0),
+    insetInlineStart: percent(vLength > 0 ? -(vStart / vLength) * 100 : 0),
     width: percent(vLength > 0 ? (total / vLength) * 100 : 100),
   };
   const pointAt = (ms: number, windowMs: number): string =>

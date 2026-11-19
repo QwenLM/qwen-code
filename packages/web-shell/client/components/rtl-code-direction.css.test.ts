@@ -21,6 +21,14 @@ const LTR_CODE_SURFACES: Array<[string, string]> = [
   ['./messages/tools/ToolChrome.module.css', '.payloadText'],
   ['./messages/TasksStatusMessage.module.css', '.shellOutput'],
   ['./dialogs/GitDiffDialog.module.css', '.diffLine'],
+  [
+    './artifacts/ArtifactPanel.module.css',
+    '.codeMirrorDiff :global(.cm-editor)',
+  ],
+  [
+    './artifacts/ArtifactPanel.module.css',
+    '.codeMirrorFile :global(.cm-editor)',
+  ],
 ];
 
 function directions(file: string, selector: string): string[] {

@@ -888,6 +888,7 @@
 }
 
 .codeMirrorDiff :global(.cm-editor) {
+  direction: ltr;
   font-size: 12px;
   background: var(--background);
   color: var(--foreground);
@@ -1230,6 +1231,7 @@ button.treeRow:hover {
 }
 
 .codeMirrorFile :global(.cm-editor) {
+  direction: ltr;
   height: 100%;
   font-size: 12px;
   background: var(--background);

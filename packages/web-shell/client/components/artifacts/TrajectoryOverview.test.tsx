@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { I18nProvider } from '../../i18n';
+import { I18nProvider, type WebShellLanguage } from '../../i18n';
 import {
   TrajectoryOverview,
   exactPercent,
@@ -16,6 +16,7 @@ import {
   formatWindowTime,
   type TrajectoryOverviewProps,
 } from './TrajectoryOverview';
+import { TrajectoryWaterfallCell } from './TrajectoryWaterfallCell';
 import type {
   TimelineModel,
   TimelineSpan,
@@ -40,13 +41,16 @@ afterEach(() => {
 /** Render the last mounted overview again with new props, same root. */
 let rerender: (props: Partial<TrajectoryOverviewProps>) => void = () => {};
 
-function render(props: Partial<TrajectoryOverviewProps>): HTMLElement {
+function render(
+  props: Partial<TrajectoryOverviewProps>,
+  language: WebShellLanguage = 'en',
+): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   mounted.push({ root, container });
-  rerender = (next) => draw(root, next);
-  draw(root, props);
+  rerender = (next) => draw(root, next, language);
+  draw(root, props, language);
   return container;
 }
 
@@ -65,10 +69,14 @@ function ControlledOverview(props: Partial<TrajectoryOverviewProps>) {
   );
 }
 
-function draw(root: Root, props: Partial<TrajectoryOverviewProps>) {
+function draw(
+  root: Root,
+  props: Partial<TrajectoryOverviewProps>,
+  language: WebShellLanguage = 'en',
+) {
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <ControlledOverview {...props} />
       </I18nProvider>,
     );
@@ -225,7 +233,7 @@ function domainOf(container: HTMLElement): HTMLElement {
 const layer = (container: HTMLElement) => {
   const domain = domainOf(container);
   return {
-    left: domain.style.left,
+    start: domain.style.insetInlineStart,
     width: domain.style.width,
     zoomed: domain.dataset['zoomed'] === 'true',
   };
@@ -530,7 +538,7 @@ describe('TrajectoryOverview', () => {
     it('draws the whole run in the track until it is zoomed', () => {
       const container = render({ model: MODEL });
       expect(layer(container)).toEqual({
-        left: '0%',
+        start: '0%',
         width: '100%',
         zoomed: false,
       });
@@ -541,7 +549,7 @@ describe('TrajectoryOverview', () => {
       const event = zoomedMiddle(container);
       expect(event.defaultPrevented).toBe(true);
       expect(layer(container)).toEqual({
-        left: '-41.106%',
+        start: '-41.106%',
         width: '182.212%',
         zoomed: true,
       });
@@ -587,7 +595,7 @@ describe('TrajectoryOverview', () => {
       zoomedMiddle(container);
       wheel(plotOf(container), at(0.5), { deltaY: 2000 });
       expect(layer(container)).toEqual({
-        left: '0%',
+        start: '0%',
         width: '100%',
         zoomed: false,
       });
@@ -603,7 +611,7 @@ describe('TrajectoryOverview', () => {
       wheel(plot, at(0.9), { deltaY: -400 });
       wheel(plot, at(0.1), { deltaY: 200 });
       expect(layer(container)).toEqual({
-        left: '-34.986%',
+        start: '-34.986%',
         width: '134.986%',
         zoomed: true,
       });
@@ -641,7 +649,7 @@ describe('TrajectoryOverview', () => {
       zoomedMiddle(container);
       const event = wheel(plotOf(container), at(0.5), { deltaX: 100_000 });
       expect(event.defaultPrevented).toBe(true);
-      expect(layer(container).left).toBe('-82.212%');
+      expect(layer(container).start).toBe('-82.212%');
     });
 
     it('leaves a sideways swipe alone when there is nowhere to pan', () => {
@@ -665,7 +673,7 @@ describe('TrajectoryOverview', () => {
       pointer(plot, 'pointermove', at(0.25), 2);
       expect(plot.dataset['panning']).toBe('true');
       pointer(plot, 'pointerup', at(0.25), 2);
-      expect(layer(container).left).toBe('-66.106%');
+      expect(layer(container).start).toBe('-66.106%');
       expect(plot.dataset['panning']).toBeUndefined();
       expect(onRangeChange).not.toHaveBeenCalled();
     });
@@ -692,11 +700,11 @@ describe('TrajectoryOverview', () => {
       // Zoomed at the very start: dragging right asks for earlier time, and
       // there is none.
       wheel(plot, at(0), { deltaY: -400 });
-      expect(layer(container).left).toBe('0%');
+      expect(layer(container).start).toBe('0%');
       pointer(plot, 'pointerdown', at(0.3), 2);
       pointer(plot, 'pointermove', at(0.6), 2);
       pointer(plot, 'pointerup', at(0.6), 2);
-      expect(layer(container).left).toBe('0%');
+      expect(layer(container).start).toBe('0%');
       expect(onRangeChange).toHaveBeenCalledWith(undefined);
     });
 
@@ -800,7 +808,7 @@ describe('TrajectoryOverview', () => {
       act(() => button(container, 'in').click());
       // One wheel notch: exp(-0.18), 1670.54 ms centred on 1000 ms.
       expect(layer(container)).toEqual({
-        left: '-9.861%',
+        start: '-9.861%',
         width: '119.722%',
         zoomed: true,
       });
@@ -815,7 +823,7 @@ describe('TrajectoryOverview', () => {
       wheel(plotOf(container), at(0.9), { deltaY: -400 });
       act(() => button(container, 'in').click());
       expect(layer(container)).toEqual({
-        left: '-98.444%',
+        start: '-98.444%',
         width: '218.147%',
         zoomed: true,
       });
@@ -896,12 +904,12 @@ describe('TrajectoryOverview', () => {
       wheel(plotOf(container), at(0), { deltaY: -400 });
       // A selection inside the view moves nothing.
       rerender({ model: MODEL, selectedKey: 'req' });
-      expect(layer(container).left).toBe('0%');
+      expect(layer(container).start).toBe('0%');
       // 'sub' runs 1500–2000 ms, past the view: it slides as far as the run
       // allows, which leaves the span inside.
       rerender({ model: MODEL, selectedKey: 'sub' });
       expect(layer(container)).toEqual({
-        left: '-82.212%',
+        start: '-82.212%',
         width: '182.212%',
         zoomed: true,
       });
@@ -917,7 +925,7 @@ describe('TrajectoryOverview', () => {
         },
       });
       expect(layer(container)).toEqual({
-        left: '0%',
+        start: '0%',
         width: '100%',
         zoomed: false,
       });
@@ -1095,6 +1103,90 @@ describe('TrajectoryOverview', () => {
       // 250 ms of 60 500.
       expect(tool!.style.getPropertyValue('--width')).toBe('0.41322314%');
       expect(tool!.style.getPropertyValue('--left')).toBe('1.65289256%');
+    });
+  });
+
+  describe('RTL axis', () => {
+    it('draws the domain on the logical axis, not the physical left', () => {
+      const container = render({ model: MODEL }, 'ar');
+      expect(layer(container)).toEqual({
+        start: '0%',
+        width: '100%',
+        zoomed: false,
+      });
+      expect(domainOf(container).style.left).toBe('');
+    });
+
+    it('maps the same instant to the same fraction as the waterfall rows', () => {
+      const container = render({ model: MODEL }, 'ar');
+      const [, tool] = spansOf(container);
+      expect(tool!.style.getPropertyValue('--left')).toBe('50%');
+
+      const cellContainer = document.createElement('div');
+      document.body.appendChild(cellContainer);
+      const root = createRoot(cellContainer);
+      mounted.push({ root, container: cellContainer });
+      act(() => {
+        root.render(
+          <I18nProvider language="ar">
+            <TrajectoryWaterfallCell
+              span={MODEL.spans[1]}
+              total={MODEL.total}
+              viewport={{ start: 0, end: MODEL.total }}
+            />
+          </I18nProvider>,
+        );
+      });
+      const bar = cellContainer.querySelector<HTMLElement>(
+        '[data-testid="trajectory-waterfall-span"]',
+      );
+      expect(bar!.style.insetInlineStart).toBe('50%');
+      expect(bar!.style.left).toBe('');
+    });
+
+    it('selects the range dragged between two axis points', () => {
+      const onRangeChange = vi.fn();
+      const container = render({ model: MODEL, onRangeChange }, 'ar');
+      const plot = plotOf(container);
+      // Axis fractions 0.25 and 0.5 sit at physical 0.75 and 0.5 under RTL.
+      pointer(plot, 'pointerdown', at(0.75));
+      pointer(plot, 'pointermove', at(0.5));
+      pointer(plot, 'pointerup', at(0.5));
+      expect(onRangeChange).toHaveBeenCalledWith({ start: 500, end: 1000 });
+    });
+
+    it('keeps the point under the pointer where it was', () => {
+      const onRangeChange = vi.fn();
+      const container = render({ model: MODEL, onRangeChange }, 'ar');
+      const plot = plotOf(container);
+      wheel(plot, at(0.75), { deltaY: -400 });
+      // 500 ms was under the pointer before the zoom; it must still be.
+      pointer(plot, 'pointerdown', at(0.75));
+      pointer(plot, 'pointermove', at(0.75) - 20);
+      pointer(plot, 'pointerup', at(0.75) - 20);
+      expect(onRangeChange.mock.calls[0]![0].start).toBeCloseTo(500, 9);
+    });
+
+    it('pans with the right button and leaves the selection alone', () => {
+      const onRangeChange = vi.fn();
+      const container = render({ model: MODEL, onRangeChange }, 'ar');
+      const plot = plotOf(container);
+      wheel(plot, at(0.5), { deltaY: -400 });
+      // Dragging right by a quarter of the track brings later time into view.
+      pointer(plot, 'pointerdown', at(0.5), 2);
+      pointer(plot, 'pointermove', at(0.75), 2);
+      expect(plot.dataset['panning']).toBe('true');
+      pointer(plot, 'pointerup', at(0.75), 2);
+      expect(layer(container).start).toBe('-66.106%');
+      expect(onRangeChange).not.toHaveBeenCalled();
+    });
+
+    it('pans a zoomed strip sideways with the wheel, up to the end of the run', () => {
+      const container = render({ model: MODEL }, 'ar');
+      wheel(plotOf(container), at(0.5), { deltaY: -400 });
+      const event = wheel(plotOf(container), at(0.5), { deltaX: -100_000 });
+      expect(event.defaultPrevented).toBe(true);
+      expect(layer(container).start).toBe('-82.212%');
     });
   });
 

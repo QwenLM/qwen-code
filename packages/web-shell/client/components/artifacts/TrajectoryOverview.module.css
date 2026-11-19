@@ -32,7 +32,7 @@
 
 .labels {
   position: relative;
-  border-right: 1px solid var(--border);
+  border-inline-end: 1px solid var(--border);
   font-size: 10px;
   line-height: 1.05;
   color: var(--muted-foreground);
@@ -40,8 +40,8 @@
 
 .labels span {
   position: absolute;
-  left: 5px;
-  right: 2px;
+  inset-inline-start: 5px;
+  inset-inline-end: 2px;
   height: 18px;
   display: flex;
   align-items: center;
@@ -93,7 +93,7 @@
   position: absolute;
   top: 0;
   bottom: 0;
-  left: var(--left);
+  inset-inline-start: var(--left);
   width: var(--width);
   min-width: 1px;
   box-sizing: border-box;
@@ -108,7 +108,7 @@
   position: absolute;
   top: 2px;
   bottom: 2px;
-  left: var(--left);
+  inset-inline-start: var(--left);
   width: 1px;
   background: var(--border);
   pointer-events: none;
@@ -122,7 +122,7 @@
      last record would not be drawn or clickable at all. Held inside instead.
      Any span wider than the floor already ends inside, so this moves no
      other. */
-  left: min(var(--left), calc(100% - 3px));
+  inset-inline-start: min(var(--left), calc(100% - 3px));
   width: max(3px, var(--width));
   height: 8px;
   z-index: var(--stack, 1);
@@ -154,6 +154,16 @@
 .span[data-lane='0'][data-ttft='true'] {
   background: linear-gradient(
     to right,
+    var(--traj-ttft) 0,
+    var(--traj-ttft) var(--ttft),
+    var(--traj-request) var(--ttft),
+    var(--traj-request) 100%
+  );
+}
+
+:global([dir='rtl']) .span[data-lane='0'][data-ttft='true'] {
+  background: linear-gradient(
+    to left,
     var(--traj-ttft) 0,
     var(--traj-ttft) var(--ttft),
     var(--traj-request) var(--ttft),
@@ -293,7 +303,7 @@
 }
 
 .zoomButton:last-of-type {
-  margin-right: 0;
+  margin-inline-end: 0;
 }
 
 .srOnly {
