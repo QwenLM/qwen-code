@@ -851,6 +851,13 @@ export function createJavaManagedAgentProvider(
         });
       },
     },
+    workspaceArtifacts: {
+      listArtifacts: (workspaceId, request) =>
+        client.listWorkspaceArtifacts(
+          { workspaceId, cursor: request.cursor, limit: request.limit },
+          request.signal,
+        ),
+    },
     ...(options.enableWorkspaceBinding
       ? {
           workspaceBinding: {
@@ -914,6 +921,8 @@ export function createJavaManagedAgentProvider(
                   page.capabilities?.localDirectoryImport === true,
                 supportsApprovalModeSelection:
                   page.capabilities?.approvalModeSelection === true,
+                artifactLibrary:
+                  page.capabilities?.workspaceArtifactLibrary === true,
               };
             },
             async get(workspaceId, request) {

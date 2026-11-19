@@ -890,6 +890,16 @@ export class Query implements AsyncIterable<SDKMessage> {
       this.abortHandler = null;
     }
 
+    // Start teardown so the transport can record an already-visible exit
+    // failure before we settle pending requests. Still clean them up if a
+    // transport throws synchronously instead of returning a rejected promise.
+    let closing: Promise<void>;
+    try {
+      closing = this.transport.close();
+    } catch (error) {
+      closing = Promise.reject(error);
+    }
+
     // Use transport's exit error if available, otherwise use generic error
     const transportError = this.transport.exitError;
     const rejectionError = transportError ?? new Error('Query is closed');
@@ -907,7 +917,7 @@ export class Query implements AsyncIterable<SDKMessage> {
     }
     this.pendingMcpResponses.clear();
 
-    await this.transport.close();
+    await closing;
 
     /**
      * Complete input stream - check if aborted first.

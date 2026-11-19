@@ -44,6 +44,23 @@ describe('GroupHistoryStore', () => {
     expect(store.drain('k', 2).map((item) => item.text)).toEqual(['b', 'c']);
   });
 
+  it('peeks the slice drain would return without consuming it', () => {
+    const path = filePath();
+    const store = new GroupHistoryStore(path);
+
+    store.record('k', entry('a'), 10);
+    store.record('k', entry('b'), 10);
+    store.record('k', entry('c'), 10);
+
+    // Same slice as drain: the NEWEST entries, not the oldest.
+    expect(store.peek('k', 2).map((item) => item.text)).toEqual(['b', 'c']);
+    // ...and it does not consume: a second peek sees the same entries.
+    expect(store.peek('k', 2).map((item) => item.text)).toEqual(['b', 'c']);
+    // The following drain still returns that slice, and really drains it.
+    expect(store.drain('k', 2).map((item) => item.text)).toEqual(['b', 'c']);
+    expect(new GroupHistoryStore(path).drain('k', 10)).toEqual([]);
+  });
+
   it('keeps only one entry for a repeated message ID', () => {
     const path = filePath();
     const store = new GroupHistoryStore(path);
