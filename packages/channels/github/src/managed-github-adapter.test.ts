@@ -2848,8 +2848,10 @@ describe('managed GitHub adapter registration-identity isolation', () => {
     };
     await b.adapter.tick(); // merge_conflict recurrence on the same head
     expect(b.watch.injected).toHaveLength(1);
-    // Today the carry is fresh-only and the legacy is archived, so B restarts
-    // at episode 1 — the id B already admitted, silently deduped.
+    // The carry is entry-scoped (legacy archive + sibling keyed ledger), so B
+    // resumes 5 and this recurrence derives episode 6 — a new input id, not the
+    // already-admitted episode-1 id. Without the entry-scoped carry B would
+    // restart at 0 and re-derive episode 1, silently deduped (the R3-1 loss).
     expect(b.watch.injected[0]!.episode).toBe(6);
     await b.adapter.disconnect();
   });
@@ -2881,6 +2883,105 @@ describe('managed GitHub adapter registration-identity isolation', () => {
       'owner/repo#7': 5,
       'owner/repo#8': 3,
     });
+    await second.adapter.disconnect();
+  });
+
+  it('at the episode cap the carry keeps the carried counter, not the loaded head (R4-2)', async () => {
+    const cwd = tempCwd();
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await first.adapter.connect();
+    // The loaded keyed ledger already holds the full cap of counters.
+    seedState(first.adapter, (s) => {
+      const episodes: Record<string, number> = {};
+      for (let i = 0; i < MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT; i++) {
+        episodes[`loaded/repo#${i}`] = 1;
+      }
+      s.watch = { prs: {}, episodes };
+    });
+    await first.adapter.disconnect();
+    // A rollback legacy carries one counter the loaded ledger does not track.
+    seedLegacy(dirname(first.adapter.stateFile), {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: { prs: {}, episodes: { 'carried/repo#9999': 7 } },
+    });
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await second.adapter.connect();
+    const state = readState(second.adapter);
+    const episodes = state.watch!.episodes!;
+    expect(Object.keys(episodes).length).toBeLessThanOrEqual(
+      MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT,
+    );
+    // The carried counter survives (tail kept); the loaded head is evicted.
+    // Keeping the head would slice the carried counter off here, re-opening the
+    // silent dedupe at the bound (the loaded ledger already holds the cap).
+    expect(episodes['carried/repo#9999']).toBe(7);
+    expect(episodes['loaded/repo#0']).toBeUndefined();
+    expect(validManagedGithubState(state)).toBe(true);
+    await second.adapter.disconnect();
+  });
+
+  it('a roll-forward names queued watch transitions as re-derivable, not never re-derived (R4-3)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await first.adapter.connect();
+    // The keyed ledger has a cursor and a clean baseline for owner/repo#9.
+    seedState(first.adapter, (s) => {
+      s.cursor.lastProcessedAt = '2026-11-19T08:00:00Z';
+      s.watch = {
+        prs: { 'owner/repo#9': { headSha: 'sha-a', mergeableState: 'clean' } },
+      };
+    });
+    await first.adapter.disconnect();
+    // A rollback legacy holds one queued merge_conflict for that PR.
+    seedLegacy(dirname(first.adapter.stateFile), {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: {
+        prs: {
+          'owner/repo#9': {
+            headSha: 'sha-a',
+            pending: [
+              {
+                key: 'prw:merge_conflict:owner/repo#9:1:1',
+                episode: 1,
+                owner: 'owner',
+                repo: 'repo',
+                prNumber: 9,
+                transition: 'merge_conflict',
+                headSha: 'sha-a',
+                evidence: 'Merge conflicts',
+                detectedAt: '2026-11-19T09:00:00Z',
+              },
+            ],
+          },
+        },
+      },
+    });
+    lines.length = 0;
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await second.adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('1 pending');
+    // Roll-forward keeps the loaded baseline, so the next tick re-detects the
+    // edge and may re-derive the transition: the clause must not claim it is
+    // never re-derived (that is only true of a fresh re-baselining ledger).
+    expect(stranded[0]).toContain('may be re-derived');
+    expect(stranded[0]).not.toContain('neither replayed nor re-derived');
     await second.adapter.disconnect();
   });
 

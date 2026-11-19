@@ -500,10 +500,16 @@ export class ManagedGithubStateStore {
     }
     const keys = Object.keys(merged);
     if (keys.length === 0) return undefined;
-    // Re-cap to the validator's bound; overflow evicts the oldest keys (the
-    // same bounded-state tradeoff the live watermark map uses).
+    // Re-cap to the validator's bound by evicting the OLDEST keys — the head of
+    // insertion order — keeping the tail, the same direction as the live
+    // watermark eviction (observePr deletes episodes[keys[i]] for i < len-cap).
+    // Keeping the head instead would drop the most recently merged counters
+    // first, so a counter only a late-walked legacy/archive holds would be the
+    // one lost at the bound — the silent dedupe this carry exists to prevent.
     const capped: Record<string, number> = {};
-    for (const key of keys.slice(0, MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT)) {
+    for (const key of keys.slice(
+      Math.max(0, keys.length - MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT),
+    )) {
       capped[key] = merged[key]!;
     }
     return capped;

@@ -931,6 +931,14 @@ describe('ManagedGithubStateStore', () => {
         watch: { prs: {}, episodes: merged },
       }),
     ).toBe(true);
+    // The eviction direction is the contract (R4-2): overflow drops the OLDEST
+    // (head of insertion order), keeping the tail — the same direction as the
+    // live watermark eviction. Keeping the head instead would drop the most
+    // recently merged counter first, losing a carried counter at the bound.
+    expect(merged[`owner/repo#${MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT}`]).toBe(
+      1,
+    );
+    expect(merged['owner/repo#0']).toBeUndefined();
   });
 
   it('counts the legacy watch.prs queues so a queued transition is not a quiescent 0 pending (R3-1)', () => {

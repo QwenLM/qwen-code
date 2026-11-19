@@ -568,14 +568,19 @@ export class ManagedGithubAdapter {
           if (legacy.pending > 0 && freshWindow)
             consequence +=
               ' Its staged-but-unadmitted claims are stranded; the fresh notification window does not re-list them.';
-          // The queued PR-watch transitions are dropped regardless of the
-          // notification window (R3-1): the fresh ledger re-baselines
-          // watch.prs empty and only re-pins still-failing heads, so a queued
-          // transition is neither replayed nor re-derived. Name that loss even
-          // when the legacy staged no inbound pending/outbound.
+          // The queued PR-watch transitions are not adopted (R3-1); name that
+          // even when the legacy staged no inbound pending/outbound. The
+          // consequence depends on the window (R4-3): a fresh ledger
+          // re-baselines watch.prs empty and only re-pins still-failing heads,
+          // so a queued transition is neither replayed nor re-derived; a
+          // roll-forward keeps the loaded baseline, so the next tick re-detects
+          // the edge against it and may re-derive the transition with a new
+          // episode — claiming "never re-derived" there would page the operator
+          // about work that is about to be delivered.
           if (legacy.watchPending > 0)
-            consequence +=
-              ' Its queued PR-watch transitions were dropped; the fresh ledger only re-baselines, so they are neither replayed nor re-derived.';
+            consequence += freshWindow
+              ? ' Its queued PR-watch transitions were dropped; the fresh ledger only re-baselines, so they are neither replayed nor re-derived.'
+              : ' Its queued PR-watch transitions were not adopted; this ledger re-detects them against its own baseline, so one may be re-derived.';
           if (legacy.outbound > 0)
             consequence +=
               ' Its un-receipted outbound segments were dropped, so their delivery status is unknown.';
@@ -613,10 +618,15 @@ export class ManagedGithubAdapter {
         for (const [key, value] of Object.entries(entryEpisodes)) {
           merged[key] = Math.max(merged[key] ?? 0, value);
         }
+        // Re-cap by evicting the oldest (head of insertion order), keeping the
+        // tail — the carried counters are appended after the loaded ledger's
+        // own, so keeping the head would slice every carried counter off when
+        // the loaded ledger already holds the full cap (R4-2), re-opening the
+        // silent dedupe at the bound. Same direction as the live eviction.
+        const keys = Object.keys(merged);
         const capped: Record<string, number> = {};
-        for (const key of Object.keys(merged).slice(
-          0,
-          MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT,
+        for (const key of keys.slice(
+          Math.max(0, keys.length - MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT),
         )) {
           capped[key] = merged[key]!;
         }
