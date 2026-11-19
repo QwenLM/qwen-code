@@ -217,5 +217,10 @@ class ToolPublicationContractTest {
                 missingFields, missingFields.length))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Invalid tool-result manifest");
+        byte[] missingResultFields = "{\"type\":\"result\"}".getBytes(StandardCharsets.UTF_8);
+        assertThatThrownBy(() -> ToolPublicationContract.parseToolResult("result",
+                missingResultFields, missingResultFields.length))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Invalid tool-result result");
     }
 }
