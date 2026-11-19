@@ -50,6 +50,7 @@ import type { EditorType } from '../utils/editor.js';
 import type { Config } from '../config/config.js';
 import type { ModToolCheck } from '../mods/tool-events.js';
 import type { ChatRecordingService } from '../services/chatRecordingService.js';
+import { ManagedRuntimeOutcomeUnknownError } from '../services/execution-environment.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { evaluateMediaPolicyToolCall } from '../omni/policy/model-access.js';
 import { sanitizeToolNameForProvider } from '../utils/tool-name-utils.js';
@@ -1543,6 +1544,12 @@ function withPostToolBatchStop(
 }
 
 interface CoreToolSchedulerOptions {
+  onManagedRuntimeOutcomeUnknown?: (
+    error: ManagedRuntimeOutcomeUnknownError,
+  ) => void;
+  onManagedRuntimeBatchFailed?: (
+    error: ManagedRuntimeOutcomeUnknownError,
+  ) => void;
   onToolExecutionStarted?: (callId: string, startedAt: number) => void;
   onToolExecutionSettled?: (
     callId: string,
@@ -5568,6 +5575,23 @@ export class CoreToolScheduler {
   private async attemptExecutionOfScheduledCalls(
     signal: AbortSignal,
   ): Promise<void> {
+    try {
+      await this.executeScheduledCalls(signal);
+    } catch (error) {
+      if (
+        error instanceof ManagedRuntimeOutcomeUnknownError &&
+        this.schedulerOptions.onManagedRuntimeOutcomeUnknown
+      ) {
+        if (this.postToolBatchSpanCallId !== undefined) {
+          this.finalizeToolSpan(this.postToolBatchSpanCallId, true);
+        }
+        this.schedulerOptions.onManagedRuntimeBatchFailed?.(error);
+      }
+      throw error;
+    }
+  }
+
+  private async executeScheduledCalls(signal: AbortSignal): Promise<void> {
     // Re-check after each pass for a call that became 'scheduled' meanwhile.
     // Each iteration either drains ≥1 'scheduled' call or returns, so this
     // cannot spin.
@@ -5674,21 +5698,28 @@ export class CoreToolScheduler {
       }
     };
 
-    for (const call of calls) {
-      if (
-        this.schedulerOptions.beforeToolLaunch &&
-        (await this.launchRefused(call))
-      ) {
-        continue;
+    try {
+      for (const call of calls) {
+        if (
+          this.schedulerOptions.beforeToolLaunch &&
+          (await this.launchRefused(call))
+        ) {
+          continue;
+        }
+        admitted.push(call);
+        if (executing.size + admitted.length >= maxConcurrency) {
+          launchAdmitted();
+          await Promise.race(executing);
+        }
       }
-      admitted.push(call);
-      if (executing.size + admitted.length >= maxConcurrency) {
-        launchAdmitted();
-        await Promise.race(executing);
+      launchAdmitted();
+      await Promise.all(executing);
+    } catch (error) {
+      if (error instanceof ManagedRuntimeOutcomeUnknownError) {
+        await Promise.allSettled(executing);
       }
+      throw error;
     }
-    launchAdmitted();
-    await Promise.all(executing);
   }
 
   private async executeSingleToolCall(
@@ -5775,6 +5806,14 @@ export class CoreToolScheduler {
         TOOL_FAILURE_KIND_TOOL_EXCEPTION,
         errorMessage,
       );
+      if (
+        error instanceof ManagedRuntimeOutcomeUnknownError &&
+        this.schedulerOptions.onManagedRuntimeOutcomeUnknown
+      ) {
+        this.finalizeToolSpan(callId, true);
+        this.schedulerOptions.onManagedRuntimeOutcomeUnknown(error);
+        throw error;
+      }
       this.setStatusInternal(
         callId,
         'error',
@@ -6470,27 +6509,33 @@ export class CoreToolScheduler {
       let schedulerTimeoutResultSelected = false;
       let schedulerTimeoutWon = false;
       if (timeoutController) {
+        const waitForManagedSettlement =
+          this.schedulerOptions.onManagedRuntimeOutcomeUnknown !== undefined &&
+          this.config
+            .getManagedRuntimeEnvironment?.()
+            ?.toolNames?.has(canonicalName) === true;
         let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
         try {
           toolResult = await new Promise<ToolResult>((resolve, reject) => {
             timeoutTimer = setTimeout(() => {
-              schedulerTimeoutResultSelected = true;
-              schedulerTimeoutWon = !signal.aborted;
+              schedulerTimeoutResultSelected = !waitForManagedSettlement;
+              schedulerTimeoutWon =
+                schedulerTimeoutResultSelected && !signal.aborted;
               debugLogger.warn(
                 `Tool ${canonicalName} (${callId}) timed out after ` +
                   `${toolExecutionTimeoutMs}ms — aborting`,
               );
-              // Cancel the in-flight tool via the derived signal, then resolve
-              // with a timeout error so the scheduler is unblocked even if the
-              // tool ignores the abort. A later settle from `promise` is a
-              // no-op once this wrapper Promise has already resolved.
+              // Cancel via the derived signal. Only non-Managed tools may
+              // resolve with a synthetic timeout before their actual outcome.
               timeoutController?.abort(
                 new DOMException(
                   `Tool execution timed out after ${toolExecutionTimeoutMs}ms`,
                   'TimeoutError',
                 ),
               );
-              resolve(createToolTimeoutResult(toolExecutionTimeoutMs));
+              if (!waitForManagedSettlement) {
+                resolve(createToolTimeoutResult(toolExecutionTimeoutMs));
+              }
             }, toolExecutionTimeoutMs);
             timeoutTimer.unref?.();
             promise.then(resolve, reject);
@@ -7742,6 +7787,13 @@ export class CoreToolScheduler {
           errorType:
             executionStatus === 'error' ? exceptionErrorType : undefined,
         });
+      }
+
+      if (
+        executionError instanceof ManagedRuntimeOutcomeUnknownError &&
+        this.schedulerOptions.onManagedRuntimeOutcomeUnknown
+      ) {
+        throw executionError;
       }
 
       const cancelMessage = executionThrew

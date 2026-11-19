@@ -479,6 +479,7 @@ export async function runAcpToolBatch(
   };
 
   const onToolCallsUpdate = (calls: ToolCall[]) => {
+    if (closed && !drainCompletedUpdates) return;
     for (const call of calls) {
       latest.set(call.request.callId, call);
       const state = stateOf(call.request);
@@ -495,6 +496,7 @@ export async function runAcpToolBatch(
             const approval = emissions
               .then(() => approve(call, state))
               .catch((error) => {
+                if (closed) return;
                 debugLogger.error(
                   `Approval of ${call.request.name} failed:`,
                   error,
@@ -557,6 +559,10 @@ export async function runAcpToolBatch(
       ...options.duplicates,
       toolSignal: tools.signal,
       executor: createSchedulerExecutor(config, {
+        onManagedRuntimeOutcomeUnknown: (error) => {
+          closed = true;
+          tools.abort(error);
+        },
         onToolCallsUpdate,
         outputUpdateHandler,
         onToolExecutionStarted: started,

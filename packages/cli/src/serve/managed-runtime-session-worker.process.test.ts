@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import type { BridgeExecutionEngine } from '@qwen-code/acp-bridge/bridgeOptions';
 import type { AcpChannel, ChannelFactory } from '@qwen-code/acp-bridge/channel';
 import { ProcessRegistry } from '@qwen-code/acp-bridge/processRegistry';
@@ -270,7 +271,7 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
   }
 
   /** Sends a prompt, approving every permission the host asks for. */
-  async function prompt(sessionId: string) {
+  async function prompt(sessionId: string, updates?: SessionUpdate[]) {
     const permissions: string[] = [];
     const events = bridge!.subscribeEvents(sessionId);
     const watching = (async () => {
@@ -291,7 +292,12 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
             },
           });
         }
-        if (event.type === 'turn_complete') return;
+        if (event.type === 'session_update' && updates) {
+          updates.push((event.data as { update: SessionUpdate }).update);
+        }
+        if (event.type === 'turn_complete' || event.type === 'turn_error') {
+          return;
+        }
       }
     })();
     try {
@@ -302,7 +308,8 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
       await watching;
       return { stopReason: response.stopReason, permissions };
     } finally {
-      void watching.catch(() => undefined);
+      if (updates) await watching;
+      else void watching.catch(() => undefined);
     }
   }
 
@@ -608,6 +615,8 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     const sessionId = await newSession();
     const shellOut = path.join(workspace, 'shell.txt');
     const sleeper = path.join(workspace, 'sleeper.pid');
+    const laterWrite = path.join(workspace, 'later.txt');
+    const updates: SessionUpdate[] = [];
     turns.push({
       toolCalls: [
         {
@@ -617,9 +626,13 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
             `; echo $$ > ${JSON.stringify(sleeper)}; exec sleep 120`,
           ),
         },
+        {
+          name: 'write_file',
+          args: { file_path: laterWrite, content: 'must not run' },
+        },
       ],
     });
-    const running = prompt(sessionId);
+    const running = prompt(sessionId, updates);
     void running.catch(() => undefined);
     const worker = await readWorker(shellOut);
     const sleepPid = Number(
@@ -637,6 +650,22 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
       data: { errorKind: 'managed_runtime_outcome_unknown' },
     };
     await expect(running).rejects.toMatchObject(unknownOutcome);
+    const toolUpdates = updates.filter(
+      (update) =>
+        update.sessionUpdate === 'tool_call' ||
+        update.sessionUpdate === 'tool_call_update',
+    );
+    const runningShell = toolUpdates.find(
+      (update) =>
+        update.status === 'in_progress' &&
+        update._meta?.['toolName'] === 'run_shell_command',
+    );
+    expect(runningShell).toBeDefined();
+    const shellStatuses = toolUpdates
+      .filter(({ toolCallId }) => toolCallId === runningShell?.toolCallId)
+      .map(({ status }) => status);
+    expect(shellStatuses).not.toContain('failed');
+    expect(shellStatuses).not.toContain('completed');
     // The model was not asked to continue with an invented result, and the
     // session refuses another turn.
     expect(modelRequests).toHaveLength(requestsBefore);
@@ -644,11 +673,34 @@ describe.skipIf(process.platform === 'win32')('Managed Runtime tools', () => {
     await expect(prompt(sessionId)).rejects.toMatchObject(unknownOutcome);
     expect(modelRequests).toHaveLength(requestsBefore);
 
+    await bridge!.closeSession(sessionId);
     // The durable form of the block: admitted before dispatch, never settled,
     // and the log answers nothing for it.
     const blockedLog = await readManagedLog(sessionId);
-    expect(blockedLog).toContain('"tool.intent"');
-    expect(blockedLog).not.toContain('"tool.receipt"');
+    const events = blockedLog
+      .trim()
+      .split('\n')
+      .map(
+        (line) =>
+          (
+            JSON.parse(line) as {
+              managedSession?: { kind: string; payload: { role?: string } };
+            }
+          ).managedSession,
+      );
+    expect(
+      events.filter((event) => event?.kind === 'tool.intent'),
+    ).toHaveLength(1);
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ kind: 'tool.receipt' }),
+    );
+    expect(events).not.toContainEqual(
+      expect.objectContaining({
+        kind: 'message.committed',
+        payload: expect.objectContaining({ role: 'tool_result' }),
+      }),
+    );
+    expect(existsSync(laterWrite)).toBe(false);
     expect(blockedLog).toContain('"durable_wait"');
   }, 120_000);
 

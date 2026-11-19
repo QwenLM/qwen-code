@@ -819,7 +819,7 @@ export function createSchedulerExecutor(
   options: Partial<SchedulerOptions> = {},
   runtimeView?: RuntimeContentGeneratorView,
 ): AgentLoopToolExecutor {
-  const { onToolResultFullTurnModel } = options;
+  const { onToolResultFullTurnModel, onManagedRuntimeOutcomeUnknown } = options;
   return {
     run: (requests, signal, hooks) =>
       new Promise<CompletedToolCall[]>((resolve, reject) => {
@@ -833,6 +833,9 @@ export function createSchedulerExecutor(
           onEditorClose: () => {},
           ...options,
           config,
+          ...(onManagedRuntimeOutcomeUnknown && {
+            onManagedRuntimeBatchFailed: reject,
+          }),
           isFinished: hooks.isFinished,
           ...(hooks.isFinished &&
             onToolResultFullTurnModel && {
