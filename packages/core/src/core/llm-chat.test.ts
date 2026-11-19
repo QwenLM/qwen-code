@@ -9916,6 +9916,70 @@ describe('LlmChat', async () => {
       expect(markTerminalSpy).not.toHaveBeenCalled();
     });
 
+    it('marks a fallback terminal when it emits output then fails on permanent quota (R2-5)', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const quotaError = Object.assign(
+        new Error(
+          'You exceeded your current quota, please check your plan and billing details.',
+        ),
+        { status: 429, code: 'insufficient_quota', type: 'insufficient_quota' },
+      );
+      streamMock().mockRejectedValue(tpmCapacityError());
+      fallbackA.mockResolvedValue(
+        streamThenThrow([textChunk('fallback-a partial')], quotaError),
+      );
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: A streams a partial chunk then fails on quota. The terminal
+      // mark runs BEFORE the post-output break (which stops the chain to avoid
+      // duplicating output), so A is recorded terminal even though it yielded.
+      const { events, caughtError } = await drainCollecting(
+        await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'post-output-quota-turn',
+          undefined,
+          { isSessionTurn: true },
+        ),
+      );
+      expect(caughtError).toBe(quotaError);
+      expect(hasChunkText(events, 'fallback-a partial')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).not.toHaveBeenCalled();
+      expect(service.snapshot('fallback-a@test0001')).toEqual({
+        available: false,
+        reason: 'quota',
+      });
+
+      // Request 2, a fresh turn: terminal A is skipped, B serves. Scoping the
+      // terminal branch behind !currentFallbackYieldedAnyChunk would re-probe A.
+      const events2 = await sendSessionCollect(
+        'test',
+        'post-output-quota-turn-2',
+      );
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(1);
+    });
+
     it('does not try the next fallback after a fallback emits output', async () => {
       const { fallbackA, fallbackB, resolveForModel } = wireTwoFallbacks();
       const capacityError = tpmCapacityError();

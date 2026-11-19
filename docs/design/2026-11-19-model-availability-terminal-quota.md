@@ -69,13 +69,20 @@ returns true exactly for the permanent-quota signals, in this order:
   error whether it arrives raw or as the formatted fast-fail `Error`.
 - the `insufficient_quota` code (case/separator insensitive) appearing in any of
   `classification.providerCode`, the provider fields' `providerCode` /
-  `providerType` (`getProviderFields(error)`), or the error object's own
-  `.type`/`.code`. This is read **independent of `classification.reason`**: the
-  canonical OpenAI `429 insufficient_quota` classifies `rate-limit`, never
-  `permanent-provider-code`, so gating the code arm on that reason would miss
-  it. Reading the provider fields also covers the SDK shape that puts
-  `insufficient_quota` in `.type` with `code: null` (the classifier reads that
-  permanence via `providerType`, leaving `classification.providerCode` empty).
+  `providerType` (`getProviderFields`), the message-scraped
+  `getRateLimitErrorDetails` `providerCode` / `providerType`, or the error
+  object's own `.type`/`.code`. This is read **independent of
+  `classification.reason`**: the canonical OpenAI `429 insufficient_quota`
+  classifies `rate-limit`, never `permanent-provider-code`, so gating the code
+  arm on that reason would miss it. The provider fields cover the SDK shape that
+  puts `insufficient_quota` in `.type` with `code: null`; the scraped details
+  cover a nested body whose `type` is `insufficient_quota` beside a non-quota
+  sibling `code` (the classifier reads permanence from `details.providerType`).
+- the message and code checks above run along a **bounded cause chain** (the
+  error and up to four `cause` levels). The retry layer wraps quota errors into
+  status-less Errors: the QWEN_OAUTH free-tier replacement strips the quota
+  wording and keeps the original only as `cause`, so the signal must be read
+  through the wrap rather than off the thrown error alone.
 
 Non-quota permanent errors (moderation `data_inspection_failed`, auth, billing
 other than `insufficient_quota`, malformed request) do **not** match: none of
@@ -198,3 +205,19 @@ uses, so same-model-different-route health stays separate.
   handles both; the integration test pins the observed shape.
 - The single-scalar `lastTurnKey` concurrency limitation documented in #17377
   is unchanged; terminal marking inherits the same session-turn whitelist.
+- Background model rounds (subagent rounds, unified-loop speculation) deliberately
+  do not bind the ledger, so they still attempt a quota-marked fallback. The skip
+  applies to the conversation's own session turns; the setting description says
+  so. Letting background rounds read the ledger without writing it is a possible
+  refinement, out of this slice.
+- A terminal mark has no in-session escape: a quota whose reset time passes
+  mid-session, or a credential swap on the same route key (the route identity
+  digests only `authType` + `baseUrl`), leaves the fallback skipped until a new
+  session. This is the deliberate session-permanent scope; the description names
+  a new session as the only re-probe. Carrying the reset deadline on the mark and
+  re-probing once it passes, or clearing terminal marks on credential rebuild, is
+  a larger recovery enhancement out of this slice.
+- The terminal mark runs before the post-output `break`, so a fallback that
+  streamed a partial chunk and then failed on quota is still recorded terminal;
+  a dedicated test pins this (scoping the mark behind `!currentFallbackYieldedAnyChunk`
+  turns it red).

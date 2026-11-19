@@ -1297,4 +1297,46 @@ describe('isTerminalQuotaError', () => {
     expect(classification.reason).toBe('rate-limit');
     expect(isTerminalQuotaError(error, classification)).toBe(false);
   });
+
+  it('reads the quota signal through the retry wrap cause chain (R2-1)', () => {
+    // retry.ts replaces the QWEN_OAUTH free-tier quota error with a status-less
+    // Error whose message strips the quota wording, keeping the original as
+    // cause. The predicate must walk the cause to find the quota code.
+    const rawFreeTier = Object.assign(
+      new Error('free allocated quota exceeded'),
+      {
+        status: 429,
+        code: 'insufficient_quota',
+        type: 'insufficient_quota',
+      },
+    );
+    const wrapped = new Error(
+      'Qwen OAuth free tier has been discontinued as of 2026-04-15.',
+      { cause: rawFreeTier },
+    );
+    const classification = classifyRetryError(wrapped);
+    expect(classification.reason).toBe('unclassified');
+    expect(isTerminalQuotaError(wrapped, classification)).toBe(true);
+  });
+
+  it('reads the message-scraped providerType beside a non-quota code (R2-2)', () => {
+    // A statusless body {code:Throttling, type:insufficient_quota} classifies
+    // permanent-provider-code via details.providerType; providerCode is the
+    // non-quota sibling code. The predicate must read the scraped type.
+    const error = new Error(
+      '{"error":{"code":"Throttling","type":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details."}}',
+    );
+    const classification = classifyRetryError(error);
+    expect(classification.reason).toBe('permanent-provider-code');
+    expect(classification.providerCode).toBe('Throttling');
+    expect(isTerminalQuotaError(error, classification)).toBe(true);
+  });
+
+  it('does not match a wrapped non-quota cause (R2-1 negative)', () => {
+    const wrapped = new Error('wrapper', {
+      cause: Object.assign(new Error('bad request'), { status: 400 }),
+    });
+    const classification = classifyRetryError(wrapped);
+    expect(isTerminalQuotaError(wrapped, classification)).toBe(false);
+  });
 });

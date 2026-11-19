@@ -60,12 +60,16 @@ true：
   无论错误以原始形状还是格式化 fast-fail `Error` 到达都能捕获。
 - `insufficient_quota` code（大小写/分隔符不敏感）出现在
   `classification.providerCode`、provider fields 的 `providerCode`/`providerType`
-  （`getProviderFields(error)`）、或错误对象自身 `.type`/`.code` 任一处。此读取
+  （`getProviderFields`）、消息内解析的 `getRateLimitErrorDetails` 的
+  `providerCode`/`providerType`、或错误对象自身 `.type`/`.code` 任一处。此读取
   **独立于 `classification.reason`**：canonical OpenAI `429 insufficient_quota`
   分类为 `rate-limit`、绝非 `permanent-provider-code`，若把 code 臂门控在该 reason
-  上就会漏掉它。读 provider fields 也覆盖 SDK 把 `insufficient_quota` 放在 `.type`、
-  `code: null` 的形状（分类器经 `providerType` 读取该永久性，使
-  `classification.providerCode` 为空）。
+  上就会漏掉它。provider fields 覆盖 SDK 把 `insufficient_quota` 放在 `.type`、
+  `code: null` 的形状；解析 details 覆盖嵌套报文的 `type` 为 `insufficient_quota`
+  而同级 `code` 为非配额的形状（分类器从 `details.providerType` 读取永久性）。
+- 上述消息与 code 检查沿**有界 cause 链**运行（错误本身及至多四层 `cause`）。
+  retry 层把配额错误包装成无 status Error：QWEN_OAUTH 免费层替代错误剥去配额措辞、
+  仅以 `cause` 保留原始错误，故须穿过包装读信号，而非只读抛出错误本身。
 
 非配额的永久错误（审核 `data_inspection_failed`、鉴权、`insufficient_quota`
 以外的计费、畸形请求）**不**命中：它们的 code 都不是 `insufficient_quota`，消息
@@ -170,3 +174,14 @@ terminal 优先于 sticky：恰好分类为可重试的重置时间配额被记�
   vs 原始 429）。谓词两者都处理；集成测试钉住观察到的形状。
 - #17377 记录的单标量 `lastTurnKey` 并发局限不变；terminal 标记继承同一会话轮
   白名单。
+- 后台模型轮（subagent 轮、unified-loop 推测）刻意不绑定台账，故仍会尝试被配额
+  标记的 fallback。跳过适用于对话自身的会话轮；设置描述已如此说明。让后台轮只读
+  台账而不写入是可能的细化，不在本切片。
+- terminal 标记在会话内无解除途径：重置时间在会话中途过去的配额、或同一路由键上
+  的凭据更换（路由身份只取 `authType` + `baseUrl` 摘要），会使 fallback 被跳过直到
+  新会话。这是刻意的会话永久范围；描述指明新会话是唯一重探。在标记上携带重置截止
+  时间并于其过去后重探、或在凭据重建时清除 terminal 标记，是更大的恢复增强，不在
+  本切片。
+- terminal 标记在 post-output `break` 之前运行，故先流式输出部分 chunk 再因配额
+  失败的 fallback 仍被记 terminal；专门测试钉住此点（把标记门控在
+  `!currentFallbackYieldedAnyChunk` 后即红）。

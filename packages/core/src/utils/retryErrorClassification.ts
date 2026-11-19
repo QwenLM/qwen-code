@@ -648,13 +648,39 @@ export function isFallbackEligible(
  * succeed until the quota resets, so the model should be skipped for the rest
  * of the session rather than re-probed each turn.
  *
- * The two fail-fast quota reasons and the `insufficient_quota` permanent
- * provider code come off the vetted classification; the reset-time signal
- * ("…quota…exhausted…will reset at…") is message-based and must be caught
- * independent of classification, whether the error arrives raw or as the
- * formatted mid-stream fast-fail Error. Non-quota permanent errors (moderation,
- * auth, other billing) and transient capacity do not match.
+ * The signal is read independent of the classification reason and through the
+ * retry layer's wraps: a 429 classifies 'rate-limit' (isRateLimitError runs
+ * before the permanence arms), and retry.ts replaces quota errors with
+ * status-less Errors — the QWEN_OAUTH free-tier replacement strips the quota
+ * wording, keeping the original only as `cause`. So the reset-time message and
+ * the insufficient_quota code are read along a bounded cause chain, from every
+ * source the classifier itself reads (the classification's providerCode, the
+ * provider fields, the message-scraped details, and the error's own type/code).
+ * Non-quota permanent errors (moderation, auth, other billing) and transient
+ * capacity do not match.
  */
+const INSUFFICIENT_QUOTA_CODE = /insufficient[_-]?quota/i;
+const MAX_QUOTA_CAUSE_DEPTH = 4;
+
+function hasInsufficientQuotaCode(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+  const { providerCode, providerType } = getProviderFields(error);
+  const details = getRateLimitErrorDetails(error);
+  const typeOrCode =
+    (error as { type?: unknown }).type ?? (error as { code?: unknown }).code;
+  return [
+    providerCode,
+    providerType,
+    details.providerCode,
+    details.providerType,
+    typeof typeOrCode === 'string' ? typeOrCode : undefined,
+  ].some(
+    (value) => typeof value === 'string' && INSUFFICIENT_QUOTA_CODE.test(value),
+  );
+}
+
 export function isTerminalQuotaError(
   error: unknown,
   classification: RetryErrorClassification,
@@ -665,33 +691,29 @@ export function isTerminalQuotaError(
   ) {
     return true;
   }
-  // The reset-time quota signal is independent of how the error classified: a
-  // 429 classifies 'rate-limit' (isRateLimitError runs before the permanence
-  // arms) and a permanent non-quota code would otherwise return early below,
-  // so check the message before the code arm.
-  if (isQuotaExhaustedError(error)) {
+  if (
+    typeof classification.providerCode === 'string' &&
+    INSUFFICIENT_QUOTA_CODE.test(classification.providerCode)
+  ) {
     return true;
   }
-  // The insufficient_quota code must be read independent of classification
-  // reason: the canonical OpenAI 429 insufficient_quota classifies 'rate-limit',
-  // never 'permanent-provider-code'. Read it off the classification, the
-  // provider fields (code and the SDK's `.type`, which the classifier reads via
-  // providerType when `code` is null), and the error object's own type/code.
-  const { providerCode, providerType } = getProviderFields(error);
-  const typeOrCode =
-    typeof error === 'object' && error !== null
-      ? ((error as { type?: unknown }).type ??
-        (error as { code?: unknown }).code)
-      : undefined;
-  return [
-    classification.providerCode,
-    providerCode,
-    providerType,
-    typeof typeOrCode === 'string' ? typeOrCode : undefined,
-  ].some(
-    (value) =>
-      typeof value === 'string' && /insufficient[_-]?quota/i.test(value),
-  );
+  // Walk the error and its cause chain: the retry layer wraps quota errors into
+  // status-less Errors, so the quota signal may live on a nested cause rather
+  // than the thrown error itself.
+  let current: unknown = error;
+  for (let depth = 0; depth <= MAX_QUOTA_CAUSE_DEPTH; depth++) {
+    if (isQuotaExhaustedError(current)) {
+      return true;
+    }
+    if (hasInsufficientQuotaCode(current)) {
+      return true;
+    }
+    current = current instanceof Error ? current.cause : undefined;
+    if (current == null) {
+      break;
+    }
+  }
+  return false;
 }
 
 /**
