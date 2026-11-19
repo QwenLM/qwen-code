@@ -100,11 +100,11 @@ pull request 也不再跑套件，并让该全量结果留在必需 context 上�
 允许工作流运行后，check run 不需要写权限 token。首次贡献者的运行可能保持
 `action_required`，直到维护者批准；批准前不会生成门禁 check。
 
-被取代的 fast 层级不会发布 check 结果：新的 push 取消 pull request 正在进行的运行时，
-gate job 会跳过，让计算出来的名字在一个 branch protection 已不再读取的 head 上保持未求值。
-其他取消仍然失败——全量运行的取消如此，下一个 approve 才能重试套件，而不是对着一个绿色
-check 去重；push 与 merge group 臂上的取消也如此，因为那里不会取消正在进行的运行，取消
-意味着超时或人工停止。
+被取代的 fast 层级会报告红色、而不是绿色：新的 push 取消 pull request 正在进行的运行时，
+门禁仍以 `Managed Agent gate` 在 branch protection 已不再读取的 head 上报告失败。这样
+没有新 push 的取消不能满足必需检查。其他取消同样失败——全量运行的取消如此，下一个 approve
+才能重试套件，而不是对着一个绿色 check 去重；push 与 merge group 臂上的取消也如此，因为
+那里不会取消正在进行的运行，取消意味着超时或人工停止。
 
 ### 当前 head 的首个 approve
 

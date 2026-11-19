@@ -120,13 +120,14 @@ need no write token after GitHub allows the workflow run. A first-time
 contributor's run can remain `action_required` until a maintainer approves it,
 so no gate check exists before that approval.
 
-A superseded fast tier does not publish a check result: when a newer push
-cancels a pull request's in-flight run, the gate job skips, leaving its computed
-name unevaluated on a head branch protection no longer reads. Every other
-cancellation stays failing — a cancelled full run, so the next approval retries
-the suite instead of deduping against a green check, and a push or merge-group
-cancellation, because nothing there cancels in progress, so it is a timeout or
-an operator stop.
+A superseded fast tier reports red, not green: when a newer push cancels a pull
+request's in-flight run, the gate still publishes `Managed Agent gate` as a
+failure on a head branch protection no longer reads. That keeps a cancellation
+without a newer push from satisfying the required check. Every other
+cancellation stays failing too — a cancelled full run, so the next approval
+retries the suite instead of deduping against a green check, and a push or
+merge-group cancellation, because nothing there cancels in progress, so it is
+a timeout or an operator stop.
 
 ### First approval of the current head
 

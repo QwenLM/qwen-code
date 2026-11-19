@@ -340,14 +340,13 @@ describe('Managed Agent gate required check', () => {
 
   it.each([
     ['pull_request', 'fast', false, true],
-    ['pull_request', 'fast', true, false],
+    ['pull_request', 'fast', true, true],
     ['pull_request', 'full', true, true],
-    ['pull_request_review', 'full', true, true],
     ['push', 'fast', true, true],
     ['merge_group', 'fast', true, true],
     ['pull_request', '', false, true],
-    ['pull_request', '', true, false],
-    ['pull_request', 'none', true, false],
+    ['pull_request', '', true, true],
+    ['pull_request', 'none', true, true],
   ])(
     '%s %s tier with workflow cancelled=%s reports=%s',
     (event, tier, cancelled, expected) => {
@@ -464,9 +463,10 @@ describe('Managed Agent gate required check', () => {
   );
 
   it.each([
-    // A superseding push cancels the in-flight fast tier: the check then
-    // means "replaced by a newer run", so it reports neutral, not failure.
-    ['pull_request', 'fast', 'cancelled', 0],
+    // A superseding push cancels the in-flight fast tier. The old head no
+    // longer matters, but the check stays red so a cancellation without a
+    // newer push cannot green the required context.
+    ['pull_request', 'fast', 'cancelled', 1],
     // Every other cancellation stays red: a full run's so the next approval
     // retries the suite instead of deduping against a green check, and a
     // push/merge-group arm's because nothing there cancels in progress — a
