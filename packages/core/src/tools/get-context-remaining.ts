@@ -61,18 +61,37 @@ class GetContextRemainingInvocation extends BaseToolInvocation<
         ).auto,
       ),
     );
-    const headroomToAuto = Math.max(0, autoCompactAt - used);
+    // The session-token limit may be tighter than the ladder (#17320 R4-1
+    // round 3): the enforced bound is whichever fires first.
+    const sessionLimit = this.config.getSessionTokenLimit?.();
+    const limitBinds =
+      sessionLimit !== undefined &&
+      sessionLimit > 0 &&
+      sessionLimit < autoCompactAt;
+    const bindingBound = limitBinds ? sessionLimit : autoCompactAt;
+    const headroomToBound = Math.max(0, bindingBound - used);
+    const bindingLabel = limitBinds
+      ? `the session token limit (${sessionLimit})`
+      : 'auto-compaction';
     const estimateNote = snapshot.promptTokensIsEstimated
       ? ' (estimated until the model reports real counts)'
       : '';
+    // Zero counts with carried-over history means the route was switched,
+    // not that the session is empty (#17320 F2): a new LlmChat starts with
+    // fresh counters while the conversation stays.
+    let zeroNote =
+      ' (no measurement yet — this is a fresh session or the first request is in flight)';
+    const history = chat.getHistory?.();
+    if (history && history.length > 0) {
+      zeroNote =
+        ' (no measurement on this model route yet — switching the model resets the counters while the conversation history carries over)';
+    }
     const lines = [
       `Context window: ${snapshot.contextWindowTokens} tokens`,
-      `Used: ${used} tokens${used === 0 ? ' (no measurement yet — this is a fresh session or the first request is in flight)' : estimateNote}`,
-      `Remaining window headroom: ${remaining} tokens (against the window; ${headroomToAuto} until auto-compaction)`,
+      `Used: ${used} tokens${used === 0 ? zeroNote : estimateNote}`,
+      `Remaining window headroom: ${remaining} tokens (against the window; ${headroomToBound} until ${bindingLabel})`,
       `Auto-compaction level: ${autoCompactAt} tokens`,
     ];
-    // The session-token limit may be tighter than the window (#17320 R4-1).
-    const sessionLimit = this.config.getSessionTokenLimit?.();
     if (sessionLimit !== undefined && sessionLimit > 0) {
       lines.push(
         `Session token limit: ${sessionLimit} tokens — the enforced bound, not the window`,

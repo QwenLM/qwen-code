@@ -752,9 +752,7 @@ export function createEventMapper(
         const reasonClause =
           v?.triggerReason === 'image_overflow'
             ? `accumulated enough tool screenshots to trigger compaction for ${model}`
-            : v?.triggerReason === 'model_requested'
-              ? `requested this compaction for ${model} ahead of the limit`
-              : `approached the input token limit for ${model}`;
+            : `approached the input token limit for ${model}`;
         // ink's formatCount (useGeminiStream): estimated counts carry a '~'
         // prefix so locally-measured figures don't read as API-reported ones.
         const formatCount = (count?: number, isEstimated?: boolean) =>

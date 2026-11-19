@@ -781,28 +781,6 @@ describe('ChatCompressionService', () => {
     expect(result.info.triggerReason).toBe('payload_overflow');
   });
 
-  it('reports model_requested as the trigger reason for model-initiated compactions (#17313)', async () => {
-    // The `request_compaction` tool rides a flag to the next model-round
-    // boundary and compresses below the token threshold, exactly like the
-    // 413 path — the reason must say who asked so the UI notice and
-    // PostCompact hooks classify the compaction correctly.
-    arrange(
-      turns(
-        `context msg ${'X'.repeat(60_000)}`,
-        'ack',
-        'final fresh user message',
-        'final model reply',
-      ),
-      90_000,
-    );
-    mockGenerate('Summary', usage(90_000, 50));
-
-    const result = await run({ force: true, trigger: 'model_requested' });
-
-    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
-    expect(result.info.triggerReason).toBe('model_requested');
-  });
-
   it('keeps tool-result text intact in the side-query for token-driven compactions (#10380)', async () => {
     const hugeOutput = 'O'.repeat(50_000);
     expect(await sideQueryContents(shellHistory(hugeOutput))).toContain(

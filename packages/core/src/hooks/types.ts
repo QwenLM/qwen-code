@@ -1186,8 +1186,6 @@ export interface PreCompactOutput extends HookOutput {
 export enum PostCompactTrigger {
   Manual = 'manual',
   Auto = 'auto',
-  /** The model asked for this compaction via the request_compaction tool. */
-  ModelRequested = 'model_requested',
 }
 
 /**

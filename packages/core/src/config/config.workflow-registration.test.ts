@@ -157,6 +157,22 @@ describe('WorkflowTool registration', () => {
   });
 });
 
+// #17320 R4-6: the registerLazy wiring is the only path that makes the
+// tool reachable; a previous round's mutation (deleting the registerLazy
+// block) kept the whole surface suite green, so pin it here against the
+// real registry.
+describe('GetContextRemaining registration', () => {
+  it('is registered unconditionally by createToolRegistry', async () => {
+    const cfg = new Config({ ...baseParams });
+    const registry = await cfg.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    expect(registry.getAllToolNames()).toContain(
+      ToolNames.GET_CONTEXT_REMAINING,
+    );
+  });
+});
+
 // FIX-G (Round 4 test Important): regression test for the FIX-8 anti-recursion
 // guard. A subagent spawned BY a workflow must not be able to call the
 // Workflow tool again — that would create unbounded O(k^n) fan-out. Without
