@@ -422,29 +422,32 @@ describe('ManagedSessionsPage', () => {
     },
   );
 
-  it('opens the same static inventory in the full-shell home layout without new requests', async () => {
-    const navigationTarget = document.createElement('div');
-    document.body.appendChild(navigationTarget);
-    try {
-      await render('s1', 'en', provider, navigationTarget);
-      const calls = Object.values(mocks.client).map(
-        (method) => method.mock.calls.length,
-      );
-      const trigger = [...container.querySelectorAll('button')].find(
-        (button) => button.textContent === 'Managed capabilities',
-      );
-      expect(trigger).toBeDefined();
-      await act(async () => trigger!.click());
-      expect(document.querySelectorAll('[data-managed-surface]')).toHaveLength(
-        35,
-      );
-      expect(
-        Object.values(mocks.client).map((method) => method.mock.calls.length),
-      ).toEqual(calls);
-    } finally {
-      navigationTarget.remove();
-    }
-  });
+  it.each([undefined, 's1'])(
+    'opens the same static inventory in the full-shell home layout from session %s without new requests',
+    async (sessionId) => {
+      const navigationTarget = document.createElement('div');
+      document.body.appendChild(navigationTarget);
+      try {
+        await render(sessionId, 'en', provider, navigationTarget);
+        const calls = Object.values(mocks.client).map(
+          (method) => method.mock.calls.length,
+        );
+        const trigger = [...container.querySelectorAll('button')].find(
+          (button) => button.textContent === 'Managed capabilities',
+        );
+        expect(trigger).toBeDefined();
+        await act(async () => trigger!.click());
+        expect(
+          document.querySelectorAll('[data-managed-surface]'),
+        ).toHaveLength(35);
+        expect(
+          Object.values(mocks.client).map((method) => method.mock.calls.length),
+        ).toEqual(calls);
+      } finally {
+        navigationTarget.remove();
+      }
+    },
+  );
 
   it('exposes the static inventory to an existing host-only Session without catalog or creation requests', async () => {
     await render('s1', 'en', provider, undefined, true, {

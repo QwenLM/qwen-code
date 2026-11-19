@@ -1,6 +1,7 @@
 import { useId } from 'react';
 import { useI18n } from '../../i18n';
 import { useFilterInput } from '../../hooks/useFilterInput';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import {
@@ -60,10 +61,11 @@ function localized(
 function ManagedSurfaceDecisionsContent() {
   const { language } = useI18n();
   const id = useId();
+  const openExternalLink = useExternalLinkOpener();
   const { filterValue: query, inputProps } = useFilterInput();
   const text = (value: readonly [string, ...string[]]) =>
     localized(value, language);
-  const normalized = query.trim().toLocaleLowerCase();
+  const normalized = query.trim().toLowerCase();
   const visible = MANAGED_SURFACE_DECISIONS.filter((surface) =>
     [
       ...surface.label,
@@ -75,7 +77,7 @@ function ManagedSurfaceDecisionsContent() {
       `#${surface.issue}`,
     ]
       .join(' ')
-      .toLocaleLowerCase()
+      .toLowerCase()
       .includes(normalized),
   );
 
@@ -126,6 +128,12 @@ function ManagedSurfaceDecisionsContent() {
                   <a
                     className="inline-flex text-xs underline underline-offset-3 hover:text-foreground"
                     href={`https://github.com/QwenLM/qwen-code/issues/${surface.issue}`}
+                    onClick={(event) =>
+                      openExternalLink(
+                        event,
+                        `https://github.com/QwenLM/qwen-code/issues/${surface.issue}`,
+                      )
+                    }
                     target="_blank"
                     rel="noreferrer"
                   >

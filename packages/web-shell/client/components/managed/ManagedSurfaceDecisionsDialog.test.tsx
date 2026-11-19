@@ -157,6 +157,42 @@ describe('ManagedSurfaceDecisionsDialog', () => {
   it('keeps reviewed surface explanations independently pinned', () => {
     const pinned = [
       {
+        id: 'settings',
+        category: 'configuration',
+        issue: 15084,
+        label: ['Settings panel', '设置面板'],
+        reason: [
+          'Managed has no daemon-style general Settings panel. Eligible Managed Sessions have their own model, approval, Plan and permission-rule controls.',
+          'Managed 没有 daemon 风格的通用设置面板。支持相应能力的 Managed 会话分别提供模型、审批模式、Plan 模式和权限规则控件。',
+        ],
+      },
+      {
+        id: 'workspace-preflight',
+        category: 'configuration',
+        issue: 15084,
+        label: [
+          'Workspace env, preflight and init',
+          '工作区 env、preflight 与 init',
+        ],
+        reason: [
+          'SSH registration can check directory and runtime prerequisites. The daemon workspace environment editing and initialization surfaces have no Managed equivalents.',
+          'SSH 注册支持目录和运行时前置检查。daemon 工作区环境编辑和初始化界面没有 Managed 对应功能。',
+        ],
+      },
+      {
+        id: 'workspace-identity',
+        category: 'configuration',
+        issue: 15084,
+        label: [
+          'Workspace directories, clone source and identity',
+          '工作区目录、克隆来源与身份',
+        ],
+        reason: [
+          'Managed creates named empty Workspaces and can bind an existing authorized directory with a display name used in navigation. Each Workspace exposes one registered root. Extra-directory lists, Git clone sources and custom ordering are unavailable.',
+          'Managed 可创建命名的空 Workspace，也可选择授权 root 下的已有目录，并提供用于导航的显示名。每个 Workspace 暴露一个注册 root。额外目录列表、Git clone 来源和自定义排序不可用。',
+        ],
+      },
+      {
         id: 'github',
         category: 'configuration',
         issue: 15084,
@@ -164,6 +200,42 @@ describe('ManagedSurfaceDecisionsDialog', () => {
         reason: [
           'Managed has no GitHub setup, pull-request list or pull-request files surface.',
           'Managed 没有 GitHub 设置、Pull Request 列表或 Pull Request 文件界面。',
+        ],
+      },
+      {
+        id: 'skill-management',
+        category: 'knowledge',
+        issue: 15084,
+        label: ['Skill settings and installation', 'Skill 设置与安装'],
+        reason: [
+          'Managed provides read-only Session Skills, reviewed archive installation through v1 preparation, runtime import and default Workspace pins at creation. Per-Skill enable/disable, batch toggles and daemon-style activation management are unavailable.',
+          'Managed 提供只读会话 Skills、经 v1 preparation 流程审查并安装归档、运行时导入和创建时的默认工作区固定。逐 Skill 启停、批量开关和 daemon 风格的激活管理不可用。',
+        ],
+      },
+      {
+        id: 'live-state',
+        category: 'runtime',
+        issue: 15084,
+        label: [
+          'Live state and background-work indicator',
+          '实时状态与后台工作指示',
+        ],
+        reason: [
+          'Managed polls unselected running Sessions and shows running indicators in the sidebar. Daemon aggregate live-state snapshots and its particular background-task indicator are unavailable.',
+          'Managed 会轮询未选中的运行中会话，并在侧栏显示运行中指示。daemon 的聚合实时状态快照及其特定后台任务指示不可用。',
+        ],
+      },
+      {
+        id: 'session-probes',
+        category: 'runtime',
+        issue: 15084,
+        label: [
+          'Session refresh, status, commands and context',
+          '会话刷新、状态、命令与上下文',
+        ],
+        reason: [
+          'Managed reads Sessions and Turns through list/get and supports context-usage queries and idle-only context compression. Daemon refresh, status probes, supported-commands and the daemon session-context route are unavailable.',
+          'Managed 通过 list/get 读取会话和轮次，并支持上下文用量查询和仅供空闲 Session 的上下文压缩。daemon 的会话刷新、状态探针、支持命令列表和 session-context 路由不可用。',
         ],
       },
       {
@@ -181,7 +253,10 @@ describe('ManagedSurfaceDecisionsDialog', () => {
         category: 'conversation',
         issue: 15084,
         label: ['Message deletion', '消息删除'],
-        reason: ['Managed cannot delete messages.', 'Managed 不能删除消息。'],
+        reason: [
+          'Managed cannot delete committed transcript messages. Queued and recovery-blocked user inputs can be withdrawn, and queued inputs can also be edited.',
+          'Managed 不能删除已提交的对话历史消息。排队和 recovery_blocked 用户输入可以撤回，排队输入还可以编辑。',
+        ],
       },
       {
         id: 'file-mutations',
@@ -191,6 +266,16 @@ describe('ManagedSurfaceDecisionsDialog', () => {
         reason: [
           'Managed supports query, read and upload, but not file deletion, directory creation or directory deletion.',
           'Managed 支持查询、读取和上传，但不支持删除文件、创建目录或删除目录。',
+        ],
+      },
+      {
+        id: 'session-organization',
+        category: 'conversation',
+        issue: 15084,
+        label: ['Session organization and metadata', '会话组织与元数据'],
+        reason: [
+          'Managed supports renaming and, where capability permits, archiving/unarchiving with an archived-list view. It has no general metadata bag or daemon-style Session organization.',
+          'Managed 支持重命名，并在能力允许时归档/取消归档及查看归档列表。没有通用元数据袋或 daemon 风格的会话组织功能。',
         ],
       },
       {
@@ -215,6 +300,13 @@ describe('ManagedSurfaceDecisionsDialog', () => {
           'message-deletion',
           'file-mutations',
           'worktree-operations',
+          'workspace-preflight',
+          'workspace-identity',
+          'session-organization',
+          'settings',
+          'skill-management',
+          'live-state',
+          'session-probes',
         ].includes(surface.id),
       ).sort((left, right) => left.id.localeCompare(right.id)),
     ).toEqual(pinned);
@@ -356,8 +448,8 @@ describe('ManagedSurfaceDecisionsDialog', () => {
     );
     expect(firstRow.querySelector('p')?.textContent).toBe(
       expected.language === 'zh-CN'
-        ? 'Managed 没有会话设置界面。完整 Shell 的设置面板配置本地 daemon，而不是 Managed 会话。'
-        : 'Managed has no Session settings surface. The full-shell Settings panel configures the local daemon, not the Managed Session.',
+        ? 'Managed 没有 daemon 风格的通用设置面板。支持相应能力的 Managed 会话分别提供模型、审批模式、Plan 模式和权限规则控件。'
+        : 'Managed has no daemon-style general Settings panel. Eligible Managed Sessions have their own model, approval, Plan and permission-rule controls.',
     );
     expect(firstRow.querySelector('a')?.textContent).toBe(
       `${expected.trackedIn} #15084`,
@@ -369,6 +461,61 @@ describe('ManagedSurfaceDecisionsDialog', () => {
     expect(portal.querySelector('[role="status"]')?.textContent).toBe(
       expected.empty,
     );
+  });
+
+  it('uses the desktop opener for issue links without changing browser behavior', async () => {
+    await open();
+    const link = portal.querySelector<HTMLAnchorElement>(
+      '[data-managed-surface="workspace-identity"] a',
+    )!;
+    const browserClick = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      link.dispatchEvent(browserClick);
+    });
+    expect(browserClick.defaultPrevented).toBe(false);
+
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal('__TAURI__', { core: { invoke } });
+    const desktopClick = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      link.dispatchEvent(desktopClick);
+    });
+    expect(desktopClick.defaultPrevented).toBe(true);
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://github.com/QwenLM/qwen-code/issues/15084',
+    });
+  });
+
+  it('uses locale-independent casing for inventory search', async () => {
+    const localeLower = String.prototype.toLocaleLowerCase;
+    const spy = vi
+      .spyOn(String.prototype, 'toLocaleLowerCase')
+      .mockImplementation(function (this: string) {
+        return localeLower.call(this, 'tr-TR');
+      });
+    try {
+      await open();
+      spy.mockClear();
+      const search = portal.querySelector<HTMLInputElement>(
+        'input[type="search"]',
+      )!;
+      await setFilterValue(search, 'generated ui');
+      expect(
+        portal.querySelector('[data-managed-surface="generated-ui-state"]'),
+      ).not.toBeNull();
+      expect(spy).not.toHaveBeenCalled();
+      expect(localeLower.call('Generated UI view state', 'tr-TR')).toBe(
+        'generated uı view state',
+      );
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('searches visible owners, tracking chrome and category titles', async () => {

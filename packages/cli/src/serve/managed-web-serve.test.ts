@@ -335,6 +335,71 @@ describe('dedicated Managed Web gateway', () => {
     peerSocket?.destroy();
   });
 
+  it('rejects dot-only selectors at the standalone gateway while preserving ordinary dotted ids', async () => {
+    const peerPaths: string[] = [];
+    const peerSockets = new Set<import('node:stream').Duplex>();
+    peer.on('upgrade', (_req, socket) => {
+      peerSockets.add(socket);
+      peerPaths.push(_req.url ?? '');
+      socket.resume();
+      socket.write(
+        'HTTP/1.1 101 Switching Protocols\r\n' +
+          'Upgrade: websocket\r\n' +
+          'Connection: Upgrade\r\n' +
+          'Sec-WebSocket-Accept: test-accept\r\n' +
+          'Sec-WebSocket-Protocol: qwen-ws\r\n\r\n',
+      );
+    });
+    await start();
+    try {
+      const statuses: number[] = [];
+      for (const selector of ['.', '..', 'tenant.v1']) {
+        statuses.push(
+          await new Promise<number>((resolve, reject) => {
+            const upgrade = request(
+              {
+                host: new URL(gateway!.url).hostname,
+                port: Number(new URL(gateway!.url).port),
+                path: `/api/agent/web-shell/v1/sessions/${selector}/terminal?terminalId=t1`,
+                headers: {
+                  Connection: 'Upgrade',
+                  Upgrade: 'websocket',
+                  'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+                  'Sec-WebSocket-Version': '13',
+                  'Sec-WebSocket-Protocol': 'qwen-ws, qwen-bearer.ticket-abc',
+                  Authorization: `Bearer ${browserToken}`,
+                },
+              },
+              (res) => {
+                res.resume();
+                res.once('end', () => resolve(res.statusCode ?? 0));
+              },
+            );
+            upgrade.on('upgrade', (res, socket) => {
+              socket.destroy();
+              resolve(res.statusCode ?? 0);
+            });
+            upgrade.on('error', (error: Error) => {
+              if (error.message === 'selector probe timed out') reject(error);
+              else resolve(0);
+            });
+            upgrade.on('close', () => resolve(0));
+            upgrade.setTimeout(5_000, () =>
+              upgrade.destroy(new Error('selector probe timed out')),
+            );
+            upgrade.end();
+          }),
+        );
+      }
+      expect(statuses).toEqual([0, 0, 101]);
+      expect(peerPaths).toEqual([
+        '/api/agent/web-shell/v1/sessions/tenant.v1/terminal?terminalId=t1',
+      ]);
+    } finally {
+      for (const socket of peerSockets) socket.destroy();
+    }
+  });
+
   it('relays distinct post-upgrade payloads in both directions', async () => {
     let peerSocket: import('node:stream').Duplex | undefined;
     let browserSocket: import('node:stream').Duplex | undefined;
