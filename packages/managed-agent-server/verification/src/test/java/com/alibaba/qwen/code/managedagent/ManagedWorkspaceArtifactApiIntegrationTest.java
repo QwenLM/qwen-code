@@ -35,8 +35,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
@@ -60,6 +62,7 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
     private static final String WORKSPACE = "workspace-1";
     private static final String ROUTE = "/api/agent/web-shell/v1/workspaces/artifacts/query";
     ToolPublicationStoreTest.ApiFixture fixture;
+    ManagedArtifactReader reader;
     MockMvc mvc;
     JsonNode stdout;
     JsonNode stderr;
@@ -76,7 +79,7 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
         fixture.jdbc().update("INSERT INTO ma_workspace (tenant_id, workspace_id,"
                 + " workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
                 + " VALUES (?, ?, 1, 'storage-1', 'Test', 'config', 'policy', 'ACTIVE')", TENANT, WORKSPACE);
-        for (String actor : new String[] {"reader", "metadata-reader", "owner"}) {
+        for (String actor : new String[] {"reader", "metadata-reader", "session-reader", "owner"}) {
             fixture.jdbc().update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id,"
                     + " role) VALUES (?, ?, ?, 'READER')", TENANT, WORKSPACE,
                     actor.getBytes(StandardCharsets.UTF_8));
@@ -90,10 +93,11 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
             public boolean publishOriginal(String tenant, String workspace, String session) { return true; }
             public boolean publishPreview(String tenant, String workspace, String session) { return true; }
             public boolean readOriginal(String tenant, String actor, String workspace, String session) {
-                return "reader".equals(actor);
+                return "reader".equals(actor) || ("session-reader".equals(actor) && "session-1".equals(session));
             }
         };
-        mvc = mvc(new ManagedArtifactService(sessions, fixture.results(), fixture.reader(),
+        reader = spy(fixture.reader());
+        mvc = mvc(new ManagedArtifactService(sessions, fixture.results(), reader,
                 policy, fixture.properties(), registry));
         var artifacts = fixture.results().listArtifacts(TENANT, "session-1", null, null, null, 100).artifacts();
         stdout = artifacts.stream().filter(a -> "stdout".equals(a.streamId())).findFirst().orElseThrow().descriptor();
@@ -223,9 +227,9 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
     void listsArtifactsAcrossSessionsNewestFirstWithSessionIdentity() throws Exception {
         String second = seedArtifactSession("session-2", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
         var page = page("reader", body(null, null));
-        assertThat(ids(page)).hasSize(3);
+        // The fixture projects stdout before stderr. The workspace lists newest inserts first.
+        assertThat(ids(page)).containsExactly(second, stderr.path("id").asText(), stdout.path("id").asText());
         var first = page.path("data").get(0);
-        assertThat(first.path("artifact").path("id").asText()).isEqualTo(second);
         assertThat(first.path("artifact").path("session_id").asText()).isEqualTo("session-2");
         assertThat(first.path("artifact").path("availability").asText()).isEqualTo("unavailable");
         assertThat(first.path("access").path("can_read_content").asBoolean()).isFalse();
@@ -235,12 +239,25 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
             assertThat(row.path("artifact").path("availability").asText()).isEqualTo("available");
             assertThat(row.path("access").path("can_read_content").asBoolean()).isTrue();
         }
-        assertThat(ids(page).subList(1, 3)).containsExactlyInAnyOrder(
-                stdout.path("id").asText(), stderr.path("id").asText());
         assertThat(page.path("hasMore").asBoolean()).isFalse();
         assertThat(page.path("nextCursor").isNull()).isTrue();
         var other = page("metadata-reader", body(null, null));
         assertThat(other.path("data").get(1).path("access").path("can_read_content").asBoolean()).isFalse();
+    }
+
+    @Test
+    void appliesTheReadersContentPolicyToEachSourceSession() throws Exception {
+        String second = seedArtifactSession("session-2", WORKSPACE, "ACTIVE", false, null, "PUBLIC", WORKSPACE);
+        doReturn(Map.of(second, true, stdout.path("id").asText(), true, stderr.path("id").asText(), true))
+                .when(reader).availability(anyList());
+        var response = page("session-reader", body(null, null));
+        assertThat(ids(response)).containsExactlyInAnyOrder(second, stdout.path("id").asText(), stderr.path("id").asText());
+        for (var row : response.required("data")) {
+            var artifact = row.required("artifact");
+            assertThat(artifact.required("availability").asText()).isEqualTo("available");
+            assertThat(row.required("access").required("can_read_content").booleanValue())
+                    .isEqualTo(!second.equals(artifact.required("id").asText()));
+        }
     }
 
     @Test
@@ -350,10 +367,10 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
                     .andExpect(status().isBadRequest())
                     .andExpect(jsonPath("$.error.code").value("invalid_limit"));
         }
-        String valid = Base64.getUrlEncoder().withoutPadding().encodeToString(
-                JSON.createObjectNode().put("v", 1).put("tenant", TENANT).put("actor", "reader")
-                        .put("workspace", WORKSPACE).put("watermark", 10).put("before", 5)
-                        .toString().getBytes(StandardCharsets.UTF_8));
+        String cursorJson = JSON.createObjectNode().put("v", 1).put("tenant", TENANT).put("actor", "reader")
+                .put("workspace", WORKSPACE).put("watermark", 10).put("before", 5).toString();
+        var encoder = Base64.getUrlEncoder().withoutPadding();
+        String valid = encoder.encodeToString(cursorJson.getBytes(StandardCharsets.UTF_8));
         var invalid = new ArrayList<String>();
         invalid.add("!!!not-base64!!!");
         invalid.add(Base64.getUrlEncoder().withoutPadding().encodeToString(
@@ -404,7 +421,11 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
                 JSON.createObjectNode().put("v", 1).put("tenant", TENANT).put("actor", "reader")
                         .put("workspace", WORKSPACE).put("watermark", 10).put("before", -1)
                         .toString().getBytes(StandardCharsets.UTF_8)));
-        invalid.add("a".repeat(2049));
+        // 1536 decoded ASCII bytes occupy exactly 2048 unpadded Base64url characters.
+        String padded = cursorJson + " ".repeat(1536 - cursorJson.length());
+        mvc.perform(query("reader", body(encoder.encodeToString(padded.getBytes(StandardCharsets.UTF_8)), null)))
+                .andExpect(status().isOk());
+        invalid.add(encoder.encodeToString((padded + " ").getBytes(StandardCharsets.UTF_8)));
         for (String cursor : invalid) {
             mvc.perform(query("reader", body(cursor, null)))
                     .andExpect(status().isBadRequest())
@@ -432,6 +453,14 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
         } finally {
             fixture.properties().getArtifacts().setEnabled(true);
         }
+    }
+
+    @Test
+    void answersArtifactNotFoundWhenTheReaderIsUnsupported() throws Exception {
+        doReturn(false).when(reader).supported();
+        mvc.perform(query("reader", body(null, null)))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("artifact_not_found"));
     }
 
     @Test
