@@ -354,7 +354,16 @@ function canAppendWithoutTailInspection(
   const readDeniedByPermissionModel =
     code === 'ERR_ACCESS_DENIED' &&
     (error as { permission?: string }).permission === 'FileSystemRead';
-  if (code !== 'EACCES' && code !== 'EPERM' && !readDeniedByPermissionModel) {
+  // Windows can reject the read handle for a sharing violation while still
+  // allowing the append handle.
+  const windowsSharingViolation =
+    code === 'EBUSY' && process.platform === 'win32';
+  if (
+    code !== 'EACCES' &&
+    code !== 'EPERM' &&
+    !readDeniedByPermissionModel &&
+    !windowsSharingViolation
+  ) {
     return false;
   }
 

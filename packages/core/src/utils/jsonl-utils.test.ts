@@ -625,6 +625,45 @@ describe('writeLine / writeLineSync / write', () => {
       },
     );
 
+    it.each([
+      { platform: 'win32', shouldAppend: true },
+      { platform: 'linux', shouldAppend: false },
+    ] as const)(
+      '$platform EBUSY tail-probe handling',
+      async ({ platform, shouldAppend }) => {
+        const original = '{"existing":true}';
+        const file = tmpFile(original);
+        const error = Object.assign(new Error('sharing violation'), {
+          code: 'EBUSY',
+        });
+        const platformSpy = vi
+          .spyOn(process, 'platform', 'get')
+          .mockReturnValue(platform);
+        const spy = denyTailProbe(error);
+
+        try {
+          const result = Promise.resolve().then(() =>
+            append(file, { next: true }),
+          );
+          if (shouldAppend) {
+            await result;
+            expect(fs.readFileSync(file, 'utf8')).toBe(
+              '{"existing":true}\n{"next":true}\n',
+            );
+          } else {
+            await expect(result).rejects.toBe(error);
+            expect(fs.readFileSync(file, 'utf8')).toBe(original);
+          }
+          expect(
+            spy.mock.calls.filter(([, flags]) => flags === tailProbeFlags),
+          ).toHaveLength(1);
+        } finally {
+          spy.mockRestore();
+          platformSpy.mockRestore();
+        }
+      },
+    );
+
     it('restores the record boundary under the Node permission model', async () => {
       const file = tmpFile('{"existing":true}');
       const error = Object.assign(new Error('read denied'), {
@@ -868,16 +907,14 @@ describe('writeLine / writeLineSync / write', () => {
     });
 
     it.runIf(process.platform !== 'win32')(
-      'keeps a real FIFO append bounded and exposes the fsync error',
+      'matches the native append outcome for a real FIFO',
       async () => {
         const fifo = tmpPath('fifo');
+        const record = Buffer.from('{"next":true}\n', 'utf8');
         execFileSync('mkfifo', [fifo]);
         const reader = fs.openSync(fifo, tailProbeFlags);
-        try {
-          await expect(
-            Promise.resolve().then(() => append(fifo, { next: true })),
-          ).rejects.toMatchObject({ code: 'EINVAL' });
-          const received = Buffer.alloc(128);
+        const drainRecord = () => {
+          const received = Buffer.alloc(record.length);
           const bytesRead = fs.readSync(
             reader,
             received,
@@ -885,9 +922,33 @@ describe('writeLine / writeLineSync / write', () => {
             received.length,
             null,
           );
-          expect(received.subarray(0, bytesRead).toString('utf8')).toBe(
-            '{"next":true}\n',
+          expect(bytesRead).toBe(record.length);
+          expect(received).toEqual(record);
+        };
+        try {
+          let nativeError: NodeJS.ErrnoException | undefined;
+          try {
+            if (name === 'writeLine') {
+              await fs.promises.appendFile(fifo, record, { flush: true });
+            } else {
+              fs.appendFileSync(fifo, record, { flush: true });
+            }
+          } catch (error) {
+            nativeError = error as NodeJS.ErrnoException;
+          }
+          drainRecord();
+
+          const result = Promise.resolve().then(() =>
+            append(fifo, { next: true }),
           );
+          if (nativeError) {
+            await expect(result).rejects.toMatchObject({
+              code: nativeError.code,
+            });
+          } else {
+            await expect(result).resolves.toBeUndefined();
+          }
+          drainRecord();
         } finally {
           fs.closeSync(reader);
         }
