@@ -372,6 +372,16 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 > {
   /** How long a post-abort repair listener waits for the teardown to surface. */
   private static readonly REPAIR_LISTENER_TTL_MS = 60_000;
+  /**
+   * The repair armed per server name. A batch shares one abort signal, so a
+   * single Escape rejects every MCP call in flight at once; without this each
+   * rejection would stack another listener and timer, and each closure would
+   * retain its invocation (and its payload) until the TTL fired.
+   */
+  private static readonly pendingRepairs = new Map<
+    string,
+    { teardown: () => void }
+  >();
   private static readonly MAX_RECONNECT_RETRIES = 3;
   private static readonly UNSAFE_REPLAY_ERROR_MESSAGE =
     'MCP tool execution may have completed before the connection failed. Automatic replay was skipped because the call could not be verified as safe to replay. Do not retry automatically; verify the outcome before trying again.';
@@ -598,10 +608,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       return;
     }
     let wasConnected = status === MCPServerStatus.CONNECTED;
-    const detach = () => {
-      clearTimeout(expiry);
-      removeMCPStatusChangeListener(listener);
-    };
     const listener = (
       serverName: string,
       status: MCPServerStatus | undefined,
@@ -644,7 +650,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       if (this.isTeardownIntent(generation)) {
         return;
       }
-      detach();
+      repair.teardown();
       // Best-effort and detached from the caller: `attemptReconnect` needs
       // this invocation only for its name and config, and a late failure must
       // not surface anywhere.
@@ -652,12 +658,34 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     };
     // A cancel whose teardown never reaches this process (the server kept the
     // connection, or the session ends first) must not leak a registry
-    // listener for the life of the process.
+    // listener for the life of the process. Arming replaces any repair still
+    // waiting for this server: the batch shares one abort signal, so a single
+    // Escape rejects every call to it at once, and the older arm would watch
+    // the same transition and repair the same server a second time.
+    const repair: { teardown: (expired?: boolean) => void } = {
+      teardown: (expired?: boolean) => {
+        if (expired) {
+          debugLogger.info(
+            `MCP server '${this.serverName}': no teardown surfaced within ${DiscoveredMCPToolInvocation.REPAIR_LISTENER_TTL_MS}ms, dropping the abort repair`,
+          );
+        }
+        clearTimeout(expiry);
+        removeMCPStatusChangeListener(listener);
+        if (
+          DiscoveredMCPToolInvocation.pendingRepairs.get(this.serverName) ===
+          repair
+        ) {
+          DiscoveredMCPToolInvocation.pendingRepairs.delete(this.serverName);
+        }
+      },
+    };
     const expiry = setTimeout(
-      detach,
+      () => repair.teardown(true),
       DiscoveredMCPToolInvocation.REPAIR_LISTENER_TTL_MS,
     );
     expiry.unref?.();
+    DiscoveredMCPToolInvocation.pendingRepairs.get(this.serverName)?.teardown();
+    DiscoveredMCPToolInvocation.pendingRepairs.set(this.serverName, repair);
     addMCPStatusChangeListener(listener);
   }
 

@@ -25,10 +25,12 @@ import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { MCPServerStatus, updateMCPServerStatus } from './mcp-client.js';
 import {
+  addMCPStatusChangeListener,
   getMCPServerStatus,
   isMCPConnectionTeardownIntent,
   isMCPServerTeardownIntent,
   removeMCPServerStatus,
+  removeMCPStatusChangeListener,
 } from './mcp-status.js';
 import { WorkspaceMcpBudget } from './mcp-workspace-budget.js';
 import { listDescendantPids, sigtermPids } from './pid-descendants.js';
@@ -1072,6 +1074,37 @@ describe('McpTransportPool', () => {
       // name-keyed one and the per-connection one the repair actually reads.
       expect(isMCPServerTeardownIntent('srv')).toBe(false);
       expect(isMCPConnectionTeardownIntent(connection, 0)).toBe(false);
+      removeMCPServerStatus('srv');
+    });
+
+    it('certifies a pooled eviction as a deliberate teardown before its transition fires (issue #12160)', async () => {
+      // An abort repair reads the `DISCONNECTED` a deliberate teardown
+      // produces and must not revive the server. The ordering that guarantees
+      // it lives in `McpClient.disconnect()`: it records the intent before it
+      // publishes the status (`mcp-client.ts`), so every teardown path that
+      // goes through it — this eviction included — is covered without the
+      // caller marking anything itself.
+      const { pool, cfg } = await acquireOne();
+      const entry = entryOf(pool, cfg);
+      const seen: boolean[] = [];
+      const listener = (
+        serverName: string,
+        status: MCPServerStatus | undefined,
+      ) => {
+        if (serverName === 'srv' && status === MCPServerStatus.DISCONNECTED) {
+          seen.push(isMCPServerTeardownIntent('srv'));
+        }
+      };
+      addMCPStatusChangeListener(listener);
+      try {
+        await entry.forceShutdown('manual');
+      } finally {
+        removeMCPStatusChangeListener(listener);
+      }
+      // The eviction really publishes the transition, and the mark was
+      // already set when each notification was delivered.
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen.every((marked) => marked)).toBe(true);
       removeMCPServerStatus('srv');
     });
   });
