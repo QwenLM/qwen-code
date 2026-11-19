@@ -1,0 +1,91 @@
+# Keeping the typed text in a reduced compaction request
+
+[English](2026-11-17-keep-typed-text-in-reduced-compaction.md) | [简体中文](2026-11-17-keep-typed-text-in-reduced-compaction.zh-CN.md)
+
+## Problem
+
+When a compaction request does not fit its window, it is reduced as the [compression request admission](2026-10-19-compression-request-admission.md) design describes: every text part longer than 4,000 characters is cut to its first 4,000. That includes what the user typed. The summary prompt asks the model to quote the user's exact phrasing where intent is at stake and to list all user messages, so a long request, such as a pasted spec or a log with the instruction after it, reaches the summary without everything past its first 4,000 characters.
+
+## Current state before this change
+
+- The reduction cannot tell what a person typed from what rides the same user turn. The layout differs by front end: the CLI puts the prompt first and attachments after it, while ACP puts attachments first and the prompt last. Other text rides user turns too: recalled memory, the IDE context, CLI notices, task notifications, a previous summary and restored files.
+- A rule by position (the parts before the first attachment header are typed) was tried in #14953. It misread most of the cases above.
+- The CLI front ends already pass `humanInput`, the text a person submitted, with their prompt, for workflow-keyword detection. Ink and OpenTUI set it only for a person's prompt: not for a slash command, a Mod's prompt, shell mode or a `/btw` query. Headless sets it only for a user message sent as stream-json input whose origin is a person; a plain `-p` prompt carries none.
+
+## Goals
+
+- Keep what a person typed in a reduced request, as far as the summary's budget allows: today about 14,000 characters for one message.
+- Refuse locally no request the plain reduction would send, and get no request rejected for the text it keeps where the plain reduction would be accepted, at any density up to one token per character.
+- Cut text that is not marked as typed exactly as before.
+
+## Non-goals
+
+- Marking every way a person's text reaches a user turn. A plain `-p` prompt, slash-command expansions, scheduled prompts, mid-turn messages, hosted input queued while a turn runs, and hosted prompts a hook rewrote or extended stay unmarked and are cut as before.
+- Keeping the end of a long message. A message the budget cannot keep is cut like any other, keeping its start.
+- Condensing older turns to the user's messages (#14953).
+- The retry after a rejection and the payload-overflow path, which keep sending the plain reduction.
+
+## Design
+
+### The mark
+
+A part that holds what a person typed carries `partMetadata['qwen-code:typed-prompt'] = true`, set where the request is built. `partMetadata` is client-side bookkeeping: the native generator deletes it before the SDK sees it (Vertex AI rejects the field), and the OpenAI, Anthropic and Responses converters never serialize it. The session file keeps it, so a resumed session still has it.
+
+Two checks drop a completed local command's input from resumed history only when its part has a lone `text` key: the history accumulator and its mirror in the serve prompt ledger. Both accept a part whose only metadata is the mark (`isBareTextPart`).
+
+### Where it is set
+
+- **Core, for the CLI front ends.** When `sendMessageStream` receives `humanInput` with a person's prompt, and the prompt is not a Mod's, the first text part of the request is marked. These front ends put the person's text first. A plain `-p` prompt carries no `humanInput`, so it is not marked. Pasted text is sent framed in `<clipboard-paste>` with a line of framing prose after it, and that part is marked whole.
+- **ACP.** In a prompt a person wrote, the parts built from their text blocks are marked, and so is the instruction part that joins them with pointers to the attached resources. A model-only prompt, a runtime Goal continuation, a mid-turn message, a slash command (including text that starts with a slash but names no command) and a prompt that holds only attachments mark nothing.
+- **Hosted.** The prompt the session's user sent, the input memory recall reads, is marked when it reaches the model as written. One a hook rewrote or extended, or that recalled memory was joined to, is left unmarked.
+
+Text spliced into a marked part later inherits the mark: the CLI prepends the IDE context to the prompt's part, and joins its notices before the prompt. Compaction therefore reads the run of envelopes that leads a marked part as not typed.
+
+### Keeping it in a reduced request
+
+`slimCompactionInput(history, modalities, { maxTextChars, keepTypedText: true })` keeps a marked part of a user turn up to `TYPED_TEXT_MAX_CHARS` (32,000 characters). The run of envelopes leading the part is cut to `maxTextChars` like other text, and the envelope the cut lands in is closed again. Past 32,000 characters the typed text is cut there, by the rule any cut text follows. Every other part is cut as before. The budget rule below keeps the text well under this cap today, about 14,000 characters at most, so the cap only applies if that budget grows.
+
+### When the kept request is sent
+
+Only on the first send, after the plain reduction made the request smaller. The kept request asks for no more in all than the plain request: its input is larger by the characters it keeps, each counted as a whole token, and its output budget is smaller by as many. It replaces the plain request only when that budget is still at least half of the plain request's, and at least the summary's minimum. If the server rejects it, the one retry sends the plain reduction. The payload-overflow path never sends it: its input is the plain cut from the start.
+
+## Decisions and rationale
+
+- **Mark at the source, keep only marked text.** Text with no mark falls back to the plain cut, so a producer that is missed costs the improvement and not correctness. The rule by position failed the other way: it kept text that was not typed.
+- **`humanInput` as the gate in core.** The front ends have already decided which sends are a person's prompt, and one place covers three front ends.
+- **The first text part, not an exact match with `humanInput`.** The CLI frames pastes and joins notices into the prompt before sending, so an exact match would fail on the main case, a pasted request.
+- **A token per character, within the plain request's total.** The estimate reads four characters to a token, and CJK text runs far denser. Counting each kept character as a token and taking it out of the output budget means a request the server accepts in its plain form is accepted with the text kept, at any density up to one token per character. The cost is a smaller output budget when much text is kept.
+- **At most half of the summary's budget.** Every token the kept text takes from the output budget is room a long summary may need; a summary longer than the kept budget is dropped as truncated where the plain request would have fit it, and the drop counts toward the failure breaker. Keeping at least half of the plain budget bounds that cost.
+- **Head-only cuts.** A message past the cap, or one the budget cannot keep, keeps its start. Eliding the middle would create cut shapes that the closing rule for cut text was never measured on.
+
+## Risks
+
+- Some characters, such as rare CJK characters and emoji, take more than one token. Above one token per character the guarantee does not hold; a kept request the server rejects is retried with the plain cut.
+- The summary's output budget shrinks by the characters kept, by at most half. A summary longer than that budget, which the plain request would have fit, is dropped as truncated.
+- When the plain request's budget is the 20,000-token cap, keeping more than 10,000 characters beyond the plain cut would take more than half of it, so a request longer than about 14,000 characters is cut as before. In a tighter window the limit is lower.
+- A kept request the server rejects is retried with the plain cut. Where the plain request would have been rejected too, the two flows then differ: the plain flow retries with a smaller budget or gives up, and the kept flow sends the plain cut once.
+- The text after a marked part's leading envelopes is kept whole as typed. In the CLI that includes the paste-framing prose and a prompt a `UserPromptSubmit` hook rewrote, since `humanInput` follows the rewrite.
+- Sessions recorded before this change have no marks, and are cut as before.
+- This change does not measure whether keeping the text improves task outcomes.
+
+## Validation
+
+- Unit tests for the mark: its shape, its absence from the request on the native, OpenAI-compatible, Anthropic and Responses routes, its survival through the session file, and the two local-command checks.
+- Unit tests for each place it is set, including every exclusion: no `humanInput`, internal send types, a Mod's prompt, a side query, an empty first text part; ACP's model-only prompts, runtime Goal continuations and attachment-only prompts; hosted prompts that are not new user input, were rewritten or extended, or had memory joined.
+- Unit tests for `keepTypedText`: leading envelopes, a run of them, a lone opening tag the person typed, the 32,000-character cap and a block it cuts inside.
+- Service tests: the budget is smaller by exactly the characters kept; the kept request is used at exactly half of the plain budget and not one character past it; the plain cut is sent when the kept request would leave the summary under its minimum, on the retry and on the payload-overflow path; CJK text billed at 2.4 times the estimate is kept without a rejection; and a sweep over 5 session shapes, 6 request lengths and ASCII or CJK text in which, wherever the plain request is accepted in one send, the kept request is too.
+- A mutant for each guard, checked to fail its tests: 20 in all.
+- A request-level comparison on a mock backend: 5 session shapes, requests of 3,000 to 40,000 characters with 5 sentences spread evenly through each. The sentences that reached the summary request rose from 15, 10 and 10 of 25 to 23, 19 and 16 of 25 at 6,000, 9,000 and 12,000 characters, for ASCII and CJK alike. At 3,000 characters nothing is cut; from 18,000 characters on the kept request is not used.
+
+## Acceptance criteria
+
+- A reduced request keeps a marked request whole whenever the summary is still left half of its budget and its minimum under the rule above: up to about 14,000 characters for one message at the 20,000-token cap. Otherwise it is cut as before.
+- Turns with no mark are cut exactly as before.
+- No new local refusal, and no rejection caused by the kept text at densities up to one token per character.
+
+## Follow-ups
+
+- Mark the remaining producers: a plain `-p` prompt; slash-command expansions, keeping the files and shell output they inject unmarked; mid-turn messages; hosted input queued while a turn runs.
+- Keep as much of a long message as the budget allows, rather than all of it or none.
+- Keep the end of a long message as well as its start.
+- Condense older turns to the user's messages when cutting is not enough (#14953).

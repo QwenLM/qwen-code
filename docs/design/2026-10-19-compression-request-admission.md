@@ -2,7 +2,7 @@
 
 [English](2026-10-19-compression-request-admission.md) | [简体中文](2026-10-19-compression-request-admission.zh-CN.md)
 
-Status: implemented for [#9455](https://github.com/QwenLM/qwen-code/issues/9455). Keeping the user's messages whole in a reduced request is a follow-up ([#14953](https://github.com/QwenLM/qwen-code/pull/14953)).
+Status: implemented for [#9455](https://github.com/QwenLM/qwen-code/issues/9455). Keeping what the user typed in a reduced request is described in [Keeping the typed text in a reduced compaction request](2026-11-17-keep-typed-text-in-reduced-compaction.md).
 
 ## Problem
 
@@ -26,7 +26,7 @@ The cold path clamps its output budget to the room the estimate leaves (#7960), 
 ## Non-goals
 
 - A more accurate estimator. A fixed per-language multiplier over-counts dense CJK text by roughly 2× (measured in #9541) and refuses sessions that would compress, so the estimator is unchanged.
-- Keeping the user's messages whole in a reduced request, or dropping older turns to make room. Both need to know which text the user typed, and are left to a follow-up (#14953).
+- Keeping the user's messages in a reduced request, or dropping older turns to make room. Both need to know which text the user typed. The first is described in [Keeping the typed text in a reduced compaction request](2026-11-17-keep-typed-text-in-reduced-compaction.md); the second is left to a follow-up (#14953).
 - The cache-sharing request. If it fails, compression falls back to the cold path, which this change covers.
 - Compacting with the previous model after a model switch.
 
@@ -71,7 +71,7 @@ A reduced request no longer describes the history it replaces. Its reported usag
 | Decision                                                 | Rationale                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Keep the char/4 estimator                                | It under-counts, so a refusal based on it only happens when the request cannot fit. #9541 replaced it with a byte-weighted estimate and refused Chinese sessions from about 50% of the window.                                                                                                                                                                                                                                                                                                      |
-| Cut every text part, keep every turn                     | It reuses the payload-overflow cut (#10380) and keeps function calls paired without parsing turn structure. Keeping the user's messages whole needs to know which text the user typed, which the follow-up adds.                                                                                                                                                                                                                                                                                    |
+| Cut every text part, keep every turn                     | It reuses the payload-overflow cut (#10380) and keeps function calls paired without parsing turn structure. Keeping the user's messages needs to know which text the user typed, which the typed-text mark adds.                                                                                                                                                                                                                                                                                    |
 | A single retry                                           | Compression stays best-effort and does not block the user. A retry held to the reserve fits in most measured shapes; one that does not fails like any second rejection.                                                                                                                                                                                                                                                                                                                             |
 | New failure status                                       | Users can tell "too large to compress" apart from an API error by its message.                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | A quarter of the window as the minimum below 16K         | A fixed 4,096 leaves an 8K window little room for history and a 4K one none. A summary that does not fit the smaller budget is dropped as truncated, and the history is kept.                                                                                                                                                                                                                                                                                                                       |
@@ -82,7 +82,7 @@ A reduced request no longer describes the history it replaces. Its reported usag
 
 ## Risks
 
-- A reduced request cuts the user's messages to 4,000 characters like tool output, keeping their start, so the summary can miss the end of a long request. The follow-up keeps them whole.
+- A reduced request cuts the user's messages to 4,000 characters like tool output, keeping their start, so the summary can miss the end of a long request. A message marked as typed is kept whole when the summary still has room, today up to about 14,000 characters ([Keeping the typed text in a reduced compaction request](2026-11-17-keep-typed-text-in-reduced-compaction.md)); an unmarked one is not.
 - The reduction only cuts parts longer than 4,000 characters. A session made of many shorter messages does not get smaller. It is sent with the room it has, which a long summary may not fit; that summary is dropped as truncated and counts toward the failure breaker. Only when its input leaves no room at all is it refused with `COMPRESSION_FAILED_INPUT_TOO_LARGE`.
 - The retry is sized from the local estimate, which the rejection has just shown runs low. For very dense text the reduced request with the reserve can still overrun: 3 of 25 measured shapes where the prompt counted half again its estimate. Compression then fails after the one retry, without a third request. A count read from the rejection sized these better, at the cost of the misreads above; calibrating the estimate from the provider's usage is a follow-up.
 - On windows below about 16K a reduced request leaves the summary at most a quarter of the window, and a request that cannot be reduced can leave less. A long summary may not fit; it is then dropped as truncated, and the history is kept.
@@ -137,7 +137,7 @@ A reduced request no longer describes the history it replaces. Its reported usag
 
 ## Follow-ups
 
-- Keep the user's messages whole in a reduced request, and condense older turns to them when truncation is not enough (#14953).
+- Condense older turns to the user's messages when truncation is not enough (#14953).
 - Calibrate the compaction estimate from the provider's usage: the last request's reported prompt tokens over its local estimate, applied when above 1. Unlike #9541's fixed multiplier it is measured per session, so it should not over-count. It would size dense retries as the parsed count did.
 - Learn a self-hosted server's window from the server itself, not from rejection text: llama.cpp's `/v1/models` reports `n_ctx`, and crush reads it.
 - Carry the provider's stop reason to the compression call and drop a summary that stopped on length. pi, Claude Code and Codex decide on it alone; `GenerateTextResult` does not carry it yet. A missing stop reason is not a clean stop: the non-streaming OpenAI converter fills in `stop`.
