@@ -2888,7 +2888,8 @@ describe('createTranscriptReplayMachine', () => {
 
   it('stamps card metadata on a failed plan-less todo_write result', () => {
     // Replay skips the todo_write start frame, so a terminal frame without
-    // kind is dropped as malformed by both channel transports.
+    // kind is dropped as malformed by both channel transports. `think` is the
+    // kind the live todo_write emitter stamps, so replay must match it.
     const machine = createTranscriptReplayMachine();
     const failed = updates(
       machine,
@@ -2910,7 +2911,7 @@ describe('createTranscriptReplayMachine', () => {
         toolCallId: 'todo-call',
         status: 'failed',
         title: 'todo_write',
-        kind: 'other',
+        kind: 'think',
       }),
     ]);
   });

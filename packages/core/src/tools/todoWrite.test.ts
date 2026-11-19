@@ -729,7 +729,7 @@ describe('TodoWriteTool', () => {
       // The display string is the only place a failure used to be visible:
       // status, telemetry, the persisted record and replay all read `error`.
       expect(result.error).toMatchObject({
-        message: 'Write failed',
+        message: 'Error writing todos: Write failed',
         type: 'execution_failed',
       });
     });
