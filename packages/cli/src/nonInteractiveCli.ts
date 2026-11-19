@@ -3033,6 +3033,13 @@ export async function runNonInteractive(
       };
 
       let currentPromptId = prompt_id;
+      // A teammate turn mints its own prompt id (registered as a background
+      // interaction so the ledger excludes it). Track whether the active turn
+      // is a teammate turn so its ToolResult continuations keep that id, while
+      // a later foreground turn restores the base id — otherwise the registered
+      // teammate id would drop every later foreground send from the ledger for
+      // the rest of the run (R8-F2).
+      let teammateTurnActive = false;
       while (true) {
         // Drain pending teammate messages into the conversation.
         // sendMessageStream only reads currentMessages[0].parts,
@@ -3093,10 +3100,19 @@ export async function runNonInteractive(
         } else {
           sendType = SendMessageType.ToolResult;
         }
-        if (isTeammateTurn) {
+        if (isTeammateTurn && sendType === SendMessageType.Teammate) {
           selectActiveInteraction(currentPromptId);
           endActiveInteraction('ok');
           currentPromptId = `${prompt_id}/teammate/${turnCount}`;
+          teammateTurnActive = true;
+        } else if (!teammateTurnActive) {
+          // Foreground turn (or a continuation of one): restore the base id so
+          // a prior teammate turn's registered id does not exclude this send.
+          // A foreground Goal first segment that coincides with a teammate
+          // batch keeps the base id too — it is a Goal/UserQuery send, not a
+          // Teammate send, so it must not wear (or rotate the ledger key to)
+          // the teammate id (R14 deferred).
+          currentPromptId = prompt_id;
         }
         selectActiveInteraction(
           currentPromptId,
@@ -3186,6 +3202,15 @@ export async function runNonInteractive(
                 },
               }
             : {}),
+          // A runtime Goal run keeps the foreground turn's prompt_id for
+          // identity but opens its own ledger turn, so a fallback the
+          // foreground turn exhausted is re-probed for the Goal run. The key
+          // is stable across the run's segments (goalTurn.turnKey), so sticky
+          // marks still persist within the run, as continuations do.
+          ...(goalTurn &&
+            goalTurn.origin === 'runtime' && {
+              ledgerTurnKey: `${prompt_id}/goal/${goalTurn.turnKey}`,
+            }),
         };
         let shouldFinalizeTurn: boolean;
         if (replyOnly) {
@@ -3264,6 +3289,7 @@ export async function runNonInteractive(
               endActiveInteraction('ok');
               const nextGoalTurn = queuedGoalTurns.shift();
               if (nextGoalTurn) {
+                teammateTurnActive = false;
                 activeGoalTurn = nextGoalTurn;
                 markGoalTurnDelivered(nextGoalTurn);
                 isFirstGoalSegment = true;
@@ -3439,6 +3465,7 @@ export async function runNonInteractive(
               endActiveInteraction('ok');
               const nextGoalTurn = queuedGoalTurns.shift();
               if (nextGoalTurn) {
+                teammateTurnActive = false;
                 activeGoalTurn = nextGoalTurn;
                 markGoalTurnDelivered(nextGoalTurn);
                 isFirstGoalSegment = true;
@@ -3463,6 +3490,9 @@ export async function runNonInteractive(
           }
         }
         if (shouldFinalizeTurn) {
+          // The turn ended; a subsequent foreground turn must not inherit a
+          // teammate turn's registered prompt id (R8-F2).
+          teammateTurnActive = false;
           await modTurn?.complete();
           if (activeGoalTurn) {
             const completedGoalTurn = activeGoalTurn;

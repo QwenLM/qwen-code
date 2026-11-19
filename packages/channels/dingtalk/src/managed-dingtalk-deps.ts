@@ -62,10 +62,16 @@ function createStreamClient(
     };
   };
   internals.debug = false;
+  // The SDK arms its own reconnect from every socket's close event without
+  // reading its `reconnecting` flag, so each drop adds a chain that compounds
+  // on the next close. Reconnect is centralized below instead (#17173 R11).
+  // Assigned on the instance because the constructor's options type omits the
+  // field, while the config it exposes carries it.
+  client.config.autoReconnect = false;
   // The SDK creates a heartbeat interval on every socket open but never
   // clears it on close, and the next open overwrites the only stored handle —
   // the old interval keeps pinging the replacement socket. Retire it on close,
-  // before the SDK's autoReconnect opens the next one (#17173 R5).
+  // before the wrapper's reconnect opens the next one (#17173 R5).
   const retireHeartbeat = () => {
     if (internals.heartbeatIntervallId !== undefined) {
       clearInterval(internals.heartbeatIntervallId);
@@ -102,17 +108,33 @@ function createStreamClient(
       );
     }
   };
-  // The SDK reconnects by calling this.connect, whose getEndpoint() logs the
-  // clientSecret. The adapter's FIRST connect must surface its failure (a bad
-  // credential creates no socket and arms no retry, so swallowing it would
-  // report a healthy start that is permanently deaf). A reconnect after a
-  // successful connect may fail, but the SDK arms its retry timer only from the
-  // socket close event — a getEndpoint() failure creates no socket and no timer,
-  // so re-arm the retry here or one transient error leaves the adapter deaf.
+  // Reconnect is owned here, not by the SDK: a drop and a failed attempt both
+  // funnel into one pending timer, and only one attempt runs at a time. The
+  // adapter's FIRST connect must surface its failure (a bad credential creates
+  // no socket, so swallowing it would report a healthy start that is
+  // permanently deaf); a later failure re-arms, because a getEndpoint() failure
+  // creates no socket and therefore no close event to re-arm from.
   let stopped = false;
   let everConnected = false;
   let loggedReconnectFailure = false;
+  let pending: Promise<void> | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
+  const scheduleReconnect = () => {
+    // Before the first successful connect a failure must surface to the
+    // operator, not turn into a silent retry loop.
+    if (stopped || !everConnected || retry !== undefined) return;
+    retry = setTimeout(() => {
+      retry = undefined;
+      if (stopped) return;
+      // An attempt still running owns the socket; try again later rather than
+      // dropping this reconnect on the floor.
+      if (pending !== undefined) {
+        scheduleReconnect();
+        return;
+      }
+      void guardedConnect();
+    }, RECONNECT_RETRY_MS);
+  };
   const sdkConnect = internals.connect.bind(client);
   // The SDK resolves connect() once the WebSocket is constructed; only the
   // 'open' event means the stream can actually receive frames. Wait for it,
@@ -158,8 +180,10 @@ function createStreamClient(
       withConnectLoggingSuppressed(sdkConnect)
         .then(() => {
           // Each attempt constructs a fresh socket; arm the heartbeat retire
-          // on its close so a reconnect never inherits the old interval.
+          // and the reconnect on its close, so a drop of a healthy socket is
+          // recovered too now that the SDK no longer reconnects itself.
           internals.socket?.on('close', retireHeartbeat);
+          internals.socket?.on('close', scheduleReconnect);
           return waitForSocketOpen();
         })
         .then(
@@ -181,8 +205,13 @@ function createStreamClient(
     });
   const guardedConnect = (): Promise<void> => {
     if (stopped) return Promise.resolve();
-    return attempt().then(
+    // A concurrent caller joins the running attempt and settles with its real
+    // outcome. Resolving early would report a healthy start while the only
+    // socket is still opening — and the attempt it joined may yet fail.
+    if (pending !== undefined) return pending;
+    pending = attempt().then(
       (result) => {
+        pending = undefined;
         everConnected = true;
         loggedReconnectFailure = false;
         // A stale retry armed by an earlier failure must not fire after the
@@ -198,6 +227,7 @@ function createStreamClient(
         return result;
       },
       (error) => {
+        pending = undefined;
         // The first failure must surface (it tells the operator the credential
         // or network is wrong), but never rethrow the SDK's error object: an
         // AxiosError serializes its config.url, which carries the gettoken
@@ -218,17 +248,12 @@ function createStreamClient(
             `Managed DingTalk stream reconnect failed; retrying in ${RECONNECT_RETRY_MS} ms.\n`,
           );
         }
-        if (!stopped && retry === undefined) {
-          retry = setTimeout(() => {
-            retry = undefined;
-            void guardedConnect();
-          }, RECONNECT_RETRY_MS);
-        }
+        scheduleReconnect();
         return undefined;
       },
     );
+    return pending;
   };
-  internals.connect = guardedConnect;
   return {
     connect: () => guardedConnect(),
     disconnect: () => {

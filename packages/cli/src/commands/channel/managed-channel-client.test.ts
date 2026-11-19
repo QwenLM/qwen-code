@@ -56,7 +56,7 @@ describe('HttpManagedChannelControlPlane', () => {
           ],
         },
       },
-      { status: 200, body: {} },
+      { status: 200, body: { deliveryId: 'd-1', state: 'delivered' } },
       { status: 200, body: {} },
     ]);
     await plane.register({
@@ -123,12 +123,15 @@ describe('HttpManagedChannelControlPlane', () => {
       },
     ]);
     expect(calls[2]!.url).toMatch(/\/deliveries:claim$/);
-    await plane.receipt('d-1', {
+    const settled = await plane.receipt('d-1', {
       outcome: 'accepted',
       ordinal: 0,
       providerMessageId: '<m@x>',
       acceptedAt: 5,
     });
+    // The settled delivery view is the only gate for prune-on-delivered; the
+    // producer must surface it, not discard it (R2-2). Returning {} reds this.
+    expect(settled).toMatchObject({ state: 'delivered' });
     expect(calls[3]!.url).toMatch(/\/deliveries\/d-1:receipt$/);
     expect(JSON.parse(calls[3]!.init.body as string)).toEqual({
       outcome: 'accepted',

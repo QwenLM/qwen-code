@@ -271,6 +271,7 @@ export class ManagedDingtalkAdapter {
       options.name,
       options.cwd,
       this.settings.clientId,
+      options.controlPlane.destinationKey ?? '',
     );
     this.controlPlane = options.controlPlane;
     this.deps = options.deps;
@@ -329,7 +330,41 @@ export class ManagedDingtalkAdapter {
       );
     }
     try {
-      this.state = this.store.load() ?? {
+      const loaded = this.store.load();
+      // The upgrade to per-registration ledgers strands the legacy
+      // managed-state.json: make the drop explicit, never silent. Detect it
+      // even when a keyed ledger already exists — a rollback to the
+      // pre-upgrade build can stage fresh legacy claims after the upgrade
+      // (R2-6). The legacy ledger is not adopted — that would replay one
+      // registration's pending into another. It is archived only once the
+      // start succeeds (below), so a failed first start leaves the file for a
+      // rollback to recover (R3-2).
+      const legacy = this.store.strandedLegacyLedger();
+      if (legacy) {
+        // An unreadable legacy is not an empty one: its counts are unknown and
+        // any claims it held are stranded (R3-1). Name the inbound and outbound
+        // consequences separately so an outbound-only strand does not report
+        // lost inbound messages, and a quiescent 0/0 legacy reports no loss
+        // (R2-1).
+        const pendingLabel = legacy.readable ? legacy.pending : 'unknown';
+        const outboundLabel = legacy.readable ? legacy.outbound : 'unknown';
+        let consequence = '';
+        if (!legacy.readable) {
+          consequence =
+            ' Its contents could not be read, so any staged-but-unadmitted claims it held are stranded.';
+        } else {
+          if (legacy.pending > 0)
+            consequence +=
+              ' Its staged-but-unadmitted claims were acked to the provider and are lost.';
+          if (legacy.outbound > 0)
+            consequence +=
+              ' Its un-receipted outbound segments were dropped, so their delivery status is unknown.';
+        }
+        this.log(
+          `Managed DingTalk upgraded to per-registration ledgers; the legacy ledger ${legacy.path} (${pendingLabel} pending, ${outboundLabel} outbound) is stranded and not replayed.${consequence}`,
+        );
+      }
+      this.state = loaded ?? {
         version: 1,
         generation: 1,
         pending: [],
@@ -367,6 +402,22 @@ export class ManagedDingtalkAdapter {
       // adapter the CLI would then park on.
       if (!this.running || this.ownershipLost)
         throw new Error('Managed DingTalk adapter stopped during connection.');
+      // The start succeeded, so archive the reported legacy: a static legacy is
+      // not re-announced on every later start, and a second registration of the
+      // entry is not told the first registration's claims were its own (R2-6).
+      // A failed start above leaves it untouched for a rollback to recover
+      // (R3-2); the notice then simply repeats on the retry.
+      if (legacy) {
+        const archived = this.store.archiveStrandedLegacy();
+        // The notice above names the legacy path, which this rename moves; name
+        // the archived path too so an operator following the notice can still
+        // find the preserved claims instead of hitting ENOENT (R4-1).
+        if (archived) {
+          this.log(
+            `Managed DingTalk archived the legacy ledger to ${archived}; the claims it held are preserved there for inspection.`,
+          );
+        }
+      }
       if (this.pollLoop) this.loop = this.runLoop();
     } catch (error) {
       this.stop();
@@ -1120,6 +1171,13 @@ export class ManagedDingtalkAdapter {
           // capability and the provider errmsg is not trusted text.
           this.log(
             `Managed DingTalk evicted the cached webhook for conversation ${conversationId} after a definitive send refusal; the next frame must commit a fresh webhook.`,
+          );
+        }
+        if (card.render === 'card' && definitive) {
+          // A definitive card refusal settles the delivery rejected; make it
+          // diagnosable. Log the fact, not the provider errmsg (untrusted text).
+          this.log(
+            `Managed DingTalk card send for ${delivery.deliveryId} was definitively refused; the delivery is rejected.`,
           );
         }
         outcome = definitive ? { outcome: 'rejected' } : { outcome: 'unknown' };

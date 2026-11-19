@@ -132,11 +132,13 @@ segments reproduces the reply) then holds for the card body too.
 The card body is capped at `MANAGED_CARD_CONTENT_LIMIT = 20_000` UTF-16 units,
 the bound the Legacy status card already uses. Before a segment is rendered
 into the card, the adapter checks whether the accumulated body plus the segment
-text still fits. When it does not — including the case where segment 0 alone is
-too large — the adapter switches that delivery to the text path for that
-segment and every segment after it, and persists the switch. The card keeps
-the prefix it carries; the tail arrives as ordinary `sessionWebhook` text
-messages. Each segment still receives exactly one truthful receipt.
+text still fits. When it does not, the adapter switches that delivery to the
+text path for that segment and every segment after it. If a card already
+exists, the switch is persisted (`mode: 'text'`) so the whole tail stays text
+across a restart; the card keeps the prefix it carries and the tail arrives as
+ordinary `sessionWebhook` text messages. If segment 0 alone is too large, no
+card is created and the delivery is text from the start — there is no card
+progress to persist. Each segment still receives exactly one truthful receipt.
 
 This is a rendering fallback inside one delivery, not a second delivery
 source: the same `deliveryId`, the same ledger, the same claim/resume protocol.

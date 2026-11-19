@@ -783,6 +783,11 @@ CREATE INDEX idx_ma_operation_execution ON ma_operation (scope_key, operation_ki
 
 CREATE INDEX idx_ma_operation_item ON ma_operation (scope_key, operation_kind, item_id);
 
+-- Workspace artifact page access path. tenant_id stays a residual filter:
+-- both identity columns are VARBINARY(2048), so a (tenant_id, workspace_id)
+-- leading pair would exceed InnoDB's 3072-byte index key limit.
+CREATE INDEX idx_ma_operation_workspace ON ma_operation (workspace_id, operation_kind, state, id);
+
 CREATE TABLE ma_operation_work (
     operation_key CHAR(64) NOT NULL COMMENT 'Hashed identity of the durable operation.',
     work_kind VARCHAR(32) NOT NULL COMMENT 'Typed work target, such as SESSION or RESOURCE.',

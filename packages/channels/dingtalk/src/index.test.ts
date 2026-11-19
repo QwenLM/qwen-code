@@ -15,6 +15,7 @@ describe('DingTalk management fields', () => {
     expect(plugin.management?.fields.map((field) => field.key)).toEqual([
       'clientId',
       'clientSecret',
+      'cardTemplateId',
       'interactiveCards',
     ]);
   });

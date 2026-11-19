@@ -296,6 +296,7 @@ const state = vi.hoisted(() => ({
   publicationRequest: vi.fn(),
   storeOptions: [] as Array<Record<string, unknown>>,
   ownershipReleases: [] as Array<Record<string, unknown>>,
+  writerRenewalStops: 0,
   setLifecycleAuthority: vi.fn(),
   modelConfig: vi.fn(),
   memory: vi.fn(),
@@ -498,6 +499,9 @@ vi.mock(
         },
         close: async () => undefined,
         stopLocal: async () => undefined,
+        stopWriterRenewal: () => {
+          state.writerRenewalStops += 1;
+        },
         quiesceOwnership: async () => undefined,
         releaseOwnership: async (
           request: Record<string, unknown> & {
@@ -670,6 +674,7 @@ beforeEach(({ task }) => {
   state.approvalSelections.clear();
   state.approvalQueries.length = 0;
   state.appendFault = undefined;
+  state.writerRenewalStops = 0;
   state.automationCreates.length = 0;
   state.automationRetires.length = 0;
   state.modelConfig.mockReset();
@@ -698,6 +703,13 @@ async function app(
   withBroker = false,
   instanceId?: string,
   extensionPackages = true,
+  suspensionOptions?: {
+    idleSuspendMs?: number;
+    suspendRetryBaseMs?: number;
+    suspendRetryCap?: number;
+    suspendReconcileMs?: number;
+    coldOpenLimit?: number;
+  },
   caps?: SseAdmissionCaps,
 ) {
   const result = express();
@@ -718,14 +730,17 @@ async function app(
         ),
       };
   installHostedHarnessContractMiddleware(result, contract);
-  registerHostedHarnessSessionRoutes(
+  const registration = registerHostedHarnessSessionRoutes(
     result,
     contract,
     state.root,
     withBroker ? { baseUrl: 'http://127.0.0.1:1', token: 'test' } : undefined,
-    { sseAdmissionCaps: caps },
+    { ...suspensionOptions, sseAdmissionCaps: caps },
   );
   const listener = createServer(result);
+  (
+    listener as Server & { harnessRegistration?: typeof registration }
+  ).harnessRegistration = registration;
   listeners.add(listener);
   // Match supertest's IPv4 URL; wildcard IPv6 can share an unrelated IPv4 port.
   await new Promise<void>((resolve) =>
@@ -23433,6 +23448,7 @@ describe('Hosted Harness no-tool session', () => {
       false,
       undefined,
       true,
+      undefined,
       resolveSseAdmissionCaps({ maxConnections: 10, maxSseConnections: 1 }),
     );
     const created = await headers(supertest(server).post('/session')).send({
@@ -32139,7 +32155,15 @@ describe('Hosted Harness Runtime turn takeover', () => {
     });
   });
 
-  async function replacementApp(instanceId?: string) {
+  async function replacementApp(
+    instanceId?: string,
+    suspensionOptions?: {
+      idleSuspendMs?: number;
+      suspendRetryBaseMs?: number;
+      suspendRetryCap?: number;
+      coldOpenLimit?: number;
+    },
+  ) {
     const result = express();
     result.use(express.json());
     const contract = createHostedHarnessContract(
@@ -32149,11 +32173,20 @@ describe('Hosted Harness Runtime turn takeover', () => {
       instanceId,
     );
     installHostedHarnessContractMiddleware(result, contract);
-    registerHostedHarnessSessionRoutes(result, contract, state.root, {
-      baseUrl: 'http://127.0.0.1:1',
-      token: 'test',
-    });
+    const registration = registerHostedHarnessSessionRoutes(
+      result,
+      contract,
+      state.root,
+      {
+        baseUrl: 'http://127.0.0.1:1',
+        token: 'test',
+      },
+      suspensionOptions,
+    );
     const listener = createServer(result);
+    (
+      listener as Server & { harnessRegistration?: typeof registration }
+    ).harnessRegistration = registration;
     listeners.add(listener);
     await new Promise<void>((resolve) =>
       listener.listen(0, '127.0.0.1', resolve),
@@ -36001,6 +36034,76 @@ describe('Hosted Harness Runtime turn takeover', () => {
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );
+  });
+
+  it('a failed lease release keeps the suspension gate closed', async () => {
+    await parkToolTurn();
+    let stopConfirmed = false;
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
+      async () => ({ state: stopConfirmed ? 'settled' : 'prepared' }),
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockImplementation(
+      async () => {
+        stopConfirmed = true;
+      },
+    );
+    // The handback the cancellation owes cannot land, so the settled Turn
+    // leaves the lease owed. The idle teardown must not certify that
+    // release: it retries to the cap and escalates instead of sealing.
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(503, 'runtime_unavailable'),
+    );
+    const server = await replacementApp(undefined, {
+      idleSuspendMs: 150,
+      suspendRetryBaseMs: 5,
+      suspendRetryCap: 2,
+    });
+    const loaded = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      passiveManagedRuntimeRecovery: true,
+    });
+    expect(loaded.status).toBe(200);
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as { checkpointId: string; activationId: string };
+    const cancelled = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(cancelled.status).toBe(200);
+    // The gate survives the resident: a cold open meets the non-transient
+    // refusal, never a silent seal that would report the Session ready
+    // while its Runtime owner is still running.
+    await vi.waitFor(
+      async () => {
+        const load = await replacementHeaders(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        ).send({
+          managedSessionStore: storeFor(BOOT_ID_2),
+          toolProfile: FILE_PROFILE,
+        });
+        expect(load.status).toBe(409);
+        expect(load.body.code).toBe('hosted_session_teardown_blocked');
+      },
+      { timeout: 5000 },
+    );
+    const stats = (
+      server as Server & {
+        harnessRegistration: ReturnType<
+          typeof registerHostedHarnessSessionRoutes
+        >;
+      }
+    ).harnessRegistration.suspensionStats();
+    expect(stats.blockedTeardowns).toBe(1);
+    expect(stats.cleanSuspensions).toBe(0);
   });
 
   it('keeps a transiently blocked restore on the retriable refusal', async () => {
@@ -46028,5 +46131,603 @@ describe('client files registration route', () => {
         peer.closeAllConnections();
       });
     }
+  });
+});
+
+// Phase 1 of the stateless Hosted Harness design: an idle Session drains
+// its non-terminal owners and seals its writer, and the next load cold-opens
+// it. The gate refuses work while a teardown converges and keeps refusing
+// after an uncertain one, until operator recovery.
+describe('idle suspension', () => {
+  beforeEach(async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'workspaceContext',
+    ).mockResolvedValue([]);
+    resetManagedRuntimeDispatchGatesForTest();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'fileHistory').mockResolvedValue({
+      ownerSessionId: SESSION_ID,
+      snapshots: [],
+      files: {},
+    });
+    state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
+    state.toolResults = null;
+    state.ownershipReleases.length = 0;
+    state.assertWritable.mockReset();
+    state.assertWritable.mockResolvedValue(undefined);
+    state.authorizeLifecycle.mockReset();
+    state.authorizeLifecycle.mockResolvedValue(undefined);
+    state.setLifecycleAuthority.mockReset();
+    state.authorizeOrdinary.mockReset();
+    state.authorizeOrdinary.mockResolvedValue(undefined);
+    state.model.mockReset();
+    state.publicationRequest.mockReset();
+    state.model.mockImplementation(async () => ({
+      text: 'hello back',
+      model: 'test-model',
+    }));
+  });
+
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+      setTimeout(resolve, ms);
+    });
+
+  async function createIdleSession(server: Server): Promise<string> {
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    return created.body.clientId as string;
+  }
+
+  const statusOf = (server: Server, clientId: string) =>
+    headers(supertest(server).get(`/session/${SESSION_ID}/status`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+
+  const loadSession = (server: Server) =>
+    headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+      managedSessionStore: store(),
+    });
+
+  const isActivationRelease = (records: readonly unknown[]) =>
+    (
+      records as Array<{
+        managedSession?: { kind?: string; payload?: { phase?: string } };
+      }>
+    ).some(
+      (record) =>
+        record.managedSession?.kind === 'activation.changed' &&
+        record.managedSession?.payload?.phase === 'released',
+    );
+
+  it('suspends an idle session and cold-opens it on the next load', async () => {
+    const server = await app(false, undefined, true, { idleSuspendMs: 150 });
+    const clientId = await createIdleSession(server);
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, clientId)).status).toBe(404);
+      },
+      { timeout: 5000 },
+    );
+    const load = await loadSession(server);
+    expect(load.status).toBe(200);
+    expect((await statusOf(server, load.body.clientId)).status).toBe(200);
+    expect(statsOf(server).cleanSuspensions).toBe(1);
+  });
+
+  it('an admitted mutation resets the idle timer', async () => {
+    const server = await app(false, undefined, true, { idleSuspendMs: 1000 });
+    const clientId = await createIdleSession(server);
+    await sleep(600);
+    await headers(supertest(server).post(`/session/${SESSION_ID}/title`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ title: 'still here' })
+      .expect(200);
+    // Past the original deadline (1000ms + ≤10% jitter), before the one
+    // the title re-armed (≥1600ms from the create). The wide ratio keeps
+    // the assertion meaningful on a loaded shard without racing it.
+    await sleep(600);
+    expect((await statusOf(server, clientId)).status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, clientId)).status).toBe(404);
+      },
+      { timeout: 5000 },
+    );
+  });
+
+  it('a resident-reuse load resets the idle clock', async () => {
+    const server = await app(false, undefined, true, { idleSuspendMs: 300 });
+    const clientId = await createIdleSession(server);
+    await sleep(200);
+    // The load route is registered before the session middleware, so a
+    // resident-reuse reply never reaches the middleware's noteActivity;
+    // sendAttachment must reset the clock itself (qqqys R1-2).
+    const reuse = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        managedSessionStore: store(),
+        passiveManagedRuntimeRecovery: true,
+      });
+    expect(reuse.status).toBe(200);
+    expect(reuse.body.clientId).toBe(clientId);
+    // Past the original deadline (~300ms from create) but before the
+    // re-armed one (~200 + 300ms): the reuse reset the clock, so the
+    // Session is still resident.
+    await sleep(200);
+    expect((await statusOf(server, clientId)).status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, clientId)).status).toBe(404);
+      },
+      { timeout: 5000 },
+    );
+  });
+
+  it('an open event stream keeps the session resident', async () => {
+    const server = await app(false, undefined, true, { idleSuspendMs: 150 });
+    const clientId = await createIdleSession(server);
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('No port');
+    const stream = new AbortController();
+    try {
+      const opened = await fetch(
+        `http://127.0.0.1:${address.port}/session/${SESSION_ID}/events`,
+        {
+          headers: {
+            'X-Qwen-Harness-Protocol-Version': '1',
+            'X-Qwen-Harness-Boot-Id': BOOT_ID,
+            'X-Qwen-Client-Id': clientId,
+          },
+          signal: stream.signal,
+        },
+      );
+      expect(opened.status).toBe(200);
+      // An open stream is a reader the teardown would cut, so the predicate
+      // refuses it across several idle periods.
+      await sleep(500);
+      expect((await statusOf(server, clientId)).status).toBe(200);
+      expect(statsOf(server).cleanSuspensions).toBe(0);
+      expect(statsOf(server).eligibilityFailures).toBeGreaterThanOrEqual(1);
+      stream.abort();
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+    } finally {
+      stream.abort();
+      server.closeAllConnections();
+    }
+  });
+
+  it('a disconnected mutation keeps its own async tail counted', async () => {
+    const server = await app(false, undefined, true, { idleSuspendMs: 200 });
+    const clientId = await createIdleSession(server);
+    let release!: () => void;
+    const stall = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let stalled = false;
+    // Stall the admitted request inside its own authorization await: the
+    // work holds no busy flag and has not entered the authority's serial
+    // queue yet, so only the admitted-work count keeps teardown off it.
+    state.authorizeOrdinary.mockImplementation(async () => {
+      if (!stalled) {
+        stalled = true;
+        await stall;
+      }
+    });
+    const request = headers(
+      supertest(server).post(`/session/${SESSION_ID}/title`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ title: 'disconnected caller' });
+    const settled = request.then(
+      () => undefined,
+      () => undefined,
+    );
+    await vi.waitFor(
+      async () => {
+        expect(stalled).toBe(true);
+      },
+      { timeout: 5000 },
+    );
+    // The socket closes while the commit is still in flight. Releasing the
+    // admitted unit here would let teardown start under live work.
+    request.abort();
+    await settled;
+    await sleep(700);
+    // The attempt raised its gate and is still waiting for the admitted unit,
+    // so routes answer the reversible closing refusal — never a completed
+    // suspension, which is what releasing on the socket's 'close' produced.
+    const gated = await statusOf(server, clientId);
+    expect(gated.status).toBe(409);
+    expect(gated.body.code).toBe('hosted_session_closing');
+    expect(statsOf(server).cleanSuspensions).toBe(0);
+    release();
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, clientId)).status).toBe(404);
+      },
+      { timeout: 5000 },
+    );
+  });
+
+  it('a capped teardown ends the writer lease renewal', async () => {
+    const server = await app(false, undefined, true, {
+      idleSuspendMs: 150,
+      suspendRetryBaseMs: 5,
+      suspendRetryCap: 2,
+      suspendReconcileMs: 400,
+    });
+    await createIdleSession(server);
+    state.appendFault = async (_journal, records, _append) => {
+      if (isActivationRelease(records)) throw new Error('store gone');
+      return false;
+    };
+    await vi.waitFor(
+      async () => {
+        expect(statsOf(server).blockedTeardowns).toBe(1);
+      },
+      { timeout: 5000 },
+    );
+    // The bounded reconciliation only fences the old writer once the lease
+    // lapses. The removed resident's Store client must not keep renewing it:
+    // stopLocal() is never reached on this path, so the timer needs its own
+    // stop (the activation renewal alone does not carry the writer lease).
+    expect(state.writerRenewalStops).toBeGreaterThanOrEqual(1);
+  });
+
+  it('a parked input keeps the session resident', async () => {
+    const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+    const clientId = await createIdleSession(server);
+    state.model.mockRejectedValueOnce(
+      new HostedToolRecoveryRequiredError(new Error('store gone')),
+    );
+    const prompt = [{ type: 'text', text: 'hello' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await statusOf(server, clientId);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    await sleep(400);
+    const status = await statusOf(server, clientId);
+    expect(status.status).toBe(200);
+    expect(status.body.recoveryBlocked).toBe(true);
+    expect(statsOf(server).revertedAttempts).toBeGreaterThanOrEqual(1);
+    expect(statsOf(server).eligibilityFailures).toBeGreaterThanOrEqual(1);
+    expect(statsOf(server).cleanSuspensions).toBe(0);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+      'X-Qwen-Client-Id',
+      clientId,
+    );
+  });
+
+  it('a converging teardown answers closing to routes and loads alike', async () => {
+    const server = await app(false, undefined, true, {
+      idleSuspendMs: 150,
+      suspendRetryBaseMs: 10,
+      suspendRetryCap: 2,
+    });
+    const clientId = await createIdleSession(server);
+    let release!: () => void;
+    const stall = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let stalled = false;
+    state.appendFault = async (_journal, records, _append) => {
+      if (isActivationRelease(records) && !stalled) {
+        stalled = true;
+        await stall;
+      }
+      return false;
+    };
+    await vi.waitFor(
+      async () => {
+        expect(stalled).toBe(true);
+      },
+      { timeout: 5000 },
+    );
+    const refused = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/title`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ title: 'too late' });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_session_closing');
+    const loadRefused = await loadSession(server);
+    expect(loadRefused.status).toBe(409);
+    expect(loadRefused.body.code).toBe('hosted_session_closing');
+    release();
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, clientId)).status).toBe(404);
+      },
+      { timeout: 5000 },
+    );
+  });
+
+  it('an uncertain teardown blocks loads during reconciliation then auto-clears', async () => {
+    const server = await app(false, undefined, true, {
+      idleSuspendMs: 150,
+      suspendRetryBaseMs: 5,
+      suspendRetryCap: 2,
+      suspendReconcileMs: 400,
+    });
+    const clientId = await createIdleSession(server);
+    let releaseFailures = 0;
+    state.appendFault = async (_journal, records, _append) => {
+      // Fail the teardown's release attempts (cap 2), then recover: the
+      // Store comes back, so the reconciled cold open succeeds.
+      if (isActivationRelease(records) && releaseFailures < 2) {
+        releaseFailures += 1;
+        throw new Error('store gone');
+      }
+      return false;
+    };
+    // During the bounded reconciliation wait the gate stays blocked: loads
+    // and reads meet the refusal, never a silent 404 that would let an
+    // ordinary load re-open the Session before the old seal is fenced.
+    await vi.waitFor(
+      async () => {
+        const load = await loadSession(server);
+        expect(load.status).toBe(409);
+        expect(load.body.code).toBe('hosted_session_teardown_blocked');
+      },
+      { timeout: 5000 },
+    );
+    const status = await statusOf(server, clientId);
+    expect(status.status).toBe(409);
+    expect(status.body.code).toBe('hosted_session_teardown_blocked');
+    expect(statsOf(server).blockedTeardowns).toBe(1);
+    // After the bound (writer lease expired + the capped attempt's in-flight
+    // seal timed out), any acquire bumps the generation and fences the old
+    // seal, so the gate auto-clears and the next load cold-opens without an
+    // operator (design open question 8).
+    await vi.waitFor(
+      async () => {
+        expect(statsOf(server).reconciledGates).toBe(1);
+      },
+      { timeout: 5000 },
+    );
+    // The gate auto-cleared without an operator: a subsequent load is no
+    // longer gate-refused. (Whether it then succeeds depends on the Store's
+    // acquire semantics; the local JSONL fixture can wedge the writer after
+    // an uncertain teardown, so assert the gate is open, not the load result.
+    // The clean suspend→cold-open path is covered by the happy-path test.)
+    const load = await loadSession(server);
+    expect(
+      load.status === 409 &&
+        load.body.code === 'hosted_session_teardown_blocked',
+    ).toBe(false);
+    expect(statsOf(server).cleanSuspensions).toBe(0);
+  });
+
+  it('a reconciled gate still surfaces a persistent Store outage as a load failure', async () => {
+    const server = await app(false, undefined, true, {
+      idleSuspendMs: 150,
+      suspendRetryBaseMs: 5,
+      suspendRetryCap: 2,
+      suspendReconcileMs: 400,
+    });
+    await createIdleSession(server);
+    state.appendFault = async (_journal, records, _append) => {
+      if (isActivationRelease(records)) throw new Error('store gone');
+      return false;
+    };
+    await vi.waitFor(
+      async () => {
+        expect(statsOf(server).reconciledGates).toBe(1);
+      },
+      { timeout: 5000 },
+    );
+    // The gate auto-cleared (no operator), but the Store is still down: the
+    // cold open fails with a transient Store error, not the gate refusal.
+    const load = await loadSession(server);
+    expect(load.status).toBe(503);
+    expect(load.body.code).not.toBe('hosted_session_teardown_blocked');
+  });
+
+  const statsOf = (server: Server) =>
+    (
+      server as Server & {
+        harnessRegistration: ReturnType<
+          typeof registerHostedHarnessSessionRoutes
+        >;
+      }
+    ).harnessRegistration.suspensionStats();
+
+  // The instance caps concurrent cold opens; the excess is refused with
+  // the transient code the control plane classifies as a budget-exempt
+  // wait, and the slot frees when the in-flight open completes.
+  it('refuses cold opens past the instance cap until a slot frees', async () => {
+    const server = await app(false, undefined, true, { coldOpenLimit: 1 });
+    let release!: () => void;
+    const stall = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let stalled = false;
+    state.appendFault = async (_journal, _records, _append) => {
+      if (!stalled) {
+        stalled = true;
+        await stall;
+      }
+      return false;
+    };
+    const creating = headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+      })
+      .then((response) => response);
+    await vi.waitFor(
+      async () => {
+        expect(stalled).toBe(true);
+      },
+      { timeout: 5000 },
+    );
+    const refused = await headers(supertest(server).post('/session')).send({
+      sessionId: '44444444-4444-4444-8444-444444444444',
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_session_open_busy');
+    expect(statsOf(server).openBusyRefusals).toBe(1);
+    release();
+    expect((await creating).status).toBe(200);
+    const retried = await headers(supertest(server).post('/session')).send({
+      sessionId: '44444444-4444-4444-8444-444444444444',
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(retried.status).toBe(200);
+    expect(statsOf(server).coldOpens).toBeGreaterThanOrEqual(2);
+    expect(statsOf(server).coldOpenStoreMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('a cap-refused create publishes nothing and leaves no opening debt', async () => {
+    const server = await app(false, 'pod-a', true, { coldOpenLimit: 1 });
+    let release!: () => void;
+    const stall = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let stalled = false;
+    state.appendFault = async (_journal, _records, _append) => {
+      if (!stalled) {
+        stalled = true;
+        await stall;
+      }
+      return false;
+    };
+    const placement = {
+      instanceId: 'pod-a',
+      bootId: BOOT_ID,
+      placementEpoch: 1,
+    };
+    const creating = headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: { ...store(), writerToken: 'a'.repeat(32) },
+        harnessPlacement: placement,
+      })
+      .then((response) => response);
+    await vi.waitFor(
+      async () => {
+        expect(stalled).toBe(true);
+      },
+      { timeout: 5000 },
+    );
+    const publish = vi.spyOn(
+      LocalManagedSessionResourceStore.prototype,
+      'publish',
+    );
+    publish.mockClear();
+    const refused = await headers(supertest(server).post('/session')).send({
+      sessionId: '44444444-4444-4444-8444-444444444444',
+      sessionScope: 'thread',
+      managedSessionStore: { ...store(), writerToken: 'a'.repeat(32) },
+      harnessPlacement: placement,
+    });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_session_open_busy');
+    // The refusal precedes the resource publication and the opening
+    // registration, so the control plane's transient retry neither leaks
+    // unreferenced resources nor inflates openingSessions until attach.
+    expect(publish).not.toHaveBeenCalled();
+    release();
+    expect((await creating).status).toBe(200);
+    // The refused Session never attaches, so any opening debt it left
+    // would survive the admitted create's attach and show up here.
+    const drained = await headers(
+      supertest(server).post('/internal/hosted-harness/v1/instance:drain'),
+    ).send({ operationId: randomUUID(), expectedBootId: BOOT_ID });
+    expect(drained.body.counters.openingSessions).toBe(0);
+  });
+
+  // Drain and suspension mark in synchronous sections: a Session whose
+  // suspension teardown is converging refuses the drain's ownership
+  // release instead of letting both close it at once.
+  it('a converging suspension refuses the drain ownership release', async () => {
+    const server = await app(false, 'pod-a', true, {
+      idleSuspendMs: 150,
+      suspendRetryBaseMs: 10,
+      suspendRetryCap: 2,
+    });
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: { ...store(), writerToken: 'a'.repeat(32) },
+      harnessPlacement: {
+        instanceId: 'pod-a',
+        bootId: BOOT_ID,
+        placementEpoch: 1,
+      },
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    let release!: () => void;
+    const stall = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let stalled = false;
+    state.appendFault = async (_journal, records, _append) => {
+      const isRelease = (
+        records as Array<{
+          managedSession?: { kind?: string; payload?: { phase?: string } };
+        }>
+      ).some(
+        (record) =>
+          record.managedSession?.kind === 'activation.changed' &&
+          record.managedSession?.payload?.phase === 'released',
+      );
+      if (isRelease && !stalled) {
+        stalled = true;
+        await stall;
+      }
+      return false;
+    };
+    await vi.waitFor(
+      async () => {
+        // Probe with a read: a mutation probe would itself reset the idle
+        // timer and the gate would never close.
+        const probe = await statusOf(server, clientId);
+        expect(probe.body.code).toBe('hosted_session_closing');
+      },
+      { timeout: 5000 },
+    );
+    const drained = await headers(
+      supertest(server).post('/internal/hosted-harness/v1/instance:drain'),
+    ).send({ operationId: randomUUID(), expectedBootId: BOOT_ID });
+    expect(drained.body.state).toBe('QUIESCING');
+    const busy = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/ownership:release`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ operationId: randomUUID(), placementEpoch: 1 });
+    expect(busy.status).toBe(409);
+    expect(busy.body.code).toBe('hosted_ownership_release_busy');
+    release();
   });
 });

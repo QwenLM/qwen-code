@@ -134,14 +134,17 @@ describe('managed-dingtalk command workspace resolution', () => {
   });
 
   it('hands the parsed robot credential to the deps so the card send exists (H5e)', async () => {
+    // The raw config is whitespace-padded; the parsed settings are trimmed.
+    // The deps must receive the PARSED credential, not the raw config, so a
+    // command that forwarded the raw values would red this (deferred round-2).
     vi.mocked(parseConfiguredChannels).mockResolvedValueOnce([
       {
         name: 'ding',
         config: {
           type: 'dingtalk',
           cwd: '/workspace',
-          clientId: 'app-key',
-          clientSecret: 'app-secret',
+          clientId: '  app-key  ',
+          clientSecret: '  app-secret  ',
           cardTemplateId: 'tpl.schema',
         },
       },
@@ -157,7 +160,7 @@ describe('managed-dingtalk command workspace resolution', () => {
     await running;
     expect(dingtalkSettings).toHaveBeenCalledWith(
       expect.objectContaining({
-        clientId: 'app-key',
+        clientId: '  app-key  ',
         cardTemplateId: 'tpl.schema',
       }),
     );

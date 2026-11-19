@@ -1256,6 +1256,25 @@ describe('WorkspaceChannelSettingsStore', () => {
     });
   });
 
+  it('accepts inject as a channel and group dispatch mode', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        dispatchMode: 'inject',
+        groups: { '*': { dispatchMode: 'inject' } },
+      },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      dispatchMode: 'inject',
+      groups: { '*': { dispatchMode: 'inject' } },
+    });
+  });
+
   it.each([
     ['blockStreaming', 'on', 'off'],
     ['blockStreamingChunk', { minChars: 400 }, { minChars: 100 }],
@@ -2477,6 +2496,34 @@ describe('WorkspaceChannelSettingsStore', () => {
       secrets: { clientSecret: { operation: 'preserve' } },
     });
     expect(again.channels['bot']?.['cardTemplateId']).toBe('tpl-2.schema');
+
+    // envResolvable like clientId/clientSecret: a per-deployment environment
+    // reference upserts and is kept (R2-3). Without the flag this throws
+    // "does not support environment references".
+    expect(
+      dingtalk?.fields.find((field) => field.key === 'cardTemplateId')
+        ?.envResolvable,
+    ).toBe(true);
+    await withEnv(
+      { DINGTALK_CARD_TEMPLATE_ID: 'tpl-resolved.schema' },
+      async () => {
+        const ref = await store.upsert('bot', {
+          expectedRevision: again.revision,
+          config: {
+            type: 'dingtalk',
+            clientId: 'client-id',
+            cardTemplateId: '$DINGTALK_CARD_TEMPLATE_ID',
+          },
+          secrets: { clientSecret: { operation: 'preserve' } },
+        });
+        // The reference is accepted (without envResolvable the upsert throws
+        // "does not support environment references") and resolves in the
+        // returned snapshot.
+        expect(ref.channels['bot']?.['cardTemplateId']).toBe(
+          'tpl-resolved.schema',
+        );
+      },
+    );
   });
 
   it('rejects an unchanged reserved nested key instead of preserving it', async () => {
