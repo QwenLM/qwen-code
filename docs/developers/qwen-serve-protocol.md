@@ -234,7 +234,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'extension_batch_activation_v2', 'extension_activation_explicit_refresh',
  'extension_state',
  'workspace_settings', 'workspace_init', 'workspace_mcp_restart',
- 'session_recap', 'session_generation', 'session_btw', 'session_btw_stream', 'session_shell_command',
+ 'session_recap', 'session_mod_rows', 'session_generation', 'session_btw', 'session_btw_stream', 'session_shell_command',
  'standalone_sessions_v1', 'standalone_session_options_v1',
  'mcp_workspace_pool', 'mcp_pool_restart',
  'require_auth', 'allow_origin', 'auth_device_flow',
@@ -3967,7 +3967,7 @@ ACP-over-HTTP uses the same request and response bodies through vendor methods `
 
 ### Multi-workspace live-session routing
 
-When `multi_workspace_sessions` is advertised, live-session operations identify their workspace from the `sessionId`; clients do not add a workspace selector to the URL. In addition to the existing owner-routed lifecycle operations, this applies to `PATCH /session/:id/metadata`, `POST /session/:id/recap`, `POST /session/:id/generate`, `POST /session/:id/btw`, `POST /session/:id/btw/stream`, `DELETE /session/:id/btw/stream/:requestId`, `POST /session/:id/mid-turn-message`, `GET /session/:id/mid-turn-messages`, `POST /session/:id/mid-turn-messages/send-now`, `DELETE /session/:id/mid-turn-messages/:messageId`, `POST /session/:id/tasks/:taskId/cancel`, `POST /session/:id/goal/clear`, `POST /session/:id/continue`, `POST /session/:id/language`, `POST /session/:id/artifacts`, `DELETE /session/:id/artifacts/:artifactId`, `GET /session/:id/sources`, `POST /session/:id/sources`, `DELETE /session/:id/sources/:sourceId`, `GET /session/:id/generated-ui/state/:cardId`, and `PUT /session/:id/generated-ui/state/:cardId`. The daemon routes each request to the trusted runtime that owns the live session. An untrusted non-primary owner returns `403 untrusted_workspace`, a missing live owner returns `404 session_not_found`, and an ambiguous owner fails closed with `500 ambiguous_session_owner`.
+When `multi_workspace_sessions` is advertised, live-session operations identify their workspace from the `sessionId`; clients do not add a workspace selector to the URL. In addition to the existing owner-routed lifecycle operations, this applies to `PATCH /session/:id/metadata`, `POST /session/:id/recap`, `POST /session/:id/mod-row`, `POST /session/:id/generate`, `POST /session/:id/btw`, `POST /session/:id/btw/stream`, `DELETE /session/:id/btw/stream/:requestId`, `POST /session/:id/mid-turn-message`, `GET /session/:id/mid-turn-messages`, `POST /session/:id/mid-turn-messages/send-now`, `DELETE /session/:id/mid-turn-messages/:messageId`, `POST /session/:id/tasks/:taskId/cancel`, `POST /session/:id/goal/clear`, `POST /session/:id/continue`, `POST /session/:id/language`, `POST /session/:id/artifacts`, `DELETE /session/:id/artifacts/:artifactId`, `GET /session/:id/sources`, `POST /session/:id/sources`, `DELETE /session/:id/sources/:sourceId`, `GET /session/:id/generated-ui/state/:cardId`, and `PUT /session/:id/generated-ui/state/:cardId`. The daemon routes each request to the trusted runtime that owns the live session. An untrusted non-primary owner returns `403 untrusted_workspace`, a missing live owner returns `404 session_not_found`, and an ambiguous owner fails closed with `500 ambiguous_session_owner`.
 
 This rule is live-session-only and does not make every workspace-less session route multi-workspace-aware. Persisted or archived operations use their documented workspace-qualified routes. `POST /session/:id/branch`, `POST /session/:id/fork`, and `POST /session/:id/cd` intentionally remain primary-only and return `non_primary_session_route_not_supported` for non-primary owners.
 
@@ -4439,6 +4439,37 @@ Errors:
 - `404` — session unknown.
 
 Cancellation: **none in v1**. The route does not listen for HTTP client disconnect, no `AbortSignal` is plumbed into the bridge, and the ACP child runs the side-query to completion regardless of whether the caller has disconnected. The only ceilings are the bridge's 60s backstop timeout (`SESSION_RECAP_TIMEOUT_MS`) and the transport-closed race against ACP channel death. This is acceptable because recap is short (single-attempt, `maxOutputTokens: 300`, ~1–5s typical); a request-id-based cancel ext-method can plumb full end-to-end cancellation in a future release if the bandwidth cost ever justifies it.
+
+### `POST /session/:id/mod-row`
+
+Capability tag: `session_mod_rows`. Bridge → ACP extMethod `qwen/control/session/mod_row`.
+
+Ask a live session's Mods for a transcript row this client draws, such as a block of the model's reply (`AssistantMessage`). The bridge declares the row sites the Web Shell draws in its `initialize` client capabilities (`_meta["qwen.modRows"]`), so the child runs each session's Mods on the `desktop` surface and offers those sites to their `ui.render` hooks.
+
+Request body:
+
+```json
+{
+  "component": "AssistantMessage",
+  "props": { "text": "The block's markdown", "isFirstOfReply": true }
+}
+```
+
+The child validates the site's prop names and types. It builds the event envelope with `surface: 'desktop'` and a `requestId` derived from the component and props, so clients share a row identity. Rows render one at a time in the session's Mod queue, with a 30-second deadline per render. The session can serve a cached answer after a reload or to a second client. The route uses the non-strict mutation gate because a hook can spend model tokens with `$.model.complete`. Rendering leaves the stored conversation intact. A hook that calls `$.ui.log` publishes the usual `mod_log` SSE event.
+
+Response (200), one of:
+
+- `{ "status": "unhooked" }` — no hook in this session hears the site (Mods off, failed to load, or none hooked it). Ask the session no more for this site.
+- `{ "status": "unanswered" }` — the hooks did not answer within the child's 60 seconds, or the session changed (`/clear`) or closed during the render. Draw the row as it is and retry later if the session is still live.
+- `{ "status": "answered", "props": { … } }` — draw `props`, which the hooks rewrote; without `props`, draw the row as it is.
+
+Errors:
+
+- `400 {code: 'invalid_mod_row'}` — the body has no valid `component` string or `props` object, or the props do not match a recognized site. The ACP extension method reports invalid params for a recognized site's invalid props.
+- `400 {code: 'invalid_client_id'}` — malformed `X-Qwen-Client-Id` header.
+- `404` — session unknown or not live.
+
+An explicit session close can interrupt rendering. An HTTP disconnect leaves the request running, with a 75-second bridge backstop. The Web Shell sends one request at a time per session. ACP-over-HTTP clients have no mapping for this route.
 
 ### `POST /session/:id/generate`
 

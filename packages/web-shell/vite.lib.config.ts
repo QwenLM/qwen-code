@@ -167,6 +167,14 @@ function injectCssModules(): Plugin {
 const TRANSCRIPT_STUBS = new Map(
   [
     [
+      './client/components/messages/AssistantMessageRow.tsx',
+      './client/components/messages/AssistantMessageRow.transcript-stub.tsx',
+    ],
+    [
+      './client/components/streaming-tail.ts',
+      './client/components/streaming-tail.transcript-stub.ts',
+    ],
+    [
       './client/components/messages/HookStatistics.tsx',
       './client/components/messages/HookStatistics.transcript-stub.tsx',
     ],

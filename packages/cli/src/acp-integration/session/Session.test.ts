@@ -2229,6 +2229,37 @@ describe('Session', () => {
     expect(provider?.()).toBe(true);
   });
 
+  it('answers a Mod row unhooked once the session started without Mods', async () => {
+    const merged: Record<string, unknown> = { experimental: { mods: true } };
+    const modSettings = {
+      get merged() {
+        return merged;
+      },
+      isTrusted: false,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    const row = { text: 'Hello', isFirstOfReply: true };
+    const modSession = new Session(
+      'mod-row-session-id',
+      mockConfig,
+      mockClient,
+      modSettings,
+    );
+
+    // Before the history is replayed, the Mods have yet to start.
+    expect(await modSession.askModRow('AssistantMessage', row)).toEqual({
+      status: 'unanswered',
+    });
+    merged['experimental'] = { mods: false };
+    modSession.installRewriter();
+    merged['experimental'] = { mods: true };
+    expect(await modSession.askModRow('AssistantMessage', row)).toEqual({
+      status: 'unhooked',
+    });
+  });
+
   it('does not create approval transcript state during construction', () => {
     expect(
       mockChatRecordingService.recordSessionApprovalMode,
