@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type {
+  DaemonGitRemoteInfo,
   DaemonSessionSummary,
   DaemonStandaloneSessionSummary,
 } from '@qwen-code/sdk/daemon';
@@ -77,6 +78,17 @@ describe('createWebShellDaemonScenario fixture ownership', () => {
     });
 
     expect(scenario.standaloneSessions).not.toBe(fixture);
+  });
+
+  it('does not hand back the caller gitRemotes array', () => {
+    // materializeRemotes returns the array itself, and the add/remove routes
+    // splice and push it, so identity decides whether those writes reach the
+    // caller. An empty fixture still exercises the clone: ??= only fills in
+    // the default when the field is nullish.
+    const fixture: DaemonGitRemoteInfo[] = [];
+    const scenario = createWebShellDaemonScenario({ gitRemotes: fixture });
+
+    expect(scenario.gitRemotes).not.toBe(fixture);
   });
 
   it('keeps a mid-turn message push out of the caller fixture', () => {

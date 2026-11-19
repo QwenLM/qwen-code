@@ -61,6 +61,7 @@ import type {
   SessionAttachmentUploadMetadata,
 } from './sessionAttachments.js';
 import type {
+  BridgeModRowAnswer,
   ServeSessionAgentsStatus,
   ServeSessionAgentTrace,
   ServeSessionContextStatus,
@@ -3067,6 +3068,17 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     sessionId: string,
     context?: BridgeClientRequestContext,
   ): Promise<{ sessionId: string; recap: string | null }>;
+
+  /**
+   * Ask a live session's Mods for a transcript row the client draws,
+   * through `qwen/control/session/mod_row`. The child builds the row's
+   * envelope and answers once its hooks did, or once the ask timed out.
+   */
+  askSessionModRow(
+    sessionId: string,
+    row: { component: string; props: Record<string, unknown> },
+    context?: BridgeClientRequestContext,
+  ): Promise<BridgeModRowAnswer>;
 
   /**
    * Run a stateless, tool-free text generation request in the ACP child and

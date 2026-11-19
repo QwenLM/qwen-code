@@ -500,6 +500,17 @@ const DEFAULT_TOOL_SEARCH_THRESHOLD = 0;
 // without a live lock as possibly current.
 const MANAGED_ACTIVATION_LEASE_MS = 5 * 60 * 1000;
 
+function normalizeVisionBridgeTimeoutMs(
+  timeoutMs: number | undefined,
+): number | undefined {
+  return timeoutMs !== undefined &&
+    Number.isInteger(timeoutMs) &&
+    timeoutMs > 0 &&
+    timeoutMs <= 2_147_483_647
+    ? timeoutMs
+    : undefined;
+}
+
 /** The recorder's view of a Managed Session log. */
 function managedRecordWriter(
   managed: ManagedSession,
@@ -2502,8 +2513,9 @@ export interface SubSessionSpawnRequest {
    * absent means the caller's workspace. */
   workspace?: string;
   workspaceGeneration?: string;
-  /** A sub-session this caller created earlier, to send the prompt to
-   * instead of creating one. It lives in `workspace`. */
+  /** The named workspace was selected under YOLO without one-time approval. */
+  requiresYolo?: true;
+  /** An existing session in `workspace` to send the prompt to. */
   sessionId?: string;
 }
 
@@ -3472,7 +3484,7 @@ export class Config {
   private reasoningSnapshot?: ReasoningSnapshot;
   private latestReasoningSnapshot?: ReasoningSnapshot;
   private imageModel?: string;
-  private readonly visionBridgeTimeoutMs: number | undefined;
+  private visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
@@ -4122,13 +4134,9 @@ export class Config {
     // schema still accepts via /config) would throw RangeError or silently
     // degrade to a 1ms timeout, killing every bridge turn. Reject anything the
     // timer can't take and fall back to the built-in default.
-    this.visionBridgeTimeoutMs =
-      params.visionBridgeTimeoutMs !== undefined &&
-      Number.isInteger(params.visionBridgeTimeoutMs) &&
-      params.visionBridgeTimeoutMs > 0 &&
-      params.visionBridgeTimeoutMs <= 2_147_483_647
-        ? params.visionBridgeTimeoutMs
-        : undefined;
+    this.visionBridgeTimeoutMs = normalizeVisionBridgeTimeoutMs(
+      params.visionBridgeTimeoutMs,
+    );
     this.modelFallbacks = normalizeModelFallbacks(params.modelFallbacks);
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
@@ -7894,6 +7902,14 @@ export class Config {
    */
   getVisionBridgeTimeoutMs(): number | undefined {
     return this.visionBridgeTimeoutMs;
+  }
+
+  /**
+   * Update the vision bridge timeout at runtime (`/model --vision --timeout`).
+   * Values the constructor would reject fall back to the built-in default.
+   */
+  setVisionBridgeTimeoutMs(timeoutMs: number | undefined): void {
+    this.visionBridgeTimeoutMs = normalizeVisionBridgeTimeoutMs(timeoutMs);
   }
 
   /**
