@@ -237,7 +237,7 @@ core 邻近面是整面跑而非抽样：`src/managed-runtime` 加 `src/skills/b
 - cron —— `Managed cron loop body teaches a sentinel, but cron fires expand none: X.` cron 触发根本不展开任何哨兵，故无论成员资格如何，任何哨兵在此都是错的。
 - union/wakeup —— `Managed <profile> loop body teaches a sentinel outside the expanding allow-list: X.`
 
-拒绝行为不变：同样的 body 被拒、同样的 profile、对未知 token 仍失败关闭。只有措辞变了，而编码旧措辞的六处断言现按 profile 断言新措辞，故每个方向都保有自己的见证。生成的 sidecar 未触碰——parity 测试重生并逐字节比对且保持绿——故这是生成器里的诊断改动，不是发布的模型面向内容的改动。
+拒绝行为不变：同样的 body 被拒、同样的 profile、对未知 token 仍失败关闭。只有措辞变了，而编码旧措辞的七处断言现按 profile 断言新措辞，故每个方向都保有自己的见证。生成的 sidecar 未触碰——parity 测试重生并逐字节比对且保持绿——故这是生成器里的诊断改动，不是发布的模型面向内容的改动。
 
 见证：把两条消息都回退为旧的 `non-expanding sentinel` 措辞会使 **4 个用例红**，各自点名它期望的措辞；字节级还原回到 35/35。core `tsc --build`、eslint 与 prettier 净。
 

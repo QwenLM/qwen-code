@@ -237,7 +237,7 @@ Round 11 posted no inline findings and one deferred item, and downgraded its own
 - cron — `Managed cron loop body teaches a sentinel, but cron fires expand none: X.` Cron fires expand no sentinel at all, so any sentinel is wrong there regardless of membership.
 - union/wakeup — `Managed <profile> loop body teaches a sentinel outside the expanding allow-list: X.`
 
-The rejection behaviour is unchanged: same bodies rejected, same profiles, still fail-closed on an unknown token. Only the wording moved, and the six assertion sites that encoded the old wording now assert the new one per profile, so each direction keeps its own witness. The generated sidecars are untouched — the parity test regenerates and compares them byte-for-byte and stays green — so this is a diagnostic change in the generator, not a change to shipped model-facing content.
+The rejection behaviour is unchanged: same bodies rejected, same profiles, still fail-closed on an unknown token. Only the wording moved, and the seven assertion sites that encoded the old wording now assert the new one per profile, so each direction keeps its own witness. The generated sidecars are untouched — the parity test regenerates and compares them byte-for-byte and stays green — so this is a diagnostic change in the generator, not a change to shipped model-facing content.
 
 Witness: reverting both messages to the old `non-expanding sentinel` wording reddens **4 tests**, each naming the wording it expected; a byte-equal restore returns 35/35. core `tsc --build`, eslint and prettier clean.
 
