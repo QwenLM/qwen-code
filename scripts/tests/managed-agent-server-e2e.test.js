@@ -342,14 +342,21 @@ const loopClassifierWiring = (text) => {
     // return { toolCalls: calls }` hid every element — so the site itself is
     // recorded and the pin requires an inline array.
     if (
-      isPropertyAssignment(node) &&
+      (isPropertyAssignment(node) || isShorthandPropertyAssignment(node)) &&
       // A quoted key is the same property: `{ 'toolCalls': [ …hand-built… ] }`
       // escaped an identifier-only match, exactly as a quoted allow key did.
       (isIdentifier(node.name) ? node.name.text : literalText(node.name)) ===
         'toolCalls'
     ) {
       const callback = fakeCallback(node);
-      if (!isArrayLiteralExpression(node.initializer)) {
+      // A shorthand (`return { toolCalls }`) is a binding reference, so it is
+      // the same non-enumerable site as `{ toolCalls: calls }`; keying on
+      // isPropertyAssignment alone let it escape every loop-scoped inventory.
+      // It carries no `initializer`, so the array test must not be reached.
+      if (
+        isShorthandPropertyAssignment(node) ||
+        !isArrayLiteralExpression(node.initializer)
+      ) {
         handBuiltToolCalls.push({ callback, text: node.getText(file) });
       } else {
         for (const element of node.initializer.elements) {
@@ -4131,6 +4138,10 @@ describe('managed-agent-server e2e runner', () => {
       'return { toolCalls: hoistedCalls };',
       // A quoted toolCalls key is the same property as an identifier one.
       "return { 'toolCalls': [{ id: 'hb4', type: 'function', function: { name: 'respond_in_schema', arguments: '{}' } }] };",
+      // A shorthand key is the same property, and its value is a binding
+      // reference, so it is non-enumerable exactly like the hoisted source.
+      'const toolCalls = hoistedCalls;',
+      'return { toolCalls };',
       'if (body.sideQuery === true) return sideQueryResponse();',
     ]);
     // A legitimate arm that names its binding differently but does the same
@@ -4213,7 +4224,7 @@ describe('managed-agent-server e2e runner', () => {
       'blockProperties',
       "{ shouldBlock: { type: 'boolean' } }",
     ]);
-    // Six answer sites exist, but only the loop callback is in scope: the
+    // Seven answer sites exist, but only the loop callback is in scope: the
     // unrelated arm reuses the helper, the binding names and the tool name,
     // and none of it may redden a loop pin.
     expect(wiring.answers).toHaveLength(7);
@@ -4274,10 +4285,11 @@ describe('managed-agent-server e2e runner', () => {
     expect(scope.dynamicToolNames).toHaveLength(2);
     // A tool call assembled without fakeToolCall is recorded whatever its
     // name spells, including a computed one, whether the toolCalls key is an
-    // identifier or quoted, and so is a toolCalls source that is not an inline
-    // array (its elements cannot be enumerated at all).
-    expect(scope.handBuiltToolCalls).toHaveLength(3);
-    expect(wiring.handBuiltToolCalls).toHaveLength(4);
+    // identifier, quoted or shorthand, and so is a toolCalls source that is
+    // not an inline array (its elements cannot be enumerated at all) — a
+    // shorthand's value is a binding reference, so it is one of those.
+    expect(scope.handBuiltToolCalls).toHaveLength(4);
+    expect(wiring.handBuiltToolCalls).toHaveLength(5);
     // The scoping of these three inventories is witnessed, not assumed: the
     // unrelated arm carries a write, a computed name and a hand-built element,
     // each of which reaches the file-wide inventory and none the loop scope.

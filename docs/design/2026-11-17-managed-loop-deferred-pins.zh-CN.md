@@ -161,7 +161,7 @@
 
 **一个新的对抗形态，先实测再在此关闭。** 第一个假设——sibling 提到模块级函数但仍答 loop call id——被实测推翻：域由 loop call id 派生，故这样的答案会把回调外的位置拉进域并使回调计数红，而把它作为 `toolCalls` 元素调用也会被记为手搭。真正存活的变体答**外来** call id 并返回**整个响应**，于是 loop 回调里根本没有 `toolCalls` 数组：它伪造自己的 schema、经 helper 推导 allow，而每个 loop 域内库存都保持干净。这是 round-8 域限定引入的——它所替换的 file-wide helper 调用与来源库存本会抓住它，同一探针在 hoisted 答案点名 loop call id 时即显示这一点。
 
-以两条 file-wide **集合**断言关闭：每次 `classifierBlockAnswer` 调用的实参都是那个被查找的绑定，且每个 `blockProperties` 初始化式都是该查找。用集合而非计数，故遵循同一查找的合法新臂不新增成员，round-8 的收益得以保留。被执行控制用例现携带该 hoisted 形态并证明两个方向——伪造到达 file-wide 库存，而 loop 域内库存不变。此次新增后它的 file-wide 计数是 5 个 answer 站点、7 个工具名站点、4 次 helper 调用（round 8 记的是 4、6、3）；round 9 把同一控制增至 6、10、4，即已提交的值。真实 runner 上的见证：hoisted sibling 使集合断言红并点名 `props`（1 失败 / 87 通过）；字节级还原回到 88/88。
+以两条 file-wide **集合**断言关闭：每次 `classifierBlockAnswer` 调用的实参都是那个被查找的绑定，且每个 `blockProperties` 初始化式都是该查找。用集合而非计数，故遵循同一查找的合法新臂不新增成员，round-8 的收益得以保留。被执行控制用例现携带该 hoisted 形态并证明两个方向——伪造到达 file-wide 库存，而 loop 域内库存不变。此次新增后它的 file-wide 计数是 5 个 answer 站点、7 个工具名站点、4 次 helper 调用（round 8 记的是 4、6、3）；round 9 把同一控制增至 6、10、4，round 12 再增至 7、13、5，即已提交的值。真实 runner 上的见证：hoisted sibling 使集合断言红并点名 `props`（1 失败 / 87 通过）；字节级还原回到 88/88。
 
 这里关闭的是**直接**伪造路线，其限度是实测而非假设：若 hoisted 函数把 `schemaTool` 查找本身伪造在上一层，实参与初始化式仍都拼写为规范形，同一探针报告钉子对它**绿**。该变体属同一拼写家族——再往上伪造一层，任何拼写库存都会被满足——故记为 #17673 执行接缝的残留，不在此再加一份库存去追。
 
@@ -188,7 +188,7 @@ core 邻近面是整面跑而非抽样：`src/managed-runtime` 加 `src/skills/b
 **守卫缺口关闭（九条），各带自己在真实 runner 或已提交夹具上的见证。**
 
 - **解构写入。** `writtenBinding` 只解析标识符与成员访问，故 `[blockProperties] = [伪造]` 会隐形地重绑输入。另设 `assignmentTarget` 行走数组与对象模式（与 `writtenBinding` 分开，使原地写入者的首参永不被当作模式读）。见证：重赋值库存红。
-- **非内联数组的 `toolCalls` 源。** `const calls = [ …手搭… ]; return { toolCalls: calls }` 藏住了每个元素。任何非内联源现按站点记录。见证用计算名，使工具名计数不动、只有这份库存触发。
+- **非内联数组的 `toolCalls` 源。** `const calls = [ …手搭… ]; return { toolCalls: calls }` 藏住了每个元素。任何非内联源现按站点记录——但同一键的 shorthand 形态直到 round 13 才被关闭，此前仍能逃过。见证用计算名，使工具名计数不动、只有这份库存触发。
 - **引号 allow 键。** `{ 'shouldBlock': false }` 对只匹配标识符的写法不可见。键匹配现接受字符串或模板字面量。见证把 allow 提到每个回调之外并答外来 call id，故只有 `allowSites` 触发。
 - **门只证明了总数。** 两个门可以都在一个回调里，而另一个无门作答。钉子现要求每回调一个门。见证用 2/0 分布，使总数仍为 2。
 - **minted-id 钉原是对整个 runner 的原文本匹配**，注释掉的或重复的副本即可满足。现改为 AST 库存：每个 `mintedScheduleId` 调用点连同它初始化的绑定与它过滤的 create-call id，外加 `?? 'missing-schedule-id'` fallback。见证注释掉一个真实调用点并替换为伪造 id。
@@ -218,7 +218,7 @@ core 邻近面是整面跑而非抽样：`src/managed-runtime` 加 `src/skills/b
 
 - **「comment-blind」见证其实没见证剥注释。** 实测：两个已提交变体——尾随的 `// key = "cron";` 与前置的 `/* key = "wakeup"; */`——在剥与不剥下解析结果完全相同，因为分支正则要求赋值前有 profile 条件，而裸赋值注释永不匹配。它们什么都没证明。两者均替换为拼出**整条分支**的注释（行与块两种形态）；不剥时这样的注释会赢得 first-match 并把 cron body 交给 `SHELL_V4`，故去掉任一剥注释步骤现在都会红。
 - **记录说验收标准承载 core 33，而它们写的是 34。** 该 nit 是那一轮规模的历史记录；现已如此限定，验收标准承载当前规模。
-- **控制计数记为 5/7/4，而已提交断言是 6/10/4。** round 9 在该句写下之后又扩充了同一控制。该句现陈述演进（round 8：4/6/3 → 合并后审计：5/7/4 → round 9：6/10/4）并点名已提交的值。
+- **控制计数记为 5/7/4，而已提交断言是 6/10/4。** round 9 在该句写下之后又扩充了同一控制。该句现陈述演进（round 8：4/6/3 → 合并后审计：5/7/4 → round 9：6/10/4）并点名该轮当时已提交的值；round 12 又扩充了一次，上面那句给出的是当前值。
 - **`assignmentTarget` 的对象模式臂没有见证。** 控制此前只带数组模式。已补两种对象形态——属性目标（`{ x: blockProperties.shouldBlock } = …`）与 shorthand 重绑（`{ blockProperties } = …`）——两者都被重赋值库存记录。
 - **未被路由的 profile 常量未被分类。** 映射无法区分「无 creator 的 profile」与「链忘记路由的 loop-bearing profile」。Java 没有机读的 creator 声明——该事实只存在于每个常量上方的 Javadoc——故 `loopBearingProfiles` 从该散文派生 loop-bearing 集合，钉子要求它等于被路由集合，并为派生本身配合成见证。这是漂移守卫而非机制钉：改写文档可绕过它，#17673 里与形态无关的路由断言仍是持久修复。
 
@@ -261,6 +261,16 @@ core 邻近面是整面跑而非抽样：`src/managed-runtime` 加 `src/skills/b
 本 head：全量构建 rc=0 且 core 与 cli 的 dist 按构建起点时间戳断言已刷新，jar 重建，`ManagedLoopSkillTest` **19/19**，bundle 重建并断言已刷新，重建 jar 内四个 sidecar 与已提交契约逐字节相等。臂：`--loop-skill` success（session `7a23c06a-5fe7-4a0c-8f84-3b78794d10f1`、modelRounds 6、cron create/list/delete 均见证）；`--loop-fire` success（session `ec5bc39a-2fb2-45e5-95c5-91e3264b2528`、schedule `asch_916ccb2d42000efe6c0fdc9ca225506d`、fireTrigger=scheduled、fireOutcome=fired、fireState=completed、occurrenceKey `schedule:2026-11-19T08:41:00Z`、modelRounds 5）。快速套件：core **35/35**、scripts 元 **184/184**；core `tsc --build`、eslint 与 prettier 净。
 
 第八次合并（`42be95703d`）带入 `457656e0ab`（#17799），纯文档（两份用户指南）、不碰任何代码，故上面全部证据原样承接；在该 head 复跑了快速套件，均绿。
+
+## 第 13 轮评审：三条延后项，两条在此修复、一条把两个方向都披露
+
+第 13 轮在其收敛姿态下未发内联发现，给了三条延后项。三条都先实测再处置。其中两条是本 PR 所交付内容的缺陷，在此修复；第三条是早已披露的 prose oracle，现把它的**两个**失效方向都实测记录，而不是只记一个。
+
+该轮披露了自身边界的两处缺口，本 PR 在本地把两处都补上。它的 build-test 车道从未进入测试阶段（`packages/cli` workspace 构建耗尽调用预算），故改由四个评审 agent 跑受影响套件——core 35/35、scripts 88/88、core `tsc` 净。且 `SDK Java (fast) / Runtime Broker and Managed Agent MySQL / Java 21` 在该提交被跳过，`ManagedLoopSkillTest` 也因缺 JDK/Maven 未在那里运行，使重新生成的 sidecar 的 Java 消费方在该 head 未经验证。本 PR 在每个影响代码的 head 都本地跑它并公布结果。
+
+- **shorthand 形式的 `toolCalls` 键逃过了手搭库存。** 在按字节抽取出的扫描器上实测：`return { toolCalls }` 使该库存在 file-wide 与 loop 域内都为零，与 round 12 修复前的引号键完全一样——shorthand 是 `ShorthandPropertyAssignment`，故按 `isPropertyAssignment` 键控的分支根本看不到它。该分支现同时接受两种节点，且 shorthand 被记为一个站点，因为它的值是绑定引用、无法内联枚举。被执行控制用例携带该 shorthand 形态。三个见证，每次还原都字节相等：把**两个**新析取项都还原（即修复前的原码）打红手搭计数（`expected … to have a length of 4 but got 3`）；只还原外层析取项打红同一计数；只还原内层则以 `TypeError: Cannot read properties of undefined (reading 'kind')` 崩溃，因为 shorthand 不带 `initializer`，数组判定不可对它执行。故内层析取项是承重的、并非冗余——「它冗余」这一假设被该实测否掉。干净基线 88/88。
+- **记录与控制用例自己的注释仍带着上一版计数。** 在 round-12 的 head 实测：已提交断言是 7 个 answer 站点、13 个工具名站点、5 次 helper 调用，而记录的演进句停在 round 9 的 6/10/4，控制注释写着「Six answer sites」。两处都在两种语言里改正。该增长归属 round 12（改名臂与引号键元素），不是本轮：round 13 只扩充手搭库存，到 loop 域内 4、file-wide 5。round-10 那条点名演进的 nit 现限定为该轮当时的值。
+- **Javadoc prose oracle 在两个方向都会失效，现两个都已实测。** Java 不带机器可读的 creator 声明：`WorkspaceToolProfiles` 的全部八个公开 helper（`isPublicShell`、`isInternalTeamLead`、`isShellOrMcp`、两个 `lifecycleProtocol` 重载、`supportsApprovalMode`、`supportsApprovalSelection`、`requiresApproval`）分类的是 shell/team-lead/MCP 归属、生命周期协议或审批模式，没有一个枚举哪些 profile 带 /loop creator——该事实只存在于四个已路由常量上方的 Javadoc 里。在真实 Java 文件上实测，每次还原字节相等：把已路由的 `SHELL_V3` 的 doc 改写为不含关键词、路由一字未动，即打红本套件（`expected [ 'FILES_V4', …(2) ] to deeply equal [ 'FILES_V4', …(3) ]`，1 失败 / 34 跳过）——一次**纯文档**的 Java 改动打红 `packages/core`；而新增一个未路由的 `SHELL_V5`、其 doc 写作 "Autonomous scheduled revision"，则保持**绿**（1 通过）——守卫对链路遗忘的 loop-bearing profile 是盲的。守卫自己的注释曾无条件断言第二个方向会红；现改为陈述两个已实测的方向。这是漂移守卫已披露的代价，保留它是因为替代方案是完全没有漂移检测。#17673 中与形态无关的路由断言仍是持久修复；此处不改 Java 契约。
 
 ## 开放问题
 

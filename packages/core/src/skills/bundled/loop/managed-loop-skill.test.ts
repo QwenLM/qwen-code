@@ -95,11 +95,13 @@ function resolveJavaRouting(javaCode: string): Map<string, string> {
 /** The profile constants whose own Javadoc declares a /loop creator. Java
  * carries no machine-readable creator declaration — the fact lives only in
  * the doc comment above each constant — so that prose is the only available
- * oracle, and this is a drift guard rather than a mechanism pin. Classifying
- * every constant against it means a new loop-bearing profile that
- * forProfile() forgets to route reddens, while a creator-less profile stays
- * unconstrained. Comments are deliberately NOT stripped here: they are the
- * signal. */
+ * oracle, and this is a drift guard rather than a mechanism pin. Both of its
+ * failure directions are measured, not assumed: a docs-only reword that
+ * drops the keywords reddens this suite although routing is unchanged, and
+ * an unrouted loop-bearing constant whose doc lacks them stays green. A
+ * creator-less profile stays unconstrained. Comments are deliberately NOT
+ * stripped here: they are the signal. The shape-independent routing
+ * assertion in #17673 is the durable fix. */
 function loopBearingProfiles(javaCode: string): string[] {
   return [
     ...javaCode.matchAll(
