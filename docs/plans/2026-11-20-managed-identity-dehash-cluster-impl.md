@@ -119,8 +119,10 @@ the ripple plus the hash-drop/rebuild/cursor/generated/CHECK/meta-test work belo
 | canonical readable resource key (fallback)  | VARCHAR(256)   | 1024  |
 | binary payloads / OSS object keys           | keep VARBINARY | n/a   |
 
-Guard exception (already landed): `ma_tenant_guard.tenant_id VARCHAR(64)` readable scope carries
-sentinels; PK `(tenant_id, guard_domain)`.
+Guard exception (already landed): `ma_tenant_guard.tenant_id VARCHAR(96)` readable scope carries
+sentinels (`local-storage-host/<64-hex>` = 83 chars); PK `(tenant_id, guard_domain)`. A regression
+test binds a real 64-hex host sentinel; `ManagedSchemaMySqlIT` pins the column width and the
+`utf8mb4_0900_bin` collation.
 
 ## Verification
 

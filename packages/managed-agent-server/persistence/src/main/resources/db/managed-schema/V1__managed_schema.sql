@@ -1175,7 +1175,7 @@ CREATE TABLE ma_storage_owner (
 CREATE INDEX idx_ma_storage_owner_binding ON ma_storage_owner (binding_id, runtime_generation, storage_key);
 
 CREATE TABLE ma_tenant_guard (
-    tenant_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Readable lock scope: tenant identity or an explicit cross-tenant/host sentinel.',
+    tenant_id VARCHAR(96) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Readable lock scope: tenant identity or an explicit cross-tenant/host sentinel.',
     guard_domain VARCHAR(32) NOT NULL COMMENT 'Lock domain: runtime_placement or output_publication.',
     CONSTRAINT pk_ma_tenant_guard PRIMARY KEY (tenant_id, guard_domain),
     CONSTRAINT ck_ma_guard_domain CHECK ((CASE guard_domain WHEN 'runtime_placement' THEN 17 WHEN 'output_publication' THEN 18 ELSE -1 END = CHAR_LENGTH(guard_domain))),

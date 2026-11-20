@@ -58,6 +58,23 @@ class ExecutionControlTenantGuardsTest {
     }
 
     @Test
+    void hostSentinelScopeFitsGuardColumn() throws SQLException {
+        String sentinel = "local-storage-host/" + "f".repeat(64);
+        try (Connection connection = source.getConnection()) {
+            JdbcRuntimeBindingRepository.lockPlacementDomain(connection, sentinel);
+            try (var statement = connection.prepareStatement(
+                    "SELECT tenant_id FROM ma_tenant_guard"
+                            + " WHERE guard_domain = 'runtime_placement' AND tenant_id = ?")) {
+                statement.setString(1, sentinel);
+                try (var rows = statement.executeQuery()) {
+                    assertTrue(rows.next());
+                    assertEquals(sentinel, rows.getString(1));
+                }
+            }
+        }
+    }
+
+    @Test
     void sessionIsolatedDispatchCompletesWhileBothTenantGuardsAreHeld() throws Exception {
         var fixture = sessionFixture(true);
         var claimed = executions.claimDispatch(fixture.prepare("call").getExecutionCallId(), "owner",

@@ -43,7 +43,7 @@
 | 规范可读 resource key（回退）       | VARCHAR(256)   | 1024   |
 | 二进制载荷 / OSS object key         | 保持 VARBINARY | 不适用 |
 
-guard 例外（已落地）：`ma_tenant_guard.tenant_id VARCHAR(64)` 可读 scope 承载哨兵；PK `(tenant_id, guard_domain)`。
+guard 例外（已落地）：`ma_tenant_guard.tenant_id VARCHAR(96)` 可读 scope 承载哨兵（`local-storage-host/<64-hex>`=83 字符）；PK `(tenant_id, guard_domain)`。回归测试绑定真实 64-hex 主机哨兵；`ManagedSchemaMySqlIT` 钉死列宽与 `utf8mb4_0900_bin` collation。
 
 ## 验证
 

@@ -129,12 +129,14 @@ budgeted at `VARCHAR(256)`) drops to ≈2304 once actor is numeric `VARCHAR(36)`
 ### Coordination protocols on raw columns
 
 - **Tenant guard.** `ma_tenant_guard` PK `(tenant_key, guard_domain)` becomes
-  `(guard_scope, guard_domain)` where `guard_scope VARCHAR(64)` is a **readable**
+  `(tenant_id, guard_domain)` where `tenant_id VARCHAR(96)` is a **readable**
   scope: the tenant decimal string for tenant domains, or an explicit sentinel for
   the cross-tenant/host locks (`external-storage-registration/1`,
-  `local-storage-host/<hostId>`, ≈55 chars). Sentinels are not numeric tenants and
-  must not be forced into `tenant_id VARCHAR(36)`; a dedicated readable scope column
-  preserves them without hashing (256+128=384 bytes). The
+  `local-storage-host/<hostId>`, 19+64=83 chars because hostId is a 64-hex HMAC).
+  Sentinels are not numeric tenants and must not be forced into a numeric tenant
+  budget; the readable scope column preserves them without hashing
+  (384+128=512 bytes). A regression test binds a real 64-hex host sentinel so the
+  width cannot silently regress. The
   `INSERT … ON DUPLICATE KEY UPDATE` + `SELECT … FOR UPDATE` acquisition shape and
   the two domains are unchanged
   ([lock inventory](2026-11-12-managed-agent-lock-inventory.md)).

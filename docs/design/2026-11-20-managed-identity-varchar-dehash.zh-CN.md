@@ -114,11 +114,11 @@ actor 改数值型 `VARCHAR(36)` 后降到 ≈2304（`actor_key` 展开为 tenan
 ### 协调协议改键在原始列
 
 - **租户 guard。** `ma_tenant_guard` PK `(tenant_key, guard_domain)` 改为
-  `(guard_scope, guard_domain)`，其中 `guard_scope VARCHAR(64)` 是**可读** scope：
+  `(tenant_id, guard_domain)`，其中 `tenant_id VARCHAR(96)` 是**可读** scope：
   租户域用 tenant 十进制串，跨租户/主机锁用显式哨兵
-  （`external-storage-registration/1`、`local-storage-host/<hostId>`，≈55 字符）。
-  哨兵不是数值 tenant，不能硬塞进 `tenant_id VARCHAR(36)`；专用可读 scope 列在不
-  哈希的前提下保留它们（256+128=384 字节）。
+  （`external-storage-registration/1`、`local-storage-host/<hostId>`，19+64=83 字符，hostId 为 64-hex HMAC）。
+  哨兵不是数值 tenant，不能硬塞进数值 tenant 预算；可读 scope 列在不哈希的前提下
+  保留它们（384+128=512 字节）。回归测试绑定真实 64-hex 主机哨兵，防止宽度静默回退。
   `INSERT … ON DUPLICATE KEY UPDATE` + `SELECT … FOR UPDATE` 的获取形态与两个 domain
   不变（[lock inventory](2026-11-12-managed-agent-lock-inventory.md)）。
 - **Session head。** `uk_ma_session_head_business_key (tenant_key, harness_key)` 改为
