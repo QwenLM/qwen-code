@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import stripAnsi from 'strip-ansi';
 import {
   extensionConsentString,
@@ -422,8 +422,80 @@ describe('requestConsentOrFail', () => {
 });
 
 describe('requestChoicePluginNonInteractive', () => {
+  // prompts() reads keypresses from stdin and draws on stdout, and the guard
+  // reuses the CLI's interactivity predicate (TTY, not CI, not TERM=dumb), so
+  // the happy paths opt into all of that and the refusal cases opt out.
+  const originalStdinTTY = process.stdin.isTTY;
+  const originalStdoutTTY = process.stdout.isTTY;
+  const setTTY = (
+    stream: NodeJS.ReadStream | NodeJS.WriteStream,
+    value: boolean | undefined,
+  ) => {
+    Object.defineProperty(stream, 'isTTY', { value, configurable: true });
+  };
+
   beforeEach(() => {
     vi.clearAllMocks();
+    setTTY(process.stdin, true);
+    setTTY(process.stdout, true);
+    // The suite itself runs under CI=1; the predicate would otherwise classify
+    // every happy path as non-interactive.
+    vi.stubEnv('CI', '');
+  });
+
+  afterEach(() => {
+    setTTY(process.stdin, originalStdinTTY);
+    setTTY(process.stdout, originalStdoutTTY);
+    vi.unstubAllEnvs();
+  });
+
+  it('should refuse when stdin is not a terminal', async () => {
+    // Under a pipe the menu is not inert: a stray newline submits whichever
+    // plugin is highlighted, and at EOF the prompt is left unsettled so the
+    // install silently no-ops.
+    setTTY(process.stdin, undefined);
+    const marketplace: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [{ name: 'plugin1', version: '1.0.0', source: 'src1' }],
+    };
+
+    await expect(
+      requestChoicePluginNonInteractive(marketplace),
+    ).rejects.toThrow(/needs an interactive terminal/);
+    expect(prompts).not.toHaveBeenCalled();
+  });
+
+  it('should refuse a CI lane that hands the CLI a pty', async () => {
+    // `script -qec`, expect and tmux-driven jobs give the CLI a TTY under CI;
+    // a bare isTTY check would let the menu render and then wait forever.
+    vi.stubEnv('CI', 'true');
+    const marketplace: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [{ name: 'plugin1', version: '1.0.0', source: 'src1' }],
+    };
+
+    await expect(
+      requestChoicePluginNonInteractive(marketplace),
+    ).rejects.toThrow(/needs an interactive terminal/);
+    expect(prompts).not.toHaveBeenCalled();
+  });
+
+  it('should refuse when stdout is redirected', async () => {
+    // The menu is drawn on stdout; with it redirected the terminal shows
+    // nothing and the process waits for a keypress nobody can see.
+    setTTY(process.stdout, undefined);
+    const marketplace: ClaudeMarketplaceConfig = {
+      name: 'test-marketplace',
+      owner: { name: 'Test Owner', email: 'test@example.com' },
+      plugins: [{ name: 'plugin1', version: '1.0.0', source: 'src1' }],
+    };
+
+    await expect(
+      requestChoicePluginNonInteractive(marketplace),
+    ).rejects.toThrow(/needs an interactive terminal/);
+    expect(prompts).not.toHaveBeenCalled();
   });
 
   it('should throw error when plugins array is empty', async () => {
