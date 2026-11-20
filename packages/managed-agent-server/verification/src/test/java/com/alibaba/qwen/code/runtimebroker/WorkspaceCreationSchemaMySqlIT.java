@@ -9,11 +9,8 @@ import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -149,7 +146,7 @@ class WorkspaceCreationSchemaMySqlIT {
     }
 
     @Test
-    void preservesReceiptsAndModelConstraintsAcrossRestart() throws Exception {
+    void preservesReceiptsAndModelConstraintsAcrossRestart() throws SQLException {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             var source = database.source();
             try (var connection = source.getConnection();
@@ -162,7 +159,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     assertTrue(result.next());
                     assertEquals(0, result.getInt(1), "A disposable empty catalog is required");
                 }
-                executeResource(connection, ManagedSchema.RESOURCE);
+                ManagedSchema.initialize(source);
                 receipt(connection, "existing", "SESSION_COMMAND");
                 statement.execute("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
                         + " VALUES ('tenant','session','qwen-code',1,1)");
@@ -211,55 +208,6 @@ class WorkspaceCreationSchemaMySqlIT {
                 assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_session SET model_revision=9007199254740992"));
             }
         }
-    }
-
-    private static void executeResource(Connection connection, String resource) throws Exception {
-        try (var statement = connection.createStatement();
-                var input = ManagedSchema.class.getResourceAsStream(resource)) {
-            for (String sql :
-                    splitStatements(
-                            new String(input.readAllBytes(), StandardCharsets.UTF_8)
-                                    .replaceAll("(?m)^--[^\\n]*", ""))) {
-                if (!sql.isBlank()) {
-                    statement.execute(sql);
-                }
-            }
-        }
-    }
-
-    // Splits on semicolons outside quoted literals: schema COMMENT text may
-    // contain ';' (e.g. 'Active range identity; retired cleanup debt ...'),
-    // which a bare split cuts mid-literal and MySQL rejects. Handles the
-    // doubled-quote and backslash escapes MySQL accepts inside literals.
-    private static List<String> splitStatements(String script) {
-        var statements = new ArrayList<String>();
-        var current = new StringBuilder();
-        char quote = 0;
-        for (int index = 0; index < script.length(); index++) {
-            char c = script.charAt(index);
-            if (quote != 0) {
-                current.append(c);
-                if (c == '\\' && quote == '\'' && index + 1 < script.length()) {
-                    current.append(script.charAt(++index));
-                } else if (c == quote) {
-                    if (index + 1 < script.length() && script.charAt(index + 1) == quote) {
-                        current.append(script.charAt(++index));
-                    } else {
-                        quote = 0;
-                    }
-                }
-            } else if (c == '\'' || c == '"' || c == '`') {
-                quote = c;
-                current.append(c);
-            } else if (c == ';') {
-                statements.add(current.toString());
-                current.setLength(0);
-            } else {
-                current.append(c);
-            }
-        }
-        statements.add(current.toString());
-        return statements;
     }
 
     private static void receipt(Connection connection, String key, String namespace)
