@@ -103,6 +103,7 @@ export function useDaemonChatController(): SessionChatController {
   // request id. Classification uses the cheap block-level predicate rather than
   // the full payload extraction, so a delta does not re-serialize each payload.
   const classifiedPending = pendingPermissions.map((permission) => ({
+    block: permission,
     id: permission.requestId,
     isQuestion: isAskUserPermissionBlock(permission),
   }));
@@ -113,9 +114,14 @@ export function useDaemonChatController(): SessionChatController {
   if (!pendingSplit || pendingSplit.signature !== pendingSignature) {
     const approvals: PendingApproval[] = [];
     const questions: PendingQuestion[] = [];
-    for (const { id, isQuestion } of classifiedPending) {
-      if (isQuestion) questions.push({ id });
-      else approvals.push({ id, status: 'pending' });
+    for (const { block, id, isQuestion } of classifiedPending) {
+      // The render-ready request is extracted only on a content change (the
+      // signature cache), not per streaming delta. Pending blocks are unresolved
+      // by the selector, so the extraction yields a request.
+      const request = extractPendingPermission([block]);
+      if (!request) continue;
+      if (isQuestion) questions.push({ id, request });
+      else approvals.push({ id, status: 'pending', request });
     }
     pendingSplit = {
       signature: pendingSignature,

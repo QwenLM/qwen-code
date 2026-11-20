@@ -1,0 +1,71 @@
+# ChatSurface Component (Slice 2e)
+
+[English](2026-11-21-chat-surface.md) |
+[简体中文](2026-11-21-chat-surface.zh-CN.md)
+
+Status: implemented (slice 2e, the surface component). Date: 2026-11-21. Part of
+the [unified chat surface](2026-11-16-unified-chat-surface.md) migration. Builds
+on the merged contract (#17520), status stack (#17684), intent engine (#17709),
+controller assembly (#17794), and binding hook (#17895).
+
+## Scope
+
+The prior slices built the backend-neutral kernel and the daemon adapter, but no
+component yet renders a chat column from the `SessionChatController` contract.
+This slice lands **`ChatSurface`** (`chat-core/ChatSurface.tsx`), the shared chat
+column renderer, plus the one contract extension it needs. It is not wired into a
+column yet: the daemon main-column switch with the visual before/after gate is the
+next increment (2f), so this slice is additive and renders nothing on its own.
+
+## Design
+
+- **One component, driven by the contract.** `ChatSurface` takes a
+  `SessionChatController` and renders the chat column: the transcript
+  (`TranscriptViewport`), the active tool approval (`ToolApproval`), the active
+  question (`AskUserQuestion`), and the composer (`ChatEditor`). It never branches
+  on `controller.kind`; a region renders only when its facts are present.
+- **Render-ready pending items (contract extension).** `ToolApproval` and
+  `AskUserQuestion` consume a full `PermissionRequest`, but the contract's
+  `PendingApproval`/`PendingQuestion` previously carried only `{ id, status }` /
+  `{ id }`. This slice adds a backend-neutral `request: PermissionRequest` (the
+  shared `adapters/types` model) to both, so the surface can render them without
+  reaching into a provider. The daemon binding populates it in the pending split.
+- **The split keeps its per-delta optimization.** The render-ready request is
+  extracted only when the content signature changes (the slice-2d ref cache), not
+  on every streaming delta; the cheap block-level classifier still builds the
+  signature each render.
+- **Admission is not establishment, in the composer too.** `ChatEditor.onSubmit`
+  dispatches `controller.submit` and clears the draft (`commitAccepted`) only on an
+  `accepted` admission, never on establishment. `onCancel` dispatches
+  `controller.cancel`. `isRunning` derives from `phase` (`submitting`/`running`).
+- **Approvals/questions.** The surface renders the first `pending` approval
+  (superseded items are skipped) and the first pending question. `ToolApproval`
+  confirmation routes to `respondApproval(id, optionId)`; `AskUserQuestion`
+  confirmation normalizes its index-keyed answers record into `QuestionAnswer[]`
+  and routes to `respondQuestion`, returning `admission === 'accepted'` as the
+  component's success boolean.
+- **Slots keep the kernel backend-neutral.** Header, backend-specific panels, the
+  composer status stack, and the localized transcript-unavailable UI arrive as
+  slots (`header`, `panels`, `composerStatus`, `transcriptError`). The status stack
+  and usage stats need richer facts than the current conservative `statusFacts`
+  (`queueLength`/`goalActive`), so the owning page supplies them until parity lands.
+
+## Deferred to later increments
+
+- **Daemon main-column switch + visual before/after gate (2f).** `App.tsx` renders
+  `ChatSurface` with the daemon binding and the duplicated inline orchestration is
+  deleted; the visual preview must show no unexplained daemon-side difference.
+- **Status stack / usage-stat parity (slice 5)** once `statusFacts` carries the full
+  queued-prompt and goal facts.
+- **Managed adapter (slice 3)** and **ChatPane convergence (slice 4)** render through
+  this same component.
+
+## Constraints respected
+
+- `chat-core`'s own modules import no `daemon/**` or `@qwen-code/sdk/daemon` value;
+  the shared components `ChatSurface` composes carry only type-only SDK imports
+  (erased at build), verified across all eight.
+- No daemon/Java route or OpenAPI change; session id namespaces and storage keys are
+  untouched (the composer reuses the existing draft-key convention via `sessionId`).
+- The contract extension is additive and backend-neutral; the daemon binding is the
+  only populated adapter today.
