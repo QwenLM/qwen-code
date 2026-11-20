@@ -7913,6 +7913,7 @@ class QwenAgent implements Agent {
   ): Promise<void> {
     const workflowChanges: Array<{ session: Session; wasEnabled: boolean }> =
       [];
+    const errors: unknown[] = [];
     const effectiveRulesByWorkspace = new Map<
       string,
       PermissionRuleSet | undefined
@@ -7945,7 +7946,7 @@ class QwenAgent implements Agent {
           ...(this.argv.excludeTools ?? []),
         );
       } catch (error) {
-        if (strict) throw error;
+        if (strict) errors.push(error);
         debugLogger.warn(
           'Could not read permission rules for a live session:',
           error,
@@ -7997,7 +7998,7 @@ class QwenAgent implements Agent {
           if (removed.length > 0) {
             const effective = getEffectiveRules(workspace);
             // Preserve existing restrictions if their other sources can't be read.
-            if (effective || ruleType === 'allow') {
+            if (effective || (!strict && ruleType === 'allow')) {
               const retained = new Set(
                 effective?.[ruleType].map((rule) => rule.trim()),
               );
@@ -8031,7 +8032,7 @@ class QwenAgent implements Agent {
               error instanceof Error ? error.message : String(error)
             }`,
           );
-          if (strict) throw error;
+          if (strict) errors.push(error);
         }
       }
     }
@@ -8048,10 +8049,16 @@ class QwenAgent implements Agent {
             'Failed to reconcile the live Workflow tool:',
             error,
           );
-          if (strict) throw error;
+          if (strict) errors.push(error);
         }
       }),
     );
+    if (errors.length > 0) {
+      throw new AggregateError(
+        errors,
+        'Could not synchronize permission rules for all live sessions',
+      );
+    }
   }
 
   private cancelDisabledWorkflowRuns(session: Session): void {
@@ -16224,12 +16231,13 @@ class QwenAgent implements Agent {
               }
               disabledToolsByWorkspace.set(workspace, disabledTools);
             }
+            const disabledTools = disabledToolsByWorkspace.get(workspace);
             // Workflow admission and controls follow the live flag even
             // while a turn or a detached workflow is running.
             const workflowsWereEnabled = config.isWorkflowsEnabled();
             await config.applyWorkflowsEnabledSetting(
               newMerged.tools?.workflowsEnabled,
-              disabledToolsByWorkspace.get(workspace),
+              disabledTools,
             );
             if (config.isWorkflowsEnabled() !== workflowsWereEnabled) {
               this.cancelDisabledWorkflowRuns(session);
@@ -16389,7 +16397,11 @@ class QwenAgent implements Agent {
               );
             }
 
-            refreshed.push(id);
+            if (disabledTools === undefined) {
+              skipped.push(id);
+            } else {
+              refreshed.push(id);
+            }
           }),
         );
         for (let i = 0; i < results.length; i++) {
@@ -18143,6 +18155,12 @@ class QwenAgent implements Agent {
       (runId) => this.isWorkflowRunLiveOutsideSession(sessionId, runId),
       (deliveries) => this.expireHostedPeerDeliveries(deliveries),
       acpModRowSites(this.clientCapabilities),
+      (scope, rule) => {
+        const settingScope =
+          scope === 'project' ? SettingScope.Workspace : SettingScope.User;
+        const { allow } = appliedPermissionRules[settingScope];
+        if (!allow.includes(rule)) allow.push(rule);
+      },
     );
     if (options.deferAutomaticWorkUntilCwdRestore) {
       session.deferAutomaticWorkUntilCwdRestore();

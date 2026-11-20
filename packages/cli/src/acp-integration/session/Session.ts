@@ -3079,6 +3079,10 @@ export class Session implements SessionContext {
     ) => void,
     /** The Mod row sites the client draws. */
     private readonly modRowSites: readonly ModRenderSite[] = [],
+    private readonly onPersistentAllowApplied?: (
+      scope: 'project' | 'user',
+      rule: string,
+    ) => void,
   ) {
     this.sessionId = id;
     this.requestLifecycleSessionId = id;
@@ -19450,6 +19454,8 @@ export class Session implements SessionContext {
                   this.config.getOnPersistPermissionRule?.(),
                   this.config.getPermissionManager?.(),
                   confirmationPayload,
+                  undefined,
+                  this.onPersistentAllowApplied,
                 );
                 const permissionPersistenceCancellation =
                   cancelBeforeExecutionIfAborted(toolName);

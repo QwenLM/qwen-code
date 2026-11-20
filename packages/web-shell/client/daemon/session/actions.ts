@@ -57,6 +57,7 @@ import {
   applyConfigOptions,
   applySessionConfigContext,
   getPlanExecutionMode,
+  getVisibleSessionCommands,
   mapProviderStatus,
   mapSessionContextModels,
   mapReasoningControls,
@@ -414,6 +415,7 @@ export function getConnectionAfterSessionClear(
     // sessionId), which also makes the effect's canReuseSessionMetadata
     // check refetch fresh data for the next session.
     delete next.supportedCommands;
+    delete next.workflowStatusUnknown;
     delete next.context;
     delete next.reasoning;
     delete next.workflowMode;
@@ -676,7 +678,9 @@ export function createDaemonSessionActions({
     // detached client must classify against its own catalog (the async read
     // below), not the session the user navigated to.
     let commands =
-      sessionRef.current === session ? getConnection().commands : undefined;
+      sessionRef.current === session
+        ? getVisibleSessionCommands(getConnection())
+        : undefined;
     const findCommand = () =>
       commands?.find((candidate) => candidate.name === name) ??
       commands?.find((candidate) => candidate.altNames?.includes(name));
@@ -701,9 +705,16 @@ export function createDaemonSessionActions({
         if (!isCurrent())
           throw new Error('Session changed before prompt submission');
         const mapped = mapSupportedCommands(status);
-        commands = mapped.commands;
+        commands = getVisibleSessionCommands({
+          commands: mapped.commands,
+          workflowStatusUnknown:
+            sessionRef.current === session &&
+            getConnection().workflowStatusUnknown,
+        });
         setConnection((current) =>
           sessionRef.current === session &&
+          status.sessionId === session.sessionId &&
+          !current.workflowStatusUnknown &&
           current.workflowStatusRevision === workflowStatusRevision
             ? { ...current, ...mapped, supportedCommands: status }
             : current,
@@ -711,7 +722,7 @@ export function createDaemonSessionActions({
         const resolved = findCommand();
         return resolved
           ? resolved.source === 'builtin-command'
-          : !commands.some(
+          : !commands?.some(
               (candidate) => candidate.source === 'builtin-command',
             );
       });
@@ -3115,6 +3126,9 @@ export function createDaemonSessionActions({
         if (sessionRef.current === session) {
           const { commands, skills } = mapSupportedCommands(status);
           setConnection((current) =>
+            sessionRef.current === session &&
+            status.sessionId === session.sessionId &&
+            !current.workflowStatusUnknown &&
             current.workflowStatusRevision === workflowStatusRevision
               ? { ...current, commands, skills, supportedCommands: status }
               : current,

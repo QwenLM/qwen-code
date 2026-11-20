@@ -84,9 +84,8 @@ export class SavedWorkflowLoader implements ICommandLoader {
     // workflow applies. A user who consented to the extension still approves
     // every run; a workflow without the condition is left to the user.
     const modelInvocable = entry.source === 'extension' && !!entry.whenToUse;
-    const reservesControls = entry.name === 'workflows';
     return {
-      name: reservesControls ? 'workflow.workflows' : entry.name,
+      name: entry.name,
       description,
       ...(modelInvocable
         ? {
@@ -116,9 +115,8 @@ export class SavedWorkflowLoader implements ICommandLoader {
       // keeps a denylist entry written with the documented name matching. A
       // user or project custom command of the same name still takes the slash
       // command, because `FileCommandLoader` loads after this loader.
-      ...(entry.extensionName ? { extensionName: entry.extensionName } : {}),
-      ...(entry.extensionName || reservesControls
-        ? { workflowName: entry.name }
+      ...(entry.extensionName
+        ? { extensionName: entry.extensionName, workflowName: entry.name }
         : {}),
       acceptsInput: true,
       argumentHint: '[json-args]',

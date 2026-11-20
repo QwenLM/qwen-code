@@ -355,6 +355,16 @@ export function mapSessionContextReasoning(
   return mapReasoningControls(status?.state?.configOptions);
 }
 
+export function getVisibleSessionCommands(
+  connection: Pick<DaemonConnectionState, 'commands' | 'workflowStatusUnknown'>,
+): DaemonConnectionState['commands'] {
+  return connection.workflowStatusUnknown
+    ? connection.commands?.filter(
+        (command) => command.source !== 'workflow-command',
+      )
+    : connection.commands;
+}
+
 export function mapSupportedCommands(
   status: DaemonSessionSupportedCommandsStatus | undefined,
 ): {
@@ -528,6 +538,7 @@ export function updateConnectionFromDaemonEvent(
         current.sessionId === sessionId &&
         typeof workflowsEnabled === 'boolean'
           ? {
+              workflowStatusUnknown: undefined,
               workflowStatusRevision: (current.workflowStatusRevision ?? 0) + 1,
               supportedCommands: {
                 ...(current.supportedCommands?.sessionId === sessionId

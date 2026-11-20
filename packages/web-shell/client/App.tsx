@@ -5152,10 +5152,15 @@ export function App({
         entry.cwd ===
         (activeWorkspaceCwd ?? resolveWorkspaceMaintenanceTargetCwd()),
     )?.workflowsEnabled ?? false;
+  const sessionWorkflowStatusUnknown =
+    workspaceContextActive &&
+    !!connection.sessionId &&
+    connection.workflowStatusUnknown;
   const workflowsEnabled =
     workspaceContextActive && connection.sessionId
-      ? (connection.supportedCommands?.workflowsEnabled ??
-        workspaceWorkflowsEnabled)
+      ? !sessionWorkflowStatusUnknown &&
+        (connection.supportedCommands?.workflowsEnabled ??
+          workspaceWorkflowsEnabled)
       : workspaceWorkflowsEnabled;
   // Mirror the daemon's `git_status_changed` push (surfaced as
   // connection.gitStatus by the session provider) into the chip state so the
@@ -11275,11 +11280,18 @@ export function App({
   useEffect(() => {
     if (
       mainView === 'workflows' &&
-      (!projectFeaturesAvailable || !workflowsEnabled)
+      (!projectFeaturesAvailable ||
+        (!sessionWorkflowStatusUnknown && !workflowsEnabled))
     ) {
       showChat();
     }
-  }, [mainView, projectFeaturesAvailable, showChat, workflowsEnabled]);
+  }, [
+    mainView,
+    projectFeaturesAvailable,
+    sessionWorkflowStatusUnknown,
+    showChat,
+    workflowsEnabled,
+  ]);
   const openGoals = useCallback(() => {
     splitClassificationGenerationRef.current += 1;
     setActivePanel(null);
@@ -25844,6 +25856,15 @@ export function App({
                   </div>
                 </div>
               )}
+              {projectFeaturesAvailable &&
+                mainView === 'workflows' &&
+                sessionWorkflowStatusUnknown && (
+                  <div className={styles.fullPage}>
+                    <div className={styles.fullPageBody} role="status">
+                      {t('common.loading')}
+                    </div>
+                  </div>
+                )}
               {projectFeaturesAvailable &&
                 mainView === 'workflows' &&
                 workflowsEnabled && (

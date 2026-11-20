@@ -1626,8 +1626,9 @@ export function WebShellSidebar({
     workspaces.find((entry) => entry.cwd === workflowWorkspaceCwd)
       ?.workflowsEnabled ?? false;
   const workflowsEnabled = workspaceSessionActive
-    ? (connection.supportedCommands?.workflowsEnabled ??
-      workspaceWorkflowsEnabled)
+    ? !connection.workflowStatusUnknown &&
+      (connection.supportedCommands?.workflowsEnabled ??
+        workspaceWorkflowsEnabled)
     : workspaceWorkflowsEnabled;
   const lockedWorkspace = lockedWorkspaceCwd
     ? workspaces.find((entry) => entry.cwd === lockedWorkspaceCwd)

@@ -111,6 +111,32 @@ describe('buildPermissionCheckContext', () => {
 });
 
 describe('persistPermissionOutcome', () => {
+  it('reports a persistent allow only after persistence and live application', async () => {
+    const persist = vi.fn().mockResolvedValue(undefined);
+    const addPersistentRule = vi.fn();
+    const recordAllow = vi.fn(() => {
+      expect(persist).toHaveBeenCalledWith('user', 'allow', 'ReadFile');
+      expect(addPersistentRule).toHaveBeenCalledWith('ReadFile', 'allow');
+    });
+
+    await persistPermissionOutcome(
+      ToolConfirmationOutcome.ProceedAlwaysUser,
+      {
+        type: 'info',
+        title: 'Confirm read',
+        prompt: 'Read the report',
+        onConfirm: async () => undefined,
+      },
+      persist,
+      { addPersistentRule } as never,
+      { permissionRules: ['ReadFile'] },
+      undefined,
+      recordAllow,
+    );
+
+    expect(recordAllow).toHaveBeenCalledExactlyOnceWith('user', 'ReadFile');
+  });
+
   it('never treats edit always-allow as a persistent project rule', async () => {
     const persist = vi.fn();
     const addPersistentRule = vi.fn();
@@ -144,6 +170,7 @@ describe('persistPermissionOutcome', () => {
     const persist = vi.fn(() => barrier);
     const addPersistentRule = vi.fn();
     const controller = new AbortController();
+    const recordAllow = vi.fn();
     const saving = persistPermissionOutcome(
       ToolConfirmationOutcome.ProceedAlwaysProject,
       {
@@ -158,6 +185,7 @@ describe('persistPermissionOutcome', () => {
       { addPersistentRule } as never,
       undefined,
       () => !controller.signal.aborted,
+      recordAllow,
     );
     await vi.waitFor(() => expect(persist).toHaveBeenCalledOnce());
     controller.abort();
@@ -165,6 +193,7 @@ describe('persistPermissionOutcome', () => {
     await saving;
     expect(persist).toHaveBeenCalledOnce();
     expect(addPersistentRule).not.toHaveBeenCalled();
+    expect(recordAllow).not.toHaveBeenCalled();
   });
 
   it('keeps legacy exec always-allow project persistence', async () => {

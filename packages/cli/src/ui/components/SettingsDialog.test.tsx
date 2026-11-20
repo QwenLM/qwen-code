@@ -403,12 +403,27 @@ describe('SettingsDialog', () => {
 
   describe('Settings Toggling', () => {
     it('toggles an unset WebSearch setting off and resets it to auto', async () => {
-      vi.mocked(saveModifiedSettings).mockClear();
+      const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-websearch-'));
+      onTestFinished(() => rmSync(tempDir, { recursive: true, force: true }));
       const settings = createMockSettings();
-      const onSelect = vi.fn();
+      settings.user.path = path.join(tempDir, 'settings.json');
+      writeFileSync(settings.user.path, '{}');
+      const readSettings = () =>
+        JSON.parse(readFileSync(settings.user.path, 'utf8'));
+      const actual = await vi.importActual<
+        typeof import('../../config/settingsUtils.js')
+      >('../../config/settingsUtils.js');
+      vi.mocked(saveModifiedSettings).mockImplementation(
+        actual.saveModifiedSettings,
+      );
+      const onRestartRequest = vi.fn();
       const { stdin, unmount, lastFrame } = render(
         <KeypressProvider kittyProtocolEnabled={false}>
-          <SettingsDialog settings={settings} onSelect={onSelect} />
+          <SettingsDialog
+            settings={settings}
+            onSelect={vi.fn()}
+            onRestartRequest={onRestartRequest}
+          />
         </KeypressProvider>,
       );
       const targetIndex = getDialogSettingKeys().indexOf(
@@ -419,26 +434,32 @@ describe('SettingsDialog', () => {
         act(() => stdin.write(TerminalKeys.DOWN_ARROW));
         await wait();
       }
-      await waitFor(() => {
-        expect(lastFrame()).toContain('●\uFE0E Enable WebSearch');
-        expect(lastFrame()).toContain('(not set)');
-      });
+      const activeRow = () =>
+        lastFrame()
+          ?.split('\n')
+          .find((line) => line.includes('●\uFE0E Enable WebSearch'));
+      await waitFor(() => expect(activeRow()).toContain('(not set)'));
 
       act(() => stdin.write(TerminalKeys.ENTER));
-      await waitFor(() => {
-        const activeRow = lastFrame()
-          ?.split('\n')
-          .find((line) => line.includes('●\uFE0E Enable WebSearch'));
-        expect(activeRow).toContain('false*');
-      });
+      await waitFor(() => expect(activeRow()).toContain('false*'));
+      expect(lastFrame()).toContain(
+        'To see changes, Qwen Code must be restarted',
+      );
+      expect(readSettings().tools.webSearch.enabled).toBe(false);
 
       act(() => stdin.write('\u0003'));
+      await waitFor(() => expect(activeRow()).toContain('(not set)*'));
+      expect(readSettings().tools.webSearch.enabled).toBe(false);
+
+      act(() => stdin.write('r'));
+      await waitFor(() => expect(onRestartRequest).toHaveBeenCalledOnce());
+      expect(readSettings().tools?.webSearch?.enabled).toBeUndefined();
       await waitFor(() => {
-        const activeRow = lastFrame()
-          ?.split('\n')
-          .find((line) => line.includes('●\uFE0E Enable WebSearch'));
-        expect(activeRow).toContain('(not set)');
-        expect(activeRow).not.toContain('(not set)*');
+        expect(activeRow()).toContain('(not set)');
+        expect(activeRow()).not.toContain('*');
+        expect(lastFrame()).not.toContain(
+          'To see changes, Qwen Code must be restarted',
+        );
       });
       unmount();
     });
@@ -517,20 +538,29 @@ describe('SettingsDialog', () => {
     });
 
     it.each([
-      { workflowsEnabled: false, safeMode: true },
-      { workflowsEnabled: true, safeMode: true },
-      { workflowsEnabled: false, safeMode: false },
+      { workflowsEnabled: false, safeMode: true, switchScope: false },
+      { workflowsEnabled: true, safeMode: true, switchScope: false },
+      { workflowsEnabled: false, safeMode: false, switchScope: false },
+      { workflowsEnabled: true, safeMode: true, switchScope: true },
     ])(
-      'unsets Dynamic Workflows=$workflowsEnabled with Safe Mode=$safeMode',
-      async ({ workflowsEnabled, safeMode }) => {
+      'unsets Dynamic Workflows=$workflowsEnabled with Safe Mode=$safeMode and scope switch=$switchScope',
+      async ({ workflowsEnabled, safeMode, switchScope }) => {
         const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-workflows-'));
         onTestFinished(() => rmSync(tempDir, { recursive: true, force: true }));
         const userSettings = {
           tools: { workflowsEnabled, webSearch: { enabled: false } },
         };
-        const settings = createMockSettings(userSettings);
-        settings.user.path = path.join(tempDir, 'settings.json');
+        const workspaceSettings = { tools: { webSearch: { enabled: true } } };
+        const settings = createMockSettings(
+          userSettings,
+          {},
+          workspaceSettings,
+        );
+        settings.user.path = path.join(tempDir, 'user.json');
         writeFileSync(settings.user.path, JSON.stringify(userSettings));
+        settings.workspace.path = path.join(tempDir, 'workspace.json');
+        const workspaceContents = JSON.stringify(workspaceSettings);
+        writeFileSync(settings.workspace.path, workspaceContents);
         const actual = await vi.importActual<
           typeof import('../../config/settingsUtils.js')
         >('../../config/settingsUtils.js');
@@ -567,11 +597,39 @@ describe('SettingsDialog', () => {
         act(() => stdin.write('\u000C'));
         await waitFor(() => expect(activeRow()).toContain(`${!safeMode}*`));
         expect(readSettings()).toEqual(userSettings);
+
+        const selectScope = async (key: '1' | '2') => {
+          act(() => stdin.write(TerminalKeys.TAB));
+          await waitFor(() => expect(lastFrame()).toContain('Apply To'));
+          act(() => stdin.write(key));
+          await waitFor(() => expect(lastFrame()).not.toContain('Apply To'));
+        };
+        if (switchScope) {
+          await selectScope('2');
+          await waitFor(() => expect(activeRow()).toBeUndefined());
+          await selectScope('1');
+          await waitFor(() => expect(activeRow()).toContain('false*'));
+          await selectScope('2');
+          await waitFor(() => expect(activeRow()).toBeUndefined());
+          expect(readSettings()).toEqual(userSettings);
+        }
+
         act(() => stdin.write('r'));
         await waitFor(() => expect(onRestartRequest).toHaveBeenCalledOnce());
         expect(readSettings()).toEqual({
           tools: { webSearch: { enabled: false } },
         });
+        expect(readFileSync(settings.workspace.path, 'utf8')).toBe(
+          workspaceContents,
+        );
+        expect(saveModifiedSettings).toHaveBeenCalledTimes(1);
+        expect(saveModifiedSettings).toHaveBeenCalledWith(
+          new Set(['tools.workflowsEnabled']),
+          expect.anything(),
+          settings,
+          SettingScope.User,
+        );
+        if (switchScope) await selectScope('1');
         await waitFor(() => {
           expect(activeRow()).toContain(String(!safeMode));
           expect(activeRow()).not.toContain('*');

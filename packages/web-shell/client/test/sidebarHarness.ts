@@ -134,6 +134,7 @@ export interface SidebarConnection {
     | { kind: 'standalone' }
     | { kind: 'live' };
   supportedCommands?: { workflowsEnabled?: boolean };
+  workflowStatusUnknown?: boolean;
 }
 
 export function createSidebarConnection(

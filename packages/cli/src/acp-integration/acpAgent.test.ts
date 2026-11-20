@@ -22743,6 +22743,67 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('continues a strict permission sync after one workspace read fails and retries only what was skipped', async () => {
+    const settings = makeCoreSettings();
+    settings.setValue(SettingScope.User, 'permissions.deny', ['ReadFile']);
+    Object.assign(settings, {
+      reloadScopesFromDiskAtomically: vi.fn(() => {
+        settings.setValue(SettingScope.User, 'permissions.deny', []);
+        return true;
+      }),
+    });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+    const sessions = (agent as unknown as { sessions: Map<string, unknown> })
+      .sessions;
+    const addSession = (id: string, cwd: string) => {
+      const removePersistentRule = vi.fn().mockReturnValue(false);
+      sessions.set(id, {
+        getId: () => id,
+        getConfig: () => ({
+          ...mockConfig,
+          storage: { getProjectRoot: () => cwd },
+          getPermissionManager: () => ({ removePersistentRule }),
+          isWorkflowsEnabled: () => false,
+        }),
+      });
+      return removePersistentRule;
+    };
+    try {
+      const removeFirst = addSession('first-session', '/first');
+      const removeSecond = addSession('second-session', '/second');
+      vi.mocked(readLiveSettingsSnapshot)
+        .mockImplementationOnce(() => {
+          throw new Error('Unreadable workspace settings');
+        })
+        .mockReturnValueOnce(settings)
+        .mockReturnValueOnce(settings);
+      const notify = (revision: number) =>
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+          v: 1,
+          revision,
+          kind: 'permissions',
+          scope: 'user',
+        });
+
+      await expect(notify(1)).rejects.toThrow(
+        'Could not synchronize permission rules for all live sessions',
+      );
+      expect(readLiveSettingsSnapshot).toHaveBeenCalledWith(
+        '/second',
+        expect.any(Boolean),
+      );
+      expect(removeFirst).not.toHaveBeenCalled();
+      expect(removeSecond).toHaveBeenCalledExactlyOnceWith('ReadFile', 'deny');
+
+      await expect(notify(2)).resolves.toMatchObject({ acknowledged: true });
+      expect(removeFirst).toHaveBeenCalledExactlyOnceWith('ReadFile', 'deny');
+      expect(removeSecond).toHaveBeenCalledOnce();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('keeps a workspace-scope permission change out of a worktree session', async () => {
     let mergedSettings: Record<string, unknown> = {
       permissions: { allow: [], ask: [], deny: [] },
@@ -24043,6 +24104,47 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each([
+    ['user', SettingScope.User, 'user'],
+    ['project', SettingScope.Workspace, 'workspace'],
+  ] as const)(
+    'revokes a live Always Allow saved after session creation (%s)',
+    async (approvalScope, settingScope, scope) => {
+      const settings = makeCoreSettings();
+      const config = await setupSessionMocks('test-session-id');
+      const liveRules = new Set<string>();
+      Object.assign(config, {
+        getPermissionManager: () => ({
+          removePersistentRule: (rule: string) => liveRules.delete(rule),
+        }),
+        storage: { ...config.storage, getProjectRoot: () => '/tmp' },
+      });
+      const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+      try {
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+        const onPersistentAllowApplied = vi.mocked(Session).mock.lastCall?.[10];
+        settings.setValue(settingScope, 'permissions.allow', ['ReadFile']);
+        liveRules.add('ReadFile');
+        onPersistentAllowApplied?.(approvalScope, 'ReadFile');
+
+        await agent.extMethod('qwen/permissions/setRules', {
+          cwd: '/tmp',
+          scope,
+          ruleType: 'allow',
+          rules: [],
+        });
+
+        expect(
+          settings.forScope(settingScope).settings.permissions?.allow,
+        ).toEqual([]);
+        expect(liveRules.has('ReadFile')).toBe(false);
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   const VALID_SESSION_ID = '12345678-1234-1234-1234-1234567890ab';
 
@@ -39220,10 +39322,16 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(cfg.isWorkflowsEnabled()).toBe(false);
 
     reloadedSettings = {};
+    isIdle.mockReturnValue(true);
     vi.mocked(readLiveSettingsSnapshot).mockImplementationOnce(() => {
       throw new SyntaxError('Invalid workspace settings');
     });
-    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {}),
+    ).resolves.toMatchObject({
+      sessionsRefreshed: [],
+      sessionsSkipped: ['s-wf-reload'],
+    });
     expect(cfg.applyWorkflowsEnabledSetting).toHaveBeenLastCalledWith(
       undefined,
       undefined,

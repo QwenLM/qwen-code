@@ -3344,10 +3344,7 @@ describe('PermissionManager.removePersistentRule', () => {
     expect(await pm.evaluate(agentCtx({}, 'review'))).toBe('default');
   });
 
-  it('cannot reach a rule AUTO mode has stashed, until it is restored', async () => {
-    // Deliberate contract pin: `initialize()` strips the wildcard into
-    // `strippedAllowRules.persistent`, which this method does not scan, so it
-    // reports false while the grant is still live after `restoreDangerousRules`.
+  it('does not restore a persistent allow revoked while AUTO mode stashes it', async () => {
     const pm = makePm({
       approvalMode: 'auto',
       permissionsAllow: ['Bash(python:*)'],
@@ -3357,13 +3354,11 @@ describe('PermissionManager.removePersistentRule', () => {
     ).toEqual(['Bash(python:*)']);
     expect(await pm.evaluate(sh('python foo.py'))).toBe('ask');
 
-    expect(pm.removePersistentRule('Bash(python:*)', 'allow')).toBe(false);
-    expect(
-      pm.getStrippedDangerousRules()?.persistent.map((r) => r.raw),
-    ).toEqual(['Bash(python:*)']);
+    expect(pm.removePersistentRule('Bash(python:*)', 'allow')).toBe(true);
+    expect(pm.getStrippedDangerousRules()?.persistent).toEqual([]);
 
     pm.restoreDangerousRules();
-    expect(await pm.evaluate(sh('python foo.py'))).toBe('allow');
+    expect(await pm.evaluate(sh('python foo.py'))).toBe('ask');
   });
 });
 

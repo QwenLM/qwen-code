@@ -5077,6 +5077,28 @@ describe('WebShellSidebar workflows entry', () => {
       container.querySelector('button[aria-label="Workflows"]'),
     ).toBeNull();
   });
+
+  it('does not fall back to the workspace while session Workflow status is unknown', () => {
+    workspace.capabilities = {
+      ...capabilities,
+      workspaces: capabilities.workspaces.map((entry) =>
+        entry.primary ? { ...entry, workflowsEnabled: true } : entry,
+      ),
+    };
+    connection.capabilities = workspace.capabilities;
+    connection.sessionId = 'session-1';
+    connection.sessionContext = { kind: 'workspace', cwd: '/tmp/project' };
+    connection.workflowStatusUnknown = true;
+    renderSidebar();
+
+    const workflowButton = 'button[aria-label="Workflows"]';
+    expect(container.querySelector(workflowButton)).toBeNull();
+
+    connection.workflowStatusUnknown = undefined;
+    connection.supportedCommands = { workflowsEnabled: true };
+    renderSidebar();
+    expect(container.querySelector(workflowButton)).not.toBeNull();
+  });
 });
 
 describe('WebShellSidebar primary workspace header', () => {

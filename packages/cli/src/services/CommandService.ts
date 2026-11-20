@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { SlashCommand, ExecutionMode } from '../ui/commands/types.js';
+import {
+  CommandKind,
+  type ExecutionMode,
+  type SlashCommand,
+} from '../ui/commands/types.js';
 import type { ICommandLoader } from './types.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import {
@@ -53,6 +57,8 @@ export class CommandService {
    * fully constructed `CommandService` instance.
    *
    * Conflict resolution:
+   * - Saved workflows that collide with a built-in name or alias move to a
+   *   free `workflow.commandName` alias after the regular merge
    * - Extension commands that conflict with existing commands are renamed to
    *   `extensionName.commandName`
    * - Non-extension commands (built-in, user, project) override earlier commands
@@ -63,7 +69,7 @@ export class CommandService {
    * @param signal An AbortSignal to cancel the loading process.
    * @param disabledNames Optional set of command names to exclude. Matched
    *   case-insensitively against the final (post-rename) command name, and for a
-   *   skill command against its authored name as well. Intended
+   *   skill or saved workflow against its authored name as well. Intended
    *   for settings- or flag-driven denylists that gate the CLI surface (see
    *   `slashCommands.disabled` and `--disabled-slash-commands`).
    * @returns A promise that resolves to a new, fully initialized `CommandService` instance.
@@ -86,8 +92,18 @@ export class CommandService {
       }
     }
 
+    const builtinNames = new Set(
+      allCommands
+        .filter((cmd) => cmd.kind === CommandKind.BUILT_IN)
+        .flatMap((cmd) => [cmd.name, ...(cmd.altNames ?? [])]),
+    );
+    const renamedWorkflows: SlashCommand[] = [];
     const commandMap = new Map<string, SlashCommand>();
     for (const cmd of allCommands) {
+      if (cmd.source === 'workflow-command' && builtinNames.has(cmd.name)) {
+        renamedWorkflows.push(cmd);
+        continue;
+      }
       let finalName = cmd.name;
 
       // Extension commands get renamed if they conflict with existing commands
@@ -118,6 +134,24 @@ export class CommandService {
       });
     }
 
+    if (renamedWorkflows.length > 0) {
+      const occupiedNames = new Set(
+        Array.from(commandMap.values()).flatMap((cmd) => [
+          cmd.name,
+          ...(cmd.altNames ?? []),
+        ]),
+      );
+      for (const cmd of renamedWorkflows) {
+        const alias = `workflow.${cmd.name}`;
+        let name = alias;
+        for (let suffix = 1; occupiedNames.has(name); suffix++) {
+          name = `${alias}${suffix}`;
+        }
+        occupiedNames.add(name);
+        commandMap.set(name, { ...cmd, name, workflowName: cmd.name });
+      }
+    }
+
     if (disabledNames && disabledNames.size > 0) {
       const normalizedDisabled = new Set<string>();
       for (const entry of disabledNames) {
@@ -129,7 +163,6 @@ export class CommandService {
           // Match either spelling — the registry name carries the extension
           // prefix while an existing entry may hold the bare authored name — so
           // the rename cannot un-disable a command an operator removed.
-          // Non-skill commands have one spelling.
           if (
             commandRestrictionNames(cmd).some((candidate) =>
               normalizedDisabled.has(candidate),

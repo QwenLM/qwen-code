@@ -1580,11 +1580,16 @@ export class PermissionManager {
    * @returns true if a rule was removed, false if no matching rule was found.
    */
   removePersistentRule(raw: string, type: RuleType): boolean {
-    const rules = this.persistentRules[type];
-    const idx = rules.findIndex((r) => r.raw === raw);
-    if (idx !== -1) {
-      rules.splice(idx, 1);
-      return true;
+    const sources = [this.persistentRules[type]];
+    if (type === 'allow' && this.strippedAllowRules) {
+      sources.push(this.strippedAllowRules.persistent);
+    }
+    for (const rules of sources) {
+      const index = rules.findIndex((rule) => rule.raw === raw);
+      if (index !== -1) {
+        rules.splice(index, 1);
+        return true;
+      }
     }
     return false;
   }

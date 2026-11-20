@@ -204,6 +204,7 @@ export async function persistPermissionOutcome(
   pm: PermissionManager | null | undefined,
   payload?: ToolConfirmationPayload,
   isActive: () => boolean = () => true,
+  onPersistentAllowApplied?: (scope: 'project' | 'user', rule: string) => void,
 ): Promise<void> {
   if (
     confirmationDetails.type !== 'exec' &&
@@ -241,7 +242,10 @@ export async function persistPermissionOutcome(
       }
       // 2. Immediately update in-memory PermissionManager so the
       //    new rule takes effect without restart.
-      pm?.addPersistentRule(rule, 'allow');
+      if (pm) {
+        pm.addPersistentRule(rule, 'allow');
+        if (persistFn) onPersistentAllowApplied?.(scope, rule);
+      }
     }
   }
 }

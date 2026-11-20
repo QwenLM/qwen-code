@@ -137,6 +137,7 @@ import {
   getSessionDisplayName,
   getReplayTokenUsage,
   getTokenCountFromUsage,
+  getVisibleSessionCommands,
   mapProviderStatus,
   mapSessionContextModels,
   mapSessionContextReasoning,
@@ -2169,6 +2170,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         const clearEventStream = () => {
           removeProviderAbortListener?.();
           removeProviderAbortListener = undefined;
+          eventStream?.controller.abort();
           if (eventStream && eventStreamRef.current === eventStream) {
             const owner = configStreamOwner;
             if (owner && sessionRef.current === owner) {
@@ -2844,6 +2846,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               flushSync(() => {
                 setConnection((current) => ({
                   ...current,
+                  commands:
+                    workflowModeSessionRef.current === nextSession
+                      ? current.commands
+                      : getVisibleSessionCommands(current),
+                  workflowStatusUnknown:
+                    workflowModeSessionRef.current === nextSession
+                      ? current.workflowStatusUnknown
+                      : undefined,
+                  supportedCommands:
+                    workflowModeSessionRef.current === nextSession
+                      ? current.supportedCommands
+                      : undefined,
                   sessionId: nextSession.sessionId,
                   restoredArtifacts: nextSession.restoredArtifacts,
                   restoredArtifactsSessionId: nextSession.sessionId,
@@ -3564,11 +3578,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const reuseWorkflowMode =
             workflowModeSessionRef.current === activeSession;
           workflowModeSessionRef.current = activeSession;
-          setConnection((current) => ({
+          setConnectionSynchronous((current) => ({
             ...current,
+            commands: reuseWorkflowMode
+              ? current.commands
+              : getVisibleSessionCommands(current),
             workflowMode: reuseWorkflowMode ? current.workflowMode : undefined,
             workflowModeStatus: 'syncing',
             workflowModePending: false,
+            workflowStatusUnknown: reuseWorkflowMode
+              ? current.workflowStatusUnknown
+              : undefined,
+            supportedCommands: reuseWorkflowMode
+              ? current.supportedCommands
+              : undefined,
             status: 'connected',
             sessionId: activeSession.sessionId,
             sessionContext: activeProductSessionContext,
@@ -3682,7 +3705,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             canReuseSessionMetadata || !activeWorkspaceScoped
               ? Promise.resolve(undefined)
               : client.workspaceProviders(),
-            canReuseSessionMetadata
+            canReuseSessionMetadata ||
+            connectionRef.current.workflowStatusUnknown
               ? Promise.resolve(undefined)
               : activeSession.supportedCommands(),
             readRecovery ? activeSession.context() : Promise.resolve(undefined),
@@ -3818,7 +3842,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               sessionRecoveryGenerationRef.current.get(activeSession) ===
                 recoveryGeneration;
             const commandsSnapshotCurrent =
-              supportedCommands !== undefined &&
+              supportedCommands?.sessionId === activeSession.sessionId &&
+              !current.workflowStatusUnknown &&
               current.workflowStatusRevision === workflowStatusRevision;
             const nextContext =
               configSnapshotCurrent && context
@@ -4047,13 +4072,68 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             sessionConfigGenerationRef.current.get(activeSession) ===
               configState;
           let acceptingConfig = activeSession.lastEventId === undefined;
-          let replayedWorkflowCommands:
-            | {
-                event: DaemonEvent;
-                commands: DaemonConnectionState['commands'];
-                skills: DaemonConnectionState['skills'];
+          let workflowRecoveryStarted = false;
+          const needsWorkflowRecovery = (current: DaemonConnectionState) =>
+            isConfigOwner() &&
+            current.sessionId === activeSession.sessionId &&
+            current.workflowStatusUnknown === true;
+          const recoverWorkflowStatus = async () => {
+            if (
+              workflowRecoveryStarted ||
+              !needsWorkflowRecovery(connectionRef.current)
+            ) {
+              return;
+            }
+            workflowRecoveryStarted = true;
+            const { commands, skills } = connectionRef.current;
+            for (
+              let attempt = 1;
+              needsWorkflowRecovery(connectionRef.current);
+              attempt++
+            ) {
+              const status = await withActionTimeout(
+                activeSession.supportedCommands(),
+                'Refresh commands after replay timed out',
+              ).catch(() => undefined);
+              if (
+                status?.sessionId === activeSession.sessionId &&
+                typeof status.workflowsEnabled === 'boolean'
+              ) {
+                const mapped = mapSupportedCommands(status);
+                setConnectionSynchronous((current) => {
+                  if (!needsWorkflowRecovery(current)) return current;
+                  const commandsChanged = current.commands !== commands;
+                  const skillsChanged = current.skills !== skills;
+                  return {
+                    ...current,
+                    commands: commandsChanged
+                      ? current.commands
+                      : mapped.commands,
+                    skills: skillsChanged ? current.skills : mapped.skills,
+                    supportedCommands: {
+                      ...status,
+                      availableCommands: commandsChanged
+                        ? (current.commands?.map(({ raw }) => raw) ?? [])
+                        : status.availableCommands,
+                      availableSkills: skillsChanged
+                        ? (current.skills ?? [])
+                        : status.availableSkills,
+                    },
+                    workflowStatusUnknown: undefined,
+                    workflowStatusRevision:
+                      (current.workflowStatusRevision ?? 0) + 1,
+                  };
+                });
+                return;
               }
-            | undefined;
+              if (needsWorkflowRecovery(connectionRef.current)) {
+                await delay(
+                  getReconnectDelayMs(attempt, 250, 30_000),
+                  eventStreamController.signal,
+                );
+              }
+            }
+          };
           let initialConfigReadRequested = false;
           const refreshConfig = () => {
             if (!isConfigOwner()) return;
@@ -4115,6 +4195,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             activeSession,
             activeSession.lastEventId === undefined,
           );
+          if (acceptingConfig) void recoverWorkflowStatus();
           for await (const event of activeSession.events({
             signal: eventStreamController.signal,
             maxQueued,
@@ -4126,72 +4207,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             if (event.type === 'replay_complete') {
               acceptingConfig = true;
-              if (replayedWorkflowCommands && isConfigOwner()) {
-                const fallback = replayedWorkflowCommands;
-                replayedWorkflowCommands = undefined;
-                const snapshot = connectionRef.current.supportedCommands;
-                const { commands, skills } = connectionRef.current;
-                const ownsSnapshot = (current: DaemonConnectionState) =>
-                  isConfigOwner() &&
-                  current.sessionId === activeSession.sessionId &&
-                  current.supportedCommands === snapshot;
-                const applyCurrent = (
-                  update: SetStateAction<DaemonConnectionState>,
-                  observed = { commands, skills },
-                ) =>
-                  setConnectionSynchronous((current) => {
-                    if (!ownsSnapshot(current)) return current;
-                    const next =
-                      typeof update === 'function' ? update(current) : update;
-                    if (
-                      current.commands === observed.commands &&
-                      current.skills === observed.skills
-                    ) {
-                      return next;
-                    }
-                    return {
-                      ...next,
-                      commands: current.commands,
-                      skills: current.skills,
-                      supportedCommands: next.supportedCommands && {
-                        ...next.supportedCommands,
-                        availableCommands:
-                          current.commands?.map(({ raw }) => raw) ?? [],
-                        availableSkills: current.skills ?? [],
-                      },
-                    };
-                  });
-                const readCommands = () =>
-                  withActionTimeout(
-                    activeSession.supportedCommands(),
-                    'Refresh commands after replay timed out',
-                  ).then(
-                    (status) =>
-                      status.sessionId === activeSession.sessionId
-                        ? status
-                        : undefined,
-                    () => undefined,
-                  );
-                void (async () => {
-                  const status =
-                    (await readCommands()) ??
-                    (snapshot !== undefined &&
-                    ownsSnapshot(connectionRef.current)
-                      ? await readCommands()
-                      : undefined);
-                  if (status !== undefined) {
-                    applyCurrent((current) => ({
-                      ...current,
-                      ...mapSupportedCommands(status),
-                      supportedCommands: status,
-                    }));
-                  } else if (snapshot === undefined) {
-                    updateConnectionFromDaemonEvent(fallback.event, (update) =>
-                      applyCurrent(update, fallback),
-                    );
-                  }
-                })();
-              }
+              void recoverWorkflowStatus();
             }
             const replayUpdate =
               !acceptingConfig &&
@@ -4204,12 +4220,29 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               isRecord(replayUpdate) &&
               replayUpdate['sessionUpdate'] === 'available_commands_update' &&
               isRecord(replayUpdate['_meta']) &&
-              isRecord(replayUpdate['_meta']['workflowStatus']);
-            if (isReplayedWorkflowCommands) {
-              // A later replayed command update can supersede these commands
-              // before the post-replay fetch even starts.
-              const { commands, skills } = connectionRef.current;
-              replayedWorkflowCommands = { event, commands, skills };
+              isRecord(replayUpdate['_meta']['workflowStatus']) &&
+              typeof replayUpdate['_meta']['workflowStatus'][
+                'workflowsEnabled'
+              ] === 'boolean';
+            if (
+              isReplayedWorkflowCommands &&
+              isConfigOwner() &&
+              isRecord(event.data) &&
+              event.data['sessionId'] === activeSession.sessionId
+            ) {
+              setConnectionSynchronous((current) =>
+                sessionRef.current === activeSession &&
+                current.sessionId === activeSession.sessionId &&
+                !current.workflowStatusUnknown
+                  ? {
+                      ...current,
+                      supportedCommands: undefined,
+                      workflowStatusUnknown: true,
+                      workflowStatusRevision:
+                        (current.workflowStatusRevision ?? 0) + 1,
+                    }
+                  : current,
+              );
             }
             requestInitialConfigRead();
             const configUpdate = getConfigOptionsUpdate(event);
@@ -6508,6 +6541,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     };
   }, [appSession, connection.sessionId, viewStateSupported]);
 
+  const visibleConnection = useMemo(
+    () =>
+      connection.workflowStatusUnknown
+        ? { ...connection, commands: getVisibleSessionCommands(connection) }
+        : connection,
+    [connection],
+  );
+
   return (
     <GeneratedUiScopeContext.Provider value={generatedUiScopeContext}>
       <McpAppGeneratedUiOwnerContext.Provider value={generatedUiOwner}>
@@ -6518,7 +6559,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 <DaemonTurnNavigationContext.Provider
                   value={turnNavigationStore}
                 >
-                  <DaemonConnectionContext.Provider value={connection}>
+                  <DaemonConnectionContext.Provider value={visibleConnection}>
                     <DaemonPromptStatusContext.Provider value={promptStatus}>
                       <DaemonSessionNoticesContext.Provider
                         value={noticesValue}

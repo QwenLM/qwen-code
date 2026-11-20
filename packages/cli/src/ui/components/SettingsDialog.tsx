@@ -17,14 +17,12 @@ import { t } from '../../i18n/index.js';
 import { ICON } from '../constants.js';
 import {
   getDialogSettingKeys,
-  setPendingSettingValue,
   getDisplayValue,
   saveModifiedSettings,
   getSettingDefinition,
   isDefaultValue,
   settingExistsInScope,
   requiresRestart,
-  getRestartRequiredFromModified,
   getDefaultValue,
   getSettingResetValue,
   setPendingSettingValueAny,
@@ -76,6 +74,21 @@ interface SettingsDialogProps {
 const debugLogger = createDebugLogger('SETTINGS_DIALOG');
 
 const maxItemsToShow = 8;
+
+function settingsWithResets(
+  settings: Settings,
+  resets?: ReadonlySet<string>,
+): Settings {
+  let updated = structuredClone(settings);
+  for (const key of resets ?? []) {
+    updated = setPendingSettingValueAny(
+      key,
+      getSettingResetValue(key),
+      updated,
+    );
+  }
+  return updated;
+}
 
 // Top tab bar for the settings dialog, mirroring Claude Code's /config layout.
 // The "Settings" tab hosts the editable settings list; the others surface the
@@ -182,48 +195,36 @@ export function SettingsDialog({
     structuredClone(settings.forScope(selectedScope).settings),
   );
 
-  // Track which settings have been modified by the user
-  const [modifiedSettings, setModifiedSettings] = useState<Set<string>>(
-    new Set(),
-  );
-
-  // Preserve pending changes across scope switches
-  type PendingValue = boolean | number | string | undefined;
-  const [globalPendingChanges, setGlobalPendingChanges] = useState<
-    Map<string, PendingValue>
+  const [pendingResets, setPendingResets] = useState<
+    Map<SettingScope, Set<string>>
   >(new Map());
+  const [restartNeeded, setRestartNeeded] = useState(false);
+  const scopeResets = pendingResets.get(selectedScope);
+  const modifiedSettings = scopeResets ?? new Set<string>();
+  const showRestartPrompt = restartNeeded || pendingResets.size > 0;
 
-  // Track restart-required settings across scope changes
-  const [restartRequiredSettings, setRestartRequiredSettings] = useState<
-    Set<string>
-  >(new Set());
-
-  const showRestartPrompt = restartRequiredSettings.size > 0;
+  const updatePendingReset = (key: string, pending: boolean) => {
+    setPendingResets((previous) => {
+      const previousScope = previous.get(selectedScope);
+      if ((previousScope?.has(key) ?? false) === pending) return previous;
+      const next = new Map(previous);
+      const scope = new Set(previousScope);
+      if (pending) scope.add(key);
+      else scope.delete(key);
+      if (scope.size > 0) next.set(selectedScope, scope);
+      else next.delete(selectedScope);
+      return next;
+    });
+  };
 
   useEffect(() => {
-    // Base settings for selected scope
-    let updated = structuredClone(settings.forScope(selectedScope).settings);
-    // Overlay globally pending (unsaved) changes so user sees their modifications in any scope
-    const newModified = new Set<string>();
-    for (const [key, value] of globalPendingChanges.entries()) {
-      const def = getSettingDefinition(key);
-      if (value === undefined) {
-        updated = setPendingSettingValueAny(key, value, updated);
-      } else if (def?.type === 'boolean' && typeof value === 'boolean') {
-        updated = setPendingSettingValue(key, value, updated);
-      } else if (
-        (isNumericSettingType(def?.type) && typeof value === 'number') ||
-        (def?.type === 'string' && typeof value === 'string') ||
-        (def?.type === 'enum' &&
-          (typeof value === 'string' || typeof value === 'number'))
-      ) {
-        updated = setPendingSettingValueAny(key, value, updated);
-      }
-      newModified.add(key);
-    }
-    setPendingSettings(updated);
-    setModifiedSettings(newModified);
-  }, [selectedScope, settings, globalPendingChanges]);
+    setPendingSettings(
+      settingsWithResets(
+        settings.forScope(selectedScope).settings,
+        scopeResets,
+      ),
+    );
+  }, [selectedScope, settings, scopeResets]);
 
   const generateSettingsItems = () => {
     // Workspace-restricted settings are stripped before the merge, so offering
@@ -266,7 +267,7 @@ export function SettingsDialog({
               definition.unsetToggleValue,
             );
             setPendingSettings((prev) =>
-              setPendingSettingValue(key, newValue as boolean, prev),
+              setPendingSettingValueAny(key, newValue, prev),
             );
           } else if (definition?.type === 'enum' && definition.options) {
             const options = definition.options;
@@ -331,31 +332,11 @@ export function SettingsDialog({
               );
             }
 
-            // Remove from modifiedSettings since it's now saved
-            setModifiedSettings((prev) => {
-              const updated = new Set(prev);
-              updated.delete(key);
-              return updated;
-            });
-
-            // Also remove from restart-required settings if it was there
-            setRestartRequiredSettings((prev) => {
-              const updated = new Set(prev);
-              updated.delete(key);
-              return updated;
-            });
-
-            // Remove from global pending changes if present
-            setGlobalPendingChanges((prev) => {
-              if (!prev.has(key)) return prev;
-              const next = new Map(prev);
-              next.delete(key);
-              return next;
-            });
-
-            // Refresh pending settings from the saved state
             setPendingSettings(
-              structuredClone(settings.forScope(selectedScope).settings),
+              settingsWithResets(
+                settings.forScope(selectedScope).settings,
+                scopeResets,
+              ),
             );
           } else {
             // For restart-required settings, save immediately but show restart prompt
@@ -372,8 +353,8 @@ export function SettingsDialog({
               selectedScope,
             );
 
-            // Mark as needing restart and show prompt
-            setRestartRequiredSettings((prev) => new Set(prev).add(key));
+            updatePendingReset(key, false);
+            setRestartNeeded(true);
           }
         },
       };
@@ -562,26 +543,6 @@ export function SettingsDialog({
         settings,
         selectedScope,
       );
-
-      // Remove from modified sets if present
-      setModifiedSettings((prev) => {
-        const updated = new Set(prev);
-        updated.delete(key);
-        return updated;
-      });
-      setRestartRequiredSettings((prev) => {
-        const updated = new Set(prev);
-        updated.delete(key);
-        return updated;
-      });
-
-      // Remove from global pending since it's immediately saved
-      setGlobalPendingChanges((prev) => {
-        if (!prev.has(key)) return prev;
-        const next = new Map(prev);
-        next.delete(key);
-        return next;
-      });
     } else {
       // For restart-required settings, save immediately but show restart prompt
       const immediateSettings = new Set([key]);
@@ -601,8 +562,8 @@ export function SettingsDialog({
         writeOutputLanguageAndRegisterPath(parsed, config);
       }
 
-      // Mark as needing restart and show prompt
-      setRestartRequiredSettings((prev) => new Set(prev).add(key));
+      updatePendingReset(key, false);
+      setRestartNeeded(true);
     }
 
     setEditingKey(null);
@@ -697,32 +658,16 @@ export function SettingsDialog({
       // otherwise consumed by the implicit-search branch before the restart
       // handler below can run.
       const applyRestart = () => {
-        // Only save settings that require restart (non-restart settings were
-        // already saved immediately).
-        const restartRequiredSet = new Set(
-          getRestartRequiredFromModified(modifiedSettings),
-        );
-
-        if (restartRequiredSet.size > 0) {
+        for (const [scope, resets] of pendingResets) {
           saveModifiedSettings(
-            restartRequiredSet,
-            pendingSettings,
+            resets,
+            settingsWithResets({}, resets),
             settings,
-            selectedScope,
+            scope,
           );
-
-          // Remove saved keys from global pending changes
-          setGlobalPendingChanges((prev) => {
-            if (prev.size === 0) return prev;
-            const next = new Map(prev);
-            for (const key of restartRequiredSet) {
-              next.delete(key);
-            }
-            return next;
-          });
         }
-
-        setRestartRequiredSettings(new Set()); // Clear restart-required settings
+        setPendingResets(new Map());
+        setRestartNeeded(false);
         if (onRestartRequest) onRestartRequest();
       };
 
@@ -1034,25 +979,13 @@ export function SettingsDialog({
               settingExistsInScope(currentSetting.value, scopeSettings) &&
               getEffectiveValue(currentSetting.value, scopeSettings, {}) !==
                 resetValue;
-            setModifiedSettings((prev) => {
-              const updated = new Set(prev);
-              if (resetChangesValue) updated.add(currentSetting.value);
-              else updated.delete(currentSetting.value);
-              return updated;
-            });
-
-            setRestartRequiredSettings((prev) => {
-              const updated = new Set(prev);
-              if (resetChangesValue && requiresRestart(currentSetting.value)) {
-                updated.add(currentSetting.value);
-              } else {
-                updated.delete(currentSetting.value);
-              }
-              return updated;
-            });
+            const needsRestart = requiresRestart(currentSetting.value);
+            if (needsRestart) {
+              updatePendingReset(currentSetting.value, resetChangesValue);
+            }
 
             // If this setting doesn't require restart, save it immediately
-            if (resetChangesValue && !requiresRestart(currentSetting.value)) {
+            if (resetChangesValue && !needsRestart) {
               const immediateSettings = new Set([currentSetting.value]);
               const toSaveValue =
                 currentSetting.type === 'boolean'
@@ -1091,31 +1024,6 @@ export function SettingsDialog({
                   );
                 }
               }
-
-              // Remove from global pending changes if present
-              setGlobalPendingChanges((prev) => {
-                if (!prev.has(currentSetting.value)) return prev;
-                const next = new Map(prev);
-                next.delete(currentSetting.value);
-                return next;
-              });
-            } else if (
-              resetChangesValue &&
-              requiresRestart(currentSetting.value)
-            ) {
-              // Track default reset as a pending change if restart required
-              setGlobalPendingChanges((prev) => {
-                const next = new Map(prev);
-                next.set(currentSetting.value, resetValue as PendingValue);
-                return next;
-              });
-            } else {
-              setGlobalPendingChanges((prev) => {
-                if (!prev.has(currentSetting.value)) return prev;
-                const next = new Map(prev);
-                next.delete(currentSetting.value);
-                return next;
-              });
             }
           }
         } else if (isDeletionKey(key) && searchQuery.length > 0) {

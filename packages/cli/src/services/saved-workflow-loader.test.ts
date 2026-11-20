@@ -32,6 +32,9 @@ import {
 import { SavedWorkflowLoader } from './saved-workflow-loader.js';
 import { CommandService } from './CommandService.js';
 import { workflowsCommand } from '../ui/commands/workflowsCommand.js';
+import { clearCommand } from '../ui/commands/clearCommand.js';
+import { helpCommand } from '../ui/commands/helpCommand.js';
+import { parseSlashCommand } from '../ui/commands/commands.js';
 import {
   extensionOwnerLabel,
   getCommandSourceBadge,
@@ -169,6 +172,108 @@ describe('SavedWorkflowLoader', () => {
         workflowName: 'workflows',
         source: 'workflow-command',
       }),
+    ]);
+  });
+
+  it.each([
+    { name: 'help', builtin: helpCommand },
+    { name: 'reset', builtin: clearCommand },
+  ])(
+    'keeps the built-in /$name and the saved workflow reachable',
+    async ({ name, builtin }) => {
+      const scriptPath = `/proj/.qwen/workflows/${name}.js`;
+      listMock.mockResolvedValue([entry({ name, scriptPath })]);
+      const service = await CommandService.create(
+        [
+          { loadCommands: async () => [builtin] },
+          new SavedWorkflowLoader(makeConfig()),
+        ],
+        signal,
+      );
+      const commands = service.getCommands();
+
+      expect(parseSlashCommand(`/${name}`, commands).commandToExecute).toEqual(
+        builtin,
+      );
+      const { commandToExecute, args } = parseSlashCommand(
+        `/workflow.${name} {"depth":2}`,
+        commands,
+      );
+      expect(await commandToExecute?.action?.(ctx, args)).toEqual({
+        type: 'tool',
+        toolName: 'workflow',
+        toolArgs: { scriptPath, args: { depth: 2 } },
+      });
+      const acpContext = { executionMode: 'acp' } as CommandContext;
+      expect(await commandToExecute?.action?.(acpContext, args)).toMatchObject({
+        type: 'submit_prompt',
+        content: expect.stringContaining(
+          `Workflow({ name: "${name}", args: {"depth":2} })`,
+        ),
+      });
+    },
+  );
+
+  it('skips names and aliases already taken by custom commands and keeps denylist identity', async () => {
+    listMock.mockResolvedValue([entry({ name: 'workflows' })]);
+    const custom = {
+      name: 'workflow.workflows',
+      altNames: ['workflow.workflows1'],
+      description: 'Custom command',
+      kind: CommandKind.FILE,
+    };
+    const loaders = [
+      { loadCommands: async () => [workflowsCommand] },
+      new SavedWorkflowLoader(makeConfig()),
+      { loadCommands: async () => [custom] },
+    ];
+    const service = await CommandService.create(loaders, signal);
+    const commands = service.getCommands();
+    expect(
+      parseSlashCommand('/workflow.workflows', commands).commandToExecute,
+    ).toEqual(custom);
+    expect(
+      parseSlashCommand('/workflow.workflows1', commands).commandToExecute,
+    ).toEqual(custom);
+    expect(
+      parseSlashCommand('/workflow.workflows2', commands).commandToExecute,
+    ).toMatchObject({
+      source: 'workflow-command',
+      workflowName: 'workflows',
+    });
+
+    for (const disabledName of ['workflows', 'workflow.workflows2']) {
+      const disabled = await CommandService.create(
+        loaders,
+        signal,
+        new Set([disabledName]),
+      );
+      expect(
+        disabled.getCommands().some((cmd) => cmd.source === 'workflow-command'),
+      ).toBe(false);
+      expect(disabled.getCommands()).toContainEqual(custom);
+    }
+  });
+
+  it('keeps custom precedence over a built-in name that a saved workflow also uses', async () => {
+    listMock.mockResolvedValue([entry({ name: 'help' })]);
+    const custom = {
+      name: 'help',
+      description: 'Custom help',
+      kind: CommandKind.FILE,
+    };
+    const service = await CommandService.create(
+      [
+        { loadCommands: async () => [helpCommand] },
+        new SavedWorkflowLoader(makeConfig()),
+        { loadCommands: async () => [custom] },
+      ],
+      signal,
+    );
+
+    expect(service.getCommands()).toEqual([
+      custom,
+      expect.objectContaining({ name: 'workflow.help', workflowName: 'help' }),
     ]);
   });
 
