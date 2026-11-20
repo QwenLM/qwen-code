@@ -29,18 +29,4 @@
     <Method name="rebuildBatch"/>
     <Bug pattern="NP_NULL_ON_SOME_PATH"/>
   </Match>
-  <!--
-    False positive: require(raw instanceof byte[], ...) is a fail-closed
-    assertion (throws ContractViolationException) before the (byte[]) raw
-    cast dereference; null instanceof byte[] is false, so the null path is
-    unreachable at the dereference. SpotBugs cannot see through the helper,
-    and ContractViolationException's constructor is private (only require()
-    may throw it), so an explicit null-throw is not possible without widening
-    the contracts API.
-  -->
-  <Match>
-    <Class name="com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore"/>
-    <Method name="acknowledgementReceiptCatalog"/>
-    <Bug pattern="NP_NULL_ON_SOME_PATH"/>
-  </Match>
 </FindBugsFilter>
