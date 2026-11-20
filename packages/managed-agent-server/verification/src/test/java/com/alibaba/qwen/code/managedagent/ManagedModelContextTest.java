@@ -102,8 +102,8 @@ class ManagedModelContextTest {
         assertThat(saved.contextSequence()).isEqualTo(latest.firstSequence());
         assertThat(saved.stale()).isFalse();
         assertThat(context("diagnostics").modelId()).isEqualTo("qwen-test");
-        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head WHERE session_id = ?",
-                Integer.class, "diagnostics")).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT has_activity_diagnostics FROM ma_session_head WHERE session_id = ?",
+                Boolean.class, "diagnostics")).isFalse();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record", Integer.class)).isEqualTo(2);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind = 'SESSION_RECORD'", Integer.class)).isEqualTo(2);
         assertThat(records.findModelDiagnostics("another-tenant", "diagnostics").statistics()).isNull();

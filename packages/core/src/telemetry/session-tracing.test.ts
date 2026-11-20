@@ -2127,6 +2127,18 @@ describe('session-tracing', () => {
       endToolSpan(toolSpan, { success: false, error: 'cancelled' });
     });
 
+    it('records an interrupted hook wait without an error status', () => {
+      const hookSpan = startHookSpan({
+        hookEvent: 'PostToolUse',
+        toolName: 'Bash',
+      });
+      endHookSpan(hookSpan, { waitInterrupted: true });
+
+      expect(attrOf('hook', 'wait_interrupted')).toBe(true);
+      expect(attrOf('hook', 'error.type')).toBeUndefined();
+      expect(rec('hook')?.statuses).toHaveLength(0);
+    });
+
     it('returns NOOP span when SDK is not initialized', () => {
       mockState.sdkInitialized = false;
       const hookSpan = startHookSpan({

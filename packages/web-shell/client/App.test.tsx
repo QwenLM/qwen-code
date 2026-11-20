@@ -402,6 +402,7 @@ type ChatEditorTestProps = {
   isPreparing?: boolean;
   cancelArmed?: boolean;
   disabled?: boolean;
+  submitDisabled?: boolean;
   dialogOpen?: boolean;
   onToggleShortcuts?: () => void;
   reasoning?: {
@@ -585,6 +586,8 @@ const {
   const qualifiedSetVisionBridgeSettings = vi.fn();
   const runtimeStop = vi.fn();
   const workspaceClient = {
+    getRestartRecoveries: vi.fn(),
+    continueRestartRecoveries: vi.fn(),
     sendToSubSession: vi.fn(),
     runtimeStopOptions: vi.fn(),
     liveSetupStatus: vi
@@ -13151,6 +13154,59 @@ async function flush(): Promise<void> {
     await Promise.resolve();
   });
 }
+
+describe('App restart recovery', () => {
+  beforeEach(() => {
+    mockConnection.capabilities.features = ['restart_recovery'];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        { id: 'secondary', cwd: '/work/secondary', trusted: true },
+      ],
+    };
+    mockWorkspace.client.getRestartRecoveries.mockReset().mockResolvedValue({
+      workspaces: [
+        {
+          workspace: '/work/secondary',
+          workspaceId: 'secondary',
+          cwd: '/work/secondary',
+          v: 1,
+          items: [
+            {
+              sessionId: 'recovery-session',
+              lastActivityAt: '2026-11-18T00:00:00.000Z',
+              interruption: 'daemon_shutdown',
+            },
+          ],
+          truncated: false,
+        },
+      ],
+    });
+  });
+
+  it('scans only the locked workspace', async () => {
+    const { container } = renderApp({
+      lockedWorkspaceCwd: '/work/secondary',
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(mockWorkspace.client.getRestartRecoveries).toHaveBeenCalled();
+      });
+    });
+    expect(
+      mockWorkspace.client.getRestartRecoveries,
+    ).toHaveBeenCalledExactlyOnceWith({
+      workspaces: ['/work/secondary'],
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(container.textContent).toContain(
+          '1 task interrupted by a restart',
+        );
+      });
+    });
+  });
+});
 
 async function clickSubmit(container: HTMLElement): Promise<void> {
   await act(async () => {
@@ -31238,6 +31294,12 @@ describe('App session callbacks', () => {
   it('names a new session from a short first prompt', async () => {
     mockConnection.sessionId = undefined;
     mockConnection.displayName = undefined;
+    const titleWrite = deferred<{ displayName: string }>();
+    const updateMetadata = vi.fn(() => titleWrite.promise);
+    mockSessionActions.createSession.mockResolvedValueOnce({
+      sessionId: 'session-1',
+      updateMetadata,
+    });
     renderApp();
     await flush();
 
@@ -31248,22 +31310,10 @@ describe('App session callbacks', () => {
       expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
     });
 
-    expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
-      '修复登录按钮在移动端错位',
-    );
-    expect(
-      mockSessionActions.renameSession.mock.invocationCallOrder[0],
-    ).toBeLessThan(
-      mockSessionActions.attachSession.mock.invocationCallOrder[0],
-    );
-    expect(
-      mockSessionActions.renameSession.mock.invocationCallOrder[0],
-    ).toBeLessThan(mockSessionActions.sendPrompt.mock.invocationCallOrder[0]);
-    expect(
-      mockSessionActions.renameSession.mock.invocationCallOrder[0],
-    ).toBeLessThan(
-      sessionCatalogController.sessionCreated.mock.invocationCallOrder[0],
-    );
+    expect(updateMetadata).toHaveBeenCalledExactlyOnceWith({
+      initialDisplayName: '修复登录按钮在移动端错位',
+    });
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
     expect(
       sessionCatalogController.setPendingSessionTitle,
     ).toHaveBeenCalledWith(
@@ -31274,14 +31324,9 @@ describe('App session callbacks', () => {
     expect(
       sessionCatalogController.setPendingSessionTitle.mock
         .invocationCallOrder[0],
-    ).toBeLessThan(
-      mockSessionActions.renameSession.mock.invocationCallOrder[0],
-    );
-    expect(sessionCatalogController.renamed).toHaveBeenCalledWith(
-      '/workspace',
-      'session-1',
-      '修复登录按钮在移动端错位',
-    );
+    ).toBeLessThan(updateMetadata.mock.invocationCallOrder[0]);
+    await act(async () => titleWrite.resolve({ displayName: '已手动改名' }));
+    expect(sessionCatalogController.renamed).not.toHaveBeenCalled();
   });
 
   it('leaves a long first prompt to the automatic session title', async () => {
@@ -31379,7 +31424,7 @@ describe('App session callbacks', () => {
     );
     // Naming goes through the created client, not the current-session action.
     expect(detachedClient.updateMetadata).toHaveBeenCalledWith({
-      displayName: 'run while I am away',
+      initialDisplayName: 'run while I am away',
     });
     expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
   });
@@ -32047,7 +32092,8 @@ describe('App session callbacks', () => {
     });
     await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
     expect(editorFocus).not.toHaveBeenCalled();
-    expect(testState.latestChatEditorProps?.disabled).toBe(true);
+    expect(testState.latestChatEditorProps?.disabled).toBe(false);
+    expect(testState.latestChatEditorProps?.submitDisabled).toBe(true);
     expect(testState.latestChatEditorProps?.onSubmit('must stay on A')).toBe(
       false,
     );
@@ -32061,6 +32107,7 @@ describe('App session callbacks', () => {
       await load.promise;
     });
     await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(testState.latestChatEditorProps?.submitDisabled).toBe(false);
     expect(editorFocus).toHaveBeenCalledOnce();
   });
 

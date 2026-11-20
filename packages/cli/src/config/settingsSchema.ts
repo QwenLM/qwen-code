@@ -4660,7 +4660,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as boolean | undefined,
         unsetToggleValue: true,
         description:
-          'Run sessions on the shared agent loop. When unset, each surface uses its own default: headless sessions (`-p` and stream-json), ACP sessions (Zed, VS Code, Web Shell, channels), the Ink TUI and subagents run on the shared loop, while OpenTUI and the Hosted Harness keep their own loop (experimental there). `true` runs all of them on the shared loop (the Hosted Harness runs its model rounds on it while keeping its journaled tool dispatch), and `false` keeps all of them, headless, ACP sessions, the Ink TUI and subagents included, on their own loop. The QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP environment variable overrides this setting per surface: `1` enables every surface, `0` disables every surface, and a comma-separated list such as `headless,acp=0` forces individual surfaces (headless, acp, ink, opentui, agent-core, speculation, hosted). A bare `1`/`0` is only recognized as the whole value, not inside a list; surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
+          'Run sessions on the shared agent loop. When unset, each surface uses its own default: headless sessions (`-p` and stream-json), ACP sessions (Zed, VS Code, Web Shell, channels), the Ink TUI, OpenTUI and subagents run on the shared loop, while the Hosted Harness keeps its own loop (experimental there). `true` runs all of them on the shared loop (the Hosted Harness runs its model rounds on it while keeping its journaled tool dispatch), and `false` keeps all of them, headless, ACP sessions, both TUIs and subagents included, on their own loop. The QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP environment variable overrides this setting per surface: `1` enables every surface, `0` disables every surface, and a comma-separated list such as `headless,acp=0` forces individual surfaces (headless, acp, ink, opentui, agent-core, speculation, hosted). A bare `1`/`0` is only recognized as the whole value, not inside a list; surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
         showInDialog: true,
       },
       eventBusAgentLoop: {
@@ -4670,7 +4670,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Run the shared agent loop on the event-bus architecture (experimental). Applies to the surfaces that run on the shared agent loop: headless sessions (`-p` and stream-json), ACP sessions (Zed, VS Code, Web Shell, channels), the Ink TUI and subagents by default, and OpenTUI when experimental.unifiedAgentLoop is enabled; other surfaces keep their current loop internals. The QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP environment variable overrides this setting: `1` enables it, `0` disables it, and a comma-separated list such as `headless=0` forces individual surfaces (headless, acp, ink, opentui, agent-core; `speculation` is reserved). Only those wired surfaces take effect today; a bare `1`/`0` is only recognized as the whole value, not inside a list, and surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
+          'Run the shared agent loop on the event-bus architecture (experimental). Applies to the surfaces that run on the shared agent loop: headless sessions (`-p` and stream-json), ACP sessions (Zed, VS Code, Web Shell, channels), the Ink TUI, OpenTUI and subagents by default; other surfaces keep their current loop internals. The QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP environment variable overrides this setting: `1` enables it, `0` disables it, and a comma-separated list such as `headless=0` forces individual surfaces (headless, acp, ink, opentui, agent-core; `speculation` is reserved). Only those wired surfaces take effect today; a bare `1`/`0` is only recognized as the whole value, not inside a list, and surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
         showInDialog: true,
       },
       modelAvailabilityTracking: {
@@ -4925,6 +4925,21 @@ const SETTINGS_SCHEMA = {
           'the worktrees directory itself) are rejected. Missing ' +
           'source dirs and existing destination paths are silently ' +
           'skipped (no overwrite, no failure).',
+        showInDialog: false,
+      },
+      maxRetained: {
+        type: 'number',
+        label: 'Maximum Retained Session Worktrees',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: 15,
+        description:
+          'Reserved for the future worktree retention sweep tracked in ' +
+          '#17237. This value is not yet applied. Deleting a chat snapshots ' +
+          'its worktree before removal when capture is required. The ' +
+          'retention sweep and restore-on-reopen are not implemented in this ' +
+          'slice. Does not affect tool/agent worktrees, which keep their ' +
+          'existing cleanup semantics.',
         showInDialog: false,
       },
     },

@@ -41,7 +41,7 @@ export const UNIFIED_SURFACE_DEFAULTS: Record<AgentLoopSurface, boolean> = {
   headless: true,
   acp: true,
   ink: true,
-  opentui: false,
+  opentui: true,
   'agent-core': true,
   speculation: false,
   hosted: false,
