@@ -527,6 +527,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Serve the Web Shell UI at the daemon root path. Use --no-web for an API-only daemon.',
       })
+      .option('eager-runtime', {
+        type: 'boolean',
+        description:
+          'Start the runtime on listen when using the lightweight startup path. Can also be enabled with QWEN_SERVE_EAGER_RUNTIME=1.',
+      })
       .option('open', {
         type: 'boolean',
         default: false,
@@ -1391,6 +1396,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         );
         applyOpenWithAuth(serveOptions);
       }
+      // The full command path always starts the runtime on listen.
       const handle = await runQwenServe(serveOptions, {
         updateRestartArgv: process.argv.slice(2),
       });

@@ -13,8 +13,13 @@ const DEFAULT_METAFILE_PATH = resolve('dist/esbuild.json');
 const METAFILE_BUILD_COMMAND =
   'node scripts/clean-package-build-artifacts.js && npm run build -- --cli-only && cross-env DEV=true npm run bundle';
 const ENTRY_OUTPUT = 'dist/cli.js';
-const ENTRY_INPUT = 'packages/cli/src/cli.ts';
+const ENTRY_INPUT = 'packages/cli/index.ts';
 const SERVE_PRE_LISTEN_ROOTS = [
+  { label: 'CLI entry', suffixes: [ENTRY_INPUT] },
+  {
+    label: 'CLI entry lifecycle',
+    suffixes: ['packages/cli/src/cli-entry.ts'],
+  },
   {
     label: 'serve fast path entry',
     suffixes: [
@@ -60,6 +65,10 @@ const SDK_IMPL_ROOT = {
 };
 
 const FORBIDDEN_SOURCE_INPUTS = [
+  {
+    label: 'General CLI dispatcher',
+    suffixes: ['packages/cli/src/cli.ts', 'packages/cli/dist/src/cli.js'],
+  },
   {
     label: 'Gemini runtime',
     suffixes: ['packages/cli/src/llm.tsx', 'packages/cli/dist/src/llm.js'],
@@ -513,11 +522,10 @@ export function checkSdkImplProtocolBoundary({
 }
 
 /**
- * `cli.ts` bootstraps only when it is the main module, comparing
- * `import.meta.url` against `process.argv[1]`. The bundle is built with
- * `splitting: true`, so a *static* `import ... from './cli.js'` in any module
- * the entry loads lazily (e.g. `llm.tsx`) makes esbuild move the entry's
- * body into a shared chunk and leave `dist/cli.js` as a re-export stub. Inside
+ * The bundled entry compares `import.meta.url` against `process.argv[1]`
+ * to decide when to bootstrap. The bundle is built with `splitting: true`,
+ * so a static import of the entry from a lazily loaded module moves the entry's
+ * body into a shared chunk and leaves `dist/cli.js` as a re-export stub. Inside
  * a chunk that comparison can never hold, so the bundled CLI exits 0 without
  * running anything — with `tsc`, eslint and every src-based unit test still
  * green. Assert the entry module still compiles into the entry output.
@@ -575,7 +583,7 @@ function main() {
           '`import.meta.url === pathToFileURL(process.argv[1]).href` guard ' +
           'can never match and the bundled CLI\nwould exit 0 without running. ' +
           'Cause: a module the entry loads lazily now statically imports ' +
-          "'./cli.js'.\nMove the shared helper into a leaf module and import " +
+          'the entry.\nMove the shared helper into a leaf module and import ' +
           `that from both sides instead.\nCurrent ${ENTRY_OUTPUT} inputs: ` +
           `${entryResult.inputs.length === 0 ? '(none)' : entryResult.inputs.join(', ')}`,
       );

@@ -11843,6 +11843,45 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('starts eager runtime on listen and holds an authenticated cold request', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-eager-runtime-')),
+    );
+    const logBaseDir = path.join(tmpDir, 'debug');
+    const { bootStarted, releaseBoot } = gateDeferredRuntimeBoot();
+    const { handle, createBridge } = await startDeferredDaemon(tmpDir, {
+      deps: { eagerRuntime: true, daemonLogBaseDir: logBaseDir },
+    });
+    try {
+      await bootStarted;
+      expect(createBridge).not.toHaveBeenCalled();
+      const unauthenticated = await fetch(`${handle.url}/brand`);
+      expect(unauthenticated.status).toBe(401);
+
+      const dispatched = new Promise<void>((resolve) => {
+        handle.server.once('request', () => resolve());
+      });
+      const pending = fetch(`${handle.url}/brand`, {
+        headers: { Authorization: 'Bearer secret-token' },
+      });
+      await dispatched;
+      releaseBoot();
+      const authenticated = await pending;
+      expect(authenticated.status).toBe(200);
+      expect(createBridge).toHaveBeenCalledOnce();
+      await handle.runtimeReady;
+    } finally {
+      releaseBoot();
+      await handle.close();
+    }
+    const daemonDir = path.join(logBaseDir, 'daemon');
+    const logFile = fs
+      .readdirSync(daemonDir)
+      .find((file) => file.endsWith('.log'))!;
+    const log = fs.readFileSync(path.join(daemonDir, logFile), 'utf8');
+    expect(log).not.toContain('deferred runtime: scheduling fallback start');
+  });
+
   it('holds GET /brand until the deferred runtime is ready, then answers 200', async () => {
     // `/brand` is not a bootstrap route: on the default deferred path the
     // delegating app must hold the request until the runtime is up and then

@@ -30,7 +30,10 @@ function makeMetafile(outputs) {
   return {
     outputs: {
       // A healthy bundle compiles the entry module into the entry output.
-      'dist/cli.js': output({ inputs: ['packages/cli/src/cli.ts'] }),
+      'dist/cli.js': output({ inputs: ['packages/cli/index.ts'] }),
+      'dist/chunks/cli-entry.js': output({
+        inputs: ['packages/cli/src/cli-entry.ts'],
+      }),
       'dist/chunks/fast-path.js': output({
         inputs: ['packages/cli/src/serve/fast-path.ts'],
       }),
@@ -77,6 +80,22 @@ function dynamicImport(path) {
 }
 
 describe('serve fast-path bundle check', () => {
+  it('detects an eager import of the general CLI from the entry lifecycle', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/cli-entry.js': output({
+        inputs: ['packages/cli/src/cli-entry.ts'],
+        imports: [staticImport('dist/chunks/cli-dispatch.js')],
+      }),
+      'dist/chunks/cli-dispatch.js': output({
+        inputs: ['packages/cli/src/cli.ts'],
+      }),
+    });
+
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual([
+      expect.objectContaining({ label: 'General CLI dispatcher' }),
+    ]);
+  });
+
   it('reports forbidden source files reached through static imports', () => {
     const metafile = makeMetafile({
       'dist/chunks/run-qwen-serve.js': output({
@@ -840,19 +859,18 @@ describe('bundled entry bootstrap check', () => {
   });
 
   it('rejects an entry hoisted into a shared chunk by code splitting', () => {
-    // What a static `import ... from './cli.js'` inside a lazily-loaded module
-    // does to the bundle: dist/cli.js keeps no inputs of its own and becomes a
-    // re-export stub, so cli.ts's main-module bootstrap guard never fires.
+    // A static entry import in a lazily loaded module leaves dist/cli.js as a
+    // re-export stub and the main-module bootstrap guard never fires.
     const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
     try {
       const metafilePath = writeMetafile(
         tempDir,
         makeMetafile({
           'dist/cli.js': output({
-            imports: [staticImport('dist/chunks/cli-entry.js')],
+            imports: [staticImport('dist/chunks/hoisted-entry.js')],
           }),
-          'dist/chunks/cli-entry.js': output({
-            inputs: ['packages/cli/src/cli.ts'],
+          'dist/chunks/hoisted-entry.js': output({
+            inputs: ['packages/cli/index.ts'],
           }),
         }),
       );
@@ -885,10 +903,10 @@ describe('bundled entry bootstrap check', () => {
         tempDir,
         makeMetafile({
           'dist/cli.js': output({
-            imports: [staticImport('dist/chunks/cli-entry.js')],
+            imports: [staticImport('dist/chunks/hoisted-entry.js')],
           }),
-          'dist/chunks/cli-entry.js': output({
-            inputs: ['packages/cli/src/cli.ts'],
+          'dist/chunks/hoisted-entry.js': output({
+            inputs: ['packages/cli/index.ts'],
           }),
         }),
       );
@@ -899,7 +917,7 @@ describe('bundled entry bootstrap check', () => {
           encoding: 'utf8',
           stdio: 'pipe',
         }),
-      ).toThrow(/no longer contains packages\/cli\/src\/cli\.ts/);
+      ).toThrow(/no longer contains packages\/cli\/index\.ts/);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
