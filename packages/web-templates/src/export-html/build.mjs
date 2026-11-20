@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_147_200;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_082;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -156,7 +156,18 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_147_200;
 // 2,146,529 lane measurement #17746 re-tracked. The forbidden-input guard
 // passes and the third-party input mix is unchanged, so the constants stay at
 // main's #17746 tracking instead of raising them for this PR.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_148_200;
+// The Agent Team peer reports and session approvals (#15658: the teammate chip
+// on background notifications and task rows, its `background.teammate` label
+// across two locales, and the identity map the adapter builds so the
+// turn-started marker is not anonymous) measure 2,148,411 JS bytes in CI on
+// all four lanes that build the workspace (Managed loop kernel and shared, TUI
+// parity, OpenTUI no-flicker), 211 above the previous 2,148,200 ceiling. The
+// slack left by #17746 was already spent: the stacked sibling head measures
+// 2,148,174 on the same lane, 26 below the old cap. Third-party inputs and the
+// forbidden-input guard are unchanged and the CSS asset is separate, so
+// re-track the lane measurement: leave 671 bytes to the warning and 1,671 to
+// the ceiling.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_150_082;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
