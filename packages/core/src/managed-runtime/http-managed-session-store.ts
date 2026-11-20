@@ -633,6 +633,13 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
       throw corrupt('snapshot resource is missing.');
     }
     if (resourceRevisions.get(ref.resourceId)![0] > revision) {
+      // A pre-fix config_install edge may name a child that a later
+      // transaction committed. Ignore the stale edge; the child's own
+      // reference still registers it.
+      if (LEGACY_EXTENSION_CLOSURE_KINDS.has(ref.kind)) {
+        requireSameRef(stored.ref, ref);
+        continue;
+      }
       throw corrupt('snapshot dependency was not committed at its use.');
     }
     requireSameRef(stored.ref, ref);
@@ -798,12 +805,17 @@ const EXTENSION_RECORD_KINDS = new Set(
 );
 
 // Resources a pre-closure-edge snapshot may name without having staged them:
-// a bundle's contributions child and the contributions manifest's parts. The
-// inspection, native-page and commit walks degrade an absent one instead of
-// condemning the snapshot. One constant so the walks cannot drift (R7-1).
+// extension contribution children, plus the children a pre-fix config_install
+// record named. The inspection, native-page and commit walks degrade an absent
+// or later-committed one instead of condemning the snapshot. One constant so
+// the walks cannot drift (R7-1).
 const LEGACY_EXTENSION_CLOSURE_KINDS = new Set([
   'managed-extension-contributions',
   'managed-extension-contributions-part',
+  'managed-extension-config-bundle',
+  'managed-extension-root',
+  'managed-extension-stage-ack',
+  'managed-extension-enable-ack',
 ]);
 
 class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
@@ -3946,14 +3958,13 @@ export function collectNestedResourceRefs(
     if (ref.kind === 'managed-hook-message-chunks')
       return collectRefs((record as { parts: unknown[] }).parts);
     if (ref.kind === 'managed-config_install') {
-      // Exclude previousRecordRef: the predecessor was committed by its own
-      // transaction, so its children are already persisted. Re-closing the
-      // chain would grow linearly (R1-2) and break on pre-fix records whose
-      // children were never uploaded (R1-1).
-      const { previousRecordRef: _, ...ownEdges } = record as Record<
-        string,
-        unknown
-      >;
+      // Exclude previousRecordRef: it belongs to the predecessor's own
+      // transaction. Re-closing the chain would grow linearly (R1-2); pre-fix
+      // records can also name children that were never uploaded (R1-1).
+      const { previousRecordRef: _, ...ownEdges } = asRecord(
+        record,
+        'config install record',
+      );
       return collectRefs([ownEdges]);
     }
     return collectRefs([record]);

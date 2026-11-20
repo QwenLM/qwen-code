@@ -25,6 +25,7 @@ import {
   collectNestedResourceRefs,
   createHttpManagedSessionStores,
   readOnlyManagedSessionSnapshot,
+  type HttpManagedSessionStores,
 } from './http-managed-session-store.js';
 import type { McpConfiguration } from './managed-mcp-record.js';
 import type { HookExecution, HookRegistration } from './managed-hook-record.js';
@@ -7998,6 +7999,246 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('keeps pre-fix config_install snapshots readable and commits a persisted record closure', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    let recovered: HttpManagedSessionStores | undefined;
+    try {
+      const bundleRef = await session.resources.publish(
+        'managed-extension-config-bundle',
+        Buffer.from('{}', 'utf8'),
+      );
+      const rootSnapshotRef = await session.resources.publish(
+        'managed-extension-root',
+        Buffer.from('{}', 'utf8'),
+      );
+      const stageAckRefs = await Promise.all([
+        session.resources.publish(
+          'managed-extension-stage-ack',
+          Buffer.from('{"stage":"host"}', 'utf8'),
+        ),
+        session.resources.publish(
+          'managed-extension-stage-ack',
+          Buffer.from('{"stage":"runtime"}', 'utf8'),
+        ),
+      ]);
+      const operationId = randomUUID();
+      const content = {
+        kind: 'hosted-extension-config',
+        formatVersion: 1,
+        command: {
+          operationId,
+          actorKey: 'b'.repeat(64),
+          expectedRevision: 0,
+          extensions: [],
+        },
+        mode: 'apply',
+        phaseOperationId: operationId,
+        configRevision: 1,
+        previousConfigRevision: 0,
+        phase: 'preparing',
+        previousBundleRef: null,
+        restoresBundleRef: null,
+        bundleRef,
+        rootSnapshotRef,
+        stageAckRefs: [],
+        enableAckRefs: [],
+        error: null,
+      } as const;
+      const preparingReceipt = await session.authority.commitDomainRecord(
+        {
+          operation: 'extensionConfig.apply.preparing',
+          commandId: operationId,
+          sessionKey: SESSION_KEY,
+          contentDigest: 'c'.repeat(64),
+        },
+        { domain: 'config_install', content },
+        { class: 'trusted_entry' },
+      );
+      const receipt = await session.authority.commitDomainRecord(
+        {
+          operation: 'extensionConfig.apply.prepared',
+          commandId: operationId,
+          sessionKey: SESSION_KEY,
+          contentDigest: 'c'.repeat(64),
+        },
+        {
+          domain: 'config_install',
+          content: {
+            ...content,
+            phase: 'prepared',
+            stageAckRefs,
+          },
+        },
+        { class: 'trusted_entry' },
+      );
+      expect(receipt.recordRef.kind).toBe('managed-config_install');
+
+      // After the domain commit releases its staged rows, this call exercises
+      // the persisted arm gated by isReferenceContainer.
+      interface CommittingResourceStore {
+        commitResources(
+          refs: readonly ManagedSessionDurableRef[],
+        ): Promise<Array<{ resourceId: string }>>;
+      }
+      // The public fixture type exposes publish/read only; this test pins the
+      // store's private commit walk through its checked-in contract.
+      const committingStore =
+        stores.resourceStore as unknown as CommittingResourceStore;
+      const census = await committingStore.commitResources([receipt.recordRef]);
+      expect(census.map((resource) => resource.resourceId)).toEqual(
+        expect.arrayContaining([
+          receipt.recordRef.resourceId,
+          bundleRef.resourceId,
+          rootSnapshotRef.resourceId,
+          ...stageAckRefs.map((ref) => ref.resourceId),
+        ]),
+      );
+
+      // A later transaction directly carries one child, proving a child first
+      // committed after the record's revision does not condemn the old edge.
+      const outcomeRef = await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}', 'utf8'),
+      );
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'recordToolResult',
+          commandId: 'config-install-late-child',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'd'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'receipt:config-install-late-child',
+          sessionKey: SESSION_KEY,
+          kind: 'tool.receipt',
+          occurredAt: 1,
+          payload: {
+            executionCallId: 'execution-config-install-late-child',
+            toolOutcomeRef: outcomeRef,
+            resultRef: null,
+            resources: [stageAckRefs[0]],
+            historyRevision: sequence,
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
+
+      const configRecordByOperation = new Map([
+        ['extensionConfig.apply.preparing', preparingReceipt.recordRef],
+        ['extensionConfig.apply.prepared', receipt.recordRef],
+      ]);
+      for (const commit of server.commits) {
+        const recordRef = configRecordByOperation.get(
+          String(commit['operation']),
+        );
+        if (recordRef === undefined) continue;
+        commit['resources'] = (
+          commit['resources'] as Array<Record<string, unknown>>
+        ).filter((resource) => resource['resourceId'] === recordRef.resourceId);
+      }
+      for (const ref of [bundleRef, rootSnapshotRef, stageAckRefs[1]!]) {
+        server.deleteResource(ref);
+      }
+
+      const transactions = server.commits.map((commit, index) => ({
+        ...commit,
+        journalRevision: index + 1,
+        recordEncoding: 'identity',
+        byteLength: Buffer.from(String(commit['recordBytesBase64']), 'base64')
+          .length,
+      }));
+      const resourcesById = new Map<
+        string,
+        {
+          ref: ManagedSessionDurableRef;
+          bytesBase64: string;
+          referencedRevisions: number[];
+        }
+      >();
+      for (const [index, commit] of server.commits.entries()) {
+        for (const raw of commit['resources'] as Array<
+          Record<string, unknown>
+        >) {
+          const ref = {
+            resourceId: String(raw['resourceId']),
+            kind: String(raw['kind']),
+            schemaVersion: Number(raw['schemaVersion']),
+            byteLength: Number(raw['byteLength']),
+            digest: String(raw['digest']),
+          };
+          const bytesBase64 = (await session.resources.read(ref)).toString(
+            'base64',
+          );
+          const row = resourcesById.get(ref.resourceId);
+          if (row === undefined) {
+            resourcesById.set(ref.resourceId, {
+              ref,
+              bytesBase64,
+              referencedRevisions: [index + 1],
+            });
+          } else {
+            row.referencedRevisions.push(index + 1);
+          }
+        }
+      }
+      const snapshotInput = {
+        format: 'qwen-csi-receipt-checkpoint-snapshot/1',
+        sessionKey: SESSION_KEY,
+        head: {
+          state: 'ACTIVE',
+          writerGeneration: 1,
+          journalRevision: transactions.length,
+          committedSequence: session.authority.committedSequence,
+          lastCommitDigest: session.authority.commitProof.committedPrefixHash,
+          activationEpoch: session.activation.epoch,
+          latestCheckpointResourceId: null,
+          compactedThroughRevision: 0,
+          recoveryStatus: 'READY',
+          recoveryDetailCode: null,
+        },
+        transactions,
+        resources: [...resourcesById.values()],
+      };
+      const snapshot = readOnlyManagedSessionSnapshot(snapshotInput);
+      expect(await snapshot.resources.read(receipt.recordRef)).toEqual(
+        await session.resources.read(receipt.recordRef),
+      );
+      expect(await snapshot.resources.read(stageAckRefs[0]!)).toEqual(
+        await session.resources.read(stageAckRefs[0]!),
+      );
+      await expect(snapshot.resources.read(stageAckRefs[1]!)).rejects.toThrow(
+        'snapshot resource is missing.',
+      );
+
+      const expected = await (
+        await stores.journalStore.open({ sessionKey: SESSION_KEY })
+      ).read();
+      const fixture = nativeSnapshotFixture(
+        server,
+        server.storedTransactions.length,
+      );
+      await stores.stopLocal();
+      recovered = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-b',
+        writerToken: TOKEN_B,
+        fetchFn: fixture.fetchFn,
+      });
+      const journal = await recovered.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      expect(await journal.read()).toEqual(expected);
+    } finally {
+      await recovered?.stopLocal().catch(() => undefined);
+      await session.close().catch(() => undefined);
+      await stores.close().catch(() => undefined);
+    }
+  });
+
   function nativeSnapshotFixture(
     server: FakeManagedSessionStore,
     coverage: number,
@@ -9467,6 +9708,10 @@ class FakeManagedSessionStore {
     Object.assign(this.transactions[index]!, patch);
   }
 
+  deleteResource(ref: ManagedSessionDurableRef): void {
+    this.resources.delete(ref.resourceId);
+  }
+
   /** The stored transaction records, for a test that rebuilds a page. */
   get storedTransactions(): ReadonlyArray<Record<string, unknown>> {
     return this.transactions;
@@ -10106,9 +10351,7 @@ describe('collectNestedResourceRefs', () => {
         enableAckRef,
       ]),
     );
-    expect(nested).not.toEqual(
-      expect.arrayContaining([predecessorRef]),
-    );
+    expect(nested).not.toEqual(expect.arrayContaining([predecessorRef]));
     // The first revision names no predecessor and no restore target; its own
     // edges still ship.
     const first = collectNestedResourceRefs(
@@ -10127,6 +10370,15 @@ describe('collectNestedResourceRefs', () => {
     );
     expect(first).toEqual(expect.arrayContaining([bundleRef, rootSnapshotRef]));
     expect(first).toHaveLength(2);
+  });
+
+  it('labels a malformed config_install record instead of throwing a TypeError', () => {
+    expect(() =>
+      collectNestedResourceRefs(
+        closureRef('managed-config_install', 'malformed'),
+        Buffer.from('null', 'utf8'),
+      ),
+    ).toThrow(/config install record must be an object/);
   });
 
   it('refuses a malformed file history record instead of collapsing its closure', () => {
