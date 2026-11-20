@@ -12,8 +12,8 @@ Code references below use symbol names rather than line numbers.
 
 The pre-merge and integration verification included a full build and type
 check, 103 focused recovery tests, 1,608 CLI server and telemetry tests, a real
-daemon probe with a loopback fake model, and three Chromium DOM workflows. The
-[published verification
+daemon probe with a loopback fake model, and three Chromium DOM workflows
+against a mock daemon. The [published verification
 report](https://github.com/QwenLM/qwen-code/pull/17677#issuecomment-7030887477)
 binds production head
 [`988dbcd182`](https://github.com/QwenLM/qwen-code/commit/988dbcd182073b0659203edeaaaeddb173e63b9f).
