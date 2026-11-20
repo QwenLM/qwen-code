@@ -108,6 +108,7 @@ const execFileAsync = promisify(execFile);
 export const GATE_FILES = [
   'scripts/lint.js',
   'scripts/lint-scope.js',
+  'scripts/lib/entry-point.js',
   'eslint.config.js',
   'eslint.legacy-filenames.mjs',
   'eslint.legacy-core-barrel-imports.mjs',

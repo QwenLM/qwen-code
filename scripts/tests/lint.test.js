@@ -35,7 +35,11 @@ describe('entry-point guard (import purity)', () => {
   // the repo suite. A fresh `node -e` import has no argv[1] and no lane
   // flags: unguarded, it walks into setup + every lane and either fails or
   // outruns the timeout; guarded, it prints the marker and exits at once.
-  it('importing lint.js from a fresh node process runs no lint lane (M19)', () => {
+  it.each([
+    undefined,
+    'missing entry script.js',
+    fileURLToPath(import.meta.url),
+  ])('importing lint.js runs no lint lane with argv[1] = %s (M19)', (argv1) => {
     const repoRoot = path.resolve(
       path.dirname(fileURLToPath(import.meta.url)),
       '../..',
@@ -48,12 +52,13 @@ describe('entry-point guard (import purity)', () => {
       [
         '--input-type=module',
         '-e',
-        `await import(${JSON.stringify(lintUrl)}); console.log('IMPORT-PURE');`,
+        `process.argv[1] = ${JSON.stringify(argv1)}; await import(${JSON.stringify(lintUrl)}); console.log('IMPORT-PURE');`,
       ],
       { cwd: repoRoot, encoding: 'utf8', timeout: 30_000 },
     );
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain('IMPORT-PURE');
+    expect(r.stdout).toBe('IMPORT-PURE\n');
+    expect(r.stderr).toBe('');
   });
 });
 
