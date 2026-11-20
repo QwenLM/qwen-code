@@ -3575,6 +3575,49 @@ describe('SessionTranscriptReader', () => {
     );
   });
 
+  it('does not let a stale equal-size build evict the live newer entry', async () => {
+    setSessionTranscriptIndexCacheMaxBytesForTest(1);
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    let releaseBuild: (() => void) | undefined;
+    const buildBlocked = new Promise<void>((resolve) => {
+      releaseBuild = resolve;
+    });
+    let firstBuild = true;
+    setSessionTranscriptIndexBuildCompleteHookForTest(async (builtPath) => {
+      if (builtPath === filePath && firstBuild) {
+        firstBuild = false;
+        await buildBlocked;
+      }
+    });
+    const staleRead = reader.readPage(sessionId, { limit: 1 });
+    await vi.waitFor(() => expect(firstBuild).toBe(false));
+    const raw = await fs.readFile(filePath, 'utf8');
+    const rewritten = raw.replace(
+      '"text":"large transcript 5"',
+      '"text":"LARGE transcript 5"',
+    );
+    expect(Buffer.byteLength(rewritten, 'utf8')).toBe(
+      Buffer.byteLength(raw, 'utf8'),
+    );
+    await fs.writeFile(filePath, rewritten, 'utf8');
+    const stats = await fs.stat(filePath);
+    await fs.utimes(filePath, stats.atime, new Date(stats.mtimeMs + 1000));
+    await reader.readPage(sessionId, { limit: 1 });
+    const liveBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(liveBytes);
+    releaseBuild!();
+    await staleRead;
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      liveBytes,
+    );
+    const builds = countBuilds(filePath);
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(0);
+  });
+
   it('evicts a superseded shared-class prefix of the same file', async () => {
     const reader = newReader();
     const filePath = await writeRecords(

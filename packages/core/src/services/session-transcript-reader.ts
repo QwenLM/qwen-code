@@ -2655,6 +2655,31 @@ async function getCachedIndex(params: {
       debugLogger.debug(`index cache skipped stale completion ${key}`);
       return value;
     }
+    // A build can complete after the file was rewritten or replaced under it
+    // (equal-size mtime move or identity change). Re-verify the frozen
+    // snapshot before admitting or evicting, so a stale completion neither
+    // caches a torn index nor evicts the live newer entry as an "orphan".
+    // allowAppend keeps a prefix frozen across a concurrent append valid.
+    if (
+      !(await hasSnapshotSignature(
+        params.filePath,
+        params.fileIdentity,
+        params.snapshotSize,
+        params.lastUpdated,
+        true,
+      ))
+    ) {
+      if (indexCache.get(key)?.pending === pending) {
+        indexCache.delete(key);
+      }
+      debugLogger.debug(`index cache skipped changed snapshot ${key}`);
+      return value;
+    }
+    // The signature check yielded; the pending entry may have been replaced.
+    if (indexCache.get(key)?.pending !== pending) {
+      debugLogger.debug(`index cache skipped stale completion ${key}`);
+      return value;
+    }
     let classBytes = getIndexCacheBytesByClass();
     if (
       (oversized ? classBytes.oversized : classBytes.shared) + byteSize >
