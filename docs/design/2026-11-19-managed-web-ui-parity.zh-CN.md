@@ -2,9 +2,10 @@
 
 [English](2026-11-19-managed-web-ui-parity.md) | [简体中文](2026-11-19-managed-web-ui-parity.zh-CN.md)
 
-- 状态：已在本地实现，真实 Managed 终端与聚焦验证已完成；CI 待运行（2026-11-19）
+- 状态：已于 2026-11-20（UTC）随 [#17795](https://github.com/QwenLM/qwen-code/pull/17795) 合入，squash 提交为 [`2ebaac20284be8dbc3aff308bfc3867481f0b2d2`](https://github.com/QwenLM/qwen-code/commit/2ebaac20284be8dbc3aff308bfc3867481f0b2d2)；Issue #17717 已关闭。
+- 交付验证：见[真实浏览器及选定 MySQL/Spring 验收账本](https://github.com/QwenLM/qwen-code/pull/17795#issuecomment-7027767699)。在[首次审批后的完整运行 44680245797](https://github.com/QwenLM/qwen-code/actions/runs/44680245797) 中，原生 Windows/Java 21 作业及其 `Run Runtime Broker state tests` 步骤均已通过。其它 full profile 和 main 工作流另行监视；本条状态不将它们视为已完成。
 - 基线：`3f7b6088d9`（`origin/main`）；已按此修订重新核对 Issue 中的声明
-- 上级跟踪单：#15084；现有归属包括 #13396 与 #16546
+- 上级跟踪单：#15084；现有归属包括 #13396 与 #16546。三者仍保持开放并覆盖 Table A 后续工作；本次状态更新不新建延期评审 Issue。
 
 ## 问题与现状
 
