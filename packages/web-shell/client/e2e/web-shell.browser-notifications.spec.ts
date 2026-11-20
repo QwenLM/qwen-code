@@ -336,9 +336,22 @@ for (const kind of ['approval', 'question'] as const) {
     });
     expect(iconColors.actual).toBe(iconColors.expected);
     await expect(help).toContainText(/background|unfocused/);
-    await expect(help).toContainText(
-      'If no reminders appear, follow the steps below to check system notifications.',
-    );
+    const clientOperatingSystem = await page.evaluate(() => {
+      const identity = `${navigator.platform} ${navigator.userAgent}`;
+      if (/iphone|ipad|ipod/i.test(identity)) return 'other';
+      if (/macintosh|mac os x|macintel/i.test(identity)) return 'macos';
+      if (/windows/i.test(identity)) return 'windows';
+      return 'other';
+    });
+    if (clientOperatingSystem === 'other') {
+      await expect(help).toContainText(
+        'Your browser or operating system is not recognized.',
+      );
+    } else {
+      await expect(help).toContainText(
+        'If no reminders appear, follow the steps below to check system notifications.',
+      );
+    }
     await waitForAnimations(page);
     await expect
       .poll(() =>
@@ -348,9 +361,13 @@ for (const kind of ['approval', 'question'] as const) {
         }),
       )
       .toBe(true);
-    await expect(help).toContainText(/macOS/);
-    await expect(help).toContainText(/Windows/);
-    for (const system of ['macOS', 'Windows']) {
+    const systems =
+      clientOperatingSystem === 'macos'
+        ? ['macOS']
+        : clientOperatingSystem === 'windows'
+          ? ['Windows']
+          : [];
+    for (const system of systems) {
       const guide = help.locator('details').filter({ hasText: system });
       const summary = guide.locator('summary');
       await expect(guide).not.toHaveAttribute('open');

@@ -34,10 +34,14 @@ export const BROWSER_NOTIFICATION_MESSAGES_EN: Record<
     'While this page is in the background or you switch to another tab, get reminders when the current chat needs approval, waits for your answer, finishes or fails. Clicking a notification returns to its chat without approving or answering.',
   'browserNotifications.helpSystem':
     'If no reminders appear, follow the steps below to check system notifications.',
+  'browserNotifications.helpSystemOther':
+    'If no reminders appear, check notification permissions in your browser and operating system settings.',
   'browserNotifications.helpMac':
     'Open System Settings → Notifications. Select your browser (for Chrome, also check Google Chrome Helper (Alerts) if listed), enable notifications and desktop banners/alerts. Check Focus and whether notifications are allowed during screen sharing.',
   'browserNotifications.helpWindows':
     'Open Settings → System → Notifications (Windows 10: Notifications & actions). Enable notifications and your browser, including notification banners. Turn off Do not disturb / Focus assist, or allow your browser through its rules.',
+  'browserNotifications.helpOther':
+    'Your browser or operating system is not recognized. Check the browser site permission and the system notification settings for this device.',
   'browserNotifications.enabled': 'Enabled.',
   'browserNotifications.disabled': 'Disabled.',
   'browserNotifications.waiting': 'Waiting for browser permission.',
@@ -74,10 +78,14 @@ export const BROWSER_NOTIFICATION_MESSAGES_ZH: Record<
     '页面在后台或者切换到其他页签时，当前聊天需要审批、等待回答、回合结束或失败会发送提醒，点击通知返回对应聊天，不会自动审批或回答。',
   'browserNotifications.helpSystem':
     '如果没有收到提醒，请按下方指引检查系统通知',
+  'browserNotifications.helpSystemOther':
+    '如果没有收到提醒，请检查浏览器通知权限和此设备的系统通知设置。',
   'browserNotifications.helpMac':
     '打开“系统设置 → 通知”，选择浏览器（Chrome 如列有 Google Chrome Helper (Alerts)，也需检查），开启允许通知及桌面横幅／提醒。检查专注模式，以及屏幕共享时是否允许通知。',
   'browserNotifications.helpWindows':
     '打开“设置 → 系统 → 通知”（Windows 10 为“通知和操作”），开启通知及浏览器通知，并允许显示通知横幅。关闭“请勿打扰／专注助手”，或在其规则中允许浏览器通知。',
+  'browserNotifications.helpOther':
+    '无法识别你的浏览器或操作系统。请检查浏览器网站权限，以及此设备的系统通知设置。',
   'browserNotifications.enabled': '已开启。',
   'browserNotifications.disabled': '未开启。',
   'browserNotifications.waiting': '等待浏览器授权。',

@@ -4,7 +4,10 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { useBrowserNotificationSettings } from '../../browser-turn-notifications';
 import { I18nProvider } from '../../i18n';
-import { BrowserNotificationControl } from './BrowserNotificationControl';
+import {
+  BrowserNotificationControl,
+  detectClientOperatingSystem,
+} from './BrowserNotificationControl';
 import { ToolApproval } from './ToolApproval';
 
 vi.mock('../../browser-turn-notifications', () => ({
@@ -26,6 +29,58 @@ let root: Root;
 let container: HTMLDivElement;
 const selector = '[aria-label="Task notifications"]';
 const popup = '[data-web-shell-notification-help]';
+
+it.each([
+  ['macos', 'MacIntel', 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)'],
+  ['windows', 'Win32', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'],
+] as const)(
+  'detects the %s browser platform',
+  (expected, platform, userAgent) => {
+    expect(detectClientOperatingSystem(userAgent, platform)).toBe(expected);
+  },
+);
+
+it('keeps generic guidance for an unrecognized browser platform', () => {
+  expect(
+    detectClientOperatingSystem(
+      'Mozilla/5.0 (X11; Linux x86_64)',
+      'Linux x86_64',
+    ),
+  ).toBe('other');
+});
+
+it('does not classify iOS as desktop macOS', () => {
+  expect(
+    detectClientOperatingSystem(
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148',
+      'iPhone',
+    ),
+  ).toBe('other');
+});
+
+it.each([
+  [
+    'MacIntel',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)',
+    'macOS',
+    'Windows',
+  ],
+  ['Win32', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Windows', 'macOS'],
+] as const)(
+  'shows only %s setup instructions for the detected browser platform',
+  (platform, userAgent, visible, hidden) => {
+    vi.spyOn(window.navigator, 'platform', 'get').mockReturnValue(platform);
+    vi.spyOn(window.navigator, 'userAgent', 'get').mockReturnValue(userAgent);
+    render();
+    hover();
+    const summaries = [...document.querySelectorAll(`${popup} summary`)].map(
+      (summary) => summary.textContent,
+    );
+    expect(summaries).toEqual([visible]);
+    expect(summaries).not.toContain(hidden);
+  },
+);
+
 function render(node: ReactNode = <BrowserNotificationControl />) {
   act(() => root.render(<I18nProvider language="en">{node}</I18nProvider>));
 }
