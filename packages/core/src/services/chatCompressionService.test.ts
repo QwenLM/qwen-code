@@ -4346,6 +4346,10 @@ describe('issue #9455: compression requests fit the receiving window', () => {
        * rejecting the request.
        */
       stopAtWindow?: boolean;
+      /** The summary to answer with. */
+      summary?: string;
+      /** Answer with no usage, as a provider that omits it does. */
+      withoutUsage?: boolean;
     } = {},
   ) {
     const window = o.window ?? WINDOW;
@@ -4429,11 +4433,13 @@ describe('issue #9455: compression requests fit the receiving window', () => {
         );
       }
       return {
-        text: '<state_snapshot>summary</state_snapshot>',
-        usage: {
-          promptTokenCount: promptTokens,
-          candidatesTokenCount: o.outputTokens ?? 2_000,
-        },
+        text: o.summary ?? '<state_snapshot>summary</state_snapshot>',
+        usage: o.withoutUsage
+          ? undefined
+          : {
+              promptTokenCount: promptTokens,
+              candidatesTokenCount: o.outputTokens ?? 2_000,
+            },
       };
     });
     vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
@@ -4650,6 +4656,25 @@ describe('issue #9455: compression requests fit the receiving window', () => {
         PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP + MARKER.length + 1,
       );
       mockBackend({ window: 25_000, rejection: vllmRejection(25_000) });
+      const result = await compressHistory(
+        typedSession(typed, 12, 20_000),
+        64_000,
+      );
+      expectCompressed(result);
+      expect(sent).toHaveLength(2);
+      expect(requestText(sent[0]!)).toBe(typed);
+      expect(requestText(sent[1]!)).toBe(plainCut(typed));
+    });
+
+    it('sends the plain cut once when the kept reply has no usage and no snapshot', async () => {
+      // A kept request is sized below the summary ceiling. With no output
+      // count and no closed <state_snapshot>, the truncation check drops
+      // its summary, which the plain cut, sized at the ceiling, keeps.
+      const typed = ASCII.repeat(700);
+      mockBackend({
+        summary: 'A summary that skips the snapshot block.',
+        withoutUsage: true,
+      });
       const result = await compressHistory(
         typedSession(typed, 12, 20_000),
         64_000,

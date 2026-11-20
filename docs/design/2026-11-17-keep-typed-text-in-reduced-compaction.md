@@ -47,7 +47,7 @@ Text spliced into a marked part later inherits the mark: the CLI prepends the ID
 
 ### When the kept request is sent
 
-Only on the first send, after the plain reduction made the request smaller. The kept request asks for no more in all than the plain request: its input is larger by the characters it keeps, each counted as a whole token, and its output budget is smaller by as many. It replaces the plain request only when that budget is still at least half of the plain request's, and at least the summary's minimum. If the server rejects it, the one retry sends the plain reduction. The payload-overflow path never sends it: its input is the plain cut from the start.
+Only on the first send, after the plain reduction made the request smaller. The kept request asks for no more in all than the plain request: its input is larger by the characters it keeps, each counted as a whole token, and its output budget is smaller by as many. It replaces the plain request only when that budget is still at least half of the plain request's, and at least the summary's minimum. If the server rejects it, the one retry sends the plain reduction. If its reply has no output count and its summary no closed `<state_snapshot>`, the truncation check would drop that summary for the smaller budget, so the plain reduction is sent once instead. The payload-overflow path never sends it: its input is the plain cut from the start.
 
 ## Decisions and rationale
 
