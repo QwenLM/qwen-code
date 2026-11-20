@@ -674,6 +674,7 @@ describe('release workflow', () => {
             ...process.env,
             PUBLISH_AUDIO_CAPTURE: 'true',
             PUBLISH_EXTERNAL_CONTEXT_MEM0: 'true',
+            PUBLISH_CHANNEL_MSTEAMS: 'true',
           },
         },
       );
@@ -801,6 +802,7 @@ describe('release workflow', () => {
               NPM_TAG: 'preview',
               PUBLISH_AUDIO_CAPTURE: optional,
               PUBLISH_EXTERNAL_CONTEXT_MEM0: optional,
+              PUBLISH_CHANNEL_MSTEAMS: optional,
               PUBLISH_FAILURE: failure,
               CLI_PUBLISHED: cliPublished,
               PUBLISH_LOG: publishLog,
@@ -831,6 +833,7 @@ describe('release workflow', () => {
               ![
                 '@qwen-code/audio-capture',
                 '@qwen-code/external-context-mem0',
+                '@qwen-code/channel-msteams',
               ].includes(name),
           ),
         );
@@ -4042,6 +4045,23 @@ esac`,
     // `if: github.repository == 'QwenLM/qwen-code'` gate. Unpinned, a fork
     // running this workflow would publish @qwen-code/audio-capture.
     expect(publishStep.env.PUBLISH_AUDIO_CAPTURE).toContain(
+      "github.repository == 'QwenLM/qwen-code'",
+    );
+  });
+
+  it('publishes the Teams channel only after trusted publishing bootstrap', () => {
+    // #15620 put @qwen-code/channel-msteams into the release selection, and no
+    // released tag contains that commit, so v0.28.1 was its first publish. npm
+    // needs a package to exist before trusted publishing can be bound to it,
+    // so the ungated first publish failed the whole publish job (#17936).
+    const publishStep = releaseYaml.jobs.publish.steps.find(
+      (step) => step.name === 'Publish npm packages',
+    );
+    expect(publishStep.env.PUBLISH_CHANNEL_MSTEAMS).toContain(
+      "vars.NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED == 'true'",
+    );
+    // A fork must not publish the scoped package, same as audio-capture above.
+    expect(publishStep.env.PUBLISH_CHANNEL_MSTEAMS).toContain(
       "github.repository == 'QwenLM/qwen-code'",
     );
   });

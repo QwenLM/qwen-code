@@ -134,6 +134,15 @@ Release versioning advances the extension manifest, current exact channel-base
 peer and development dependency together, while retaining the explicitly supported legacy peer. A
 release must not install a second base or leave its own base version excluded.
 
+Because npm requires a package to exist before trusted publishing can be
+configured, the publish step stays behind the
+`NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED` repository variable until a
+maintainer completes the one-time public bootstrap publish and binds the package
+to the `release.yml` workflow in the `production-release` environment. Without
+that gate the first release carrying the package fails the whole publish job, as
+v0.28.1 did. The bootstrap should publish the first actual Qwen release that
+contains the package, not invent a second version line.
+
 ## Validation
 
 Automated checks cover SDK authentication rejection, tenant/bot validation,
