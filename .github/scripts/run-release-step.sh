@@ -292,24 +292,20 @@ case "${step}" in
         # CHANGELOG commit that makes the tree differ, but the version is
         # done and should not be reported as a failure.
         release_check_ok=false
-        release_exists=false
         release_published=false
         for attempt in 1 2 3; do
           gh_output="$(gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft' 2>&1)" || true
           if echo "${gh_output}" | grep -qx 'false'; then
             release_check_ok=true
-            release_exists=true
             release_published=true
             break
           elif echo "${gh_output}" | grep -qx 'true'; then
             release_check_ok=true
-            release_exists=true
             release_published=false
             break
           elif echo "${gh_output}" | grep -qi 'not found\|release not found'; then
             # Release does not exist yet — normal for a first resume.
             release_check_ok=true
-            release_exists=false
             break
           fi
           if [[ "${attempt}" -lt 3 ]]; then
