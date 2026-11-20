@@ -597,6 +597,7 @@ function fakeDaemonLog(): DaemonLogger {
     warn: vi.fn(),
     error: vi.fn(),
     raw: vi.fn(),
+    setPort: vi.fn(),
     getLogPath: () => '',
     getDaemonId: () => 'test-daemon',
     getStatus: () => ({
@@ -861,6 +862,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_archived_session_export',
   'workspace_session_live_state',
   'workspace_session_live_state_batch',
+  'restart_recovery',
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
@@ -979,6 +981,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_archived_session_export' &&
       f !== 'workspace_session_live_state' &&
       f !== 'workspace_session_live_state_batch' &&
+      f !== 'restart_recovery' &&
       f !== 'workspace_session_metadata' &&
       f !== 'session_worktree_persistence_v1' &&
       f !== 'session_worktree_reset_v1' &&
@@ -1066,6 +1069,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_archived_session_export',
   'workspace_session_live_state',
   'workspace_session_live_state_batch',
+  'restart_recovery',
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
@@ -17496,6 +17500,84 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session/:id/load and /resume', () => {
+    it('gzip-compresses large load responses when the client negotiates it (#6181)', async () => {
+      // Transcript-shaped replay: highly repetitive JSON past the 1 KiB
+      // compression threshold, like a real multi-megabyte session load.
+      const compactedReplay = Array.from({ length: 200 }, (_, i) => ({
+        id: i + 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'gzip-large',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'assistant message chunk with repeated transcript prose '.repeat(
+                4,
+              ),
+            },
+          },
+        },
+      }));
+      const bridge = fakeBridge({
+        loadImpl: async (req) => ({
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          attached: false,
+          clientId: req.clientId ?? 'client-load',
+          state: {},
+          hasActivePrompt: false,
+          compactedReplay,
+        }),
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      // `Accept-Encoding: identity` is set explicitly: superagent injects a
+      // default `Accept-Encoding: gzip, deflate` when the header is absent,
+      // which would negotiate compression on the "uncompressed" control
+      // request.
+      const identityRes = await request(app)
+        .post('/session/gzip-large/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Accept-Encoding', 'identity')
+        .send({});
+      expect(identityRes.status).toBe(200);
+      expect(identityRes.headers['content-encoding']).toBeUndefined();
+      const identityBytes = Buffer.byteLength(JSON.stringify(identityRes.body));
+
+      const gzipRes = await request(app)
+        .post('/session/gzip-large/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Accept-Encoding', 'gzip, deflate, br')
+        .send({})
+        .buffer(true)
+        .parse((response, callback) => {
+          const chunks: Buffer[] = [];
+          response.on('data', (chunk) => chunks.push(chunk));
+          response.on('end', () => callback(null, Buffer.concat(chunks)));
+        });
+      expect(gzipRes.status).toBe(200);
+      expect(gzipRes.headers['content-encoding']).toBe('gzip');
+      expect(String(gzipRes.headers['vary']).toLowerCase()).toContain(
+        'accept-encoding',
+      );
+      // superagent transparently inflates the gzip layer before the parse
+      // callback runs, so res.body is the decoded JSON bytes; the wire size
+      // is carried by the rewritten Content-Length header.
+      expect(gzipRes.body.byteLength).toBe(identityBytes);
+      expect(Number(gzipRes.headers['content-length'])).toBeLessThan(
+        identityBytes / 2,
+      );
+      expect(JSON.parse(gzipRes.body.toString('utf8'))).toEqual(
+        identityRes.body,
+      );
+    });
+
     it('reports resume as unsupported for virtual subagent sessions', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -30421,6 +30503,7 @@ describe('createServeApp', () => {
           JSON.parse(await fsp.readFile(sidecarPath, 'utf8')),
         ).toMatchObject({
           workspaceCwd: repo,
+          carriedFrom: realpathSync(repo),
           worktreeBranch: '',
           originalHeadCommit: baseCommit,
           worktreeBase: baseCommit,
@@ -30558,6 +30641,25 @@ describe('createServeApp', () => {
             return null;
           }
         };
+        await fsp.writeFile(
+          path.join(siblingPath, 'session-carry.txt'),
+          'sibling-carry\n',
+        );
+        const routedCarryEntry = {
+          path: 'session-carry.txt',
+          hash: (
+            await execFileAsync(
+              'git',
+              ['hash-object', '--no-filters', '--', 'session-carry.txt'],
+              { cwd: siblingPath },
+            )
+          ).stdout.trim(),
+          executable:
+            ((await fsp.stat(path.join(siblingPath, 'session-carry.txt')))
+              .mode &
+              0o100) !==
+            0,
+        };
         const createWorktreeCalls: unknown[][] = [];
         mockWt.impl = (cwd?: string) => ({
           isGitRepository: async () => true,
@@ -30583,6 +30685,7 @@ describe('createServeApp', () => {
             return {
               success: true,
               worktree: { slug, path: worktreePath, branch: '' },
+              carriedEntries: [routedCarryEntry],
             };
           },
         });
@@ -30658,6 +30761,8 @@ describe('createServeApp', () => {
         expect(sidecar.originalHeadCommit).toBe(rootHead);
         expect(sidecar.worktreeBase).toBe(siblingHead);
         expect(sidecar.originalCwd).toBe(repo);
+        expect(sidecar.carriedFrom).toBe(realpathSync(siblingPath));
+        expect(sidecar.carriedEntries).toEqual([routedCarryEntry]);
       } finally {
         mockWt.impl = undefined;
         mockWt.readSidecar = undefined;
@@ -52369,7 +52474,9 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       const chunk = await reader.read();
       if (chunk.done) break;
       buffer += decoder.decode(chunk.value, { stream: true });
-      for (const frame of buffer.split('\n\n')) {
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop() ?? '';
+      for (const frame of frames) {
         const dataLine = frame
           .split('\n')
           .find((line) => line.startsWith('data: '));

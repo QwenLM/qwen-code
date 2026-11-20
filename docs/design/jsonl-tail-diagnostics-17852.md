@@ -2,10 +2,21 @@
 
 [English](./jsonl-tail-diagnostics-17852.md) | [简体中文](./jsonl-tail-diagnostics-17852.zh-CN.md)
 
-**Status: implemented in this change, pending review.** This is the follow-up to
-the merged append-integrity fix #17771 and resolves items 1–3 of tracker #17852.
-Item 4 (native Windows and current-head macOS validation) is **not** resolved
-here; see [Scope boundaries](#scope-boundaries).
+**Status: merged.** Landed as
+[#17901](https://github.com/QwenLM/qwen-code/pull/17901), squash commit
+`78411506df6734efd2fcf7e627ab1b27098afd77`, merged `2026-11-20`. This is the
+follow-up to the merged append-integrity fix #17771 and resolves items 1–3 of
+tracker #17852. Item 4 (native Windows and current-head macOS validation) is
+**not** resolved and stays open in #17852; see
+[Scope boundaries](#scope-boundaries).
+
+The validation plan below was executed as written. Its results — the confirmed
+280-warning churn baseline and its 128-warning outcome, the 150 → 171 focused-suite
+counts, the eleven-row mutation matrix with its one documented survivor, and the
+Linux-only native FIFO evidence — are recorded in the
+[verification report](https://github.com/QwenLM/qwen-code/pull/17901#issuecomment-7029094987)
+and the
+[landing note on the tracker](https://github.com/QwenLM/qwen-code/issues/17852#issuecomment-7032035092).
 
 ## Problem statement
 
@@ -265,12 +276,15 @@ No public API, config key, CLI flag, or on-disk record format changes.
 
 ## Scope boundaries
 
-Item 4 of #17852 is **not** delivered here. Native Windows sharing-violation
-behavior and current-head macOS behavior require hosts this change was not run
-on. The earlier macOS evidence at `14893f6f10` predates the #17771 writer-handle
-lifecycle and is not reused as validation. Skipped CI jobs are not presented as
-native-platform certification. Linux native results in this change are labeled
-with their actual OS and Node version and are not generalized to other platforms.
+Item 4 of #17852 is **not** delivered by #17901 and stays open in that tracker.
+Native Windows sharing-violation behavior and current-head macOS behavior require
+hosts the merged change was not run on. The earlier macOS evidence at `14893f6f10`
+predates the #17771 writer-handle lifecycle and is not reused as validation.
+Skipped CI jobs are not presented as native-platform certification: at the merged
+head the PR's checks were 30 pass / 40 skipping / 0 fail, and the Windows and macOS
+test lanes are among the skips. Linux native results for the merged change are
+labeled with their actual OS and Node version and are not generalized to other
+platforms.
 
 Also out of scope, as in #17852: a universal cross-process append lock, arbitrary
 pathname-replacement atomicity, generic FIFO transcript support, reconstruction
@@ -287,7 +301,15 @@ single handle remains an independent performance change.
 
 ## References
 
-- Tracker: [#17852](https://github.com/QwenLM/qwen-code/issues/17852).
+- This design landed as: [#17901](https://github.com/QwenLM/qwen-code/pull/17901),
+  squash `78411506df6734efd2fcf7e627ab1b27098afd77`, PR head
+  `b265c5f17ed4294594dd86374ea41ff389daceb8`.
+- Verification report:
+  [#17901 comment](https://github.com/QwenLM/qwen-code/pull/17901#issuecomment-7029094987).
+  Landing note and remaining scope:
+  [#17852 comment](https://github.com/QwenLM/qwen-code/issues/17852#issuecomment-7032035092).
+- Tracker: [#17852](https://github.com/QwenLM/qwen-code/issues/17852) — open for
+  item 4 only.
 - Merged parent: [#17771](https://github.com/QwenLM/qwen-code/pull/17771), squash
   `f8fa7c476f2244d5c6832fb2bb9a551882c425b3`.
 - Post-merge ledger: [#17853](https://github.com/QwenLM/qwen-code/pull/17853),
