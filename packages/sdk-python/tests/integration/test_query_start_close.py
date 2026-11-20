@@ -344,6 +344,75 @@ async def test_clean_exit_cancels_incoming_permission_callback(
 
 
 @pytest.mark.asyncio
+async def test_permission_callback_can_close_query(tmp_path: Path) -> None:
+    peer = tmp_path / "permission_then_wait.py"
+    peer.write_text(
+        textwrap.dedent(
+            """
+            import json
+            import sys
+
+            request = json.loads(sys.stdin.readline())
+            print(json.dumps({
+                "type": "control_response",
+                "response": {
+                    "subtype": "success",
+                    "request_id": request["request_id"],
+                    "response": {},
+                },
+            }), flush=True)
+            print(json.dumps({
+                "type": "control_request",
+                "request_id": "permission-1",
+                "request": {
+                    "subtype": "can_use_tool", "tool_name": "Read", "input": {},
+                },
+            }), flush=True)
+            sys.stdin.read()
+            """
+        ),
+        encoding="utf-8",
+    )
+    callback_finished = asyncio.Event()
+    close_returned = False
+
+    async def can_use_tool(
+        name: str, tool_input: dict[str, Any], context: CanUseToolContext
+    ) -> PermissionResult:
+        nonlocal close_returned
+        try:
+            await result.close()
+            close_returned = True
+        finally:
+            callback_finished.set()
+        return {"behavior": "deny", "message": "Closed by callback"}
+
+    result = query(
+        "unused",
+        {"path_to_qwen_executable": str(peer), "can_use_tool": can_use_tool},
+    )
+
+    async def consume() -> None:
+        async with result:
+            assert [message async for message in result] == []
+
+    consumer = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(callback_finished.wait(), timeout=5)
+        assert close_returned
+        assert result._transport.is_closed
+        child = result._transport._process
+        assert child is not None and child.returncode is not None
+        await asyncio.wait_for(consumer, timeout=2)
+        assert result._incoming_control_requests == {}
+    finally:
+        await result._transport.close()
+        if not consumer.done():
+            consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "initialized,streaming", [(False, False), (True, False), (True, True)]
 )

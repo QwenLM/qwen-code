@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterable, Mapping, MutableMapping
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from types import TracebackType
 from typing import Any, Literal, cast
@@ -39,6 +40,9 @@ from .types import (
 from .validation import validate_query_options
 
 _DONE = object()
+_incoming_control_task: ContextVar[asyncio.Task[None] | None] = ContextVar(
+    "incoming_control_task", default=None
+)
 
 
 def _parse_effort_status(value: Any) -> EffortStatus | None:
@@ -237,6 +241,8 @@ class Query:
         cancel_event = asyncio.Event()
 
         async def runner() -> None:
+            # wait_for creates a separate callback task on Python 3.10/3.11.
+            token = _incoming_control_task.set(asyncio.current_task())
             try:
                 await self._handle_control_request(request, cancel_event)
             except asyncio.CancelledError:
@@ -244,6 +250,7 @@ class Query:
             except Exception as exc:  # pragma: no cover - fatal background path
                 await self._finish_with_error(exc)
             finally:
+                _incoming_control_task.reset(token)
                 self._incoming_control_requests.pop(request_id, None)
 
         task = asyncio.create_task(runner())
@@ -582,7 +589,7 @@ class Query:
             self._pending_control_requests.pop(request_id, None)
 
     async def _cancel_incoming_control_requests(self) -> None:
-        current_task = asyncio.current_task()
+        current_task = _incoming_control_task.get() or asyncio.current_task()
         tasks: list[asyncio.Task[None]] = []
 
         for incoming in list(self._incoming_control_requests.values()):
@@ -619,7 +626,7 @@ class Query:
                     await self._input_task
 
             if self._router_task is not None:
-                current_task = asyncio.current_task()
+                current_task = _incoming_control_task.get() or asyncio.current_task()
                 inside_incoming = any(
                     incoming.task is current_task
                     for incoming in self._incoming_control_requests.values()

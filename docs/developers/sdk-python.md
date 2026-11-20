@@ -396,6 +396,8 @@ pending response waits immediately, without waiting for
 `timeout.control_request`, and cancels pending permission callbacks before
 iteration ends. Already queued messages remain readable after a clean
 exit; use `close()` or the query context manager to finish input-task cleanup.
+Permission callbacks may also await `close()` before returning their result;
+shutdown reaps the child without cancelling the callback that initiated it.
 
 ## Session Resume
 
