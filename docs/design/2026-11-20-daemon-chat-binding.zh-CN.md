@@ -22,13 +22,19 @@ provider 即可测试的组装。本切片落地**绑定 hook** `useDaemonChatCo
   状态事实）经 getter 读取一个每次渲染更新的 ref，故长生命周期的控制器总能看到当前
   provider 状态而无需重建。
 - **transport 包装会话动作。** `submitPrompt` 把 composer 输入映射到
-  `actions.submitPrompt` 并转发 daemon 的 `onAdmitted` prompt id；`cancelPrompt`、
+  `actions.submitPrompt`，转发 daemon 的 `onAdmitted` prompt id，并转发
+  `metadata.inputAnnotations`（composer `@` 文件引用的唯一通道）；`cancelPrompt`、
   `submitPermission`、`submitQuestionAnswers` 包装对应动作并把结果映射为 admission
-  （`accepted`/`rejected`/抛错时 `unknown`）。被拒的应答不再跟踪，故不会播种决策信号。
-  问题应答应投票该请求的提交（`allow_once`）选项并附带答案——与
-  `AskUserQuestion.handleSubmit` 相同的 wire 形状，由 `questionSubmitOptionId`
-  查找；不带 optionId 投票会发出 `cancelled` 结果，丢弃答案并取消问题，故缺失提交
-  选项时是 `rejected` admission，而非取消投票。
+  （`accepted`/`rejected`/抛错时 `unknown`）。被拒或抛错的应答不再跟踪，故不会播种
+  决策信号（抛错 transport 的尝试已被控制器 abandon，保留应答也无用）。问题应答应
+  投票该请求的提交（`allow_once`）选项并附带答案——与 `AskUserQuestion` 相同的 wire
+  形状，由 `questionSubmitOptionId` 查找；不带 optionId 投票会发出 `cancelled` 结果，
+  丢弃答案并取消问题，故缺失提交选项时是 `rejected` admission，而非取消投票。答案键
+  按问题十进制索引对照问题数校验，故 id 形状的键是 `rejected` admission，而非被静默
+  丢弃的条目。
+- **问题与审批拆分。** 属于 AskUserQuestion 的待处理权限块（`isAskUserPermission`）
+  发布为 `pendingQuestions`，其余为 `pendingApprovals`，与既有 UI 拆分一致，使问题
+  带答案应答，而非经审批通道作为裸投票。
 - **prompt 结算**由 `useDaemonPromptSettled`（终态 `turn_complete`/`turn_error`/
   cancelled 事件）桥接到控制器的 `subscribePromptSettlement`，按 `promptId` 键控。
 - **approval 时效与决策结算是派生的**，因为 provider 没有显式通道。纯助手
@@ -43,13 +49,15 @@ provider 即可测试的组装。本切片落地**绑定 hook** `useDaemonChatCo
 - **存储键**复用 `getComposerDraftStorageKey(sessionId, workspaceCwd)`，使表面的
   草稿持久化与既有 daemon composer 一致。
 - **能力**由 `connection.capabilities.features` 经穷举的
-  `DAEMON_CHAT_CAPABILITY_MAP` 派生（未知 tag 跳过）。
+  `DAEMON_CHAT_CAPABILITY_MAP` 派生；未知 tag 跳过，且 `Object.hasOwn` 守卫防止未校验
+  的 wire tag 命中 `Object.prototype` 成员（如 `toString`）而解析到不可迭代的继承值。
+- **transcript 态**在 connection 报告缺失会话或错误时为 `error`，加载中为 `loading`，
+  否则 `ready`。
 
 ## 保守绑定（ChatSurface 增量的后续）
 
-- `pendingQuestions`、`statusFacts.queueLength`、`statusFacts.goalActive` 尚无
-  直接的 provider 选择器/hook；此处保守绑定（空/0/false），待状态栈与问题区域切换
-  时接到真实来源。
+- `statusFacts.queueLength`、`statusFacts.goalActive` 尚无直接的 provider 选择器/
+  hook；此处保守绑定（0/false），待状态栈切换时接到真实来源。
 - `settledPhase` 为 `idle`；失败会话的 phase 将在需要时从 connection 态派生。
 - 可选的能力门控子控制器（模型选择、审批模式、上下文用量、会话操作）尚未绑定；其
   区域在后续增量接线前保持隐藏。契约的 `acknowledge` 暴露（释放已消费终态行）也随

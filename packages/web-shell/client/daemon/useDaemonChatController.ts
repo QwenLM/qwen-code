@@ -14,6 +14,8 @@ import {
 import { useI18n } from '../i18n.js';
 import { useMessagesFromBlocks } from '../hooks/useMessages.js';
 import { getComposerDraftStorageKey } from '../hooks/useComposerCore.js';
+import { extractPendingPermission } from '../adapters/transcriptAdapter.js';
+import { isAskUserPermission } from '../utils/askUserPermission.js';
 import {
   useDaemonActions,
   useDaemonConnection,
@@ -51,8 +53,10 @@ function capabilitiesFromFeatures(
     readonly ChatRegion[]
   >;
   for (const feature of features) {
-    const mapped = map[feature];
-    if (mapped) for (const region of mapped) regions.add(region);
+    // features are unvalidated wire strings; guard against Object.prototype
+    // members (e.g. "toString") resolving to a non-iterable inherited value.
+    if (!Object.hasOwn(map, feature)) continue;
+    for (const region of map[feature]) regions.add(region);
   }
   return regionsToCapabilities(regions);
 }
@@ -79,27 +83,42 @@ export function useDaemonChatController(): SessionChatController {
   const messages = useMessagesFromBlocks(t, blocks);
 
   const sessionId = connection.sessionId;
-  const pendingApprovals: readonly PendingApproval[] = pendingPermissions.map(
-    (permission) => ({ id: permission.requestId, status: 'pending' }),
-  );
+  // Questions are permission blocks too; split them from tool approvals the same
+  // way the existing UI does, so a question is answered with answers rather than
+  // routed through the approval lane as a bare vote.
+  const approvals: PendingApproval[] = [];
+  const questions: PendingQuestion[] = [];
+  for (const permission of pendingPermissions) {
+    if (isAskUserPermission(extractPendingPermission([permission]))) {
+      questions.push({ id: permission.requestId });
+    } else {
+      approvals.push({ id: permission.requestId, status: 'pending' });
+    }
+  }
+  const pendingApprovals: readonly PendingApproval[] = approvals;
+  const pendingQuestions: readonly PendingQuestion[] = questions;
 
   const factsRef = useRef<LiveFacts>({
     messages,
     transcriptState: 'loading',
     pendingApprovals,
-    pendingQuestions: [],
+    pendingQuestions,
     statusFacts: { queueLength: 0, goalActive: false },
     capabilities: regionsToCapabilities([]),
     settledPhase: 'idle',
   });
   factsRef.current = {
     messages,
-    transcriptState: connection.loadingTranscript ? 'loading' : 'ready',
+    transcriptState:
+      connection.missingSession || connection.error
+        ? 'error'
+        : connection.loadingTranscript
+          ? 'loading'
+          : 'ready',
     pendingApprovals,
-    // Pending questions, queue length and goal activity are surfaced by the
-    // ChatSurface increment; the provider exposes no direct selector/hook for
-    // them yet, so they are bound conservatively here.
-    pendingQuestions: [],
+    pendingQuestions,
+    // Queue length and goal activity are surfaced by the ChatSurface increment;
+    // the provider exposes no direct selector/hook for them yet.
     statusFacts: { queueLength: 0, goalActive: false },
     capabilities: capabilitiesFromFeatures(
       connection.capabilities?.features ?? [],
@@ -166,6 +185,11 @@ export function useDaemonChatController(): SessionChatController {
             await actionsRef.current.submitPrompt(input.text, {
               images: input.images ? [...input.images] : undefined,
               files: input.files ? [...input.files] : undefined,
+              // The composer's @-file references reach the daemon only through
+              // inputAnnotations; dropping them loses the reference chips.
+              ...(input.metadata?.inputAnnotations?.length
+                ? { inputAnnotations: [...input.metadata.inputAnnotations] }
+                : {}),
               onAdmitted: ({ promptId }) => onAdmitted(promptId),
             });
             return 'accepted';
@@ -191,8 +215,10 @@ export function useDaemonChatController(): SessionChatController {
             if (!applied) answeredRef.current.delete(requestId);
             return applied ? 'accepted' : 'rejected';
           } catch {
-            // Admission unknown: the answer may still have been applied (lost
-            // response), so keep it tracked for the permission-resolution signal.
+            // Admission unknown: the controller abandons the attempt, so a
+            // later permission-resolution signal could not settle it anyway;
+            // drop the answer tracking instead of retaining a useless entry.
+            answeredRef.current.delete(requestId);
             return 'unknown';
           }
         },
@@ -206,10 +232,30 @@ export function useDaemonChatController(): SessionChatController {
             requestId,
           );
           if (!submitOptionId) return 'rejected';
-          answeredRef.current.add(requestId);
+          // The daemon keys answers by the question's decimal index (the shape
+          // AskUserQuestion.buildResult emits); an id-shaped key would be
+          // silently discarded while the vote still succeeds, so validate each
+          // questionId against the question count instead.
+          const permission = pendingPermissionsRef.current.find(
+            (candidate) => candidate.requestId === requestId,
+          );
+          const questions = permission
+            ? extractPendingPermission([permission])?.rawInput?.questions
+            : undefined;
+          const questionCount = Array.isArray(questions) ? questions.length : 0;
           const record: Record<string, string> = {};
-          for (const answer of answers)
-            record[answer.questionId] = answer.value;
+          for (const answer of answers) {
+            const index = Number(answer.questionId);
+            if (
+              !Number.isInteger(index) ||
+              index < 0 ||
+              index >= questionCount
+            ) {
+              return 'rejected';
+            }
+            record[String(index)] = answer.value;
+          }
+          answeredRef.current.add(requestId);
           try {
             const applied = await actionsRef.current.submitPermission(
               requestId,
@@ -219,6 +265,7 @@ export function useDaemonChatController(): SessionChatController {
             if (!applied) answeredRef.current.delete(requestId);
             return applied ? 'accepted' : 'rejected';
           } catch {
+            answeredRef.current.delete(requestId);
             return 'unknown';
           }
         },

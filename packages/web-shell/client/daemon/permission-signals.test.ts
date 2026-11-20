@@ -73,11 +73,17 @@ describe('derivePermissionSignals', () => {
   });
 
   it('does not re-emit a decision for an answer already consumed', () => {
-    // r1 was answered and consumed in a prior transition (not in answered now);
-    // if it somehow re-leaves the pending set it is treated as superseded.
-    const signals = derivePermissionSignals(set('r1'), set(), set());
-    expect(signals.decisions).toEqual([]);
-    expect(signals.currency).toEqual([['r1', false]]);
+    // First transition: the answered request resolves, emitting the decision and
+    // consuming the answered entry.
+    const first = derivePermissionSignals(set('r1'), set(), set('r1'));
+    expect(first.decisions).toEqual([{ requestId: 'r1', applied: true }]);
+    expect(first.answered.has('r1')).toBe(false);
+    // A later departure of the same id with the consumed (empty) answered set
+    // must not re-emit a decision — it is superseded, not answered. A regression
+    // that kept the entry in `answered` would re-emit here.
+    const second = derivePermissionSignals(set('r1'), set(), first.answered);
+    expect(second.decisions).toEqual([]);
+    expect(second.currency).toEqual([['r1', false]]);
   });
 });
 

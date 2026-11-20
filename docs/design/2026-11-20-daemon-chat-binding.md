@@ -27,16 +27,25 @@ gate) are the next increment.
   updated each render, so the long-lived controller always sees current provider
   state without being rebuilt.
 - **Transports wrap the session actions.** `submitPrompt` maps the composer input
-  to `actions.submitPrompt` and forwards the daemon's `onAdmitted` prompt id;
-  `cancelPrompt`, `submitPermission`, and `submitQuestionAnswers` wrap the
-  corresponding actions and map their result to an admission (`accepted` /
-  `rejected` / `unknown` on a thrown transport). A rejected answer is untracked so
-  it cannot seed a decision signal. A question answer must vote the request's
-  submit (`allow_once`) option with the answers attached — the same wire shape
-  `AskUserQuestion.handleSubmit` uses, looked up by `questionSubmitOptionId`;
-  voting with no option id would send a `cancelled` outcome, which discards the
-  answers and cancels the question, so a missing submit option is a `rejected`
-  admission rather than a cancel vote.
+  to `actions.submitPrompt`, forwards the daemon's `onAdmitted` prompt id, and
+  forwards `metadata.inputAnnotations` (the only channel for the composer's
+  `@`-file references); `cancelPrompt`, `submitPermission`, and
+  `submitQuestionAnswers` wrap the corresponding actions and map their result to an
+  admission (`accepted` / `rejected` / `unknown` on a thrown transport). A rejected
+  or thrown answer is untracked so it cannot seed a decision signal (a thrown
+  transport's attempt is abandoned by the controller, so retaining the answer would
+  be useless). A question answer must vote the request's submit (`allow_once`)
+  option with the answers attached — the same wire shape `AskUserQuestion` uses,
+  looked up by `questionSubmitOptionId`; voting with no option id would send a
+  `cancelled` outcome, which discards the answers and cancels the question, so a
+  missing submit option is a `rejected` admission rather than a cancel vote. Answer
+  keys are validated as the question's decimal index against the question count, so
+  an id-shaped key is a `rejected` admission rather than a silently discarded entry.
+- **Questions are split from approvals.** Pending permission blocks that are
+  AskUserQuestion prompts (`isAskUserPermission`) are published as
+  `pendingQuestions`; the rest as `pendingApprovals`, matching the existing UI split
+  so a question is answered with answers rather than routed through the approval
+  lane as a bare vote.
 - **Prompt settlement** is bridged from `useDaemonPromptSettled` (the terminal
   `turn_complete` / `turn_error` / cancelled event) to the controller's
   `subscribePromptSettlement`, keyed by `promptId`.
@@ -55,14 +64,17 @@ gate) are the next increment.
 - **Storage key** reuses `getComposerDraftStorageKey(sessionId, workspaceCwd)` so
   the surface's draft persistence matches the existing daemon composer.
 - **Capabilities** are derived from `connection.capabilities.features` via the
-  exhaustive `DAEMON_CHAT_CAPABILITY_MAP` (unknown tags are skipped).
+  exhaustive `DAEMON_CHAT_CAPABILITY_MAP`; unknown tags are skipped, and an
+  `Object.hasOwn` guard keeps an unvalidated wire tag naming an `Object.prototype`
+  member (e.g. `toString`) from resolving to a non-iterable inherited value.
+- **Transcript state** is `error` when the connection reports a missing session or
+  an error, `loading` while the transcript loads, else `ready`.
 
 ## Bound conservatively (follow-ups for the ChatSurface increment)
 
-- `pendingQuestions`, `statusFacts.queueLength`, and `statusFacts.goalActive` have
-  no direct provider selector/hook yet; they are bound conservatively (empty /
-  zero / false) and will be wired to their real sources when the status stack and
-  question region are switched.
+- `statusFacts.queueLength` and `statusFacts.goalActive` have no direct provider
+  selector/hook yet; they are bound conservatively (zero / false) and will be wired
+  to their real sources when the status stack is switched.
 - `settledPhase` is `idle`; a failed-session phase will be derived from connection
   state when needed.
 - The optional capability-gated sub-controllers (model selection, approval mode,
