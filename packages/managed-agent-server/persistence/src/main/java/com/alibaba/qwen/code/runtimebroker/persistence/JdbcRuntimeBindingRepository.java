@@ -1701,7 +1701,9 @@ public final class JdbcRuntimeBindingRepository
                         && current.getState()
                                 != RuntimeBindingRecord.State.RECOVERY_BLOCKED
                         && current.getState()
-                                != RuntimeBindingRecord.State.READY) {
+                                != RuntimeBindingRecord.State.READY
+                        && current.getState()
+                                != RuntimeBindingRecord.State.LOST) {
             throw new IllegalStateException(
                     "Original terminated external binding is unavailable");
         }
@@ -1727,7 +1729,7 @@ public final class JdbcRuntimeBindingRepository
         }
         String storageOwnerKey;
         try (var statement = connection.prepareStatement(
-                "SELECT physical_key FROM ma_storage WHERE alias_key = ?")) {
+                "SELECT physical_key, storage_kind FROM ma_storage WHERE alias_key = ?")) {
             statement.setString(1, storageAliasKey(
                     current.getRequest().getScope().getTenantId(),
                     current.getRequest().getStorageId()));
@@ -1737,6 +1739,10 @@ public final class JdbcRuntimeBindingRepository
                             "Workspace storage registration is unavailable");
                 }
                 storageOwnerKey = rows.getString(1);
+                if (current.getState() == RuntimeBindingRecord.State.LOST
+                        && !"EPHEMERAL".equals(rows.getString("storage_kind"))) {
+                    throw new IllegalStateException("Lost external retirement requires ephemeral storage");
+                }
             }
         }
         try (var statement = connection.prepareStatement(

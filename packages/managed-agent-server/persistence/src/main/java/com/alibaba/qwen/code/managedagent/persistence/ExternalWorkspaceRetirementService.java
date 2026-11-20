@@ -197,7 +197,8 @@ public final class ExternalWorkspaceRetirementService {
                 && request.runtimeGeneration() == binding.getGeneration() && !binding.isDrainRequested()
                 && (binding.getState() == RuntimeBindingRecord.State.PROVISIONING
                         || binding.getState() == RuntimeBindingRecord.State.RECOVERY_BLOCKED
-                        || binding.getState() == RuntimeBindingRecord.State.READY));
+                        || binding.getState() == RuntimeBindingRecord.State.READY
+                        || binding.getState() == RuntimeBindingRecord.State.LOST));
         broker.validateExternalTerminalOriginal(binding);
         var registered = storage.find(request.tenantId(), request.workspaceId()).orElseThrow(ExternalWorkspaceRetirementService::blocked);
         require(registered.ephemeral() && request.tenantId().equals(registered.ephemeralTenantId()));
