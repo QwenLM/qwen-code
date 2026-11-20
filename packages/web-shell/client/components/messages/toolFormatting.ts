@@ -350,12 +350,42 @@ export function isMachineToolDescription(
     workspaceCwd,
     isShellToolName(tool.toolName) ? { includeTimeout: false } : {},
   );
-  // Both public getters cap the text, so compare against the capped form.
-  const text = truncateText(produced.text, MAX_DESCRIPTION_LENGTH);
+  if (!produced.machine) return false;
+
+  const matches = (candidate: string) => {
+    const text = truncateText(candidate, MAX_DESCRIPTION_LENGTH);
+    return description === text || description === truncateText(text, 120);
+  };
+  // The legacy wire title has no provenance flag. Only recognize a grep
+  // title that exactly matches the daemon's known machine form, never arbitrary
+  // prose supplied with the same arguments.
   return (
-    produced.machine &&
-    (description === text || description === truncateText(text, 120))
+    matches(produced.text) ||
+    getGrepTitlesFromArgs(tool, workspaceCwd).some(matches)
   );
+}
+
+function getGrepTitlesFromArgs(
+  tool: ACPToolCall,
+  workspaceCwd?: string,
+): string[] {
+  const name = tool.toolName.toLowerCase();
+  if (name !== 'grep' && name !== 'grep_search') return [];
+  const args = tool.args;
+  const pattern = args?.pattern ?? args?.query;
+  if (typeof pattern !== 'string' || !pattern) return [];
+
+  const rawPath = typeof args?.path === 'string' ? args.path : '';
+  const filter =
+    typeof args?.glob === 'string' && args.glob
+      ? ` (filter: '${args.glob}')`
+      : '';
+  // Unlike the browser's args-only fallback, the daemon's JS Grep appends a
+  // formatted path (defaulting to "."), and RipGrep omits an unset path.
+  const path = pathForDisplay(rawPath || '.', workspaceCwd);
+  const titles = [`'${pattern}' in ${path}${filter}`];
+  if (!rawPath) titles.push(`'${pattern}'${filter}`);
+  return titles.map((title) => formatDescriptionPaths(title, workspaceCwd));
 }
 
 export function getToolSummaryDescription(

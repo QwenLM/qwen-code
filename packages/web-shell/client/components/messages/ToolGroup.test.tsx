@@ -274,6 +274,41 @@ describe('tool header description direction', () => {
     },
   );
 
+  it.each([
+    {
+      title: "Grep: 'نمط|pattern' in مجلد (filter: '*.ts')",
+      args: { path: 'مجلد', glob: '*.ts' },
+      dir: 'ltr',
+      tag: 'BDI',
+    },
+    { title: "Grep: 'نمط|pattern'", args: {}, dir: 'ltr', tag: 'BDI' },
+    { title: "Grep: 'نمط|pattern' in .", args: {}, dir: 'ltr', tag: 'BDI' },
+    {
+      title: 'Grep: اعثر على الملاحظات',
+      args: { path: 'مجلد', glob: '*.ts' },
+      dir: 'auto',
+      tag: 'SPAN',
+    },
+  ])(
+    'keeps direction appropriate for daemon grep title $title',
+    ({ title, args, dir, tag }) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'grep_search',
+          title,
+          args: { pattern: 'نمط|pattern', ...args },
+        }),
+        {},
+        {},
+        'ar',
+      );
+      const arg = container.querySelector('[class*="lineArg"]');
+      expect(arg?.tagName).toBe(tag);
+      expect(arg?.getAttribute('dir')).toBe(dir);
+      expect(arg?.textContent).toBe(title.slice('Grep: '.length));
+    },
+  );
+
   it('keeps a fetch URL with a prose prompt auto-direction', () => {
     const container = renderToolLine(
       makeTool({

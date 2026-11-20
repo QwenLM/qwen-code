@@ -195,10 +195,21 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_200_700;
 // The merged catalog-loading tree measures 2,149,263 JS bytes, down 419,
 // with 2,425,802 bytes of separate CSS and the same third-party input mix.
 // The warning and ceiling keep 713 and 1,713 bytes above that measurement.
+//
+// A frozen-install build of a clean detached worktree at main 82a0f3031f71
+// measures 2,151,147 bytes of renderer JS on Node 22.22.2, 171 above the
+// previous ceiling. CI's Build unit-test tree (Linux, Node 22.x) measures
+// 2,149,864 bytes. The forbidden-input guard passes. Preserve the existing
+// 713- and 1,713-byte margins above the CI measurement, leaving 430 bytes
+// above the local measurement.
+//
 // Merging main e92f3090e8 into the Arabic branch measures 2,199,754 JS bytes
 // on Node 22.23.2 (CSS 2,439,556, separate); the forbidden-input guard passes
 // and the third-party input mix is unchanged. Re-track: the warning sits 946
 // above that measurement and the ceiling 1,946 above it.
+// A paired local Node 24 build of PR head 27c2ee57 before and after merging
+// main 2421ad2c measures the same 2,138,480 JS and 2,439,280 separate CSS
+// bytes in both trees. This merge keeps the Arabic branch's existing cap.
 const MAX_DOCUMENT_RUNTIME_BYTES = 2_201_700;
 
 // Modules that must not be reachable from the document entry, checked against
