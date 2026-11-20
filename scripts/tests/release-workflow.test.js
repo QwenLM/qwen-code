@@ -4118,7 +4118,7 @@ esac`,
     // default of 360 minutes leaves same-tag retries queued behind it,
     // unable to run, fail, or notify.
     expect(workflow).toMatch(
-      / {2}publish:\n {4}name: 'Publish Release'[\s\S]*?concurrency:\n {6}group: 'release-publish-\$\{\{ needs\.prepare\.outputs\.npm_tag \}\}-\$\{\{ needs\.prepare\.outputs\.is_dry_run \}\}'\n {6}cancel-in-progress: false\n {4}timeout-minutes: 90\n {4}environment:\n {6}name: 'production-release'/,
+      / {2}publish:\n {4}name: 'Publish Release'[\s\S]*?concurrency:\n(?: {6}#[^\n]*\n)* {6}group: 'release-publish-\$\{\{ needs\.prepare\.outputs\.npm_tag \}\}-\$\{\{ needs\.prepare\.outputs\.is_dry_run \}\}'\n {6}cancel-in-progress: false\n {4}timeout-minutes: 90\n {4}environment:\n {6}name: 'production-release'/,
     );
   });
 
