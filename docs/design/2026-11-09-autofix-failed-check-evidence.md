@@ -167,17 +167,23 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
    too; the `TOKEN`/`KEY`/… rule is quadratic on a long word run in base (about a
    second at 40k characters); the repair pass clamps its input to the shipped
    300-character width so it does not add a second copy of that cost, leaving
-   only the first pass's base cost on an adversarial long line; a value cannot
+   only the first pass's base cost on an adversarial long line (a control-split
+   token straddling column 300 can be cut below its rule's minimum length and
+   ship a short prefix fragment, but never the whole token — the fragment is
+   below the usable length, so this is not a credential leak); a value cannot
    tell a weld INSIDE the credential from a weld BEFORE following word-like
    text, so a bare failure keyword (no `##[error]`) welded onto a value is still
    consumed (the message tail survives); and a `##[error]` inside a BEGIN…END
    span stops the private-key match, preserving the marker over redacting the
    span — a real PEM with no marker, and a body with a non-marker `#`, are still
-   fully redacted. The strip class also does not cover the zero-width format
-   family (U+200B, U+2060, U+FEFF), so a credential split by one of those is
-   neither welded nor redacted; and a tab inside a credential is preserved by
-   the strip and terminates both passes' value classes, so that shape is
-   unmatched too. Both are recorded as gaps, not closed here.
+   fully redacted (an intact-label block containing a marker is redacted whole
+   by the first pass, as in base). The strip class also does not cover the
+   wider Unicode whitespace/format families — zero-width (U+200B, U+2060,
+   U+FEFF), NBSP (U+00A0), U+2000–U+200A, U+3000 — so a credential split by any
+   character outside the strip class is neither welded nor redacted; and a tab
+   inside a credential is preserved by the strip and terminates both passes'
+   value classes, so that shape is unmatched too. These are recorded as gaps,
+   not closed here; the list is illustrative, not exhaustive.
    Living in
    `skillLog`, the strip covers both the collector's excerpt and the patrol's
    rendered evidence (its only `jobLog` caller goes through `skillLog`). The
@@ -302,10 +308,13 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
   shapes the suite pins: a control inside a credential, in front of its leading
   word boundary, or inside its keyword; a value carrying `#`, `[`, `]`, `@`,
   `}` or a quote; a log-supplied `[redacted]` prefix; a welded scheme prefix; a
-  deleted `Bearer` separator. The exceptions are the gaps listed in the Costs
-  paragraph above (a bare failure keyword welded onto a value, a zero-width or
-  tab split, a split header keyword), which this criterion does not claim to
-  cover.
+  deleted `Bearer` separator. The exceptions are the gaps recorded in the Costs
+  paragraph above — notably any split by a character OUTSIDE the strip class
+  (the broader Unicode whitespace/format families such as NBSP, U+2000–U+200A,
+  U+3000, zero-width and tab, not just the ones named there), a bare failure
+  keyword welded onto a value, and a split header keyword. That list is
+  illustrative, not closed: this criterion does not claim to cover splits the
+  strip class does not remove.
 - A NON-EMPTY whitespace-bounded credential value terminated by a bare CR
   leaves the failure line that follows it in the excerpt, and a control that
   splits the credential keyword does not consume the `##[error]` marker. An

@@ -1196,12 +1196,11 @@ describe('ci flaky rerun patrol', () => {
   });
 
   it('keeps the failure line a welded URL userinfo would otherwise reach', () => {
-    // The scheme rule's userinfo ends at whitespace, so a welded tail carrying
-    // a space-free run up to an @ is a candidate value. Two shapes: one where
-    // the first pass already redacted the userinfo (the guard must skip it),
-    // and one where it saw no @ at all and never matched — there only the
-    // gen-delims # [ ] (illegal in userinfo per RFC 3986) keep the rule off
-    // the ##[error] marker.
+    // The scheme rule's userinfo is a tempered token per @-segment: it runs to
+    // the next whitespace or @ but never across the ##[error] marker. Two
+    // shapes: one where the first pass already redacted the userinfo, and one
+    // where it saw no @ at all and never matched — in both, the temper keeps
+    // the rule off the ##[error] marker.
     for (const line of [
       'https://u@h\r##[error]AssertionError:real@failure',
       'https://host\r##[error]AssertionError:real@failure',
@@ -1215,10 +1214,10 @@ describe('ci flaky rerun patrol', () => {
   });
 
   it('keeps the marker when a control splits the credential keyword itself', () => {
-    // The guard's premise ("the first pass redacted the value") is false exactly
-    // when the control split the keyword — the case this pass exists to repair.
-    // Selection runs before the strip so the line is still chosen, and the value
-    // classes stop at `#` so the weld cannot carry the value over the marker.
+    // A split keyword is exactly the case the first pass cannot see, so the
+    // repair pass must redact the welded value. Selection runs before the strip
+    // so the line is still chosen, and the value is a tempered token that stops
+    // before the ##[error] marker, so the weld cannot carry the value over it.
     const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
       '\n',
     );
@@ -1259,9 +1258,10 @@ describe('ci flaky rerun patrol', () => {
   });
 
   it('redacts a credential the log hid behind a literal [redacted] prefix', () => {
-    // The placeholder guard must skip a value the FIRST pass redacted, not one
-    // the log itself wrote as [redacted]…: with the keyword split, the first pass
-    // saw nothing and this pass is the only chance to scrub it.
+    // The value is a tempered token, not a class that excludes [ or ]: a value
+    // the log itself wrote as [redacted]… is still a value and gets redacted.
+    // With the keyword split, the first pass saw nothing and this pass is the
+    // only chance to scrub it.
     for (const [line, secret] of [
       ['##[error]API_KE\rY=[redacted]realsecretvalue123', 'realsecretvalue123'],
       ['##[error]NPM_TO\rKEN=[redacted]abcdefghijklmno', 'abcdefghijklmno'],
@@ -1323,8 +1323,10 @@ describe('ci flaky rerun patrol', () => {
   });
 
   it('keeps a marker inside a BEGIN…END span instead of redacting the span', () => {
-    // The tempered private-key body stops before ##[error], so a fork cannot
-    // delete the failure marker by wrapping it in a fake key block. A real PEM
+    // For a SPLIT-label block (the case the repair pass handles) the tempered
+    // private-key body stops before ##[error], so the marker survives instead
+    // of the span being redacted. (An intact-label block is redacted whole by
+    // the first pass, as in base — that path has no marker temper.) A real PEM
     // (no marker) and a body with a non-marker # are still fully redacted.
     const withMarker = skillLog(
       '-----BEGIN RSA\rKEY-----\nMIIEow\n##[error]x\n-----END RSA\rKEY-----',
