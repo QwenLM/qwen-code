@@ -754,7 +754,12 @@ export const InstalledTab = ({
         }
         if (row.type === 'header') {
           return (
-            <Text key={`header-${row.group}`} color={theme.text.accent} bold>
+            <Text
+              key={`header-${row.group}`}
+              color={theme.text.accent}
+              bold
+              wrap="truncate-end"
+            >
               {groupLabel(row.group)} ({row.count})
             </Text>
           );
@@ -810,7 +815,10 @@ export const InstalledTab = ({
               </Text>
             </Box>
             <Box flexGrow={1}>
-              <Text color={isSelected ? theme.text.accent : theme.text.primary}>
+              <Text
+                color={isSelected ? theme.text.accent : theme.text.primary}
+                wrap="truncate-end"
+              >
                 {isChild ? '  └ ' : ''}
                 {item.name}
               </Text>
@@ -818,10 +826,16 @@ export const InstalledTab = ({
                 <Text color={theme.status.warning}> {ICON.STAR}</Text>
               ) : null}
             </Box>
-            <Text color={isSelected ? theme.text.accent : theme.text.secondary}>
+            <Text
+              color={isSelected ? theme.text.accent : theme.text.secondary}
+              wrap="truncate-end"
+            >
               {kindBadge}{' '}
             </Text>
-            <Text color={isSelected ? theme.text.accent : statusColor}>
+            <Text
+              color={isSelected ? theme.text.accent : statusColor}
+              wrap="truncate-end"
+            >
               ({statusLabel})
             </Text>
           </Box>

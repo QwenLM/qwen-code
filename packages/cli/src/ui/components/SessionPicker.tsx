@@ -314,13 +314,13 @@ export function SessionPicker(props: SessionPickerProps) {
             {title ?? t('Resume Session')}
           </Text>
           {picker.filterByBranch && currentBranch && (
-            <Text color={theme.text.secondary}>
+            <Text color={theme.text.secondary} wrap="truncate-end">
               {' '}
               {t('(branch: {{branch}})', { branch: currentBranch })}
             </Text>
           )}
           {picker.searchQuery !== '' && (
-            <Text color={theme.text.secondary}>
+            <Text color={theme.text.secondary} wrap="truncate-end">
               {' '}
               {t('({{count}} matches)', {
                 count: String(picker.filteredSessions.length),

@@ -46,11 +46,21 @@ it(`keeps a short model dialog title, multiple choices and footer visible (${run
     general: { enableAutoUpdate: false, showSessionRecap: false },
     ui: { theme: 'Qwen Dark', enableFollowupSuggestions: false },
     memory: E2E_MEMORY_SETTINGS_DEFAULTS,
+    model: {
+      generationConfig: {
+        modalities: { image: false, audio: false, video: false, pdf: false },
+      },
+    },
+    fastModel: 'boundary-00',
+    compactionModel: 'boundary-00',
     modelProviders: {
       openai: Array.from({ length: 12 }, (_, index) => ({
         id: `boundary-${String(index).padStart(2, '0')}`,
         name: `Boundary ${index}`,
         envKey: 'BOUNDARY_API_KEY',
+        generationConfig: {
+          modalities: { image: false, audio: false, video: false, pdf: false },
+        },
       })),
     },
   });
@@ -97,6 +107,17 @@ it(`keeps a short model dialog title, multiple choices and footer visible (${run
         writeFileSync(join(evidence, 'startup.ansi'), raw),
     });
     await sendAboutUntilRendered(session);
+    await session.send('/model');
+    frames['native-config'] = await session.waitForScreen(
+      (screen) =>
+        /Modality:?\s+text-only/.test(screen) &&
+        screen.includes('Enter to select'),
+      'selected runtime model must expose its native text-only modalities',
+      12_000,
+    );
+    expect(frames['native-config']).toMatch(/›[^\n]*\(Runtime\)/);
+    session.pressKey('\x1b');
+    await session.idle(150, 750);
     session.resize(70, 18);
     await session.idle(300, 1500);
     await session.send('/model');

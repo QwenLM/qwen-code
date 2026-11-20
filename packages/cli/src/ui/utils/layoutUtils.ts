@@ -17,16 +17,18 @@ export const getPromptHorizontalMargin = (terminalWidth: number): number =>
  * Returns the text-buffer width, the input and suggestions container widths,
  * and the columns used by the outer gutters and prompt prefix.
  */
-export const calculatePromptWidths = (terminalWidth: number) => {
+export const calculatePromptWidths = (
+  terminalWidth: number,
+  prefixWidth = 2,
+) => {
   const OUTER_GUTTER = getPromptHorizontalMargin(terminalWidth) * 2;
-  const PROMPT_PREFIX_WIDTH = 2; // '> ' or '! '
   const MIN_CONTENT_WIDTH = 2;
 
   const containerWidth = Math.max(4, terminalWidth - OUTER_GUTTER);
-  const innerContentWidth = containerWidth - PROMPT_PREFIX_WIDTH;
+  const innerContentWidth = containerWidth - prefixWidth;
 
   const inputWidth = Math.max(MIN_CONTENT_WIDTH, innerContentWidth);
-  const FRAME_OVERHEAD = OUTER_GUTTER + PROMPT_PREFIX_WIDTH;
+  const FRAME_OVERHEAD = OUTER_GUTTER + prefixWidth;
   const suggestionsWidth = containerWidth;
 
   return {

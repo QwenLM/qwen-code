@@ -15,6 +15,12 @@ import {
 } from './layoutUtils.js';
 
 describe('layoutUtils', () => {
+  it('R3-2 fits the command-search prefix inside the same input frame', () => {
+    const widths = calculatePromptWidths(100, 6);
+    expect(widths.inputWidth).toBe(90);
+    expect(widths.inputWidth + 6).toBe(widths.containerWidth);
+  });
+
   it('calculates prompt widths', () => {
     expect(calculatePromptWidths(100)).toEqual({
       inputWidth: 94,

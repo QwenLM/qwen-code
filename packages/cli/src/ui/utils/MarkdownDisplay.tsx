@@ -216,6 +216,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   enforceHeightBudget = false,
 }) => {
   const { renderMode } = useRenderMode();
+  const showLineNumbers = useSettings()?.merged.ui?.showLineNumbers ?? true;
   const copyHint = React.useMemo(() => {
     if (!showSourceCopyHints) return () => undefined;
     return sourceCopyText === undefined
@@ -464,6 +465,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   const highlighter = getLowlightInstance();
   const contextKey = JSON.stringify([
     renderMode,
+    showLineNumbers,
     contentWidth,
     availableTerminalHeight,
     textColor,
@@ -553,7 +555,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       if (isClosingCodeFence(fenceMatch, codeBlockFence)) {
         addContentBlock(
           <RenderCodeBlock
-            key={key}
+            key={`${key}:${showLineNumbers}`}
             content={codeBlockContent}
             lang={codeBlockLang}
             codeBlockIndex={currentCodeBlockIndex}
@@ -887,7 +889,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   if (inCodeBlock) {
     addContentBlock(
       <RenderCodeBlock
-        key="line-eof"
+        key={`line-eof:${showLineNumbers}`}
         content={codeBlockContent}
         lang={codeBlockLang}
         codeBlockIndex={currentCodeBlockIndex}

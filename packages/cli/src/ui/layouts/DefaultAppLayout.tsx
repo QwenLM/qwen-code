@@ -76,6 +76,7 @@ export const DefaultAppLayout: React.FC = () => {
       ? Math.min(32, dialogMaxHeight)
       : dialogMaxHeight;
   const floatingDialog =
+    constrainDialogHeight &&
     uiState.useTerminalBuffer &&
     uiState.dialogsVisible &&
     !uiState.auth.isAuthDialogOpen &&
@@ -83,6 +84,7 @@ export const DefaultAppLayout: React.FC = () => {
     !uiState.auth.isAuthenticating;
   const fillViewport =
     uiState.useTerminalBuffer &&
+    (!uiState.dialogsVisible || constrainDialogHeight) &&
     !uiState.auth.isAuthDialogOpen &&
     !uiState.auth.authError &&
     !uiState.auth.isAuthenticating;

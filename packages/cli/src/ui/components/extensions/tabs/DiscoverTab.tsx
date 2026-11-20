@@ -698,14 +698,16 @@ export const DiscoverTab = ({
                       {checkbox}
                     </Text>
                   </Box>
-                  <Text bold color={titleColor}>
+                  <Text bold color={titleColor} wrap="truncate-end">
                     {plugin.name}
                   </Text>
-                  <Text color={theme.text.secondary}>{meta}</Text>
+                  <Text color={theme.text.secondary} wrap="truncate-end">
+                    {meta}
+                  </Text>
                 </Box>
                 {plugin.description ? (
                   <Box paddingLeft={4}>
-                    <Text color={theme.text.secondary}>
+                    <Text color={theme.text.secondary} wrap="truncate-end">
                       {truncateText(plugin.description, availableWidth - 4)}
                     </Text>
                   </Box>

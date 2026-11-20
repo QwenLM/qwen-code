@@ -22,6 +22,32 @@ const sessions: SessionListItem[] = Array.from({ length: 28 }, (_, index) => ({
 }));
 
 describe('SessionPicker floating layout', () => {
+  it('R3-4 keeps the branch-filter header on its reserved row', async () => {
+    const branch = 'feature/long-branch-'.repeat(8);
+    const view = renderWithProviders(
+      <DialogSizeProvider value={{ columns: 40, rows: 20 }}>
+        <SessionPicker
+          sessionService={{} as never}
+          currentBranch={branch}
+          initialSessions={sessions.slice(0, 8).map((session, index) => ({
+            ...session,
+            prompt: `BRANCH-SESSION-${index}`,
+            gitBranch: branch,
+          }))}
+          onSelect={vi.fn()}
+          onCancel={vi.fn()}
+        />
+      </DialogSizeProvider>,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    view.stdin.write('\u0002');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(view.lastFrame()).toContain('(branch:');
+    expect(view.lastFrame()?.split('\n')[2]).toContain('Press /');
+    expect(view.lastFrame()).toContain('BRANCH-SESSION-3');
+    view.unmount();
+  });
+
   it('keeps all frame edges, long titles and metadata inside the popup budget', async () => {
     const { lastFrame, stdin } = renderWithProviders(
       <DialogSizeProvider value={{ columns: 70, rows: 20 }}>

@@ -439,6 +439,38 @@ describe('InputPrompt', () => {
     };
   });
 
+  it.each([false, true])(
+    'R3-2 reports search prefix width and restores it (shell=%s)',
+    async (shellModeActive) => {
+      const setInputPrefixWidth = vi.fn();
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        submitFeedback: vi.fn(),
+        popAllQueuedMessages: vi.fn(() => null),
+        invalidateSubmittedPromptProvenance: vi.fn(),
+        setInputPrefixWidth,
+      } as unknown as ReturnType<typeof useUIActions>);
+      const view = renderWithProviders(
+        <InputPrompt {...props} shellModeActive={shellModeActive} />,
+      );
+      await waitFor(() =>
+        expect(setInputPrefixWidth).toHaveBeenLastCalledWith(2),
+      );
+      act(() => view.stdin.write('\u0012'));
+      await waitFor(() =>
+        expect(setInputPrefixWidth).toHaveBeenLastCalledWith(6),
+      );
+      expect(view.lastFrame()).toContain('(r:)');
+      act(() => view.stdin.write('\u001b'));
+      await waitFor(() =>
+        expect(setInputPrefixWidth).toHaveBeenLastCalledWith(2),
+      );
+      view.unmount();
+      expect(setInputPrefixWidth).toHaveBeenLastCalledWith(2);
+    },
+  );
+
   it('stashes non-empty input on Ctrl+S', async () => {
     props.buffer.setText('draft prompt');
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);

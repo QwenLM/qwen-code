@@ -224,6 +224,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const isShellFocused = useShellFocusState();
   const uiState = useUIState();
   const uiActions = useUIActions();
+  const setInputPrefixWidth = uiActions.setInputPrefixWidth;
   const feedbackOpenRef = useRef(uiState.isFeedbackDialogOpen);
   useEffect(() => {
     feedbackOpenRef.current = uiState.isFeedbackDialogOpen;
@@ -2432,6 +2433,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       : approvalMode === ApprovalMode.YOLO
         ? 2 // "* " = 2 chars
         : 2; // "> " = 2 chars
+
+  useEffect(() => {
+    setInputPrefixWidth?.(prefixWidth);
+    return () => setInputPrefixWidth?.(2);
+  }, [prefixWidth, setInputPrefixWidth]);
 
   return (
     <>

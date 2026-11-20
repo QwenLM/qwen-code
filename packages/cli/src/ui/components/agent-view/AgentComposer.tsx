@@ -64,31 +64,6 @@ interface AgentComposerProps {
   active?: boolean;
 }
 
-// ─── Layout key ─────────────────────────────────────────────
-
-/**
- * Build the layout key AppContainer's controls-height measure effect depends
- * on to re-measure the agent footer. The footer's height shifts with the
- * agent's streaming state (LoadingIndicator row), terminal status row
- * (Completed/Failed/Cancelled), queued-message display, and input text
- * wrapping — none of which AppContainer can observe through its own state.
- * Syncing this key to AgentViewContext is what triggers the re-measure;
- * mirrors getLiveAgentPanelLayoutKey for the LiveAgentPanel.
- */
-export function getAgentComposerLayoutKey(parts: {
-  streamingState: StreamingState;
-  statusLabel: string;
-  queuedMessageCount: number;
-  inputText: string;
-}): string {
-  return [
-    parts.streamingState,
-    parts.statusLabel,
-    parts.queuedMessageCount,
-    parts.inputText,
-  ].join('|');
-}
-
 /**
  * The context window the agent tab's usage line is sized against. An agent
  * on the session's model shares the session's window. An agent on its own
@@ -163,7 +138,6 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
   } = useAgentViewState();
   const {
     setAgentInputBufferText,
-    setAgentComposerLayoutKey,
     setAgentTabBarFocused,
     setAgentApprovalMode,
     appendToAgentMessageQueue,
@@ -376,22 +350,6 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({
         return null;
     }
   }, [status, interactiveAgent]);
-
-  // Sync a layout key that changes whenever this footer's height can change
-  // (loading row toggling, status row appearing, queued messages growing,
-  // input wrapping). AppContainer's controls-height measure effect depends on
-  // it via AgentViewContext; without the sync, controlsHeight stays
-  // stale-high after the footer grows and the transcript viewport pushes the
-  // composer and tab bar past the terminal bottom (#9507).
-  const composerLayoutKey = getAgentComposerLayoutKey({
-    streamingState,
-    statusLabel: statusLabel?.text ?? '',
-    queuedMessageCount: messageQueue.length,
-    inputText: buffer.text,
-  });
-  useEffect(() => {
-    setAgentComposerLayoutKey(composerLayoutKey);
-  }, [composerLayoutKey, setAgentComposerLayoutKey]);
 
   // ── Approval-mode styling (mirrors main InputPrompt) ──
 

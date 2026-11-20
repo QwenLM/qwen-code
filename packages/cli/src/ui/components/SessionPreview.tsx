@@ -174,7 +174,10 @@ export function SessionPreview(props: SessionPreviewProps) {
   ) : null;
   const footer = (
     <Box key="footer" paddingX={1}>
-      <Text color={theme.text.secondary}>
+      <Text
+        color={theme.text.secondary}
+        wrap={isDialog ? 'truncate-end' : 'wrap'}
+      >
         {t('Enter to resume · Esc to back')}
       </Text>
     </Box>

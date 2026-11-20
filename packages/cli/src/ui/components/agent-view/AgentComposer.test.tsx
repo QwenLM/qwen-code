@@ -105,7 +105,6 @@ const renderWithMenu = () =>
 
 describe('AgentComposer', () => {
   const setAgentInputBufferText = vi.fn();
-  const setAgentComposerLayoutKey = vi.fn();
   const setAgentTabBarFocused = vi.fn();
   const setAgentApprovalMode = vi.fn();
   let capturedKeypressHandlers: KeypressHandler[];
@@ -174,7 +173,6 @@ describe('AgentComposer', () => {
     } as never);
     vi.mocked(useAgentViewActions).mockReturnValue({
       setAgentInputBufferText,
-      setAgentComposerLayoutKey,
       setAgentTabBarFocused,
       setAgentApprovalMode,
       setAgentMessageQueue: vi.fn(),
@@ -557,33 +555,6 @@ describe('AgentComposer', () => {
 
       expect(agentFooterProps.contextWindowSize).toBe(250_000);
     });
-  });
-
-  it('syncs the footer layout key and updates it when the agent completes', () => {
-    // AppContainer's controls-height measure effect depends on this key; it
-    // is the only re-measure trigger for the agent footer (#9507).
-    const { rerender } = render(<AgentComposer agentId="agent-1" />);
-
-    expect(setAgentComposerLayoutKey).toHaveBeenCalled();
-    const initialKey = String(setAgentComposerLayoutKey.mock.calls.at(-1)?.[0]);
-    // The input text is part of the key (input wrapping shifts the height).
-    expect(initialKey).toContain('draft');
-
-    vi.mocked(useAgentStreamingState).mockReturnValue({
-      status: AgentStatus.COMPLETED,
-      streamingState: StreamingState.Idle,
-      isInputActive: false,
-      elapsedTime: 0,
-      lastPromptTokenCount: 0,
-    } as never);
-    rerender(<AgentComposer agentId="agent-1" />);
-
-    // The terminal-status row appeared, so the key must change to trigger a
-    // re-measure of the grown footer.
-    const completedKey = String(
-      setAgentComposerLayoutKey.mock.calls.at(-1)?.[0],
-    );
-    expect(completedKey).not.toBe(initialKey);
   });
 
   // The second useKeypress call is the Shift+Tab approval-mode cycler.

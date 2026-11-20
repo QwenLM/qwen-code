@@ -7,6 +7,7 @@
 
 import { act } from 'react';
 import { render } from 'ink-testing-library';
+import { Box } from 'ink';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { waitFor } from '@testing-library/react';
 import type { Config, DiscoveredPlugin } from '@qwen-code/qwen-code-core';
@@ -55,6 +56,55 @@ describe('DiscoverTab', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
+
+  it.each(['short description', '中'.repeat(52)])(
+    'R3-5 keeps descriptions and the lower scroll hint in the row budget (%s)',
+    async (description) => {
+      const plugins = Array.from({ length: 8 }, (_, index) => ({
+        name: `cjk-plugin-${index}-${'n'.repeat(20)}`,
+        marketplaceName: 'long-marketplace-name',
+        installSource: `owner/cjk-${index}`,
+        installed: false,
+        description,
+      })) as DiscoveredPlugin[];
+      const manager = { discoverPlugins: vi.fn().mockResolvedValue(plugins) };
+      const view = render(
+        <DialogSizeProvider value={{ columns: 56, rows: 16 }}>
+          <Box
+            width={56}
+            maxHeight={16}
+            overflow="hidden"
+            flexDirection="column"
+          >
+            <DiscoverTab
+              config={
+                { getExtensionManager: () => manager } as unknown as Config
+              }
+              isActive
+              onLockChange={vi.fn()}
+              onStatus={vi.fn()}
+              onInstalled={vi.fn()}
+              reloadSignal={0}
+            />
+          </Box>
+        </DialogSizeProvider>,
+      );
+      await waitFor(() => expect(view.lastFrame()).toContain('cjk-plugin-0'));
+      expect(view.lastFrame()).toMatch(/╭─+╮\n│[^\n]*⌕ Search…[^\n]*│\n╰─+╯/);
+      expect(view.lastFrame()).toContain('cjk-plugin-2');
+      expect(view.lastFrame()).toContain('↓ more below');
+      if (description.includes('中')) {
+        expect(
+          view
+            .lastFrame()
+            ?.split('\n')
+            .filter((line) => line.includes('中')),
+        ).toHaveLength(3);
+      }
+      expect(view.lastFrame()?.split('\n').length).toBeLessThanOrEqual(16);
+      view.unmount();
+    },
+  );
 
   it('PR17541 R1-9 uses the available dialog rows for two complete plugins', async () => {
     const plugins = Array.from({ length: 5 }, (_, i) => ({

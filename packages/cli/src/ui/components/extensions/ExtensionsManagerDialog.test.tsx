@@ -267,6 +267,7 @@ describe('ExtensionsManagerDialog (tabbed)', () => {
       stdin.write(' ');
       await waitFor(() => expect(manager.disableExtension).toHaveBeenCalled());
       await waitFor(() => expect(lastFrame()).toContain('错误：插件权限'));
+      await waitFor(() => expect(lastFrame()).toMatch(/●.*entry-16/));
       const errorFrame = stripAnsi(lastFrame() ?? '');
       expect(errorFrame.split('\n').length).toBeLessThanOrEqual(rows);
       expect(errorFrame).toMatch(/●.*entry-16/);

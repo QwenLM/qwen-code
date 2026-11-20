@@ -59,7 +59,7 @@ jobs:
               render: [
                 /^packages\/cli\/src\/ui\/.*(status.?line|footer|header|viewport|transcript|messages|markdown|theme|colors|layout|textUtils|HistoryItemDisplay|useGitBranchName|hooksCommand|contexts\/SessionContext|model\/)/i,
                 /^packages\/core\/src\/telemetry\/uiTelemetry/i,
-                /^integration-tests\/(renderer-matrix|interactive\/(tui-migration|interactive-session-viewport|statusline-parity))/i,
+                /^integration-tests\/(renderer-matrix|interactive\/(tui-migration|tui-dialog-bounds|interactive-session-viewport|statusline-parity))/i,
               ],
               input: [
                 /^packages\/cli\/src\/(ui\/.*(input|keypress|key-map|keyMatchers|kitty|mouse|focus|editor|clipboard|paste|text-buffer|line-edit|vim|completion|atCommandProcessor|useShellHistory)|utils\/.*(clipboard|paste|editor))/i,
@@ -257,7 +257,7 @@ jobs:
           for leg in node:ink bun:ink bun:opentui; do
             export QWEN_E2E_RUNTIME="${leg%%:*}"
             export QWEN_E2E_RENDERER="${leg#*:}"
-            npx vitest run interactive/tui-migration.test.ts interactive/tui-input-ownership.test.ts interactive/tui-foreground-shell.test.ts interactive/tui-clipboard-source.test.ts interactive/tui-extension-acquisition.test.ts interactive/tui-session-recovery.test.ts interactive/tui-editor-parity.test.ts interactive/statusline-parity.test.ts interactive/tui-dual-output.test.ts interactive/tui-memory-manager.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false || failed=1
+            npx vitest run interactive/tui-migration.test.ts interactive/tui-dialog-bounds.test.ts interactive/tui-input-ownership.test.ts interactive/tui-foreground-shell.test.ts interactive/tui-clipboard-source.test.ts interactive/tui-extension-acquisition.test.ts interactive/tui-session-recovery.test.ts interactive/tui-editor-parity.test.ts interactive/statusline-parity.test.ts interactive/tui-dual-output.test.ts interactive/tui-memory-manager.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false || failed=1
           done
           exit "$failed"
       - name: 'Targeted product acceptance (Node+Ink, Bun+Ink, Bun+OpenTUI)'
@@ -278,7 +278,7 @@ jobs:
           tests=()
           if [ "$TUI_RENDER" = true ]; then
             npx vitest run renderer-matrix.test.ts interactive/interactive-session-viewport.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false
-            tests+=(interactive/tui-migration.test.ts interactive/statusline-parity.test.ts)
+            tests+=(interactive/tui-migration.test.ts interactive/tui-dialog-bounds.test.ts interactive/statusline-parity.test.ts)
           fi
           if [ "$TUI_INPUT" = true ]; then
             tests+=(interactive/tui-input-ownership.test.ts interactive/tui-editor-parity.test.ts interactive/tui-clipboard-source.test.ts)

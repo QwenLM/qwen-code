@@ -195,6 +195,7 @@ it(`acquires a real source through Discover and cold reload on ${runtime}+${rend
     json(join(scratch, 'system.json'), { $version: 4 });
     json(join(scratch, 'defaults.json'), { $version: 4 });
     json(join(home, 'settings.json'), {
+      $version: 4,
       security: {
         auth: { selectedType: 'openai' },
         folderTrust: { enabled: true },
@@ -202,6 +203,29 @@ it(`acquires a real source through Discover and cold reload on ${runtime}+${rend
       general: { enableAutoUpdate: false, showSessionRecap: false },
       ui: { enableFollowupSuggestions: false },
       memory: E2E_MEMORY_SETTINGS_DEFAULTS,
+      model: {
+        generationConfig: {
+          modalities: { image: false, audio: false, video: false, pdf: false },
+        },
+      },
+      fastModel: 'qwen-extension-e2e',
+      compactionModel: 'qwen-extension-e2e',
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen-extension-e2e',
+            envKey: 'OPENAI_API_KEY',
+            generationConfig: {
+              modalities: {
+                image: false,
+                audio: false,
+                video: false,
+                pdf: false,
+              },
+            },
+          },
+        ],
+      },
     });
     server = await startFakeOpenAIServer(() => ({
       content: 'UNEXPECTED_ACQUISITION_HTTP',
@@ -248,6 +272,16 @@ it(`acquires a real source through Discover and cold reload on ${runtime}+${rend
       });
       sessions.push(session);
       await screen(`startup-${sessions.length}`, ['Type your message']);
+      await submit('/model');
+      await screen(`native-config-${sessions.length}`, [
+        'Select Model',
+        'Modality:',
+        'text-only',
+      ]);
+      expect(frames[`native-config-${sessions.length}`]).toMatch(
+        /›[^\n]*qwen-extension-e2e[^\n]*\(Runtime\)/,
+      );
+      await key('\x1b');
     };
     await start();
     sourceStates['startup'] = sourceState();
@@ -443,6 +477,7 @@ it(`acquires a real source through Discover and cold reload on ${runtime}+${rend
     for (const active of sessions) await preserve(() => active.close());
     await preserve(() => server?.close());
     for (const [name, file] of Object.entries({
+      'native-settings.json': join(home, 'settings.json'),
       'marketplace.json': join(market, '.claude-plugin', 'marketplace.json'),
       'trusted-folders.json': trust,
       'marketplaces.json': registry,

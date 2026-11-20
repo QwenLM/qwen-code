@@ -433,6 +433,23 @@ describe('DefaultAppLayout', () => {
     expect(output).toContain('DialogManager 20');
   });
 
+  it('R3-6 releases the floating dialog budget when height constraints are disabled', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+    });
+    dialogManagerMockState.lineCount = 20;
+    const view = renderLayout({
+      ...baseUIState,
+      dialogsVisible: true,
+      useTerminalBuffer: true,
+      terminalHeight: 8,
+      constrainHeight: false,
+    });
+    expect(view.lastFrame()).toContain('DialogManager 20');
+    view.unmount();
+  });
+
   it('caps floating settings and session windows on tall terminals', () => {
     mockedUseAgentViewState.mockReturnValue({
       activeView: 'main',

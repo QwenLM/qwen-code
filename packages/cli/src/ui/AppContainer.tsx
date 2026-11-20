@@ -1565,11 +1565,14 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [historyManager.addItem]);
 
   // Derive widths for InputPrompt using shared helper
+  const [inputPrefixWidth, setInputPrefixWidth] = useState(2);
   const { inputWidth, suggestionsWidth } = useMemo(() => {
-    const { inputWidth, suggestionsWidth } =
-      calculatePromptWidths(terminalWidth);
+    const { inputWidth, suggestionsWidth } = calculatePromptWidths(
+      terminalWidth,
+      inputPrefixWidth,
+    );
     return { inputWidth, suggestionsWidth };
-  }, [terminalWidth]);
+  }, [terminalWidth, inputPrefixWidth]);
   // Uniform width for bordered box components: accounts for margins and caps at 100
   const mainAreaWidth = Math.min(terminalWidth - 4, 100);
   const staticAreaMaxItemHeight = Math.max(terminalHeight * 4, 100);
@@ -5697,6 +5700,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleProjectHooksApprovalSelect,
       setConstrainHeight,
       onEscapePromptChange: handleEscapePromptChange,
+      setInputPrefixWidth,
       onTabConsumerChange: setHasTabConsumer,
       refreshStatic,
       handleFinalSubmit,

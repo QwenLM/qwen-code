@@ -15,6 +15,7 @@ import { DefaultDark } from '../themes/default.js';
 import * as lowlightLoader from './lowlightLoader.js';
 import * as colorizer from './CodeColorizer.js';
 import { MarkdownDisplay } from './MarkdownDisplay.js';
+import { LoadedSettings } from '../../config/settings.js';
 
 const originalTheme = themeManager.getActiveTheme().name;
 const settledCode = '```javascript\nconst stable = 1;\n```\n\n';
@@ -58,7 +59,7 @@ function view(
   );
 }
 
-function mountView(text: string) {
+function mountView(text: string, settings?: LoadedSettings) {
   type Options = Parameters<typeof view>[1];
   let update!: (text: string, options?: Options) => void;
   function App() {
@@ -68,7 +69,7 @@ function mountView(text: string) {
     update = (text, options) => setState({ text, options });
     return view(state.text, state.options);
   }
-  const app = renderWithProviders(<App />);
+  const app = renderWithProviders(<App />, { settings });
   return {
     ...app,
     update: (text: string, options?: Options) => {
@@ -78,6 +79,37 @@ function mountView(text: string) {
 }
 
 describe('streaming Markdown reuse', () => {
+  it('R3-7 invalidates a frozen code prefix after line-number settings change', async () => {
+    const empty = () => ({ path: '', settings: {}, originalSettings: {} });
+    const user = {
+      path: '',
+      settings: { ui: { showLineNumbers: true } },
+      originalSettings: {},
+    };
+    const settings = new LoadedSettings(
+      empty(),
+      empty(),
+      user,
+      empty(),
+      true,
+      new Set(),
+    );
+    const spy = vi.spyOn(colorizer, 'colorizeCode');
+    const app = mountView(settledCode + 'tail', settings);
+    await tick();
+    app.update(settledCode + 'tail grows');
+    await tick();
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(app.lastFrame()).toContain('1 const stable = 1;');
+    user.settings.ui.showLineNumbers = false;
+    settings.recomputeMerged();
+    app.update(settledCode + 'tail grows again');
+    await tick();
+    expect(app.lastFrame()).toContain('const stable = 1;');
+    expect(app.lastFrame()).not.toContain('1 const stable = 1;');
+    app.unmount();
+  });
+
   it('does not rebuild completed code while the following paragraph grows', async () => {
     const spy = vi.spyOn(colorizer, 'colorizeCode');
     const app = mountView(settledCode + 'tail');

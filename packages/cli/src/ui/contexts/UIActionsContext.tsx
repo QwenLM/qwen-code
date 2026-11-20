@@ -80,6 +80,7 @@ export interface UIActions {
     choice: ProjectHooksApprovalChoice,
   ) => void;
   setConstrainHeight: (value: boolean) => void;
+  setInputPrefixWidth?: (width: number) => void;
   onEscapePromptChange: (show: boolean) => void;
   onTabConsumerChange: (active: boolean) => void;
   refreshStatic: () => void;

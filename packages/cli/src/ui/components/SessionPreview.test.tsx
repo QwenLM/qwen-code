@@ -87,6 +87,38 @@ function fakeResumedData(
 }
 
 describe('SessionPreview', () => {
+  it('R3-3 paints the last preview line with a narrow one-row footer', async () => {
+    const svc = mockService(
+      fakeResumedData([
+        {
+          text: Array.from(
+            { length: 20 },
+            (_, index) => `NARROW-LINE-${index + 1}`,
+          ).join('\n'),
+        },
+      ]),
+    );
+    const view = renderWithProviders(
+      <DialogSizeProvider value={{ columns: 30, rows: 20 }}>
+        <SessionPreview
+          sessionService={svc}
+          sessionId="s1"
+          sessionTitle="Narrow preview"
+          onExit={vi.fn()}
+          onResume={vi.fn()}
+        />
+      </DialogSizeProvider>,
+    );
+    await wait(150);
+    for (let index = 0; index < 8; index++) {
+      view.stdin.write('\u001b[6~');
+      await wait(20);
+    }
+    expect(view.lastFrame()).toContain('NARROW-LINE-20');
+    expect(view.lastFrame()?.split('\n').length).toBeLessThanOrEqual(20);
+    view.unmount();
+  });
+
   it('keeps preview navigation paused while its context menu owns Enter and Escape', async () => {
     const onExit = vi.fn();
     const onResume = vi.fn();

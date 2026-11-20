@@ -946,7 +946,7 @@ export function PermissionsDialog({
       >
         <Text color={theme.text.accent}>{'> '}</Text>
         {searchQuery ? (
-          <Text wrap="truncate-end">{searchQuery}</Text>
+          <Text wrap="truncate-start">{searchQuery}</Text>
         ) : (
           <Text color={Colors.Gray}>{t('Search…')}</Text>
         )}

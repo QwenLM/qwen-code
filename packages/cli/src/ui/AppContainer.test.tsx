@@ -7818,6 +7818,48 @@ describe('AppContainer State Management', () => {
       vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue(undefined!);
     });
 
+    it('R3-2 resizes the live text buffer when the input prefix changes', async () => {
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      mockedUseTerminalSize.mockReturnValue({ columns: 100, rows: 30 });
+      let view: ReturnType<typeof render>;
+      await act(async () => {
+        view = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
+      expect(mockedUseTextBuffer.mock.calls.at(-1)?.[0].viewport.width).toBe(
+        94,
+      );
+      await act(async () => capturedUIActions.setInputPrefixWidth?.(6));
+      expect(mockedUseTextBuffer.mock.calls.at(-1)?.[0].viewport.width).toBe(
+        90,
+      );
+      mockedUseTerminalSize.mockReturnValue({ columns: 120, rows: 30 });
+      await act(async () => {
+        view!.rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
+      expect(mockedUseTextBuffer.mock.calls.at(-1)?.[0].viewport.width).toBe(
+        110,
+      );
+      await act(async () => capturedUIActions.setInputPrefixWidth?.(2));
+      expect(mockedUseTextBuffer.mock.calls.at(-1)?.[0].viewport.width).toBe(
+        114,
+      );
+      view!.unmount();
+    });
+
     it('updates transcript height when controls geometry changes without input changes', async () => {
       vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       mockedUseTerminalSize.mockReturnValue({ columns: 100, rows: 50 });
@@ -8495,45 +8537,48 @@ describe('AppContainer State Management', () => {
       mockedUseTerminalSize.mockReturnValue({ columns: 80, rows: 24 });
       mockedMeasureElement.mockReturnValue({ width: 80, height: 4 });
 
-      let view: ReturnType<typeof render>;
-      await act(async () => {
-        view = render(
+      let refresh!: () => void;
+      function Harness() {
+        const [, update] = useReducer((value: number) => value + 1, 0);
+        refresh = update;
+        return (
           <AppContainer
             config={mockConfig}
             settings={mockSettings}
             version="1.0.0"
             initializationResult={mockInitResult}
-          />,
+          />
         );
+      }
+      let view: ReturnType<typeof render>;
+      await act(async () => {
+        view = render(<Harness />);
       });
 
       // Let any pending state updates from useLayoutEffect settle.
       await act(async () => {
-        view!.rerender(
-          <AppContainer
-            config={mockConfig}
-            settings={mockSettings}
-            version="1.0.0"
-            initializationResult={mockInitResult}
-          />,
-        );
+        refresh();
       });
 
       const heightAfterSettle = capturedUIState.availableTerminalHeight;
 
       historyManager.history = makeTodoHistory('in_progress');
       await act(async () => {
-        view!.rerender(
-          <AppContainer
-            config={mockConfig}
-            settings={mockSettings}
-            version="1.0.0"
-            initializationResult={mockInitResult}
-          />,
-        );
+        refresh();
       });
 
       expect(capturedUIState.availableTerminalHeight).toBe(heightAfterSettle);
+      expect(boxLayoutListeners.size).toBeGreaterThan(0);
+      mockedMeasureElement.mockReturnValue({ width: 80, height: 10 });
+      await act(async () =>
+        boxLayoutListeners.forEach((listener) => listener()),
+      );
+      await vi.waitFor(() =>
+        expect(capturedUIState.availableTerminalHeight).toBe(
+          heightAfterSettle! - 6,
+        ),
+      );
+      view!.unmount();
     });
   });
 
