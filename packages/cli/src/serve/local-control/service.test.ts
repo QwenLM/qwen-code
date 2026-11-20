@@ -130,6 +130,54 @@ describe('LocalControlService', () => {
     }
   });
 
+  it('prunes closed sockets before the disable force-close sweep', async () => {
+    const port = await unusedPort();
+    const accepted: NetSocket[] = [];
+    const service = new LocalControlService({
+      app: express(),
+      credentials: new CredentialStore(),
+      originAllowlist: new MutableOriginAllowlist({
+        allowAny: false,
+        origins: new Set(),
+      }),
+      attachWebSocket: (server) => {
+        server.on('connection', (socket) => accepted.push(socket));
+      },
+      detachWebSocket: vi.fn(),
+      getPort: () => port,
+    });
+    const connectClient = () =>
+      new Promise<NetSocket>((resolve, reject) => {
+        const client = netConnect(port, '127.0.0.1', () => resolve(client));
+        client.once('error', reject);
+      });
+
+    await service.enable();
+    const firstClient = await connectClient();
+    let secondClient: NetSocket | undefined;
+    try {
+      await vi.waitFor(() => expect(accepted).toHaveLength(1));
+      const closedSocket = accepted[0]!;
+      const closed = new Promise<void>((resolve) => {
+        closedSocket.once('close', resolve);
+      });
+      firstClient.destroy();
+      await closed;
+      const destroyClosed = vi.spyOn(closedSocket, 'destroy');
+
+      // A second live socket keeps disable()'s close sweep observable.
+      secondClient = await connectClient();
+      await vi.waitFor(() => expect(accepted).toHaveLength(2));
+      await service.disable();
+
+      expect(destroyClosed).not.toHaveBeenCalled();
+    } finally {
+      firstClient.destroy();
+      secondClient?.destroy();
+      await service.disable();
+    }
+  });
+
   it('serializes lifecycle changes and fully revokes state on disable', async () => {
     const port = await unusedPort();
     const credentials = new CredentialStore();
