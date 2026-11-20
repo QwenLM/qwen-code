@@ -53,6 +53,9 @@ afterAll(() => {
 
 afterEach(() => {
   _resetEnsuredDirsCacheForTest();
+  // The cooldown cases fake only Date; a setup failure before their try block
+  // must not leak that clock into later cases.
+  vi.useRealTimers();
 });
 
 const tmpPath = (prefix: string) =>
@@ -1274,7 +1277,7 @@ describe('writeLine / writeLineSync / write', () => {
       });
     });
 
-    it('warns again for an evicted path after exceeding the cache bound', async () => {
+    it('keeps delivered suppressions when the diagnostic cache is full', async () => {
       const sessionId = `jsonl-tail-log-bound-${name}`;
       await withDebugLog(sessionId, true, async (logPath) => {
         const files = Array.from({ length: 129 }, () => tmpFile(''));
@@ -1284,24 +1287,282 @@ describe('writeLine / writeLineSync / write', () => {
         const spy = denyTailProbe(error);
 
         try {
+          // A burst with no delivery settled in between: an in-flight slot owns
+          // its suppression just as a delivered one does, so the bound must not
+          // depend on delivery timing.
           for (const [index, file] of files.entries()) {
             await append(file, { index });
           }
           await vi.waitFor(() => {
-            expect(tailWarnings(logPath)).toHaveLength(files.length);
+            expect(tailWarnings(logPath)).toHaveLength(128);
           });
-          await append(files[0], { evicted: true });
-          await vi.waitFor(() => {
-            expect(tailWarnings(logPath)).toHaveLength(files.length + 1);
-          });
+          await flushDebugSink(logPath, `bound-${name}`);
 
-          expect(tailWarnings(logPath, files[0])).toHaveLength(2);
-          expect(tailWarnings(logPath, files[1])).toHaveLength(1);
+          expect(tailWarnings(logPath)).toHaveLength(128);
+          expect(tailWarnings(logPath, files[128])).toHaveLength(0);
+
+          await append(files[0], { again: true });
+          await append(files[128], { again: true });
+          await flushDebugSink(logPath, `bound-recheck-${name}`);
+
+          expect(tailWarnings(logPath)).toHaveLength(128);
+          expect(tailWarnings(logPath, files[0])).toHaveLength(1);
           expect(
             spy.mock.calls.filter(([, flags]) => flags === tailProbeFlags),
-          ).toHaveLength(files.length + 1);
+          ).toHaveLength(files.length + 2);
         } finally {
           spy.mockRestore();
+        }
+      });
+    });
+
+    it('evicts an undelivered entry to admit a new path', async () => {
+      const sessionId = `jsonl-tail-log-evict-undelivered-${name}`;
+      await withDebugLog(sessionId, true, async (logPath) => {
+        // A directory at the log path makes every debug append fail, so no
+        // entry is ever retained and eviction stays observable.
+        fs.mkdirSync(logPath, { recursive: true });
+        const files = Array.from({ length: 129 }, () => tmpFile(''));
+        const denySpy = denyTailProbe(
+          Object.assign(new Error('read denied'), { code: 'EACCES' }),
+        );
+        const { spy: appendSpy, attempts } = trackDebugAppends(logPath);
+
+        try {
+          for (const [index, file] of files.entries()) {
+            await append(file, { index });
+            await vi.waitFor(() => {
+              expect(attempts).toHaveLength(index + 1);
+            });
+            await settleDelivery(attempts[index]);
+          }
+          expect(await Promise.all(attempts)).toEqual(
+            Array.from({ length: 129 }, () => false),
+          );
+
+          // files[0] was reclaimed to admit files[128], so it comes back with a
+          // fresh three-attempt budget. A cache that never evicted would still
+          // hold its spent entry and admit only two more attempts, so counting
+          // one re-delivery alone would not pin eviction.
+          for (let round = 0; round < 3; round++) {
+            await append(files[0], { again: round });
+            await vi.waitFor(() => {
+              expect(attempts).toHaveLength(130 + round);
+            });
+            await settleDelivery(attempts[129 + round]);
+          }
+          expect(await Promise.all(attempts.slice(129))).toEqual([
+            false,
+            false,
+            false,
+          ]);
+
+          // The sink is still a directory, so no warning could land.
+          expect(fs.statSync(logPath).isDirectory()).toBe(true);
+          expect(debugLogger.isDebugLoggingDegraded()).toBe(true);
+        } finally {
+          appendSpy.mockRestore();
+          denySpy.mockRestore();
+        }
+      });
+    });
+
+    it('delivers one warning after the cooldown window when the sink recovers', async () => {
+      const sessionId = `jsonl-tail-log-cooldown-${name}`;
+      await withDebugLog(sessionId, true, async (logPath) => {
+        vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: true });
+        vi.setSystemTime(new Date('2026-11-20T00:00:00.000Z'));
+        fs.mkdirSync(logPath, { recursive: true });
+        const file = tmpFile('{"partial":');
+        const denySpy = denyTailProbe(
+          Object.assign(new Error('read denied'), { code: 'EACCES' }),
+        );
+        const { spy: appendSpy, attempts } = trackDebugAppends(logPath);
+
+        try {
+          for (let index = 0; index < 3; index++) {
+            await append(file, { index });
+            await vi.waitFor(() => {
+              expect(attempts).toHaveLength(index + 1);
+            });
+            await settleDelivery(attempts[index]);
+          }
+          expect(await Promise.all(attempts)).toEqual([false, false, false]);
+
+          // Repaired at the same path, but still inside the cooldown window.
+          fs.rmdirSync(logPath);
+          await append(file, { stage: 'inside-window' });
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(attempts).toHaveLength(3);
+
+          vi.advanceTimersByTime(60_001);
+          await append(file, { stage: 'recovered' });
+          await vi.waitFor(() => {
+            expect(attempts).toHaveLength(4);
+          });
+          expect(await settleDelivery(attempts[3])).toBe(true);
+          expect(tailWarnings(logPath, file)).toHaveLength(1);
+
+          // Delivered: neither further appends nor a later window re-warn.
+          await append(file, { stage: 'deduplicated' });
+          vi.advanceTimersByTime(120_000);
+          await append(file, { stage: 'later-window' });
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(attempts).toHaveLength(4);
+
+          // The sink-health marker is itself a debug append, so drain it only
+          // after the diagnostic attempt count is pinned.
+          await flushDebugSink(logPath, `cooldown-${name}`);
+          expect(tailWarnings(logPath, file)).toHaveLength(1);
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"partial":\n{"index":0}\n\n{"index":1}\n\n{"index":2}\n\n' +
+              '{"stage":"inside-window"}\n\n{"stage":"recovered"}\n\n' +
+              '{"stage":"deduplicated"}\n\n{"stage":"later-window"}\n',
+          );
+        } finally {
+          appendSpy.mockRestore();
+          denySpy.mockRestore();
+          vi.useRealTimers();
+        }
+      });
+    });
+
+    it('admits at most one retry attempt per cooldown window', async () => {
+      const sessionId = `jsonl-tail-log-cooldown-bound-${name}`;
+      await withDebugLog(sessionId, true, async (logPath) => {
+        vi.useFakeTimers({ toFake: ['Date'], shouldAdvanceTime: true });
+        vi.setSystemTime(new Date('2026-11-20T00:00:00.000Z'));
+        fs.mkdirSync(logPath, { recursive: true });
+        const file = tmpFile('{"partial":');
+        const denySpy = denyTailProbe(
+          Object.assign(new Error('read denied'), { code: 'EACCES' }),
+        );
+        const { spy: appendSpy, attempts } = trackDebugAppends(logPath);
+
+        try {
+          for (let index = 0; index < 3; index++) {
+            await append(file, { index });
+            await vi.waitFor(() => {
+              expect(attempts).toHaveLength(index + 1);
+            });
+            await settleDelivery(attempts[index]);
+          }
+
+          vi.advanceTimersByTime(60_001);
+          await append(file, { probe: 1 });
+          await vi.waitFor(() => {
+            expect(attempts).toHaveLength(4);
+          });
+          await settleDelivery(attempts[3]);
+
+          // Same window: the spent budget admits no second probe.
+          await append(file, { probe: 2 });
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(attempts).toHaveLength(4);
+
+          vi.advanceTimersByTime(60_001);
+          await append(file, { probe: 3 });
+          await vi.waitFor(() => {
+            expect(attempts).toHaveLength(5);
+          });
+          await settleDelivery(attempts[4]);
+
+          expect(await Promise.all(attempts)).toEqual([
+            false,
+            false,
+            false,
+            false,
+            false,
+          ]);
+          expect(fs.statSync(logPath).isDirectory()).toBe(true);
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"partial":\n{"index":0}\n\n{"index":1}\n\n{"index":2}\n\n' +
+              '{"probe":1}\n\n{"probe":2}\n\n{"probe":3}\n',
+          );
+        } finally {
+          appendSpy.mockRestore();
+          denySpy.mockRestore();
+          vi.useRealTimers();
+        }
+      });
+    });
+
+    it('does not let a replaced pending delivery settle a newer entry', async () => {
+      const sessionId = `jsonl-tail-log-stale-${name}`;
+      await withDebugLog(sessionId, true, async (logPath) => {
+        const file = tmpFile('{"partial":');
+        const denySpy = denyTailProbe(
+          Object.assign(new Error('read denied'), { code: 'EACCES' }),
+        );
+        const realAppend = fs.promises.appendFile.bind(fs.promises);
+        const gates: Array<{
+          open: () => void;
+          fail: (error: Error) => void;
+        }> = [];
+        // Only tail diagnostics are held back; sink-health markers flow.
+        const appendSpy = vi
+          .spyOn(fs.promises, 'appendFile')
+          .mockImplementation((async (
+            ...args: Parameters<typeof fs.promises.appendFile>
+          ) => {
+            if (
+              args[0] !== logPath ||
+              !String(args[1]).includes('Cannot inspect JSONL tail')
+            ) {
+              return realAppend(...args);
+            }
+            let open!: () => void;
+            let fail!: (error: Error) => void;
+            const gate = new Promise<void>((resolve, reject) => {
+              open = resolve;
+              fail = reject;
+            });
+            gates.push({ open, fail });
+            await gate;
+            return realAppend(...args);
+          }) as typeof fs.promises.appendFile);
+
+        try {
+          await append(file, { stage: 'first' });
+          await vi.waitFor(() => {
+            expect(gates).toHaveLength(1);
+          });
+          // Eviction never reclaims an in-flight slot, so the remaining way an
+          // entry is replaced mid-delivery is the test-only cache reset. The
+          // guard must still keep the orphaned completion out of the new entry.
+          _resetEnsuredDirsCacheForTest();
+          await append(file, { stage: 'second' });
+          await vi.waitFor(() => {
+            expect(gates).toHaveLength(2);
+          });
+
+          // The orphaned attempt now fails. Its completion must not settle the
+          // newer entry, which is still in flight.
+          gates[0].fail(
+            Object.assign(new Error('sink failed'), { code: 'EIO' }),
+          );
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          await append(file, { stage: 'still-pending' });
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          expect(gates).toHaveLength(2);
+
+          gates[1].open();
+          await vi.waitFor(() => {
+            expect(tailWarnings(logPath, file)).toHaveLength(1);
+          });
+          await append(file, { stage: 'retained' });
+          await flushDebugSink(logPath, `stale-${name}`);
+
+          expect(gates).toHaveLength(2);
+          expect(tailWarnings(logPath, file)).toHaveLength(1);
+          expect(fs.readFileSync(file, 'utf8')).toBe(
+            '{"partial":\n{"stage":"first"}\n\n{"stage":"second"}\n\n' +
+              '{"stage":"still-pending"}\n\n{"stage":"retained"}\n',
+          );
+        } finally {
+          for (const gate of gates) gate.open();
+          appendSpy.mockRestore();
+          denySpy.mockRestore();
         }
       });
     });
@@ -1512,6 +1773,9 @@ describe('writeLine / writeLineSync / write', () => {
           await expect(append(file, { next: true })).rejects.toMatchObject({
             code: 'EIO',
           });
+          // This fstat runs inside the ENOENT recovery catch, so it reaches the
+          // caller only through the recovery rethrow's file context.
+          expect(error.message).toBe(`fstat failed (file: ${file})`);
           expect(writer?.close).toHaveBeenCalledOnce();
           expect(writer?.fd).toBe(-1);
         } finally {
@@ -1539,6 +1803,7 @@ describe('writeLine / writeLineSync / write', () => {
           await expect(
             Promise.resolve().then(() => append(file, { next: true })),
           ).rejects.toMatchObject({ code: 'EIO' });
+          expect(error.message).toBe(`fstat failed (file: ${file})`);
           expect(closeSpy).toHaveBeenCalledWith(descriptor);
           let closeError: unknown;
           try {
@@ -1552,6 +1817,258 @@ describe('writeLine / writeLineSync / write', () => {
           closeSpy.mockRestore();
           openSpy.mockRestore();
         }
+      }
+    });
+
+    it('appends through the validated writer, then syncs and closes it', async () => {
+      // A missing path takes the ENOENT branch, which keeps an explicit writer.
+      const file = tmpPath('writer-lifecycle');
+      let writer: fs.promises.FileHandle | undefined;
+      let descriptor: number | undefined;
+      const open = fs.promises.open.bind(fs.promises);
+      const openSync = fs.openSync.bind(fs);
+      const openSpy =
+        name === 'writeLine'
+          ? vi
+              .spyOn(fs.promises, 'open')
+              .mockImplementation(async (...args) => {
+                const handle = await open(...args);
+                if (args[0] === file && args[1] === 'a') {
+                  writer = handle;
+                  vi.spyOn(handle, 'sync');
+                  vi.spyOn(handle, 'close');
+                }
+                return handle;
+              })
+          : vi.spyOn(fs, 'openSync').mockImplementation((...args) => {
+              const result = openSync(...args);
+              if (args[0] === file && args[1] === 'a') descriptor = result;
+              return result;
+            });
+      const appendSpy =
+        name === 'writeLine'
+          ? vi.spyOn(fs.promises, 'appendFile')
+          : vi.spyOn(fs, 'appendFileSync');
+      const closeSpy =
+        name === 'writeLine' ? undefined : vi.spyOn(fs, 'closeSync');
+
+      try {
+        await append(file, { next: true });
+        const target = name === 'writeLine' ? writer : descriptor;
+        expect(target).toBeDefined();
+        expect(appendSpy.mock.calls[0]?.[0]).toBe(target);
+        if (name === 'writeLine') {
+          expect(writer?.sync).toHaveBeenCalled();
+          expect(writer?.close).toHaveBeenCalledOnce();
+          expect(writer?.fd).toBe(-1);
+        } else {
+          expect(closeSpy).toHaveBeenCalledWith(descriptor);
+          let closeError: unknown;
+          try {
+            fs.fstatSync(descriptor!);
+          } catch (error) {
+            closeError = error;
+          }
+          expect(closeError).toMatchObject({ code: 'EBADF' });
+        }
+        expect(fs.readFileSync(file, 'utf8')).toBe('{"next":true}\n');
+      } finally {
+        openSpy.mockRestore();
+        appendSpy.mockRestore();
+        closeSpy?.mockRestore();
+      }
+    });
+
+    it('propagates a writer flush failure and still closes the writer', async () => {
+      const file = tmpPath('writer-flush-fails');
+      const failure = Object.assign(new Error('flush failed'), { code: 'EIO' });
+      let writer: fs.promises.FileHandle | undefined;
+      let descriptor: number | undefined;
+      const open = fs.promises.open.bind(fs.promises);
+      const openSync = fs.openSync.bind(fs);
+      const openSpy =
+        name === 'writeLine'
+          ? vi
+              .spyOn(fs.promises, 'open')
+              .mockImplementation(async (...args) => {
+                const handle = await open(...args);
+                if (args[0] === file && args[1] === 'a') {
+                  writer = handle;
+                  vi.spyOn(handle, 'sync').mockRejectedValue(failure);
+                  vi.spyOn(handle, 'close');
+                }
+                return handle;
+              })
+          : vi.spyOn(fs, 'openSync').mockImplementation((...args) => {
+              const result = openSync(...args);
+              if (args[0] === file && args[1] === 'a') descriptor = result;
+              return result;
+            });
+      // Async flushes through the explicit sync(); sync flushes inside
+      // appendFileSync's flush:true.
+      const flushSpy =
+        name === 'writeLine'
+          ? undefined
+          : vi.spyOn(fs, 'appendFileSync').mockImplementation(() => {
+              throw failure;
+            });
+      const closeSpy =
+        name === 'writeLine' ? undefined : vi.spyOn(fs, 'closeSync');
+
+      try {
+        await expect(
+          Promise.resolve().then(() => append(file, { next: true })),
+        ).rejects.toBe(failure);
+        if (name === 'writeLine') {
+          expect(writer?.close).toHaveBeenCalledOnce();
+          expect(writer?.fd).toBe(-1);
+          // The record reached the file before the flush failed. The failure
+          // still propagates instead of being reported as a durable write.
+          expect(fs.readFileSync(file, 'utf8')).toBe('{"next":true}\n');
+        } else {
+          expect(closeSpy).toHaveBeenCalledWith(descriptor);
+          expect(fs.readFileSync(file, 'utf8')).toBe('');
+        }
+      } finally {
+        openSpy.mockRestore();
+        flushSpy?.mockRestore();
+        closeSpy?.mockRestore();
+      }
+    });
+
+    it('appends by pathname without retaining a writer for a readable file', async () => {
+      const file = tmpFile('{"existing":true}\n');
+      const appendSpy =
+        name === 'writeLine'
+          ? vi.spyOn(fs.promises, 'appendFile')
+          : vi.spyOn(fs, 'appendFileSync');
+
+      try {
+        await append(file, { next: true });
+        // A retained writer would appear here as a handle/descriptor, so the
+        // pathname proves the explicit sync()/close() path did not run.
+        expect(appendSpy.mock.calls[0]?.[0]).toBe(file);
+        expect(fs.readFileSync(file, 'utf8')).toBe(
+          '{"existing":true}\n{"next":true}\n',
+        );
+      } finally {
+        appendSpy.mockRestore();
+      }
+    });
+
+    it.runIf(process.platform !== 'win32')(
+      'targets the FIFO writer handle and closes it after a failed append',
+      async () => {
+        const fifo = tmpPath('fifo-writer-handle');
+        execFileSync('mkfifo', [fifo]);
+        // A reader must exist so the append-only open does not block.
+        const reader = fs.openSync(fifo, tailProbeFlags);
+        const failure = Object.assign(new Error('append failed'), {
+          code: 'EIO',
+        });
+        let writer: fs.promises.FileHandle | undefined;
+        let descriptor: number | undefined;
+        const open = fs.promises.open.bind(fs.promises);
+        const openSync = fs.openSync.bind(fs);
+        const openSpy =
+          name === 'writeLine'
+            ? vi
+                .spyOn(fs.promises, 'open')
+                .mockImplementation(async (...args) => {
+                  const handle = await open(...args);
+                  if (args[0] === fifo && args[1] === 'a') {
+                    writer = handle;
+                    vi.spyOn(handle, 'close');
+                  }
+                  return handle;
+                })
+            : vi.spyOn(fs, 'openSync').mockImplementation((...args) => {
+                const result = openSync(...args);
+                if (args[0] === fifo && args[1] === 'a') descriptor = result;
+                return result;
+              });
+        const appendSpy =
+          name === 'writeLine'
+            ? vi.spyOn(fs.promises, 'appendFile').mockRejectedValue(failure)
+            : vi.spyOn(fs, 'appendFileSync').mockImplementation(() => {
+                throw failure;
+              });
+        const closeSpy =
+          name === 'writeLine' ? undefined : vi.spyOn(fs, 'closeSync');
+
+        try {
+          await expect(
+            Promise.resolve().then(() => append(fifo, { next: true })),
+          ).rejects.toBe(failure);
+          expect(appendSpy.mock.calls[0]?.[0]).toBe(
+            name === 'writeLine' ? writer : descriptor,
+          );
+          if (name === 'writeLine') {
+            expect(writer?.close).toHaveBeenCalledOnce();
+            expect(writer?.fd).toBe(-1);
+          } else {
+            expect(closeSpy).toHaveBeenCalledWith(descriptor);
+          }
+        } finally {
+          openSpy.mockRestore();
+          appendSpy.mockRestore();
+          closeSpy?.mockRestore();
+          fs.closeSync(reader);
+        }
+      },
+    );
+
+    it('names the file when a descriptor-based tail read fails fatally', async () => {
+      const original = '{"existing":true}';
+      const file = tmpFile(original);
+      const failure = Object.assign(new Error('read failed'), { code: 'EIO' });
+      const open = fs.promises.open.bind(fs.promises);
+      const openSpy =
+        name === 'writeLine'
+          ? vi
+              .spyOn(fs.promises, 'open')
+              .mockImplementation(async (...args) => {
+                const handle = await open(...args);
+                if (args[1] === tailProbeFlags) {
+                  vi.spyOn(handle, 'read').mockRejectedValue(failure);
+                }
+                return handle;
+              })
+          : undefined;
+      const readSpy =
+        name === 'writeLine'
+          ? undefined
+          : vi.spyOn(fs, 'readSync').mockImplementation(() => {
+              throw failure;
+            });
+
+      try {
+        await expect(
+          Promise.resolve().then(() => append(file, { next: true })),
+        ).rejects.toBe(failure);
+        expect(failure.message).toBe(`read failed (file: ${file})`);
+        expect(failure.code).toBe('EIO');
+        expect(fs.readFileSync(file, 'utf8')).toBe(original);
+      } finally {
+        openSpy?.mockRestore();
+        readSpy?.mockRestore();
+      }
+    });
+
+    it('does not restate a path the error already names', async () => {
+      const file = tmpFile('{"existing":true}');
+      const message = `EIO: i/o error, open '${file}'`;
+      const failure = Object.assign(new Error(message), { code: 'EIO' });
+      const spy = denyTailProbe(failure);
+
+      try {
+        await expect(
+          Promise.resolve().then(() => append(file, { next: true })),
+        ).rejects.toBe(failure);
+        expect(failure.message).toBe(message);
+        expect(fs.readFileSync(file, 'utf8')).toBe('{"existing":true}');
+      } finally {
+        spy.mockRestore();
       }
     });
 
