@@ -160,7 +160,6 @@ public final class WorkspaceCsiRuntimeMain {
         var sessions = new JdbcRuntimeSessionRepository(source);
         var nativeStore = new JdbcManagedSessionStore(jdbc,
                 new JdbcManagedExtensionRecordStore(jdbc), null, null,
-                com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy.inProcess(),
                 null, null, null, null, null,
                 com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy.unbound(), bindings, null);
         var application = new WorkspaceCsiApplicationStore(jdbc, manager, nativeStore, bindings, sessions,
