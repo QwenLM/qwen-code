@@ -6044,6 +6044,27 @@ describe('ChatEditor mobile composer actions', () => {
     expect(composerCoreState.submitText).toHaveBeenCalledOnce();
   });
 
+  it('leaves the desktop Send mousedown unprevented so outside clicks still close', () => {
+    composerCoreState.hasContent = true;
+    const container = renderChatEditor({});
+    const send = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      send.dispatchEvent(mouseDown);
+    });
+
+    // The history-search panel closes on an unprevented window `mousedown`;
+    // preventing a desktop click on Send would leave the panel open over the
+    // just-cleared editor and restore the sent draft on the next click.
+    expect(mouseDown.defaultPrevented).toBe(false);
+  });
+
   it('opens history from the add drawer without simulated keyboard keys', async () => {
     mobileComposer();
     renderChatEditor({ visibleToolbarActions: ['addMenu'] });

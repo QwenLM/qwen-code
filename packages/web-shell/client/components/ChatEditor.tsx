@@ -4227,7 +4227,12 @@ export const ChatEditor = memo(
               // Do not dismiss the software keyboard between touch-down and
               // click: the resulting viewport resize would move Send out from
               // under the same tap before its click is dispatched (#12462).
-              onMouseDown={(event) => event.preventDefault()}
+              // A prevented `mousedown` is also what the history-search panel
+              // treats as a click outside itself, so keep the desktop mouse
+              // semantics intact.
+              onMouseDown={(event) => {
+                if (isMobile) event.preventDefault();
+              }}
               onClick={(e) => {
                 e.stopPropagation();
                 if (submitLoading) {

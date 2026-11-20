@@ -777,6 +777,92 @@ test('submits welcome and follow-up prompts on the first tap above a software ke
   expect(followUpSendEvents[0]?.top).toBe(followUpSendEvents[1]?.top);
 });
 
+test('keeps the custom-footer mobile welcome group inside the pane above a software keyboard @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await installTestSoftwareKeyboard(page);
+  await gotoEmptyMobileWelcomeHarness(page, { customFooter: true });
+  await expectEmptyMobileWelcomeChromeVisible(page);
+
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.tap();
+  await textarea.fill('custom footer welcome');
+  await expect(textarea).toBeFocused();
+  await setTestSoftwareKeyboard(page, true);
+
+  const viewportHeight = page.viewportSize()!.height;
+  const expectedInset = `${viewportHeight - TEST_ACCESSORY_TOP}px`;
+  await expect
+    .poll(() =>
+      page
+        .locator('[data-web-shell-root]')
+        .evaluate((element) =>
+          getComputedStyle(element)
+            .getPropertyValue('--web-shell-visual-viewport-inset-bottom')
+            .trim(),
+        ),
+    )
+    .toBe(expectedInset);
+
+  const layout = await page
+    .getByTestId('chat-pane-container')
+    .evaluate((pane) => {
+      const measure = (selector: string) => {
+        const element = pane.querySelector(selector);
+        return element ? element.getBoundingClientRect() : null;
+      };
+      const paneRect = pane.getBoundingClientRect();
+      const header = measure('[data-e2e-mobile-welcome-header]');
+      const welcomeFooter = measure('[data-e2e-mobile-welcome-footer]');
+      const composer = measure('[data-web-shell-composer-surface]');
+      const send = measure('[data-web-shell-composer-submit]');
+      if (!header || !welcomeFooter || !composer || !send) {
+        throw new Error('Expected the custom-footer welcome chrome to render.');
+      }
+      return {
+        paneTop: paneRect.top,
+        paneBottom: paneRect.bottom,
+        headerTop: header.top,
+        headerBottom: header.bottom,
+        welcomeFooterTop: welcomeFooter.top,
+        composerTop: composer.top,
+        composerBottom: composer.bottom,
+        sendBottom: send.bottom,
+      };
+    });
+
+  const screenshotPath = testInfo.outputPath(
+    'custom-footer-welcome-keyboard-open.png',
+  );
+  await page.screenshot({ path: screenshotPath });
+  await testInfo.attach('custom-footer-welcome-keyboard-open', {
+    path: screenshotPath,
+    contentType: 'image/png',
+  });
+  await testInfo.attach('custom-footer-welcome-layout', {
+    body: JSON.stringify(layout, null, 2),
+    contentType: 'application/json',
+  });
+
+  // The inset is reserved by the pane padding, so the whole shrink-to-content
+  // welcome group must stay inside the pane instead of being displaced above
+  // its `overflow: hidden` box by the inset a second time.
+  expect(layout.headerTop).toBeGreaterThanOrEqual(layout.paneTop);
+  expect(layout.headerBottom).toBeLessThanOrEqual(layout.welcomeFooterTop);
+  expect(layout.welcomeFooterTop).toBeLessThanOrEqual(layout.composerTop);
+  expect(layout.composerBottom).toBeLessThanOrEqual(layout.paneBottom);
+  expect(layout.composerBottom).toBeLessThanOrEqual(TEST_ACCESSORY_TOP);
+  expect(layout.sendBottom).toBeLessThanOrEqual(TEST_ACCESSORY_TOP);
+
+  await expectUncoveredStableSend(page, testInfo, 'custom-footer-welcome');
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  expect(JSON.stringify(daemon.promptRequests()[0]?.body)).toContain(
+    'custom footer welcome',
+  );
+});
+
 test('keeps voice controls reachable on an extra-narrow touch viewport @smoke', async ({
   page,
 }, testInfo) => {

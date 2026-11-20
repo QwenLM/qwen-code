@@ -445,7 +445,13 @@
   padding-bottom: var(--web-shell-visual-viewport-inset-bottom, 0px);
 }
 
-.app[data-compact-sidebar] .chatViewWrap {
+/* Only the session layout wraps the composer in an absolutely positioned
+   `.chatViewWrap` whose bottom edge must be lifted. The empty welcome state
+   resets the wrap to `position: static` (and the custom-footer variant makes
+   it `position: relative` as the bottom-panel anchor), where `bottom` would
+   displace the whole shrink-to-content group above the overflow-hidden pane
+   on top of the pane padding that already reserves the inset. */
+.app:not(.appChatEmpty)[data-compact-sidebar] .chatViewWrap {
   bottom: var(--web-shell-visual-viewport-inset-bottom, 0px);
 }
 
