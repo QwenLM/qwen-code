@@ -28,6 +28,7 @@ const FOLLOWUP_ACCEPT = '[data-web-shell-mobile-followup-accept]';
 const FOLLOWUP_DISMISS = '[data-web-shell-mobile-followup-dismiss]';
 const FOLLOWUP_FILL = '[data-web-shell-mobile-followup-fill]';
 const SUGGESTION = 'run the tests';
+const ZH_SUGGESTION = '运行测试';
 
 async function installScenario(
   page: Page,
@@ -61,13 +62,14 @@ async function gotoHarness(
 async function pushSuggestion(
   daemon: MockDaemonController,
   sessionId: string,
+  suggestion: string = SUGGESTION,
 ): Promise<void> {
   await daemon.sendEvent({
     v: 1,
     type: 'followup_suggestion',
     data: {
       sessionId,
-      suggestion: SUGGESTION,
+      suggestion,
       promptId: `${sessionId}########1`,
     },
   });
@@ -237,5 +239,61 @@ test('mobile editing row fill key fills the textarea without submitting', async 
   await expect(textarea).toBeFocused();
   await expect(fillKey).toHaveCount(0);
   await expect(page.locator(FOLLOWUP_BAR)).toHaveCount(0);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('mobile follow-up bar renders in Simplified Chinese', async ({
+  page,
+}, testInfo) => {
+  await page.addInitScript(() =>
+    localStorage.setItem('qwen-code-web-shell-language', 'zh-CN'),
+  );
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'simple');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  const idlePlaceholder = await textarea.getAttribute('placeholder');
+  await pushSuggestion(daemon, scenario.sessionId, ZH_SUGGESTION);
+  await expect(page.locator(FOLLOWUP_BAR)).toBeVisible();
+  await expect(page.locator(FOLLOWUP_ACCEPT)).toHaveText(ZH_SUGGESTION);
+  await expect(page.locator(FOLLOWUP_DISMISS)).toHaveAttribute(
+    'aria-label',
+    '忽略建议',
+  );
+  await expect(page.locator(FOLLOWUP_FILL)).toHaveCount(0);
+  await expect(textarea).toHaveAttribute('placeholder', idlePlaceholder!);
+  await expect(textarea).not.toHaveAttribute('placeholder', ZH_SUGGESTION);
+  await page.screenshot({
+    path: testInfo.outputPath('followup-bar-simple-zh.png'),
+  });
+  await page.locator(FOLLOWUP_ACCEPT).tap();
+  await expect(textarea).toHaveValue(ZH_SUGGESTION);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('mobile editing row fill key renders in Simplified Chinese', async ({
+  page,
+}, testInfo) => {
+  await page.addInitScript(() =>
+    localStorage.setItem('qwen-code-web-shell-language', 'zh-CN'),
+  );
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await expect(page.locator(FOLLOWUP_FILL)).toHaveCount(0);
+  const idlePlaceholder = await textarea.getAttribute('placeholder');
+  await pushSuggestion(daemon, scenario.sessionId, ZH_SUGGESTION);
+  const fillKey = page.locator(FOLLOWUP_FILL);
+  await expect(fillKey).toBeVisible();
+  await expect(fillKey).toHaveText('填入');
+  await expect(page.locator(FOLLOWUP_ACCEPT)).toHaveText(ZH_SUGGESTION);
+  await expect(textarea).toHaveAttribute('placeholder', idlePlaceholder!);
+  await page.screenshot({
+    path: testInfo.outputPath('followup-fill-key-zh.png'),
+  });
+  await fillKey.tap();
+  await expect(textarea).toHaveValue(ZH_SUGGESTION);
+  await expect(fillKey).toHaveCount(0);
   expect(daemon.promptRequests()).toHaveLength(0);
 });
