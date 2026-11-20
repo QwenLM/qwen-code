@@ -2343,6 +2343,13 @@ export const ZH: Messages = {
   'attachment.readFailed': '读取附件失败。',
   'attachment.loadingFile': '正在加载文件...',
   'attachment.loadingPreview': '正在加载预览...',
+  'pdf.previousPage': '上一页',
+  'pdf.nextPage': '下一页',
+  'pdf.openFull': '打开完整 PDF',
+  'pdf.page': (v) => `PDF 第 ${v?.page ?? 1} 页`,
+  'pdf.fileChanged': '加载期间文件已更改，请重新打开预览。',
+  'pdf.workerFailed': '无法启动 PDF 预览。',
+  'pdf.externalFontMap': '此 PDF 需要字体映射。请打开完整 PDF 查看。',
   'sideTask.creating': '正在创建侧边任务…',
   'sideTask.createFailed': '创建侧边任务失败',
   'sideTask.commandsLoadingTimedOut':

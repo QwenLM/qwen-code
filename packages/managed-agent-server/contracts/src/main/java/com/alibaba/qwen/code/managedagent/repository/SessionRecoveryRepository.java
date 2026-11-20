@@ -6,7 +6,7 @@ public interface SessionRecoveryRepository {
     public record HeadRecovery(String state, String reasonCode,
             String journalState, String activationPhase,
             Long activationHeadRevision, Long journalRevision,
-            boolean wakePending, Long wakeHeadRevision) { }
+            boolean wakePending, Long wakeHeadRevision, Long wakeSealRevision) { }
     public List<HeadRecovery> heads(String tenantId, String sessionId);
     public long nonInitialTurns(String tenantId, String sessionId);
 
@@ -18,4 +18,12 @@ public interface SessionRecoveryRepository {
      * view reads these obligations before it calls a sealed Session ready.
      */
     public boolean hasUnsettledWork(String tenantId, String sessionId);
+
+    /**
+     * Whether the Turn's terminal public event was projected from the
+     * Harness's journaled settlement. Only that projection carries a Harness
+     * source key; the terminal events the control plane writes itself (a SQL
+     * failure or cancel) carry none, so they never count as native settlement.
+     */
+    public boolean hasNativeTerminal(String tenantId, String sessionId, String turnId);
 }

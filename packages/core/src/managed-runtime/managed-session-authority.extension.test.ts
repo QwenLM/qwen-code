@@ -1477,10 +1477,10 @@ describe('managed session authority Stage H records', () => {
 });
 
 describe('reader compatibility for the H3 domains', () => {
-  it('stamps a new Session with a reader every deployed version carries', async () => {
+  it('stamps a new Session without a minimum-reader requirement', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
-      expect(authority.sessionHeader.minimumReader).toBe('managed-session/1');
+      expect(authority.sessionHeader.minimumReader).toBeUndefined();
     });
   });
 
@@ -1490,7 +1490,6 @@ describe('reader compatibility for the H3 domains', () => {
     const harness = await createHarness();
     const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
-      expect(authority.sessionHeader.minimumReader).toBe('managed-session/1');
       await authority.commitExtensionRecord(
         command('monitor-1:1'),
         { domain: 'monitor_run', record: life[0] },
