@@ -75,6 +75,7 @@ import { AsyncHookRegistry } from '../hooks/asyncHookRegistry.js';
 import {
   ASYNC_HOOK_CONTEXT_OPEN,
   isAsyncHookContextPartText,
+  wrapAsyncHookContext,
 } from '../hooks/async-hook-context.js';
 import { isUserPromptSubmitContextPartText } from '../utils/transcript-records.js';
 import {
@@ -1849,6 +1850,42 @@ describe('Gemini Client (client.ts)', () => {
         type: SendMessageType.UserQuery,
       });
       expect(getLastTurnRequestText()).toContain('retained owned block');
+    });
+
+    it('a Retry re-attaches the block recovered from the stripped orphaned entry exactly once', async () => {
+      // The failed attempt drained the block and pushed it into history; the
+      // provider then failed. Retry strips that orphaned entry (which carries
+      // the block) and rebuilds from the caller's parts (which do not), so the
+      // recovery must re-attach the block — not lose it from both history and
+      // the wire, and not double it via the restore path.
+      const orphan = content(
+        'user',
+        { text: 'original prompt' },
+        { text: wrapAsyncHookContext('retry recovered block') },
+      );
+      installChat({
+        stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([orphan]),
+        getUserContentPushCount: vi.fn().mockReturnValue(1),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        setHistory: vi.fn(),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      });
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, 0);
+        return textTurn('retry response');
+      });
+      await run([{ text: 'retry me' }], 'prompt-retry-async', {
+        type: SendMessageType.Retry,
+      });
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      // Rebuilt from the caller's parts, with the recovered block attached once.
+      expect(parts).toContainEqual({ text: 'retry me' });
+      const asyncParts = parts.filter(isAsyncHookPart);
+      expect(asyncParts).toHaveLength(1);
+      expect((asyncParts[0] as Part).text).toContain('retry recovered block');
+      // The block was removed from the stripped entry, so the restore path
+      // cannot re-add a second copy.
+      expect(orphan.parts?.some(isAsyncHookPart)).toBe(false);
     });
   });
 

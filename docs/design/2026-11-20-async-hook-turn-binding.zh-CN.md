@@ -26,7 +26,7 @@ push 之后的 provider 失败本身**不是**丢失：块留在进程内 histor
 - **插入点**：把 gate + drain + append 从请求组装处移到紧邻 `turn.run` 之前（goal-event yield 与 message-display 构造之后、push-snapshot source 赋值之前）。所有权门原样随行（同作用域）。这一步零键控成本地消灭窗口 1 与 3，并保持压缩阈值、gate 语义、全部现有见证完好。尾部回执检测改用 `isUserPromptSubmitContextPartText` 读最终消息形状（ACP wrapper 的写法），不再依赖组装期的 `appendedHookContext` 布尔。
 - **push 前结算（窗口 4）**：把 drained part 暂存 client 字段；在 send 的 `finally` 里按 history-push 快照结算——push 未落地则保留该 part，交给下一次 drain-eligible send 在新 drain 点重附（重附前重新过所有权门）。push 已落地则该 part 已在 history，不得重附（push 后失败随下一请求送达）。
 - **Retry 重附（窗口 2）**：在既有的从被剥 Retry entries 保留日期提醒 / workflow envelope 旁，识别被剥 entries 中的异步信封 part 并重附。被剥即 history 已无副本，故重附不会双份交付；它与 restore 路径互斥。
-- **顺序说明**：drain 后移使 ToolResult 轮上异步块落在 exploration/loop reminder 与 tool-result memory 之后（现在在其前）。现有见证只要求块在 `functionResponse` parts 之后，仍成立；wire 顺序变化在此明示。
+- **顺序说明**：drain 后移使 ToolResult 轮上异步块落在 exploration/loop reminder 与 tool-result memory 之后（现在在其前）。现有见证只要求块在 `functionResponse` parts 之后，仍成立；wire 顺序变化在此明示。ToolResult 的 size-only microcompact checkpoint 也在新 drain 点之前估算 `requestToSend`（组装处的旧 drain 曾先于它），故其尺寸估算不再计入异步块；该块受大小上限（#17736）约束，而 chat 在 `turn.run` 内自身的压缩阈值仍在 push 前估算含块的已 drain 请求。
 
 ## 范围
 
@@ -35,4 +35,4 @@ push 之后的 provider 失败本身**不是**丢失：块留在进程内 histor
 
 ## 验证
 
-`client.test.ts` 调用点见证（真实 `AsyncHookRegistry`、mock `Turn.run`）：现有 12 条交付/所有权见证保持绿；新见证钉住 (a) ToolResult loop-detection 退出后块仍 pending、下一 send 送达；(b) push 后失败 + Retry 恰好重附块一次；(c) chat 侧 push 前抛出后块留给下一 send、不双份；(d) 保留的块不被侧问续传消费；(e) drain 后 abort 结算无丢失无重复。变异见证：把 drain 还原到组装点使 loop-detection 见证转红；去掉 Retry 重附使 Retry 见证转红；按 acceptance 而非 push 快照结算使无双份见证转红。改动文件 `prettier`/`eslint` 干净；改动文件通过类型检查（以 CI 的 frozen-lockfile 构建为权威）。
+`client.test.ts` 调用点见证（真实 `AsyncHookRegistry`、mock `Turn.run`）：现有 12 条交付/所有权见证保持绿；4 条新见证钉住 (a) ToolResult loop-detection 退出后块仍 pending、下一 send 送达；(b) Retry 从被剥的孤儿 entry 找回块并恰好重附一次，且把块从该 entry 移除、使 restore 路径不会重附第二份；(c) chat 侧 push 前抛出后块留给下一 send、不双份；(d) 保留的块不被带闸的侧问 send 消费。变异见证：整文件回退到改动前实现使 4 条新见证全红、12 条现有见证保持绿；禁用 Retry 找回使 Retry 见证转红；强制结算把每次 send 都当作已 push（从不保留）恰使两条 push 前保留见证转红。改动文件 `prettier`/`eslint` 干净；改动文件通过类型检查（以 CI 的 frozen-lockfile 构建为权威）。
