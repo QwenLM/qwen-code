@@ -2,9 +2,15 @@
 
 [English](2026-11-15-opentui-stats-history.md) | [简体中文](2026-11-15-opentui-stats-history.zh-CN.md)
 
+## 验证记录——2026-11-20（合入main与按键处理见证）
+
+本轮合入`origin/main`（`be5a7ee3`），并回应维护者对突发结论的范围修正。main现在自行隔离MCP suspension的teardown，因此本移植采用main的该用例版本并去掉自己的终态关闭变体：`packages/cli/src/serve/hosted-harness-session.test.ts`与main逐字节一致，上一条记录中关于`finally`的描述不再适用于当前树。合并还同时保留了两侧完全相同的俄语catalog条目`'{{count}} more'`；删除本移植重复插入的那一条，保留main的条目。突发结论按要求限定范围：范围分支的`monthRef.current = 0`**仅在same-batch（同批按键）下承重**——当按键在同一批内到达、彼此之间没有渲染时，逐渲染的`monthRef.current = monthOffset`回同步不会运行，因此尾随的月份键会读到陈旧ref；若按键之间存在渲染，该回同步已经重置了偏移，重置并不是由该写入承担的。已提交突发用例的注释现在写明这一范围。三个按键处理守卫获得各自的见证：月份翻页在Activity标签页之外与all-time之外被忽略、ctrl/meta组合键不会到达对话框、escape关闭对话框。七个变异探针在各自守卫被移除时变红（tab门、range门、ctrl+meta提前返回、仅ctrl、仅meta、escape回退路径、突发ref写入），恢复后套件为绿。构建、类型检查与lint通过，改动文件通过Prettier检查；原生历史套件通过25项，历史hook/stats服务/对话框挂载套件通过75项，设置对话框套件通过26项，i18n与Ink stats套件通过61项，hosted-harness文件全部865项通过。hosted-harness的一次整文件运行先在`blocks a turn whose journal append is fenced`上变红（期望202，实际503）；该用例单独运行通过，紧接着的整文件重跑865项全部通过，因此记录为负载下的偶发失败，而非本轮缺陷。
+
+A–D组公开leg、几何重放与OpenTUI集成leg本轮未重跑；合入验收前需重跑。
+
 ## 验证记录——2026-11-20（验证报告跟进）
 
-本轮以纯测试改动回应head `8916672b`上的2026-11-19验证报告。报告认为范围分支的`monthRef.current = 0`是冗余防御的note被证伪：逐渲染回同步在一次持键突发的各键之间不会运行，因此从已翻页的月份（且有三个可用月份）出发，尾随的月份键会读到陈旧ref，除非范围分支重置它；报告里相同的突发读数并未覆盖能区分该写入的情形——从已翻页的月份出发且有三个可用月份。新增的已提交用例钉住该突发——先翻到最旧月份，再在同一键盘批内循环范围四次并翻页一次——移除该ref写入时变红（`1 failed | 21 passed`，帧仍显示`Token Trend  Sep 2026 →`）；该写入保留。idle-suspension用例对的冷打开teardown现在在`finally`中运行，因此变红的正文断言不再跳过它：把teardown状态故意置错后，有`finally`时该用例对暴露teardown的状态错误，没有它时被跳过的teardown复现drain用例的两次release污染；`204`钉扎不变。窄宽度热力图超宽（R1-1）按下文声明留在follow-up队列。构建、类型检查与lint通过，改动文件通过Prettier检查；原生历史套件通过22项，历史hook与stats服务套件通过29项，hosted-harness文件全部859项通过。
+本轮以纯测试改动回应head `8916672b`上的2026-11-19验证报告。报告认为范围分支的`monthRef.current = 0`是冗余防御的note仅在same-batch（同批按键）突发下被证伪：逐渲染回同步在一次持键突发的各键之间不会运行，因此从已翻页的月份（且有三个可用月份）出发，尾随的月份键会读到陈旧ref，除非范围分支重置它；若按键之间存在渲染，逐渲染的`monthRef.current = monthOffset`回同步已经重置了偏移，该写入在那里并不承重；报告里相同的突发读数并未覆盖能区分该写入的情形——从已翻页的月份出发且有三个可用月份。新增的已提交用例钉住该突发——先翻到最旧月份，再在同一键盘批内循环范围四次并翻页一次——移除该ref写入时变红（`1 failed | 21 passed`，帧仍显示`Token Trend  Sep 2026 →`）；该写入保留。idle-suspension用例对的冷打开teardown现在在`finally`中运行，因此变红的正文断言不再跳过它：把teardown状态故意置错后，有`finally`时该用例对暴露teardown的状态错误，没有它时被跳过的teardown复现drain用例的两次release污染；`204`钉扎不变。窄宽度热力图超宽（R1-1）按下文声明留在follow-up队列。构建、类型检查与lint通过，改动文件通过Prettier检查；原生历史套件通过22项，历史hook与stats服务套件通过29项，hosted-harness文件全部859项通过。
 
 A–D组公开leg、几何重放与OpenTUI集成leg本轮未重跑（本轮未改动生产代码）；合入验收前需重跑。
 

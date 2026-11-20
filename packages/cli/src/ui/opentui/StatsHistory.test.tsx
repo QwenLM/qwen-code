@@ -132,9 +132,17 @@ function report(): StatsData {
     ],
   };
 }
-function press(name: string, shift = false) {
+function press(
+  name: string,
+  shift = false,
+  mods: { ctrl?: boolean; meta?: boolean } = {},
+) {
   for (const handler of [...mock.keys])
-    handler({ ...catalogKey(name, name === 'tab' ? '\t' : name), shift });
+    handler({
+      ...catalogKey(name, name === 'tab' ? '\t' : name),
+      shift,
+      ...mods,
+    });
 }
 
 afterEach(cleanup);
@@ -561,9 +569,11 @@ describe('native historical statistics', () => {
   });
 
   it('resets the paged month inside a held-key range burst', () => {
-    // One act() is one held-key burst: no re-render resyncs monthRef between
-    // keys, so the reset must come from the range branch's ref write. Three
-    // months keep the clamp from hiding a stale offset.
+    // Same-batch only: one act() delivers every key on the last render's
+    // closure, so no per-render monthRef resync runs between them and the
+    // reset must come from the range branch's ref write. With a render
+    // between keys that resync already resets it. Three months keep the
+    // clamp from hiding a stale offset.
     const data = report();
     data.heatmap['2026-10-16'] = 512;
     data.tokensPerDay.push({ date: '2026-10-16', model: 'alpha', tokens: 512 });
@@ -604,6 +614,56 @@ describe('native historical statistics', () => {
       press('right');
     });
     expect(trend()).toBe('Token Trend  ← Nov 2026');
+  });
+
+  it('pages months only while all-time Activity owns the view', () => {
+    const view = render(<OpenTuiStatsDialog config={null} onClose={vi.fn()} />);
+    const heatmapWindow = () =>
+      /Activity Heatmap {2}\w+ \d+, \d{4} - \w+ \d+, \d{4}/.exec(
+        view.container.textContent ?? '',
+      )![0];
+    act(() => {
+      press('tab');
+      press('tab');
+    });
+    act(() => {
+      press('h');
+    });
+    act(() => {
+      press('tab', true);
+    });
+    expect(view.container.textContent).toContain('← Nov 2026');
+    act(() => {
+      press('r');
+    });
+    const narrowed = heatmapWindow();
+    act(() => {
+      press('h');
+    });
+    expect(heatmapWindow()).toBe(narrowed);
+  });
+
+  it('leaves ctrl and meta chords to the host', () => {
+    const view = render(<OpenTuiStatsDialog config={null} onClose={vi.fn()} />);
+    act(() => {
+      press('tab');
+    });
+    act(() => {
+      press('h', false, { meta: true });
+      press('r', false, { ctrl: true });
+      press('tab', false, { ctrl: true });
+    });
+    expect(mock.range).toBe('all');
+    expect(view.container.textContent).toContain('← Nov 2026');
+  });
+
+  it('closes the dialog on escape', () => {
+    const onClose = vi.fn();
+    render(<OpenTuiStatsDialog config={null} onClose={onClose} />);
+    act(() => {
+      press('escape');
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('localizes the chart peak and the project overflow counter', async () => {
