@@ -1004,6 +1004,7 @@ interface SessionEntry {
    */
   goalTurnActive?: boolean;
   goalTurnId?: string;
+  retiringGoalTurnId?: string;
   backgroundTurn?: BackgroundNotificationTurn;
   hasRunningBackgroundTasks?: boolean;
   backgroundAdmissionEpoch?: number;
@@ -12265,9 +12266,12 @@ export function createSessionControlPlane(
                   entry.activePromptTerminal.resolve();
                 }
                 entry.promptActive = true;
-                // The child serializes Goal turns against RPC prompts, so a
-                // still-set flag here means the goal end_turn signal was
-                // lost; self-heal rather than pin the session active.
+                // Dispatch can preempt a live Goal before its terminal
+                // arrives. Retire permission ownership now, but keep the ID
+                // so the child can still publish that Goal's terminal.
+                if (entry.goalTurnId !== undefined) {
+                  entry.retiringGoalTurnId = entry.goalTurnId;
+                }
                 clearGoalTurn(entry, permissionMediator);
                 entry.activePromptId = pendingEntry.promptId;
                 delete entry.cancelBroadcastWithoutPrompt;

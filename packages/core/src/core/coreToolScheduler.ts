@@ -65,7 +65,11 @@ import {
   firePermissionRequestHook,
   appendAdditionalContext,
 } from './toolHookTriggers.js';
-import type { PermissionRequestHookResult } from './toolHookTriggers.js';
+import type {
+  PermissionRequestHookResult,
+  PostToolUseFailureHookResult,
+  PostToolUseHookResult,
+} from './toolHookTriggers.js';
 import {
   appendTextToFunctionResponse,
   appendToolHookContextToParts,
@@ -498,6 +502,8 @@ export const TOOL_INTERRUPTED_FOR_USER_MESSAGE =
   'The user interrupted this tool call to send you a message, which follows. Read it before deciding whether to run the tool again.';
 export const TOOL_DISCARDED_FOR_USER_MESSAGE =
   'The tool had already completed, but its output was discarded when the user interrupted to send you a message, which follows. Read it before deciding whether to run the tool again.';
+const POST_TOOL_HOOK_INTERRUPTED =
+  'Hook wait interrupted to send a user message.';
 
 function interruptedForUserMessage(signal: AbortSignal): boolean {
   return signal.reason === USER_MESSAGE_INTERRUPT_ABORT_REASON;
@@ -513,6 +519,31 @@ function cancelledAfterCompletionMessage(signal: AbortSignal): string {
   return interruptedForUserMessage(signal)
     ? TOOL_DISCARDED_FOR_USER_MESSAGE
     : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
+}
+
+async function waitForPostToolHook<T>(
+  signal: AbortSignal,
+  interruptedResult: T,
+  runHook: (hookSignal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const hookController = new AbortController();
+  let finishWait!: () => void;
+  const interrupted = new Promise<T>((resolve) => {
+    finishWait = () => resolve(interruptedResult);
+  });
+  // Ordinary Stop still waits for the hook and keeps its output.
+  const onAbort = () => {
+    if (!interruptedForUserMessage(signal)) return;
+    finishWait();
+    hookController.abort(signal.reason);
+  };
+  if (signal.aborted) onAbort();
+  else signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    return await Promise.race([interrupted, runHook(hookController.signal)]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
 }
 
 /**
@@ -622,24 +653,32 @@ async function safelyFirePostToolUseFailureHook(
   toolInput: Record<string, unknown>,
   errorMessage: string,
   isInterrupt: boolean,
+  turnSignal: AbortSignal,
   permissionMode?: string,
   tool_call_id?: string,
   durationMs?: number,
   owner?: HookExecutionOwner,
 ): ReturnType<typeof firePostToolUseFailureHook> {
   try {
-    return await firePostToolUseFailureHook(
-      messageBus,
-      toolUseId,
-      toolName,
-      toolInput,
-      errorMessage,
-      isInterrupt,
-      permissionMode,
-      undefined,
-      tool_call_id,
-      durationMs,
-      owner,
+    return await waitForPostToolHook<PostToolUseFailureHookResult>(
+      turnSignal,
+      { hookError: POST_TOOL_HOOK_INTERRUPTED },
+      (hookSignal) =>
+        firePostToolUseFailureHook(
+          messageBus,
+          toolUseId,
+          toolName,
+          toolInput,
+          errorMessage,
+          isInterrupt,
+          permissionMode,
+          // An interrupt still emits the failure hook. Its result is no longer
+          // needed by the ending turn.
+          isInterrupt && hookSignal.aborted ? undefined : hookSignal,
+          tool_call_id,
+          durationMs,
+          owner,
+        ),
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -6810,6 +6849,7 @@ export class CoreToolScheduler {
                 toolInput,
                 cancelMessage,
                 true,
+                signal,
                 this.config.getApprovalMode(),
                 callId,
                 elapsedExecutionMs(),
@@ -6909,17 +6949,25 @@ export class CoreToolScheduler {
           const postHookResult = await this.withHookSpan(
             { hookEvent: 'PostToolUse', toolName: canonicalName, toolUseId },
             () =>
-              firePostToolUseHook(
-                messageBus,
-                canonicalName,
-                toolInput,
-                toolResponse,
-                toolUseId,
-                permissionMode,
-                undefined, // signal
-                callId, // Original API call ID (e.g., call_xxx)
-                elapsedExecutionMs(),
-                this.hookOwners.get(callId),
+              waitForPostToolHook<PostToolUseHookResult>(
+                signal,
+                {
+                  shouldStop: false,
+                  hookError: POST_TOOL_HOOK_INTERRUPTED,
+                },
+                (hookSignal) =>
+                  firePostToolUseHook(
+                    messageBus,
+                    canonicalName,
+                    toolInput,
+                    toolResponse,
+                    toolUseId,
+                    permissionMode,
+                    hookSignal,
+                    callId,
+                    elapsedExecutionMs(),
+                    this.hookOwners.get(callId),
+                  ),
               ),
             (r) =>
               r.hookError
@@ -7471,6 +7519,7 @@ export class CoreToolScheduler {
                 toolInput,
                 toolResult.error!.message,
                 false,
+                signal,
                 this.config.getApprovalMode(),
                 callId,
                 elapsedExecutionMs(),
@@ -7877,6 +7926,7 @@ export class CoreToolScheduler {
                 toolInput,
                 failureMessage,
                 true,
+                signal,
                 this.config.getApprovalMode(),
                 callId,
                 elapsedExecutionMs(),
@@ -7928,6 +7978,7 @@ export class CoreToolScheduler {
                 toolInput,
                 errorMessage,
                 false,
+                signal,
                 this.config.getApprovalMode(),
                 callId,
                 elapsedExecutionMs(),

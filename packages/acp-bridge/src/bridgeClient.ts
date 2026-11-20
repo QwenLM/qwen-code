@@ -757,6 +757,8 @@ export interface BridgeClientSessionEntry {
    */
   goalTurnActive?: boolean;
   goalTurnId?: string;
+  /** Goal preempted by an RPC prompt, still owed its terminal event. */
+  retiringGoalTurnId?: string;
   backgroundTurn?: BackgroundNotificationTurn;
   /** Bridge prompt that owns the child Guard wait for this FIFO. */
   todoStopGuardAwaitingQueuedPromptOwnerPromptId?: string;
@@ -1757,17 +1759,20 @@ export class BridgeClient implements Client {
     }
     if (method === MID_TURN_GOAL_HANDOFF_METHOD) {
       const sessionId = params['sessionId'];
-      const entry =
-        typeof sessionId === 'string' && this.ownsSession(sessionId)
-          ? this.resolveEntry(sessionId)
-          : undefined;
-      if (entry) {
-        // An interrupted RPC prompt may still be settling. Its terminal
-        // path can append the promoted user input to the FIFO.
-        const current = entry.promptQueue;
+      if (typeof sessionId !== 'string' || !this.ownsSession(sessionId))
+        return {};
+      const entry = this.resolveEntry(sessionId);
+      if (!entry) return {};
+      // A prompt admitted during settlement can take the tail before the
+      // queued correction is promoted. Keep waiting through that promotion.
+      let current: Promise<void> | undefined;
+      do {
+        current = entry.promptQueue;
         await current;
-        if (entry.promptQueue !== current) await entry.promptQueue;
-      }
+      } while (
+        entry.promptQueue !== current &&
+        this.resolveEntry(sessionId) === entry
+      );
       return {};
     }
     if (method !== MID_TURN_QUEUE_DRAIN_METHOD) {
@@ -2892,9 +2897,11 @@ export class BridgeClient implements Client {
       const reason = params['reason'];
       const source = params['source'];
       const turnId = params['turnId'];
+      const retiringGoal =
+        typeof turnId === 'string' && turnId === entry.retiringGoalTurnId;
       // A malformed Goal terminal must not pin future loads to live replay
       // or strand the queue when its turn_complete cannot be published.
-      if (source === 'goal') {
+      if (source === 'goal' && !retiringGoal) {
         if (turnId !== entry.goalTurnId) return;
         clearGoalTurn(entry, this.mediator);
         this.onAutomaticTurnEnded?.(sessionId);
@@ -2916,6 +2923,7 @@ export class BridgeClient implements Client {
         ) {
           return;
         }
+        if (retiringGoal) delete entry.retiringGoalTurnId;
         entry.events.publish({
           type: 'turn_complete',
           promptId,

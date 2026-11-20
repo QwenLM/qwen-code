@@ -2822,8 +2822,10 @@ export class Session implements SessionContext {
   private midTurnGoalHandoff?: Promise<Record<string, unknown>>;
   // Pulls queued input for the model response currently open to interruption.
   private pullForOpenResponse: (() => void) | undefined;
-  // Whether that response has started a tool call.
-  private openResponseHasToolCall: (() => boolean) | undefined;
+  // Whether the response for the given turn has started a tool call.
+  private openResponseHasToolCall:
+    | ((signal: AbortSignal) => boolean)
+    | undefined;
   // The turn whose last response called tools, until that tool batch settles.
   private midTurnToolPhaseFor: AbortSignal | undefined;
   // Drain requests awaiting the host's answer.
@@ -4091,7 +4093,7 @@ export class Session implements SessionContext {
       this.midTurnDrainsInFlight === 0 &&
       this.midTurnRecoveredMessages.length === 0 &&
       (this.midTurnToolPhaseFor === pending.signal ||
-        this.openResponseHasToolCall?.() === true)
+        this.openResponseHasToolCall?.(pending.signal) === true)
     ) {
       pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
     }
@@ -12738,7 +12740,8 @@ export class Session implements SessionContext {
         this.pullForOpenResponse?.();
       });
     };
-    const openHasToolCall = () => open && hasToolCall();
+    const openHasToolCall = (signal: AbortSignal) =>
+      open && signal === turnSignal && hasToolCall();
     const begin = () => {
       open = true;
       this.pullForOpenResponse = pull;

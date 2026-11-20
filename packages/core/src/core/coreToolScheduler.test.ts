@@ -71,6 +71,7 @@ import {
   extractToolFilePaths,
   getOptInToolNotFoundMessage,
   isToolCallConcurrencySafe,
+  TOOL_DISCARDED_FOR_USER_MESSAGE,
   TOOL_INTERRUPTED_FOR_USER_MESSAGE,
   USER_MESSAGE_INTERRUPT_ABORT_REASON,
 } from './coreToolScheduler.js';
@@ -11757,6 +11758,86 @@ describe('CoreToolScheduler telemetry spans', () => {
       const responseText = JSON.stringify(completedCall.response.responseParts);
       expect(responseText).toContain(notice);
       expect(responseText).not.toContain('User intentionally cancelled');
+    },
+  );
+
+  it.each([
+    {
+      hook: 'PostToolUse',
+      outcome: textResult('done'),
+      interruptExecution: false,
+    },
+    {
+      hook: 'PostToolUseFailure',
+      outcome: { ...textResult('failed'), error: { message: 'failed' } },
+      interruptExecution: false,
+    },
+    {
+      hook: 'PostToolUseFailure',
+      outcome: {
+        ...textResult('interrupted'),
+        interruptedBeforeCompletion: true,
+      },
+      interruptExecution: true,
+    },
+  ])(
+    'settles after Send now without waiting for $hook (interrupted execution: $interruptExecution)',
+    async ({ hook, outcome, interruptExecution }) => {
+      const abort = new AbortController();
+      const entered = deferred<HookRequest>();
+      const releaseHook = deferred<HookExecutionResponse>();
+      const executionStarted = deferred();
+      const { scheduler, onAllToolCallsComplete } = buildScheduler({
+        hooks: hookBus((request) => {
+          if (request.eventName === hook) {
+            entered.resolve(request);
+            return releaseHook.promise;
+          }
+          return hookResponse(request.eventName, {});
+        }),
+        execute: async () => {
+          if (interruptExecution) {
+            await new Promise<void>((resolve) => {
+              abort.signal.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+              executionStarted.resolve();
+            });
+          }
+          return outcome;
+        },
+      });
+      const scheduled = scheduler.schedule(
+        mockToolRequest('send-now-during-post-hook'),
+        abort.signal,
+      );
+      try {
+        if (interruptExecution) {
+          await executionStarted.promise;
+          abort.abort(USER_MESSAGE_INTERRUPT_ABORT_REASON);
+        }
+        const request = await entered.promise;
+        if (interruptExecution) {
+          expect(request.input?.['is_interrupt']).toBe(true);
+        } else {
+          abort.abort(USER_MESSAGE_INTERRUPT_ABORT_REASON);
+        }
+        const [call] = await settledLastBatch(onAllToolCallsComplete);
+        expectStatus(call, 'cancelled');
+        expect(JSON.stringify(call.response.responseParts)).toContain(
+          interruptExecution
+            ? TOOL_INTERRUPTED_FOR_USER_MESSAGE
+            : TOOL_DISCARDED_FOR_USER_MESSAGE,
+        );
+        if (!interruptExecution) {
+          expect(request.signal?.reason).toBe(
+            USER_MESSAGE_INTERRUPT_ABORT_REASON,
+          );
+        }
+      } finally {
+        releaseHook.resolve(hookResponse(hook, {}));
+        await scheduled;
+      }
     },
   );
 

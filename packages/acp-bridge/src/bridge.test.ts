@@ -42310,51 +42310,81 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     }
   });
 
-  it('waits for the prompt promoted after a Goal handoff RPC starts', async () => {
-    const first = deferred<void>();
-    const promoted = deferred<void>();
-    const promotedStarted = deferred<void>();
-    const handle = makeChannel({
-      promptImpl: async (req) => {
-        if ((req.prompt[0] as { text?: string }).text === 'work') {
-          await first.promise;
-        } else {
-          promotedStarted.resolve();
-          await promoted.promise;
+  it.each(['direct promotion', 'ordinary prompt queued first'] as const)(
+    'waits for the prompt promoted after a Goal handoff RPC starts (%s)',
+    async (order) => {
+      const first = deferred<void>();
+      const ordinary = deferred<void>();
+      const ordinaryStarted = deferred<void>();
+      const promoted = deferred<void>();
+      const promotedStarted = deferred<void>();
+      const handle = makeChannel({
+        promptImpl: async (req) => {
+          const text = (req.prompt[0] as { text?: string }).text;
+          if (text === 'work') {
+            await first.promise;
+          } else if (text === 'ordinary') {
+            ordinaryStarted.resolve();
+            await ordinary.promise;
+          } else {
+            promotedStarted.resolve();
+            await promoted.promise;
+          }
+          return { stopReason: 'end_turn' };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      try {
+        const { sessionId, clientId } = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+        });
+        const turn = bridge.sendPrompt(sessionId, {
+          sessionId,
+          prompt: [{ type: 'text', text: 'work' }],
+        });
+        await vi.waitFor(() =>
+          expect(handle.agent.promptCalls).toHaveLength(1),
+        );
+        bridge.enqueueMidTurnMessage(
+          sessionId,
+          'correction',
+          { clientId },
+          'm1',
+        );
+        const settled = vi.fn();
+        const wait = handle.agentConnection
+          .extMethod(MID_TURN_GOAL_HANDOFF_METHOD, { sessionId })
+          .then(settled);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        const queued =
+          order === 'ordinary prompt queued first'
+            ? bridge.sendPrompt(sessionId, {
+                sessionId,
+                prompt: [{ type: 'text', text: 'ordinary' }],
+              })
+            : undefined;
+        first.resolve();
+        await turn;
+        if (queued) {
+          await ordinaryStarted.promise;
+          expect(settled).not.toHaveBeenCalled();
+          ordinary.resolve();
+          await queued;
         }
-        return { stopReason: 'end_turn' };
-      },
-    });
-    const bridge = makeBridge({ channelFactory: async () => handle.channel });
-    try {
-      const { sessionId, clientId } = await bridge.spawnOrAttach({
-        workspaceCwd: WS_A,
-      });
-      const turn = bridge.sendPrompt(sessionId, {
-        sessionId,
-        prompt: [{ type: 'text', text: 'work' }],
-      });
-      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
-      bridge.enqueueMidTurnMessage(sessionId, 'correction', { clientId }, 'm1');
-      const settled = vi.fn();
-      const wait = handle.agentConnection
-        .extMethod(MID_TURN_GOAL_HANDOFF_METHOD, { sessionId })
-        .then(settled);
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      first.resolve();
-      await turn;
-      await promotedStarted.promise;
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(settled).not.toHaveBeenCalled();
-      promoted.resolve();
-      await wait;
-      expect(settled).toHaveBeenCalledOnce();
-    } finally {
-      first.resolve();
-      promoted.resolve();
-      await bridge.shutdown();
-    }
-  });
+        await promotedStarted.promise;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled).not.toHaveBeenCalled();
+        promoted.resolve();
+        await wait;
+        expect(settled).toHaveBeenCalledOnce();
+      } finally {
+        first.resolve();
+        ordinary.resolve();
+        promoted.resolve();
+        await bridge.shutdown();
+      }
+    },
+  );
 
   it('settles a Goal handoff withdrawn during attachment resolution', async () => {
     const reading = deferred<void>();
@@ -42891,6 +42921,70 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
       }
     },
   );
+
+  it('publishes a preempted Goal terminal once and keeps the newer Goal active', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const abort = new AbortController();
+    try {
+      const { sessionId } = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const terminals: BridgeEvent[] = [];
+      const collecting = (async () => {
+        for await (const event of bridge.subscribeEvents(sessionId, {
+          signal: abort.signal,
+        })) {
+          if (event.type === 'turn_complete') terminals.push(event);
+        }
+      })();
+      const startGoal = (turnId: string) =>
+        handle.agentConnection.extNotification('_qwencode/start_turn', {
+          sessionId,
+          source: 'goal',
+          turnId,
+        });
+      const endGoal = (turnId: string, promptId: string) =>
+        handle.agentConnection.extNotification('_qwencode/end_turn', {
+          sessionId,
+          source: 'goal',
+          reason: 'cancelled',
+          turnId,
+          promptId,
+        });
+
+      await startGoal('preempted');
+      await bridge.sendPrompt(sessionId, {
+        sessionId,
+        prompt: [{ type: 'text', text: 'ordinary' }],
+      });
+      await startGoal('next-goal');
+      await endGoal('preempted', 'preempted-prompt');
+      await endGoal('preempted', 'preempted-prompt');
+      await vi.waitFor(() =>
+        expect(terminals).toContainEqual(
+          expect.objectContaining({
+            promptId: 'preempted-prompt',
+            data: expect.objectContaining({ stopReason: 'cancelled' }),
+          }),
+        ),
+      );
+      expect(bridge.getSessionSummary(sessionId)?.hasActivePrompt).toBe(true);
+      await endGoal('next-goal', 'next-goal-prompt');
+      await vi.waitFor(() =>
+        expect(
+          terminals
+            .map((event) => event.promptId)
+            .filter(
+              (id) => id === 'preempted-prompt' || id === 'next-goal-prompt',
+            ),
+        ).toEqual(['preempted-prompt', 'next-goal-prompt']),
+      );
+      abort.abort();
+      await collecting;
+    } finally {
+      abort.abort();
+      await bridge.shutdown();
+    }
+  });
 
   it('rejects a whitespace-only message even while busy', async () => {
     const { factory, release } = hangingPromptFactory();

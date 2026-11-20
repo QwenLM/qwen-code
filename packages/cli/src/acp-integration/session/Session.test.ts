@@ -34120,6 +34120,79 @@ describe('Session', () => {
           expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
         });
 
+        it('keeps Send now bound to the current prompt during Goal preemption', async () => {
+          const permit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'retiring',
+          };
+          mockGoalRuntime.getSnapshot.mockReturnValue({
+            v: 2,
+            activity: 'running',
+            goal: {
+              goalId: permit.goalId,
+              revision: permit.revision,
+              objective: 'check weather',
+              status: 'active',
+              evidenceCursor: { recordId: 'cursor-1' },
+              turnCount: 0,
+              activeTimeMs: 0,
+              tokensUsed: 0,
+              createdAt: 1234,
+              updatedAt: 1234,
+            },
+          });
+          mockGoalRuntime.permitForTurn.mockImplementation((key) => {
+            if (key === 'goal-runtime:retiring') return permit;
+            if (key.startsWith('goal-user:'))
+              return { ...permit, turnId: 'incoming' };
+            return undefined;
+          });
+          mockClient.extMethod = vi.fn().mockResolvedValue({ messages: [] });
+          let markStreamHeld!: () => void;
+          const held = new Promise<void>((resolve) => {
+            markStreamHeld = resolve;
+          });
+          let releaseStream!: () => void;
+          const released = new Promise<void>((resolve) => {
+            releaseStream = resolve;
+          });
+          let retiringSignal: AbortSignal | undefined;
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockImplementationOnce(
+              async (
+                _model: string,
+                request: { config: { abortSignal: AbortSignal } },
+              ) => {
+                retiringSignal = request.config.abortSignal;
+                return (async function* () {
+                  yield readFileCall;
+                  markStreamHeld();
+                  await released;
+                })();
+              },
+            )
+            .mockResolvedValue(createEmptyStream());
+
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'check weather',
+          });
+          await held;
+          const incoming = startPrompt();
+          try {
+            await vi.waitFor(() => expect(retiringSignal?.aborted).toBe(true));
+            expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+            session.sendMidTurnInputNow();
+          } finally {
+            releaseStream();
+          }
+
+          await expect(incoming).resolves.toEqual({ stopReason: 'end_turn' });
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        });
+
         it('ends the turn for input sent once the response called a tool', async () => {
           const execute = vi
             .fn()
