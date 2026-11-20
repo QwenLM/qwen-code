@@ -13591,6 +13591,10 @@ exit 1
         const proc = spawnSync(
           'bash',
           [
+            // Runner-local startup files can prepend PATH entries ahead of
+            // the executable shims this probe owns.
+            '--noprofile',
+            '--norc',
             '-e',
             '-o',
             'pipefail',
