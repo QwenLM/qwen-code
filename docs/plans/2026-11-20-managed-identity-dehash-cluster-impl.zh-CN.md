@@ -10,7 +10,7 @@
 - 身份列通过哈希键与原始 actor/scope 列互相 join（如 `ma_memory_store.owner_actor_key = COALESCE(ma_session.owner_actor_key, ma_session.creator_actor_key)`），转换单表会破坏 join 直到全部转换。
 - 预算收缩与 fixture 对齐耦合：`VARCHAR(64)` 会拒绝现有长 fixture（`ws-<cwd>` workspace id、43 字符 `"tenant-"+UUID`），故 DDL 预算与 fixture 改动须同批落地。
 - 跨表哈希引用（`ma_message.body_resource_key`、`ma_event_stream.artifact_refs_resource_key`、`ma_resource_ref.resource_key` 等）无法展开为引用表中不存在的本地原始列；需在同批给引用表加原始 scope+resource 列（或规范可读键），即 schema 扩张。
-- 探针（H2 2.4.240 MySQL mode）：`utf8mb4_0900_bin` 可解析，但列级 plain `CHARACTER SET … COLLATE …` 子句后接 `NOT NULL DEFAULT` 或用于生成列时会语法报错；须把 charset+collate 包进 MySQL 可执行注释 `/*!80000 … */` 让 H2 忽略。VARCHAR 等值/PK 为 NO PAD；`setBytes`→VARCHAR 在 INSERT/`getBytes` 往返保留 UTF-8 与尾随空格，**但 H2 拒绝 VARCHAR 列与 byte[] 绑定做 WHERE 比较**（`CHARACTER VARYING` 与 `BINARY VARYING` 不可比）。故仅改 DDL 类型的迁移必红：DDL 类型变更与 Java `byte[]`→`String` 绑定变更须同批落地，叠加上述预算/fixture/哈希耦合。
+- 探针（H2 2.4.240 MySQL mode）：`utf8mb4_0900_bin` 可解析，但列级 plain `CHARACTER SET … COLLATE …` 子句后接 `NOT NULL DEFAULT` 或用于生成列时会语法报错；须把 charset+collate 包进 MySQL 可执行注释 `/*!80000 … */` 让 H2 忽略。VARCHAR 等值/PK 为 NO PAD；`setBytes`→VARCHAR 在 INSERT/`getBytes` 往返保留 UTF-8 与尾随空格，**但 H2 拒绝 VARCHAR 列与 byte[] 绑定做 WHERE 比较**（`CHARACTER VARYING` 与 `BINARY VARYING` 不可比）。故仅改 DDL 类型的迁移必红：DDL 类型变更与 Java `byte[]`→`String` 绑定变更须同批落地，叠加上述预算/fixture/哈希耦合。仅迁移绑定（String 绑定对接仍为 VARBINARY 的列）同样红：H2 比较要求绑定类型族与列类型族一致（`BINARY VARYING` 与 `CHARACTER VARYING` 不可比），故两半都无法单独落地。
 
 因此：单分支、转换期间暂红、仅在全绿时 commit+push。
 

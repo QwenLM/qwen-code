@@ -26,7 +26,9 @@ ma_session.creator_actor_key)`), so converting one table breaks joins until all 
   INSERT/`getBytes`, **but H2 rejects byte[] binds in WHERE against VARCHAR** (`CHARACTER VARYING`
   vs `BINARY VARYING` not comparable). A type-only DDL migration is therefore red: the DDL type
   change and the Java `byte[]`→`String` bind change must land together, on top of the
-  budget/fixture/hash coupling above.
+  budget/fixture/hash coupling above. A bind-only migration (String binds against still-VARBINARY
+  columns) is equally red: H2 comparison requires the bind type family to match the column type
+  family (`BINARY VARYING` vs `CHARACTER VARYING` not comparable), so neither half lands alone.
 
 Therefore: one branch, temporarily red during conversion, commit+push only when fully green.
 
