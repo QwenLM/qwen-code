@@ -303,7 +303,12 @@ function estimateFunctionResponseTokens(
     for (const inner of nested as Part[]) {
       if (inner.inlineData || inner.fileData) {
         tokens += Math.ceil(
-          estimatePartChars(inner, imageTokenEstimate) / TOKEN_TO_CHAR_RATIO,
+          // Floor at the resolved flat estimate: the send path's transport
+          // guard prices kept images at no less than this, and /context
+          // must not under-report what the next request will pay (#17321
+          // R3-1).
+          estimatePartChars(inner, imageTokenEstimate, imageTokenEstimate) /
+            TOKEN_TO_CHAR_RATIO,
         );
       } else if (typeof inner.text === 'string') {
         tokens += estimateContextTextTokens(inner.text);
@@ -376,8 +381,13 @@ function estimateConversationTokens(
         // Same resolution-aware estimator core uses (#17315): derive from
         // image dimensions when parseable, honor the flat estimate otherwise.
         tokens += Math.ceil(
-          estimatePartChars(part, billing.imageTokenEstimate) /
-            TOKEN_TO_CHAR_RATIO,
+          // Floor at the resolved flat estimate, matching the send path's
+          // transport guard (#17321 R3-1).
+          estimatePartChars(
+            part,
+            billing.imageTokenEstimate,
+            billing.imageTokenEstimate,
+          ) / TOKEN_TO_CHAR_RATIO,
         );
       } else if (part.functionCall) {
         tokens += estimateContextTextTokens(JSON.stringify(part.functionCall));

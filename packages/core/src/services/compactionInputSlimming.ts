@@ -341,30 +341,35 @@ function isPotentiallyAnimated(bytes: Uint8Array, mime: string): boolean {
   }
   if (isPngBytes(bytes)) {
     // APNG has an acTL (animation control) chunk before IDAT — a
-    // structural marker, not a heuristic. Without it, a PNG is static
-    // and takes the resolution path (#17321 F1). Metadata chunks before
-    // acTL are legal and unbounded, so the scan covers the whole
-    // pre-IDAT region — a 1 KiB window would miss acTL behind a large
-    // tEXt chunk (#17321 F1 residual).
-    const limit = bytes.length;
-    for (let i = 8; i < limit - 4; i++) {
-      if (
-        bytes[i] === 0x61 &&
-        bytes[i + 1] === 0x63 &&
-        bytes[i + 2] === 0x54 &&
-        bytes[i + 3] === 0x4c // 'acTL'
-      ) {
-        return true;
+    // structural marker, not a heuristic. Walk the CHUNK structure
+    // (length + type + payload + CRC) and match only TYPE fields: a raw
+    // byte scan would let 'acTL' bytes inside a tEXt PAYLOAD decide the
+    // answer (#17321 R1-1). Metadata chunks before acTL are legal and
+    // unbounded, so the walk covers the whole pre-IDAT region — a 1 KiB
+    // window would miss acTL behind a large tEXt chunk (#17321 F1
+    // residual).
+    let offset = 8;
+    while (offset + 8 <= bytes.length) {
+      const length =
+        (bytes[offset]! * 0x1_00_00_00 +
+          bytes[offset + 1]! * 0x1_00_00 +
+          bytes[offset + 2]! * 0x1_00 +
+          bytes[offset + 3]!) >>>
+        0;
+      const t0 = bytes[offset + 4]!;
+      const t1 = bytes[offset + 5]!;
+      const t2 = bytes[offset + 6]!;
+      const t3 = bytes[offset + 7]!;
+      if (t0 === 0x61 && t1 === 0x63 && t2 === 0x54 && t3 === 0x4c) {
+        return true; // 'acTL' chunk type
       }
-      // Stop at IDAT — acTL must appear before the image data.
-      if (
-        bytes[i] === 0x49 &&
-        bytes[i + 1] === 0x44 &&
-        bytes[i + 2] === 0x41 &&
-        bytes[i + 3] === 0x54 // 'IDAT'
-      ) {
-        return false;
+      if (t0 === 0x49 && t1 === 0x44 && t2 === 0x41 && t3 === 0x54) {
+        return false; // 'IDAT' — acTL must appear before the image data
       }
+      // Malformed/absurd length: fall back to conservative animated
+      // rather than walking past the buffer.
+      if (length > bytes.length) return true;
+      offset += 12 + length; // length + type + payload + CRC
     }
     return false;
   }

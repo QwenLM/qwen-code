@@ -158,6 +158,11 @@ function webpDimensions(
 // headers can produce absurd values that would dominate the context
 // estimate (#17321 R4-1).
 const MAX_PLAUSIBLE_DIMENSION = 100_000;
+// Each axis under 100 000 can still multiply to nonsense (a hostile
+// 99 999 × 99 999 header bills ~4.9M tokens). Real images stay well
+// inside 8K × 8K (67M px), so the PRODUCT is capped one notch above
+// that; anything beyond falls back to the flat estimate (#17321 R4-1).
+const MAX_PLAUSIBLE_PIXELS = 100_000_000;
 
 function positive(
   width: number,
@@ -168,7 +173,8 @@ function positive(
     width > 0 &&
     height > 0 &&
     width <= MAX_PLAUSIBLE_DIMENSION &&
-    height <= MAX_PLAUSIBLE_DIMENSION
+    height <= MAX_PLAUSIBLE_DIMENSION &&
+    width * height <= MAX_PLAUSIBLE_PIXELS
     ? { width, height }
     : undefined;
 }
