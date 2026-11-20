@@ -27,7 +27,7 @@ export interface ManagedLocalWebOptions {
   }>;
 }
 
-export const MANAGED_TERMINAL_UPGRADE_PATH =
+const MANAGED_TERMINAL_UPGRADE_PATH =
   /^\/api\/agent\/web-shell\/v1\/sessions\/(?!\.{1,2}\/)[A-Za-z0-9._-]+\/terminal$/;
 
 const TERMINAL_REQUEST_HEADERS = [
