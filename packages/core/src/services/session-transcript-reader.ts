@@ -2060,8 +2060,10 @@ function pruneCacheByteBudget(oversizedClass: boolean): void {
   }
 }
 
-// A snapshot of the same file that the live one supersedes: a strictly
-// smaller prefix, or an equal-size orphan an in-place rewrite (mtime moved)
+// A snapshot of the same file that the live one supersedes: a different
+// byte length in either direction — a smaller prefix left by an append, or
+// a longer prefix of a shortened transcript whose frozen cursors the size
+// guard rejects — or an equal-size orphan an in-place rewrite (mtime moved)
 // or equal-size replacement (identity changed) left unreachable on every
 // read path (the equal-size mtime guard, the identity check and
 // hasSnapshotSignature all reject it).
@@ -2073,12 +2075,11 @@ function isSupersededSnapshot(
   fileIdentity: SessionTranscriptFileIdentity,
 ): boolean {
   if (value.filePath !== filePath) return false;
-  if (value.snapshotSize < snapshotSize) return true;
+  if (value.snapshotSize !== snapshotSize) return true;
   return (
-    value.snapshotSize === snapshotSize &&
-    (value.lastUpdated !== lastUpdated ||
-      value.fileIdentity.dev !== fileIdentity.dev ||
-      value.fileIdentity.ino !== fileIdentity.ino)
+    value.lastUpdated !== lastUpdated ||
+    value.fileIdentity.dev !== fileIdentity.dev ||
+    value.fileIdentity.ino !== fileIdentity.ino
   );
 }
 
@@ -2120,7 +2121,7 @@ function supersededSnapshotBytes(
 // at the frozen offsets whether or not the index is cached. That read model
 // assumes append-only writes: an in-place rewrite followed by an append
 // serves rewritten prefix bytes under a frozen cursor (see the design doc's
-// capacity section). Cross-class eviction is deliberately absent: freeing
+// Compatibility and limits section). Cross-class eviction is deliberately absent: freeing
 // shared bytes does not admit an oversized index, and the class-full refusal
 // keeps resident indexes instead of thrashing between them.
 function evictSupersededSnapshots(
@@ -2741,29 +2742,13 @@ async function getCachedIndex(params: {
   // eslint-disable-next-line prefer-const -- assigned once, see above
   pending = (async () => {
     const value = await buildIndex(params);
-    const byteSize = estimateIndexCacheBytes(value);
-    const oversized = byteSize > getIndexCacheMaxBytes();
-    const classBudget = oversized
-      ? getIndexCacheOversizedMaxBytes()
-      : getIndexCacheMaxBytes();
-    if (byteSize > classBudget) {
-      if (indexCache.get(key)?.pending === pending) {
-        indexCache.delete(key);
-      }
-      debugLogger.debug(
-        `index cache skipped oversized entry ${key} byteSize=${byteSize}`,
-      );
-      return value;
-    }
-    if (indexCache.get(key)?.pending !== pending) {
-      debugLogger.debug(`index cache skipped stale completion ${key}`);
-      return value;
-    }
     // A build can complete after the file was rewritten or replaced under it
-    // (equal-size mtime move or identity change). Re-verify the frozen
-    // snapshot before admitting or evicting, so a stale completion neither
-    // caches a torn index nor evicts the live newer entry as an "orphan".
-    // allowAppend keeps a prefix frozen across a concurrent append valid.
+    // (equal-size mtime move, identity change, truncation). Re-verify the
+    // frozen snapshot before ANY early return or admission: cache-entry
+    // ownership only governs cache writes and deletes, never whether the
+    // built index is safe to serve, so every sharer of the build fails
+    // closed together. allowAppend keeps a prefix frozen across a concurrent
+    // append valid.
     let signatureOk: boolean;
     try {
       signatureOk = await hasSnapshotSignature(
@@ -2796,9 +2781,25 @@ async function getCachedIndex(params: {
         path.basename(params.filePath, '.jsonl'),
       );
     }
-    // The signature check yielded; the pending entry may have been replaced.
+    // The signature check yielded; the pending entry may have been replaced
+    // (TTL expiry or the 32-entry LRU). The verified value is still safe to
+    // serve, but this completion no longer owns the cache slot.
     if (indexCache.get(key)?.pending !== pending) {
       debugLogger.debug(`index cache skipped stale completion ${key}`);
+      return value;
+    }
+    const byteSize = estimateIndexCacheBytes(value);
+    const oversized = byteSize > getIndexCacheMaxBytes();
+    const classBudget = oversized
+      ? getIndexCacheOversizedMaxBytes()
+      : getIndexCacheMaxBytes();
+    if (byteSize > classBudget) {
+      if (indexCache.get(key)?.pending === pending) {
+        indexCache.delete(key);
+      }
+      debugLogger.debug(
+        `index cache skipped oversized entry ${key} byteSize=${byteSize}`,
+      );
       return value;
     }
     const classBytes = getIndexCacheBytesByClass();
@@ -3053,19 +3054,23 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
   const classBudget = oversized
     ? getIndexCacheOversizedMaxBytes()
     : getIndexCacheMaxBytes();
-  if (byteSize > classBudget || indexCache.size >= INDEX_CACHE_MAX_ENTRIES) {
+  if (byteSize > classBudget) {
     debugLogger.debug(
       `fresh index cache offer skipped ${key} byteSize=${byteSize}`,
     );
     return;
   }
   const classBytes = getIndexCacheBytesByClass();
+  const countFull = indexCache.size >= INDEX_CACHE_MAX_ENTRIES;
   if (
     (oversized ? classBytes.oversized : classBytes.shared) + byteSize >
-    classBudget
+      classBudget ||
+    countFull
   ) {
-    // Same fit-before-evict judgment as getCachedIndex: a refused offer must
-    // not evict the superseded prefix it cannot replace.
+    // Same fit-before-evict judgment as getCachedIndex, extended to the
+    // 32-entry count cap: a refused offer must not evict the superseded
+    // prefix it cannot replace, and reclaiming a superseded entry frees a
+    // count slot as well as class bytes.
     const reclaimable = supersededSnapshotBytes(
       index.filePath,
       index.snapshotSize,
@@ -3077,7 +3082,8 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
       (oversized ? classBytes.oversized : classBytes.shared) -
         reclaimable +
         byteSize >
-      classBudget
+        classBudget ||
+      (countFull && reclaimable === 0)
     ) {
       debugLogger.debug(
         `fresh index cache offer skipped ${key} byteSize=${byteSize}`,
@@ -4837,7 +4843,7 @@ export class SessionTranscriptReader {
     // not detected: page bodies are read from the live file at the frozen
     // offsets, so rewritten prefix bytes are served under the frozen cursor
     // even with a warm index (frozen-prefix digest validation is deferred;
-    // see the design doc's capacity section).
+    // see the design doc's Compatibility and limits section).
     const frozenLastUpdated = cursor?.lastUpdated ?? snapshot?.lastUpdated;
     if (
       frozenLastUpdated !== undefined &&
