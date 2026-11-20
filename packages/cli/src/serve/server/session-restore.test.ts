@@ -180,6 +180,87 @@ beforeEach(() => {
 });
 
 describe('restoreSessionCore', () => {
+  const strictSidecar = () =>
+    ({
+      state: 'valid',
+      session: {
+        workspaceCwd: WORKSPACE_CWD,
+        originalCwd: WORKSPACE_CWD,
+        worktreePath: `${WORKSPACE_CWD}/.qwen/worktrees/task`,
+        worktreeBranch: 'worktree-task',
+        slug: 'task',
+      },
+    }) as const;
+  const legacySidecar = () =>
+    ({
+      state: 'valid',
+      session: {
+        originalCwd: WORKSPACE_CWD,
+        worktreePath: `${WORKSPACE_CWD}/.qwen/worktrees/task`,
+        worktreeBranch: 'worktree-task',
+        slug: 'task',
+      },
+    }) as const;
+
+  it.each(['missing', 'legacy'] as const)(
+    'discards a cold restore when its strict worktree sidecar becomes %s',
+    async (state) => {
+      // Pre-read, then the read under the ownership lock: both strict.
+      mocks.readWorktreeSessionStrict
+        .mockResolvedValueOnce(strictSidecar())
+        .mockResolvedValueOnce(strictSidecar())
+        .mockResolvedValue(
+          state === 'missing' ? { state: 'missing' } : legacySidecar(),
+        );
+      const bridge = fakeBridge({
+        fireDeferredRestoreAskUserQuestionPrompt: vi.fn(),
+        discardDeferredRestoreAskUserQuestionPrompt: vi.fn(),
+      });
+      const { options, release } = coreOptions(fakeRuntime(bridge));
+
+      await expect(restoreSessionCore(options)).rejects.toThrow(
+        /Worktree sidecar .* during restore/,
+      );
+      expect(bridge.loadSession).toHaveBeenCalledWith(
+        expect.objectContaining({ deferAutomaticWorkUntilCwdRestore: true }),
+      );
+      expect(bridge.killSession).toHaveBeenCalledWith(SESSION_ID, {
+        requireZeroAttaches: true,
+      });
+      expect(bridge.changeSessionCwd).not.toHaveBeenCalled();
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt,
+      ).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('keeps the lock-free legacy path when the locked read is already legacy', async () => {
+    // A reset or transfer can replace a strict sidecar while the restore
+    // waits for the ownership lock. The locked read is authoritative: a
+    // legacy record there never earned the automatic-work hold, so the
+    // restore must not disarm it with a failure the older path tolerated.
+    mocks.readWorktreeSessionStrict
+      .mockResolvedValueOnce(strictSidecar())
+      .mockResolvedValueOnce(legacySidecar())
+      .mockResolvedValue(legacySidecar());
+    const bridge = fakeBridge({
+      fireDeferredRestoreAskUserQuestionPrompt: vi.fn(),
+      discardDeferredRestoreAskUserQuestionPrompt: vi.fn(),
+    });
+    const { options, release } = coreOptions(fakeRuntime(bridge));
+
+    const result = await restoreSessionCore(options);
+
+    expect(result.kind).toBe('restored');
+    expect(bridge.loadSession).toHaveBeenCalledWith(
+      expect.not.objectContaining({ deferAutomaticWorkUntilCwdRestore: true }),
+    );
+    expect(bridge.killSession).not.toHaveBeenCalled();
+    expect(bridge.changeSessionCwd).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledOnce();
+  });
+
   it('returns the restored session and releases the reservation', async () => {
     const bridge = fakeBridge();
     const { options, release } = coreOptions(fakeRuntime(bridge));

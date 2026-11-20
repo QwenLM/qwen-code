@@ -337,6 +337,19 @@ describe('daemon event schema', () => {
     expect(isDaemonEventType(event, 'trust_change_requested')).toBe(true);
   });
 
+  it('recognizes sub_session_task_changed only with the caller id', () => {
+    const event: DaemonEvent = {
+      id: 4,
+      v: 1,
+      type: 'sub_session_task_changed',
+      data: { sessionId: 'caller-1' },
+    };
+    expect(asKnownDaemonEvent(event)).toBe(event);
+    expect(
+      asKnownDaemonEvent({ ...event, data: { sessionId: '' } }),
+    ).toBeUndefined();
+  });
+
   it('recognizes artifact_changed as a known daemon event', () => {
     const event: DaemonEvent = {
       id: 3,
@@ -3531,6 +3544,25 @@ describe('PR 21 — auth device-flow events', () => {
       expect(afterSnapshot.approvalMode).toBe('auto-edit');
       // awaitingResync stays true (consumer hasn't explicitly recovered).
       expect(afterSnapshot.awaitingResync).toBe(true);
+    });
+  });
+
+  describe('mod_log', () => {
+    it("recognizes a Mod's log line and rejects one without its plugin", () => {
+      const event = {
+        id: 4,
+        v: 1,
+        type: 'mod_log',
+        data: { sessionId: 's-1', plugin: 'zh-display', text: 'translated' },
+      } satisfies DaemonEvent;
+      expect(asKnownDaemonEvent(event)).toBe(event);
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'mod_log',
+          data: { sessionId: 's-1', text: 'translated' },
+        }),
+      ).toBeUndefined();
     });
   });
 

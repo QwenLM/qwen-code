@@ -312,6 +312,10 @@ type MockConnection = {
   capabilities: { qwenCodeVersion: string; features: string[] };
   loadingTranscript: boolean;
   catchingUp: boolean;
+  restoredArtifacts?: DaemonSessionArtifact[];
+  restoredArtifactsSessionId?: string;
+  artifactCountHint?: number;
+  artifactCountHintSessionId?: string;
   error?: string;
   errorStatus?: number;
   missingSession?: boolean;
@@ -355,6 +359,7 @@ function activeGoalSnapshot(
 }
 
 type ChatEditorTestProps = {
+  slashArgumentCompleter?: import('./completions/slashCompletion').SlashArgumentCompleter;
   btwEnabled?: boolean;
   contextChipPlacement?: 'toolbar' | 'below' | 'header';
   liveVoicePortalContainer?: HTMLElement | null;
@@ -397,6 +402,7 @@ type ChatEditorTestProps = {
   isPreparing?: boolean;
   cancelArmed?: boolean;
   disabled?: boolean;
+  submitDisabled?: boolean;
   dialogOpen?: boolean;
   onToggleShortcuts?: () => void;
   reasoning?: {
@@ -548,6 +554,7 @@ const {
   rootWorkspaceVoice,
   qualifiedWorkspaceVoice,
   qualifiedSetWorkspaceSetting,
+  qualifiedSetVisionBridgeSettings,
   sessionCatalogController,
   mockReleaseDetachedWebTerminal,
   mockReleaseWebTerminal,
@@ -576,8 +583,12 @@ const {
   const rootWorkspaceVoice = vi.fn();
   const qualifiedWorkspaceVoice = vi.fn();
   const qualifiedSetWorkspaceSetting = vi.fn();
+  const qualifiedSetVisionBridgeSettings = vi.fn();
   const runtimeStop = vi.fn();
   const workspaceClient = {
+    getRestartRecoveries: vi.fn(),
+    continueRestartRecoveries: vi.fn(),
+    sendToSubSession: vi.fn(),
     runtimeStopOptions: vi.fn(),
     liveSetupStatus: vi
       .fn()
@@ -601,6 +612,7 @@ const {
       workspaceSettings: qualifiedWorkspaceSettings,
       workspaceVoice: qualifiedWorkspaceVoice,
       setWorkspaceSetting: qualifiedSetWorkspaceSetting,
+      setVisionBridgeSettings: qualifiedSetVisionBridgeSettings,
     })),
     sessionStatus: vi.fn(() =>
       Promise.resolve({ workspaceCwd: '/tmp/project' }),
@@ -1105,6 +1117,11 @@ const {
       },
       latestSettingsState: null as {
         settings: DaemonSettingDescriptor[];
+        setValue: (
+          scope: 'workspace' | 'user',
+          key: string,
+          value: unknown,
+        ) => Promise<unknown>;
       } | null,
       artifactPanelExtra: null as ReactNode,
       captureArtifactPanelOnly: false,
@@ -1194,6 +1211,7 @@ const {
     rootWorkspaceVoice,
     qualifiedWorkspaceVoice,
     qualifiedSetWorkspaceSetting,
+    qualifiedSetVisionBridgeSettings,
     sessionCatalogController: {
       invalidateWorkspace: vi.fn(),
       refreshWorkspace: vi.fn(),
@@ -1752,9 +1770,7 @@ vi.mock('./components/messages/SettingsMessage', async () => {
   const React = await import('react');
   return {
     SettingsMessage: (props: {
-      settingsState: {
-        settings: DaemonSettingDescriptor[];
-      };
+      settingsState: NonNullable<typeof testState.latestSettingsState>;
       initialCategory?: string;
       presentation?: WebShellSettingsOptions;
       onSubDialog?: (key: string, scope: 'user' | 'workspace') => void;
@@ -2008,7 +2024,11 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
       ) => Promise<boolean> | boolean | void;
       onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
       onOpenWorkspacesOverview?: () => void;
-      onLoadSession?: (sessionId: string) => Promise<void> | void;
+      onLoadSession?: (
+        sessionId: string,
+        workspaceCwd?: string,
+        artifactCount?: number,
+      ) => Promise<void> | void;
       onLoadStandaloneSession?: (
         sessionId: string,
         displayName?: string,
@@ -2177,6 +2197,16 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
             onClick: () => props.onLoadSession?.('session-2'),
           },
           'load session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'load-session-with-count',
+            type: 'button',
+            onClick: () =>
+              props.onLoadSession?.('session-2', '/tmp/project', 3),
+          },
+          'load session with count',
         ),
         React.createElement(
           'button',
@@ -4368,7 +4398,7 @@ describe('task activity key', () => {
     expect(testState.latestBackgroundTasksRefreshTrigger).toBe(1);
   });
 
-  it('shows the header artifacts entry with the session count and opens the environment panel', async () => {
+  it('shows the header artifacts entry with the session count and opens the right panel artifacts list', async () => {
     mockConnection.capabilities = {
       ...mockConnection.capabilities,
       features: ['session_artifacts'],
@@ -4391,58 +4421,217 @@ describe('task activity key', () => {
     const { container } = renderApp();
     await flush();
 
-    const entry = container.querySelector<HTMLButtonElement>(
-      '[data-web-shell-artifacts-entry]',
-    );
-    expect(entry).not.toBeNull();
-    expect(entry!.getAttribute('aria-label')).toBe('Open artifacts (2)');
+    const entry = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-artifacts-entry]',
+      );
+    expect(entry()).not.toBeNull();
+    expect(entry()!.getAttribute('aria-label')).toBe('Artifacts (2)');
+    expect(entry()!.getAttribute('aria-pressed')).toBe('false');
 
     await act(async () => {
-      entry!.click();
+      entry()!.click();
     });
     await flush();
-    const panel = container.querySelector(
-      '[data-testid="environment-panel"]:not([hidden])',
-    );
-    expect(panel).not.toBeNull();
-    // The entry must reveal the artifact list, not just open the panel shell.
-    expect(panel?.textContent).toContain('report.html');
-    expect(panel?.textContent).toContain('chart.html');
+    // The entry opens the right panel's artifacts list tab, not the
+    // environment panel.
+    const list = container.querySelector('[data-testid="artifacts-list"]');
+    expect(list).not.toBeNull();
+    expect(list?.textContent).toContain('report.html');
+    expect(list?.textContent).toContain('chart.html');
+    expect(
+      container.querySelector(
+        '[data-testid="environment-panel"]:not([hidden])',
+      ),
+    ).toBeNull();
+    expect(entry()!.getAttribute('aria-pressed')).toBe('true');
 
-    // Collapse the artifacts section, close the panel, then re-click the entry:
-    // the App glue (signal bump + prop pass) must re-expand the section, since
-    // the panel keeps its local section state while hidden.
-    const sectionHeader = Array.from(
-      panel!.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
-    ).find((button) => button.textContent?.trim() === 'Artifacts');
-    expect(sectionHeader).toBeTruthy();
+    // A second click toggles the right panel closed.
     await act(async () => {
-      sectionHeader!.click();
+      entry()!.click();
     });
     await flush();
     expect(
-      container.querySelector('[data-testid="environment-panel"]')?.textContent,
-    ).not.toContain('report.html');
+      container.querySelector('[data-testid="artifacts-list"]'),
+    ).toBeNull();
+    expect(entry()!.getAttribute('aria-pressed')).toBe('false');
+
+    // A third click reopens through the upsert branch (the tab already exists):
+    // exactly one artifacts tab, not a second appended duplicate.
     await act(async () => {
-      container
-        .querySelector<HTMLButtonElement>(
-          '[data-testid="chat-context-header"] button[aria-label="Toggle environment information"]',
-        )
-        ?.click();
+      entry()!.click();
     });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="artifacts-list"]'),
+    ).not.toBeNull();
+    expect(entry()!.getAttribute('aria-pressed')).toBe('true');
+    expect(
+      container.querySelectorAll('[role="tab"][title="Artifacts"]'),
+    ).toHaveLength(1);
+  });
+
+  it('opens an artifact preview tab when a row in the artifacts list is clicked', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [
+        {
+          id: 'report',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'report',
+          workspacePath: 'report.html',
+          clientRetained: false,
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+    });
+    const { container } = renderApp();
     await flush();
     await act(async () => {
       container
-        .querySelector<HTMLButtonElement>('[data-web-shell-artifacts-entry]')
-        ?.click();
+        .querySelector<HTMLButtonElement>('[data-web-shell-artifacts-entry]')!
+        .click();
     });
     await flush();
-    const reopened = container.querySelector(
-      '[data-testid="environment-panel"]:not([hidden])',
+    const row = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="artifacts-list"] button',
+      ),
+    ).find((button) => button.textContent?.includes('report.html'));
+    expect(row).toBeTruthy();
+    await act(async () => {
+      row!.click();
+    });
+    await flush();
+    // The row click reaches the real preview opener: the artifacts list is
+    // replaced by the clicked artifact's preview tab. The row and the tab carry
+    // the same title, so only a role="tab"-qualified selector tells them apart;
+    // with onOpenArtifact unwired the list would stay mounted and this fails.
+    expect(
+      container.querySelector('[data-testid="artifacts-list"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[role="tab"][title="report.html"]'),
+    ).not.toBeNull();
+  });
+
+  it('restores a persisted artifacts tab without re-clicking the entry', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [
+        {
+          id: 'report',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'report',
+          workspacePath: 'report.html',
+          clientRetained: false,
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+    });
+    // Seed a persisted artifacts tab (parse + restore arm), independent of the
+    // serialize path: the app must reopen the list on load without a click.
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'artifacts:session-1',
+          tabs: [
+            {
+              id: 'artifacts:session-1',
+              kind: 'artifacts',
+              title: 'Artifacts',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
     );
-    expect(reopened).not.toBeNull();
-    expect(reopened?.textContent).toContain('report.html');
-    expect(reopened?.textContent).toContain('chart.html');
+    const { container } = renderApp();
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector('[data-testid="artifacts-list"]'),
+      ).not.toBeNull();
+    });
+    expect(
+      container.querySelector('[data-testid="artifacts-list"]')?.textContent,
+    ).toContain('report.html');
+  });
+
+  it('does not restore a persisted artifacts tab when the host hides the artifacts entry', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    // A non-empty list: if the guard were absent the restored tab would render
+    // artifacts-list, so asserting every list state absent pins the guard.
+    mockSessionActions.loadArtifacts.mockResolvedValue({
+      artifacts: [
+        {
+          id: 'report',
+          kind: 'html',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'report',
+          workspacePath: 'report.html',
+          clientRetained: false,
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+    });
+    window.localStorage.setItem(
+      'qwen-code-web-shell-right-panel-state',
+      JSON.stringify({
+        '/tmp/project\0session-1': {
+          open: true,
+          activeTabId: 'artifacts:session-1',
+          tabs: [
+            {
+              id: 'artifacts:session-1',
+              kind: 'artifacts',
+              title: 'Artifacts',
+              sessionId: 'session-1',
+            },
+          ],
+        },
+      }),
+    );
+    const { container } = renderApp({
+      header: { items: ['title', 'environment', 'rightPanel'] },
+    });
+    await flush();
+    await flush();
+    expect(
+      container.querySelector('[data-web-shell-artifacts-entry]'),
+    ).toBeNull();
+    for (const testId of [
+      'artifacts-list',
+      'artifacts-list-empty',
+      'artifacts-list-skeleton',
+    ]) {
+      expect(container.querySelector(`[data-testid="${testId}"]`)).toBeNull();
+    }
+    expect(
+      container.querySelector('[role="tab"][title="Artifacts"]'),
+    ).toBeNull();
   });
 
   it('hides the header artifacts entry when the session has no artifacts', async () => {
@@ -4457,6 +4646,100 @@ describe('task activity key', () => {
     expect(
       container.querySelector('[data-web-shell-artifacts-entry]'),
     ).toBeNull();
+  });
+
+  it('shows the header artifacts entry from the click-time hint before the load lands', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    const makeArtifact = (id: string): DaemonSessionArtifact => ({
+      id,
+      kind: 'html',
+      storage: 'workspace',
+      source: 'tool',
+      status: 'available',
+      title: id,
+      workspacePath: `${id}.html`,
+      clientRetained: false,
+      createdAt: '2026-09-07T00:00:00.000Z',
+      updatedAt: '2026-09-07T00:00:00.000Z',
+    });
+    // The gated fetch stays pending: no authoritative data exists yet, so
+    // the keyed click-time hint from the session-list summary must surface.
+    const pending = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    mockSessionActions.loadArtifacts.mockReturnValue(pending.promise);
+    mockConnection.artifactCountHint = 3;
+    mockConnection.artifactCountHintSessionId = mockConnection.sessionId;
+    try {
+      const { container } = renderApp();
+      await flush();
+
+      const entry = container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-artifacts-entry]',
+      );
+      expect(entry).not.toBeNull();
+      expect(entry!.getAttribute('aria-label')).toBe('Artifacts (3)');
+
+      // The authoritative list supersedes the hint once it lands.
+      await act(async () => {
+        pending.resolve({ artifacts: [makeArtifact('report')] });
+        await pending.promise;
+      });
+      await flush();
+      expect(
+        container
+          .querySelector<HTMLButtonElement>('[data-web-shell-artifacts-entry]')
+          ?.getAttribute('aria-label'),
+      ).toBe('Artifacts (1)');
+    } finally {
+      mockConnection.artifactCountHint = undefined;
+      mockConnection.artifactCountHintSessionId = undefined;
+    }
+  });
+
+  it('withholds the click-time hint keyed to another session', async () => {
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_artifacts'],
+    };
+    const pending = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    mockSessionActions.loadArtifacts.mockReturnValue(pending.promise);
+    mockConnection.artifactCountHint = 3;
+    mockConnection.artifactCountHintSessionId = `${mockConnection.sessionId}-other`;
+    try {
+      const { container } = renderApp();
+      await flush();
+
+      expect(
+        container.querySelector('[data-web-shell-artifacts-entry]'),
+      ).toBeNull();
+    } finally {
+      mockConnection.artifactCountHint = undefined;
+      mockConnection.artifactCountHintSessionId = undefined;
+    }
+  });
+
+  it('forwards the clicked session artifact count into loadSession options', async () => {
+    // Pins the sidebar → App → loadSession wiring: the count the sidebar
+    // row carries must reach the action options, or the hint never lands
+    // on the connection and the entry reverts to load-response timing.
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="load-session-with-count"]',
+        )
+        ?.click();
+    });
+    await flush();
+
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+      'session-2',
+      expect.objectContaining({ artifactCountHint: 3 }),
+    );
   });
 
   it('exposes the artifact count and opener to a custom chat header', async () => {
@@ -4496,20 +4779,52 @@ describe('task activity key', () => {
         onOpenArtifacts: expect.any(Function),
       }),
     );
-    await act(async () => {
+    const openEntry = () =>
       Array.from(container.querySelectorAll('button'))
         .find((button) => button.textContent === 'Custom artifacts 1')!
         .click();
+    await act(async () => {
+      openEntry();
     });
-    await flush();
+    await vi.waitFor(async () => {
+      await flush();
+      expect(
+        container.querySelector('[data-testid="artifacts-list"]'),
+      ).not.toBeNull();
+    });
+    // The entry targets the right panel's artifacts list tab, not the
+    // environment panel.
     expect(
       container.querySelector(
         '[data-testid="environment-panel"]:not([hidden])',
       ),
-    ).not.toBeNull();
+    ).toBeNull();
+
+    // The artifacts tab serializes into the persisted right-panel state.
+    await vi.waitFor(async () => {
+      await flush();
+      const rawState = JSON.parse(
+        window.localStorage.getItem('qwen-code-web-shell-right-panel-state') ??
+          '{}',
+      ) as Record<string, { tabs?: Array<{ kind?: string }> }>;
+      expect(
+        Object.values(rawState).some((entry) =>
+          entry.tabs?.some((tab) => tab.kind === 'artifacts'),
+        ),
+      ).toBe(true);
+    });
+
+    // A second click toggles the right panel closed.
+    await act(async () => {
+      openEntry();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="artifacts-list"]'),
+    ).toBeNull();
   });
 
-  it('withholds the artifact count from a custom header when the panel has no artifacts section', async () => {
+  it('publishes the artifact count independent of the environment panel artifacts section', async () => {
     mockConnection.capabilities = {
       ...mockConnection.capabilities,
       features: ['session_artifacts'],
@@ -4537,11 +4852,11 @@ describe('task activity key', () => {
     });
     await flush();
 
-    // The count and the opener share one gate: with no artifacts section in
-    // the panel there is nothing to open, so no count may be published either.
+    // The entry opens the right panel's artifacts list tab, so the count is
+    // published even when the environment panel has no artifacts section.
     const info = renderChatHeader.mock.lastCall?.[0];
-    expect(info?.artifactCount).toBeUndefined();
-    expect(info?.onOpenArtifacts).toBeUndefined();
+    expect(info?.artifactCount).toBe(1);
+    expect(info?.onOpenArtifacts).toEqual(expect.any(Function));
   });
 
   it('persists the environment panel open state across reloads', async () => {
@@ -12840,6 +13155,59 @@ async function flush(): Promise<void> {
   });
 }
 
+describe('App restart recovery', () => {
+  beforeEach(() => {
+    mockConnection.capabilities.features = ['restart_recovery'];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        { id: 'secondary', cwd: '/work/secondary', trusted: true },
+      ],
+    };
+    mockWorkspace.client.getRestartRecoveries.mockReset().mockResolvedValue({
+      workspaces: [
+        {
+          workspace: '/work/secondary',
+          workspaceId: 'secondary',
+          cwd: '/work/secondary',
+          v: 1,
+          items: [
+            {
+              sessionId: 'recovery-session',
+              lastActivityAt: '2026-11-18T00:00:00.000Z',
+              interruption: 'daemon_shutdown',
+            },
+          ],
+          truncated: false,
+        },
+      ],
+    });
+  });
+
+  it('scans only the locked workspace', async () => {
+    const { container } = renderApp({
+      lockedWorkspaceCwd: '/work/secondary',
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(mockWorkspace.client.getRestartRecoveries).toHaveBeenCalled();
+      });
+    });
+    expect(
+      mockWorkspace.client.getRestartRecoveries,
+    ).toHaveBeenCalledExactlyOnceWith({
+      workspaces: ['/work/secondary'],
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(container.textContent).toContain(
+          '1 task interrupted by a restart',
+        );
+      });
+    });
+  });
+});
+
 async function clickSubmit(container: HTMLElement): Promise<void> {
   await act(async () => {
     container
@@ -12848,6 +13216,95 @@ async function clickSubmit(container: HTMLElement): Promise<void> {
     await Promise.resolve();
   });
 }
+
+describe('App /send', () => {
+  const callerCwd = '/tmp/project';
+  const targetCwd = '/tmp/backend';
+
+  beforeEach(() => {
+    mockConnection.capabilities.features = ['session_sub_session_send'];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'caller-id',
+          cwd: callerCwd,
+          displayName: targetCwd,
+          primary: true,
+          trusted: true,
+        },
+        { id: 'target-id', cwd: targetCwd, primary: false, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspace.client.sendToSubSession.mockReset();
+  });
+
+  it('only clears the submitted draft after the daemon accepts it', async () => {
+    const send = deferred<{ sessionId: string }>();
+    mockWorkspace.client.sendToSubSession.mockReturnValue(send.promise);
+    const { container } = renderApp();
+    testState.prompt = '/send hello';
+    await clickSubmit(container);
+    await clickSubmit(container);
+    expect(
+      mockWorkspace.client.sendToSubSession,
+    ).toHaveBeenCalledExactlyOnceWith(
+      'session-1',
+      { prompt: 'hello' },
+      'client-1',
+    );
+    expect(editorCommit).not.toHaveBeenCalled();
+
+    await act(async () => send.resolve({ sessionId: 'target' }));
+    expect(editorCommit).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the draft if the host refuses the outgoing prompt', async () => {
+    const onSubmitBefore = vi.fn().mockRejectedValue(new Error('host refusal'));
+    const { container } = renderApp({ onSubmitBefore });
+    testState.prompt = '/send --workspace target-id hello';
+    await clickSubmit(container);
+    expect(onSubmitBefore).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      prompt: 'hello',
+    });
+    expect(mockWorkspace.client.sendToSubSession).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('/send --workspace target-id hello');
+  });
+
+  it('does not restore a late refusal into another session', async () => {
+    const send = deferred<never>();
+    mockWorkspace.client.sendToSubSession.mockReturnValue(send.promise);
+    const { container, rerender } = renderApp();
+    testState.prompt = '/send hello';
+    await clickSubmit(container);
+    expect(mockWorkspace.client.sendToSubSession).toHaveBeenCalledOnce();
+
+    mockConnection.sessionId = 'session-2';
+    testState.prompt = '';
+    rerender();
+    await act(async () => send.reject(new Error('target refused')));
+    expect(testState.prompt).toBe('');
+    expect(editorCommit).not.toHaveBeenCalled();
+  });
+
+  it('offers a stable selector for a colliding workspace name and honors the lock', async () => {
+    const { container } = renderApp({ lockedWorkspaceCwd: callerCwd });
+    await flush();
+    const result =
+      testState.latestChatEditorProps?.slashArgumentCompleter?.(
+        '/send --workspace ',
+      );
+    expect(result?.items).toMatchObject([
+      { detail: callerCwd, apply: '/send --workspace caller-id ' },
+    ]);
+
+    testState.prompt = `/send --workspace ${targetCwd} hello`;
+    await clickSubmit(container);
+    expect(mockWorkspace.client.sendToSubSession).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+  });
+});
 
 function deferred<T>(): {
   promise: Promise<T>;
@@ -13366,6 +13823,8 @@ beforeEach(() => {
     voiceWorkspaceStatus('/work/secondary'),
   );
   qualifiedSetWorkspaceSetting.mockReset();
+  qualifiedSetVisionBridgeSettings.mockReset();
+  qualifiedSetVisionBridgeSettings.mockResolvedValue({ requiresRestart: true });
   qualifiedSetWorkspaceSetting.mockResolvedValue({
     key: 'voiceModel',
     scope: 'workspace',
@@ -30835,6 +31294,12 @@ describe('App session callbacks', () => {
   it('names a new session from a short first prompt', async () => {
     mockConnection.sessionId = undefined;
     mockConnection.displayName = undefined;
+    const titleWrite = deferred<{ displayName: string }>();
+    const updateMetadata = vi.fn(() => titleWrite.promise);
+    mockSessionActions.createSession.mockResolvedValueOnce({
+      sessionId: 'session-1',
+      updateMetadata,
+    });
     renderApp();
     await flush();
 
@@ -30845,22 +31310,10 @@ describe('App session callbacks', () => {
       expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
     });
 
-    expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
-      '修复登录按钮在移动端错位',
-    );
-    expect(
-      mockSessionActions.renameSession.mock.invocationCallOrder[0],
-    ).toBeLessThan(
-      mockSessionActions.attachSession.mock.invocationCallOrder[0],
-    );
-    expect(
-      mockSessionActions.renameSession.mock.invocationCallOrder[0],
-    ).toBeLessThan(mockSessionActions.sendPrompt.mock.invocationCallOrder[0]);
-    expect(
-      mockSessionActions.renameSession.mock.invocationCallOrder[0],
-    ).toBeLessThan(
-      sessionCatalogController.sessionCreated.mock.invocationCallOrder[0],
-    );
+    expect(updateMetadata).toHaveBeenCalledExactlyOnceWith({
+      initialDisplayName: '修复登录按钮在移动端错位',
+    });
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
     expect(
       sessionCatalogController.setPendingSessionTitle,
     ).toHaveBeenCalledWith(
@@ -30871,14 +31324,9 @@ describe('App session callbacks', () => {
     expect(
       sessionCatalogController.setPendingSessionTitle.mock
         .invocationCallOrder[0],
-    ).toBeLessThan(
-      mockSessionActions.renameSession.mock.invocationCallOrder[0],
-    );
-    expect(sessionCatalogController.renamed).toHaveBeenCalledWith(
-      '/workspace',
-      'session-1',
-      '修复登录按钮在移动端错位',
-    );
+    ).toBeLessThan(updateMetadata.mock.invocationCallOrder[0]);
+    await act(async () => titleWrite.resolve({ displayName: '已手动改名' }));
+    expect(sessionCatalogController.renamed).not.toHaveBeenCalled();
   });
 
   it('leaves a long first prompt to the automatic session title', async () => {
@@ -30976,7 +31424,7 @@ describe('App session callbacks', () => {
     );
     // Naming goes through the created client, not the current-session action.
     expect(detachedClient.updateMetadata).toHaveBeenCalledWith({
-      displayName: 'run while I am away',
+      initialDisplayName: 'run while I am away',
     });
     expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
   });
@@ -31644,7 +32092,8 @@ describe('App session callbacks', () => {
     });
     await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
     expect(editorFocus).not.toHaveBeenCalled();
-    expect(testState.latestChatEditorProps?.disabled).toBe(true);
+    expect(testState.latestChatEditorProps?.disabled).toBe(false);
+    expect(testState.latestChatEditorProps?.submitDisabled).toBe(true);
     expect(testState.latestChatEditorProps?.onSubmit('must stay on A')).toBe(
       false,
     );
@@ -31658,6 +32107,7 @@ describe('App session callbacks', () => {
       await load.promise;
     });
     await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(testState.latestChatEditorProps?.submitDisabled).toBe(false);
     expect(editorFocus).toHaveBeenCalledOnce();
   });
 
@@ -49380,6 +49830,203 @@ describe('App session callbacks', () => {
     ).toBeNull();
   });
 
+  it('writes only the timeout for the primary workspace', async () => {
+    mockConnection.workspaceCwd = '/workspace';
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/model --timeout 90000ms --vision';
+    await clickSubmit(container);
+    await flush();
+    expect(settingsSetValue.mock.calls).toEqual([
+      ['workspace', 'visionBridgeTimeoutMs', 90_000],
+    ]);
+    expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
+  });
+
+  it('uses the secondary workspace for the vision picker, timeout command and settings panel', async () => {
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockWorkspace.capabilities = {
+      features: ['workspace_qualified_rest_core', 'workspace_settings'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    const timeoutSetting: DaemonSettingDescriptor = {
+      key: 'visionBridgeTimeoutMs',
+      type: 'integer',
+      label: 'Vision Bridge Timeout (ms)',
+      category: 'Model',
+      requiresRestart: true,
+      default: undefined,
+      values: { effective: 30_000, workspace: 30_000 },
+    };
+    const modelSetting: DaemonSettingDescriptor = {
+      key: 'visionModel',
+      type: 'string',
+      label: 'Vision Model',
+      category: 'Model',
+      requiresRestart: false,
+      default: '',
+      values: { effective: 'primary-vl', workspace: 'primary-vl' },
+    };
+    testState.settings = [timeoutSetting, modelSetting];
+    qualifiedWorkspaceSettings.mockResolvedValue({
+      v: 1,
+      settings: [
+        { ...timeoutSetting, values: { effective: 90_000, workspace: 90_000 } },
+        {
+          ...modelSetting,
+          values: { effective: 'secondary-vl', workspace: 'secondary-vl' },
+        },
+      ],
+    });
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/model --vision --timeout 60';
+    await clickSubmit(container);
+    await flush();
+    expect(mockWorkspace.client.workspaceById).toHaveBeenCalledWith(
+      'secondary',
+    );
+    expect(qualifiedSetWorkspaceSetting).toHaveBeenCalledWith(
+      'workspace',
+      'visionBridgeTimeoutMs',
+      60_000,
+    );
+
+    testState.prompt = '/model --vision';
+    await clickSubmit(container);
+    await flush();
+    const picker = container.querySelector<HTMLButtonElement>(
+      '[data-testid="model-select"]',
+    );
+    expect(picker?.getAttribute('data-current-model-id')).toBe('secondary-vl');
+    await act(async () => picker?.click());
+    expect(qualifiedSetWorkspaceSetting).toHaveBeenCalledWith(
+      'workspace',
+      'visionModel',
+      'fast-model-x',
+    );
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      testState.latestSettingsState?.settings.find(
+        (setting) => setting.key === 'visionBridgeTimeoutMs',
+      )?.values.effective,
+    ).toBe(90_000);
+    expect(
+      testState.latestSettingsState?.settings.find(
+        (setting) => setting.key === 'visionModel',
+      )?.values.workspace,
+    ).toBe('secondary-vl');
+    await testState.latestSettingsState?.setValue(
+      'workspace',
+      'visionBridgeTimeoutMs',
+      120_000,
+    );
+    expect(qualifiedSetWorkspaceSetting).toHaveBeenCalledWith(
+      'workspace',
+      'visionBridgeTimeoutMs',
+      120_000,
+    );
+    expect(settingsSetValue).not.toHaveBeenCalled();
+  });
+
+  it('keeps the standalone User timeout editor without borrowing a workspace value', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    testState.settings = [
+      {
+        key: 'visionBridgeTimeoutMs',
+        type: 'integer',
+        label: 'Vision Bridge Timeout (ms)',
+        category: 'Model',
+        requiresRestart: true,
+        default: undefined,
+        values: { effective: 30_000, user: 45_000, workspace: 30_000 },
+      },
+    ];
+    const { container } = renderApp();
+    await flush();
+    const settingsButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="open-sidebar-settings"]',
+    );
+    expect(settingsButton).not.toBeNull();
+    await act(async () => settingsButton?.click());
+    await flush();
+    const state = testState.latestSettingsState;
+    expect(state).not.toBeNull();
+    expect(
+      state?.settings.find((setting) => setting.key === 'visionBridgeTimeoutMs')
+        ?.values,
+    ).toEqual({ effective: 45_000, user: 45_000 });
+    await state?.setValue('user', 'visionBridgeTimeoutMs', 60_000);
+    expect(settingsSetValue.mock.calls).toEqual([
+      ['user', 'visionBridgeTimeoutMs', 60_000],
+    ]);
+    expect(qualifiedSetWorkspaceSetting).not.toHaveBeenCalled();
+  });
+
+  it('sends a model and timeout together in one request without a fallback on failure', async () => {
+    mockConnection.workspaceCwd = '/workspace';
+    const client = {
+      ...mockWorkspace.client.workspaceByCwd(),
+      setVisionBridgeSettings: qualifiedSetVisionBridgeSettings,
+    };
+    mockWorkspace.client.workspaceByCwd.mockReturnValue(client);
+    mockWorkspace.client.workspaceByCwd.mockClear();
+    qualifiedSetVisionBridgeSettings.mockRejectedValueOnce(
+      new Error('write failed'),
+    );
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/model --vision qwen-vl --timeout 45';
+    await clickSubmit(container);
+    await flush();
+    expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(
+      '/workspace',
+    );
+    expect(qualifiedSetVisionBridgeSettings.mock.calls).toEqual([
+      ['qwen-vl', 45_000],
+    ]);
+    expect(settingsSetValue).not.toHaveBeenCalled();
+    expect(qualifiedSetWorkspaceSetting).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
+  });
+
+  it.each([
+    '/model --vision qwen-vl --timeout 1.5',
+    '/model --vision --timeout 60 --timeout abc',
+    '/model --vision --timeout 60 --global',
+    '/model --vision qwen-vl --timeout 60 --',
+    '/model --vision --timeout=60',
+    '/model --voice --timeout 60',
+  ])('rejects %s without writing', async (prompt) => {
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+    settingsSetValue.mockClear();
+    testState.prompt = prompt;
+    await clickSubmit(container);
+    await flush();
+    expect(settingsSetValue).not.toHaveBeenCalled();
+    expect(qualifiedSetWorkspaceSetting).not.toHaveBeenCalled();
+    expect(qualifiedSetVisionBridgeSettings).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      expect.stringMatching(/^Invalid /),
+    );
+    expect(container.querySelector('[data-testid="model-select"]')).toBeNull();
+  });
+
   it('does not close a command-launched fast picker when its setting is excluded', async () => {
     const { container, rerender } = renderApp();
     await flush();
@@ -50499,6 +51146,7 @@ describe('App session callbacks', () => {
     ['/language ui en --project', 'en', 'workspace'],
     ['/language ui --global ru', 'ru', 'user'],
     ['/language ui ru --global', 'ru', 'user'],
+    ['/language ui zh-TW', 'zh-TW', 'user'],
   ])(
     'accepts UI language scope flags in %s',
     async (command, language, scope) => {

@@ -6410,6 +6410,35 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(targetedGates).toContain('is a semantic merge conflict');
     expect(targetedGates).toContain('`expected 112 to be 104`');
 
+    const webShellPath = '.qwen/skills/verify-pr/references/web-shell.md';
+    if (flat.includes('references/web-shell.md') || existsSync(webShellPath)) {
+      expect(flat).toContain('references/web-shell.md');
+      expect(flat).toContain(
+        "Verify the model's reply from backend assistant output",
+      );
+      expect(flat).toContain(
+        'Confirm turn completion from the backend terminal state for the prompt',
+      );
+      const webShell = readFileSync(webShellPath, 'utf8').replace(/\s+/g, ' ');
+      expect(webShell).toContain("page.route('**/capabilities'");
+      expect(webShell).toContain(
+        'Verify that no stale Finished badge appears for Home.',
+      );
+      expect(webShell).toContain(
+        '`storedKey: true`, `keyConfigured: true`, and `enabled: false`',
+      );
+      expect(webShell).toContain('Use the same isolated `QWEN_HOME`');
+      expect(webShell).toContain('qwen serve --channel my-plugin-test');
+      expect(webShell).toContain(
+        'the channel session appears in the intended workspace and that the reply reaches the sender',
+      );
+      expect(webShell).toContain('GET /session/<sessionId>/turns/<promptId>');
+      expect(webShell).toContain(
+        'Require the response to report `state: completed` for that prompt in that session.',
+      );
+      expect(webShell).toContain('`context.sessionId` and `request.model`');
+    }
+
     // The Android recipe lives in a reference file the restored .qwen tree
     // carries, so the pointer must resolve.
     expect(flat).toContain('references/android.md');
@@ -6605,6 +6634,20 @@ describe('qwen-triage verify hardening round 2', () => {
   // precede the round, as the watch prompt's own write-before-start rule does.
   it('registers a manual re-verification round before it starts', () => {
     const flat = verifySkill.replace(/\s+/g, ' ');
+    // R4-2: pin shared sentences on the manual section's own slice, so the
+    // watch prompt's copy is not an alibi for a deleted manual sentence.
+    // R4-2 (round 5): resolve both sentinels and assert their order before
+    // slicing — slice(start, -1) returns the whole tail, so a renamed end
+    // sentinel would silently widen the slice past the manual section.
+    const manualStart = verifySkill.indexOf(
+      'When the maintainer says a previously verified PR has moved',
+    );
+    const manualEnd = verifySkill.indexOf('To make this trigger automatic');
+    expect(manualStart).toBeGreaterThan(-1);
+    expect(manualEnd).toBeGreaterThan(manualStart);
+    const manualSlice = verifySkill
+      .slice(manualStart, manualEnd)
+      .replace(/\s+/g, ' ');
 
     // The phrase is a documented trigger, and an ambiguous PR is asked about.
     expect(flat).toContain('有更新了，重新验证');
@@ -6616,12 +6659,105 @@ describe('qwen-triage verify hardening round 2', () => {
     // the hand-written completion write and left the file two heads stale,
     // so the contract now names one command per step instead of a JSON edit.
     expect(flat).toContain(
-      'Register the round in the shared watch state before starting it',
+      'Register the round in the shared watch state **ahead of prepare**',
     );
     expect(flat).toContain('never hand-write');
+    // R17-2: registration runs ahead of prepare, so --start carries no
+    // --artifact-dir (prepare has not printed the directory yet); a prepare
+    // window kill then leaves a recoverable marker, not a dropped head.
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --artifact-dir <dir> --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --repo <owner>/<repo>',
     );
+    // R4-2: shared sentences on the manual slice (the watch copy is no alibi).
+    expect(manualSlice).toContain(
+      'no `--artifact-dir`, because prepare has not printed the directory yet',
+    );
+    expect(manualSlice).toContain(
+      'a release alone leaves the head unregistered',
+    );
+    expect(manualSlice).toContain(
+      'Do not `git checkout` the named head under the old marker',
+    );
+    // R1-1: the prepare-failure recovery must carry the full --release form
+    // with --repo (a recorded repo refuses an omitted --repo, so a shortened
+    // copy would strand the marker — reintroducing R17-2). Removing --repo
+    // from the sentence reds this whole-form pin.
+    expect(manualSlice).toContain(
+      'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> --round <r> --repo <owner>/<repo>`',
+    );
+    // R1-1 (round 2): the manual recovery also pairs release with a restart.
+    expect(manualSlice).toContain(
+      'then start the head again (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r+1> --repo <owner>/<repo>`) and retry prepare',
+    );
+    // Deferred (round 7): a transient prepare failure leaves the marker intact —
+    // retry-without-release recovers `H`; release+restart is for a dead round.
+    expect(manualSlice).toContain(
+      'retrying prepare against it and completing at the original round recovers `H` with no release',
+    );
+    // R3-2: the restarted round's number becomes this round's number.
+    expect(manualSlice).toContain(
+      "The restarted round's number (`<r+1>`) becomes this round's number — repeat that value in `--complete`",
+    );
+    // R3-1: the manual inconclusive-recovery prohibition (colon variant).
+    expect(manualSlice).toContain(
+      'Do not recover with `--complete inconclusive` instead: it increments the retry counter whose cap is the terminal not-covered state',
+    );
+    // R1-1 (round 3) + R4-1: the manual moved-head terminal case (<H> variant)
+    // re-resolves and starts the newer head itself — there is no watch fire.
+    expect(manualSlice).toContain(
+      'If prepare refuses because the head it names is not the head this round registered — moved forward or force-pushed; prepare tests exact equality and states no ordering — the registered head can never prepare: `--release --head <H> --round <r> --repo <owner>/<repo>` it and do not restart it',
+    );
+    expect(manualSlice).toContain(
+      'There is no watch fire here to deliver the live head, so re-resolve it yourself',
+    );
+    expect(manualSlice).toContain(
+      '`--start --head <live> --round <next> --repo <owner>/<repo>` and run prepare',
+    );
+    // Deferred (round 6): after the moved-head restart the completion
+    // placeholders re-bind to <live>/<next> — the completion form below still
+    // prints <H>/<r>, so without this clause a restarted round would complete
+    // under the original head and round and be refused (exit 3).
+    expect(manualSlice).toContain(
+      'The restarted round is now `<live>` at `<next>` — repeat those values in `--complete`, not the original `<H>` and `<r>`',
+    );
+    // Deferred (round 13): a force-push can return the live head to one already
+    // verified, so the --start <live> may be refused — the head needs no new
+    // round; and the follow-up protocol re-measures at <live>, not the original H.
+    expect(manualSlice).toContain(
+      'is refused because `<live>` is already verified (a force-push can return to an earlier, already-covered head), the head needs no new round',
+    );
+    expect(manualSlice).toContain(
+      'classifies the delta and re-measures at `<live>` (the new head), not the original `H`',
+    );
+    // P1 (maintainer, round 14): the manual flow also compares the prepared head
+    // with the registered one when prepare SUCCEEDS (the <H> twin of the watch
+    // pin); the shared release-without-complete sentence is pinned on this
+    // slice so the watch copy is not its alibi.
+    expect(manualSlice).toContain(
+      "When prepare succeeds, compare the `head` line it printed (the trusted snapshot's `headRefOid`) with `<H>` before the battery",
+    );
+    expect(manualSlice).toContain(
+      "A differing head is the moved-head case below: release this round's marker and run neither the battery nor `--complete`",
+    );
+    // R1-2: a positional pin — registration precedes prepare in this section
+    // (an order-insensitive toContain would stay green if --start moved back
+    // below prepare). Round 13: scope it to manualSlice, not the whole flattened
+    // skill, so it guards this section as claimed.
+    expect(
+      manualSlice.indexOf(
+        'Register the round in the shared watch state **ahead of prepare**',
+      ),
+    ).toBeLessThan(manualSlice.indexOf('Then run prepare; it creates'));
+    // Deferred (round 10): the heading pin above is not enough — guard the
+    // --start COMMAND's position too, so moving the command below prepare (while
+    // the heading stays above) reds this per-section assertion. Presence guards
+    // (round 11): if either placeholder spelling changes, indexOf returns -1 and
+    // the ordering comparison would go vacuous — assert both are found first.
+    const manualStartAt = manualSlice.indexOf('--start --head <H>');
+    const manualPrepareAt = manualSlice.indexOf('Then run prepare; it creates');
+    expect(manualStartAt).toBeGreaterThan(-1);
+    expect(manualPrepareAt).toBeGreaterThan(-1);
+    expect(manualStartAt).toBeLessThan(manualPrepareAt);
     expect(flat).toContain(
       'Exit 3 means the file already records `H` as verified or in flight',
     );
@@ -6640,8 +6776,13 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'the same write-before-start rule the watch prompt follows',
     );
-    expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--comment-id <id>] --repo <owner>/<repo>',
+    // R17-2: the directory prepare printed is recorded at --complete.
+    expect(manualSlice).toContain(
+      'verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>',
+    );
+    // Deferred (round 6): the replay-omission clause is pinned in this section.
+    expect(manualSlice).toContain(
+      'omit it on a replayed completion to inherit the directory already recorded for `H`',
     );
     // Registration is a step of its own ahead of the round, not an
     // afterthought behind it.
@@ -6701,14 +6842,227 @@ describe('qwen-triage verify hardening round 2', () => {
   // the manual section's identical command uses <H> and cannot satisfy this.
   it('spells out the watch prompt completion and release forms', () => {
     const flat = verifySkill.replace(/\s+/g, ' ');
+    // R4-2: a sentence that also exists verbatim in the manual section must be
+    // pinned on the prompt's own slice, or the manual copy is its alibi.
+    // R4-2 (round 5): resolve both sentinels and assert their order before
+    // slicing — slice(start, -1) returns the whole tail, so a renamed end
+    // sentinel would silently widen the slice into the manual section.
+    const promptStart = verifySkill.indexOf('The prompt consumes the gate');
+    const promptEnd = verifySkill.indexOf('On `action: "stop"`');
+    expect(promptStart).toBeGreaterThan(-1);
+    expect(promptEnd).toBeGreaterThan(promptStart);
+    const promptSlice = verifySkill
+      .slice(promptStart, promptEnd)
+      .replace(/\s+/g, ' ');
     // The full registration form, every required flag included.
+    // R17-2: the watch prompt registers ahead of prepare, so --start carries
+    // no --artifact-dir; the directory is recorded at --complete.
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --artifact-dir <dir> --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo>',
     );
+    // Deferred (round 6): the no-artifact-dir invariant is a shared sentence
+    // (the manual section carries it too) — pin the prompt's own copy so the
+    // manual copy is not its alibi. A positive form pin alone would stay green
+    // if --artifact-dir crept back into the watch registration prose.
+    expect(promptSlice).toContain(
+      'no `--artifact-dir`, because prepare has not printed the directory yet',
+    );
+    expect(flat).toContain(
+      'Register the round **first, ahead of prepare** (R17-2)',
+    );
+    expect(flat).toContain(
+      'a round killed in the prepare window leaves a recoverable in-flight marker rather than a silently dropped head',
+    );
+    // R4-3 / deferred (round 6): the general "Start here" maintainer entry
+    // describes the prepare block (registration is a watch/re-verification
+    // procedure, not claimed for every maintainer round); the boundary
+    // section qualifies that the watch-state registration precedes prepare.
+    // Reverting the boundary sentence to the unqualified form reds these pins.
+    expect(flat).toContain(
+      'Maintainer round on a workstation** — `/verify-pr <n>`, running the full step-1 prepare block',
+    );
+    expect(flat).toContain(
+      'Run the full step-1 prepare block on the host before any work inside the boundary — the watch-state registration precedes it (R17-2)',
+    );
+    expect(flat).not.toContain('before anything else');
+    // R5-1 (round 8): the wrong-HEAD remedy keys off IDENTITY, not recency — the
+    // plain checkout is the remedy only when the named head IS this round's
+    // registered head; a head that DIFFERS (moved or force-pushed — prepare tests
+    // exact equality, no ordering) is the moved-head case. A fresh /verify-pr <n>
+    // registers nothing, so it reads the state's in-flight entry and defers to a
+    // live marker rather than checking out under it (which would file the named
+    // head's evidence under the registered head's verdict). The round-7 "newer
+    // than" framing was ill-defined for a fresh round and missed force-push;
+    // reverting to it reds these pins.
+    expect(flat).toContain(
+      'a wrong HEAD names the `git checkout` to run — but if this round registered a head, the plain checkout is the remedy only when the named head **is** that head',
+    );
+    expect(flat).toContain(
+      "a head that differs is the moved-head case below (release this round's marker; never check out the named head under it",
+    );
+    expect(flat).toContain(
+      'A round that registered nothing (a fresh `/verify-pr <n>`) has no marker of its own',
+    );
+    expect(flat).toContain(
+      "read the state file's in-flight entry first — while another round's marker is live, let that round answer, never checking out under a live marker",
+    );
+    // Deferred (round 11): the fresh-round case also needs the dead-marker branch
+    // (recover a dead round's marker, then check out), not only the live case.
+    expect(flat).toContain(
+      'if that round is dead, recover its marker per the dead-round recovery below, then check out',
+    );
+    expect(flat).not.toContain("newer than this round's registered head");
+    expect(flat).not.toContain(
+      'let that round answer — do not release a live marker or check out under it',
+    );
+    // Deferred (round 12): the flow must explicitly compare prepare's named head
+    // with the registered head — a differing head is the moved-head case, not a
+    // transient prepare failure.
+    expect(promptSlice).toContain(
+      'a differing head is the moved-head case below, not a transient failure',
+    );
+    // P1 (maintainer, round 14): the comparison must also run when prepare
+    // SUCCEEDS — prepare checks the tree against the live PR head, not the
+    // registered one, so a force-push back to a head the tree already sits at
+    // prepares successfully while the round registered a different head; the
+    // refusal-handler comparison alone never fires, and completing would file
+    // the other head's evidence under the registered head. Removing the
+    // post-success comparison reds these pins.
+    expect(promptSlice).toContain(
+      "When prepare succeeds, compare the `head` line it printed (the trusted snapshot's `headRefOid`) with `<headSha>` before the battery",
+    );
+    expect(promptSlice).toContain(
+      "A differing head is the moved-head case below: release this round's marker and run neither the battery nor `--complete`",
+    );
+    // R1-1: the watch prompt's prepare-failure recovery carries the full
+    // --release form with --repo (the <headSha> variant; the manual section
+    // uses <H>). Removing --repo reds this whole-form pin.
+    expect(flat).toContain(
+      'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> --round <r> --repo <owner>/<repo>`',
+    );
+    // R1-1 (round 2): the recovery pairs the release with a restart — a
+    // release alone files only a push-order hint and leaves the head
+    // unregistered. Removing the restart clause reds this pin.
+    expect(flat).toContain(
+      'then start the head again (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r+1> --repo <owner>/<repo>`) and retry prepare',
+    );
+    // Deferred (round 7): a transient prepare failure leaves the marker intact
+    // (prepare never reads the watch state) — retry-without-release recovers the
+    // head with no unregistered window; release+restart is for a dead round.
+    expect(promptSlice).toContain(
+      'retrying prepare against it and completing at the original round recovers the head with no release',
+    );
+    // R4-2: these sentences exist verbatim in both sections — pin the prompt's
+    // own copy so deleting it reds this block while the manual stays green.
+    expect(promptSlice).toContain(
+      'a release alone leaves the head unregistered',
+    );
+    // R3-2: the restarted round's number becomes this round's number; the
+    // completion must repeat <r+1>, not the original <r>.
+    expect(promptSlice).toContain(
+      "The restarted round's number (`<r+1>`) becomes this round's number — repeat that value in `--complete`",
+    );
+    expect(promptSlice).toContain(
+      'Do not `git checkout` the named head under the old marker',
+    );
+    // R3-1: the inconclusive-recovery prohibition (watch em-dash variant).
+    expect(promptSlice).toContain(
+      'Do not recover with `--complete inconclusive` instead — only that verdict increments the retry counter',
+    );
+    // R1-1 (round 3) + R4-1 (round 5): the moved-head terminal case — release
+    // without restart; the newer head arrives by the next fire (the gate
+    // cursor tracks the live head) or is already deferred, which you start.
+    expect(promptSlice).toContain(
+      'If prepare refuses because the head it names is not the head this round registered — moved forward or force-pushed; prepare tests exact equality and states no ordering — the registered head can never prepare: `--release --head <headSha> --round <r> --repo <owner>/<repo>` it and do not restart it',
+    );
+    expect(promptSlice).toContain(
+      'the live head is delivered by the next fire (the gate cursor tracks the live head), or is already in the deferred list the release prints, which you then start',
+    );
+    // Deferred (round 7): the watch moved-head branch rebinds the completion to
+    // the started head's own round (the manual twin carries the same clause); a
+    // literal completion under the released head would exit 3.
+    expect(promptSlice).toContain(
+      "The started head is its own round — repeat its head and round in `--complete`, not the released head's",
+    );
+    // Deferred (round 7): registering ahead records --repo before prepare can
+    // validate it; a mistyped slug poisons the state, and the contract documents
+    // the reset (delete the state file) rather than leaving it undiscoverable.
+    expect(promptSlice).toContain(
+      'a mistyped `--repo` is recorded at `--start` before prepare can reject it',
+    );
+    expect(promptSlice).toContain(
+      "is to delete the state file `.qwen/tmp/verify-pr-watch-<n>.json` in the trusted clone's main worktree",
+    );
+    // Deferred (round 8): the reset drops the delivered head's only delivery
+    // record, so the contract must say to re-register it (the cursor already
+    // advanced; no fire delivers it again).
+    // Deferred (round 10): the delete also drops deferred heads no fire will
+    // re-deliver, and the re-register covers them too — not just dedup history.
+    expect(promptSlice).toContain(
+      "this drops the PR's dedup history and any deferred heads, which no fire will re-deliver",
+    );
+    // Deferred (round 12/13): the reset must not strand another live round — it
+    // is only safe when no OTHER round is live (the sole in-flight marker is the
+    // mistyped one being reset); gating on "no in-flight marker" at all would
+    // deadlock, since the mistyped --start itself writes that marker.
+    expect(promptSlice).toContain(
+      "only when no other round is live (the sole in-flight marker is the mistyped one being reset), since deleting the file would strand any other live round's marker",
+    );
+    expect(promptSlice).toContain(
+      'and then re-register the delivered head — and any deferred head you still want covered — with the correct slug (`--start`)',
+    );
+    // Deferred (round 12): a pre-register-ahead watch keeps the old prompt (a
+    // persisted snapshot); re-creating it through the standard install does not
+    // work (the probe cursor blocks step 3 and --release clears only the claim),
+    // and another session's live watch must not be deleted to make room.
+    expect(flat).toContain(
+      'Re-creating it through the standard install does not work',
+    );
+    expect(flat).toContain(
+      'blocked by the probe cursor as well as the claim, and `--release` clears only the claim',
+    );
+    expect(flat).toContain(
+      "Do not delete another session's live watch to make room; the claim guard forbids it",
+    );
+    // R2-1: the watch prompt's exit-3 dead-marker bullet carries the full
+    // --release form with --repo (anchored on the watch-only continuation, so
+    // the manual twin cannot satisfy it). Removing --repo reds it.
+    expect(flat).toContain(
+      'recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>` and then start the last deferred head, or the deferral is never delivered',
+    );
+    // R2-1 (round 4): the bullet tells the operator to read the marker's round
+    // from the state file and pass it — an omitted --round skips the match and
+    // a retried release would delete a newer round's live marker.
+    expect(flat).toContain(
+      "Here `<r>` is the dead round's number (the blocking marker's), not this round's. Read it from the state file's in-flight entry and pass it",
+    );
+    expect(flat).toContain(
+      "an omitted `--round` skips the round match, so a retried release would delete a newer round's live marker for the same head",
+    );
+    // R1-2: positional pin — registration precedes prepare in the watch prompt.
+    expect(
+      flat.indexOf('Register the round **first, ahead of prepare** (R17-2)'),
+    ).toBeLessThan(flat.indexOf('Then run prepare (trusted host metadata)'));
+    // Deferred (round 10): guard the --start COMMAND's position too, so moving
+    // the command below prepare (while the heading stays above) reds this.
+    // Presence guards (round 11) keep the comparison from going vacuous if a
+    // placeholder spelling changes (indexOf would return -1).
+    const watchStartAt = promptSlice.indexOf('--start --head <headSha>');
+    const watchPrepareAt = promptSlice.indexOf(
+      'Then run prepare (trusted host metadata)',
+    );
+    expect(watchStartAt).toBeGreaterThan(-1);
+    expect(watchPrepareAt).toBeGreaterThan(-1);
+    expect(watchStartAt).toBeLessThan(watchPrepareAt);
     // The completion and release forms carry --repo too: the guard
     // refuses a registered round's completion without it (D9-1).
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--comment-id <id>] --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>',
+    );
+    // Deferred (round 6): the replay-omission clause is pinned in this section
+    // (the manual twin uses `H`, so it cannot satisfy this prompt-only form).
+    expect(promptSlice).toContain(
+      'omit it on a replayed completion to inherit the directory already recorded for the head rather than overwriting it',
     );
     // The duty, not just the command string: deleting the consequence
     // sentence while keeping the command must go red too.
@@ -6765,14 +7119,9 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('A corrupt state file is refused (exit 1)');
     // Section slices, not the whole flattened skill: a sentence that also
     // exists in the manual section stays green after the watch prompt's
-    // own copy is deleted unless the pin reads the prompt's slice.
-    const promptStart = verifySkill.indexOf('The prompt consumes the gate');
-    const promptEnd = verifySkill.indexOf('On `action: "stop"`');
-    expect(promptStart).toBeGreaterThan(-1);
-    expect(promptEnd).toBeGreaterThan(promptStart);
-    const prompt = verifySkill
-      .slice(promptStart, promptEnd)
-      .replace(/\s+/g, ' ');
+    // own copy is deleted unless the pin reads the prompt's slice. The
+    // sentinel-resolved promptSlice is defined at the top of this block.
+    const prompt = promptSlice;
     expect(prompt).toContain('repeat the same value in `--complete`');
     expect(prompt).toContain('recorded as deferred');
     expect(prompt).toContain('no second event will arrive');

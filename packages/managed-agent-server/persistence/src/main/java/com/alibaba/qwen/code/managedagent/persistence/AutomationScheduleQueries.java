@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.Sched
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.ScheduleRow;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
@@ -26,8 +27,25 @@ final class AutomationScheduleQueries {
         } catch (IllegalArgumentException error) {
             return new SchedulePage(List.of(), false);
         }
+        boolean h2 = Boolean.TRUE.equals(jdbc.execute((ConnectionCallback<Boolean>) connection ->
+                "H2".equals(connection.getMetaData().getDatabaseProductName())));
         String select =
-                "WITH RECURSIVE readable_workspace (tenant_identity, workspace_identity) AS ( SELECT CONCAT(w.tenant_id, '!'), CONCAT(w.workspace_id, '!') FROM ma_workspace w JOIN ma_workspace_access a ON a.tenant_id = w.tenant_id AND a.workspace_id = w.workspace_id WHERE w.tenant_id = ? AND w.workspace_kind = 'ROOT' AND a.actor_id = ? AND a.role IN ('READER', 'OPERATOR', 'OWNER') UNION ALL SELECT CONCAT(c.tenant_id, '!'), CONCAT(c.workspace_id, '!') FROM ma_workspace c JOIN readable_workspace p ON CONCAT(c.tenant_id, '!') = p.tenant_identity AND CONCAT(c.parent_workspace_id, '!') = p.workspace_identity WHERE c.tenant_id = ? AND c.workspace_kind = 'CHILD_GIT') SELECT " + ManagedSchemaProjection.SCHEDULE.columns("s") + " FROM ma_schedule s WHERE s.tenant_id = ? AND EXISTS (SELECT 1 FROM readable_workspace r WHERE r.tenant_identity = CONCAT(s.tenant_id, '!') AND r.workspace_identity = CONCAT(s.workspace_id, '!'))"
+                "WITH RECURSIVE readable_workspace (tenant_identity, workspace_identity) AS ("
+                        + " SELECT CONCAT(w.tenant_id, '!'), CONCAT(w.workspace_id, '!')"
+                        + " FROM ma_workspace w JOIN ma_workspace_access a"
+                        + " ON a.tenant_id = w.tenant_id AND a.workspace_id = w.workspace_id"
+                        + " WHERE w.tenant_id = ? AND w.workspace_kind = 'ROOT'"
+                        + " AND a.actor_id = ? AND a.role IN ('READER', 'OPERATOR', 'OWNER')"
+                        + " UNION ALL SELECT CONCAT(c.tenant_id, '!'), CONCAT(c.workspace_id, '!')"
+                        + " FROM ma_workspace c JOIN readable_workspace p"
+                        + " ON c.tenant_id = " + unsuffixedIdentity("p.tenant_identity", h2)
+                        + " AND c.parent_workspace_id = " + unsuffixedIdentity("p.workspace_identity", h2)
+                        + " WHERE c.tenant_id = ? AND c.workspace_kind = 'CHILD_GIT')"
+                        + " SELECT " + ManagedSchemaProjection.SCHEDULE.columns("s")
+                        + " FROM ma_schedule s WHERE s.tenant_id = ?"
+                        + " AND EXISTS (SELECT 1 FROM readable_workspace r WHERE s.tenant_id = "
+                        + unsuffixedIdentity("r.tenant_identity", h2)
+                        + " AND s.workspace_id = " + unsuffixedIdentity("r.workspace_identity", h2) + ")"
                         + " AND EXISTS (SELECT 1 FROM ma_session ms WHERE ms.tenant_id = s.tenant_id"
                         + " AND ms.session_id = s.session_id AND (ms.owner_only = 0"
                         + " OR COALESCE(ms.owner_actor_key, ms.creator_actor_key) = ?))";
@@ -44,6 +62,12 @@ final class AutomationScheduleQueries {
         boolean hasMore = rows.size() > limit;
         return new SchedulePage(hasMore ? rows.subList(0, limit) : rows,
                 hasMore);
+    }
+
+    private static String unsuffixedIdentity(String identity, boolean h2) {
+        // Strip only the CTE's PAD SPACE sentinel for indexed joins; H2 needs UTF-8 bytes first.
+        String binary = h2 ? "STRINGTOUTF8(" + identity + ")" : identity;
+        return "SUBSTRING(" + binary + ", 1, OCTET_LENGTH(" + binary + ") - 1)";
     }
 
     /**

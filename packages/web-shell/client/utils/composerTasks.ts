@@ -1,5 +1,13 @@
-import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionSubSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
+} from '@qwen-code/sdk/daemon';
 import { formatRuntime } from './formatRuntime';
+
+/** A task the chip row can show: the child's own, or a send it made. */
+export type ComposerChipTask =
+  | DaemonSessionTaskWithWorkflowStatus
+  | DaemonSessionSubSessionTaskStatus;
 
 /**
  * Tasks that belong to THIS session's live background state — what the
@@ -20,24 +28,34 @@ export function isComposerTask(
 }
 
 /** The kinds the composer chip row groups live tasks under, in display order. */
-export type ComposerTaskChipKind = 'workflow' | 'agent' | 'shell' | 'monitor';
+export type ComposerTaskChipKind =
+  | 'workflow'
+  | 'agent'
+  | 'session'
+  | 'shell'
+  | 'monitor';
 
 export interface ComposerTaskChipGroup {
   kind: ComposerTaskChipKind;
-  tasks: DaemonSessionTaskWithWorkflowStatus[];
+  tasks: ComposerChipTask[];
 }
 
 const CHIP_KIND_ORDER: readonly ComposerTaskChipKind[] = [
   'workflow',
   'agent',
+  'session',
   'shell',
   'monitor',
 ];
 
 function chipKindFor(
-  task: DaemonSessionTaskWithWorkflowStatus,
+  task: ComposerChipTask,
   includeAgents: boolean,
 ): ComposerTaskChipKind | undefined {
+  // A message sent to another session: shown until its turn there ends.
+  if (task.kind === 'session') {
+    return task.status === 'running' ? 'session' : undefined;
+  }
   if (task.kind === 'agent') {
     // Foreground agents block the turn and live in the transcript; only
     // background ones are "running beside the chat". A paused agent is parked
@@ -67,13 +85,10 @@ function chipKindFor(
  * environment panel and the tasks dialog.
  */
 export function getComposerTaskChipGroups(
-  tasks: readonly DaemonSessionTaskWithWorkflowStatus[],
+  tasks: readonly ComposerChipTask[],
   options: { includeAgents: boolean },
 ): ComposerTaskChipGroup[] {
-  const byKind = new Map<
-    ComposerTaskChipKind,
-    DaemonSessionTaskWithWorkflowStatus[]
-  >();
+  const byKind = new Map<ComposerTaskChipKind, ComposerChipTask[]>();
   for (const task of tasks) {
     const kind = chipKindFor(task, options.includeAgents);
     if (!kind) continue;
