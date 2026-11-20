@@ -17,11 +17,10 @@ milestones.
   the workspace CLI and packaged bundle. Keep the general CLI as the fallback
   for help, version, unsupported arguments, and managed update dispatch. Share
   the entry lifecycle so both paths retain error handling and environment setup.
-- Add `--eager-runtime` and support `QWEN_SERVE_EAGER_RUNTIME=1` for managed
-  launchers that also spawn older builds. Start the same single-flight runtime
-  initializer from the listen callback in eager mode. Keep the existing
-  authenticated cold-request and health behavior, including startup failures
-  and shutdown, with the current timing as the default.
+- Keep the existing runtime startup triggers. With a warm compile cache and
+  50 ms initial polling on the staging host, starting the runtime at listen
+  saved 49 ms on workspace readiness and added 163 ms to the first shallow
+  health response, using the medians of the paired differences.
 - Prewarm Node's existing compile cache during the managed image build. Start
   the installed daemon with an isolated home and workspace and stop it after
   deep health confirms the runtime has loaded. The managed launcher passes
@@ -42,19 +41,20 @@ milestones.
 
 ## Managed launcher
 
-The companion change in opencode `release/FY27B22` starts the daemon in eager
-mode when supported, configures a launcher-owned compile cache and reduces the
-initial polling interval. HTTP health and the target workspace's scoped status
-remain the readiness checks. The launcher retains the old-version fallback.
+The companion change in opencode `release/FY27B22` configures a launcher-owned
+compile cache and polls shallow and deep health every 50 ms in the first two
+seconds of each phase, then every 250 ms. HTTP health and the target workspace's
+scoped status remain the readiness checks. The launcher retains the old-version
+fallback.
 
 ## Acceptance
 
 - Check `serve --help`, `serve --version`, unknown arguments, and graceful
   shutdown through the packaged and workspace entries.
-- Verify an eager daemon starts runtime initialization with zero HTTP requests,
-  and an authenticated request during boot reaches its normal route. Verify
-  default startup, authentication, and startup failure responses separately.
+- Verify shallow health can respond during bootstrap and that runtime startup
+  can be triggered by health, an authenticated runtime request, or the fallback
+  timer. Verify authentication and runtime startup failure responses.
 - Measure process to listening, first healthy response, and first successful
-  scoped status against the same build setup. Report cool and warmed compile
-  caches separately. Repeat on the deployment's Linux 2 CU environment before
+  scoped status against the same build setup. Report cold and warmed compile
+  caches separately. Repeat on the target deployment environment before
   attributing the observed production estimates to this change.

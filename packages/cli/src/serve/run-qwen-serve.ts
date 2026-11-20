@@ -2247,8 +2247,6 @@ export interface RunQwenServeDeps {
    * when no health probe arrives. Only applies with resolveOnListen.
    */
   deferRuntimeUntilFirstHealth?: boolean;
-  /** Start on listen while retaining the fast path's cold-request handling. */
-  eagerRuntime?: boolean;
   /**
    * Bounds background runtime mounting after the listener is ready. Defaults to
    * QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS, then 120s. Use 0 to disable.
@@ -4996,7 +4994,6 @@ async function runQwenServeImpl(
   let startRuntimeForRequest: (() => boolean) | undefined;
   const deferRuntimeUntilFirstHealth =
     deps.resolveOnListen === true && deps.deferRuntimeUntilFirstHealth === true;
-  const waitForFirstHealth = deferRuntimeUntilFirstHealth && !deps.eagerRuntime;
   const runtimeReady = new Promise<void>((resolve, reject) => {
     markRuntimeReady = resolve;
     markRuntimeFailed = reject;
@@ -9605,7 +9602,7 @@ async function runQwenServeImpl(
     getChannelWorkerSnapshot,
     getChannelWorkerSnapshots,
     getChannelRestoreFailures: () => channelRestoreFailures.list(),
-    onHealthServed: waitForFirstHealth
+    onHealthServed: deferRuntimeUntilFirstHealth
       ? () => startRuntimeAfterHealth?.()
       : undefined,
   });
@@ -11583,7 +11580,7 @@ async function runQwenServeImpl(
             markRuntimeReady();
           }
         }
-      } else if (waitForFirstHealth) {
+      } else if (deferRuntimeUntilFirstHealth) {
         scheduleRuntimeStartFallback();
       } else {
         startRuntime();

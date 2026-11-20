@@ -459,7 +459,7 @@ describe('Managed Runtime attestation worker', () => {
   });
 
   function spawnWorker(): ReturnType<typeof spawn> {
-    const cliEntry = fileURLToPath(new URL('../cli.ts', import.meta.url));
+    const cliEntry = fileURLToPath(new URL('../../index.ts', import.meta.url));
     const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
     const child = spawn(
       process.execPath,
@@ -620,7 +620,9 @@ describe('Managed Runtime attestation worker', () => {
   it.each(['SIGTERM', 'SIGINT'] as const)(
     'starts through the hidden CLI command and stops on %s',
     async (signal) => {
-      const cliEntry = fileURLToPath(new URL('../cli.ts', import.meta.url));
+      const cliEntry = fileURLToPath(
+        new URL('../../index.ts', import.meta.url),
+      );
       const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
       const child = spawn(
         process.execPath,
@@ -660,7 +662,7 @@ describe('Managed Runtime attestation worker', () => {
   );
 
   it('leaves the environment of a worker started without a channel to its launcher', async () => {
-    const cliEntry = fileURLToPath(new URL('../cli.ts', import.meta.url));
+    const cliEntry = fileURLToPath(new URL('../../index.ts', import.meta.url));
     const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
     const child = spawn(
       process.execPath,
@@ -693,7 +695,7 @@ describe('Managed Runtime attestation worker', () => {
   }, 30_000);
 
   it('stops when the parent that started it with a channel goes away', async () => {
-    const cliEntry = fileURLToPath(new URL('../cli.ts', import.meta.url));
+    const cliEntry = fileURLToPath(new URL('../../index.ts', import.meta.url));
     const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
     const child = spawn(
       process.execPath,

@@ -1447,15 +1447,27 @@ describe('bootstrap import boundaries', () => {
     expect(fastPathImport).toBeGreaterThan(install);
   });
 
-  it('keeps fast-path-only dependencies out of static imports', () => {
-    const source = readFileSync('src/cli.ts', 'utf8');
+  it.each([
+    {
+      file: 'src/cli.ts',
+      forbiddenCoreImport: /from '@qwen-code\/qwen-code-core'/,
+    },
+    {
+      file: 'src/cli-entry.ts',
+      forbiddenCoreImport: /from '@qwen-code\/qwen-code-core(?:\/|')/,
+    },
+  ])(
+    '$file keeps fast-path-only dependencies out of static imports',
+    ({ file, forbiddenCoreImport }) => {
+      const source = readFileSync(file, 'utf8');
 
-    expect(source).not.toContain("import yargs from 'yargs'");
-    expect(source).not.toContain("from '@qwen-code/qwen-code-core'");
-    expect(source).not.toContain("import './llm.js'");
-    expect(source).not.toContain("import { main } from './llm.js'");
-    expect(source).not.toContain("from './utils/acp-startup-profiler.js'");
-  });
+      expect(source).not.toContain("import yargs from 'yargs'");
+      expect(source).not.toMatch(forbiddenCoreImport);
+      expect(source).not.toContain("import './llm.js'");
+      expect(source).not.toContain("import { main } from './llm.js'");
+      expect(source).not.toContain("from './utils/acp-startup-profiler.js'");
+    },
+  );
 
   it('keeps the shared option definitions free of runtime imports', () => {
     // A value import from @qwen-code/qwen-code-core here was measured at

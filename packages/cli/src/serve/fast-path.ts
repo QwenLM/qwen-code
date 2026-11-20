@@ -25,7 +25,6 @@ type McpBudgetMode = NonNullable<ServeOptions['mcpBudgetMode']>;
 
 interface ParsedServeFastPath {
   kind: 'serve';
-  eagerRuntime: boolean;
   open: boolean;
   openWithAuth: boolean;
   httpBridge: boolean;
@@ -87,15 +86,10 @@ const STRING_OPTION_BY_FLAG = new Map<string, keyof ServeOptions>([
 
 const BOOLEAN_OPTION_BY_FLAG = new Map<
   string,
-  | keyof ServeOptions
-  | 'eager-runtime'
-  | 'open'
-  | 'open-with-auth'
-  | 'http-bridge'
+  keyof ServeOptions | 'open' | 'open-with-auth' | 'http-bridge'
 >([
   ['require-auth', 'requireAuth'],
   ['enable-session-shell', 'enableSessionShell'],
-  ['eager-runtime', 'eager-runtime'],
   ['web', 'serveWebShell'],
   ['open', 'open'],
   ['open-with-auth', 'open-with-auth'],
@@ -359,7 +353,6 @@ export function parseServeFastPathArgs(
     mode: 'http-bridge',
     port: 4170,
   };
-  let eagerRuntime = env['QWEN_SERVE_EAGER_RUNTIME'] === '1';
   let open = false;
   let openWithAuth = false;
   let httpBridge = true;
@@ -389,9 +382,7 @@ export function parseServeFastPathArgs(
         if (parsed === null || negated) return { kind: 'fallback' };
         value = parsed;
       }
-      if (booleanTarget === 'eager-runtime') {
-        eagerRuntime = value;
-      } else if (booleanTarget === 'open') {
+      if (booleanTarget === 'open') {
         open = value;
       } else if (booleanTarget === 'open-with-auth') {
         openWithAuth = value;
@@ -520,7 +511,6 @@ export function parseServeFastPathArgs(
   applyRateLimitEnvDefaults(options, env);
   return {
     kind: 'serve',
-    eagerRuntime,
     open: open || openWithAuth,
     openWithAuth,
     httpBridge,
@@ -652,7 +642,6 @@ export async function tryRunServeFastPath(
       ...(settings ? { bootSettings: settings } : {}),
       resolveOnListen: true,
       deferRuntimeUntilFirstHealth: !parsed.open,
-      eagerRuntime: parsed.eagerRuntime,
     });
     try {
       emitHeadlessYoloWarning(settings);

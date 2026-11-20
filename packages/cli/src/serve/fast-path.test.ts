@@ -569,24 +569,20 @@ describe('serve fast path argument parsing', () => {
   });
 
   it('parses the common daemon startup flags without loading the full CLI parser', () => {
-    const parsed = parseServeFastPathArgs(
-      [
-        'serve',
-        '--port',
-        '0',
-        '--hostname',
-        '127.0.0.1',
-        '--workspace',
-        '/tmp/workspace',
-        '--no-web',
-        '--no-open',
-      ],
-      {},
-    );
+    const parsed = parseServeFastPathArgs([
+      'serve',
+      '--port',
+      '0',
+      '--hostname',
+      '127.0.0.1',
+      '--workspace',
+      '/tmp/workspace',
+      '--no-web',
+      '--no-open',
+    ]);
 
     expect(parsed).toEqual({
       kind: 'serve',
-      eagerRuntime: false,
       openWithAuth: false,
       httpBridge: true,
       open: false,
@@ -600,23 +596,6 @@ describe('serve fast path argument parsing', () => {
       },
     });
   });
-
-  it.each([
-    { args: [], env: '1', expected: true },
-    { args: [], env: '0', expected: false },
-    { args: ['--eager-runtime'], env: '0', expected: true },
-    { args: ['--eager-runtime=false'], env: '1', expected: false },
-    { args: ['--no-eager-runtime'], env: '1', expected: false },
-  ])(
-    'resolves eager runtime for $args with env $env',
-    ({ args, env, expected }) => {
-      expect(
-        parseServeFastPathArgs(['serve', ...args], {
-          QWEN_SERVE_EAGER_RUNTIME: env,
-        }),
-      ).toMatchObject({ kind: 'serve', eagerRuntime: expected });
-    },
-  );
 
   it('parses --tls-cert and --tls-key on the fast path', () => {
     const parsed = parseServeFastPathArgs([
@@ -771,7 +750,6 @@ describe('serve fast path argument parsing', () => {
       ['tls-cert', ['--tls-cert', '/tmp/cert.pem']],
       ['tls-key', ['--tls-key', '/tmp/key.pem']],
       ['web', ['--no-web']],
-      ['eager-runtime', ['--eager-runtime']],
       ['open', ['--open']],
       ['open-with-auth', ['--open-with-auth']],
       ['token-qr', ['--token-qr']],
