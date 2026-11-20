@@ -264,12 +264,13 @@ configured, the publish step remains behind the
 until a maintainer completes the one-time public bootstrap publish and binds
 the package to the `release.yml` workflow in the `production-release`
 environment. The bootstrap should publish the version of a release that has
-already shipped — the first one containing this change, which skipped the
-package — not an upcoming release version, and should not invent a second
-version line. The already-shipped guard probes this package too, so
-hand-publishing an upcoming version gets every attempt at that release
-refused, with no failure issue filed. Future releases use trusted publishing
-and require no npm token.
+already shipped with the package skipped — not an upcoming release version —
+and should not invent a second version line. Hand-publishing an upcoming
+version does not get the release refused: the version step probes this package
+too, finds that version on npm and increments past it, leaving the stray
+version on npm for good. A nightly instead fails the version step with a
+version conflict and files a failure issue. Future releases use trusted
+publishing and require no npm token.
 
 When a service fits `DialectV1`, its administrator writes and validates a local
 dialect file. When it does not fit, the service owner publishes a separate MCP

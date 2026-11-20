@@ -715,14 +715,34 @@ describe('release workflow', () => {
         ),
       );
       // A silent Teams skip is indistinguishable from a mistyped variable,
-      // so the skip names the package and its switch in the runner log.
-      if (pkg !== '@qwen-code/channel-msteams') {
+      // so the skip names the package and its switch in the runner log —
+      // and says nothing when Teams does publish.
+      if (pkg === '@qwen-code/channel-msteams') {
+        expect(result.stderr).toBe('');
+      } else {
         expect(result.stderr).toContain(
           '::notice::Skipping @qwen-code/channel-msteams; set NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED=true',
         );
       }
     },
   );
+
+  // release.yml always materialises 'true'/'false', so only a direct
+  // invocation can omit a switch. Unset must skip like 'false': a gate
+  // narrowed to === 'false' would publish a never-bootstrapped package.
+  it('skips every bootstrap-gated package when its switch is unset', () => {
+    const env = { ...process.env };
+    for (const key of Object.values(BOOTSTRAP_SWITCHES)) delete env[key];
+    const result = spawnSync(
+      process.execPath,
+      [join(process.cwd(), 'scripts/release-packages.mjs')],
+      { encoding: 'utf8', env },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim().split('\n')).toEqual(
+      RELEASE_WORKSPACES.filter((name) => !(name in BOOTSTRAP_SWITCHES)),
+    );
+  });
 
   it('keeps the workflow focused on orchestration', () => {
     // 920, raised from 880 for reconcile_failure: the success-gated sibling of
@@ -4074,21 +4094,21 @@ esac`,
     const publishStep = publishSteps.find(
       (step) => step.name === 'Publish npm packages',
     );
-    expect(publishStep.env.PUBLISH_EXTERNAL_CONTEXT_MEM0).toContain(
-      "vars.NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED == 'true'",
-    );
     // npm cannot bind trusted publishing to a package that has never been
     // published, so the first Teams release failed the nightly's publish job
-    // (#17898). Pin the whole expression, conjunction included: with `||`
-    // the repository guard alone would publish Teams before its bootstrap.
+    // (#17898). Pin whole expressions, not substrings: `toContain` survives
+    // `&&` -> `||`, which publishes a gate before its bootstrap exists.
+    expect(publishStep.env.PUBLISH_EXTERNAL_CONTEXT_MEM0).toBe(
+      "${{ github.repository == 'QwenLM/qwen-code' && vars.NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED == 'true' }}",
+    );
     expect(publishStep.env.PUBLISH_CHANNEL_MSTEAMS).toBe(
       "${{ github.repository == 'QwenLM/qwen-code' && vars.NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED == 'true' }}",
     );
     // The audio-capture switch replaced a deleted step-level
     // `if: github.repository == 'QwenLM/qwen-code'` gate. Unpinned, a fork
     // running this workflow would publish @qwen-code/audio-capture.
-    expect(publishStep.env.PUBLISH_AUDIO_CAPTURE).toContain(
-      "github.repository == 'QwenLM/qwen-code'",
+    expect(publishStep.env.PUBLISH_AUDIO_CAPTURE).toBe(
+      "${{ github.repository == 'QwenLM/qwen-code' }}",
     );
   });
 

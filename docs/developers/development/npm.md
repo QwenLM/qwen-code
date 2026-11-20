@@ -94,13 +94,14 @@ environment. They are gated on the repository variables
 `NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED` and
 `NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED`, both defaulting to off, so a
 release skips them instead of failing to authenticate. Set a variable to
-`true` only after its bootstrap publish. Bootstrap at the version of a release
-that has already shipped — the first one containing the package, which skipped
-it — not at an upcoming release version, and do not invent a second version
-line. The already-shipped guard probes both packages, so hand-publishing an
-upcoming version gets every attempt at that release refused, with no failure
-issue filed. The same guard keeps a partial release from being overwritten by
-a retry.
+`true` only after its bootstrap publish. Bootstrap at a version that has
+already shipped — the first release that ships with the package skipped — never
+at an upcoming one, and do not invent a second version line. Hand-publishing an
+upcoming version does not get the release refused: the version step probes
+every published package, finds that version on npm and increments past it,
+leaving the stray version on npm for good. A nightly instead fails the version
+step with a version conflict and files a failure issue. The push-time guard
+still keeps a partial release from being overwritten by a retry.
 
 ### Failure Handling
 
