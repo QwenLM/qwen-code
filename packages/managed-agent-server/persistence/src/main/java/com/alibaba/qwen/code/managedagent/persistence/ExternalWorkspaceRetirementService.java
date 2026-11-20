@@ -283,10 +283,17 @@ public final class ExternalWorkspaceRetirementService {
             // (CAPTURE_GC / SESSION_RESOURCE_GC), RETURNED (OBJECT_PUT), SUPPRESSED
             // (projection suppressed by session deletion) and REMOVED (worktree
             // cleanup). Unknown states stay fencing: a new nonterminal state must
-            // block retirement, never silently pass it.
+            // block retirement, never silently pass it. Terminality is a property
+            // of the operation kind, so the child relay's settled outcome tokens —
+            // lowercase done/orphaned/unknown written by
+            // JdbcChildResultRelayStore.classify — are exempted only for its own
+            // kinds; its live states (creating, binding, watching, delivering,
+            // close_debt) keep fencing.
             empty("SELECT operation_id FROM ma_operation WHERE tenant_id = ? AND session_id = ?"
                     + " AND state NOT IN ('COMPLETED','FAILED','CANCELLED','SUPERSEDED',"
-                    + "'READY','SUCCEEDED','RETURNED','SUPPRESSED','REMOVED') LIMIT 1 FOR UPDATE",
+                    + "'READY','SUCCEEDED','RETURNED','SUPPRESSED','REMOVED')"
+                    + " AND NOT (operation_kind IN ('CHILD_SESSION_START','CHILD_SESSION_CLOSE')"
+                    + " AND state IN ('done','orphaned','unknown')) LIMIT 1 FOR UPDATE",
                     request.tenantId(), session);
         }
         // 孤立 head 不能当作没有成员；常规 Hosted 写入在同一 placement guard 后串行提交。

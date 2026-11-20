@@ -670,8 +670,16 @@ class ExternalWorkspaceProvisionerTest {
         assertEquals(original.handle().getValue().get("identity"), body.get("identity"));
         assertEquals(original.handle().getValue().get("provider"), body.get("handle"));
         assertEquals(original.lease().getEndpoint().toString(), body.get("endpoint"));
-        assertTrue(body.get("scope") instanceof Map<?, ?>);
-        assertTrue(body.get("boot") instanceof Map<?, ?>);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> scope = (Map<String, Object>) body.get("scope");
+        assertEquals("workspace", scope.get("isolationClass"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> reattachBoot = (Map<String, Object>) body.get("boot");
+        assertEquals("managed-context/1", reattachBoot.get("managedContext"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> storage = (Map<String, Object>) reattachBoot.get("storage");
+        assertEquals(MOUNT, storage.get("mountRoot"),
+                "reattach must carry the storage-bearing boot, not the base document");
         assertTrue(subject.isUsable(original.lease()));
     }
 

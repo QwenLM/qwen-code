@@ -126,6 +126,24 @@ class ExternalWorkspaceBootContractTest {
         assertEquals(WorkspaceExecutionProfile.CAPABILITY_DIGEST, boot.get("capabilityDigest"));
     }
 
+    // R3-9: the ephemeral boot's storage member set is the shipped worker's
+    // exact six-key shape; pin it on an always-on run so the shape cannot drift
+    // behind the @DisabledOnOs cross-language parser check.
+    @Test
+    void theMintedEphemeralBootKeepsTheShippedStorageShape() throws Exception {
+        Map<String, Object> boot = mintedBoot("/mnt/external/workspace-a", "workspace", true);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> storage = (Map<String, Object>) boot.get("storage");
+        assertEquals(Set.of("kind", "workspaceId", "mountRoot", "registrationRevision",
+                "provisionRequestId", "runtimeIncarnation"), storage.keySet());
+        assertEquals("ephemeral", storage.get("kind"));
+        assertEquals(boot.get("mountRoot"), storage.get("mountRoot"));
+        assertEquals(boot.get("workspaceId"), storage.get("workspaceId"));
+        assertEquals(boot.get("provisionRequestId"), storage.get("provisionRequestId"));
+        assertEquals(boot.get("runtimeIncarnation"), storage.get("runtimeIncarnation"));
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"session", "workspace"})
     @Timeout(120)

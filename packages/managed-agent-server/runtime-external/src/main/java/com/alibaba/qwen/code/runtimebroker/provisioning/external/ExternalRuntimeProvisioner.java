@@ -466,8 +466,11 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
 
     /** Validates an unleased first-start original without adopting a replacement endpoint. */
     public final void validateTerminalOriginal(RuntimeBindingRecord binding) {
-        if (binding == null || executor.isShutdown()) {
+        if (binding == null) {
             throw conflict();
+        }
+        if (executor.isShutdown()) {
+            throw unavailable();
         }
         validate(binding.getRequest(), binding.getProvisionSeed());
         if (binding.getLease() != null

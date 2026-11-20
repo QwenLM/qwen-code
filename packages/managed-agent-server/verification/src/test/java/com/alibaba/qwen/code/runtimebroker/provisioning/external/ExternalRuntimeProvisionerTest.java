@@ -25,6 +25,7 @@ import javax.sql.DataSource;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -200,6 +201,22 @@ class ExternalRuntimeProvisionerTest {
         api.closing = provider::close;
         var failure = (RuntimeBrokerException) assertThrows(CompletionException.class,
                 () -> join(provider.provision(request, seed))).getCause();
+        assertEquals("runtime_external_unavailable", failure.getCode());
+        assertTrue(failure.isRetryable());
+    }
+
+    @Test
+    void shutdownMakesTerminalOriginalValidationRetryableInsteadOfPermanent() {
+        var api = new Provider();
+        var provider = provisioner(api);
+        var seed = RuntimeProvisionSeed.create("binding", 1);
+        var request = request(provider);
+        var binding = new RuntimeBindingRecord("binding", request, seed, 1,
+                RuntimeBindingRecord.State.LOST, null, null, 0, false, null,
+                null, 0, 1, null, null, Instant.now());
+        provider.close();
+        var failure = assertThrows(RuntimeBrokerException.class,
+                () -> provider.validateTerminalOriginal(binding));
         assertEquals("runtime_external_unavailable", failure.getCode());
         assertTrue(failure.isRetryable());
     }

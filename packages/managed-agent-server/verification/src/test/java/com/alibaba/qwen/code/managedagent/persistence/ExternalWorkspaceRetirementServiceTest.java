@@ -486,4 +486,44 @@ class ExternalWorkspaceRetirementServiceTest {
         assertThat(bindings.findById(original.getBindingId()).getState())
                 .isEqualTo(RuntimeBindingRecord.State.RELEASED);
     }
+
+    // R3-1: the child relay settles its own operation kinds in lowercase
+    // done/orphaned/unknown (JdbcChildResultRelayStore.classify). Those rows
+    // are the finished record of a child run, never live work, so they must
+    // not fence retirement of the Workspace forever.
+    @ParameterizedTest
+    @ValueSource(strings = {"CHILD_SESSION_START:done", "CHILD_SESSION_START:orphaned",
+        "CHILD_SESSION_START:unknown", "CHILD_SESSION_CLOSE:done"})
+    void settledChildRelayOperationDoesNotFenceRetirement(String kindAndState) {
+        String[] parts = kindAndState.split(":");
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, operation_kind,"
+                + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
+                + " gmt_create, gmt_modified) VALUES (?, ?, NULL, ?, ?, ?, 'user-session', 'SESSION', ?,"
+                + " 'digest', '{}', ?, 'PENDING', 'PENDING', 1, 1)",
+                "a".repeat(64), "b".repeat(64), "child-op".getBytes(StandardCharsets.UTF_8), parts[0],
+                "tenant".getBytes(StandardCharsets.UTF_8), "c".repeat(64), parts[1]);
+
+        var receipt = service.retire(request, this::terminated);
+
+        assertThat(receipt.state()).isEqualTo("RELEASED");
+        assertThat(bindings.findById(original.getBindingId()).getState())
+                .isEqualTo(RuntimeBindingRecord.State.RELEASED);
+    }
+
+    // The exemption is scoped to the child relay's settled tokens: every live
+    // child-relay state keeps fencing retirement.
+    @ParameterizedTest
+    @ValueSource(strings = {"creating", "binding", "watching", "delivering", "close_debt"})
+    void liveChildRelayOperationStillFencesRetirement(String state) {
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, operation_kind,"
+                + " tenant_id, session_id, target_kind, target_key, request_digest, request_json, state, phase, delivery_state,"
+                + " gmt_create, gmt_modified) VALUES (?, ?, NULL, ?, 'CHILD_SESSION_CLOSE', ?, 'user-session', 'SESSION', ?,"
+                + " 'digest', '{}', ?, 'PENDING', 'PENDING', 1, 1)",
+                "a".repeat(64), "b".repeat(64), "child-op".getBytes(StandardCharsets.UTF_8),
+                "tenant".getBytes(StandardCharsets.UTF_8), "c".repeat(64), state);
+
+        assertThatThrownBy(() -> service.retire(request, this::terminated))
+                .isInstanceOf(RuntimeBrokerException.class)
+                .hasFieldOrPropertyWithValue("code", "external_workspace_retirement_blocked");
+    }
 }
