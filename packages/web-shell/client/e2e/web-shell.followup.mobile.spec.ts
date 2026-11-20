@@ -350,6 +350,202 @@ test('mobile right key label and accept stay in sync on a typed prefix', async (
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
+test('mobile right key steps whole graphemes and slash keeps emoji intact', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  const caret = () =>
+    textarea.evaluate((el) => (el as HTMLTextAreaElement).selectionStart);
+  await textarea.fill('A😀B');
+  await textarea.evaluate((el) => el.setSelectionRange(1, 1));
+  await page.locator('[data-web-shell-mobile-caret-right]').tap();
+  expect(await caret()).toBe(3);
+  await page.locator('[data-web-shell-mobile-insert-slash]').tap();
+  await expect(textarea).toHaveValue('A😀/B');
+  // Native parity: ArrowRight from the same caret also lands after the pair.
+  await textarea.fill('A😀B');
+  await textarea.evaluate((el) => el.setSelectionRange(1, 1));
+  await textarea.focus();
+  await page.keyboard.press('ArrowRight');
+  expect(await caret()).toBe(3);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('mobile vertical keys follow soft-wrapped lines like the native arrows', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  const caret = () =>
+    textarea.evaluate((el) => (el as HTMLTextAreaElement).selectionStart);
+  await textarea.fill('a'.repeat(150));
+  for (const [hook, native] of [
+    ['[data-web-shell-mobile-caret-up]', 'ArrowUp'],
+    ['[data-web-shell-mobile-caret-down]', 'ArrowDown'],
+  ] as const) {
+    await textarea.evaluate((el) => el.setSelectionRange(64, 64));
+    await page.locator(hook).tap();
+    const touch = await caret();
+    await textarea.evaluate((el) => el.setSelectionRange(64, 64));
+    await textarea.focus();
+    await page.keyboard.press(native);
+    const nativeCaret = await caret();
+    expect(touch).toBe(nativeCaret);
+    expect(touch).not.toBe(0);
+    expect(touch).not.toBe(150);
+  }
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('mobile vertical run holds the preferred column through short lines', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  const caret = () =>
+    textarea.evaluate((el) => (el as HTMLTextAreaElement).selectionStart);
+  await textarea.fill('aaaa\nbb\ncccc');
+  await textarea.evaluate((el) => el.setSelectionRange(12, 12));
+  const up = page.locator('[data-web-shell-mobile-caret-up]');
+  const down = page.locator('[data-web-shell-mobile-caret-down]');
+  await up.tap();
+  expect(await caret()).toBe(7);
+  await up.tap();
+  expect(await caret()).toBe(4);
+  await down.tap();
+  expect(await caret()).toBe(7);
+  await down.tap();
+  expect(await caret()).toBe(12);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('mobile caret keys scroll long drafts back into the visible window', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  const draft = Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n');
+  await textarea.fill(draft);
+  const initialScroll = await textarea.evaluate((el) => {
+    el.setSelectionRange(el.value.length, el.value.length);
+    el.scrollTop = el.scrollHeight;
+    return el.scrollTop;
+  });
+  expect(initialScroll).toBeGreaterThan(0);
+  const up = page.locator('[data-web-shell-mobile-caret-up]');
+  for (let i = 0; i < 15; i += 1) await up.tap();
+  const after = await textarea.evaluate((el) => ({
+    scrollTop: el.scrollTop,
+    caret: el.selectionStart,
+    clientHeight: el.clientHeight,
+  }));
+  expect(after.scrollTop).toBeLessThan(initialScroll);
+  const caretLine = draft.slice(0, after.caret).split('\n').length - 1;
+  const lineHeight = await textarea.evaluate(
+    (el) => parseFloat(getComputedStyle(el).lineHeight) || 25.6,
+  );
+  expect(caretLine * lineHeight).toBeGreaterThanOrEqual(after.scrollTop);
+  expect(caretLine * lineHeight + lineHeight).toBeLessThanOrEqual(
+    after.scrollTop + after.clientHeight,
+  );
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('mobile dismiss does not focus the empty composer', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await pushSuggestion(daemon, scenario.sessionId);
+  await expect(page.locator(FOLLOWUP_BAR)).toBeVisible();
+  await textarea.evaluate((el) => el.blur());
+  await page.locator(FOLLOWUP_DISMISS).tap();
+  await expect(page.locator(FOLLOWUP_BAR)).toHaveCount(0);
+  await expect(textarea).not.toBeFocused();
+  await expect(
+    page.getByRole('button', { name: 'Hide keyboard', exact: true }),
+  ).toHaveCount(0);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('mobile expanded dialog keeps the suggestion on its placeholder', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  await pushSuggestion(daemon, scenario.sessionId);
+  await expect(page.locator(FOLLOWUP_BAR)).toBeVisible();
+  await page.getByRole('button', { name: 'Expand editor', exact: true }).tap();
+  const expanded = page.locator('[data-web-shell-expanded-editor] textarea');
+  await expect(expanded).toBeVisible();
+  await expect(expanded).toHaveAttribute('placeholder', SUGGESTION);
+  await expect(expanded).toHaveAttribute('aria-label', SUGGESTION);
+  await page.screenshot({
+    path: testInfo.outputPath('followup-expanded-v7.png'),
+  });
+  await expanded.fill('draft');
+  await expect(expanded).not.toHaveAttribute('placeholder', SUGGESTION);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('mobile caret keys yield to an active IME composition', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoHarness(page, scenario, daemon, 'default');
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.fill('abcd');
+  await textarea.evaluate((el) => el.setSelectionRange(2, 2));
+  await textarea.focus();
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Input.imeSetComposition', {
+    text: 'ni',
+    selectionStart: 2,
+    selectionEnd: 2,
+    replacementStart: 2,
+    replacementEnd: 2,
+  });
+  const before = await textarea.evaluate((el) => ({
+    value: el.value,
+    caret: el.selectionStart,
+  }));
+  expect(before.value).toContain('ni');
+  await page.locator('[data-web-shell-mobile-caret-up]').tap();
+  await page.locator('[data-web-shell-mobile-caret-right]').tap();
+  await page.locator('[data-web-shell-mobile-insert-slash]').tap();
+  const during = await textarea.evaluate((el) => ({
+    value: el.value,
+    caret: el.selectionStart,
+  }));
+  expect(during).toEqual(before);
+  await cdp.send('Input.imeSetComposition', {
+    text: '',
+    selectionStart: 0,
+    selectionEnd: 0,
+    replacementStart: 2,
+    replacementEnd: 4,
+  });
+  await expect(textarea).toHaveValue('abcd');
+  await page.locator('[data-web-shell-mobile-caret-right]').tap();
+  expect(
+    await textarea.evaluate((el) => (el as HTMLTextAreaElement).selectionStart),
+  ).toBe(3);
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
 test('mobile slash key inserts a literal slash', async ({ page }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
   const daemon = await installScenario(page, scenario, testInfo);

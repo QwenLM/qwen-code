@@ -170,6 +170,7 @@ const composerCoreState = vi.hoisted(() => ({
   insertText: vi.fn(),
   pressEditingKey: vi.fn(),
   setComposing: vi.fn(),
+  resetVerticalColumn: vi.fn(),
   expandPastedText: vi.fn(),
   slashMenu: null as SlashMenuState | null,
   focus: vi.fn(),
@@ -324,6 +325,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         insertText: composerCoreState.insertText,
         pressEditingKey: composerCoreState.pressEditingKey,
         setComposing: composerCoreState.setComposing,
+        resetVerticalColumn: composerCoreState.resetVerticalColumn,
         setText: composerCoreState.setText,
         submit: vi.fn(),
         clear: vi.fn(),
@@ -425,6 +427,7 @@ afterEach(() => {
   composerCoreState.insertText.mockReset();
   composerCoreState.pressEditingKey.mockReset();
   composerCoreState.setComposing.mockReset();
+  composerCoreState.resetVerticalColumn.mockReset();
   composerCoreState.expandPastedText.mockReset();
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
@@ -6832,6 +6835,13 @@ describe('ChatEditor mobile composer actions', () => {
         .querySelector('[data-web-shell-mobile-caret-right]')
         ?.getAttribute('aria-label'),
     ).toBe('Move cursor right');
+    mobileComposer('run the tests');
+    rerenderChatEditor(container, { visibleToolbarActions: [] });
+    expect(
+      container
+        .querySelector('[data-web-shell-mobile-caret-right]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Move cursor right');
   });
 
   it('keeps the editing-row keys out of the simple variant', () => {
@@ -6863,6 +6873,58 @@ describe('ChatEditor mobile composer actions', () => {
     await clickButton('Dismiss suggestion');
     expect(composerCoreState.onDismissFollowup).toHaveBeenCalledOnce();
     expect(composerCoreState.onAcceptFollowup).not.toHaveBeenCalled();
+  });
+
+  it('dismisses without focusing the empty textarea', async () => {
+    mobileComposer();
+    visibleFollowup();
+    renderChatEditor({ visibleToolbarActions: [] });
+    await clickButton('Dismiss suggestion');
+    expect(composerCoreState.focus).not.toHaveBeenCalled();
+  });
+
+  it('wires IME composition and caret-column resets on the touch textarea', () => {
+    const backend = mobileComposer();
+    renderChatEditor({ visibleToolbarActions: [] });
+    const textarea = backend.textareaRef.current!;
+    act(() => {
+      textarea.dispatchEvent(
+        new CompositionEvent('compositionstart', { bubbles: true }),
+      );
+    });
+    expect(composerCoreState.setComposing).toHaveBeenLastCalledWith(true);
+    act(() => {
+      textarea.dispatchEvent(
+        new CompositionEvent('compositionend', { bubbles: true }),
+      );
+    });
+    expect(composerCoreState.setComposing).toHaveBeenLastCalledWith(false);
+    // React synthesizes onSelect from selectionchange/keyup, not from a
+    // native select event, and suppresses it while a mousedown is open —
+    // sibling tests dispatch unpaired mousedowns, so close one first.
+    act(() => {
+      textarea.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      textarea.focus();
+      textarea.setSelectionRange(1, 2);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    expect(composerCoreState.resetVerticalColumn).toHaveBeenCalled();
+  });
+
+  it('keeps the suggestion on the expanded textarea while the draft is empty', async () => {
+    const backend = mobileComposer();
+    visibleFollowup();
+    const container = renderChatEditor({ visibleToolbarActions: [] });
+    await clickButton('Expand editor');
+    const expanded = document.querySelector<HTMLTextAreaElement>(
+      '[data-web-shell-expanded-editor] textarea',
+    )!;
+    expect(expanded.placeholder).toBe('run the tests');
+    expect(expanded.getAttribute('aria-label')).toBe('run the tests');
+    backend.value = 'draft';
+    rerenderChatEditor(container, { visibleToolbarActions: [] });
+    expect(expanded.placeholder).toBe('Ask anything');
+    expect(expanded.getAttribute('aria-label')).toBe('Ask anything');
   });
 
   it('hides the follow-up controls once the draft has text', () => {

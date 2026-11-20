@@ -40,6 +40,36 @@ describe('touch editing-key caret targets', () => {
     expect(computeCaretTarget('aa\nbbb\ncc', 1, 5, 'up')).toBe(2);
     expect(computeCaretTarget('aa\nbbb\ncc', 1, 5, 'down')).toBe(9);
   });
+
+  it('steps a whole grapheme so inserting never splits a surrogate pair', () => {
+    const caret = computeCaretTarget('A😀B', 1, 1, 'right');
+    expect(caret).toBe(3);
+    const next = 'A😀B'.slice(0, caret) + '/' + 'A😀B'.slice(caret);
+    expect(next).toBe('A😀/B');
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(next)).toBe(false);
+    expect(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(next)).toBe(false);
+    expect(computeCaretTarget('A😀B', 3, 3, 'right')).toBe(4);
+  });
+
+  it('clamps vertical moves to grapheme boundaries on astral lines', () => {
+    expect(computeCaretTarget('a\n😀b', 1, 1, 'down')).toBe(4);
+    expect(computeCaretTarget('😀b\na', 2, 2, 'down')).toBe(5);
+    expect(computeCaretTarget('a\n😀b', 4, 4, 'up')).toBe(1);
+  });
+
+  it('holds the preferred column across a vertical run', () => {
+    const text = 'aaaa\nbb\ncccc';
+    const first = computeCaretTarget(text, 12, 12, 'up');
+    expect(first).toBe(7);
+    expect(computeCaretTarget(text, first, first, 'up', undefined, 4)).toBe(4);
+    expect(computeCaretTarget(text, 7, 7, 'up')).toBe(2);
+  });
+
+  it('moves between the supplied displayed lines, not only newlines', () => {
+    expect(computeCaretTarget('aaaaaa', 4, 4, 'up', [0, 3])).toBe(1);
+    expect(computeCaretTarget('aaaaaa', 1, 1, 'down', [0, 3])).toBe(4);
+    expect(computeCaretTarget('aaaaaa', 4, 4, 'down', [0, 3])).toBe(6);
+  });
 });
 
 describe('follow-up completion helpers', () => {

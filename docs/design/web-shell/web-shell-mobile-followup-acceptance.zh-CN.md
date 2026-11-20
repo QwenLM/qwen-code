@@ -2,7 +2,7 @@
 
 [English](web-shell-mobile-followup-acceptance.md) | [简体中文](web-shell-mobile-followup-acceptance.zh-CN.md)
 
-状态:已实现于 `feat/web-shell-mobile-followup-acceptance`(PR #17918),2026-11-20 经多轮评审修订(Tab 键 → 动作词键 → 单 chip 建议条 → 光标/斜杠键排 → 240px 换行修复)。
+状态:已实现于 `feat/web-shell-mobile-followup-acceptance`(PR #17918),2026-11-20 经多轮评审修订(Tab 键 → 动作词键 → 单 chip 建议条 → 光标/斜杠键排 → 240px 换行修复 → 字素/视觉行光标、列保持与滚动揭示、完全匹配接受门、展开对话框 surface、忽略不聚焦)。
 
 ## 问题
 
@@ -18,11 +18,11 @@
 
 单 chip 出自三轮评审;后续轮次加入下文的光标/斜杠键排与窄屏换行。第一版加建议条与编辑行 `Tab` 键;评审指出触摸用户没有 Tab 键与相应肌肉记忆。第二版把该键改本地化动作词(`Fill in` / 填入 / Вставить);评审指出光秃及物动词仍缺宾语,且与建议内容空间分离。终版删除编辑行键,并给建议条 chip 容器(浅底、描边、插入图标),使其在无 hover 的触摸端读作可点:内容即标签,是最易懂的形态,也与业界移动建议 chip 一致。随键删除的还有 `composerMobile.fillFollowup` 目录键。
 
-第四轮评审在编辑行尾侧(default 变体、触摸)加入始终有活功能的编辑键:↑/↓ 行感知移动光标(列钳制到目标行、首/末行出界钳到文档首/尾);→ 光标右移,并在建议匹配时兼作桌面 ArrowRight 式接受(整草稿替换为补全,遥测 method `right`);/ 插字面斜杠——textarea 后端没有 slash 菜单,该键是字符便利键,命令浏览仍在加号抽屉。IME 组合期间按键让路;纯光标移动不碰草稿与其持久化。simple 变体与语音通话时编辑行不渲染,键排缺席。历史召回仍走搜索面板:不复活步进回调,故 #14220 移除步进的 inline-tag-chip 限制不适用。
+第四轮评审在编辑行尾侧(default 变体、触摸)加入始终有活功能的编辑键:↑/↓ 在*屏幕上显示的行*之间移动光标——用镜像 textarea 折行样式测得的视觉软折行(布局不可用时回退逻辑 `\n` 行),步进与钳制都落在字素边界(光标绝不落入代理对中间),连续垂直移动期间保持目标字素列(→、/、草稿编辑与用户跳选区时清除;我们自己的程序化选区变化豁免于跳选区清除),短行钳制、首/末行出界钳到文档首/尾,并把光标行滚回高度上限的滚动窗口;→ 右移一个字素,且仅当补全相对草稿确有剩余时兼作桌面 ArrowRight 式接受——完全匹配的草稿落到光标移动分支,键的 aria-label 用同一判据——接受时整草稿替换为补全(遥测 method `right`);/ 插字面斜杠——textarea 后端没有 slash 菜单,该键是字符便利键,命令浏览仍在加号抽屉。IME 组合期间按键让路;纯光标移动不碰草稿与其持久化。simple 变体与语音通话时编辑行不渲染,键排缺席。历史召回仍走搜索面板:不复活步进回调,故 #14220 移除步进的 inline-tag-chip 限制不适用。
 
-可见性:触摸后端已挂载、建议可见、草稿为空、composer 未禁用。开始打字即隐藏,与桌面 ghost 的前缀规则精神一致,同时保证触摸面不干扰草稿。chip 可见时触摸 textarea 保持普通占位符,建议文字只出现在一个 surface 上;早先一版曾同时留在 placeholder 里,造成同屏重复。桌面仍保留空输入 placeholder、前缀 ghost 补全的渲染。
+可见性:触摸后端已挂载、建议可见、草稿为空、composer 未禁用。开始打字即隐藏,与桌面 ghost 的前缀规则精神一致,同时保证触摸面不干扰草稿。chip 可见时触摸 textarea 保持普通占位符,建议文字只出现在一个 surface 上;早先一版曾同时留在 placeholder 里,造成同屏重复。全屏展开对话框是 chip-only 规则的唯一例外:chip 条只渲染在行内输入框,故对话框打开且草稿为空时,由对话框 textarea 的 placeholder 与 aria-label 承载建议(草稿非空后还原普通占位符),保证任何布局下建议都恰好出现在一个 surface 上。桌面仍保留空输入 placeholder、前缀 ghost 补全的渲染。
 
-接受调用 `onAcceptFollowup('tab')` 且不带 `skipOnAccept`,复用宿主现成的 `onAccept → insertText` 接线:填入 textarea 并请求 focus;宿主 accept 经 `queueMicrotask` 延迟插入,故真 iOS 上 focus 可能落在 tap 手势之外、键盘可能不弹——真 iOS 键盘行为未验证、属范围外。忽略调用 `onDismissFollowup`,保留既有 ignored 遥测。不新增数据通路:daemon sidechannel、controller、insertText 触摸分支均原样复用。
+接受调用 `onAcceptFollowup('tab')` 且不带 `skipOnAccept`,复用宿主现成的 `onAccept → insertText` 接线:填入 textarea 并请求 focus。焦点时序:composer 外层点击处理先在手势内同步聚焦 textarea;宿主 accept 再经 `queueMicrotask` 延迟插入并在插入后再次请求 focus。真 iOS 上延迟插入的 focus 请求可能落在 tap 手势之外、键盘可能不弹——真 iOS 键盘行为未验证、属范围外。忽略调用 `onDismissFollowup` 并阻止点击冒泡,外层聚焦处理不再执行:未聚焦状态下点忽略后 textarea 保持未聚焦、「收起键盘」控件不出现,保留既有 ignored 遥测。不新增数据通路:daemon sidechannel、controller、insertText 触摸分支均原样复用。
 
 保留快路径:空输入点发送仍整条直发;输入前缀再发送仍补全直发。建议条让第一条路径可发现,但不改变其语义。
 
@@ -36,8 +36,8 @@
 
 ## 验证
 
-- `client/e2e/web-shell.followup.mobile.spec.ts`,mobile-chromium(Pixel 7 触摸模拟):13/13 通过——chip 填入不发送、忽略、空输入直发、打字隐藏、前缀补全、编辑行不带 follow-up 专用键而 chip 接受(default 变体)、chip 可见时 placeholder 保持普通文案(单 surface)、光标上/下/右移动、→ 接受可见建议、前缀草稿下右键标签/接受同步、字面斜杠插入、390px 同行/240px 自占行且无横向溢出,以及两条 zh-CN 用例钉住本地化 chip 文本、忽略标签与光标键标签并截中文 UI 图。这些用例传 `?language=`,由 App 的 `getInitialLanguage` 直接读取(无需 harness prop);spec 会把取证截图写入其 test-results 输出目录。
-- `ChatEditor.test.tsx` mobile composer actions:单测钉可见性(有草稿、无可见建议、桌面后端、disabled、simple 变体)、accept/dismiss 接线、编辑键接线与 → 的动态 aria-label;`useComposerCore.test.ts` 钉行感知光标计算;合并后 head(含 main incoming)上三个文件 404/404 通过。
+- `client/e2e/web-shell.followup.mobile.spec.ts`,mobile-chromium(Pixel 7 触摸模拟):20/20 通过——chip 填入不发送、忽略、未聚焦时忽略不拉焦点、空输入直发、打字隐藏、前缀补全、编辑行不带 follow-up 专用键而 chip 接受(default 变体)、chip 可见时 placeholder 保持普通文案(单 surface)、空草稿展开对话框由 placeholder 承载建议、光标上/下/右移动、字素安全右移加斜杠不拆 emoji、150 连续字符软折行草稿上上/下与原生方向键落在同一光标、短中间行的连续垂直移动保持目标列、长草稿滚回高度上限窗口、→ 接受可见建议、前缀草稿下右键标签/接受同步与完全匹配落到光标移动、字面斜杠插入、CDP 驱动的 IME 组合期间按键让路、390px 同行/240px 自占行且无横向溢出,以及两条 zh-CN 用例钉住本地化 chip 文本、忽略标签与光标键标签并截中文 UI 图。这些用例传 `?language=`,由 App 的 `getInitialLanguage` 直接读取(无需 harness prop);spec 会把取证截图写入其 test-results 输出目录。
+- `ChatEditor.test.tsx` mobile composer actions:单测钉可见性(有草稿、无可见建议、桌面后端、disabled、simple 变体)、accept/dismiss 接线、忽略不调用外层聚焦、composition 与选区重置接线、编辑键接线与 → 的动态 aria-label(含完全匹配判据);`useComposerCore.test.ts` 钉字素/视觉行光标计算与目标列保持;`useComposerCore.mobile.dom.test.tsx` 对真实钩子钉完全匹配接受门、前缀接受、IME 让路、列保持与用户跳选区重置、滚动揭示;四个文件(含 `i18n.test.ts`)481/481 通过。
 - web-shell `tsc --noEmit` 与改动文件 ESLint:干净。
 - 未覆盖:mobile-webkit / iOS 真机(本机缺 WebKit 运行库);软键盘弹起时新增行的高度挤压;iPad 外接键盘 Tab/→ 接受(后置)。
 

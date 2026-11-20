@@ -82,6 +82,15 @@ import {
   inputHighlightTheme,
 } from '../extensions/inputHighlight';
 import { getShadowAwareActiveElement, isEditableTarget } from '../utils/dom';
+import {
+  caretGraphemeColumn,
+  logicalLineStarts,
+  measureVisualLineStarts,
+  nextGraphemeBoundary,
+  offsetAtGraphemeColumn,
+  lineIndexAt,
+  revealCaret,
+} from '../utils/touchCaret';
 import { cssUrlValue } from '../utils/cssUrlVar';
 import {
   createInputAnnotationsFromComposerTags,
@@ -1053,38 +1062,35 @@ function getFollowupRemainder(
 }
 
 /**
- * Line-aware caret target for the touch editing-row direction keys. Up/Down
- * keep the column clamped to the target line; leaving the first/last line
- * clamps to the document start/end, matching native textarea behavior.
+ * Line-aware caret target for the touch editing-row direction keys. Right
+ * steps a whole grapheme (never inside a surrogate pair); Up/Down move between
+ * the given displayed lines (visual wrap included when measured), holding the
+ * preferred grapheme column across a vertical run and clamping it to shorter
+ * lines; leaving the first/last line clamps to the document start/end, matching
+ * native textarea behavior.
  */
 export function computeCaretTarget(
   text: string,
   start: number,
   end: number,
   direction: 'up' | 'down' | 'right',
+  lineStarts: number[] = logicalLineStarts(text),
+  preferredColumn?: number,
 ): number {
   if (direction === 'right') {
-    return start === end ? Math.min(text.length, end + 1) : end;
+    return start === end ? nextGraphemeBoundary(text, end) : end;
   }
   const caret = end;
-  const lines = text.split('\n');
-  let offset = 0;
-  let index = lines.length - 1;
-  for (let i = 0; i < lines.length; i += 1) {
-    const lineEnd = offset + lines[i].length;
-    if (caret <= lineEnd) {
-      index = i;
-      break;
-    }
-    offset = lineEnd + 1;
-  }
-  const column = caret - offset;
+  const index = lineIndexAt(lineStarts, caret);
+  const column =
+    preferredColumn ?? caretGraphemeColumn(text, caret, lineStarts);
   const target = index + (direction === 'up' ? -1 : 1);
   if (target < 0) return 0;
-  if (target >= lines.length) return text.length;
-  let targetStart = 0;
-  for (let i = 0; i < target; i += 1) targetStart += lines[i].length + 1;
-  return targetStart + Math.min(column, lines[target].length);
+  if (target >= lineStarts.length) return text.length;
+  const targetStart = lineStarts[target];
+  const targetEnd =
+    target + 1 < lineStarts.length ? lineStarts[target + 1] - 1 : text.length;
+  return offsetAtGraphemeColumn(text, targetStart, targetEnd, column);
 }
 
 export function mapRestoredInputAnnotationsAfterTextChange(
@@ -1637,6 +1643,7 @@ export interface UseComposerCoreReturn {
   removeInlineTags: (predicate?: (tag: WebShellComposerTag) => boolean) => void;
   insertText: (text: string, options?: WebShellComposerTextOptions) => void;
   pressEditingKey: (key: 'up' | 'down' | 'right' | 'slash') => void;
+  resetVerticalColumn: () => void;
   setComposing: (active: boolean) => void;
   setText: (text: string) => void;
   submit: (input?: WebShellComposerInput) => void;
@@ -1793,6 +1800,14 @@ export function useComposerCore(
   // Mirrors the CodeMirror updateListener contract: every draft change —
   // typing or programmatic (setText, clear, history restore, post-submit
   // clear) — notifies onInputTextChange, so parent trackers never go stale.
+  // Native textareas hold the desired column for a whole vertical run; keep it
+  // across consecutive up/down presses until a horizontal move, edit or
+  // selection jump resets it.
+  const verticalColumnRef = useRef<number | null>(null);
+  // selectionchange (React onSelect) also fires for our own setSelectionRange
+  // calls; without this exemption the reset would erase the column we just
+  // remembered and the vertical run would crawl like the pre-fix behavior.
+  const programmaticSelectionRef = useRef<[number, number] | null>(null);
   const setMobileText = useCallback((text: string) => {
     if (!applyingSharedDraftRef.current && mobileTextRef.current !== text) {
       markComposerDraftEdited(draftIdentityRef.current.storageKey);
@@ -1805,6 +1820,8 @@ export function useComposerCore(
       );
     mobileTextVersionRef.current += 1;
     mobileTextRef.current = text;
+    verticalColumnRef.current = null;
+    programmaticSelectionRef.current = null;
     setMobileTextState(text);
     if (draftIdentityRef.current.storageKey === undefined) {
       unscopedDraftEditedRef.current = true;
@@ -5031,16 +5048,25 @@ export function useComposerCore(
       if (!el) return;
       const text = mobileTextRef.current;
       if (key === 'right') {
+        verticalColumnRef.current = null;
         const followup = followupStateRef.current;
         const completion = getFollowupCompletion(
           text,
           followup?.isVisible ? followup.suggestion : null,
         );
-        if (completion) {
+        // Only accept when there is an actual remainder: with the draft already
+        // equal to the suggestion, Right must move the caret, not re-set the
+        // same text and consume the suggestion.
+        if (completion && completion.length > text.length) {
           historyBrowseActiveRef.current = false;
           setMobileText(completion);
           const restoreCaret = () => {
+            programmaticSelectionRef.current = [
+              completion.length,
+              completion.length,
+            ];
             el.setSelectionRange(completion.length, completion.length);
+            revealCaret(el, completion, completion.length);
           };
           if (typeof requestAnimationFrame === 'function') {
             requestAnimationFrame(restoreCaret);
@@ -5053,17 +5079,48 @@ export function useComposerCore(
         }
       }
       if (key === 'slash') {
+        verticalColumnRef.current = null;
         insertText('/');
         return;
       }
       const start = el.selectionStart ?? text.length;
       const end = el.selectionEnd ?? start;
-      const target = computeCaretTarget(text, start, end, key);
+      let lineStarts = measureVisualLineStarts(el, text);
+      if (lineStarts.length === 1 && text.includes('\n')) {
+        lineStarts = logicalLineStarts(text);
+      }
+      const column =
+        verticalColumnRef.current ?? caretGraphemeColumn(text, end, lineStarts);
+      const target = computeCaretTarget(
+        text,
+        start,
+        end,
+        key,
+        lineStarts,
+        column,
+      );
+      verticalColumnRef.current = column;
+      programmaticSelectionRef.current = [target, target];
       el.focus();
       el.setSelectionRange(target, target);
+      revealCaret(el, text, target);
     },
     [insertText, isTouchComposer, setMobileText],
   );
+
+  const resetVerticalColumn = useCallback(() => {
+    const el = expandedTextareaRef.current ?? mobileTextareaRef.current;
+    const programmatic = programmaticSelectionRef.current;
+    if (
+      el &&
+      programmatic &&
+      el.selectionStart === programmatic[0] &&
+      el.selectionEnd === programmatic[1]
+    ) {
+      return;
+    }
+    verticalColumnRef.current = null;
+  }, []);
 
   const getText = useCallback(() => {
     if (isTouchComposer) return mobileTextRef.current;
@@ -5845,6 +5902,7 @@ export function useComposerCore(
     removeInlineTags,
     insertText,
     pressEditingKey,
+    resetVerticalColumn,
     setComposing,
     setText,
     submit,

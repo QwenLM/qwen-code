@@ -4127,12 +4127,20 @@ export const ChatEditor = memo(
         : null;
     // The right key accepts on a typed prefix too, so its label follows the
     // same completion the key performs, not the empty-draft chip rule.
-    const touchFollowupCompletion =
+    const touchFollowupCompletionRaw =
       core.mobileComposer && core.followupState?.isVisible
         ? getFollowupCompletion(
             core.mobileComposer.value,
             core.followupState.suggestion,
           )
+        : null;
+    // Label only announces an accept when there is an actual remainder; an
+    // exact-match draft falls through to the caret move, same as the key.
+    const touchFollowupCompletion =
+      touchFollowupCompletionRaw &&
+      core.mobileComposer &&
+      touchFollowupCompletionRaw.length > core.mobileComposer.value.length
+        ? touchFollowupCompletionRaw
         : null;
 
     const primaryInput = (
@@ -4155,6 +4163,7 @@ export const ChatEditor = memo(
               onChange={core.mobileComposer.onChange}
               onCompositionStart={() => core.setComposing(true)}
               onCompositionEnd={() => core.setComposing(false)}
+              onSelect={() => core.resetVerticalColumn()}
               onFocus={() => setMobileFocused(true)}
               onBlur={() => {
                 setMobileFocused(false);
@@ -4991,7 +5000,13 @@ export const ChatEditor = memo(
                   data-web-shell-mobile-followup-dismiss
                   aria-label={t('composerMobile.dismissFollowup')}
                   onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => core.onDismissFollowup()}
+                  onClick={(event) => {
+                    // Dismissing must not bubble into the composer surface's
+                    // focus handler: that would focus the empty textarea and
+                    // pop the keyboard for a user who only ignored a hint.
+                    event.stopPropagation();
+                    core.onDismissFollowup();
+                  }}
                 >
                   <XIcon />
                 </button>
@@ -5305,10 +5320,15 @@ export const ChatEditor = memo(
                     event.currentTarget.selectionStart,
                     event.currentTarget.selectionEnd,
                   ];
+                  core.resetVerticalColumn();
                 }}
                 className={styles.mobileExpandedTextarea}
-                aria-label={core.mobileComposer.placeholder}
-                placeholder={core.mobileComposer.placeholder}
+                aria-label={
+                  mobileFollowupSuggestion ?? core.mobileComposer.placeholder
+                }
+                placeholder={
+                  mobileFollowupSuggestion ?? core.mobileComposer.placeholder
+                }
                 autoCapitalize="off"
                 autoCorrect="off"
                 spellCheck={false}
