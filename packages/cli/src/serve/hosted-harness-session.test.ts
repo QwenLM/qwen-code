@@ -116,7 +116,9 @@ import {
   reloadStableOwnerIds,
   settleCancelledHookTurn,
   settleCrashedWakeTurnAftermath,
+  wakeDispatchOwnsInput,
 } from './hosted-harness-session.js';
+import type { PendingSessionInput } from './hosted-wake-intake.js';
 import {
   HostedHookRecoveryRequiredError,
   HostedHookSession,
@@ -178,7 +180,10 @@ import {
   monitorWakeNeedsRecovery,
 } from './hosted-monitor-wake-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
-import { HostedSessionMessageSession } from './hosted-session-message-session.js';
+import {
+  HostedSessionMessageSession,
+  SESSION_MESSAGE_INPUT_SOURCE,
+} from './hosted-session-message-session.js';
 import { HostedSessionCommandSession } from './hosted-session-command-session.js';
 import { HostedContextCompression } from './hosted-context-compression.js';
 import type { HistoryMaintenance } from '@qwen-code/qwen-code-core/managed-runtime/managed-history-maintenance-record.js';
@@ -1219,6 +1224,54 @@ describe('attributeShellReceipts', () => {
     ]);
     expect(promptId).toBeNull();
     expect(receipts.map((item) => item.promptId)).toEqual(['prompt']);
+  });
+});
+
+describe('wakeDispatchOwnsInput', () => {
+  const NOW = 1_000_000;
+  const input = (
+    overrides: Partial<PendingSessionInput> = {},
+  ): PendingSessionInput => ({
+    inputId: 'loop:wakeup',
+    turnId: 'loop:wakeup',
+    source: 'loop',
+    sequence: 1,
+    contentRef: undefined,
+    notBefore: NOW + 1,
+    ...overrides,
+  });
+
+  it('owns a deferred, unattempted wake input', () => {
+    expect(
+      wakeDispatchOwnsInput(
+        {},
+        input(),
+        [{ daemonPromptId: 'another-turn' }],
+        NOW,
+      ),
+    ).toBe(true);
+  });
+
+  it.each<
+    [
+      string,
+      { messagesStopped?: boolean },
+      PendingSessionInput,
+      Array<{ daemonPromptId?: string }>,
+    ]
+  >([
+    ['a non-wake input', {}, input({ source: 'hosted-harness' }), []],
+    [
+      "a stopped run's message",
+      { messagesStopped: true },
+      input({ source: SESSION_MESSAGE_INPUT_SOURCE }),
+      [],
+    ],
+    ['an immediate input', {}, input({ notBefore: null }), []],
+    ['an input due now', {}, input({ notBefore: NOW }), []],
+    ['an attempted input', {}, input(), [{ daemonPromptId: 'loop:wakeup' }]],
+  ])('leaves %s to the resident Session', (_, session, pending, projected) => {
+    expect(wakeDispatchOwnsInput(session, pending, projected, NOW)).toBe(false);
   });
 });
 
