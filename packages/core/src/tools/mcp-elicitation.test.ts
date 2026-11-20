@@ -41,7 +41,7 @@ class ScriptedElicitationTransport {
         jsonrpc: '2.0',
         id: (message as JSONRPCRequest).id,
         result: {
-          protocolVersion: message.params['protocolVersion'],
+          protocolVersion: message.params?.['protocolVersion'],
           capabilities: {},
           serverInfo: { name: 'scripted', version: '0.0.0' },
         },
