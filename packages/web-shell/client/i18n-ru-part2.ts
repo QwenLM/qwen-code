@@ -257,6 +257,8 @@ export const RU_PART2: Record<
   'composerMobile.commands': 'Все команды',
   'composerMobile.searchCommands': 'Поиск команд',
   'composerMobile.history': 'История ввода',
+  'composerMobile.acceptFollowup': 'Принять предложение',
+  'composerMobile.dismissFollowup': 'Скрыть предложение',
   'composerMobile.stop': 'Стоп',
   'composerMobile.attachments': (v) => `Вложения/изображения: ${v?.count ?? 0}`,
   'composerAdd.emptyState': 'Здесь нет доступных действий добавления',

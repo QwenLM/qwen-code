@@ -1157,6 +1157,8 @@ export const ZH_TW: Record<string, MessageValue> = {
   'composerMobile.commands': '全部命令',
   'composerMobile.searchCommands': '搜尋命令',
   'composerMobile.history': '輸入歷史',
+  'composerMobile.acceptFollowup': '接受建議',
+  'composerMobile.dismissFollowup': '忽略建議',
   'composerMobile.stop': '停止',
   'composerMobile.attachments': (v) => `已新增附件/圖片：${v?.count ?? 0}`,
   'composerAdd.emptyState': '此處沒有可用的新增操作',

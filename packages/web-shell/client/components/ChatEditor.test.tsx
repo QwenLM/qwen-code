@@ -170,6 +170,12 @@ const composerCoreState = vi.hoisted(() => ({
   focus: vi.fn(),
   closeSlashMenu: vi.fn(),
   mobileComposer: null as unknown,
+  followupState: { isVisible: false, suggestion: '' } as {
+    isVisible: boolean;
+    suggestion: string;
+  },
+  onAcceptFollowup: vi.fn(),
+  onDismissFollowup: vi.fn(),
   searchMode: false,
   openHistorySearch: vi.fn(),
   imageDropCapture: vi.fn(),
@@ -336,10 +342,10 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           handleSearchCompositionEnd: vi.fn(),
         },
         showShortcutHints: false,
-        followupState: { isVisible: false, suggestion: '' },
+        followupState: composerCoreState.followupState,
         disabled: Boolean(options?.disabled),
-        onAcceptFollowup: vi.fn(),
-        onDismissFollowup: vi.fn(),
+        onAcceptFollowup: composerCoreState.onAcceptFollowup,
+        onDismissFollowup: composerCoreState.onDismissFollowup,
         slashMenu: composerCoreState.slashMenu,
         closeSlashMenu: composerCoreState.closeSlashMenu,
         selectSlashCompletion: vi.fn(),
@@ -414,6 +420,9 @@ afterEach(() => {
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
   composerCoreState.mobileComposer = null;
+  composerCoreState.followupState = { isVisible: false, suggestion: '' };
+  composerCoreState.onAcceptFollowup.mockReset();
+  composerCoreState.onDismissFollowup.mockReset();
   composerCoreState.searchMode = false;
   composerCoreState.openHistorySearch.mockReset();
   composerCoreState.imageDropCapture.mockReset();
@@ -6675,6 +6684,126 @@ describe('ChatEditor mobile composer actions', () => {
     act(() => voiceButtonState.onActiveChange?.(false));
     expect(
       container.querySelector('[data-mobile-voice-active="true"]'),
+    ).toBeNull();
+  });
+
+  function visibleFollowup() {
+    composerCoreState.followupState = {
+      isVisible: true,
+      suggestion: 'run the tests',
+    };
+  }
+
+  it('shows the follow-up bar and editing-row Tab key for an empty touch draft', () => {
+    mobileComposer();
+    visibleFollowup();
+    const container = renderChatEditor({ visibleToolbarActions: [] });
+    expect(
+      container.querySelector('[data-web-shell-mobile-followup]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-mobile-followup-accept]')
+        ?.textContent,
+    ).toBe('run the tests');
+    expect(
+      container.querySelector('[data-web-shell-mobile-followup-tab]'),
+    ).not.toBeNull();
+    const accept = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-mobile-followup-accept]',
+    )!;
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    accept.dispatchEvent(mouseDown);
+    expect(mouseDown.defaultPrevented).toBe(true);
+  });
+
+  it('accepts the follow-up into the draft without submitting', async () => {
+    mobileComposer();
+    visibleFollowup();
+    renderChatEditor({ visibleToolbarActions: [] });
+    await clickButton('run the tests');
+    expect(composerCoreState.onAcceptFollowup).toHaveBeenCalledWith('tab');
+    expect(composerCoreState.submitText).not.toHaveBeenCalled();
+    composerCoreState.onAcceptFollowup.mockClear();
+    await clickButton('Tab');
+    expect(composerCoreState.onAcceptFollowup).toHaveBeenCalledWith('tab');
+    expect(composerCoreState.submitText).not.toHaveBeenCalled();
+  });
+
+  it('dismisses the follow-up suggestion without accepting it', async () => {
+    mobileComposer();
+    visibleFollowup();
+    renderChatEditor({ visibleToolbarActions: [] });
+    await clickButton('Dismiss suggestion');
+    expect(composerCoreState.onDismissFollowup).toHaveBeenCalledOnce();
+    expect(composerCoreState.onAcceptFollowup).not.toHaveBeenCalled();
+  });
+
+  it('hides the follow-up controls once the draft has text', () => {
+    mobileComposer('draft');
+    visibleFollowup();
+    const container = renderChatEditor({ visibleToolbarActions: [] });
+    expect(
+      container.querySelector('[data-web-shell-mobile-followup]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-mobile-followup-tab]'),
+    ).toBeNull();
+  });
+
+  it('hides the follow-up controls when no suggestion is visible', () => {
+    mobileComposer();
+    const container = renderChatEditor({ visibleToolbarActions: [] });
+    expect(
+      container.querySelector('[data-web-shell-mobile-followup]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-mobile-followup-tab]'),
+    ).toBeNull();
+  });
+
+  it('keeps the follow-up controls off the desktop backend', () => {
+    visibleFollowup();
+    const container = renderChatEditor({});
+    expect(
+      container.querySelector('[data-web-shell-mobile-followup]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-mobile-followup-tab]'),
+    ).toBeNull();
+  });
+
+  it('hides the follow-up controls while the composer is disabled', () => {
+    mobileComposer();
+    visibleFollowup();
+    const container = renderChatEditor({
+      disabled: true,
+      visibleToolbarActions: [],
+    });
+    expect(
+      container.querySelector('[data-web-shell-mobile-followup]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-mobile-followup-tab]'),
+    ).toBeNull();
+  });
+
+  it('keeps the bar but not the Tab key in the simple variant', () => {
+    mobileComposer();
+    visibleFollowup();
+    const container = renderChatEditor({
+      customization: { composerVariant: 'simple' },
+    });
+    expect(
+      container.querySelector('[data-web-shell-mobile-followup]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-mobile-followup-tab]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-mobile-editing-actions]'),
     ).toBeNull();
   });
 });

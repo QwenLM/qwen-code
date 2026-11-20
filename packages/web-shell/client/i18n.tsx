@@ -1231,6 +1231,8 @@ const EN: Messages = {
   'composerMobile.commands': 'All commands',
   'composerMobile.searchCommands': 'Search commands',
   'composerMobile.history': 'Input history',
+  'composerMobile.acceptFollowup': 'Accept suggestion',
+  'composerMobile.dismissFollowup': 'Dismiss suggestion',
   'composerMobile.stop': 'Stop',
   'composerMobile.attachments': (v) =>
     `Attached files/images: ${v?.count ?? 0}`,

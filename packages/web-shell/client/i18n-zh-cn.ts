@@ -1266,6 +1266,8 @@ export const ZH: Messages = {
   'composerMobile.commands': '全部命令',
   'composerMobile.searchCommands': '搜索命令',
   'composerMobile.history': '输入历史',
+  'composerMobile.acceptFollowup': '接受建议',
+  'composerMobile.dismissFollowup': '忽略建议',
   'composerMobile.stop': '停止',
   'composerMobile.attachments': (v) => `已添加附件/图片：${v?.count ?? 0}`,
   'composerAdd.emptyState': '此处没有可用的添加操作',

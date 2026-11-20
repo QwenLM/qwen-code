@@ -4097,6 +4097,19 @@ export const ChatEditor = memo(
       </button>
     );
 
+    // Touch accept fills the textarea without submitting (desktop Tab
+    // semantics); Send with an empty input still submits the suggestion
+    // directly. The bar covers every variant, the editing-row Tab key only
+    // the default one, and both hide once the user starts typing.
+    const mobileFollowupSuggestion =
+      !disabled &&
+      core.mobileComposer &&
+      core.mobileComposer.value === '' &&
+      core.followupState?.isVisible &&
+      core.followupState.suggestion
+        ? core.followupState.suggestion
+        : null;
+
     const primaryInput = (
       <>
         <div className={styles.editorArea}>
@@ -4799,6 +4812,20 @@ export const ChatEditor = memo(
                     {workspaceControls(false)}
                   </div>
                 )}
+                {mobileFollowupSuggestion && (
+                  <button
+                    type="button"
+                    className={styles.toolBtn}
+                    disabled={disabled}
+                    aria-label={t('composerMobile.acceptFollowup')}
+                    title={t('composerMobile.acceptFollowup')}
+                    data-web-shell-mobile-followup-tab
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => core.onAcceptFollowup('tab')}
+                  >
+                    Tab
+                  </button>
+                )}
                 {!showAddMenuAction && (
                   <button
                     type="button"
@@ -4858,6 +4885,33 @@ export const ChatEditor = memo(
                   }}
                 >
                   <Maximize2Icon />
+                </button>
+              </div>
+            )}
+            {mobileFollowupSuggestion && (
+              <div
+                className={styles.mobileFollowup}
+                data-web-shell-mobile-followup
+              >
+                <button
+                  type="button"
+                  className={styles.mobileFollowupAccept}
+                  data-web-shell-mobile-followup-accept
+                  title={t('composerMobile.acceptFollowup')}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => core.onAcceptFollowup('tab')}
+                >
+                  {mobileFollowupSuggestion}
+                </button>
+                <button
+                  type="button"
+                  className={styles.toolBtn}
+                  data-web-shell-mobile-followup-dismiss
+                  aria-label={t('composerMobile.dismissFollowup')}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => core.onDismissFollowup()}
+                >
+                  <XIcon />
                 </button>
               </div>
             )}

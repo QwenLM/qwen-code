@@ -1279,6 +1279,40 @@
   overflow-y: auto;
 }
 
+/* Touch follow-up suggestion bar: tap fills the textarea without submitting
+   (desktop Tab semantics). Rendered only while the input is empty, so it
+   never competes with a draft for room. */
+.mobileFollowup {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 44px;
+}
+
+.mobileFollowupAccept {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--chat-editor-text-dimmed, #666);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: start;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.mobileFollowupAccept:not(:disabled):hover {
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
+}
+
 .editorArea .cm-scroller {
   scrollbar-color: var(--chat-editor-border-color) transparent;
   scrollbar-width: thin;
