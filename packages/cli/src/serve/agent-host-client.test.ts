@@ -759,22 +759,27 @@ describe('enrolling', () => {
     );
   });
 
-  it('drops its saved secret when the coordinator refuses the enrollment', async () => {
-    await withCoordinator(
-      () =>
-        Response.json(
-          { error: AGENT_HOST_ENROLLMENT_REFUSED },
-          { status: 401 },
-        ),
-      async (files, sent) => {
-        await expect(connect()).rejects.toThrow(AGENT_HOST_ENROLLMENT_REFUSED);
+  it.each([undefined, 'Pinned programs unavailable for ag_pinned.'])(
+    'drops its saved secret when the coordinator refuses the enrollment (%s)',
+    async (detail) => {
+      await withCoordinator(
+        () =>
+          Response.json(
+            { error: AGENT_HOST_ENROLLMENT_REFUSED, detail },
+            { status: 401 },
+          ),
+        async (files, sent) => {
+          await expect(connect()).rejects.toThrow(
+            detail ?? AGENT_HOST_ENROLLMENT_REFUSED,
+          );
 
-        // Nothing holds it: a failed join leaves no identity behind.
-        expect(sent).toHaveLength(1);
-        await expect(fs.access(files.enrolling)).rejects.toThrow();
-      },
-    );
-  });
+          // Nothing holds it: a failed join leaves no identity behind.
+          expect(sent).toHaveLength(1);
+          await expect(fs.access(files.enrolling)).rejects.toThrow();
+        },
+      );
+    },
+  );
 
   it.each([
     // A bare 401 from a coordinator still starting says nothing about it.
@@ -785,12 +790,18 @@ describe('enrolling', () => {
       503,
       AGENT_HOST_ENROLLMENT_UNAVAILABLE,
     ],
+    [
+      'an enrolled staged program conflict',
+      409,
+      'Pinned programs unavailable for ag_pinned.',
+    ],
   ])('keeps its saved secret through %s', async (_label, status, error) => {
     await withCoordinator(
       () => Response.json({ error }, { status }),
       async (files, sent) => {
         await expect(connect()).rejects.toThrow(error);
 
+        expect(sent).toHaveLength(1);
         await expect(readJson(files.enrolling)).resolves.toEqual({
           schemaVersion: 1,
           secret: sent[0],
@@ -799,6 +810,30 @@ describe('enrolling', () => {
       },
     );
   });
+
+  it.each([true, false, 'true'])(
+    'ignores an unrecognized refusal with wire marker %s and detail',
+    async (enrollmentRefused) => {
+      await withCoordinator(
+        () =>
+          Response.json(
+            {
+              error: 'Unknown conflict',
+              detail: 'Untrusted detail',
+              enrollmentRefused,
+            },
+            { status: 401 },
+          ),
+        async (files, sent) => {
+          await expect(connect()).rejects.toThrow('Unknown conflict');
+          expect(sent).toHaveLength(1);
+          await expect(readJson(files.enrolling)).resolves.toMatchObject({
+            secret: sent[0],
+          });
+        },
+      );
+    },
+  );
 
   it('makes a new secret for a Replace when its saved one is already enrolled', async () => {
     const stranded = 's'.repeat(43);
@@ -1157,49 +1192,54 @@ describe('enrolling', () => {
     );
   });
 
-  it('puts back the earlier secret only over the one its refused Replace saved', async () => {
-    const stranded = 's'.repeat(43);
-    const other = 't'.repeat(43);
-    await withCoordinator(
-      async (secret) => {
-        if (secret === stranded) {
-          return Response.json(
-            { error: AGENT_HOST_ALREADY_ENROLLED },
-            { status: 409 },
+  it.each([undefined, 'Pinned programs unavailable for ag_pinned.'])(
+    'puts back the earlier secret only over the one its refused Replace saved (%s)',
+    async (detail) => {
+      const stranded = 's'.repeat(43);
+      const other = 't'.repeat(43);
+      await withCoordinator(
+        async (secret) => {
+          if (secret === stranded) {
+            return Response.json(
+              { error: AGENT_HOST_ALREADY_ENROLLED },
+              { status: 409 },
+            );
+          }
+          // Another process saved its own meanwhile; this Replace is refused.
+          const files = hostFiles(
+            process.env['QWEN_HOME']!,
+            serverUrl,
+            workspaceId,
+            workspaceCwd,
           );
-        }
-        // Another process saved its own meanwhile; this Replace is refused.
-        const files = hostFiles(
-          process.env['QWEN_HOME']!,
-          serverUrl,
-          workspaceId,
-          workspaceCwd,
-        );
-        await fs.writeFile(
-          files.enrolling,
-          JSON.stringify({ schemaVersion: 1, secret: other }),
-        );
-        return Response.json(
-          { error: AGENT_HOST_ENROLLMENT_REFUSED },
-          { status: 401 },
-        );
-      },
-      async (files) => {
-        await fs.mkdir(path.dirname(files.enrolling), { recursive: true });
-        await fs.writeFile(
-          files.enrolling,
-          JSON.stringify({ schemaVersion: 1, secret: stranded }),
-        );
+          await fs.writeFile(
+            files.enrolling,
+            JSON.stringify({ schemaVersion: 1, secret: other }),
+          );
+          return Response.json(
+            { error: AGENT_HOST_ENROLLMENT_REFUSED, detail },
+            { status: 401 },
+          );
+        },
+        async (files) => {
+          await fs.mkdir(path.dirname(files.enrolling), { recursive: true });
+          await fs.writeFile(
+            files.enrolling,
+            JSON.stringify({ schemaVersion: 1, secret: stranded }),
+          );
 
-        await expect(connect()).rejects.toThrow(AGENT_HOST_ENROLLMENT_REFUSED);
+          await expect(connect()).rejects.toThrow(
+            detail ?? AGENT_HOST_ENROLLMENT_REFUSED,
+          );
 
-        await expect(readJson(files.enrolling)).resolves.toEqual({
-          schemaVersion: 1,
-          secret: other,
-        });
-      },
-    );
-  });
+          await expect(readJson(files.enrolling)).resolves.toEqual({
+            schemaVersion: 1,
+            secret: other,
+          });
+        },
+      );
+    },
+  );
 
   it('goes on, run again, with the credential its enrollment saved before the connection failed', async () => {
     let busy = true;
@@ -1645,39 +1685,44 @@ describe('enrolling', () => {
     );
   });
 
-  it('puts back the earlier secret when a Replace is refused outright after its 409', async () => {
-    const stranded = 's'.repeat(43);
-    await withCoordinator(
-      (secret) =>
-        secret === stranded
-          ? Response.json(
-              { error: AGENT_HOST_ALREADY_ENROLLED },
-              { status: 409 },
-            )
-          : // Expired, or its target gone: it did nothing.
-            Response.json(
-              { error: AGENT_HOST_ENROLLMENT_REFUSED },
-              { status: 401 },
-            ),
-      async (files, sent) => {
-        await fs.mkdir(path.dirname(files.enrolling), { recursive: true });
-        await fs.writeFile(
-          files.enrolling,
-          JSON.stringify({ schemaVersion: 1, secret: stranded }),
-        );
+  it.each([undefined, 'Pinned programs unavailable for ag_pinned.'])(
+    'puts back the earlier secret when a Replace is refused outright after its 409 (%s)',
+    async (detail) => {
+      const stranded = 's'.repeat(43);
+      await withCoordinator(
+        (secret) =>
+          secret === stranded
+            ? Response.json(
+                { error: AGENT_HOST_ALREADY_ENROLLED },
+                { status: 409 },
+              )
+            : // Expired, or its target gone: it did nothing.
+              Response.json(
+                { error: AGENT_HOST_ENROLLMENT_REFUSED, detail },
+                { status: 401 },
+              ),
+        async (files, sent) => {
+          await fs.mkdir(path.dirname(files.enrolling), { recursive: true });
+          await fs.writeFile(
+            files.enrolling,
+            JSON.stringify({ schemaVersion: 1, secret: stranded }),
+          );
 
-        await expect(connect()).rejects.toThrow(AGENT_HOST_ENROLLMENT_REFUSED);
+          await expect(connect()).rejects.toThrow(
+            detail ?? AGENT_HOST_ENROLLMENT_REFUSED,
+          );
 
-        expect(sent).toHaveLength(2);
-        // The join that enrolled it can still be finished.
-        await expect(readJson(files.enrolling)).resolves.toEqual({
-          schemaVersion: 1,
-          secret: stranded,
-          tokenHashes: [tokenHash('join-token')],
-        });
-      },
-    );
-  });
+          expect(sent).toHaveLength(2);
+          // The join that enrolled it can still be finished.
+          await expect(readJson(files.enrolling)).resolves.toEqual({
+            schemaVersion: 1,
+            secret: stranded,
+            tokenHashes: [tokenHash('join-token')],
+          });
+        },
+      );
+    },
+  );
 
   it('makes no new secret for a Replace once its connection was stopped', async () => {
     const stranded = 's'.repeat(43);

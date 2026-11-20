@@ -169,6 +169,12 @@ public final class ToolPublicationAdmissionStore {
                 && positiveCounter(journal.get("activation_epoch")) == binding.path("activationEpoch").longValue()
                 && "identity".equals(journal.get("record_encoding")), "Original receipt transaction conflicts");
         Object raw = journal.remove("record_bytes");
+        if (raw == null) {
+            JdbcJournalPacks packs = sessions.journalPacks();
+            raw = packs == null ? null : packs.resolveBytes(text(key, "tenantId"),
+                    text(key, "sessionId"), revision, (String) journal.get("record_digest"),
+                    ((Number) journal.get("byte_length")).longValue());
+        }
         require(raw instanceof byte[], "Original receipt bytes are missing");
         byte[] bytes = (byte[]) raw;
         require(bytes.length > 0 && bytes.length <= ManagedSessionStoreModels.MAX_TRANSACTION_BYTES
