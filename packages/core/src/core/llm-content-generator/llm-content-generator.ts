@@ -68,9 +68,16 @@ function observeLlmStream(
   const iterator = stream[Symbol.asyncIterator]();
   return {
     async next() {
-      const result = await iterator.next();
-      if (!result.done) reportLlmChunk(telemetryAttempt, result.value);
-      return result;
+      try {
+        const result = await iterator.next();
+        if (!result.done) reportLlmChunk(telemetryAttempt, result.value);
+        return result;
+      } catch (error) {
+        if (error instanceof SyntaxError && error.message.includes('[DONE]')) {
+          return { done: true, value: undefined };
+        }
+        throw error;
+      }
     },
     async return(value?: GenerateContentResponse) {
       if (iterator.return) return iterator.return(value);

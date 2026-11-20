@@ -495,6 +495,7 @@ interface ChatEditorRenderProps
   onCancel?: () => void;
   currentModel?: string;
   modelControlsDisabled?: boolean;
+  modelRefresh?: ComponentProps<typeof ChatEditor>['modelRefresh'];
   availableModels?: Array<{ id: string; label?: string }>;
   unavailableModels?: readonly WebShellUnavailableModel[];
   mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
@@ -4571,6 +4572,27 @@ describe('ChatEditor toolbar popovers', () => {
       scrollWidth.mockRestore();
       vi.unstubAllGlobals();
     }
+  });
+
+  it('refreshes the model catalog each time the model popover opens', () => {
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      availableModels: [{ id: 'qwen-plus', label: 'Qwen Plus' }],
+      modelRefresh: { refresh, refreshing: false },
+    });
+    const openButton = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    )!;
+
+    act(() => openButton.click());
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    act(() => openButton.click());
+    expect(refresh).toHaveBeenCalledTimes(1);
+
+    act(() => openButton.click());
+    expect(refresh).toHaveBeenCalledTimes(2);
   });
 
   it('opens a searchable model popover and selects the filtered model', () => {

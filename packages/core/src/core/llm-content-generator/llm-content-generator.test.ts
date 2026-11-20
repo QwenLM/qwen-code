@@ -375,6 +375,30 @@ describe('LlmContentGenerator', () => {
     );
   });
 
+  it('treats an SSE [DONE] sentinel as end of stream', async () => {
+    const next = vi
+      .fn()
+      .mockResolvedValueOnce({ done: false, value: { responseId: '1' } })
+      .mockRejectedValueOnce(
+        new SyntaxError('Unexpected token \'D\', "[DONE]" is not valid JSON'),
+      );
+    mockGoogleGenAI.models.generateContentStream.mockResolvedValue({
+      [Symbol.asyncIterator]: () => ({ next }),
+    });
+
+    const stream = await generator.generateContentStream(
+      flashReq(),
+      'prompt-id',
+    );
+
+    expect(await stream.next()).toEqual({
+      done: false,
+      value: { responseId: '1' },
+    });
+    expect(await stream.next()).toEqual({ done: true, value: undefined });
+    expect(next).toHaveBeenCalledTimes(2);
+  });
+
   it('forwards stream return without pre-consuming the SDK stream', async () => {
     const next = vi.fn();
     const close = vi.fn().mockResolvedValue({ done: true, value: undefined });
