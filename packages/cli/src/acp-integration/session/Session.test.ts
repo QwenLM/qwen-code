@@ -1356,6 +1356,24 @@ describe('Session', () => {
         listenerCount(type: string) {
           return listeners.get(type)?.size ?? 0;
         },
+        /** Records intake calls so a test can pin the flush ordering. */
+        intakeCalls: [] as string[],
+        /** Lets a test hold `quiesceLeaderInbox` on a poll already in flight. */
+        holdQuiesce: null as null | (() => Promise<void>),
+        stopLeaderInboxPolling() {
+          manager.intakeCalls.push('stopLeaderInboxPolling');
+        },
+        async drainLeaderInbox() {
+          manager.intakeCalls.push('drainLeaderInbox');
+        },
+        async quiesceLeaderInbox() {
+          manager.intakeCalls.push('quiesce:start');
+          if (manager.holdQuiesce) await manager.holdQuiesce();
+          manager.intakeCalls.push('quiesce:settled');
+        },
+        resumeLeaderInboxPolling() {
+          manager.intakeCalls.push('resumeLeaderInboxPolling');
+        },
       };
       return manager;
     }
@@ -1465,6 +1483,45 @@ describe('Session', () => {
       // session that no longer exists.
       expect(manager.leaderCallback).toBeNull();
       expect(manager.listenerCount('teammate_approval_request')).toBe(0);
+    });
+
+    it('records a team_error as a runtime notice, not a peer report', async () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      vi.mocked(mockChatRecordingService.recordNotification).mockClear();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      manager.leaderCallback?.(
+        '<team_error>Coordination step "x" failed</team_error>',
+        'Coordination step "x" failed',
+      );
+
+      await vi.waitFor(() =>
+        expect(mockChatRecordingService.recordNotification).toHaveBeenCalled(),
+      );
+      const recorded = vi.mocked(mockChatRecordingService.recordNotification)
+        .mock.calls[0]!;
+      expect(recorded).toEqual([
+        [{ text: '<team_error>Coordination step "x" failed</team_error>' }],
+        'Coordination step "x" failed',
+      ]);
+      expect(sentPeerNotifications()).toEqual([]);
+      expect(session.pendingExternalAgentContext).toEqual([
+        '<team_error>Coordination step "x" failed</team_error>',
+      ]);
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      session.dispose();
     });
 
     it.each(['report', 'roster'] as const)(
@@ -1963,6 +2020,44 @@ describe('Session', () => {
           }),
         }),
       );
+      session.dispose();
+    });
+
+    it('splits a mixed-status exit burst so no member takes another status', async () => {
+      const manager = makeFakeTeamManager();
+      session.dispose();
+      vi.mocked(mockConfig.isAgentTeamEnabled).mockReturnValue(true);
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(manager as never);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+      sendMessageStream.mockClear();
+      sendMessageStream.mockResolvedValue(createEmptyStream());
+      manager.emit('teammate_exited', {
+        agentId: 'qa-a',
+        name: 'qa-a',
+        status: 'completed',
+        timestamp: 1,
+      });
+      manager.emit('teammate_exited', {
+        agentId: 'qa-b',
+        name: 'qa-b',
+        status: 'failed',
+        timestamp: 2,
+      });
+
+      await vi.waitFor(() =>
+        expect(sendMessageStream).toHaveBeenCalledTimes(2),
+      );
+      const prompted = sendMessageStream.mock.calls
+        .map((call) => JSON.stringify(call[1]))
+        .join('\n');
+      expect(prompted).toContain('qa-a left the team (completed)');
+      expect(prompted).toContain('qa-b left the team (failed)');
       session.dispose();
     });
 

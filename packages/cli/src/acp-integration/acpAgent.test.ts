@@ -33394,6 +33394,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
       cancelMcpAppCalls: vi.fn(),
       cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      takeQueuedPeerDeliveries: vi.fn().mockReturnValue([]),
       waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       flushPendingPeerNotifications: vi.fn(),
       dispose: vi.fn(),
@@ -33433,6 +33434,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
       cancelMcpAppCalls: vi.fn(),
       cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      takeQueuedPeerDeliveries: vi.fn().mockReturnValue([]),
+      waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       flushPendingPeerNotifications: vi.fn(() => held),
       dispose: vi.fn(),
     };
@@ -33474,6 +33477,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
       cancelMcpAppCalls: vi.fn(),
       cancelPendingPrompt: vi.fn().mockReturnValue(cancelSettled),
+      takeQueuedPeerDeliveries: vi.fn().mockReturnValue([]),
       waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       flushPendingPeerNotifications: vi.fn(),
       dispose: vi.fn(),
@@ -33518,6 +33522,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
       cancelMcpAppCalls: vi.fn(),
       cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      takeQueuedPeerDeliveries: vi.fn().mockReturnValue([]),
       waitForActiveTurnsToSettle: vi.fn().mockReturnValue(settled),
       flushPendingPeerNotifications: vi.fn(),
       dispose: vi.fn(),
@@ -33555,6 +33560,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
       cancelMcpAppCalls: vi.fn(),
       cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      takeQueuedPeerDeliveries: vi.fn().mockReturnValue([]),
       waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
       flushPendingPeerNotifications: vi.fn(() => {
         throw new Error('mailbox write failed');

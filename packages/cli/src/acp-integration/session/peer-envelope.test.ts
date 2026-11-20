@@ -34,9 +34,25 @@ describe('defangPeerNotificationTags', () => {
     );
   });
 
+  it('neutralises every slash inside a spaced delimiter', () => {
+    expect(defangPeerNotificationTags('<//peer-notification>')).toBe(
+      '&lt;//peer-notification>',
+    );
+    expect(defangPeerNotificationTags('< / / /peer-notification>')).toBe(
+      '&lt; / / /peer-notification>',
+    );
+  });
+
   it('does not touch a longer tag that merely shares the prefix', () => {
     const text = '<peer-notification-extra>keep</peer-notification-extra>';
     expect(defangPeerNotificationTags(text)).toBe(text);
+  });
+
+  it('leaves a long whitespace run linear', () => {
+    const text = `<${' '.repeat(65_536)}x`;
+    const started = Date.now();
+    expect(defangPeerNotificationTags(text)).toBe(text);
+    expect(Date.now() - started).toBeLessThan(500);
   });
 
   it('neutralises a forged task-notification boundary in the body', () => {

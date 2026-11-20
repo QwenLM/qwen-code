@@ -13812,6 +13812,8 @@ export class Session implements SessionContext {
         : undefined,
       injectLeaderMessage: (modelText, displayText, senders) =>
         this.#enqueueTeammateMessage(modelText, displayText, senders),
+      injectLeaderNotice: (modelText, displayText) =>
+        this.#enqueueTeamRuntimeNotice(modelText, displayText),
       reportRosterChange: (change) => this.#enqueueTeamRosterChange(change),
       reportTeammateActivity: (activity) =>
         this.#emitTeammateActivity(activity),
@@ -13837,6 +13839,36 @@ export class Session implements SessionContext {
           sessionId: this.sessionId,
           teammateName,
         }),
+    });
+  }
+
+  /**
+   * Runtime error/notice text (`<team_error>` / `<team_notice>`) that shares
+   * the leader callback with teammate reports. It names no sender and is not
+   * a message from anyone, so it must not enter the peer queue: that queue
+   * seals on close, lands cold copies as peer records, and renders rows under
+   * the peer label. It splices into the next ordinary turn as runtime context
+   * and records as a plain notification with no `backgroundTask`.
+   */
+  #enqueueTeamRuntimeNotice(modelText: string, displayText: string): void {
+    if (this.disposed) return;
+    this.pendingExternalAgentContext.push(modelText);
+    // The notice does not wake the leader by itself; the parked text reaches
+    // the model with the next ordinary turn.
+    this.config
+      .getChatRecordingService()
+      ?.recordNotification([{ text: modelText }], displayText);
+    void this.sendUpdate({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: displayText },
+      _meta: {
+        source: 'background_notification',
+        qwenDiscreteMessage: true,
+      },
+    }).catch((error) => {
+      debugLogger.warn(
+        `Failed to publish team runtime notice: ${this.#formatError(error)}`,
+      );
     });
   }
 
@@ -13898,46 +13930,52 @@ export class Session implements SessionContext {
     this.#rosterFlushScheduled = false;
     const changes = this.#pendingRosterChanges.splice(0);
     if (changes.length === 0 || this.disposed) return;
-    // One burst can carry both kinds (a re-created team); split so each
-    // queued item keeps a single status the client can switch on.
+    // One burst can carry both kinds (a re-created team), and an exit burst
+    // can mix statuses; split both dimensions so one member never takes
+    // another member's terminal state.
     for (const type of ['joined', 'exited'] as const) {
-      const burst = changes.filter((change) => change.type === type);
-      if (burst.length === 0) continue;
-      const names = burst.map((change) => change.name);
-      const joined = type === 'joined';
-      const head =
-        names.length === 1
-          ? `Teammate ${names[0]}`
-          : `Teammates ${names.join(', ')}`;
-      const tail = joined
-        ? 'joined the team'
-        : `left the team (${burst[0]?.status ?? 'cancelled'})`;
-      const members = burst.map((change) => ({
-        name: change.name,
-        ...(change.status ? { status: change.status } : {}),
-      }));
-      this.#enqueueBackgroundNotification({
-        kind: 'peer',
-        taskId: `teammate-roster-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
-        status: type,
-        modelText: `<peer-notification>\n${escapeXml(`${head} ${tail}.`)}\n</peer-notification>`,
-        displayText: `teammate ${names.join(', ')} ${tail}`,
-        // A single-member burst keeps that member's identity chip; a
-        // multi-member frame carries every member structurally instead
-        // (#15659 review, R1-3).
-        ...(burst.length === 1
-          ? {
-              agent: {
-                agentName: `${ROOT_AGENT_IDENTITY.agentName}/${names[0]}`,
-                depth: 1,
-                kind: 'teammate' as const,
-              },
-            }
-          : {}),
-        label: names.length === 1 ? names[0] : 'team',
-        structured: { rosterMembers: members },
-        continuesTodoStopGuardWorkChain: false,
-      });
+      const byStatus = new Map<string | undefined, typeof changes>();
+      for (const change of changes.filter((entry) => entry.type === type)) {
+        const key = type === 'exited' ? change.status : undefined;
+        byStatus.set(key, [...(byStatus.get(key) ?? []), change]);
+      }
+      for (const burst of byStatus.values()) {
+        const names = burst.map((change) => change.name);
+        const joined = type === 'joined';
+        const head =
+          names.length === 1
+            ? `Teammate ${names[0]}`
+            : `Teammates ${names.join(', ')}`;
+        const tail = joined
+          ? 'joined the team'
+          : `left the team (${burst[0]?.status ?? 'cancelled'})`;
+        const members = burst.map((change) => ({
+          name: change.name,
+          ...(change.status ? { status: change.status } : {}),
+        }));
+        this.#enqueueBackgroundNotification({
+          kind: 'peer',
+          taskId: `teammate-roster-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
+          status: type,
+          modelText: `<peer-notification>\n${escapeXml(`${head} ${tail}.`)}\n</peer-notification>`,
+          displayText: `teammate ${names.join(', ')} ${tail}`,
+          // A single-member burst keeps that member's identity chip; a
+          // multi-member frame carries every member structurally instead
+          // (#15659 review, R1-3).
+          ...(burst.length === 1
+            ? {
+                agent: {
+                  agentName: `${ROOT_AGENT_IDENTITY.agentName}/${names[0]}`,
+                  depth: 1,
+                  kind: 'teammate' as const,
+                },
+              }
+            : {}),
+          label: names.length === 1 ? names[0] : 'team',
+          structured: { rosterMembers: members },
+          continuesTodoStopGuardWorkChain: false,
+        });
+      }
     }
   }
 

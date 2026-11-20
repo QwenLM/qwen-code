@@ -23,7 +23,8 @@ export function defangPeerNotificationTags(text: string): string {
   // the cold copy wraps this body in a real `<task-notification>`, so a
   // report could otherwise close it early and forge a sibling notification
   // in the durable transcript (R3-4). Ordinary markup stays verbatim.
-  return text
-    .replace(/<(?=\s*\/?\s*peer-notification(?![-\w]))/gi, '&lt;')
-    .replace(/<(?=\s*\/?\s*task-notification(?![-\w]))/gi, '&lt;');
+  return text.replace(
+    /<(?=(?:\/|\s)*(?:peer|task)-notification(?![-\w]))/gi,
+    '&lt;',
+  );
 }
