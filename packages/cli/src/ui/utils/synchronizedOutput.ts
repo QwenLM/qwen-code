@@ -69,6 +69,10 @@ export function terminalSupportsSynchronizedOutput(
 
   const termProgram = env['TERM_PROGRAM'];
 
+  // Ink wraps every interactive frame in DECSET 2026 on its own
+  // (`shouldSynchronize` in ink/build/write-synchronized.js), so this
+  // predicate decides only whether Qwen Code's additional layer is
+  // installed. A terminal missing from it still gets Ink's pair.
   if (isWindowsTerminal(env)) {
     return true;
   }
