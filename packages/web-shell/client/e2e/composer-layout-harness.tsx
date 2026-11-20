@@ -1,9 +1,12 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import '../styles/standalone.css';
-import { WebShellWithProviders } from '../index';
+import { WebShellWithProviders, type WebShellLanguage } from '../index';
 
 const params = new URLSearchParams(window.location.search);
+const language = (params.get('language') ?? undefined) as
+  | WebShellLanguage
+  | undefined;
 const emptyMobileWelcome = params.get('emptyMobileWelcome') === 'true';
 const includeWelcomeFooter = params.get('welcomeFooter') !== 'false';
 const includeCustomFooter = params.get('customFooter') === 'true';
@@ -48,6 +51,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
       baseUrl={window.location.origin}
       sidebar={false}
       composerVariant={composerVariant}
+      language={language}
       theme={
         params.get('theme') === 'light'
           ? 'light'

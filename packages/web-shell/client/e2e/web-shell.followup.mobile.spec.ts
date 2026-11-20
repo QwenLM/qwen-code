@@ -45,9 +45,11 @@ async function gotoHarness(
   scenario: WebShellDaemonScenario,
   daemon: MockDaemonController,
   composerVariant: 'simple' | 'default',
+  language?: 'zh-CN',
 ): Promise<void> {
+  const languageQuery = language ? `&language=${language}` : '';
   await page.goto(
-    `/e2e/composer-layout-harness.html?composerVariant=${composerVariant}&tags=false&sessionId=${scenario.sessionId}`,
+    `/e2e/composer-layout-harness.html?composerVariant=${composerVariant}&tags=false&sessionId=${scenario.sessionId}${languageQuery}`,
   );
   const connection = await daemon.sse.waitForConnection(scenario.sessionId);
   await daemon.sendEvent(
@@ -245,12 +247,9 @@ test('mobile editing row fill key fills the textarea without submitting', async 
 test('mobile follow-up bar renders in Simplified Chinese', async ({
   page,
 }, testInfo) => {
-  await page.addInitScript(() =>
-    localStorage.setItem('qwen-code-web-shell-language', 'zh-CN'),
-  );
   const scenario = createWebShellDaemonScenario();
   const daemon = await installScenario(page, scenario, testInfo);
-  await gotoHarness(page, scenario, daemon, 'simple');
+  await gotoHarness(page, scenario, daemon, 'simple', 'zh-CN');
   const textarea = page.locator(COMPOSER_TEXTAREA);
   const idlePlaceholder = await textarea.getAttribute('placeholder');
   await pushSuggestion(daemon, scenario.sessionId, ZH_SUGGESTION);
@@ -274,12 +273,9 @@ test('mobile follow-up bar renders in Simplified Chinese', async ({
 test('mobile editing row fill key renders in Simplified Chinese', async ({
   page,
 }, testInfo) => {
-  await page.addInitScript(() =>
-    localStorage.setItem('qwen-code-web-shell-language', 'zh-CN'),
-  );
   const scenario = createWebShellDaemonScenario();
   const daemon = await installScenario(page, scenario, testInfo);
-  await gotoHarness(page, scenario, daemon, 'default');
+  await gotoHarness(page, scenario, daemon, 'default', 'zh-CN');
   const textarea = page.locator(COMPOSER_TEXTAREA);
   await expect(page.locator(FOLLOWUP_FILL)).toHaveCount(0);
   const idlePlaceholder = await textarea.getAttribute('placeholder');
