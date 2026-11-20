@@ -4079,17 +4079,10 @@ esac`,
     );
   });
 
-  it('force-pushes the release branch so a retry replaces a failed attempt', () => {
-    // A failed attempt leaves release/<tag> on an older head, and the
-    // retry's divergent bump commit makes a plain push fail as
-    // non-fast-forward, blocking every retry of the release. Force is safe
-    // only while nothing for this version has shipped, so the push is
-    // pinned INSIDE the dry-run guard: the dry-run contract (release.yml's
-    // dispatch input) promises no branch is created, and no other test
-    // pins this guard — a force push outside it would turn a dry run into
-    // a destructive overwrite of the remote branch.
+  it('pushes new release branches without replacing an existing release', () => {
+    expect(releaseStepScript).not.toContain('git push --force');
     expect(releaseStepScript).toMatch(
-      /if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then[\s\S]*?git push --force --set-upstream origin "\$\{release_branch_name\}" --follow-tags\n {4}else\n {6}echo "Dry run enabled\. Skipping push\."/,
+      /if \[\[ "\$\{IS_DRY_RUN\}" == "false" \]\]; then[\s\S]*?git push --set-upstream origin "\$\{release_branch_name\}" --follow-tags\n {4}else\n {6}echo "Dry run enabled\. Skipping push\."/,
     );
   });
 
@@ -4113,9 +4106,8 @@ esac`,
 
   it('serializes publish jobs per release tag', () => {
     // The pre-push re-validation below is only sound while at most one
-    // publish job pushes and publishes a given version at a time; --force
-    // removed the non-fast-forward rejection that used to serialize the
-    // push itself. The group must sit on the publish job — in-progress
+    // publish job pushes and publishes a given version at a time.
+    // The group must sit on the publish job — in-progress
     // runs are never cancelled, and of queued same-tag runs only the
     // latest survives, but whichever run reaches the push re-validates
     // first — and it must be keyed by the computed tag, which only exists
@@ -4148,12 +4140,11 @@ esac`,
     );
   });
 
-  it('re-validates that the version is still unshipped right before force-pushing', () => {
+  it('re-validates that the version is still unshipped before pushing a new release branch', () => {
     // prepare computed and validated the version minutes to hours before
     // this push (the validation jobs and the production-release approval
     // gate sit in between). A concurrent same-version run can ship in that
-    // window; the force push would then replace the branch tip that the
-    // shipped npm packages, tag, and merge to main anchor to. Pin the
+    // window before this run has created its release branch. Pin the
     // re-validation of prepare's invariant directly before the push, and
     // pinned to the script that owns the published-package list so the
     // guard cannot silently drift from it: the call must sit inside the
@@ -4201,7 +4192,7 @@ esac`,
     );
     expect(
       releaseStepScript.indexOf(
-        'git push --force --set-upstream origin "${release_branch_name}" --follow-tags',
+        'git push --set-upstream origin "${release_branch_name}" --follow-tags',
       ),
     ).toBeGreaterThan(guard);
   });

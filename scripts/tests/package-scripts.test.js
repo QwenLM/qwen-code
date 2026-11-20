@@ -3005,7 +3005,7 @@ describe('package scripts', () => {
     );
     expect(setupGitIdx).toBeGreaterThan(exportTokenIdx);
     expect(setupGitIdx).toBeLessThan(
-      releaseStepScript.indexOf('git push --force --set-upstream'),
+      releaseStepScript.indexOf('git push --set-upstream'),
     );
     expect(buildStep).toContain('run-release-step.sh build-package');
   });
