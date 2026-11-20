@@ -270,11 +270,12 @@ export function runGitCapture(
   cwd: string,
   args: string[],
   env?: Readonly<Record<string, string | undefined>>,
+  maxBuffer: number = 10 * 1024 * 1024,
 ): Promise<{ stdout: string; stderr: string }> {
   return execFileAsync('git', args, {
     cwd,
     timeout: GIT_TIMEOUT_MS,
-    maxBuffer: 10 * 1024 * 1024,
+    maxBuffer,
     env: ['push', 'pull', 'fetch'].includes(args[0] ?? '')
       ? gitRemoteEnv(env)
       : gitEnv(env),
@@ -285,8 +286,9 @@ export function runGit(
   cwd: string,
   args: string[],
   env?: Readonly<Record<string, string | undefined>>,
+  maxBuffer?: number,
 ): Promise<string> {
-  return runGitCapture(cwd, args, env).then(({ stdout }) => stdout);
+  return runGitCapture(cwd, args, env, maxBuffer).then(({ stdout }) => stdout);
 }
 
 const SEPARATOR = '\x00';
