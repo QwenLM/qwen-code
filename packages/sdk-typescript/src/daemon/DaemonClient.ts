@@ -8256,6 +8256,8 @@ export class DaemonClient {
     sessionId: string,
     metadata: {
       displayName?: string;
+      /** Best-effort initial title for a session without a custom title. */
+      initialDisplayName?: string;
       pr?: Omit<DaemonSessionPrInfo, 'issues'>;
     },
     clientId?: string,
