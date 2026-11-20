@@ -37,6 +37,22 @@ final class ExternalWorkspaceSessionPolicies {
     }
 
     /**
+     * Workspace resolution precedes the profile choice, so it admits either
+     * negotiated external profile. The registry predicate throws so execution
+     * paths fail closed; on admission an unreadable or drifted registration is
+     * a permanent record defect, so the caller answers its own 409 instead of
+     * the registry's retryable 503.
+     */
+    static boolean externalExecutionAllowedOrRefuse(JdbcManagedWorkspaceRegistry workspaces,
+            ContextBinding binding) {
+        try {
+            return workspaces.externalExecutionAllowed(binding);
+        } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException unreadable) {
+            return false;
+        }
+    }
+
+    /**
      * Resolve the revision and compile the stored definition before Workspace
      * resolution. External-profile eligibility and requested approval/plan
      * options are checked after the Workspace determines the effective profile.

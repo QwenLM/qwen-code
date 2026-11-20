@@ -528,8 +528,7 @@ public class JdbcManagedWorkspaceRegistry
             throw new ManagedAgentException(404, "workspace_not_found", "Workspace not found.");
         }
         if (isExternal(binding)
-                && (!(externalFilesAvailable() || externalShellAvailable())
-                        || !externalBindingCurrent(binding)
+                && (!ExternalWorkspaceSessionPolicies.externalExecutionAllowedOrRefuse(this, binding)
                         || !".".equals(binding.getCwdRelative()))) {
             throw new ManagedAgentException(HttpStatus.CONFLICT.value(), "workspace_unavailable", "External Workspace execution is unavailable.");
         }

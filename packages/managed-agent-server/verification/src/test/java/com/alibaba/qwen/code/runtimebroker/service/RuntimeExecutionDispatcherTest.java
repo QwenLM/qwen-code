@@ -519,6 +519,7 @@ class RuntimeExecutionDispatcherTest {
         private final ScheduledExecutorService scheduler = mock(ScheduledExecutorService.class);
         private final ScheduledExecutorService renewalScheduler = mock(ScheduledExecutorService.class);
         private final ScheduledFuture<?> renewal = mock(ScheduledFuture.class);
+        private final RuntimePublicationVerifier verifier = mock(RuntimePublicationVerifier.class);
         private final AtomicBoolean closed = new AtomicBoolean();
         private final SessionContext context = mock(SessionContext.class);
         private final RuntimeSession session = mock(RuntimeSession.class);
@@ -554,7 +555,7 @@ class RuntimeExecutionDispatcherTest {
             when(renewalScheduler.scheduleWithFixedDelay(any(Runnable.class), anyLong(), anyLong(),
                     eq(TimeUnit.MILLISECONDS))).thenAnswer(call -> renewal);
             dispatcher = new RuntimeExecutionDispatcher(registry, state, bindings, sessions, executions,
-                    provisioner, transport, mock(RuntimePublicationVerifier.class), "broker", LEASE,
+                    provisioner, transport, verifier, "broker", LEASE,
                     Duration.ofMinutes(30), Clock.fixed(Instant.parse("2026-11-01T00:00:00Z"), ZoneOffset.UTC),
                     scheduler, renewalScheduler, closed);
         }
@@ -580,7 +581,8 @@ class RuntimeExecutionDispatcherTest {
         // A Tool v3 Shell dispatch carries the publication grant and names
         // run_shell_command — the exact shape the files gate used to refuse.
         Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "turn",
-                "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+                "callId", "call", "argsDigest", "sha256:" + "a".repeat(64),
+                "dispatchMode", "deferred_v3");
         when(fixture.prepared.getReference()).thenReturn(reference);
         Map<String, Object> payload = Map.of("toolName", "run_shell_command",
                 "input", Map.of("command", "printf hi"));
@@ -590,6 +592,14 @@ class RuntimeExecutionDispatcherTest {
                 Map.of("sessionKey", Map.of("tenantId", "tenant", "sessionId", "runtime"),
                         "turnId", "turn", "executionCallId", "execution", "bindingGeneration", 1L),
                 System.currentTimeMillis() + 60_000);
+        // The Broker opens the worker's own capture channel for this lane; a
+        // missing producer is refused before the dispatch, so the fixture must
+        // answer one. The channel ID feeds the drain, which this not-started
+        // settle never reaches.
+        var producer = mock(com.alibaba.qwen.code.runtimebroker.spi.ExternalShellPublication.class);
+        when(fixture.verifier.externalShell()).thenReturn(producer);
+        when(producer.begin(eq(fixture.lease), eq(fixture.binding), eq(fixture.executing), eq(grant)))
+                .thenReturn(CompletableFuture.completedFuture("shell-channel"));
         // The executing record carries the Shell dispatch's own reference;
         // settle synchronously so the dispatch never reaches result polling.
         when(fixture.executing.getReference()).thenReturn(reference);
