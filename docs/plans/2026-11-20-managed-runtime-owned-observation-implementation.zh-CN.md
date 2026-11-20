@@ -29,12 +29,15 @@
 ## 切片 1 — 剩余
 
 1. **worker 中的 Monitor 策略 — 已落地（worker 侧）。** executor monitor lane（`managed-runtime-tool-executor.ts`，`executeV3Monitor`）在 prepared sink 为 `WorkerBackgroundCaptureSink` 时挂载 `WorkerMonitorPolicy`；sink 将 stdout 路由到 `policy.onChunk`，policy 分配 sequence（全新启动 `startSequence:0`）并构建通知资源，quota/idle stop 经 `monitorRegistry.terminate` 终止 unit，其退出经 terminal 条目的 `monitorStopReason` 结算记录。参数与 Harness admit 一致（`max_events` 默认 1000 clamp 1..10000，`idle_timeout_ms` 默认 300000 clamp 1..600000，`debounceMs` 1000）。测试：观测条目恰好提交一次（`observationSequence=1`、`notifiedThrough=1`、settled `exited`）。**仍剩余：** capability 模式下 Harness `HostedMonitorLoop` 须变为纯 applier — `resumeMonitorWatch`（`hosted-workspace-tool-turn.ts:9263`）在 worker 自持观测时须跳过启动 loop，否则双方都观测。rebuild/re-attach 须以已提交的 `observationSequence` 水位作为 `startSequence`（全新 worker lane 恒为 0）。
-2. **advertise capability 并在生产启用 registry — 协调链（尚未接线）。** 仅当整条注册链携带 writer generation 且 Harness loop 被旁路时，启用才安全；部分启用会停滞后台输出（worker run 永不 attach）或重复观测 monitor。精确链：
-   - worker capability `runtime-observation/1` 在 worker attestation/capabilities 中 advertise（TS attestation 契约 + Java `ManagedContextProtocol`/`RuntimeAttestation` capability 集）；准入检查属切片 3。
-   - 在 `managed-runtime-attestation-worker.ts:658`（及 SSH worker 站点）以 `{ enabled: <capability>, workspaceId: contextBoot.workspaceId }` 构造 `ManagedShellPublisherRegistry`。
-   - Harness `HostedWorkspaceBroker.registerPublisher`（`hosted-workspace-broker.ts:460`）发送 `writerGeneration`（取自 session 的 writer generation）；Java `RuntimeBrokerService.installPublisher` 接受；`HttpRuntimeTransport.installPublisherV3`（`:928`）将其加入闭键 body + expected 集；HTTP controller 路由解析。worker registry 已接受相同或更新 generation（更旧 → 409）。
-   - Harness `resumeMonitorWatch` 旁路（项 1）由同一 capability 门控。
-   - 按设计 §4.11 门控：worker 自持采集仅由 worker capability 门控，而非 server setting。在 characterization（项 3）证明等价前保持生产关闭。
+2. **capability 门 + publisher generation — TS 已落地；Java 转发剩余。** TS 侧（提交 `833d61d0bb`，验证：cli tsc 0、broker+delivery 104、tool-turn 654）：worker registry 启用时在注册响应回 `observation:true`，由 env `QWEN_MANAGED_RUNTIME_OBSERVATION=1`（默认关）在 `managed-runtime-attestation-worker.ts:658` 门控，`workspaceId` 取自 boot；`HostedWorkspaceBroker.registerPublisher(publisher, writerGeneration?)` 保持 string 返回、加 `observationOwned` 字段、发送 `writerGeneration`；turn 在 publication 模式传 `writer.writerGeneration` 并置 `workerOwnsObservation`，`resumeMonitorWatch` 在其为 true 时提前返回。向后兼容（返回 `'1'` 的旧 mock 仍绿；两处 publication 模式 `toHaveBeenCalledWith(descriptor, 1)` 断言已更新）。
+   **Java 转发（尚未接线 — 端到端启用所需；约 12 文件，多模块 Maven 验证）：** 携带 `writerGeneration` Harness→worker 与 `observation` worker→Harness。将 `installPublisher`/`installPublisherV3` 改为接受 `Long writerGeneration` 并返回 `CompletionStage<Map<String,Object>>`（worker 响应字段）：
+   - `contracts/RuntimeTransport.java:123`（default）、`contracts/WorkspacePhysicalTransport.java:24`（`installPublisherV3`）、`contracts/RuntimeBrokerOperations.java:113`。
+   - `runtime-http/HttpRuntimeTransport.java:928` `installPublisherV3`：存在时将 `writerGeneration` 加入闭键 body；`expected` 响应集允许可选 `observation`；返回解析后的响应 map。
+   - `control-plane/WorkspaceRuntimeTransport.java:393` override 以新签名委托。
+   - `runtime-broker/RuntimeBrokerService.java:1198` `installPublisher`：接受 `writerGeneration` 透传，从 transport 结果读 `observation` 入响应。
+   - `server/RuntimeBrokerHttpServer.java:328` `:publisher` 路由：从 body 解析可选 `writerGeneration` 透传；响应 envelope 加 `observation`。
+   - 需更新的测试 mock（返回 `Map.of()` 而非 `null`、加参数）：`verification/UnknownExecutionObservationTest.java:323`、`verification/RuntimeBrokerHttpServerTest.java:1672`、`verification/HttpRuntimeTransportTest.java:1135`、`verification/SshRuntimeInteropTest.java:420`、`verification/WorkspaceRuntimeTest.java:1037`。
+   - 正式 `runtime-observation/1` capability 字符串进 attestation + 准入检查属切片 3；env 门 + 注册响应信号即切片 1 的 worker capability。在 characterization（项 3）前保持生产关闭。
 3. **characterization 测试。** 证明 worker 自持采集发布的段/页/manifest 对象与 Harness 采集逐字节等价（段大小与页容量除外），且最终 Artifact 相同（设计 §10「Capture equivalence」）。新增 Harness 重启测试：连续后台输出、kill+reload Harness、单一采集、无 `producer_lost`、每字节恰好一次、manifest 链有效。
 
 ## 切片 2 — Broker staging（未动）
