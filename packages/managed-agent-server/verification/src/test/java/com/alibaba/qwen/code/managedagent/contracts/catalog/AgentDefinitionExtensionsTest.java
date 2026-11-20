@@ -172,6 +172,34 @@ class AgentDefinitionExtensionsTest {
         assertRefused("hook_catalog", () -> AgentDefinitionExtensions.hookCatalog(pin, true));
     }
 
+    @Test
+    void storedPinsKeepTheBoundThatAdmissionEnforces() {
+        Map<String, Object> pin = new LinkedHashMap<>(MCP);
+        pin.put("server_revision", 9007199254740991L);
+        assertRefused("mcp_servers", () -> AgentDefinitionExtensions.mcpServers(List.of(pin), WorkspaceToolProfiles.MCP));
+        assertThat(AgentDefinitionExtensions.mcpServers(List.of(pin), WorkspaceToolProfiles.MCP, true))
+                .containsExactly(Map.of("serverId", "docs", "serverRevision", 9007199254740991L,
+                        "definitionDigest", "a".repeat(64)));
+        Map<String, Object> catalog = new LinkedHashMap<>(Map.of("catalog_id", "review",
+                "catalog_revision", 9007199254740991L, "definition_digest", "b".repeat(64)));
+        assertRefused("hook_catalog", () -> AgentDefinitionExtensions.hookCatalog(catalog, true));
+        assertThat(AgentDefinitionExtensions.hookCatalog(catalog, true, true))
+                .isEqualTo(Map.of("catalogId", "review", "catalogRevision", 9007199254740991L,
+                        "definitionDigest", "b".repeat(64)));
+        // The stored read tolerates only the bound that was legal before this
+        // change; a value JavaScript cannot hold stays refused on every path.
+        Map<String, Object> beyond = new LinkedHashMap<>();
+        beyond.put("server_id", "docs");
+        beyond.put("server_revision", 9007199254740992L);
+        beyond.put("definition_digest", "a".repeat(64));
+        assertRefused("mcp_servers", () -> AgentDefinitionExtensions.mcpServers(List.of(beyond), WorkspaceToolProfiles.MCP, true));
+        Map<String, Object> beyondCatalog = new LinkedHashMap<>();
+        beyondCatalog.put("catalog_id", "review");
+        beyondCatalog.put("catalog_revision", 9007199254740992L);
+        beyondCatalog.put("definition_digest", "b".repeat(64));
+        assertRefused("hook_catalog", () -> AgentDefinitionExtensions.hookCatalog(beyondCatalog, true, true));
+    }
+
     private static void assertRefused(String field, Runnable operation) {
         assertThatThrownBy(operation::run).isInstanceOfSatisfying(ManagedAgentException.class, error -> {
             assertThat(error.getStatus()).isEqualTo(409);

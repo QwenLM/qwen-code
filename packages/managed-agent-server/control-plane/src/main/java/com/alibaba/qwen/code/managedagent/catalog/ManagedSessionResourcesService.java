@@ -116,7 +116,7 @@ public class ManagedSessionResourcesService {
                 if (session.agentDefinitionDigest() != null) {
                     Map<String, Object> definition = definitions.pinnedContent(session);
                     charge(bytes(json.valueToTree(definition)));
-                    for (Map<String, Object> pin : AgentDefinitionExtensions.mcpServers(definition.get("mcp_servers"), session.toolProfile())) {
+                    for (Map<String, Object> pin : AgentDefinitionExtensions.mcpServers(definition.get("mcp_servers"), session.toolProfile(), true)) {
                         JsonNode node = json.valueToTree(pin);
                         basePins.put(node.path("serverId").asText(), node);
                     }

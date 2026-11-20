@@ -2628,7 +2628,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             return null;
         }
         List<Map<String, Object>> pins = AgentDefinitionExtensions.mcpServers(
-                definitions.pinnedContent(session).get("mcp_servers"), session.toolProfile());
+                definitions.pinnedContent(session).get("mcp_servers"), session.toolProfile(), true);
         if (!pins.isEmpty() && WorkspaceToolProfiles.isPublicShell(session.toolProfile())
                 && (!client().capabilities().getFeatures().contains("workspace-shell-mcp/1")
                         || !client().capabilities().getLifecycleV2Profiles().contains(session.toolProfile()))) {
@@ -2642,7 +2642,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             return null;
         }
         return AgentDefinitionExtensions.hookCatalog(
-                definitions.pinnedContent(session).get("hook_catalog"), session.workspace() != null);
+                definitions.pinnedContent(session).get("hook_catalog"), session.workspace() != null, true);
     }
 
     private ManagedSessionStoreConnection managedSessionStore(

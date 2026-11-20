@@ -26,6 +26,13 @@ public final class AgentDefinitionExtensions {
     private static final Pattern DIGEST = Pattern.compile("^[0-9a-f]{64}$");
     private static final Set<String> SKILL_FIELDS = Set.of("name", "description", "body", "base_directory", "model_invocable", "user_invocable");
 
+    /**
+     * The widest revision an older build stored before admission bounded pins,
+     * and still the largest value JavaScript holds exactly. A stored read
+     * accepts it; nothing above it, since no producer could have written one.
+     */
+    private static final long MAX_STORED_REVISION = 9_007_199_254_740_991L;
+
     private AgentDefinitionExtensions() {
     }
 
@@ -116,6 +123,16 @@ public final class AgentDefinitionExtensions {
     }
 
     public static List<Map<String, Object>> mcpServers(Object value, String profile) {
+        return mcpServers(value, profile, false);
+    }
+
+    /**
+     * {@code stored} reads a definition this deployment already pinned. The
+     * ceiling is an admission bound: a definition written before this
+     * validator bounded pins still has to load, and a Session that cannot
+     * load cannot be deleted because attach is the delete precondition.
+     */
+    public static List<Map<String, Object>> mcpServers(Object value, String profile, boolean stored) {
         List<?> entries = list(value, "mcp_servers");
         if (entries.size() > 16 || entries.isEmpty() && WorkspaceToolProfiles.MCP.equals(profile)
                 || !entries.isEmpty() && !WorkspaceToolProfiles.MCP.equals(profile)
@@ -125,7 +142,7 @@ public final class AgentDefinitionExtensions {
         List<Map<String, Object>> result = new ArrayList<>();
         Set<String> ids = new HashSet<>();
         for (Object entry : entries) {
-            Map<String, Object> pin = pin(entry, "server", "mcp_servers");
+            Map<String, Object> pin = pin(entry, "server", "mcp_servers", stored);
             if (!ids.add((String) pin.get("serverId"))) {
                 throw unsupported("mcp_servers");
             }
@@ -135,23 +152,27 @@ public final class AgentDefinitionExtensions {
     }
 
     public static Map<String, Object> hookCatalog(Object value, boolean workspaceBound) {
+        return hookCatalog(value, workspaceBound, false);
+    }
+
+    public static Map<String, Object> hookCatalog(Object value, boolean workspaceBound, boolean stored) {
         if (value == null) {
             return null;
         }
         if (!workspaceBound) {
             throw unsupported("hook_catalog");
         }
-        return pin(value, "catalog", "hook_catalog");
+        return pin(value, "catalog", "hook_catalog", stored);
     }
 
-    private static Map<String, Object> pin(Object value, String prefix, String field) {
+    private static Map<String, Object> pin(Object value, String prefix, String field, boolean stored) {
         if (!(value instanceof Map<?, ?> pin)
                 || !pin.keySet().equals(Set.of(prefix + "_id", prefix + "_revision", "definition_digest"))
                 || !(pin.get(prefix + "_id") instanceof String id) || !ID.matcher(id).matches()
                 || !(pin.get(prefix + "_revision") instanceof Number revision)
                 || !Double.isFinite(revision.doubleValue()) || revision.doubleValue() != revision.longValue()
                 || revision.longValue() < 1
-                || revision.longValue() > ManagedSessionStoreModels.MAX_SAFE_COUNTER
+                || revision.longValue() > (stored ? MAX_STORED_REVISION : ManagedSessionStoreModels.MAX_SAFE_COUNTER)
                 || !(pin.get("definition_digest") instanceof String digest) || !DIGEST.matcher(digest).matches()) {
             throw unsupported(field);
         }
