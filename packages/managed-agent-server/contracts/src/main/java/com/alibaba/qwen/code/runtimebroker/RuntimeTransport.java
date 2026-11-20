@@ -120,8 +120,8 @@ public interface RuntimeTransport {
     public CompletionStage<Void> acquire(RuntimeLease lease,
             RuntimeSession session);
 
-    public default CompletionStage<Void> installPublisher(RuntimeLease lease,
-            RuntimeSession session, Map<String, Object> publisher) {
+    public default CompletionStage<Map<String, Object>> installPublisher(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> publisher, Long writerGeneration) {
         return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
                 "managed_tool_publisher_unavailable",
                 "Runtime transport does not support output publication.", false));

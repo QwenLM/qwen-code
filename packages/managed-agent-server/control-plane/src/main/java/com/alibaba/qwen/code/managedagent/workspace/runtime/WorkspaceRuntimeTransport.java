@@ -390,14 +390,14 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     @Override
-    public CompletionStage<Void> installPublisher(RuntimeLease lease, RuntimeSession session,
-            Map<String, Object> publisher) {
+    public CompletionStage<Map<String, Object>> installPublisher(RuntimeLease lease, RuntimeSession session,
+            Map<String, Object> publisher, Long writerGeneration) {
         if (!managed(session)) {
             throw WorkspaceExecutionStore.unavailable();
         }
         Context context = requireLocalCapture(context(lease, session, true));
         assertHeld(context);
-        return delegate.installPublisherV3(lease, session, publisher);
+        return delegate.installPublisherV3(lease, session, publisher, writerGeneration);
     }
 
     @Override

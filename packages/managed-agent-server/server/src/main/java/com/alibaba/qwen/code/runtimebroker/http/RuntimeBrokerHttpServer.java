@@ -334,11 +334,24 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             if (!runtimeSessionId.equals(JsonCodec.requiredString(body, "runtimeSessionId", "publisher request"))) {
                 throw new RuntimeBrokerException(409, "runtime_session_conflict", "Runtime Session identity differs", false);
             }
+            Long writerGeneration = null;
+            Object rawGeneration = body.get("writerGeneration");
+            if (rawGeneration != null) {
+                if (!(rawGeneration instanceof Number generationNumber)
+                        || generationNumber.longValue() < 1) {
+                    throw new RuntimeBrokerException(400, "managed_runtime_attestation_invalid",
+                            "writerGeneration must be a positive integer", false);
+                }
+                writerGeneration = generationNumber.longValue();
+            }
             complete(exchange, service.installPublisher(harnessSessionId, runtimeSessionId,
-                    requiredObject(body, "publisher", "publisher request")), result -> {
+                    requiredObject(body, "publisher", "publisher request"), writerGeneration), result -> {
                         Map<String, Object> response = envelope(harnessSessionId, runtimeSessionId,
                                 "installed", result.get("installed"));
                         response.put("bindingGeneration", result.get("bindingGeneration"));
+                        if (result.get("observation") != null) {
+                            response.put("observation", result.get("observation"));
+                        }
                         return response;
                     });
             return;

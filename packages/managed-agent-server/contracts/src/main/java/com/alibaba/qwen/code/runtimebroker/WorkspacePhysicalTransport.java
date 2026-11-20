@@ -21,8 +21,8 @@ public interface WorkspacePhysicalTransport extends RuntimeTransport {
     public CompletionStage<Void> activateWorkspace(RuntimeBindingRecord runtime,
             RuntimeSessionRecord sessionRecord, ContextBinding binding, boolean active);
 
-    public CompletionStage<Void> installPublisherV3(RuntimeLease lease,
-            RuntimeSession session, Map<String, Object> publisher);
+    public CompletionStage<Map<String, Object>> installPublisherV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> publisher, Long writerGeneration);
 
     public CompletionStage<Map<String, Object>> executeV3(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference,

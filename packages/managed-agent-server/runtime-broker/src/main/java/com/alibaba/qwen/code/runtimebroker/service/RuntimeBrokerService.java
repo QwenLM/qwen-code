@@ -1196,7 +1196,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     }
 
     public CompletionStage<Map<String, Object>> installPublisher(String harnessSessionId,
-            String runtimeSessionId, Map<String, Object> publisher) {
+            String runtimeSessionId, Map<String, Object> publisher, Long writerGeneration) {
         requireOpen(closed);
         Map<String, Object> descriptor = immutableMap(publisher, "publisher");
         return mapStoreFailure(safeStage(() -> bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId)
@@ -1210,9 +1210,17 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                     }
                     return safeStage(() -> {
                         bindingRegistry.requireUsableLease(context);
-                        return transport.installPublisher(context.lease(), context.session(), descriptor);
-                    }).thenApply(ignored -> Map.<String, Object>of("installed", true,
-                            "bindingGeneration", Long.toString(context.binding().getGeneration())))
+                        return transport.installPublisher(context.lease(), context.session(),
+                                descriptor, writerGeneration);
+                    }).thenApply(workerResponse -> {
+                        Map<String, Object> response = new java.util.LinkedHashMap<>();
+                        response.put("installed", true);
+                        response.put("bindingGeneration", Long.toString(context.binding().getGeneration()));
+                        if (workerResponse != null && workerResponse.get("observation") != null) {
+                            response.put("observation", workerResponse.get("observation"));
+                        }
+                        return response;
+                    })
                             .whenComplete((ignored, error) -> context.endControl());
                 })));
     }

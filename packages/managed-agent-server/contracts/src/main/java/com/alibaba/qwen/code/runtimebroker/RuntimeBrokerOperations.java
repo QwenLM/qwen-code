@@ -111,7 +111,7 @@ public interface RuntimeBrokerOperations {
             String harnessSessionId);
 
     public CompletionStage<Map<String, Object>> installPublisher(String harnessSessionId,
-            String runtimeSessionId, Map<String, Object> publisher);
+            String runtimeSessionId, Map<String, Object> publisher, Long writerGeneration);
 
     public CompletionStage<Map<String, Object>> acknowledgeExecution(
             String harnessSessionId, String runtimeSessionId,

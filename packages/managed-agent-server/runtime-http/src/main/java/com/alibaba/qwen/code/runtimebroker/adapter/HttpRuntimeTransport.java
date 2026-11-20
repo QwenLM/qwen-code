@@ -925,8 +925,8 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                         parseToolResponse(bytes, "cancel"), "cancel"));
     }
 
-    public CompletionStage<Void> installPublisherV3(RuntimeLease lease,
-            RuntimeSession session, Map<String, Object> publisher) {
+    public CompletionStage<Map<String, Object>> installPublisherV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> publisher, Long writerGeneration) {
         requireV3Context(lease, session);
         requireClosed(publisher, Set.of("url", "token"), "publisher");
         if (!(publisher.get("url") instanceof String url)
@@ -936,15 +936,29 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
                 || !token.matches("[A-Za-z0-9_-]{43}")) {
             throw new IllegalArgumentException("Output publisher descriptor is invalid");
         }
-        Map<String, Object> body = Map.of("protocolVersion", 3,
-                "toolResult", "managed-tool-result/1", "sessionId", session.getRuntimeSessionId(),
-                "publisher", publisher);
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        body.put("protocolVersion", 3);
+        body.put("toolResult", "managed-tool-result/1");
+        body.put("sessionId", session.getRuntimeSessionId());
+        body.put("publisher", publisher);
+        if (writerGeneration != null) {
+            body.put("writerGeneration", writerGeneration);
+        }
         Map<String, Object> expected = Map.of("protocolVersion", 3,
                 "toolResult", "managed-tool-result/1", "sessionId", session.getRuntimeSessionId(),
                 "installed", true);
         return post(lease, "/internal/managed-runtime/v3/publisher",
                 encodeToolRequest(body, BODY_LIMIT_BYTES), BODY_LIMIT_BYTES)
-                .thenAccept(bytes -> ManagedContextProtocol.verify(ManagedContextProtocol.parse(bytes), expected));
+                .thenApply(bytes -> {
+                    // Phase 3b: the worker may signal observation ownership;
+                    // it is optional, so verify the closed core without it.
+                    Map<String, Object> parsed =
+                            new java.util.LinkedHashMap<>(ManagedContextProtocol.parse(bytes));
+                    Object observation = parsed.remove("observation");
+                    ManagedContextProtocol.verify(parsed, expected);
+                    return observation == null ? Map.<String, Object>of()
+                            : Map.<String, Object>of("observation", observation);
+                });
     }
 
     /** Explicit Tool v3 call; selection belongs to the saved Broker reference. */
