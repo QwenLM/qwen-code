@@ -353,8 +353,9 @@ describe('pathRulesFor — the shell/CI-lane rule', () => {
   // Linux runners hardened a workflow's wipe script, added `realpath -m` to
   // canonicalize its path guard, and added a test pinning that line. `-m` is a
   // GNU coreutils extension — Darwin's realpath(1) exits 1 on it — so the
-  // script's `|| printf` fallback silently keeps the raw path and the new test
-  // is red on the `test_macos` lane. Nothing caught it: every agent ran on a
+  // script's `|| printf` fallback silently kept the raw path and the new test
+  // was red on the then-`test_macos` lane (now the `scripts` group of
+  // `test_macos_shards`). Nothing caught it: every agent ran on a
   // GNU host, and no dimension asks which lanes execute a file. A human
   // reviewer running the suite on a Mac found it in one round.
   it('attaches to shell, CI scripts, and the tests that drive them', () => {
@@ -365,6 +366,23 @@ describe('pathRulesFor — the shell/CI-lane rule', () => {
     expect(out).toContain('Shell and CI scripts — the lanes that run them');
     expect(out).toContain('scripts/tests/qwen-pr-review-workflow.test.js');
     expect(out).not.toContain('src/pay.ts');
+  });
+
+  it('names the Mac lane and its command chain in the worked example', () => {
+    // The worked example is the only place an agent learns which lane to cite,
+    // so the lane name and the command chain are pinned here verbatim: an edit
+    // that points reviewers at a lane which no longer runs the script fails on
+    // these strings. This file does not read `ci.yml`, so it holds the text and
+    // not the workflow; `scripts/tests/ci-platform-lanes.test.js` is the suite
+    // that reads the workflow and fails if the job or the group runner is
+    // renamed.
+    const out = pathRulesFor(['scripts/tests/qwen-pr-review-workflow.test.js']);
+    expect(out).toContain(
+      '`test_macos_shards` runs on `merge_group`/`schedule`/`workflow_dispatch`',
+    );
+    expect(out).toContain('`node scripts/run-macos-ci-group.js scripts`');
+    expect(out).toContain('`npm run test:standalone:runtimes:ci`');
+    expect(out).toContain('`npm run test:scripts:unit`');
   });
 
   it('stacks with the workflow rule on a diff that changes embedded shell', () => {
