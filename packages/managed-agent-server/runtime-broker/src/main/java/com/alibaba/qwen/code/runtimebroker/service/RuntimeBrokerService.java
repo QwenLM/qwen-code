@@ -1004,10 +1004,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                         }
                         RuntimeDispatchPayloadAdmission.Admitted admitted =
                                 payloadAdmission.admit(context, record, v3, payloadJson);
-                        if (admitted.refused()) {
-                            return CompletableFuture.completedFuture(admitted.settled() == null
-                                    ? executionState.requireExecution(context, executionId) : admitted.settled());
-                        }
                         Map<String, Object> payload = admitted.payload();
                         String toolName = (String) payload.get("toolName");
                         VerifiedDispatchPayload verifiedPayload = admitted.verified();
@@ -1786,32 +1782,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         }
         return bindingProvisioning.recoverBinding(
                 bindingId, expectedGeneration, false, expectedVersion);
-    }
-
-    private record ReconcileStep(Kind kind, RuntimeObservation observation,
-            RuntimeBrokerException error) {
-        private enum Kind {
-            RETRY,
-            LOST,
-            BLOCKED,
-            READY
-        }
-
-        static ReconcileStep retry() {
-            return new ReconcileStep(Kind.RETRY, null, null);
-        }
-
-        static ReconcileStep lost(RuntimeObservation observation) {
-            return new ReconcileStep(Kind.LOST, observation, null);
-        }
-
-        static ReconcileStep blocked(RuntimeBrokerException error) {
-            return new ReconcileStep(Kind.BLOCKED, null, error);
-        }
-
-        static ReconcileStep ready(RuntimeObservation observation) {
-            return new ReconcileStep(Kind.READY, observation, null);
-        }
     }
 
     private RuntimeSessionRecord requireAcquireSessionRecord(SessionContext context) {

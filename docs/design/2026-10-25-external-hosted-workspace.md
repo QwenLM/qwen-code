@@ -298,7 +298,7 @@ The acceptance packet above is historical evidence for `dd5c2d2fb2e2665dd593b27f
 
 ## 15. Slice C: external foreground Shell (`hosted-workspace-external-shell/1`)
 
-Status: **implemented locally; verified by the local evidence listed under "Locally verified so far" at the end of this section. No CI gate has run on this slice** (the PR targets a feature branch, so the main-filtered CI and managed-agent gates do not trigger). Everything below describes the code as written, plus the local test observations explicitly enumerated there.
+Status: **implemented locally; verified by the local evidence listed under "Locally verified so far" at the end of this section.** PR #17474 targets `main`, so the main-filtered CI and managed-agent gates run on this slice (lint/static, the unit-test tree, the kernel and shared managed loops, the host bundle, the SDK real-daemon E2E and tier selection). Everything below describes the code as written, plus the local test observations explicitly enumerated there.
 
 ### Boundary
 

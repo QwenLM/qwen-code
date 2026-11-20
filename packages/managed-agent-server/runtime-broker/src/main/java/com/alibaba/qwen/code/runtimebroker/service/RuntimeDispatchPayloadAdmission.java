@@ -41,13 +41,10 @@ final class RuntimeDispatchPayloadAdmission {
     }
 
     /**
-     * The admitted payload and its verified classification. A profile refusal
-     * settles the PREPARED row and reports {@code refused} instead, so the caller
-     * answers that record rather than dispatching; its own settle may answer null
-     * when the row moved on, which the caller re-reads.
+     * The admitted payload and its verified classification. Every refusal throws
+     * after settling the PREPARED row, so an admitted value always dispatches.
      */
-    record Admitted(Map<String, Object> payload, VerifiedDispatchPayload verified,
-            boolean refused, ToolExecutionRecord settled) {
+    record Admitted(Map<String, Object> payload, VerifiedDispatchPayload verified) {
     }
 
     Admitted admit(SessionContext context, ToolExecutionRecord record,
@@ -115,6 +112,6 @@ final class RuntimeDispatchPayloadAdmission {
                             "message", "External Workspace requires a file Tool v2 payload")), clock.instant());
             throw invalid("runtime_payload_invalid", "External Workspace requires a file Tool v2 payload");
         }
-        return new Admitted(payload, verifiedPayload, false, null);
+        return new Admitted(payload, verifiedPayload);
     }
 }
