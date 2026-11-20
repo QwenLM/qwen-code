@@ -70,7 +70,16 @@ import {
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
-import { createUserPromptSubmitContextPart } from '@qwen-code/qwen-code-core/hooks/user-prompt-submit-context.js';
+import {
+  createUserPromptSubmitContextPart,
+  isUserPromptSubmitContextPartText,
+} from '@qwen-code/qwen-code-core/hooks/user-prompt-submit-context.js';
+import {
+  ASYNC_HOOK_CONTEXT_OPEN,
+  isAsyncHookContextPartText,
+} from '@qwen-code/qwen-code-core/hooks/async-hook-context.js';
+import { AsyncHookRegistry } from '@qwen-code/qwen-code-core/hooks/asyncHookRegistry.js';
+import { HookEventName } from '@qwen-code/qwen-code-core/hooks/types.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
 import {
@@ -1323,6 +1332,104 @@ describe('Session', () => {
       });
       expect(entrySpy).toHaveBeenCalledWith(mockConfig, 'acp');
       entrySpy.mockRestore();
+    });
+  });
+
+  describe('async hook output delivery (ACP legacy)', () => {
+    // Mirror the core L11 witnesses: a registry-backed getHookSystem, the real
+    // legacy send wrapper, and the outgoing chat.sendMessageStream request.
+    const installAsyncOutput = (additionalContext: string) => {
+      const registry = new AsyncHookRegistry();
+      registry.register({
+        hookId: 'bg-1',
+        hookName: 'Background Hook',
+        hookEvent: HookEventName.PostToolUse,
+        sessionId: 'test-session-id',
+        startTime: Date.now(),
+        timeout: 60000,
+        stdout: JSON.stringify({
+          hookSpecificOutput: { additionalContext },
+        }),
+        stderr: '',
+      });
+      registry.complete('bg-1');
+      mockConfig.getHookSystem = vi.fn().mockReturnValue({
+        getPendingAsyncOutput: () => registry.getPendingOutput(),
+      } as unknown as ReturnType<Config['getHookSystem']>);
+    };
+
+    type SentPart = { text?: string };
+    const lastSentParts = (): SentPart[] => {
+      const calls = vi.mocked(mockChat.sendMessageStream).mock.calls;
+      const request = calls[calls.length - 1]?.[1] as { message: SentPart[] };
+      return request?.message ?? [];
+    };
+    const isAsyncHookPart = (part: SentPart): boolean =>
+      typeof part.text === 'string' && isAsyncHookContextPartText(part.text);
+    const hasAsyncBlock = (parts: SentPart[]) => parts.some(isAsyncHookPart);
+    const promptText = (text: string) =>
+      session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text' as const, text }],
+      });
+
+    beforeEach(() => {
+      vi.mocked(mockChat.sendMessageStream).mockImplementation(async () =>
+        createEmptyStream(),
+      );
+    });
+
+    it('delivers pending async output in the outgoing legacy request', async () => {
+      installAsyncOutput('async delivered context');
+      await promptText('hello');
+      const parts = lastSentParts();
+      expect(hasAsyncBlock(parts)).toBe(true);
+      const asyncPart = parts.find(isAsyncHookPart);
+      expect(asyncPart?.text).toContain('async delivered context');
+      expect(asyncPart?.text).toContain(ASYNC_HOOK_CONTEXT_OPEN);
+    });
+
+    it('drains once: a second prompt delivers nothing', async () => {
+      installAsyncOutput('once only');
+      await promptText('first');
+      expect(hasAsyncBlock(lastSentParts())).toBe(true);
+      await promptText('second');
+      expect(hasAsyncBlock(lastSentParts())).toBe(false);
+    });
+
+    it('delivers nothing when no async output is pending', async () => {
+      await promptText('hello');
+      expect(hasAsyncBlock(lastSentParts())).toBe(false);
+    });
+
+    it('splices async ahead of the trailing sync receipt on a co-occurrence turn', async () => {
+      installAsyncOutput('async co-occurrence');
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi.fn(
+        (name) => name === 'UserPromptSubmit',
+      );
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({
+        request: vi.fn().mockResolvedValue({
+          success: true,
+          output: {
+            hookSpecificOutput: {
+              hookEventName: 'UserPromptSubmit',
+              additionalContext: 'sync receipt context',
+            },
+          },
+        }),
+      });
+      await promptText('hello');
+      const parts = lastSentParts();
+      const last = parts[parts.length - 1];
+      const secondLast = parts[parts.length - 2];
+      // The sync receipt must stay the last part (resume/projection/title
+      // strips read only that slot); the async block sits immediately before it.
+      expect(typeof last?.text).toBe('string');
+      expect(isUserPromptSubmitContextPartText(last.text as string)).toBe(true);
+      expect(last.text).toContain('sync receipt context');
+      expect(isAsyncHookContextPartText(secondLast.text as string)).toBe(true);
+      expect(secondLast.text).toContain('async co-occurrence');
     });
   });
 
