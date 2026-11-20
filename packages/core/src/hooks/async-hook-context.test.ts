@@ -18,6 +18,7 @@ import {
   formatAsyncHookOutput,
   drainAsyncHookContextPart,
   appendAsyncHookContextPart,
+  mergeAsyncHookContextParts,
 } from './async-hook-context.js';
 import {
   createUserPromptSubmitContextPart,
@@ -518,6 +519,56 @@ describe('async-hook-context', () => {
       const result = appendAsyncHookContextPart([user, sync], asyncPart, true);
       expect(result).toEqual([user, asyncPart, sync]);
       expect(result[result.length - 1]).toBe(sync);
+    });
+  });
+
+  describe('mergeAsyncHookContextParts', () => {
+    it('returns null for no parts', () => {
+      expect(mergeAsyncHookContextParts([])).toBeNull();
+    });
+
+    it('returns null when no part is a valid envelope', () => {
+      expect(mergeAsyncHookContextParts([{ text: 'plain text' }])).toBeNull();
+    });
+
+    it('passes a single within-cap envelope through byte-identical', () => {
+      const envelope = wrapAsyncHookContext('lone block');
+      expect(mergeAsyncHookContextParts([{ text: envelope }])).toEqual({
+        text: envelope,
+      });
+    });
+
+    it('merges several envelopes into one joined envelope', () => {
+      const merged = mergeAsyncHookContextParts([
+        { text: wrapAsyncHookContext('first') },
+        { text: wrapAsyncHookContext('second') },
+      ]);
+      expect(merged?.text).toBe(wrapAsyncHookContext('first\n\nsecond'));
+      expect(isAsyncHookContextPartText(merged?.text ?? '')).toBe(true);
+    });
+
+    it('bounds the merged body to exactly the cap and marks the cut', () => {
+      const big = 'x'.repeat(MAX_ASYNC_HOOK_CONTEXT_LENGTH);
+      const merged = mergeAsyncHookContextParts([
+        { text: wrapAsyncHookContext(big) },
+        { text: wrapAsyncHookContext(big) },
+      ]);
+      expect(merged).not.toBeNull();
+      const body = (merged?.text ?? '').slice(
+        ASYNC_HOOK_CONTEXT_OPEN.length + 1,
+        -(ASYNC_HOOK_CONTEXT_CLOSE.length + 1),
+      );
+      expect(body).toHaveLength(MAX_ASYNC_HOOK_CONTEXT_LENGTH);
+      expect(body).toContain(ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE);
+    });
+
+    it('skips blank bodies and non-envelope parts', () => {
+      const merged = mergeAsyncHookContextParts([
+        { text: wrapAsyncHookContext('   ') },
+        { text: 'not an envelope' },
+        { text: wrapAsyncHookContext('kept') },
+      ]);
+      expect(merged?.text).toBe(wrapAsyncHookContext('kept'));
     });
   });
 

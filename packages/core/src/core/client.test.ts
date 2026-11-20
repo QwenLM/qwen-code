@@ -73,8 +73,10 @@ import {
 import { HookSystem } from '../hooks/hookSystem.js';
 import { AsyncHookRegistry } from '../hooks/asyncHookRegistry.js';
 import {
+  ASYNC_HOOK_CONTEXT_CLOSE,
   ASYNC_HOOK_CONTEXT_OPEN,
   isAsyncHookContextPartText,
+  MAX_ASYNC_HOOK_CONTEXT_LENGTH,
   wrapAsyncHookContext,
 } from '../hooks/async-hook-context.js';
 import { isUserPromptSubmitContextPartText } from '../utils/transcript-records.js';
@@ -1886,6 +1888,93 @@ describe('Gemini Client (client.ts)', () => {
       // The block was removed from the stripped entry, so the restore path
       // cannot re-add a second copy.
       expect(orphan.parts?.some(isAsyncHookPart)).toBe(false);
+    });
+
+    it('a continue Retry whose payload already carries the block delivers it exactly once', async () => {
+      // The continue-interrupted caller clones the pushed trailing entry into
+      // the Retry payload, envelope included; the recovery must not re-attach a
+      // second copy on top of the one the payload already carries.
+      const envelope = wrapAsyncHookContext('continue carried block');
+      const orphan = content(
+        'user',
+        { text: 'original prompt' },
+        { text: envelope },
+      );
+      installChat({
+        stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([orphan]),
+        getUserContentPushCount: vi.fn().mockReturnValue(1),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        setHistory: vi.fn(),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      });
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, 0);
+        return textTurn('retry response');
+      });
+      await run(
+        [{ text: 'original prompt' }, { text: envelope }],
+        'prompt-continue-retry',
+        { type: SendMessageType.Retry },
+      );
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      expect(parts.filter(isAsyncHookPart)).toHaveLength(1);
+    });
+
+    it('a retained block is delivered once and then dropped (splice, not a peek)', async () => {
+      installAsyncOutput('deliver once then drop');
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('chat pre-push failure');
+      });
+      await expect(
+        run([{ text: 'first' }], 'prompt-once', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('chat pre-push failure');
+      await run([{ text: 'second' }], 'prompt-once-2', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).toContain('deliver once then drop');
+      // A third send must not re-deliver it: the retention was spliced away on
+      // the successful send, not peeked and left to re-attach forever.
+      await run([{ text: 'third' }], 'prompt-once-3', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).not.toContain('deliver once then drop');
+    });
+
+    it('repeated pre-push exits keep the combined async payload within the cap', async () => {
+      const big = (tag: string) => tag + 'x'.repeat(6000);
+      installAsyncOutput(big('block-one '));
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('pre-push 1');
+      });
+      await expect(
+        run([{ text: 'first' }], 'prompt-bound-1', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('pre-push 1');
+      installAsyncOutput(big('block-two '));
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('pre-push 2');
+      });
+      await expect(
+        run([{ text: 'second' }], 'prompt-bound-2', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('pre-push 2');
+      await run([{ text: 'third' }], 'prompt-bound-3', {
+        type: SendMessageType.UserQuery,
+      });
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      const asyncParts = parts.filter(isAsyncHookPart);
+      // The two retained blocks merge into a single bounded envelope rather
+      // than riding as two separate (individually capped) parts.
+      expect(asyncParts).toHaveLength(1);
+      const envelopeOverhead =
+        ASYNC_HOOK_CONTEXT_OPEN.length + ASYNC_HOOK_CONTEXT_CLOSE.length + 2;
+      expect((asyncParts[0] as Part).text?.length ?? 0).toBeLessThanOrEqual(
+        MAX_ASYNC_HOOK_CONTEXT_LENGTH + envelopeOverhead,
+      );
     });
   });
 

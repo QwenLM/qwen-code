@@ -231,6 +231,7 @@ import {
   appendAsyncHookContextPart,
   drainAsyncHookContextPart,
   isAsyncHookContextPartText,
+  mergeAsyncHookContextParts,
 } from '../hooks/async-hook-context.js';
 import {
   TrustedUserAnswers,
@@ -4444,6 +4445,7 @@ export class LlmClient {
       // drained and pushed. Recover it into the retention so the drain point
       // re-attaches it (the registry is already cleared); removing it from the
       // stripped entry keeps the restore path from re-adding a second copy.
+      let recoveredAsyncParts = 0;
       for (const entry of strippedRetryEntries) {
         const parts = entry.parts;
         if (!parts) continue;
@@ -4455,7 +4457,14 @@ export class LlmClient {
         if (asyncTexts.length > 0) {
           entry.parts = parts.filter((p) => !isAsyncPart(p));
           this.retainedAsyncHookParts.push(...asyncTexts);
+          recoveredAsyncParts += asyncTexts.length;
         }
+      }
+      if (recoveredAsyncParts > 0) {
+        debugLogger.info('[AsyncHook] recovered blocks from stripped entries', {
+          entries: strippedRetryEntries.length,
+          recovered: recoveredAsyncParts,
+        });
       }
       // The matching dangling-`functionCall` repair runs inside
       // `chat.sendMessageStream` AFTER the user content is pushed, so any
@@ -5820,12 +5829,38 @@ export class LlmClient {
         (messageType === SendMessageType.ToolResult &&
           this.concurrentSideQueryPromptIds.has(prompt_id));
       if (!skipAsyncHookDrain) {
-        const toAttach = this.retainedAsyncHookParts.splice(0);
+        const retained = this.retainedAsyncHookParts.splice(0);
         const drained = drainAsyncHookContextPart(
           this.config.getHookSystem?.(),
         );
-        if (drained) toAttach.push(drained);
-        for (const part of toAttach) {
+        const candidates = drained ? [...retained, drained] : retained;
+        // A continue-interrupted Retry payload clones the pushed trailing entry
+        // (envelope included), so drop a candidate the request already carries
+        // and any byte-identical repeat; merge the rest into one bounded block so
+        // repeated pre-push exits cannot stack N envelopes on a single request.
+        const present = new Set(
+          requestToSend
+            .map((p) =>
+              typeof p === 'object' &&
+              p !== null &&
+              'text' in p &&
+              typeof p.text === 'string'
+                ? p.text
+                : undefined,
+            )
+            .filter(
+              (t): t is string =>
+                typeof t === 'string' && isAsyncHookContextPartText(t),
+            ),
+        );
+        const seen = new Set<string>();
+        const deduped = candidates.filter((part) => {
+          if (present.has(part.text) || seen.has(part.text)) return false;
+          seen.add(part.text);
+          return true;
+        });
+        const merged = mergeAsyncHookContextParts(deduped);
+        if (merged) {
           const lastPart = requestToSend[requestToSend.length - 1];
           const syncReceiptTrailing =
             typeof lastPart === 'object' &&
@@ -5835,11 +5870,17 @@ export class LlmClient {
             isUserPromptSubmitContextPartText(lastPart.text);
           requestToSend = appendAsyncHookContextPart(
             requestToSend,
-            part,
+            merged,
             syncReceiptTrailing,
           );
-          attachedAsyncHookParts.push(part);
+          attachedAsyncHookParts.push(merged);
         }
+        debugLogger.info('[AsyncHook] drain before send', {
+          retained: retained.length,
+          drained: drained ? 1 : 0,
+          droppedDuplicates: candidates.length - deduped.length,
+          attached: merged ? 1 : 0,
+        });
       }
 
       // The acceptance snapshot for the attached carrier is published by
@@ -6775,6 +6816,13 @@ export class LlmClient {
         if (!asyncPushed) {
           this.retainedAsyncHookParts.push(...attachedAsyncHookParts);
         }
+        debugLogger.info('[AsyncHook] settle attached blocks', {
+          attached: attachedAsyncHookParts.length,
+          pushInitiated,
+          asyncPushSnapshot,
+          pushCount: currentPushCount(),
+          retained: !asyncPushed,
+        });
       }
       // Belt-and-suspenders: close out the MessageDisplay dispatcher on any
       // exit the explicit finish() sites above didn't cover (an uncaught

@@ -210,6 +210,35 @@ export function drainAsyncHookContextPart(
 }
 
 /**
+ * Merge several already-wrapped async envelopes into a single bounded envelope.
+ * The drain re-attaches blocks a prior send retained; without a combined bound,
+ * repeated pre-push exits would accumulate one envelope per attempt on a single
+ * request. The bodies are joined and re-cut to `MAX_ASYNC_HOOK_CONTEXT_LENGTH`,
+ * so the aggregate stays bounded while a lone block (already within the cap)
+ * passes through byte-identical. Returns null when no body survives.
+ */
+export function mergeAsyncHookContextParts(
+  parts: ReadonlyArray<{ text: string }>,
+): { text: string } | null {
+  const prefix = `${ASYNC_HOOK_CONTEXT_OPEN}\n`;
+  const suffix = `\n${ASYNC_HOOK_CONTEXT_CLOSE}`;
+  const bodies: string[] = [];
+  for (const { text } of parts) {
+    const trimmed = text.trim();
+    if (!trimmed.startsWith(prefix) || !trimmed.endsWith(suffix)) continue;
+    const body = trimmed.slice(prefix.length, -suffix.length);
+    if (body.trim()) bodies.push(body);
+  }
+  if (bodies.length === 0) return null;
+  const joined = bodies.join('\n\n');
+  return {
+    text: wrapAsyncHookContext(
+      boundHalf(joined, MAX_ASYNC_HOOK_CONTEXT_LENGTH),
+    ),
+  };
+}
+
+/**
  * Append the async context part to the outgoing request parts. When the
  * UserPromptSubmit context receipt is the trailing part, splice the async
  * part in *before* it so the sync block stays trailing: the resume half of

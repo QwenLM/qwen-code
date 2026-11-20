@@ -25,7 +25,8 @@ push 之后的 provider 失败本身**不是**丢失：块留在进程内 histor
 - **为何不在 chat 内（紧贴 provider）drain**：压缩阈值在 push 前估算组装后请求（含异步块）；更晚 drain 会破坏该不变量、history-push 语义，以及全部现有调用点见证（其 mock 了 `Turn.run`）。
 - **插入点**：把 gate + drain + append 从请求组装处移到紧邻 `turn.run` 之前（goal-event yield 与 message-display 构造之后、push-snapshot source 赋值之前）。所有权门原样随行（同作用域）。这一步零键控成本地消灭窗口 1 与 3，并保持压缩阈值、gate 语义、全部现有见证完好。尾部回执检测改用 `isUserPromptSubmitContextPartText` 读最终消息形状（ACP wrapper 的写法），不再依赖组装期的 `appendedHookContext` 布尔。
 - **push 前结算（窗口 4）**：把 drained part 暂存 client 字段；在 send 的 `finally` 里按 history-push 快照结算——push 未落地则保留该 part，交给下一次 drain-eligible send 在新 drain 点重附（重附前重新过所有权门）。push 已落地则该 part 已在 history，不得重附（push 后失败随下一请求送达）。
-- **Retry 重附（窗口 2）**：在既有的从被剥 Retry entries 保留日期提醒 / workflow envelope 旁，识别被剥 entries 中的异步信封 part 并重附。被剥即 history 已无副本，故重附不会双份交付；它与 restore 路径互斥。
+- **Retry 重附（窗口 2）**：在既有的从被剥 Retry entries 保留日期提醒 / workflow envelope 旁，识别被剥 entries 中的异步信封 part、找回进保留集，并把它从被剥 entry 中移除，使 restore 路径不会重附副本。drain 负责重附——但 continue-interrupted Retry 的载荷已克隆了被 push 的 entry（含信封），故 drain 必须对请求去重（见下），否则会双份交付。
+- **drain 点去重与总量上限**：drain 先丢弃请求已携带的保留块（continue-interrupted 情形）及字节相同的重复，再把幸存的保留块与新 drain 合并为单个信封、按 `MAX_ASYNC_HOOK_CONTEXT_LENGTH` 重新截断。这使反复 push 前退出不会在单个请求上堆叠 N 个信封；单个未超限的块字节不变地通过。保留、重附、找回三处决策各向 debug logger 记日志，使丢失或重复的块留下痕迹。
 - **顺序说明**：drain 后移使 ToolResult 轮上异步块落在 exploration/loop reminder 与 tool-result memory 之后（现在在其前）。现有见证只要求块在 `functionResponse` parts 之后，仍成立；wire 顺序变化在此明示。ToolResult 的 size-only microcompact checkpoint 也在新 drain 点之前估算 `requestToSend`（组装处的旧 drain 曾先于它），故其尺寸估算不再计入异步块；该块受大小上限（#17736）约束，而 chat 在 `turn.run` 内自身的压缩阈值仍在 push 前估算含块的已 drain 请求。
 
 ## 范围
@@ -35,4 +36,4 @@ push 之后的 provider 失败本身**不是**丢失：块留在进程内 histor
 
 ## 验证
 
-`client.test.ts` 调用点见证（真实 `AsyncHookRegistry`、mock `Turn.run`）：现有 12 条交付/所有权见证保持绿；4 条新见证钉住 (a) ToolResult loop-detection 退出后块仍 pending、下一 send 送达；(b) Retry 从被剥的孤儿 entry 找回块并恰好重附一次，且把块从该 entry 移除、使 restore 路径不会重附第二份；(c) chat 侧 push 前抛出后块留给下一 send、不双份；(d) 保留的块不被带闸的侧问 send 消费。变异见证：整文件回退到改动前实现使 4 条新见证全红、12 条现有见证保持绿；禁用 Retry 找回使 Retry 见证转红；强制结算把每次 send 都当作已 push（从不保留）恰使两条 push 前保留见证转红。改动文件 `prettier`/`eslint` 干净；改动文件通过类型检查（以 CI 的 frozen-lockfile 构建为权威）。
+`client.test.ts` 调用点见证（真实 `AsyncHookRegistry`、mock `Turn.run`）：现有 12 条交付/所有权见证保持绿；7 条新见证钉住 (a) ToolResult loop-detection 退出后块仍 pending、下一 send 送达；(b) push 前抛出后块留给下一 send、不双份；(c) 保留的块不被带闸的侧问 send 消费；(d) 载荷不含块的 Retry 恰好重附找回的块一次、并把它从被剥 entry 移除；(e) 载荷已含块的 continue Retry 恰好交付一份（drain 去重）；(f) 保留的块交付一次后即丢弃（splice 而非 peek）；(g) 反复 push 前退出使合并后的异步载荷仍在上限内（合并＋约束）。`mergeAsyncHookContextParts` 另有直接单测（单块字节不变通过、合并、恰好上限的带标记截断、跳过无效 part）。变异见证：整文件回退到改动前实现使保留/迁移见证 (a–d, f, g) 转红、(e) 保持绿（改动前代码没有会双份交付的找回）；禁用 Retry 找回红 (d)；禁用 drain 去重红 (e)；peek 替代 splice 红 (f)；去掉合并上限红 (g)；从不保留的结算红保留见证 (b, c, f, g)。改动文件 `prettier`/`eslint` 干净；改动文件通过类型检查（以 CI 的 frozen-lockfile 构建为权威）。
