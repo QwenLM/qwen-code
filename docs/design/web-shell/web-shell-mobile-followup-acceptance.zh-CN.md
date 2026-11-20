@@ -32,7 +32,7 @@
 
 ## 验证
 
-- `client/e2e/web-shell.followup.mobile.spec.ts`,mobile-chromium(Pixel 7 触摸模拟):6/6 通过——建议条填入不发送、忽略、空输入直发、打字隐藏、前缀补全、编辑行填入键接受(标签 `Fill in`),以及建议条可见时 placeholder 保持普通文案(单 surface)。spec 会把取证截图写入其 test-results 输出目录。
+- `client/e2e/web-shell.followup.mobile.spec.ts`,mobile-chromium(Pixel 7 触摸模拟):8/8 通过——建议条填入不发送、忽略、空输入直发、打字隐藏、前缀补全、编辑行填入键接受(标签 `Fill in`)、建议条可见时 placeholder 保持普通文案(单 surface),以及两条 zh-CN 用例钉住本地化建议条文本、忽略标签与「填入」键并截中文 UI 图。composer-layout harness 为这些用例新增可选 `language` URL 参数;spec 会把取证截图写入其 test-results 输出目录。
 - `ChatEditor.test.tsx` mobile composer actions:新增 8 条单测钉可见性(有草稿、无可见建议、桌面后端、disabled、simple 变体)与 accept/dismiss 接线;合并后 head 上连同 `i18n.test.ts` 383/383 通过。
 - web-shell `tsc --noEmit` 与改动文件 ESLint:干净。
 - 未覆盖:mobile-webkit / iOS 真机(本机缺 WebKit 运行库);软键盘弹起时新增行的高度挤压;iPad 外接键盘 Tab/→ 接受(后置)。

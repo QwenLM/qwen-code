@@ -32,7 +32,7 @@ Preserved fast paths: Send with an empty input still submits the visible suggest
 
 ## Validation
 
-- `client/e2e/web-shell.followup.mobile.spec.ts`, mobile-chromium (Pixel 7 touch emulation): 6/6 passed — bar fill without submit, dismiss, empty-send direct submit, typing hides the bar, prefix completion, editing-row fill key accept (labelled `Fill in`), and the placeholder staying ordinary while the bar shows (single surface). The spec captures evidence screenshots into its
+- `client/e2e/web-shell.followup.mobile.spec.ts`, mobile-chromium (Pixel 7 touch emulation): 8/8 passed — bar fill without submit, dismiss, empty-send direct submit, typing hides the bar, prefix completion, editing-row fill key accept (labelled `Fill in`), the placeholder staying ordinary while the bar shows (single surface), and two zh-CN cases pinning the localized bar text, dismiss label and `填入` fill key while capturing Chinese-UI screenshots. The composer-layout harness takes an optional `language` URL param for those cases; the spec captures evidence screenshots into its
   test-results output.
 - `ChatEditor.test.tsx` mobile composer actions: 8 new unit tests pin visibility (draft, hidden suggestion, desktop backend, disabled, simple variant) and the accept/dismiss wiring; 383/383 passed with `i18n.test.ts` at the merged head.
 - web-shell `tsc --noEmit` and ESLint on the changed files: clean.
