@@ -902,7 +902,6 @@ CREATE TABLE ma_extension_source_import (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Source import intents retained before external I/O, paired with publication operations when prepared.';
 
 CREATE TABLE ma_extension_package (
-    package_key CHAR(64) NOT NULL COMMENT 'Hashed identity of the scoped extension package revision.',
     scope_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and Workspace identity.',
     tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(512) NOT NULL COMMENT 'Workspace identity within the tenant.',
@@ -916,7 +915,6 @@ CREATE TABLE ma_extension_package (
     byte_length BIGINT UNSIGNED NOT NULL COMMENT 'Total published package size in bytes.',
     state VARCHAR(16) NOT NULL COMMENT 'Package publication state: PREPARING or PUBLISHED.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
-    CONSTRAINT uk_ma_extension_package_business_key UNIQUE (package_key),
     CONSTRAINT uk_ma_extension_package UNIQUE (scope_key, extension_id, package_revision),
     CONSTRAINT ck_ma_extension_package_listed CHECK (is_catalog_listed >= 0 AND is_catalog_listed <= 1),
     CONSTRAINT ck_ma_extension_package_revision CHECK (package_revision > 0),
@@ -927,7 +925,6 @@ CREATE TABLE ma_extension_package (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Versioned Workspace extension package manifests and publication state.';
 
 CREATE TABLE ma_extension_settings (
-    settings_key CHAR(64) NOT NULL COMMENT 'Hashed identity of the scoped extension settings revision.',
     scope_key CHAR(64) NOT NULL COMMENT 'Hashed tenant and Workspace identity.',
     tenant_id VARBINARY(512) NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(512) NOT NULL COMMENT 'Workspace identity within the tenant.',
@@ -937,7 +934,6 @@ CREATE TABLE ma_extension_settings (
     encrypted_values LONGTEXT NOT NULL COMMENT 'Encrypted serialized extension setting values.',
     configured_keys_json LONGTEXT NOT NULL COMMENT 'Configured setting names, without their secret values.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
-    CONSTRAINT uk_ma_extension_settings_business_key UNIQUE (settings_key),
     CONSTRAINT uk_ma_extension_settings UNIQUE (scope_key, extension_id, settings_revision),
     CONSTRAINT ck_ma_extension_settings_revision CHECK (settings_revision > 0),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
