@@ -50,6 +50,7 @@ from pathlib import Path
 BUCKET = "dataworks-upload-and-download-inner-pre"
 OSS_HOST = f"{BUCKET}.oss-cn-zhangjiakou.aliyuncs.com"
 MAVEN_REPO_URL = "https://mvnrepo.alibaba-inc.com/mvn/repository"
+MAVEN_DEPLOY_URL = "https://artlab.alibaba-inc.com/1/maven/thirdparty"
 MAVEN_REPO_ID = "alibaba-releases"
 WORKER_REPOSITORY = "hub.docker.alibaba-inc.com/aone-base-global/data-agent-worker"
 HARNESS_REPOSITORY = "hub.docker.alibaba-inc.com/aone-base-global/data-agent-harness"
@@ -304,10 +305,10 @@ def require_maven_credentials():
         fail("Maven credentials missing: set MAVEN_USERNAME and MAVEN_PASSWORD")
 
 
-def artifact_url(coordinate, extension):
+def artifact_url(coordinate, extension, base_url=MAVEN_REPO_URL):
     group_id, artifact_id, version = coordinate.split(":")
     group_path = group_id.replace(".", "/")
-    return f"{MAVEN_REPO_URL}/{group_path}/{artifact_id}/{version}/{artifact_id}-{version}.{extension}"
+    return f"{base_url}/{group_path}/{artifact_id}/{version}/{artifact_id}-{version}.{extension}"
 
 
 def maven_headers(username, password):
@@ -331,17 +332,23 @@ def maven_probe(jar_url, pom_url, username, password):
         fail("cannot inspect Maven coordinate before deploy: HTTP " + ",".join(map(str, statuses)))
 
 
-def maven_verify(url, expected_sha, username, password):
-    request = urllib.request.Request(url, headers=maven_headers(username, password))
-    digest = hashlib.sha256()
-    try:
-        with urllib.request.urlopen(request, timeout=300) as response:
-            for chunk in iter(lambda: response.read(1 << 20), b""):
-                digest.update(chunk)
-    except urllib.error.HTTPError as error:
-        fail(f"Maven readback failed: HTTP {error.code}")
-    if digest.hexdigest() != expected_sha:
-        fail("Maven readback sha256 mismatch")
+def maven_verify(url, expected_sha, username, password, wait_seconds=0):
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        request = urllib.request.Request(url, headers=maven_headers(username, password))
+        digest = hashlib.sha256()
+        try:
+            with urllib.request.urlopen(request, timeout=300) as response:
+                for chunk in iter(lambda: response.read(1 << 20), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != expected_sha:
+                fail("Maven readback sha256 mismatch")
+            return
+        except urllib.error.HTTPError as error:
+            if error.code == 404 and time.monotonic() < deadline:
+                time.sleep(2)
+                continue
+            fail(f"Maven readback failed: HTTP {error.code}")
 
 
 def maven_deploy(jar, pom, coordinate, username, password):
@@ -361,7 +368,7 @@ def maven_deploy(jar, pom, coordinate, username, password):
             "mvn", "-B", "-ntp", "deploy:deploy-file",
             "-s", settings.name,
             f"-DrepositoryId={MAVEN_REPO_ID}",
-            f"-Durl={MAVEN_REPO_URL}",
+            f"-Durl={MAVEN_DEPLOY_URL}",
             f"-DgroupId={group_id}",
             f"-DartifactId={artifact_id}",
             f"-Dversion={version}",
@@ -460,10 +467,10 @@ def main():
     # forbid-overwrite release id on OSS without its manifest.
     maven_username = os.environ["MAVEN_USERNAME"]
     maven_password = os.environ["MAVEN_PASSWORD"]
-    sdk_jar_url = artifact_url(plan["sdkCoordinate"], "jar")
-    sdk_pom_url = artifact_url(plan["sdkCoordinate"], "pom")
-    server_jar_url = artifact_url(plan["coordinate"], "jar")
-    server_pom_url = artifact_url(plan["coordinate"], "pom")
+    sdk_jar_url = artifact_url(plan["sdkCoordinate"], "jar", MAVEN_DEPLOY_URL)
+    sdk_pom_url = artifact_url(plan["sdkCoordinate"], "pom", MAVEN_DEPLOY_URL)
+    server_jar_url = artifact_url(plan["coordinate"], "jar", MAVEN_DEPLOY_URL)
+    server_pom_url = artifact_url(plan["coordinate"], "pom", MAVEN_DEPLOY_URL)
     maven_probe(sdk_jar_url, sdk_pom_url, maven_username, maven_password)
     maven_probe(server_jar_url, server_pom_url, maven_username, maven_password)
     maven_deploy(plan["sdkJar"], plan["sdkPom"], plan["sdkCoordinate"],
@@ -476,6 +483,20 @@ def main():
     maven_verify(server_jar_url, plan["hashes"]["serverJarSha256"], maven_username, maven_password)
     maven_verify(server_pom_url, plan["hashes"]["serverPomSha256"], maven_username, maven_password)
     print(f"verified maven {plan['coordinate']}")
+
+    for coordinate, artifact, hash_key in (
+        (plan["sdkCoordinate"], "jar", "sdkJarSha256"),
+        (plan["sdkCoordinate"], "pom", "sdkPomSha256"),
+        (plan["coordinate"], "jar", "serverJarSha256"),
+        (plan["coordinate"], "pom", "serverPomSha256"),
+    ):
+        maven_verify(
+            artifact_url(coordinate, artifact),
+            plan["hashes"][hash_key],
+            maven_username,
+            maven_password,
+            wait_seconds=60,
+        )
 
     if oss_name:
         oss_put(server_key, plan["serverJar"], access_key, secret, security_token)
