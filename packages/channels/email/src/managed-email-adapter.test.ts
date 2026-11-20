@@ -1,7 +1,15 @@
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ImapFlow } from 'imapflow';
 import type { Transporter } from 'nodemailer';
@@ -78,6 +86,7 @@ class FakeImap extends EventEmitter {
 }
 
 class FakeControlPlane implements ManagedChannelControlPlane {
+  destinationKey = '';
   registrations: Array<{ accountGeneration: number }> = [];
   events: ManagedInboundEvent[] = [];
   admitted = new Map<string, string>();
@@ -2069,5 +2078,180 @@ describe('managed email outbound', () => {
     await adapter.connect();
     await adapter.disconnect();
     expect(plane.disconnected).toBe(true);
+  });
+});
+
+describe('managed email adapter registration-identity isolation', () => {
+  function legacyState(pending: number, outbound: number) {
+    return {
+      version: 1,
+      uidValidity: '1',
+      generation: 1,
+      lastUid: pending,
+      pending: Array.from({ length: pending }, (_, i) => ({
+        uid: i + 1,
+        eventId: `1:${i + 1}`,
+      })),
+      outbound: Array.from({ length: outbound }, (_, i) => ({
+        deliveryId: `d-${i}`,
+        ordinal: i,
+        messageId: `<m-${i}@example.com>`,
+      })),
+      recent: [],
+      routes: [],
+    };
+  }
+
+  it('a destination change never replays one tenant pending into another', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const a = make();
+    await a.connect();
+    const sA = state(a);
+    sA.pending = [{ uid: 1, eventId: '1:1' }];
+    sA.lastUid = 1;
+    writeFileSync(a.stateFile, JSON.stringify(sA));
+    await a.disconnect();
+    const stateFileA = a.stateFile;
+
+    plane.destinationKey = 'cp|tenant-b|chan|actor|ws|.';
+    const b = make();
+    await b.connect();
+    expect(b.stateFile).not.toBe(stateFileA);
+    expect(dirname(b.stateFile)).toBe(dirname(stateFileA));
+    expect(state(b).pending).toEqual([]);
+    await b.tick();
+    expect(plane.events).toHaveLength(0);
+    await b.disconnect();
+  });
+
+  it('a workspace change within one tenant isolates the ledger', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const a = make();
+    await a.connect();
+    const sA = state(a);
+    sA.pending = [{ uid: 1, eventId: '1:1' }];
+    sA.lastUid = 1;
+    writeFileSync(a.stateFile, JSON.stringify(sA));
+    await a.disconnect();
+
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws-2|.';
+    const b = make();
+    await b.connect();
+    expect(b.stateFile).not.toBe(a.stateFile);
+    expect(state(b).pending).toEqual([]);
+    await b.disconnect();
+  });
+
+  it('logs the stranded legacy ledger on upgrade rather than dropping it silently', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify(legacyState(2, 3)),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain(join(dir, 'managed-state.json'));
+    expect(stranded[0]).toContain('2 pending');
+    expect(stranded[0]).toContain('3 outbound');
+    expect(stranded[0]).toContain('does not re-fetch them');
+    expect(stranded[0]).toContain(
+      'un-receipted outbound segments were dropped',
+    );
+    // Not adopted: the legacy pending never enters this registration's state.
+    expect(state(adapter).pending).toEqual([]);
+    // Archive contract: renamed (not deleted), claims preserved, path logged,
+    // and a second start does not re-announce it.
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(false);
+    const archived = readdirSync(dir).filter((f) =>
+      f.startsWith('managed-state.json.stranded-'),
+    );
+    expect(archived).toHaveLength(1);
+    const archivedState = JSON.parse(
+      readFileSync(join(dir, archived[0]), 'utf8'),
+    );
+    expect(archivedState.pending).toHaveLength(2);
+    expect(archivedState.outbound).toHaveLength(3);
+    expect(lines.some((l) => l.includes(join(dir, archived[0])))).toBe(true);
+    await adapter.disconnect();
+    lines.length = 0;
+    const second = make({}, { log: (l: string) => lines.push(l) });
+    await second.connect();
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(0);
+    await second.disconnect();
+  });
+
+  it('a quiescent legacy ledger (0/0) is reported without a loss alarm', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify(legacyState(0, 0)),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 pending');
+    expect(stranded[0]).toContain('0 outbound');
+    expect(stranded[0]).not.toContain('does not re-fetch them');
+    expect(stranded[0]).not.toContain('outbound segments were dropped');
+    await adapter.disconnect();
+  });
+
+  it('an unreadable legacy ledger reports unknown counts and a possible loss', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'managed-state.json'), '{not json');
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('unknown pending');
+    expect(stranded[0]).toContain('unknown outbound');
+    expect(stranded[0]).toContain('could not be read');
+    expect(stranded[0]).not.toContain('0 pending');
+    await adapter.disconnect();
+  });
+
+  it('a legacy ledger staged after a rollback is still reported (keyed ledger exists)', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const first = make({}, { log: (l: string) => lines.push(l) });
+    await first.connect();
+    await first.disconnect();
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(0);
+    // A rollback stages a fresh legacy after the keyed ledger already exists.
+    writeFileSync(
+      join(dirname(first.stateFile), 'managed-state.json'),
+      JSON.stringify(legacyState(1, 0)),
+    );
+    lines.length = 0;
+    const second = make({}, { log: (l: string) => lines.push(l) });
+    await second.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('1 pending');
+    await second.disconnect();
   });
 });

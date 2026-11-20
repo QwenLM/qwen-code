@@ -185,6 +185,7 @@ export class ManagedEmailAdapter {
       options.name,
       options.cwd,
       this.settings,
+      options.controlPlane.destinationKey ?? '',
     );
     this.controlPlane = options.controlPlane;
     this.deps = options.deps;
@@ -223,7 +224,40 @@ export class ManagedEmailAdapter {
       );
     }
     try {
-      this.state = this.store.load();
+      const loaded = this.store.load();
+      // The upgrade to per-registration ledgers strands the legacy
+      // managed-state.json: make the drop explicit, never silent. Detect it
+      // even when a keyed ledger already exists — a rollback to the
+      // pre-upgrade build can stage fresh legacy claims after the upgrade. The
+      // legacy ledger is not adopted — that would replay one registration's
+      // pending into another. It is archived only once the start succeeds
+      // (below), so a failed first start leaves the file for a rollback to
+      // recover.
+      const legacy = this.store.strandedLegacyLedger();
+      if (legacy) {
+        // An unreadable legacy is not an empty one: its counts are unknown and
+        // any claims it held are stranded. Name the inbound and outbound
+        // consequences separately so an outbound-only strand does not report
+        // lost inbound mail, and a quiescent 0/0 legacy reports no loss.
+        const pendingLabel = legacy.readable ? legacy.pending : 'unknown';
+        const outboundLabel = legacy.readable ? legacy.outbound : 'unknown';
+        let consequence = '';
+        if (!legacy.readable) {
+          consequence =
+            ' Its contents could not be read, so any staged-but-unadmitted claims it held are stranded.';
+        } else {
+          if (legacy.pending > 0)
+            consequence +=
+              ' Its staged-but-unadmitted claims are stranded; the fresh ledger starts at the current mailbox tip and does not re-fetch them.';
+          if (legacy.outbound > 0)
+            consequence +=
+              ' Its un-receipted outbound segments were dropped, so their delivery status is unknown.';
+        }
+        this.log(
+          `Managed email upgraded to per-registration ledgers; the legacy ledger ${legacy.path} (${pendingLabel} pending, ${outboundLabel} outbound) is stranded and not replayed.${consequence}`,
+        );
+      }
+      this.state = loaded;
       // The stall flag is in-memory, so a restart zeroes it: derive the
       // stall from a persisted held claim, or the search re-opens behind
       // it and the mail the stall promised to keep is admitted to its
@@ -256,6 +290,31 @@ export class ManagedEmailAdapter {
       // Segments sent before a crash took their receipt: the provider may
       // hold them, so each is reported unknown — never sent again.
       await this.reportOrphanedOutbound();
+      // A lock compromise can land during the awaits above. Re-check so
+      // connect() rejects rather than resolving a healthy-looking start for a
+      // stopped, deaf adapter the CLI would then park on.
+      if (!this.running || this.ownershipLost)
+        throw new Error('Managed email adapter stopped during connection.');
+      // The start succeeded, so archive the reported legacy: a static legacy is
+      // not re-announced on every later start, and a second registration of the
+      // mailbox is not told the first registration's claims were its own. A
+      // failed start above leaves it untouched for a rollback to recover; the
+      // notice then simply repeats on the retry.
+      if (legacy) {
+        const archived = this.store.archiveStrandedLegacy();
+        // The notice above names the legacy path, which this rename moves; name
+        // the archived path too so an operator following the notice can still
+        // find the preserved claims instead of hitting ENOENT.
+        if (archived) {
+          this.log(
+            `Managed email archived the legacy ledger to ${archived}; the claims it held are preserved there for inspection.`,
+          );
+        } else {
+          this.log(
+            `Managed email could not archive the legacy ledger ${legacy.path}; it remains in place and will be reported again on the next start.`,
+          );
+        }
+      }
       if (this.pollLoop) this.loop = this.runLoop();
     } catch (error) {
       this.stop();
