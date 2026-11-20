@@ -118,7 +118,7 @@ actor 改数值型 `VARCHAR(36)` 后降到 ≈2304（`actor_key` 展开为 tenan
   租户域用 tenant 十进制串，跨租户/主机锁用显式哨兵
   （`external-storage-registration/1`、`local-storage-host/<hostId>`，19+64=83 字符，hostId 为 64-hex HMAC）。
   哨兵不是数值 tenant，不能硬塞进数值 tenant 预算；可读 scope 列在不哈希的前提下
-  保留它们（384+128=512 字节）。回归测试绑定真实 64-hex 主机哨兵，防止宽度静默回退。
+  保留它们（384+128=512 字节）。回归测试绑定真实 64-hex 主机哨兵，防止宽度静默回退。interim 边界：scope <=96 字符，超长在严格模式下于 guard INSERT fail-closed；完整 admission 校验留待后续阶段。
   `INSERT … ON DUPLICATE KEY UPDATE` + `SELECT … FOR UPDATE` 的获取形态与两个 domain
   不变（[lock inventory](2026-11-12-managed-agent-lock-inventory.md)）。
 - **Session head。** `uk_ma_session_head_business_key (tenant_key, harness_key)` 改为
@@ -216,8 +216,7 @@ resource_key`）、`JdbcHostedCleanupDebtStore`（`owner_key > ?`）、
 
 ## 验证与验收
 
-- 在全新 H2 与一次性 MySQL 8.4 重建 catalog；catalog 校验拒绝漂移、残留哈希列、错误
-  collation；断言全部 246 键 < 3072。
+- 在全新 H2 与一次性 MySQL 8.4 重建 catalog；catalog 校验拒绝漂移与残留哈希列；guard scope collation 由 MySQL-shape 门（`ManagedSchemaMySqlIT`）钉死，而非跨引擎 catalog 校验；断言全部 246 键 < 3072。
 - 跨引擎身份等值测试：大小写、尾随空格、多字节；MySQL NO PAD 与 H2 对齐行为。
 - Admission 拒绝测试：超长/畸形 tenant/actor/外部 id。
 - MySQL 竞态套件：guard 获取（租户 + 哨兵域）、head claim/drain/renew、rename 结算、

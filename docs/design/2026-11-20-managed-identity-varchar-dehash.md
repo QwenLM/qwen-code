@@ -136,7 +136,7 @@ budgeted at `VARCHAR(256)`) drops to ≈2304 once actor is numeric `VARCHAR(36)`
   Sentinels are not numeric tenants and must not be forced into a numeric tenant
   budget; the readable scope column preserves them without hashing
   (384+128=512 bytes). A regression test binds a real 64-hex host sentinel so the
-  width cannot silently regress. The
+  width cannot silently regress. Interim bound: scopes must be <=96 chars and over-long values fail closed at the guard INSERT under strict mode; full admission validation is deferred to a later phase. The
   `INSERT … ON DUPLICATE KEY UPDATE` + `SELECT … FOR UPDATE` acquisition shape and
   the two domains are unchanged
   ([lock inventory](2026-11-12-managed-agent-lock-inventory.md)).
@@ -259,7 +259,7 @@ both engines.
 ## Validation and acceptance
 
 - Recreate catalogs on fresh H2 and disposable MySQL 8.4; catalog validation rejects
-  drift, leftover hash columns, and wrong collations; all 246 keys assert < 3072.
+  drift and leftover hash columns; the guard scope collation is pinned by the MySQL-shape gate (`ManagedSchemaMySqlIT`), not by cross-engine catalog validation; all 246 keys assert < 3072.
 - Cross-engine identity equality tests: case, trailing space, multi-byte; NO PAD on
   MySQL and aligned H2 behavior.
 - Admission rejection tests for over-long/malformed tenant/actor/external ids.
