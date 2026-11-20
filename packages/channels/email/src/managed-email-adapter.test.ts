@@ -2174,6 +2174,9 @@ describe('managed email adapter registration-identity isolation', () => {
       join(dir, 'managed-state.json'),
       JSON.stringify(legacyState(2, 3)),
     );
+    // Mail up to UID 5 arrived while down, so the legacy cursor (2) sits below
+    // the tip and the offline window is genuine.
+    for (let i = 0; i < 5; i++) append(raw(`strand-${i}`));
     await adapter.connect();
     const stranded = lines.filter((l) =>
       l.includes('is stranded and not replayed'),
@@ -2473,6 +2476,29 @@ describe('managed email adapter registration-identity isolation', () => {
     await b.disconnect();
   });
 
+  it('a second registration seeds from an archive that outranks every ledger', async () => {
+    plane.destinationKey = 'cp|tenant-a|chan|actor-a|ws|.';
+    const a = make();
+    await a.connect();
+    const dir = dirname(a.stateFile);
+    await a.disconnect();
+    // The rollback case: an archive carries a generation above A's keyed ledger
+    // (the pre-upgrade build advanced it, then the file was archived), so the
+    // archive arm — not any live ledger — must decide the seed.
+    writeFileSync(
+      join(dir, 'managed-state.json.stranded-fixture'),
+      JSON.stringify({ ...legacyState(0, 0), generation: 4 }),
+    );
+    plane.enforceGenerationFence = true;
+    plane.highestGeneration = 4;
+    plane.destinationKey = 'cp|tenant-a|chan|actor-b|ws|.';
+    const b = make();
+    await b.connect();
+    expect(plane.registrations.at(-1)).toEqual({ accountGeneration: 4 });
+    expect(state(b).generation).toBe(4);
+    await b.disconnect();
+  });
+
   it('repeats the loss clauses on the retry after a failed first start', async () => {
     const lines: string[] = [];
     plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
@@ -2646,5 +2672,75 @@ describe('managed email adapter registration-identity isolation', () => {
     expect(stranded).toHaveLength(1);
     expect(stranded[0]).toContain('restore or repair it before restarting');
     expect(stranded[0]).toContain('only local copy');
+  });
+
+  it('keeps an unreadable legacy in place for repair instead of archiving it', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'managed-state.json'), '{not json');
+    await adapter.connect();
+    // The repair target stays at the printed path; archiving it would
+    // invalidate the restore instruction and make the warning permanent.
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+    expect(
+      readdirSync(dir).filter((f) =>
+        f.startsWith('managed-state.json.stranded-'),
+      ),
+    ).toHaveLength(0);
+    expect(
+      lines.some((l) => l.includes('restore or repair it before restarting')),
+    ).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('names an unreadable generation source on a runtime mailbox reopen', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    const corrupt = join(dir, 'managed-state-aaaaaaaaaaaaaaaa.json');
+    writeFileSync(corrupt, '{not json');
+    await adapter.connect();
+    // Exactly one line per start: openMailbox names it, the heal does not re-log.
+    expect(
+      lines.filter((l) => l.includes('could not read the generation source')),
+    ).toHaveLength(1);
+    lines.length = 0;
+    // Force a runtime reopen: tick() re-enters openMailbox without connect().
+    (adapter as unknown as { imap: { usable: boolean } }).imap.usable = false;
+    await adapter.tick();
+    expect(
+      lines.filter(
+        (l) =>
+          l.includes('could not read the generation source') &&
+          l.includes(corrupt),
+      ),
+    ).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
+  it('does not report a skipped offline window for a lossless quiescent upgrade', async () => {
+    const lines: string[] = [];
+    plane.destinationKey = 'cp|tenant-a|chan|actor|ws|.';
+    const adapter = make({}, { log: (l: string) => lines.push(l) });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    // Quiescent at the pre-upgrade cursor: legacy lastUid 0, empty mailbox (tip
+    // 0). Nothing arrived while down, so the upgrade skipped no offline window.
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({ ...legacyState(0, 0), lastUid: 0 }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).not.toContain('Mail received after the legacy cursor');
+    await adapter.disconnect();
   });
 });

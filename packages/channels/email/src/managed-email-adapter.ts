@@ -234,56 +234,6 @@ export class ManagedEmailAdapter {
       // (below), so a failed first start leaves the file for a rollback to
       // recover.
       const legacy = this.store.strandedLegacyLedger();
-      if (legacy) {
-        // An unreadable legacy is not an empty one: its counts are unknown and
-        // any claims it held are stranded. Name the inbound and outbound
-        // consequences separately so an outbound-only strand does not report
-        // lost inbound mail.
-        const pendingLabel = legacy.readable ? legacy.pending : 'unknown';
-        const outboundLabel = legacy.readable ? legacy.outbound : 'unknown';
-        // The loss clauses are reporting gates keyed on the cursors, not on
-        // load-ness, so the retry after a first start that failed once
-        // openMailbox pinned a fresh ledger to the tip still reports a window
-        // that is permanently skipped. The pending claims sit at/below the legacy
-        // cursor, so they are stranded once the loaded cursor reaches it (the
-        // search floor is cursor + 1). The offline window begins at legacy cursor
-        // + 1, so it is only skipped when the loaded cursor is STRICTLY past the
-        // legacy cursor — at equality the next poll admits that mail, and
-        // claiming a loss would be the false alarm these gates exist to prevent.
-        // A roll-forward whose keyed cursor still sits below the legacy cursor
-        // re-fetches the window and is told no loss. The cursor itself is never
-        // seeded from the legacy.
-        const cursor = legacy.lastUid;
-        const pendingStranded =
-          loaded === undefined ||
-          (cursor !== undefined && loaded.lastUid >= cursor);
-        const offlineSkipped =
-          loaded === undefined ||
-          (cursor !== undefined && loaded.lastUid > cursor);
-        let consequence = '';
-        if (!legacy.readable) {
-          consequence =
-            ' Its contents could not be read; restore or repair it before restarting — the account generation it carried is the only local copy, and any staged-but-unadmitted claims it held are stranded.';
-        } else {
-          if (legacy.pending > 0 && pendingStranded)
-            consequence +=
-              ' Its staged-but-unadmitted claims are stranded; the fresh ledger starts at the current mailbox tip and does not re-fetch them.';
-          if (legacy.outbound > 0)
-            consequence +=
-              ' Its outbound segments with an unknown delivery status were dropped.';
-          // Even a quiescent 0/0 legacy skips the offline backlog: the fresh
-          // ledger restarts the cursor at the mailbox tip, so mail received
-          // after the legacy cursor while the adapter was down is never listed.
-          // Name that window separately — an independent sentence, not a
-          // loosening of the pending gate (mirrors the GitHub offline-window
-          // clause). A genuinely cursor-less legacy reports no loss.
-          if (offlineSkipped && cursor !== undefined)
-            consequence += ` Mail received after the legacy cursor (UID ${cursor}) and before this start was never listed and will not be admitted.`;
-        }
-        this.log(
-          `Managed email upgraded to per-registration ledgers; the legacy ledger ${legacy.path} (${pendingLabel} pending, ${outboundLabel} outbound) is stranded and not replayed.${consequence}`,
-        );
-      }
       this.state = loaded;
       // The stall flag is in-memory, so a restart zeroes it: derive the
       // stall from a persisted held claim, or the search re-opens behind
@@ -323,13 +273,9 @@ export class ManagedEmailAdapter {
       // re-offer them at a raised generation, which would change their dedupe
       // key — and raise the counter, mirroring the epoch branch. An unreadable
       // generation source is named, not dropped silently. No cursor adoption.
-      const { generation: highWater, skipped } =
-        this.store.highestSiblingGeneration();
-      for (const path of skipped) {
-        this.log(
-          `Managed email could not read the generation source ${path}; its generation is not carried this start.`,
-        );
-      }
+      // openMailbox already named any unreadable generation source this start,
+      // so the heal reads only the number (no second log line per start).
+      const { generation: highWater } = this.store.highestSiblingGeneration();
       if (this.state && highWater > this.state.generation) {
         if (this.state.pending.length) {
           this.log(
@@ -341,6 +287,44 @@ export class ManagedEmailAdapter {
         }
         this.state.generation = highWater;
         this.persist();
+      }
+      // Report the stranded legacy now that the cursor is pinned, so the
+      // offline-window clause consults the ACTUAL window: a fresh ledger pins to
+      // the mailbox tip, and a quiescent upgrade whose tip equals the legacy
+      // cursor skipped nothing — reporting a loss there would be a false alarm
+      // on the common clean-shutdown path. The pending claims sit at/below the
+      // legacy cursor (stranded once the cursor reaches it; always stranded on a
+      // fresh upgrade). The offline window begins at legacy cursor + 1, so it is
+      // skipped only when the pinned cursor is STRICTLY past it — at equality the
+      // next poll admits that mail. These are reporting gates keyed on the
+      // cursors, not on load-ness, so the retry after a failed first start (whose
+      // ledger is already pinned to the tip) still reports; the cursor itself is
+      // never seeded from the legacy.
+      if (legacy) {
+        const pendingLabel = legacy.readable ? legacy.pending : 'unknown';
+        const outboundLabel = legacy.readable ? legacy.outbound : 'unknown';
+        const cursor = legacy.lastUid;
+        const pinned = this.state!.lastUid;
+        const pendingStranded =
+          loaded === undefined || (cursor !== undefined && pinned >= cursor);
+        const offlineSkipped = cursor !== undefined && pinned > cursor;
+        let consequence = '';
+        if (!legacy.readable) {
+          consequence =
+            ' Its contents could not be read; restore or repair it before restarting — the account generation it carried is the only local copy, and any staged-but-unadmitted claims it held are stranded.';
+        } else {
+          if (legacy.pending > 0 && pendingStranded)
+            consequence +=
+              ' Its staged-but-unadmitted claims are stranded; the fresh ledger starts at the current mailbox tip and does not re-fetch them.';
+          if (legacy.outbound > 0)
+            consequence +=
+              ' Its outbound segments with an unknown delivery status were dropped.';
+          if (offlineSkipped)
+            consequence += ` Mail received after the legacy cursor (UID ${cursor}) and before this start was never listed and will not be admitted.`;
+        }
+        this.log(
+          `Managed email upgraded to per-registration ledgers; the legacy ledger ${legacy.path} (${pendingLabel} pending, ${outboundLabel} outbound) is stranded and not replayed.${consequence}`,
+        );
       }
       await this.ensureRegistered(this.state!);
       // Segments sent before a crash took their receipt: the provider may
@@ -355,8 +339,11 @@ export class ManagedEmailAdapter {
       // not re-announced on every later start, and a second registration of the
       // mailbox is not told the first registration's claims were its own. A
       // failed start above leaves it untouched for a rollback to recover; the
-      // notice then simply repeats on the retry.
-      if (legacy) {
+      // notice then simply repeats on the retry. An UNREADABLE legacy is kept in
+      // place, not archived: the notice told the operator to repair it at that
+      // path, and archiving would invalidate the instruction and turn the corrupt
+      // file into a permanent unreadable generation source no start can clear.
+      if (legacy && legacy.readable) {
         const archived = this.store.archiveStrandedLegacy();
         // The notice above names the legacy path, which this rename moves; name
         // the archived path too so an operator following the notice can still
@@ -421,7 +408,16 @@ export class ManagedEmailAdapter {
     // not merely +1, or its register is refused channel_generation_stale before
     // any later seed can heal it. Clamp both the fresh and the epoch generation
     // to it here, before this branch registers.
-    const { generation: highWater } = this.store.highestSiblingGeneration();
+    const { generation: highWater, skipped } =
+      this.store.highestSiblingGeneration();
+    // Name every unreadable generation source here too: tick()/poll() re-enter
+    // openMailbox without going through connect()'s own start path, so the
+    // diagnostic must not live only in connect().
+    for (const path of skipped) {
+      this.log(
+        `Managed email could not read the generation source ${path}; its generation is not carried this start.`,
+      );
+    }
     if (!this.state) {
       this.state = {
         version: 1,

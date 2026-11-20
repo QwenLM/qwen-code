@@ -233,7 +233,6 @@ describe('ManagedEmailStateStore registration-identity keying', () => {
     expect(stranded.pending).toBe(0);
     expect(stranded.outbound).toBe(0);
     expect(stranded.lastUid).toBeUndefined();
-    expect(stranded.generation).toBeUndefined();
   });
 
   it('counts only unknown-status outbound segments, not settled receipts', () => {
@@ -283,7 +282,7 @@ describe('ManagedEmailStateStore registration-identity keying', () => {
     expect(stranded.readable).toBe(true);
   });
 
-  it('reads the legacy cursor and generation for the notice and seed', () => {
+  it('reads the legacy cursor for the notice', () => {
     const store = new ManagedEmailStateStore(
       'mail',
       tempCwd(),
@@ -293,14 +292,13 @@ describe('ManagedEmailStateStore registration-identity keying', () => {
     mkdirSync(store.directory, { recursive: true });
     writeFileSync(
       join(store.directory, 'managed-state.json'),
-      JSON.stringify({ ...freshState(), lastUid: 440, generation: 2 }),
+      JSON.stringify({ ...freshState(), lastUid: 440 }),
     );
     const stranded = store.strandedLegacyLedger()!;
     expect(stranded.lastUid).toBe(440);
-    expect(stranded.generation).toBe(2);
   });
 
-  it('a cursor-less legacy reports undefined cursor and generation', () => {
+  it('a cursor-less legacy reports undefined cursor', () => {
     const store = new ManagedEmailStateStore(
       'mail',
       tempCwd(),
@@ -321,7 +319,6 @@ describe('ManagedEmailStateStore registration-identity keying', () => {
     );
     const stranded = store.strandedLegacyLedger()!;
     expect(stranded.lastUid).toBeUndefined();
-    expect(stranded.generation).toBeUndefined();
     expect(stranded.readable).toBe(true);
   });
 
@@ -463,6 +460,30 @@ describe('ManagedEmailStateStore registration-identity keying', () => {
     const carried = store.highestSiblingGeneration();
     expect(carried.generation).toBe(6);
     // The corrupt sibling is named, not dropped silently; tmp/Legacy ignored.
+    expect(carried.skipped).toEqual([corrupt]);
+  });
+
+  it('the archive arm alone carries the high-water when no ledger is higher', () => {
+    const store = new ManagedEmailStateStore(
+      'mail',
+      tempCwd(),
+      settings,
+      'cp|tenant-a|chan|actor|ws|.',
+    );
+    mkdirSync(store.directory, { recursive: true });
+    // The rollback case: only a .stranded-* archive carries the generation
+    // (the pre-upgrade build advanced it, then the file was archived).
+    writeFileSync(
+      join(store.directory, 'managed-state.json.stranded-only'),
+      JSON.stringify({ ...freshState(), generation: 5 }),
+    );
+    const corrupt = join(
+      store.directory,
+      'managed-state-aaaaaaaaaaaaaaaa.json',
+    );
+    writeFileSync(corrupt, '{not json');
+    const carried = store.highestSiblingGeneration();
+    expect(carried.generation).toBe(5);
     expect(carried.skipped).toEqual([corrupt]);
   });
 

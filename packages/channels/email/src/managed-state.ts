@@ -211,12 +211,11 @@ export class ManagedEmailStateStore {
    * an empty ledger: an unreadable legacy certainly strands whatever it held,
    * so the caller must not render it as a quiescent "nothing was lost".
    *
-   * `lastUid` and `generation` are read for the notice and the generation seed,
-   * never adopted as pending state: the fresh ledger restarts the cursor at the
-   * mailbox tip (so the offline window after the legacy cursor is skipped, even
-   * for a quiescent 0/0 legacy) and at generation 1 (so a mailbox that already
-   * re-keyed must seed the monotonic counter back, or the control plane refuses
-   * the lower generation on every start).
+   * `lastUid` is read for the notice's offline-window gate, never adopted as
+   * pending state: the fresh ledger restarts the cursor at the mailbox tip, so
+   * the offline window after the legacy cursor is skipped. The monotonic
+   * generation seed comes from `highestSiblingGeneration()` (the durable
+   * high-water across the mailbox directory), NOT from this record.
    */
   strandedLegacyLedger():
     | {
@@ -225,7 +224,6 @@ export class ManagedEmailStateStore {
         outbound: number;
         readable: boolean;
         lastUid: number | undefined;
-        generation: number | undefined;
       }
     | undefined {
     const legacyPath = join(this.directory, 'managed-state.json');
@@ -234,13 +232,11 @@ export class ManagedEmailStateStore {
     let outbound = 0;
     let readable = true;
     let lastUid: number | undefined;
-    let generation: number | undefined;
     try {
       const value = JSON.parse(readFileSync(legacyPath, 'utf8')) as {
         pending?: unknown[];
         outbound?: unknown[];
         lastUid?: unknown;
-        generation?: unknown;
       } | null;
       // A parseable non-ledger (`{}`, `[]`, `null`, or an object without the
       // pending/outbound arrays) is not a quiescent empty ledger: it is an
@@ -275,8 +271,6 @@ export class ManagedEmailStateStore {
           }).length
         : 0;
       lastUid = typeof value?.lastUid === 'number' ? value.lastUid : undefined;
-      generation =
-        typeof value?.generation === 'number' ? value.generation : undefined;
     } catch {
       // A corrupt or unreadable legacy still strands; flag it so the caller
       // reports unknown counts and a possible loss, never a silent "empty".
@@ -288,7 +282,6 @@ export class ManagedEmailStateStore {
       outbound,
       readable,
       lastUid,
-      generation,
     };
   }
 
