@@ -36357,6 +36357,78 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('updateSessionMetadata', () => {
+    it('keeps a live manual rename when the initial title completes late', async () => {
+      const initialWrite = deferred<Record<string, unknown>>();
+      const titleUpdates: unknown[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method, params) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionTitle) {
+                titleUpdates.push(params);
+                if (params['initialDisplayName'] !== undefined) {
+                  return initialWrite.promise;
+                }
+              }
+              return { persisted: true };
+            },
+          }).channel,
+      });
+
+      try {
+        const { sessionId } = await bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+        });
+        const events: BridgeEvent[] = [];
+        const sub = bridge.subscribeEvents(sessionId);
+        const drain = (async () => {
+          for await (const event of sub) events.push(event);
+        })();
+
+        expect(
+          bridge.initializeSessionTitle?.(sessionId, 'First prompt'),
+        ).toEqual({ displayName: undefined });
+        await vi.waitFor(() => expect(titleUpdates).toHaveLength(1));
+        expect(titleUpdates[0]).toEqual({
+          sessionId,
+          initialDisplayName: 'First prompt',
+        });
+
+        bridge.updateSessionMetadata(sessionId, { displayName: 'My title' });
+        await vi.waitFor(() => expect(titleUpdates).toHaveLength(2));
+        expect(
+          bridge.initializeSessionTitle?.(sessionId, 'Late title'),
+        ).toEqual({ displayName: 'My title' });
+        expect(titleUpdates).toHaveLength(2);
+
+        const beforeInitialReply = bridge.getSessionCatalogVersion().revision;
+        initialWrite.resolve({ persisted: true });
+        await vi.waitFor(() =>
+          expect(bridge.getSessionCatalogVersion().revision).toBe(
+            beforeInitialReply + 1,
+          ),
+        );
+        expect(bridge.getSessionSummary(sessionId).displayName).toBe(
+          'My title',
+        );
+        await bridge.closeSession(sessionId);
+        await drain;
+        expect(
+          events
+            .filter((event) => event.type === 'session_metadata_updated')
+            .map((event) => event.data),
+        ).toEqual([
+          expect.objectContaining({
+            displayName: 'My title',
+            titleSource: 'manual',
+          }),
+        ]);
+      } finally {
+        initialWrite.resolve({ persisted: false });
+        await bridge.shutdown();
+      }
+    });
+
     it('publishes session_metadata_updated event', async () => {
       const handles: Array<{ killed: boolean }> = [];
       const factory: ChannelFactory = async () => {

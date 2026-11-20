@@ -41,13 +41,17 @@ public class WakeRecovery {
                 if (!store.claim(candidate)) {
                     continue;
                 }
-                var proof = store.hasPendingInput(candidate);
-                if (proof.isEmpty()) {
-                    continue;
-                }
-                boolean pending = proof.get();
-                if (!store.recordPending(candidate, pending) || !pending) {
-                    continue;
+                // A stamped head's seal already proved a due input at this
+                // revision; only an unstamped head needs the journal replay.
+                if (!candidate.stamped()) {
+                    var proof = store.hasPendingInput(candidate);
+                    if (proof.isEmpty()) {
+                        continue;
+                    }
+                    boolean pending = proof.get();
+                    if (!store.recordPending(candidate, pending) || !pending) {
+                        continue;
+                    }
                 }
                 if (candidate.parentSessionId() != null) {
                     var run = records.childRunBody(candidate.tenantId(), candidate.parentSessionId(),

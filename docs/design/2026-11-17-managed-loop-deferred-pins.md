@@ -1,7 +1,9 @@
 # Managed /loop deferred review pins
 
-- Status: proposed
+- Status: merged — [#17594](https://github.com/QwenLM/qwen-code/pull/17594), squash `4612552f46`, 2026-11-20T03:51:54Z (approved by yiliang114 and qqqys)
 - Date: 2026-11-17
+- Verification at the merged head: fourteen review rounds and three independent verification rounds folded in. Core 35/35, scripts meta 185/185, cli i18n 22/22, `ManagedLoopSkillTest` 19/19, the neighbouring core surface 88 files / 4187 tests, and both packaged arms green after a full rebuild — skill session `78f20402-0a2f-441d-9615-21b66959ad1a`, fire session `8d2a1796-8e93-4765-97c6-21ef29f1a4c1` with occurrenceKey `schedule:2026-11-19T19:28:00Z` (scheduled/fired/completed). All four required checks passed. The record below carries every mutation witness, every byte-equal restore and every CI attribution.
+- Follow-ups: [#17673](https://github.com/QwenLM/qwen-code/issues/17673) — six open hardening items, including the executed-decision seam that ends the spelling-evasion family; [#17885](https://github.com/QwenLM/qwen-code/issues/17885) — the windows-latest Java lane's argv limit, main-owned and attributed here.
 - Related: [Managed loop skill asset](2026-11-14-managed-loop-skill-asset.md) (#17272), [skill E2E CI wiring](2026-11-14-managed-loop-skill-asset.md) (#17433, #17470), [scheduled-fire E2E](2026-11-17-managed-loop-fire-e2e.md) (#17506)
 - 中文版本: [2026-11-17-managed-loop-deferred-pins.zh-CN.md](2026-11-17-managed-loop-deferred-pins.zh-CN.md)
 

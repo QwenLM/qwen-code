@@ -293,6 +293,8 @@ vi.mock('./hosted-never-started-reconcile.js', async (importOriginal) => {
 
 const state = vi.hoisted(() => ({
   root: '',
+  wakeDispatch: false,
+  wakeStamps: [] as unknown[],
   assertWritable: vi.fn(async () => undefined),
   toolResults: null as DurableToolResultResourceStore | null,
   publicationRequest: vi.fn(),
@@ -466,6 +468,7 @@ vi.mock(
         // spy still intercepts; a pre-bound copy would shadow it.
         const proto = Object.getPrototypeOf(opened) as {
           appendTransaction: (records: readonly unknown[]) => Promise<void>;
+          seal: typeof opened.seal;
         };
         const append = (records: readonly unknown[]) =>
           proto.appendTransaction.call(opened, records);
@@ -476,9 +479,17 @@ vi.mock(
           }
           return append(records);
         };
+        opened.seal = (
+          commit: Parameters<typeof opened.seal>[0],
+          wake?: unknown,
+        ) => {
+          if (wake) state.wakeStamps.push(wake);
+          return proto.seal.call(opened, commit);
+        };
         return opened;
       };
       return {
+        supportsWakeDispatch: () => state.wakeDispatch,
         journalStore,
         resourceStore,
         toolResultResources: state.toolResults ?? resourceStore,
@@ -10429,6 +10440,50 @@ describe('Hosted Harness no-tool session', () => {
       await managed.close().catch(() => undefined);
     }
   });
+
+  it.each([false, true])(
+    'suspends beside an unattempted deferred loop wakeup only where the control plane dispatches it (wakeDispatch=%s)',
+    async (wakeDispatch) => {
+      const notBefore = Date.now() + 3_600_000;
+      await prewriteLoopWakeupInput(notBefore);
+      mockBrokerBroker();
+      state.wakeDispatch = wakeDispatch;
+      state.wakeStamps.length = 0;
+      try {
+        const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+        const loaded = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        ).send({
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-shell/1',
+        });
+        expect(loaded.status).toBe(200);
+        const status = () =>
+          headers(supertest(server).get(`/session/${SESSION_ID}/status`)).set(
+            'X-Qwen-Client-Id',
+            loaded.body.clientId as string,
+          );
+        if (wakeDispatch) {
+          await vi.waitFor(
+            async () => {
+              expect((await status()).status).toBe(404);
+            },
+            { timeout: 5000 },
+          );
+          expect(state.wakeStamps).toEqual([
+            { pending: true, dueAt: notBefore },
+          ]);
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 600));
+          expect((await status()).status).toBe(200);
+          expect(state.wakeStamps).toEqual([]);
+          await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+        }
+      } finally {
+        state.wakeDispatch = false;
+      }
+    },
+  );
 
   it('does not keep the Session busy while a loop wakeup is still deferred', async () => {
     await prewriteLoopWakeupInput(Date.now() + 3_600_000);
@@ -46854,6 +46909,24 @@ describe('idle suspension', () => {
         record.managedSession?.kind === 'activation.changed' &&
         record.managedSession?.payload?.phase === 'released',
     );
+
+  it('stamps a clean suspension with nothing pending where the control plane dispatches wakes', async () => {
+    state.wakeDispatch = true;
+    state.wakeStamps.length = 0;
+    try {
+      const server = await app(false, undefined, true, { idleSuspendMs: 150 });
+      const clientId = await createIdleSession(server);
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+      expect(state.wakeStamps).toEqual([{ pending: false, dueAt: 0 }]);
+    } finally {
+      state.wakeDispatch = false;
+    }
+  });
 
   it('suspends an idle session and cold-opens it on the next load', async () => {
     const server = await app(false, undefined, true, { idleSuspendMs: 150 });
