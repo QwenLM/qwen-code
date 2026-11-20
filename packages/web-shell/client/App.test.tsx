@@ -586,6 +586,8 @@ const {
   const qualifiedSetVisionBridgeSettings = vi.fn();
   const runtimeStop = vi.fn();
   const workspaceClient = {
+    getRestartRecoveries: vi.fn(),
+    continueRestartRecoveries: vi.fn(),
     sendToSubSession: vi.fn(),
     runtimeStopOptions: vi.fn(),
     liveSetupStatus: vi
@@ -13152,6 +13154,59 @@ async function flush(): Promise<void> {
     await Promise.resolve();
   });
 }
+
+describe('App restart recovery', () => {
+  beforeEach(() => {
+    mockConnection.capabilities.features = ['restart_recovery'];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        { id: 'secondary', cwd: '/work/secondary', trusted: true },
+      ],
+    };
+    mockWorkspace.client.getRestartRecoveries.mockReset().mockResolvedValue({
+      workspaces: [
+        {
+          workspace: '/work/secondary',
+          workspaceId: 'secondary',
+          cwd: '/work/secondary',
+          v: 1,
+          items: [
+            {
+              sessionId: 'recovery-session',
+              lastActivityAt: '2026-11-18T00:00:00.000Z',
+              interruption: 'daemon_shutdown',
+            },
+          ],
+          truncated: false,
+        },
+      ],
+    });
+  });
+
+  it('scans only the locked workspace', async () => {
+    const { container } = renderApp({
+      lockedWorkspaceCwd: '/work/secondary',
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(mockWorkspace.client.getRestartRecoveries).toHaveBeenCalled();
+      });
+    });
+    expect(
+      mockWorkspace.client.getRestartRecoveries,
+    ).toHaveBeenCalledExactlyOnceWith({
+      workspaces: ['/work/secondary'],
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(container.textContent).toContain(
+          '1 task interrupted by a restart',
+        );
+      });
+    });
+  });
+});
 
 async function clickSubmit(container: HTMLElement): Promise<void> {
   await act(async () => {

@@ -1344,6 +1344,28 @@ export const ZH: Messages = {
     '此旧会话已取消，但未记录来源。继续前需要你确认。',
   'session.recovery.confirmCancellation':
     '此轮任务可能已被主动停止，但未记录原因。确定要继续执行吗？',
+  'restartRecovery.title': (v) => `上次重启中断了 ${v?.['count'] ?? 0} 个任务`,
+  'restartRecovery.review': '查看',
+  'restartRecovery.hide': '收起',
+  'restartRecovery.continue': '继续',
+  'restartRecovery.continueAll': '全部继续',
+  'restartRecovery.confirmToolTurn': '确认并继续',
+  'restartRecovery.toolTurnHint':
+    '任务在工具调用中中断；继续会先把未完成的调用标记为失败，再由模型接续。',
+  'restartRecovery.inFlight': '进程中断',
+  'restartRecovery.daemonShutdown': 'Daemon 重启',
+  'restartRecovery.interrupted': '已中断',
+  'restartRecovery.cancellationNeedsConversation': '请打开会话确认这次取消。',
+  'restartRecovery.notContinuable': '该任务已不再等待恢复。',
+  'restartRecovery.failed': '无法继续',
+  'restartRecovery.batchStopped':
+    'Daemon 未回复；前面的会话可能已在运行，请先确认会话状态再重试。',
+  'restartRecovery.loadFailed': '无法读取中断任务',
+  'restartRecovery.retry': '重试',
+  'restartRecovery.truncated':
+    '可能还有更多被中断的任务超出扫描上限，请重试扫描。',
+  'restartRecovery.scanFailedWorkspaces': (v) =>
+    `无法扫描：${v?.workspaces ?? ''}`,
   'session.archived': '该会话已归档',
   'session.archivedDescription': '需要先取消归档，才能打开该会话。',
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',
@@ -2749,8 +2771,7 @@ export const ZH: Messages = {
   'queue.insertTip': '插入当前回合',
   'queue.insertCommandDisabled': '命令不能插入当前回合',
   'queue.sendNow': '立即发送',
-  'queue.sendNowTip':
-    '立即发送排队的消息，并截断模型当前的回复（回复已开始调用工具时不截断）；正在运行的工具会先执行完',
+  'queue.sendNowTip': '立即发送排队的消息。模型正在回复或调用工具时会打断它',
   'queue.sendNowFailed': '立即发送排队消息失败',
   'queue.footer': '按 ↑ 编辑最后一条排队消息 · Esc 清空队列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 张图片）`,

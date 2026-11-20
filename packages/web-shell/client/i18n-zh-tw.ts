@@ -1225,6 +1225,28 @@ export const ZH_TW: Record<string, MessageValue> = {
     '此舊會話已取消，但未記錄來源。繼續前需要你確認。',
   'session.recovery.confirmCancellation':
     '此輪任務可能已被主動停止，但未記錄原因。確定要繼續執行嗎？',
+  'restartRecovery.title': (v) => `上次重啟中斷了 ${v?.['count'] ?? 0} 個任務`,
+  'restartRecovery.review': '檢視',
+  'restartRecovery.hide': '收起',
+  'restartRecovery.continue': '繼續',
+  'restartRecovery.continueAll': '全部繼續',
+  'restartRecovery.confirmToolTurn': '確認並繼續',
+  'restartRecovery.toolTurnHint':
+    '任務在工具呼叫時中斷；繼續前會先將未完成的呼叫標記為失敗，再由模型接續。',
+  'restartRecovery.inFlight': '處理程序中斷',
+  'restartRecovery.daemonShutdown': 'Daemon 重新啟動',
+  'restartRecovery.interrupted': '已中斷',
+  'restartRecovery.cancellationNeedsConversation': '請開啟會話確認這次取消。',
+  'restartRecovery.notContinuable': '此任務已不再等待恢復。',
+  'restartRecovery.failed': '無法繼續',
+  'restartRecovery.batchStopped':
+    'Daemon 未回覆；先前的會話可能正在執行，請先確認會話狀態再重試。',
+  'restartRecovery.loadFailed': '無法讀取中斷的任務',
+  'restartRecovery.retry': '重試',
+  'restartRecovery.truncated':
+    '可能有更多被中斷的任務超出掃描上限，請重試掃描。',
+  'restartRecovery.scanFailedWorkspaces': (v) =>
+    `無法掃描：${v?.workspaces ?? ''}`,
   'session.archived': '該會話已歸檔',
   'session.archivedDescription': '需要先取消歸檔，才能開啟該會話。',
   'session.capabilitiesFailed': '無法載入 Daemon 能力。請重試後再開啟該會話。',
@@ -2661,8 +2683,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'queue.insertTip': '插入當前回合',
   'queue.insertCommandDisabled': '命令不能插入當前回合',
   'queue.sendNow': '立即傳送',
-  'queue.sendNowTip':
-    '立即傳送排隊的訊息，並截斷模型當前的回覆（回覆已開始呼叫工具時不截斷）；正在執行的工具會先執行完',
+  'queue.sendNowTip': '立即傳送排隊的訊息。模型正在回覆或呼叫工具時會打斷它',
   'queue.sendNowFailed': '立即傳送排隊訊息失敗',
   'queue.footer': '按 ↑ 編輯最後一條排隊訊息 · Esc 清空佇列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 張圖片）`,

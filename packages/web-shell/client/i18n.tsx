@@ -1314,6 +1314,31 @@ const EN: Messages = {
     'This older session was cancelled, but the reason was not recorded. Confirm before continuing.',
   'session.recovery.confirmCancellation':
     'This turn may have been stopped intentionally. Do you want to continue it?',
+  'restartRecovery.title': (v) =>
+    `${v?.['count'] ?? 0} task${v?.['count'] === 1 ? '' : 's'} interrupted by a restart`,
+  'restartRecovery.review': 'Review',
+  'restartRecovery.hide': 'Hide',
+  'restartRecovery.continue': 'Continue',
+  'restartRecovery.continueAll': 'Continue all',
+  'restartRecovery.confirmToolTurn': 'Confirm and continue',
+  'restartRecovery.toolTurnHint':
+    'This task stopped during a tool call. Continuing closes the unfinished call as failed before the model resumes.',
+  'restartRecovery.inFlight': 'Process interrupted',
+  'restartRecovery.daemonShutdown': 'Daemon restarted',
+  'restartRecovery.interrupted': 'Interrupted',
+  'restartRecovery.cancellationNeedsConversation':
+    'Open the conversation to confirm this cancellation.',
+  'restartRecovery.notContinuable':
+    'This task is no longer waiting for recovery.',
+  'restartRecovery.failed': 'Could not continue',
+  'restartRecovery.batchStopped':
+    'No reply from the daemon. Earlier sessions may already be running; check their state before retrying.',
+  'restartRecovery.loadFailed': 'Could not read interrupted tasks',
+  'restartRecovery.retry': 'Retry',
+  'restartRecovery.truncated':
+    'More interrupted tasks may be available beyond the scan limit. Retry to scan again.',
+  'restartRecovery.scanFailedWorkspaces': (v) =>
+    `Could not scan: ${v?.workspaces ?? ''}`,
   'session.archived': 'This conversation is archived',
   'session.archivedDescription':
     'Unarchive it before opening the conversation.',
@@ -2850,7 +2875,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'queue.insertCommandDisabled': 'Commands cannot be inserted mid-turn',
   'queue.sendNow': 'Send now',
   'queue.sendNowTip':
-    "Send queued messages now, cutting the model's current response short unless it has started a tool call; running tools finish first",
+    'Send queued messages now. Interrupts the model if it is responding or calling tools',
   'queue.sendNowFailed': 'Failed to send queued messages now',
   'queue.footer':
     'Press ↑ to edit the latest queued message · Esc to clear queue',
@@ -5404,6 +5429,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
  */
 export const LOCAL_FILES_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
   key.startsWith('localFiles.'),
+);
+
+export const RESTART_RECOVERY_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
+  key.startsWith('restartRecovery.'),
 );
 
 const catalogs = new Map(eagerCatalogs);

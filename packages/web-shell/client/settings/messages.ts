@@ -484,6 +484,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.worktree.defaultForNewSessions': '新会话默认使用 Worktree',
   'settings.description.worktree.defaultForNewSessions':
     '开启（默认）时，受信任 Git workspace 中的新 Web Shell 会话默认进入隔离 worktree：composer 缺省为 Worktree 模式，首条消息发送时创建 worktree。设为 false 则缺省使用当前分支。仅影响 Web Shell composer 的缺省值；显式模式选择与 daemon API 不变。',
+  'settings.label.worktree.maxRetained': '保留的会话 Worktree 上限',
+  'settings.description.worktree.maxRetained':
+    '每仓库最近 Web Shell 会话 worktree 的预留保留上限，目前尚未应用：按数量清扫与重开 chat 时恢复均未在此切片实现。删除 chat 仅在必须保留工作树状态时，于移除前创建快照；归档 chat 保留工作树及绑定。设为 0 将用于关闭按数量自动删除。不影响工具/agent worktree，它们保留现有清理语义。后续功能由 #17237 跟踪。',
 };
 
 export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
@@ -718,9 +721,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
   'settings.label.fastModel': 'Быстрая модель',
   'settings.description.fastModel':
     'Модель для подсказок ввода и спекулятивного исполнения. Оставьте пустым, чтобы использовать основную. Более маленькая/быстрая модель (например qwen3-coder-flash) снижает задержку и стоимость.',
-  'settings.label.visionBridgeTimeoutMs': 'Тайм-аут Vision Bridge (мс)',
+  'settings.label.visionBridgeTimeoutMs': 'Тайм-аут моста зрения (мс)',
   'settings.description.visionBridgeTimeoutMs':
-    'Тайм-аут одной попытки в миллисекундах для вызова транскрипции изображений vision bridge (положительное целое до 2147483647). Без значения используются встроенные 30 с. Увеличьте для медленных или проксируемых vision-эндпоинтов. Задаётся через /model --vision --timeout <секунды>.',
+    'Тайм-аут одной попытки в миллисекундах для вызова транскрипции изображений моста зрения (положительное целое до 2147483647). Без значения используются встроенные 30 с. Увеличьте для медленных или проксируемых vision-эндпоинтов. Задаётся через /model --vision --timeout <секунды>.',
   'settings.label.modelFallbacks': 'Резервные модели',
   'settings.description.modelFallbacks':
     'Список ID резервных моделей (через запятую, до 3), которые пробуются по порядку при ошибках ёмкости основной (429/503/529). Например «qwen-plus,qwen-turbo». Можно задать CLI --fallback-model.',
@@ -766,9 +769,9 @@ export const SETTINGS_MESSAGES_RU: Record<string, SettingsMessage> = {
     'Открывать страницы результатов',
   'settings.description.tools.webSearch.webExtractor':
     'Разрешить поисковому агенту открывать и читать страницы результатов (DashScope web_extractor), чтобы ответы были обоснованнее. DashScope тарифицирует это отдельно. Переопределение: WEB_SEARCH_EXTRACTOR.',
-  'settings.label.tools.webSearch.timeoutMs': 'Таймаут поиска (мс)',
+  'settings.label.tools.webSearch.timeoutMs': 'Тайм-аут поиска (мс)',
   'settings.description.tools.webSearch.timeoutMs':
-    'Общий бюджет времени одного вызова web_search в миллисекундах (по умолчанию 120000, максимум 600000; остальные значения откатываются к умолчанию). Поисковый агент делает несколько запросов и может открывать страницы; если бюджет исчерпан после хотя бы одного завершённого поиска, возвращаются частичные результаты — если бюджет кончился до первого поиска, инструмент сообщает ошибку таймаута, потому что рассказ без выполненного поиска не является аудируемым доказательством. Более низкий лимит одного инструмента (QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS) сработает раньше и отбросит частичные результаты; держите его выше этого бюджета. Переопределение: WEB_SEARCH_TIMEOUT_MS.',
+    'Общий бюджет времени одного вызова web_search в миллисекундах (по умолчанию 120000, максимум 600000; остальные значения откатываются к умолчанию). Поисковый агент делает несколько запросов и может открывать страницы; если бюджет исчерпан после хотя бы одного завершённого поиска, возвращаются частичные результаты — если бюджет кончился до первого поиска, инструмент сообщает ошибку тайм-аута, потому что рассказ без выполненного поиска не является аудируемым доказательством. Более низкий лимит одного инструмента (QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS) сработает раньше и отбросит частичные результаты; держите его выше этого бюджета. Переопределение: WEB_SEARCH_TIMEOUT_MS.',
   'settings.label.tools.webSearch.maxPerSession': 'Максимум поисков за сессию',
   'settings.description.tools.webSearch.maxPerSession':
     'Максимум вызовов web_search в одной сессии (по умолчанию 200, максимум 10000; остальные значения откатываются к умолчанию). Счётчик общий с субагентами и сбрасывается при смене сессии (/clear, /resume, ветка). По достижении лимита дальнейшие поиски пропускаются, модели предлагается продолжить с уже собранным. Переопределение: WEB_SEARCH_MAX_PER_SESSION.',
