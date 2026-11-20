@@ -222,6 +222,7 @@ CREATE TABLE ma_session_head (
     is_wake_pending TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Whether committed journal changes require a wake attempt.',
     wake_head_revision BIGINT UNSIGNED COMMENT 'Journal revision through which wake requirements have been evaluated.',
     wake_retry_at BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Earliest wake retry time in Unix epoch milliseconds.',
+    wake_seal_revision BIGINT UNSIGNED COMMENT 'Journal revision at which a clean suspension sealed the head and certified its wake projection.',
     is_wake_scan_pending TINYINT UNSIGNED GENERATED ALWAYS AS (is_wake_pending = 1 OR wake_head_revision IS NULL OR wake_head_revision <> journal_revision)
         COMMENT 'Generated flag for pending wake work or an outdated wake projection.',
     cleanup_head_revision BIGINT UNSIGNED COMMENT 'Journal revision through which cleanup requirements have been projected.',

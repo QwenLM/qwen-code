@@ -6,7 +6,7 @@ public interface SessionRecoveryRepository {
     public record HeadRecovery(String state, String reasonCode,
             String journalState, String activationPhase,
             Long activationHeadRevision, Long journalRevision,
-            boolean wakePending, Long wakeHeadRevision) { }
+            boolean wakePending, Long wakeHeadRevision, Long wakeSealRevision) { }
     public List<HeadRecovery> heads(String tenantId, String sessionId);
     public long nonInitialTurns(String tenantId, String sessionId);
 

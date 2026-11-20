@@ -150,7 +150,7 @@ public enum ManagedSchemaProjection {
                     + "activation_phase, activation_event_epoch, activation_expires_at, "
                     + "activation_head_revision, tenant_key, harness_key, harness_session_id, head_kind, "
                     + "phase, operation_id, claim_generation, claim_lease_until, is_wake_pending, "
-                    + "wake_head_revision, wake_retry_at, is_wake_scan_pending, cleanup_head_revision"),
+                    + "wake_head_revision, wake_retry_at, wake_seal_revision, is_wake_scan_pending, cleanup_head_revision"),
     SESSION_JOURNAL_TX(
             "tenant_id, workspace_id, session_id, journal_revision, command_key_hash, "
                     + "transaction_id, operation, command_id, content_digest, first_sequence, "

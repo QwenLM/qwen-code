@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.RestoreHead;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.SealReceipt;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.SealWriterRequest;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.WakeStamp;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.WriterGrant;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedStorageVersions;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
@@ -284,13 +285,18 @@ final class JournalWriterLifecycle {
             return null;
         }
         Timestamp leaseUntil = plusMillis(now, request.leaseMillis());
+        // A new writer may commit, so it voids any seal-time wake stamp. The
+        // cap pulls a stamped future due time back to the backstop's claim
+        // pace, so a crash after accepting an immediate input is recovered as
+        // today; it never lowers a delay a claim just set.
         jdbc.update(
-                "UPDATE ma_session_head SET state = 'ACTIVE', writer_generation = ?, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, gmt_modified = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
+                "UPDATE ma_session_head SET state = 'ACTIVE', writer_generation = ?, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, gmt_modified = ?, wake_seal_revision = NULL, wake_retry_at = LEAST(wake_retry_at, ?) WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
                 generation,
                 request.writerId(),
                 leaseUntil.getTime(),
                 tokenHash,
                 now.getTime(),
+                now.getTime() + JdbcWakeRecoveryStore.RETRY_MS,
                 RuntimeAdmissionFences.harnessDrainKey(tenantId),
                 RuntimeAdmissionFences.harnessDrainKey(sessionId),
                 tenantId,
@@ -395,14 +401,37 @@ final class JournalWriterLifecycle {
         Timestamp now = storeRows.databaseNow();
         fencing.requireWriter(head, request.writerId(), request.writerGeneration(),
                 writerToken, now, false);
+        WakeStamp wake = request.wake();
+        if (wake == null) {
+            jdbc.update(
+                    "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ? WHERE tenant_key = ?"
+                        + " AND harness_key = ? AND tenant_id = ? AND session_id = ?",
+                    now.getTime(),
+                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
+                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
+                    tenantId,
+                    sessionId);
+            return new SealReceipt(head.writerGeneration(), "SEALED", false);
+        }
+        JournalStoreRows.validateCounter(wake.revision(), "wake.revision", 0);
+        JournalStoreRows.validateCounter(wake.dueAt(), "wake.dueAt", 0);
+        // The stamp certifies the writer's wake projection of exactly this
+        // committed prefix; nothing can commit until the next acquisition
+        // clears it.
+        if (wake.revision() != head.journalRevision()) {
+            throw JournalStoreRows.conflict("managed_session_wake_stamp_stale",
+                    "The wake stamp does not match the committed journal revision.");
+        }
+        String tenantKey = RuntimeAdmissionFences.harnessDrainKey(tenantId);
+        String sessionKey = RuntimeAdmissionFences.harnessDrainKey(sessionId);
         jdbc.update(
-                "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ? WHERE tenant_key = ?"
-                    + " AND harness_key = ? AND tenant_id = ? AND session_id = ?",
-                now.getTime(),
-                RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                RuntimeAdmissionFences.harnessDrainKey(sessionId),
-                tenantId,
-                sessionId);
+                "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ?, wake_seal_revision = journal_revision,"
+                    + " wake_head_revision = journal_revision, is_wake_pending = ?"
+                    + (wake.pending() ? ", wake_retry_at = ?" : "")
+                    + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?",
+                wake.pending()
+                        ? new Object[] {now.getTime(), true, wake.dueAt(), tenantKey, sessionKey, tenantId, sessionId}
+                        : new Object[] {now.getTime(), false, tenantKey, sessionKey, tenantId, sessionId});
         return new SealReceipt(head.writerGeneration(), "SEALED", false);
     }
 

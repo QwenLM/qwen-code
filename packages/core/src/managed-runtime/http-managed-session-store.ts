@@ -83,10 +83,12 @@ import {
   ManagedSessionCommitRejectedError,
   scanManagedSessionJournal,
   type ManagedSessionActivationLease,
+  type ManagedSessionCommitProof,
   type ManagedSessionJournalHandle,
   type ManagedSessionJournalScan,
   type ManagedSessionJournalStore,
   type ManagedSessionResourceStore,
+  type ManagedSessionWakeStamp,
 } from './managed-session-storage.js';
 
 export const HTTP_MANAGED_SESSION_STORE_CONTRACT = {
@@ -188,6 +190,8 @@ export interface ManagedMemoryQuery {
 export interface HttpManagedSessionStores {
   supportsModelDiagnostics(): boolean;
   supportsExecutionDiagnostics(): boolean;
+  /** Whether the control plane delivers a suspended Session's wake inputs. */
+  supportsWakeDispatch(): boolean;
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
   readonly publication: HttpToolPublicationOwner;
@@ -431,6 +435,7 @@ export function createHttpManagedSessionStores(
   return {
     supportsModelDiagnostics: () => client.supportsModelDiagnostics(),
     supportsExecutionDiagnostics: () => client.supportsExecutionDiagnostics(),
+    supportsWakeDispatch: () => client.supportsWakeDispatch(),
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
     publication: {
@@ -818,8 +823,11 @@ class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
     return this.client.blockRecovery(request);
   }
 
-  seal(): Promise<void> {
-    return this.client.seal();
+  seal(
+    _commit?: ManagedSessionCommitProof,
+    wake?: ManagedSessionWakeStamp,
+  ): Promise<void> {
+    return this.client.seal(wake);
   }
 
   get writerSealed(): boolean {
@@ -1005,6 +1013,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
 
 interface WriterGrant {
   readonly activationLeaseRenewal: boolean;
+  readonly wakeDispatch: boolean;
   readonly activationLease?: ManagedSessionActivationLease;
   readonly supportedStorageVersion: number;
   readonly writerGeneration: number;
@@ -1072,6 +1081,9 @@ class ManagedSessionStoreHttpClient {
   }
   supportsModelDiagnostics(): boolean {
     return (this.grant?.supportedStorageVersion ?? 1) >= 3;
+  }
+  supportsWakeDispatch(): boolean {
+    return this.grant?.wakeDispatch === true;
   }
   readonly sessionKey: ManagedSessionKey;
   private readonly baseUrl: string;
@@ -2904,14 +2916,14 @@ class ManagedSessionStoreHttpClient {
     }
   }
 
-  async seal(): Promise<void> {
+  async seal(wake?: ManagedSessionWakeStamp): Promise<void> {
     if (this.retirementJoin)
       throw corrupt('original CSI retirement owns the final boundary.');
     // The seal joins sealsAnswered before it waits on acquirePromise, so a
     // reacquire that starts meanwhile still waits for it.
     const sealing = (async () => {
       await this.acquirePromise?.catch(() => undefined);
-      await this.sealGrant();
+      await this.sealGrant(wake);
     })();
     const answered = sealing.then(
       () => undefined,
@@ -2934,7 +2946,7 @@ class ManagedSessionStoreHttpClient {
     return sealing;
   }
 
-  private async sealGrant(): Promise<void> {
+  private async sealGrant(wake?: ManagedSessionWakeStamp): Promise<void> {
     if (this.sealed) return;
     const grant = this.grant;
     this.stopWriterRenewal();
@@ -2948,6 +2960,10 @@ class ManagedSessionStoreHttpClient {
         workspaceId: this.sessionKey.workspaceId,
         writerId: this.writerId,
         writerGeneration: grant.writerGeneration,
+        // The Store refuses a stamp whose revision is not the head's.
+        ...(wake === undefined
+          ? {}
+          : { wake: { revision: grant.journalRevision, ...wake } }),
       }),
       'seal receipt',
     );
@@ -3223,6 +3239,7 @@ class ManagedSessionStoreHttpClient {
         ...this.requireGrant(),
         leaseUntil: renewed.leaseUntil,
         supportedStorageVersion: renewed.supportedStorageVersion,
+        wakeDispatch: renewed.wakeDispatch,
       };
       this.scheduleRenewal();
     })();
@@ -3868,6 +3885,7 @@ function parseWriterGrant(value: unknown): WriterGrant {
   const record = asRecord(value, 'writer grant');
   return {
     activationLeaseRenewal: record['activationLeaseRenewal'] === true,
+    wakeDispatch: record['wakeDispatch'] === true,
     ...(record['activationLease'] == null
       ? {}
       : { activationLease: parseActivationLease(record['activationLease']) }),

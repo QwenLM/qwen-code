@@ -2876,6 +2876,30 @@ describe('HTTP Managed Session store', () => {
     return { stores, session };
   }
 
+  it.each([false, true])(
+    'stamps a clean suspension seal with its wake projection (wakeDispatch=%s)',
+    async (wakeDispatch) => {
+      const server = new FakeManagedSessionStore();
+      server.wakeDispatch = wakeDispatch;
+      const { stores, session } = await bootStoresAndSession(server);
+      expect(stores.supportsWakeDispatch()).toBe(wakeDispatch);
+      await session.authority.close({ pending: true, dueAt: 1234 });
+      expect(server.sealBodies.at(-1)?.['wake']).toEqual({
+        revision: server.storedTransactions.length,
+        pending: true,
+        dueAt: 1234,
+      });
+    },
+  );
+
+  it('sends no wake stamp on a bare seal', async () => {
+    const server = new FakeManagedSessionStore();
+    server.wakeDispatch = true;
+    const { session } = await bootStoresAndSession(server);
+    await session.authority.close();
+    expect(server.sealBodies.at(-1)).not.toHaveProperty('wake');
+  });
+
   it.each([1, 2, 3])(
     'requires storage 3 before committing model statistics (version=%s)',
     async (version) => {
@@ -9506,6 +9530,8 @@ describe('HTTP Managed Session store', () => {
 
 class FakeManagedSessionStore {
   activationLeaseRenewal = false;
+  wakeDispatch = false;
+  readonly sealBodies: Array<Record<string, unknown>> = [];
   private activationLease?: ManagedSessionActivationLease;
   supportedStorageVersion: number | undefined = 2;
   enforceReaderCeiling = false;
@@ -9663,6 +9689,9 @@ class FakeManagedSessionStore {
     }
     if (suffix === '/writers:seal') {
       this.sealCount++;
+      this.sealBodies.push(
+        JSON.parse(String(init?.body)) as Record<string, unknown>,
+      );
       if (this.sealFailuresRemaining > 0) {
         this.sealFailuresRemaining--;
         return jsonResponse(
@@ -9967,6 +9996,7 @@ class FakeManagedSessionStore {
   private grant(): Record<string, unknown> {
     return {
       activationLeaseRenewal: this.activationLeaseRenewal,
+      ...(this.wakeDispatch ? { wakeDispatch: true } : {}),
       ...(this.activationLease
         ? { activationLease: this.activationLease }
         : {}),

@@ -211,7 +211,7 @@ public class WakeRecoveryStoreTest {
         assertThatThrownBy(() -> store.hasPendingInput(pending)).hasMessageContaining("cannot prove");
         jdbc.update("UPDATE ma_session_head SET compacted_through_revision = 1");
         var compacted = new JdbcWakeRecoveryStore.Candidate("tenant", "workspace", "session",
-                pending.journalRevision(), pending.committedSequence(), 1, null, null);
+                pending.journalRevision(), pending.committedSequence(), 1, null, null, false);
         assertThatThrownBy(() -> store.hasPendingInput(compacted)).hasMessageContaining("cannot prove");
         assertThat(store.findPending("workspace", 8)).isEmpty();
         assertThat(store.claim(pending)).isFalse();

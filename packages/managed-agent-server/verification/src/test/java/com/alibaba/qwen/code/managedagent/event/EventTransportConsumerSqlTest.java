@@ -134,6 +134,41 @@ public class EventTransportConsumerSqlTest {
         verify(harness, times(1)).activateForWake(TENANT, held);
     }
 
+    // A delayed notice arriving after a clean suspension's seal: the stamp
+    // already hands the next attempt to the backstop unless an input is due.
+    @Test
+    public void aStampedHeadsNoticeLoadsOnlyWhenAnInputIsDue() {
+        String future = session("ACTIVE");
+        head(future, "SEALED", 5, -60);
+        stamp(future, 3, true, ManagedSchemaTime.SQL_NOW + " + 3600000");
+        String settled = session("ACTIVE");
+        head(settled, "SEALED", 5, -60);
+        stamp(settled, 3, false, "0");
+        String due = session("ACTIVE");
+        head(due, "SEALED", 5, -60);
+        stamp(due, 3, true, "0");
+        String stale = session("ACTIVE");
+        head(stale, "SEALED", 5, -60);
+        stamp(stale, 2, true, ManagedSchemaTime.SQL_NOW + " + 3600000");
+
+        for (String session : List.of(future, settled, due, stale)) {
+            deliver(wake(session, WORKSPACE, 3));
+        }
+
+        verify(harness, never()).activateForWake(TENANT, future);
+        verify(harness, never()).activateForWake(TENANT, settled);
+        assertThat(wakeWatermark(future)).isNull();
+        assertThat(wakeWatermark(settled)).isNull();
+        verify(harness, times(1)).activateForWake(TENANT, due);
+        verify(harness, times(1)).activateForWake(TENANT, stale);
+    }
+
+    private void stamp(String session, long revision, boolean pending, String retryAt) {
+        jdbc.update("UPDATE ma_session_head SET wake_seal_revision = ?, wake_head_revision = 3,"
+                + " is_wake_pending = ?, wake_retry_at = " + retryAt
+                + " WHERE tenant_id = ? AND session_id = ?", revision, pending, TENANT, session);
+    }
+
     // Sealing leaves the lease column set, but a SEALED journal is
     // re-acquirable at once: it holds no writer, so its wake is attempted.
     @Test
