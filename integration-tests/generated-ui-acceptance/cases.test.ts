@@ -391,12 +391,24 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       'no-edit',
       'inert-edit',
       'hidden-empty',
+      'unacknowledged',
+      'save-failed',
     ] as const)(
       'checks checklist progress and undo persistence: %s',
       async (mode) => {
         const context = await browser.newContext();
         const page = await context.newPage();
         const token = 'acceptance-test-token';
+        // The host's save outcome next to the view; none when nothing saves.
+        const outcome =
+          mode === 'save-failed'
+            ? 'failed'
+            : mode === 'unacknowledged' || mode === 'inert-add'
+              ? undefined
+              : 'saved';
+        const bar = outcome
+          ? `<span data-generated-ui-save="${outcome}"></span>`
+          : '';
         try {
           const html = `
             <input id="new-item"><select id="filter"><option value="all">All</option><option value="open">Open</option><option value="done">Done</option></select>
@@ -463,7 +475,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                       if (supplied) sessionStorage.setItem('daemon-token', supplied);
                       history.replaceState(null, '', location.pathname + location.search);
                       if (sessionStorage.getItem('daemon-token') === ${JSON.stringify(token)}) {
-                        document.body.insertAdjacentHTML('beforeend', '<iframe name="view" src="/view' + location.search + '"></iframe>');
+                        document.body.insertAdjacentHTML('beforeend', '<div data-testid="mcp-app">${bar}<iframe name="view" src="/view' + location.search + '"></iframe></div>');
                       }
                     </script></body>`,
             });
@@ -529,6 +541,7 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
               'persists-after-reload',
               'persists-after-reopen',
               'repeated-undo',
+              'save-acknowledged',
             ].map((id) => `checklist.${id}`),
           );
           // The reopened tab stays open while it is read, then is closed.
@@ -543,6 +556,8 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             ]) {
               expect(status(id)).toBe('not-applicable');
             }
+            // Nothing persisted and the host showed no outcome.
+            expect(status('save-acknowledged')).toBe('not-applicable');
             return;
           }
           expect(checkedBeforeReload).toBe(true);
@@ -565,6 +580,11 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
           }
           expect(status('edit')).toBe(
             mode === 'no-edit' || mode === 'inert-edit' ? 'fail' : 'pass',
+          );
+          expect(status('save-acknowledged')).toBe(
+            mode === 'unacknowledged' || mode === 'save-failed'
+              ? 'fail'
+              : 'pass',
           );
         } finally {
           await context.close();

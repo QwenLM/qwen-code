@@ -33,6 +33,7 @@ import {
   SHOW_TOOL,
   clickWhenStill,
   messageText,
+  saveOutcome,
   setValue,
   settle,
   text,
@@ -462,7 +463,10 @@ async function addItem(view: Frame, label: string) {
   );
 }
 
-/** Checklist: add, filter, delete, undo, edit, persistence and isolation. */
+/**
+ * Checklist: add, filter, delete, undo, edit, persistence, the host's save
+ * acknowledgement and isolation.
+ */
 const EDITED_LABEL = 'Agenda (edited)';
 
 export async function runChecklist(
@@ -656,6 +660,11 @@ export async function runChecklist(
       saved,
     );
   }
+  // Read before the reload: the outcome belongs to this mount's last change.
+  const acknowledged = await saveOutcome(card).then(
+    (outcome) => ({ outcome }),
+    (error: unknown) => ({ error }),
+  );
   let hasPersistedItems = false;
   const pages: Page[] = [];
   const persistenceChecks = async (
@@ -733,6 +742,28 @@ export async function runChecklist(
   );
   // Closed only after every read of the reopened card.
   await Promise.all(pages.map((page) => page.close().catch(() => {})));
+
+  await checks.guard('save-acknowledged', 'case 2 / R4', async () => {
+    if ('error' in acknowledged) throw acknowledged.error;
+    const { outcome } = acknowledged;
+    if (outcome === undefined && !hasPersistedItems) {
+      checks.add(
+        'save-acknowledged',
+        'case 2 / R4',
+        'not-applicable',
+        'nothing was persisted and the host showed no save outcome, so there is no save to acknowledge',
+      );
+      return false;
+    }
+    return checks.expect(
+      'save-acknowledged',
+      'case 2 / R4',
+      outcome === 'saved',
+      outcome === undefined
+        ? 'the items persisted, but the host showed no save outcome for this card'
+        : `after the last change the host showed "${outcome}"`,
+    );
+  });
 
   if (!hasPersistedItems) {
     checks.add(

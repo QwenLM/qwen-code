@@ -2,9 +2,9 @@
 
 [English](generated-ui-view-state.md) | [简体中文](generated-ui-view-state.zh-CN.md)
 
-Status: in progress. Step 1 (storage and daemon routes) landed in #17448. Step 2
-(card runtime and host) is implemented by the PR that updates this document.
-Step 3 is not implemented yet.
+Status: implemented. Step 1 (storage and daemon routes) landed in #17448 and
+step 2 (card runtime and host) in #17522. Step 3 (skill and evaluation) is
+implemented by the PR that updates this document.
 
 ## Problem
 
@@ -215,14 +215,14 @@ saving, and the bar reports the failure.
 1. **Storage and routes** (#17448): transcript record, branch selection, fork
    carry-over, agent service and ext methods, bridge, daemon routes, SDK client,
    capability.
-2. **Runtime and host** (this PR): mint `cardId`; add `state` to the Worker `init`
+2. **Runtime and host** (#17522): mint `cardId`; add `state` to the Worker `init`
    message; add `ui.state.get()` / `ui.state.set(value)` (synchronous, one write
    per round, last write wins); load state in the App before `init` and show a
    load failure instead of starting empty; coalesce and save each round's state;
    show the save outcome in host-owned UI with a `data-` attribute the
    acceptance harness can read; persist the Worker's state even when a
    superseded round's patches are dropped.
-3. **Skill and evaluation:** teach `ui.state` in the Generated UI skill and stop
+3. **Skill and evaluation** (this PR): teach `ui.state` in the Generated UI skill and stop
    saying cards cannot persist; update the reference checklist document;
    intentionally flip the acceptance pins for persistence and isolation; bring
    back a `checklist.save-acknowledged` check that observes the outcome.
@@ -284,7 +284,16 @@ Step 2:
   reopening the session, another session sees nothing, a rewind restores the
   earlier value, and reset clears it.
 
-Step 3 adds the acceptance pins.
+Step 3:
+
+- Replay through the real daemon, Web Shell and Chromium: the reference
+  checklist restores its items, checked state and undo history from
+  `ui.state`, and the persistence, save acknowledgement and isolation pins
+  pass; all other pins are unchanged.
+- Evaluator tests with a controlled host: the save acknowledgement passes when
+  the host shows `saved`, fails on any other outcome or when items persisted
+  without an outcome, and does not apply when nothing persisted.
+- A live run of the checklist case with the gating model, reported in the PR.
 
 ## Acceptance criteria
 

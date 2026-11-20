@@ -597,6 +597,41 @@ export async function waitForCardOn(
   throw new Error(`card ${index} did not render within ${timeoutMs} ms`);
 }
 
+/**
+ * The save outcome the host shows for a card (`data-generated-ui-save` in its
+ * bar outside the sandbox) once it has stopped saving, or undefined when the
+ * host shows none.
+ */
+export async function saveOutcome(
+  card: Card,
+  timeoutMs = 10_000,
+): Promise<string | undefined> {
+  let frame = card.view;
+  const top = frame.page().mainFrame();
+  while (frame.parentFrame() && frame.parentFrame() !== top) {
+    frame = frame.parentFrame()!;
+  }
+  const element = await frame.frameElement();
+  let previous: string | null | undefined = null;
+  const { value } = await settle(
+    async () => {
+      const value = await element.evaluate(
+        (iframe) =>
+          (iframe as Element)
+            .closest('[data-testid="mcp-app"]')
+            ?.querySelector('[data-generated-ui-save]')
+            ?.getAttribute('data-generated-ui-save') ?? undefined,
+      );
+      const held = value === previous;
+      previous = value;
+      return { value, held };
+    },
+    ({ value, held }) => held && value !== 'saving',
+    timeoutMs,
+  );
+  return value;
+}
+
 /** Sets a control's value in the generated view and lets the round settle. */
 export async function setValue(
   view: Frame,
