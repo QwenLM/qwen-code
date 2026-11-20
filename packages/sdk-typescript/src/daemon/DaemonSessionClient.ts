@@ -1497,6 +1497,8 @@ export class DaemonSessionClient {
 
   async updateMetadata(metadata: {
     displayName?: string;
+    /** Best-effort initial title for a session without a custom title. */
+    initialDisplayName?: string;
     pr?: Omit<DaemonSessionPrInfo, 'issues'>;
   }): Promise<SessionMetadataResult> {
     return await this.client.updateSessionMetadata(
