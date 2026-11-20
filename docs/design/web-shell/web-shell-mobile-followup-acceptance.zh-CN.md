@@ -22,7 +22,7 @@
 
 可见性:触摸后端已挂载、建议可见、草稿为空、composer 未禁用。开始打字即隐藏,与桌面 ghost 的前缀规则精神一致,同时保证触摸面不干扰草稿。chip 可见时触摸 textarea 保持普通占位符,建议文字只出现在一个 surface 上;早先一版曾同时留在 placeholder 里,造成同屏重复。桌面仍保留空输入 placeholder、前缀 ghost 补全的渲染。
 
-接受调用 `onAcceptFollowup('tab')` 且不带 `skipOnAccept`,复用宿主现成的 `onAccept → insertText` 接线:在 tap 手势内填入 textarea 并 focus(iOS 只对手势内发起的 focus 弹键盘)。忽略调用 `onDismissFollowup`,保留既有 ignored 遥测。不新增数据通路:daemon sidechannel、controller、insertText 触摸分支均原样复用。
+接受调用 `onAcceptFollowup('tab')` 且不带 `skipOnAccept`,复用宿主现成的 `onAccept → insertText` 接线:填入 textarea 并请求 focus;宿主 accept 经 `queueMicrotask` 延迟插入,故真 iOS 上 focus 可能落在 tap 手势之外、键盘可能不弹——真 iOS 键盘行为未验证、属范围外。忽略调用 `onDismissFollowup`,保留既有 ignored 遥测。不新增数据通路:daemon sidechannel、controller、insertText 触摸分支均原样复用。
 
 保留快路径:空输入点发送仍整条直发;输入前缀再发送仍补全直发。建议条让第一条路径可发现,但不改变其语义。
 
