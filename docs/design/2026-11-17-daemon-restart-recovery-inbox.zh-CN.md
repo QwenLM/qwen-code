@@ -9,9 +9,9 @@
 
 ## 合入与验证记录
 
-合并前及集成验证包括完整构建与类型检查、103 项恢复定向测试、1,525 项 serve
-server 测试、84 项 telemetry 测试、使用 loopback fake model 的真实 daemon
-探针，以及三个 Chromium DOM 工作流。[已发布的验证报告](https://github.com/QwenLM/qwen-code/pull/17677#issuecomment-7030887477)
+合并前及集成验证包括完整构建与类型检查、103 项恢复定向测试、1,608 项 CLI server
+与 telemetry 测试、使用 loopback fake model 的真实 daemon 探针，以及三个 Chromium
+DOM 工作流。[已发布的验证报告](https://github.com/QwenLM/qwen-code/pull/17677#issuecomment-7030887477)
 绑定了生产代码 head
 [`988dbcd182`](https://github.com/QwenLM/qwen-code/commit/988dbcd182073b0659203edeaaaeddb173e63b9f)。
 这些证据对应上述被测树，不表示所有 main CI 或平台 profile 均已通过。
