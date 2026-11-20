@@ -601,7 +601,7 @@ function WorkflowToolDetail({
 }: {
   tool: ACPToolCall;
   displayName: string;
-  detail: string;
+  detail: ReactNode;
   result: string;
 }) {
   const { t } = useI18n();

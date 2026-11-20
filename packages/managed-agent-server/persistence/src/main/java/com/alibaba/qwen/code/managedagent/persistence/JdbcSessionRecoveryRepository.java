@@ -54,6 +54,15 @@ public class JdbcSessionRecoveryRepository implements SessionRecoveryRepository 
     }
 
     @Override
+    public boolean hasNativeTerminal(String tenantId, String sessionId, String turnId) {
+        return Boolean.TRUE.equals(jdbc.queryForObject(
+                "SELECT EXISTS(SELECT 1 FROM ma_public_event WHERE tenant_id = ? AND session_id = ?"
+                        + " AND turn_id = ? AND stream_kind = 'SESSION' AND is_terminal = 1"
+                        + " AND source_key IS NOT NULL)",
+                Boolean.class, tenantId, sessionId, turnId));
+    }
+
+    @Override
     public long nonInitialTurns(String tenantId, String sessionId) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
                         + " AND (status <> 'CANCELLED' OR is_submission_attempted = TRUE OR harness_event_epoch IS NOT NULL)",

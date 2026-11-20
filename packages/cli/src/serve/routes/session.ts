@@ -10113,6 +10113,29 @@ export function registerSessionRoutes(
         }
         const pr = parseSessionPrBody(req, res);
         if (pr === null) return;
+        const initialDisplayName = body['initialDisplayName'];
+        if (
+          initialDisplayName !== undefined &&
+          rawDisplayName === undefined &&
+          pr === undefined
+        ) {
+          if (typeof initialDisplayName !== 'string') {
+            res.status(400).json({
+              error: '`initialDisplayName` must be a string',
+              code: 'invalid_metadata',
+              field: 'initialDisplayName',
+            });
+            return;
+          }
+          const effective = runtime.bridge.initializeSessionTitle?.(
+            sessionId,
+            initialDisplayName.slice(0, 256),
+            clientId !== undefined ? { clientId } : undefined,
+          );
+          invalidateSessionLists(runtime, ['active']);
+          res.status(200).json({ sessionId, ...effective });
+          return;
+        }
         // The null role clear is sidecar semantics (upsertSessionPr); the
         // bridge only knows set-or-preserve, and the persisted list
         // reconciles the live entry right after the upsert anyway.

@@ -1734,6 +1734,8 @@ export default {
     'تعذر ضغط سجل المحادثة لأن ملخص الضغط كان فارغاً.',
   'Could not compress chat history because the compression summary was truncated.':
     'تعذر ضغط سجل المحادثة لأن ملخص الضغط تم اقتطاعه.',
+  'Could not compress chat history because it is too large for the context window.':
+    'تعذّر ضغط سجل المحادثة لأن حجمه يتجاوز نافذة السياق.',
   'Could not compress chat history due to an API error.':
     'تعذر ضغط سجل المحادثة بسبب خطأ في واجهة API.',
 

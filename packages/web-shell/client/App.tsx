@@ -13084,7 +13084,11 @@ export function App({
                 ? { name: gitModeIntentRef.current.name }
                 : undefined,
             sessionSourceType: sessionSourceTypeRef.current,
-            onSessionCreated: async (sessionId, detachedSession) => {
+            onSessionCreated: async (
+              sessionId,
+              detachedSession,
+              createdSession,
+            ) => {
               // A detached creation never bound the connection: rename
               // through the created client, not the current-session action.
               const rename = (displayName: string) =>
@@ -13107,27 +13111,14 @@ export function App({
                 } catch {
                   pendingManualTitleRef.current = undefined;
                 }
-              } else if (initialTitle) {
-                // Name the new session from its first prompt before the row
-                // is first rendered, so it never shows the session-id
-                // fallback. Best-effort: on failure the daemon's first-prompt
-                // label still names it.
-                try {
-                  await rename(initialTitle);
-                  if (catalogWorkspaceCwd) {
-                    sessionCatalogController.renamed(
-                      catalogWorkspaceCwd,
-                      sessionId,
-                      initialTitle,
-                    );
-                  }
-                } catch {
-                  // Fall back to the first-prompt label.
-                }
+              } else if (initialTitle && createdSession.updateMetadata) {
+                // The catalog already has a provisional title. Reconcile
+                // through daemon events and reads, since a manual rename can
+                // land while this request is still in flight.
+                void createdSession
+                  .updateMetadata({ initialDisplayName: initialTitle })
+                  .catch(() => {});
               }
-              // Start the first catalog read only after the rename (or the
-              // carry) settled, so the row's first publish already carries
-              // the name instead of the session-id prefix.
               if (catalogWorkspaceCwd) {
                 sessionCatalogController.sessionCreated(
                   catalogWorkspaceCwd,
@@ -16805,6 +16796,8 @@ export function App({
           sessionId,
           displayName,
         );
+      } else if (connection.sessionContext?.kind === 'standalone') {
+        setStandaloneSessionsReloadToken((value) => value + 1);
       }
     }
     dispatchSessionChangeRef.current?.({
@@ -22409,13 +22402,14 @@ export function App({
       standaloneDirectoryErrorCode === 'working_directory_missing' ||
       standaloneDirectoryErrorCode === 'working_directory_compromised',
   );
-  const isDisabled =
-    sessionWriteBlocked ||
+  const composerInputDisabled =
+    rewindSyncBlocked ||
     standaloneInteractionBlocked ||
     shouldDisableComposerInput({
       pendingApproval: pendingApproval !== null,
       isPreparingPrompt,
     });
+  const isDisabled = sessionWriteBlocked || composerInputDisabled;
   const retryableTurnErrorIdentity = retryableTurnErrorIdentityRef.current;
   const showCurrentRetryHint = Boolean(
     showRetryHint &&
@@ -23407,6 +23401,7 @@ export function App({
   const submitAgentChat = agentChatEntry.submit;
   const submitComposerInput = useCallback(
     (...args: Parameters<typeof handleEditorSubmit>) => {
+      if (sessionWriteBlockedRef.current) return false;
       if (
         !collaborationAvailable ||
         (sendCommandAvailable && /^\/send(?:\s|$)/i.test(args[0]))
@@ -27184,12 +27179,13 @@ export function App({
                           cancelArmed={cancelArmed}
                           disabled={
                             (collaborationAvailable && agentChatEntry.pending) ||
-                            isDisabled ||
+                            composerInputDisabled ||
                             isStartingNewSessionSuggestion ||
                             interactionBlocked ||
                             approvalOverlayActive ||
                             unknownPromptAdmission?.payloadAvailable === true
                           }
+                          submitDisabled={sessionWriteBlocked}
                           commands={commands}
                           skills={composerSkills}
                           onSkillsOpenChange={

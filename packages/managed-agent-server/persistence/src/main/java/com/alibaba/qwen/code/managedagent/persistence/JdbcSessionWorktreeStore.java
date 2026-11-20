@@ -210,7 +210,7 @@ public class JdbcSessionWorktreeStore
                         + " ORDER BY w.gmt_create DESC",
                 JdbcSessionWorktreeStore::row, tenant, workspace,
                 ManagedWorkspaceRegistry.actorKey(tenant, actor));
-        var descriptions = descriptors(worktreeFiles, jdbc, tenant, rows.stream().map(Row::sessionId).toList());
+        var descriptions = descriptors(worktreeFiles, jdbc, rows);
         return rows.stream().map(row -> descriptions.get(row.sessionId())).toList();
     }
 

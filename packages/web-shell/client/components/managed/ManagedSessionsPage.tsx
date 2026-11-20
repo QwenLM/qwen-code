@@ -87,6 +87,7 @@ import {
 import { isManagedSessionRunning } from './managed-agent-provider';
 import { ManagedToolResultPanel } from './ManagedToolResultPanel';
 import { ManagedArtifactLibraryPage } from './ManagedArtifactLibraryPage';
+import { ManagedSurfaceDecisionsDialog } from './ManagedSurfaceDecisionsDialog';
 import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
 import { ManagedChildSessionView } from './ManagedChildSessionView';
@@ -2298,8 +2299,13 @@ function ManagedSessionsContent({
           onClose={rename.close}
         />
       )}
+      {home && (
+        <div className="flex justify-end">
+          <ManagedSurfaceDecisionsDialog />
+        </div>
+      )}
       {!home && (
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <Button
             variant="outline"
             onClick={() => {
@@ -2311,9 +2317,12 @@ function ManagedSessionsContent({
           >
             {t('managed.new')}
           </Button>
-          <Button variant="ghost" onClick={refresh}>
-            {t('managed.refresh')}
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <ManagedSurfaceDecisionsDialog />
+            <Button variant="ghost" onClick={refresh}>
+              {t('managed.refresh')}
+            </Button>
+          </div>
         </div>
       )}
       {pendingRestoreFailed && (
