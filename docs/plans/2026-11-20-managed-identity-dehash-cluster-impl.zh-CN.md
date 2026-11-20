@@ -1,0 +1,48 @@
+# 实施计划：managed-agent-server 身份去哈希原子簇
+
+[English](2026-11-20-managed-identity-dehash-cluster-impl.md) | [简体中文](2026-11-20-managed-identity-dehash-cluster-impl.zh-CN.md)
+
+配套设计：[design EN](../design/2026-11-20-managed-identity-varchar-dehash.md) · [design ZH](../design/2026-11-20-managed-identity-varchar-dehash.zh-CN.md)。
+状态：执行规格。增量 1（tenant guard）已在分支 `feat/managed-identity-varchar-dehash` 全绿落地（PR #17927）。本计划覆盖剩余 join 连通簇，须原子转换。
+
+## 为什么簇是原子的（没有可保绿子步）
+
+- 身份列通过哈希键与原始 actor/scope 列互相 join（如 `ma_memory_store.owner_actor_key = COALESCE(ma_session.owner_actor_key, ma_session.creator_actor_key)`），转换单表会破坏 join 直到全部转换。
+- 预算收缩与 fixture 对齐耦合：`VARCHAR(64)` 会拒绝现有长 fixture（`ws-<cwd>` workspace id、43 字符 `"tenant-"+UUID`），故 DDL 预算与 fixture 改动须同批落地。
+- 跨表哈希引用（`ma_message.body_resource_key`、`ma_event_stream.artifact_refs_resource_key`、`ma_resource_ref.resource_key` 等）无法展开为引用表中不存在的本地原始列；需在同批给引用表加原始 scope+resource 列（或规范可读键），即 schema 扩张。
+- 探针（H2 2.4.240 MySQL mode）：`utf8mb4_0900_bin` 可解析；VARCHAR 等值/PK 为 NO PAD；`setBytes`→VARCHAR 往返保留 UTF-8 与尾随空格。故 byte[] 绑定可临时 coerce，但并不能解耦上述预算/fixture/哈希耦合。
+
+因此：单分支、转换期间暂红、仅在全绿时 commit+push。
+
+## 执行顺序
+
+1. **DDL（V1 原地）。** 文本身份 `VARBINARY` 转 `VARCHAR` 预算并逐列 `COLLATE utf8mb4_0900_bin`；二进制载荷（`record_bytes`、`object_key`、`capture_object_key`）保持 `VARBINARY`。删 60 个 "Hashed" 列及同族派生身份键（`physical_key`、`storage_key`、`holder_key`、`*_resource_key`、`import_key`、`runtime_binding_key`、`execution_storage_key`、`source_record_key`、`delivery_key`、`result_operation_key`、`deletion_operation_key`）。保留 32 个内容摘要列与 git-sha `VARCHAR(64)` 列。在原始列上重建所有用到被删键的唯一键/索引；删 `ma_session.uk_ma_session_scope`（与 PK 冗余）。在原始 scope 列上重定义两个生成列（`ma_request_receipt.decision_scope_key`、`ma_side_query.active_slot`）；在原始列上重写三个 CHECK（`ck_ma_resource_capture`、`ck_ma_ref_binding`、`ck_ma_storage_registered`）。
+2. **跨表引用。** 给每个引用表补其所缺的原始 scope+resource 列（按需 `tenant_id`、`workspace_id`、`session_id`、`resource_id`）并在写入时填充；join/唯一键中用这些原始列替换哈希引用列。若某表承载不了完整 scope，改用规范**可读** resource key `VARCHAR(256)`（明确不是哈希）并复核索引宽度。
+3. **Java 绑定 + 派生。** persistence/runtime-broker/control-plane/contracts/verification 全链路 `byte[]`→`String`；删 `ManagedSchemaKeys.key()` 身份派生（410 处）但保留摘要 helper；按类别重写 ~1613 处列引用：等值、领头前缀（`tenant_id=? AND session_id=? …`）、键集游标、`FOR UPDATE` 序、生成列消费方、CHECK 消费方、projection（`ManagedSchemaProjection`）、contract 表清单、schema-shape（`ManagedSchemaTest` BUSINESS_KEYS）与 catalog 校验。
+4. **游标 + 锁序。** 把哈希全序的键集游标与 `ORDER BY … FOR UPDATE` 获取序替换为复合字典序元组序（如 `(tenant_id, session_id, resource_id)`），游标用 row-value 比较，且所有锁这些行的事务保持**同一**全序（防死锁）。涉及 store：`ManagedSessionRetirementStore`、`WorkspaceRecoveryStore`、`SessionResourceCollectionCollector`、`JdbcHostedCleanupDebtStore`、`ManagedExtensionQueries`、`JdbcAutomationLedgerStore`。
+5. **契约 + admission + fixture。** 边界加 fail-closed 身份长度/格式校验（tenant/actor ≤36、UUID/前缀形态、外部 ≤512）；verification fixture 与 dev 默认值对齐预算（替换 43 字符 tenant 与超长 `ws-<cwd>` workspace id）；保留多字节与尾随空格语义测试。
+6. **Meta-test。** 随 DDL 更新 schema-shape 钉死、catalog 校验、surface fixture（`managed-surface.txt`）；加逐键宽度断言（<3072）与逐 store 游标/锁序等价测试（同行、同序、并发无死锁）。
+
+## 预算（索引字节 = 4×字符，utf8mb4）
+
+| 类                                  | 预算           | 字节   |
+| ----------------------------------- | -------------- | ------ |
+| tenant / actor（上游数值 ≤20）      | VARCHAR(36)    | 144    |
+| UUID 类 id、workspace_id            | VARCHAR(64)    | 256    |
+| 外部渠道 account/sender/chat/thread | VARCHAR(512)   | 2048   |
+| 规范可读 resource key（回退）       | VARCHAR(256)   | 1024   |
+| 二进制载荷 / OSS object key         | 保持 VARBINARY | 不适用 |
+
+guard 例外（已落地）：`ma_tenant_guard.tenant_id VARCHAR(64)` 可读 scope 承载哨兵；PK `(tenant_id, guard_domain)`。
+
+## 验证
+
+- 隔离 Maven 仓库：`cp -Rc ~/.m2/repository /tmp/dehash-m2`；装 sibling SDK `mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.repo.local=/tmp/dehash-m2 install`。
+- 转换后 `cd packages/managed-agent-server && mvn -Dmaven.repo.local=/tmp/dehash-m2 test`（全量 H2 套件）；若改编译期常量先 `mvn -pl verification clean`。
+- `mvn checkstyle:check checkstyle:check@runtime-broker-checkstyle`（双 execution）。
+- 一次性 MySQL 8.4：竞态套件（guard/head/claim/drain/rename/retirement/receipt）与 `ManagedSqlPerformanceMySqlIT` 基线 vs 改动指纹 + examined 行数；无本地 MySQL 则记 pending CI。native/media 测试需已构建 core+cli TS dist。
+- 仅当编译 + 全量 H2 + 双 Checkstyle 全绿才 commit+push；MySQL 门未本地跑时记 pending CI。
+
+## 验收
+
+- 无残留身份哈希列；全部 246+ 重建键 <3072 字节；两引擎 NO PAD 字节精确等值；游标/锁序等价且无死锁；admission 拒绝超长 id；fixture/dev 对齐；全量 H2 + 编译 + 双 Checkstyle 绿；MySQL 竞态 + sqlperf 证据（本地或 CI）。
