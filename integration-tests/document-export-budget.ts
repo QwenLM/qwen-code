@@ -8,19 +8,17 @@
  * Wall-clock budget for the maximum transcript-document browser gate.
  *
  * The 7M-character document renders well inside a minute on a dev machine, but
- * CI has measured it past that ceiling under contention: 73s (recorded in
- * ci.yml's web_shell_e2e_smoke history), 68.4s (#17158) and 60.9s (#17203) on
- * the shared self-hosted ARM64 pool, and 64.5s (#17884). CI therefore gets the
- * same 3x multiplier the interactive harness uses in `interactive/wait.ts`,
- * keyed on the same marker. Neither gate step maps RUNNER_ENVIRONMENT —
- * ci.yml's smoke step sets only TMPDIR, e2e.yml's browser-regression step sets
- * no env — so a per-class tier would rest on an ambient runner default that is
- * not established for these lanes. Widening every CI lane is the deliberate
- * tradeoff: github-hosted goes from 60s to 180s too, so a regression between
- * those bounds no longer fails there. Local runs keep the tight 60s so a real
- * regression still fails fast. The gate sets its per-case ceiling 30s above
- * this budget, under the integration suite's 5-minute testTimeout, so the
- * budget assertion is always observed before a case timeout.
+ * the shared self-hosted ARM64 pool has measured it past that ceiling under
+ * contention: 73s (recorded in ci.yml's web_shell_e2e_smoke history), 68.4s
+ * (#17158), 60.9s (#17203) and 64.5s (#17884). Those hosts get the same 3x
+ * multiplier the interactive harness uses in `interactive/wait.ts`; GitHub-
+ * hosted CI and local runs keep the tight 60s ceiling so a real regression
+ * still fails fast. RUNNER_ENVIRONMENT is a runner default, so the tier reaches
+ * both gate lanes — ci.yml's web_shell_e2e_smoke shard 1 and e2e.yml's nightly
+ * browser-regression step — without either mapping it under `env:`. The gate
+ * sets its per-case ceiling 30s above this budget, under the integration
+ * suite's 5-minute testTimeout, so the budget assertion is always observed
+ * before a case timeout.
  *
  * Pure and read at call time so the decision is pinned state-by-state with a
  * plain object instead of real time
@@ -28,10 +26,10 @@
  */
 
 const LOCAL_BUDGET_MS = 60_000;
-const CI_MULTIPLIER = 3;
+const SELF_HOSTED_MULTIPLIER = 3;
 
 export function documentExportBudgetMs(env: NodeJS.ProcessEnv): number {
-  return env['CI'] === 'true'
-    ? LOCAL_BUDGET_MS * CI_MULTIPLIER
+  return env['RUNNER_ENVIRONMENT'] === 'self-hosted'
+    ? LOCAL_BUDGET_MS * SELF_HOSTED_MULTIPLIER
     : LOCAL_BUDGET_MS;
 }
