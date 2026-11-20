@@ -15,7 +15,10 @@ import {
 import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { readSettingsSnapshot } from '../config/settings.js';
-import { readStartupEnvironment } from '../config/environment.js';
+import {
+  readStartupEnvironment,
+  readStartupHomeEnv,
+} from '../config/environment.js';
 import {
   expandsAgainstHome,
   isFullyQualifiedPath,
@@ -75,8 +78,12 @@ export function readTrustedWorkflowSettings(
     const startupHomeDir = childEnvOverrides
       ? readStartupHome(launchEnv, workspaceCwd)
       : undefined;
+    const settingsEnv =
+      startupHomeDir === undefined
+        ? launchEnv
+        : readStartupHomeEnv(launchEnv, workspaceCwd, startupHomeDir);
     const settings = readSettingsSnapshot(workspaceCwd, {
-      environment: launchEnv,
+      environment: settingsEnv,
       workspaceTrusted: true,
       ...(startupHomeDir !== undefined ? { startupHomeDir } : {}),
     }).merged;
@@ -85,7 +92,7 @@ export function readTrustedWorkflowSettings(
         ? readStartupEnvironment(
             settings,
             workspaceCwd,
-            launchEnv,
+            settingsEnv,
             startupHomeDir,
           )
         : undefined;

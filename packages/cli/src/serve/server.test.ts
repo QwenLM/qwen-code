@@ -6249,6 +6249,58 @@ describe('createServeApp', () => {
       expect(await workflowCapability()).toBe(false);
     });
 
+    it.each(['absolute', 'relative'] as const)(
+      'loads Workflow settings from %s QWEN_HOME in the child home .env',
+      async (homeKind) => {
+        const root = path.join(
+          serverTestEnvironmentRoot,
+          `acp-home-redirect-${homeKind}`,
+        );
+        const home = path.join(root, 'home');
+        const workspace = path.join(root, 'workspace');
+        const redirected = path.join(root, 'redirected-config');
+        for (const dir of [path.join(home, '.qwen'), workspace, redirected]) {
+          await fsp.mkdir(dir, { recursive: true });
+        }
+        const homeValue =
+          homeKind === 'relative'
+            ? path.relative(workspace, redirected)
+            : redirected;
+        await fsp.writeFile(
+          path.join(home, '.env'),
+          `QWEN_HOME="${homeValue.split(path.sep).join('/')}"\n`,
+        );
+        await fsp.writeFile(
+          path.join(home, '.qwen', 'settings.json'),
+          JSON.stringify({ tools: { workflowsEnabled: true } }),
+        );
+        const settingsPath = path.join(redirected, 'settings.json');
+        await fsp.writeFile(
+          settingsPath,
+          JSON.stringify({ tools: { workflowsEnabled: false } }),
+        );
+        const homeKey = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+        const app = createServeApp({ ...baseOpts, workspace }, undefined, {
+          primaryWorkspaceTrusted: true,
+          daemonEnv: { [homeKey]: home },
+        });
+        const capability = async () => {
+          const response = await request(app)
+            .get('/capabilities')
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .expect(200);
+          return response.body.workspaces[0].workflowsEnabled;
+        };
+
+        expect(await capability()).toBe(false);
+        await fsp.writeFile(
+          settingsPath,
+          JSON.stringify({ tools: { workflowsEnabled: true } }),
+        );
+        expect(await capability()).toBe(true);
+      },
+    );
+
     it('passes the effective default session scope to the owned engine probe', async () => {
       const factory = vi.fn();
       const evaluate = vi.fn<ManagedExecutionEngine['evaluate']>(

@@ -1239,7 +1239,11 @@ function readSettingsLayers(
     : readOperatorSandboxSettings().tools?.executionSandbox;
   const userSettingsPath = snapshotEnvironment
     ? path.join(
-        getGlobalQwenDirLite(snapshotEnvironment, snapshotOf?.startupHomeDir),
+        getGlobalQwenDirLite(
+          snapshotEnvironment,
+          snapshotOf?.startupHomeDir,
+          snapshotOf?.startupHomeDir === undefined ? undefined : workspaceDir,
+        ),
         'settings.json',
       )
     : getUserSettingsPath();

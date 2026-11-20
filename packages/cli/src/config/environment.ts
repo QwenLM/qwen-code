@@ -23,7 +23,11 @@ import {
   resetLoaderKeyRejectionReportingForTesting,
 } from './shared-env-keys.js';
 import { readConfigFile } from './read-config-file.js';
-import { getGlobalQwenDirLite } from './storage-paths-lite.js';
+import {
+  getGlobalQwenDirLite,
+  readEnvironmentVariable,
+  spawnedEnvironmentView,
+} from './storage-paths-lite.js';
 import { VERIFY_PR_COORDINATE_ENV } from './verify-pr-coordinates.js';
 import { isWithinRoot } from './path-comparison.js';
 import { publishPendingCompileCache } from './compile-cache.js';
@@ -216,52 +220,73 @@ export function preResolveHomeEnvOverrides(): void {
   }
   homeEnvBootstrapped = true;
 
-  if (HOME_ENV_BOOTSTRAP_KEYS.every((key) => process.env[key])) {
-    return;
-  }
+  applyHomeEnvOverrides(
+    process.env,
+    () => Storage.getGlobalQwenDir(),
+    (file) => {
+      if (!fs.existsSync(file)) return undefined;
+      try {
+        return fs.readFileSync(file, 'utf-8');
+      } catch {
+        // Startup ignores unreadable home .env files, like loadEnvironment.
+        return undefined;
+      }
+    },
+  );
+}
 
-  // Storage.getGlobalQwenDir() shares the same homedir resolution as the
-  // rest of the storage layer; when QWEN_HOME is unset it equals
-  // `<homedir>/.qwen`, so path.dirname() recovers `<homedir>`.
-  const initialQwenHome = process.env['QWEN_HOME'];
-  const initialQwenDir = Storage.getGlobalQwenDir();
-  const candidates: string[] = [path.join(initialQwenDir, '.env')];
+export function readStartupHomeEnv(
+  environment: Readonly<NodeJS.ProcessEnv>,
+  workspaceCwd: string,
+  homeDir: string,
+): Readonly<NodeJS.ProcessEnv> {
+  const env = { ...spawnedEnvironmentView(environment) };
+  applyHomeEnvOverrides(
+    env,
+    () => getGlobalQwenDirLite(env, homeDir, workspaceCwd),
+    readConfigFile,
+  );
+  return spawnedEnvironmentView(env);
+}
+
+function applyHomeEnvOverrides(
+  env: NodeJS.ProcessEnv,
+  getQwenDir: () => string,
+  readEnvFile: (file: string) => string | undefined,
+): void {
+  const value = (key: string) => readEnvironmentVariable(env, key);
+  if (HOME_ENV_BOOTSTRAP_KEYS.every((key) => value(key))) return;
+
+  const readHomeEnvInto = (file: string) => {
+    const content = readEnvFile(file);
+    if (content === undefined) return;
+    const parsed = dotenv.parse(content);
+    for (const key of HOME_ENV_BOOTSTRAP_KEYS) {
+      const entry = parsed[key];
+      if (
+        entry !== undefined &&
+        (entry || keepsEmptyHomeEnvValue(key)) &&
+        value(key) === undefined
+      ) {
+        env[key] = entry;
+      }
+    }
+  };
+
+  const initialQwenHome = value('QWEN_HOME');
+  const initialQwenDir = getQwenDir();
+  readHomeEnvInto(path.join(initialQwenDir, '.env'));
   if (!initialQwenHome) {
-    candidates.push(path.join(path.dirname(initialQwenDir), '.env'));
+    readHomeEnvInto(path.join(path.dirname(initialQwenDir), '.env'));
   }
 
-  for (const candidate of candidates) {
-    readHomeEnvInto(candidate);
-  }
-
-  // If QWEN_HOME was just discovered, also read <new QWEN_HOME>/.env so
-  // QWEN_RUNTIME_DIR can be sourced from there.
-  const discoveredQwenHome = process.env['QWEN_HOME'];
+  // The redirected directory may supply the rest of the startup paths.
+  const discoveredQwenHome = value('QWEN_HOME');
   if (discoveredQwenHome && discoveredQwenHome !== initialQwenHome) {
-    const discoveredDir = Storage.getGlobalQwenDir();
+    const discoveredDir = getQwenDir();
     if (discoveredDir !== initialQwenDir) {
       readHomeEnvInto(path.join(discoveredDir, '.env'));
     }
-  }
-}
-
-function readHomeEnvInto(file: string): void {
-  if (!fs.existsSync(file)) {
-    return;
-  }
-  try {
-    const parsed = dotenv.parse(fs.readFileSync(file, 'utf-8'));
-    for (const key of HOME_ENV_BOOTSTRAP_KEYS) {
-      if (
-        (parsed[key] ||
-          (keepsEmptyHomeEnvValue(key) && parsed[key] !== undefined)) &&
-        !Object.hasOwn(process.env, key)
-      ) {
-        process.env[key] = parsed[key];
-      }
-    }
-  } catch (_e) {
-    // Match the dotenv quiet-mode behavior used by loadEnvironment below.
   }
 }
 
@@ -785,7 +810,7 @@ function buildEnvironmentSnapshot(
 ): RuntimeEnvironmentSnapshot {
   const startup = startupHomeDir !== undefined;
   const globalQwenDir = startup
-    ? getGlobalQwenDirLite(baseEnv, startupHomeDir)
+    ? getGlobalQwenDirLite(baseEnv, startupHomeDir, startDir)
     : Storage.getGlobalQwenDir();
   const userLevelPaths = getUserLevelEnvPaths(globalQwenDir, startupHomeDir);
   const envFilePaths = findEnvFiles(

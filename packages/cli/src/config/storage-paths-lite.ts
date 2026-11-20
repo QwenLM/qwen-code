@@ -161,10 +161,12 @@ export function isFullyQualifiedPath(location: string): boolean {
 export function getGlobalQwenDirLite(
   env: Readonly<NodeJS.ProcessEnv> = process.env,
   homeDir = os.homedir(),
+  cwd?: string,
 ): string {
   const envDir = readEnvironmentVariable(env, 'QWEN_HOME');
   if (envDir) {
-    return resolveConfigPathLite(envDir, undefined, homeDir);
+    const configDir = resolveConfigPathLite(envDir, cwd, homeDir);
+    return cwd ? path.resolve(cwd, configDir) : configDir;
   }
   if (!homeDir) {
     return path.join(os.tmpdir(), SETTINGS_DIRECTORY_NAME);
