@@ -186,6 +186,35 @@ export function formatAsyncHookOutput(
 }
 
 /**
+ * Provenance stamp on the parts this module builds. History carries no
+ * hook-origin field, and a caller-authored part can reproduce the envelope
+ * shape byte-for-byte, so shape alone cannot prove a block came from a hook
+ * (the same rationale as the UserPromptSubmit receipt). The symbol is
+ * module-private: transcript records, ACP prompt blocks, and model output
+ * cannot carry it. The Retry recovery re-attaches only stamped parts and
+ * leaves a shape-matched but unstamped part in the caller's entry as text.
+ * Parts are carried by reference through the in-memory push/strip, so the
+ * stamp survives there; it does not survive serialization (the retention is
+ * in-memory only).
+ */
+const asyncHookContextProvenance = Symbol('asyncHookContextProvenance');
+
+function stampAsyncHookContextPart(
+  text: string,
+): { text: string } & Record<symbol, unknown> {
+  return { text, [asyncHookContextProvenance]: true };
+}
+
+/** Whether a part was built (stamped) by this module, not caller-authored. */
+export function isStampedAsyncHookContextPart(part: unknown): boolean {
+  return (
+    typeof part === 'object' &&
+    part !== null &&
+    (part as Record<symbol, unknown>)[asyncHookContextProvenance] === true
+  );
+}
+
+/**
  * Drain the pending async hook output and build the tagged part to append to
  * the outgoing request, or null when there is nothing to deliver. The drain
  * clears the registry, so a block is selected for delivery once. This proves
@@ -206,7 +235,7 @@ export function drainAsyncHookContextPart(
   if (context === null) {
     return null;
   }
-  return { text: wrapAsyncHookContext(context) };
+  return stampAsyncHookContextPart(wrapAsyncHookContext(context));
 }
 
 /**
@@ -230,16 +259,43 @@ export function mergeAsyncHookContextParts(
     if (body.trim()) bodies.push(body);
   }
   if (bodies.length === 0) return null;
-  // Give each body a share so an older retained block cannot crowd out the
-  // freshly drained one: formatAsyncHookOutput keeps notification messages
-  // last, and a tail cut would lose them forever (the registry is cleared).
-  const share = Math.floor(MAX_ASYNC_HOOK_CONTEXT_LENGTH / bodies.length);
-  const joined = bodies.map((body) => boundHalf(body, share)).join('\n\n');
-  return {
-    text: wrapAsyncHookContext(
-      boundHalf(joined, MAX_ASYNC_HOOK_CONTEXT_LENGTH),
-    ),
-  };
+  const joinedRaw = bodies.join('\n\n');
+  // Only truncate on real overflow: a merge that fits the cap must pass
+  // through whole (the registry is get-and-clear, so a needless cut is a
+  // permanent loss). A lone within-cap block stays byte-identical.
+  if (joinedRaw.length <= MAX_ASYNC_HOOK_CONTEXT_LENGTH) {
+    return stampAsyncHookContextPart(wrapAsyncHookContext(joinedRaw));
+  }
+  // Overflow: water-fill the budget — a short body consumes only its own
+  // length and the remainder goes to the long ones — so an older retained
+  // block cannot crowd out the fresh drain, and budget the separators too.
+  // Keep each cut marked with the notice its body already carries, so a
+  // message-only body does not claim a context truncation that never happened.
+  const cut = (body: string, budget: number) =>
+    boundHalf(
+      body,
+      budget,
+      body.trimEnd().endsWith(ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE)
+        ? ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE
+        : ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE,
+    );
+  let budget = Math.max(
+    MAX_ASYNC_HOOK_CONTEXT_LENGTH - 2 * (bodies.length - 1),
+    0,
+  );
+  const order = bodies
+    .map((_, i) => i)
+    .sort((a, b) => bodies[a].length - bodies[b].length);
+  const alloc = new Array<number>(bodies.length).fill(0);
+  let remaining = bodies.length;
+  for (const i of order) {
+    const share = Math.floor(budget / remaining);
+    alloc[i] = Math.min(bodies[i].length, share);
+    budget -= alloc[i];
+    remaining -= 1;
+  }
+  const joined = bodies.map((body, i) => cut(body, alloc[i])).join('\n\n');
+  return stampAsyncHookContextPart(wrapAsyncHookContext(joined));
 }
 
 /**

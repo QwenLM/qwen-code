@@ -231,6 +231,7 @@ import {
   appendAsyncHookContextPart,
   drainAsyncHookContextPart,
   isAsyncHookContextPartText,
+  isStampedAsyncHookContextPart,
   mergeAsyncHookContextParts,
 } from '../hooks/async-hook-context.js';
 import {
@@ -4449,8 +4450,10 @@ export class LlmClient {
       for (const entry of strippedRetryEntries) {
         const parts = entry.parts;
         if (!parts) continue;
+        // Recover only parts this client stamped when it appended them; a
+        // shape-matched part the caller authored stays in the entry as text.
         const isAsyncPart = (p: (typeof parts)[number]) =>
-          typeof p.text === 'string' && isAsyncHookContextPartText(p.text);
+          typeof p.text === 'string' && isStampedAsyncHookContextPart(p);
         const asyncTexts = parts
           .filter(isAsyncPart)
           .map((p) => ({ text: p.text as string }));
@@ -5851,12 +5854,13 @@ export class LlmClient {
             .filter(
               (t): t is string =>
                 typeof t === 'string' && isAsyncHookContextPartText(t),
-            ),
+            )
+            .map((t) => t.trim()),
         );
         const seen = new Set<string>();
         const deduped: Array<{ text: string }> = [];
         for (const part of candidates) {
-          if (present.has(part.text)) {
+          if (present.has(part.text.trim())) {
             // The request already carries it, so do not append a second copy —
             // but the retention entry was consumed above, and only this send's
             // push snapshot decides whether it survives. Register it for
@@ -5865,8 +5869,8 @@ export class LlmClient {
             attachedAsyncHookParts.push({ text: part.text });
             continue;
           }
-          if (seen.has(part.text)) continue;
-          seen.add(part.text);
+          if (seen.has(part.text.trim())) continue;
+          seen.add(part.text.trim());
           deduped.push(part);
         }
         const merged = mergeAsyncHookContextParts(deduped);

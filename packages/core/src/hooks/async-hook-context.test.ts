@@ -533,9 +533,9 @@ describe('async-hook-context', () => {
 
     it('passes a single within-cap envelope through byte-identical', () => {
       const envelope = wrapAsyncHookContext('lone block');
-      expect(mergeAsyncHookContextParts([{ text: envelope }])).toEqual({
-        text: envelope,
-      });
+      expect(mergeAsyncHookContextParts([{ text: envelope }])?.text).toBe(
+        envelope,
+      );
     });
 
     it('merges several envelopes into one joined envelope', () => {
@@ -578,6 +578,55 @@ describe('async-hook-context', () => {
       );
       expect(body.length).toBeLessThanOrEqual(MAX_ASYNC_HOOK_CONTEXT_LENGTH);
       expect(isAsyncHookContextPartText(merged?.text ?? '')).toBe(true);
+    });
+
+    it('a merge that fits the cap is not truncated (no needless loss)', () => {
+      // 9000 + separator + short notification fits the cap; an equal-share
+      // pre-cut would truncate the big body even though the total fits.
+      const big = 'R'.repeat(9000);
+      const merged = mergeAsyncHookContextParts([
+        { text: wrapAsyncHookContext(big) },
+        { text: wrapAsyncHookContext('fresh notification') },
+      ]);
+      expect(merged).not.toBeNull();
+      const body = (merged?.text ?? '').slice(
+        ASYNC_HOOK_CONTEXT_OPEN.length + 1,
+        -(ASYNC_HOOK_CONTEXT_CLOSE.length + 1),
+      );
+      expect(body).toBe(big + '\n\n' + 'fresh notification');
+      expect(body).not.toContain(ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE);
+      expect(body.length).toBeLessThanOrEqual(MAX_ASYNC_HOOK_CONTEXT_LENGTH);
+    });
+
+    it('cutting a message-only body keeps the message notice, not the context notice', () => {
+      const messageOnly = formatAsyncHookOutput({
+        contexts: [],
+        messages: [
+          {
+            type: 'warning',
+            message: 'x'.repeat(MAX_ASYNC_HOOK_CONTEXT_LENGTH + 5000),
+            hookName: 'H',
+            hookId: 'h1',
+            timestamp: 0,
+          },
+        ],
+      })!;
+      expect(messageOnly.endsWith(ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE)).toBe(
+        true,
+      );
+      const merged = mergeAsyncHookContextParts([
+        { text: wrapAsyncHookContext(messageOnly) },
+        { text: wrapAsyncHookContext('fresh notification') },
+      ]);
+      expect(merged).not.toBeNull();
+      const body = (merged?.text ?? '').slice(
+        ASYNC_HOOK_CONTEXT_OPEN.length + 1,
+        -(ASYNC_HOOK_CONTEXT_CLOSE.length + 1),
+      );
+      expect(body).toContain(ASYNC_HOOK_MESSAGE_TRUNCATION_NOTICE);
+      expect(body).not.toContain(ASYNC_HOOK_CONTEXT_TRUNCATION_NOTICE);
+      expect(body).toContain('fresh notification');
+      expect(body.length).toBeLessThanOrEqual(MAX_ASYNC_HOOK_CONTEXT_LENGTH);
     });
 
     it('skips blank bodies and non-envelope parts', () => {

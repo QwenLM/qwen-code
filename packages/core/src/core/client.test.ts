@@ -75,6 +75,7 @@ import { AsyncHookRegistry } from '../hooks/asyncHookRegistry.js';
 import {
   ASYNC_HOOK_CONTEXT_CLOSE,
   ASYNC_HOOK_CONTEXT_OPEN,
+  drainAsyncHookContextPart,
   isAsyncHookContextPartText,
   MAX_ASYNC_HOOK_CONTEXT_LENGTH,
   wrapAsyncHookContext,
@@ -1507,6 +1508,27 @@ describe('Gemini Client (client.ts)', () => {
       return registry;
     };
 
+    /** A stamped async part (as the drain builds it), for seeding a stripped entry. */
+    const stampedAsyncPart = (context: string) => {
+      const reg = new AsyncHookRegistry();
+      reg.register({
+        hookId: 'stamp-1',
+        hookName: 'Background Hook',
+        hookEvent: HookEventName.PostToolUse,
+        sessionId: 'session-1',
+        startTime: Date.now(),
+        timeout: 60000,
+        stdout: JSON.stringify({
+          hookSpecificOutput: { additionalContext: context },
+        }),
+        stderr: '',
+      });
+      reg.complete('stamp-1');
+      return drainAsyncHookContextPart({
+        getPendingAsyncOutput: () => reg.getPendingOutput(),
+      })!;
+    };
+
     // Identify the async envelope with the same exact matcher the code under
     // test uses (whitespace-tolerant, rejects an internally nested tag), not a
     // loose substring check, so a change to the envelope shape cannot leave a
@@ -1869,7 +1891,7 @@ describe('Gemini Client (client.ts)', () => {
       const orphan = content(
         'user',
         { text: 'original prompt' },
-        { text: wrapAsyncHookContext('retry recovered block') },
+        stampedAsyncPart('retry recovered block'),
       );
       installChat({
         stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([orphan]),
@@ -1904,7 +1926,7 @@ describe('Gemini Client (client.ts)', () => {
       const orphan = content(
         'user',
         { text: 'original prompt' },
-        { text: envelope },
+        stampedAsyncPart('continue carried block'),
       );
       installChat({
         stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([orphan]),
@@ -1991,7 +2013,7 @@ describe('Gemini Client (client.ts)', () => {
       const orphan = content(
         'user',
         { text: 'original prompt' },
-        { text: envelope },
+        stampedAsyncPart('carried then pre-push exit'),
       );
       let pushes = 0;
       installChat({
@@ -2055,6 +2077,64 @@ describe('Gemini Client (client.ts)', () => {
       expect(
         getLastTurnRequestText().split('stable standing rule').length - 1,
       ).toBe(1);
+    });
+
+    it('a Retry leaves a caller-authored envelope-shaped part in the entry (provenance)', async () => {
+      // Shape alone cannot prove hook provenance: a caller-authored part that
+      // happens to match the envelope must stay in the entry as text, not be
+      // recovered and re-attached as an injected block.
+      const orphan = content(
+        'user',
+        { text: 'original prompt' },
+        { text: wrapAsyncHookContext('not from a hook') },
+      );
+      installChat({
+        stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([orphan]),
+        getUserContentPushCount: vi.fn().mockReturnValue(1),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        setHistory: vi.fn(),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      });
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, 0);
+        return textTurn('ok');
+      });
+      await run([{ text: 'retry me' }], 'prompt-caller-envelope', {
+        type: SendMessageType.Retry,
+      });
+      // Not recovered: the caller's part stays in the entry...
+      expect(orphan.parts?.some(isAsyncHookPart)).toBe(true);
+      // ...and no async block is attached to the request.
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      expect(parts.filter(isAsyncHookPart)).toHaveLength(0);
+    });
+
+    it('a continue Retry dedups a carried envelope differing only by whitespace', async () => {
+      const orphan = content(
+        'user',
+        { text: 'original prompt' },
+        stampedAsyncPart('padded dedup block'),
+      );
+      installChat({
+        stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([orphan]),
+        getUserContentPushCount: vi.fn().mockReturnValue(1),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        setHistory: vi.fn(),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      });
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, 0);
+        return textTurn('ok');
+      });
+      // The payload re-serialised the envelope with a trailing newline.
+      const padded = wrapAsyncHookContext('padded dedup block') + '\n';
+      await run(
+        [{ text: 'original prompt' }, { text: padded }],
+        'prompt-padded-dedup',
+        { type: SendMessageType.Retry },
+      );
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      expect(parts.filter(isAsyncHookPart)).toHaveLength(1);
     });
   });
 
