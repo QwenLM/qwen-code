@@ -28,8 +28,13 @@
 
 ## 切片 1 — 剩余
 
-1. **将 Monitor 策略接入 worker monitor 路径。** `WorkerMonitorPolicy` 已存在但尚未挂载。capability 开启时，executor 的 monitor start（`managed-runtime-tool-executor.ts`，monitor lane ~1713）与 `ManagedMonitorWatcher` 须在 watcher 旁构造 policy，从已提交的 `monitor_run.observationSequence` 水位传入 `startSequence`，并将 stdout chunk 路由到 `policy.onChunk`。Harness `HostedMonitorLoop` 在 capability 模式下变为观测条目的纯 applier（其定时器/Broker stop 往返消失）。terminal 条目的 `monitorStopReason` 须反映 policy 的 quota/idle/自然原因。
-2. **advertise capability 并在生产启用 registry。** 将 `runtime-observation/1` 加入 worker capabilities（attestation 契约 `managed-runtime-attestation-contract.ts` + Java `ManagedContextProtocol`/`RuntimeAttestation` capability 集），并在 `managed-context-worker.ts` 以 `{ enabled: <capability>, workspaceId: boot.workspaceId }` 构造 `ManagedShellPublisherRegistry`。按设计 §4.11 门控：worker 自持采集仅由 worker capability 门控，而非 server setting。
+1. **worker 中的 Monitor 策略 — 已落地（worker 侧）。** executor monitor lane（`managed-runtime-tool-executor.ts`，`executeV3Monitor`）在 prepared sink 为 `WorkerBackgroundCaptureSink` 时挂载 `WorkerMonitorPolicy`；sink 将 stdout 路由到 `policy.onChunk`，policy 分配 sequence（全新启动 `startSequence:0`）并构建通知资源，quota/idle stop 经 `monitorRegistry.terminate` 终止 unit，其退出经 terminal 条目的 `monitorStopReason` 结算记录。参数与 Harness admit 一致（`max_events` 默认 1000 clamp 1..10000，`idle_timeout_ms` 默认 300000 clamp 1..600000，`debounceMs` 1000）。测试：观测条目恰好提交一次（`observationSequence=1`、`notifiedThrough=1`、settled `exited`）。**仍剩余：** capability 模式下 Harness `HostedMonitorLoop` 须变为纯 applier — `resumeMonitorWatch`（`hosted-workspace-tool-turn.ts:9263`）在 worker 自持观测时须跳过启动 loop，否则双方都观测。rebuild/re-attach 须以已提交的 `observationSequence` 水位作为 `startSequence`（全新 worker lane 恒为 0）。
+2. **advertise capability 并在生产启用 registry — 协调链（尚未接线）。** 仅当整条注册链携带 writer generation 且 Harness loop 被旁路时，启用才安全；部分启用会停滞后台输出（worker run 永不 attach）或重复观测 monitor。精确链：
+   - worker capability `runtime-observation/1` 在 worker attestation/capabilities 中 advertise（TS attestation 契约 + Java `ManagedContextProtocol`/`RuntimeAttestation` capability 集）；准入检查属切片 3。
+   - 在 `managed-runtime-attestation-worker.ts:658`（及 SSH worker 站点）以 `{ enabled: <capability>, workspaceId: contextBoot.workspaceId }` 构造 `ManagedShellPublisherRegistry`。
+   - Harness `HostedWorkspaceBroker.registerPublisher`（`hosted-workspace-broker.ts:460`）发送 `writerGeneration`（取自 session 的 writer generation）；Java `RuntimeBrokerService.installPublisher` 接受；`HttpRuntimeTransport.installPublisherV3`（`:928`）将其加入闭键 body + expected 集；HTTP controller 路由解析。worker registry 已接受相同或更新 generation（更旧 → 409）。
+   - Harness `resumeMonitorWatch` 旁路（项 1）由同一 capability 门控。
+   - 按设计 §4.11 门控：worker 自持采集仅由 worker capability 门控，而非 server setting。在 characterization（项 3）证明等价前保持生产关闭。
 3. **characterization 测试。** 证明 worker 自持采集发布的段/页/manifest 对象与 Harness 采集逐字节等价（段大小与页容量除外），且最终 Artifact 相同（设计 §10「Capture equivalence」）。新增 Harness 重启测试：连续后台输出、kill+reload Harness、单一采集、无 `producer_lost`、每字节恰好一次、manifest 链有效。
 
 ## 切片 2 — Broker staging（未动）
