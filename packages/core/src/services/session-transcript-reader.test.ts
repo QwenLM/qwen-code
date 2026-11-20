@@ -3807,6 +3807,34 @@ describe('SessionTranscriptReader', () => {
     },
   );
 
+  it('evicts a superseded shared-class prefix when a restore-built index is offered under a full shared budget', async () => {
+    const reader = newReader();
+    const filePath = await writeRecords(
+      linear('large-', 0, 19, null, (i) => `large transcript ${i}`),
+    );
+    const first = await reader.readPage(sessionId, { limit: 1 });
+    const oldState = first.nextCursorState!;
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    await appendRecords(filePath, record('u21', 'large-19', 'appended'));
+    await reader.readPage(sessionId, { limit: 1 });
+    const newBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldBytes;
+    expect(newBytes).toBeGreaterThan(oldBytes);
+    clearSessionTranscriptIndexCacheEntriesForTest();
+    // Both snapshots stay shared-class; together they exceed the budget.
+    setSessionTranscriptIndexCacheMaxBytesForTest(newBytes + 1);
+    await readAfter(reader, oldState, { limit: 1 });
+    const builds = countBuilds(filePath);
+    await expect(
+      reader.readRestoreProjection(sessionId, NONE),
+    ).resolves.toBeDefined();
+    await reader.readPage(sessionId, { limit: 1 });
+    expect(builds.count).toBe(1);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      newBytes,
+    );
+  });
+
   it('keeps a superseded prefix cached when a restore offer cannot fit even after reclaiming it', async () => {
     setSessionTranscriptIndexCacheMaxBytesForTest(1);
     const reader = newReader();
