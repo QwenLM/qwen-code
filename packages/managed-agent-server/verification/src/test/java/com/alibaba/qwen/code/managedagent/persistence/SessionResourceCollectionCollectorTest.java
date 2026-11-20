@@ -177,7 +177,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
 
     private void head(String sessionId) {
         jdbc.update(
-                "INSERT INTO ma_session_head (head_kind, tenant_key, harness_key, tenant_id, harness_session_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, committed_sequence, last_commit_digest, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES ('MANAGED_SESSION', ?, ?, ?, ?, 'workspace-1', ?, 1, 'SEALED', 1, 'original', 946684800000, ?, 1, 1, ?, 1, 1, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
+                "INSERT INTO ma_session_head (head_kind, tenant_key, harness_key, tenant_id, harness_session_id, workspace_id, session_id, state, writer_generation, writer_id, writer_lease_until, lease_token_hash, journal_revision, committed_sequence, last_commit_digest, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES ('MANAGED_SESSION', ?, ?, ?, ?, 'workspace-1', ?, 'SEALED', 1, 'original', 946684800000, ?, 1, 1, ?, 1, 1, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(sessionId), tenant, sessionId, sessionId, "a".repeat(64), "b".repeat(64));
     }
 

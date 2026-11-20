@@ -30,6 +30,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { raceWithAbort } from '../utils/race-with-abort.js';
 
 const debugLogger = createDebugLogger('EXIT_WORKTREE');
 
@@ -115,12 +116,14 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
    * to the base info-type since it is non-destructive.
    */
   override async getConfirmationDetails(
-    _abortSignal: AbortSignal,
+    signal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     if (this.params.action !== 'remove') {
-      return super.getConfirmationDetails(_abortSignal);
+      return super.getConfirmationDetails(signal);
     }
-    const target = await this.resolveConfirmationTarget();
+    const target = await raceWithAbort(signal, () =>
+      this.resolveConfirmationTarget(),
+    );
     const worktreePath = target.worktreePath;
     const branch = target.branch;
     const command =
@@ -140,7 +143,8 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     return details;
   }
 
-  async execute(_signal: AbortSignal): Promise<ToolResult> {
+  async execute(signal: AbortSignal): Promise<ToolResult> {
+    signal.throwIfAborted();
     // Mirror `enter_worktree`: anchor at the repo top-level so we look
     // for the worktree under the same directory it was created in.
     // Otherwise launching `qwen` from a subdirectory of a monorepo would
@@ -149,7 +153,8 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     // found" even when the worktree is alive.
     const cwd = this.config.getTargetDir();
     const probe = new GitWorktreeService(cwd);
-    const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
+    const projectRoot =
+      (await raceWithAbort(signal, () => probe.getRepoTopLevel())) ?? cwd;
     let service =
       projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
 
@@ -166,15 +171,18 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     // making it impossible to diagnose a real filesystem problem.
     let exists = false;
     try {
-      exists = await isDirectory(worktreePath);
+      exists = await raceWithAbort(signal, () => isDirectory(worktreePath));
     } catch (error) {
+      signal.throwIfAborted();
       debugLogger.warn(`exit_worktree: cannot stat ${worktreePath}: ${error}`);
       return errorResult(
         `Cannot access worktree at ${worktreePath} (${error instanceof Error ? error.message : String(error)}).`,
       );
     }
     if (!exists) {
-      const resolved = await this.resolveCurrentSessionWorktree();
+      const resolved = await raceWithAbort(signal, () =>
+        this.resolveCurrentSessionWorktree(),
+      );
       if (resolved) {
         service = resolved.service;
         worktreePath = resolved.worktreePath;
@@ -182,9 +190,8 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
         currentWorktreeSession = resolved.session;
         exists = true;
       } else {
-        const current = await resolveManagedWorktreeFromCwd(
-          cwd,
-          this.params.name,
+        const current = await raceWithAbort(signal, () =>
+          resolveManagedWorktreeFromCwd(cwd, this.params.name),
         );
         if (current) {
           service = new GitWorktreeService(current.repoRoot);
@@ -236,7 +243,9 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     //    those as "owner unknown" and allow removal (matches prior
     //    behaviour) but log so operators can see when the guard is
     //    bypassed.
-    const markerOutcome = await readWorktreeSessionMarkerOutcome(worktreePath);
+    const markerOutcome = await raceWithAbort(signal, () =>
+      readWorktreeSessionMarkerOutcome(worktreePath),
+    );
     const currentSessionId = this.config.getSessionId();
     if (markerOutcome.state === 'inconclusive') {
       // The marker changed identity (or vanished) mid-read — a concurrent
@@ -252,7 +261,9 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     const owner =
       markerOutcome.state === 'owned' ? markerOutcome.sessionId : null;
     if (owner !== null && owner !== currentSessionId) {
-      currentWorktreeSession ??= await this.readCurrentWorktreeSession();
+      currentWorktreeSession ??= await raceWithAbort(signal, () =>
+        this.readCurrentWorktreeSession(),
+      );
       // A sidecar carrying `supersededBy` is proof the marker is *not* stale:
       // the worktree-reset transfer deliberately retains the superseded
       // sidecar with the same slug and path, so without this term the hatch
@@ -262,20 +273,20 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
         currentWorktreeSession?.slug === this.params.name &&
         currentWorktreeSession.supersededBy === undefined &&
         samePath(currentWorktreeSession.worktreePath, worktreePath);
-      const ownerActive = await isSessionRuntimeActive(
-        owner,
-        currentWorktreeSession
-          ? [
-              currentWorktreeSession.originalCwd,
-              currentWorktreeSession.worktreePath,
-            ]
-          : [ownerProjectRoot, worktreePath],
-      ).catch((error) => {
-        debugLogger.warn(
-          `exit_worktree: failed to check owner runtime ${owner}: ${error}`,
-        );
-        return true;
-      });
+      const ownerRoots = currentWorktreeSession
+        ? [
+            currentWorktreeSession.originalCwd,
+            currentWorktreeSession.worktreePath,
+          ]
+        : [ownerProjectRoot, worktreePath];
+      const ownerActive = await raceWithAbort(signal, () =>
+        isSessionRuntimeActive(owner, ownerRoots).catch((error) => {
+          debugLogger.warn(
+            `exit_worktree: failed to check owner runtime ${owner}: ${error}`,
+          );
+          return true;
+        }),
+      );
       if (
         ownerActive ||
         (!currentSessionOwnsPath && !currentSessionInWorktree)
@@ -308,7 +319,9 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     //    commits" flag because losing committed work is rarely what the
     //    user means by "remove worktree".
     if (!this.params.discard_changes) {
-      const counts = await service.countWorktreeChanges(worktreePath);
+      const counts = await raceWithAbort(signal, () =>
+        service.countWorktreeChanges(worktreePath),
+      );
       if (counts === null) {
         // Inspecting the worktree itself failed — most likely a corrupt
         // git index, a permission problem, or the worktree dir was
@@ -339,7 +352,9 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     // the expected path (the common case), and only trust it when it
     // names THIS worktree — the session may track a different one.
     const slugBranch = worktreeBranchForSlug(this.params.name);
-    const sessionSidecar = await this.readCurrentWorktreeSession();
+    const sessionSidecar = await raceWithAbort(signal, () =>
+      this.readCurrentWorktreeSession(),
+    );
     const sidecarForThis =
       sessionSidecar?.slug === this.params.name ? sessionSidecar : null;
     const branchOwned =
@@ -350,11 +365,11 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
 
     let hasUnmerged = true;
     try {
-      hasUnmerged = await service.hasUnmergedWorktreeCommits(
-        this.params.name,
-        creationBase,
+      hasUnmerged = await raceWithAbort(signal, () =>
+        service.hasUnmergedWorktreeCommits(this.params.name, creationBase),
       );
     } catch (error) {
+      signal.throwIfAborted();
       // Service-level helper logs its own failures, but the caller
       // context is what an operator would grep for ("why did
       // exit_worktree refuse?"). Add a second log here so the chain
@@ -376,6 +391,7 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
       deleteBranch: true,
       branchOwned,
       baseCommit: creationBase,
+      signal,
     });
     if (!result.success) {
       return errorResult(result.error ?? 'Failed to remove worktree.');
