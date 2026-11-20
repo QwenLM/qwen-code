@@ -3707,6 +3707,16 @@ describe('SessionTranscriptReader', () => {
       // rejection window is left unhandled; the assertions follow below.
       void initiator.catch(() => {});
       void waiter.catch(() => {});
+      // Wait until the waiter has actually taken the pending-hit path; on a
+      // loaded runner its stat can lag, and clearing before it shares would
+      // let it start a second build against the not-yet-rewritten file.
+      await vi.waitFor(() =>
+        expect(
+          mockDebugLogger.debug.mock.calls.some((call) =>
+            String(call[0]).includes('index cache pending hit'),
+          ),
+        ).toBe(true),
+      );
       if (condition === 'entry-cleared') {
         // The placeholder loses its cache slot mid-build (via the test clear
         // seam; count-cap eviction of in-flight placeholders is prevented by
