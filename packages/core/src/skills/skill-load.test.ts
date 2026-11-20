@@ -93,7 +93,9 @@ describe('skill-load', () => {
             ? { size: 42 }
             : yamlString.includes('mcp: github')
               ? 'github'
-              : ' github, notion ';
+              : yamlString.includes('mcp: jira, ')
+                ? 'jira, '
+                : ' github, notion ';
         return { ...base, mcp };
       }
       return { ...base }; // Default case
@@ -137,6 +139,10 @@ describe('skill-load', () => {
         parse({ extra: ['mcp:', '  size: 42'] }).mcpServers,
       ).toBeUndefined();
       expect(parse({}).mcpServers).toBeUndefined();
+      // Trailing/empty segments drop rather than inventing a name
+      // (round-8 deferral oracle). The mock returns 'jira, ' for this
+      // fixture shape.
+      expect(parse({ extra: ['mcp: jira, '] }).mcpServers).toEqual(['jira']);
     });
 
     it('should parse markdown with CRLF line endings (Windows format)', () => {

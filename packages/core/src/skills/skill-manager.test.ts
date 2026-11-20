@@ -275,6 +275,10 @@ describe('SkillManager', () => {
       // A malformed value never breaks loading.
       expect(parseWith('mcp:\n  size: 42').mcpServers).toBeUndefined();
       expect(parse(validMarkdown).mcpServers).toBeUndefined();
+      // Trailing/empty segments drop rather than inventing a name
+      // (round-8 deferral oracle).
+      expect(parseWith('mcp: "jira, "').mcpServers).toEqual(['jira']);
+      expect(parseWith('mcp: " ,, "').mcpServers).toBeUndefined();
     });
 
     it('should parse valid markdown content', () => {

@@ -82,7 +82,7 @@ export function buildSkillLlmContent(baseDir: string, body: string): string {
  */
 const UNAVAILABLE_GUIDANCE: Record<McpServerUnavailableReason, string> = {
   excluded: 'remove them from mcp.excluded',
-  not_allowed: 'add them to mcp.allowed',
+  not_allowed: 'add them to mcp.allowed (or pass --allowed-mcp-server-names)',
   pending_approval: 'approve them via /mcp',
   removed: 're-add them to your MCP configuration',
 };
