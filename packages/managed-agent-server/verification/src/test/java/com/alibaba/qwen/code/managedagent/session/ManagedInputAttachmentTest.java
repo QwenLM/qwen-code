@@ -59,30 +59,30 @@ class ManagedInputAttachmentTest {
     @Test
     void unboundActiveSessionAdvertisesInputAttachmentsWithACapableHarness() {
         when(harness.supportsInputAttachments()).thenReturn(true);
-        var admission = service.createSession("tenant", "unbound-capable", "qwen-code", null, null, null,
+        var admission = service.createSession("tenant", "actor", "unbound-capable", "qwen-code", null, null, null,
                 List.of(new InputBlock("input_text", "hello")));
-        var summary = service.getWebShellSession("tenant", null, admission.sessionId());
+        var summary = service.getWebShellSession("tenant", "actor", admission.sessionId());
         assertThat(summary.capabilities().inputAttachments()).isTrue();
     }
 
     @Test
     void unboundSessionWithoutHarnessSupportDoesNotAdvertiseInputAttachments() {
-        var admission = service.createSession("tenant", "unbound-unsupported", "qwen-code", null, null, null,
+        var admission = service.createSession("tenant", "actor", "unbound-unsupported", "qwen-code", null, null, null,
                 List.of(new InputBlock("input_text", "hello")));
-        var summary = service.getWebShellSession("tenant", null, admission.sessionId());
+        var summary = service.getWebShellSession("tenant", "actor", admission.sessionId());
         assertThat(summary.capabilities().inputAttachments()).isFalse();
     }
 
     @Test
     void unboundClosedSessionDoesNotAdvertiseInputAttachments() {
         when(harness.supportsInputAttachments()).thenReturn(true);
-        var admission = service.createSession("tenant", "unbound-closed", "qwen-code", null, null, null,
+        var admission = service.createSession("tenant", "actor", "unbound-closed", "qwen-code", null, null, null,
                 List.of(new InputBlock("input_text", "hello")));
         // CLOSED keeps deletedAt null, so only the ACTIVE conjunct can refuse;
         // a DELETED row would pass for the wrong reason (visible is false).
         jdbc.update("UPDATE ma_session SET status = 'CLOSED' WHERE tenant_id = ? AND session_id = ?",
                 "tenant", admission.sessionId());
-        var summary = service.getWebShellSession("tenant", null, admission.sessionId());
+        var summary = service.getWebShellSession("tenant", "actor", admission.sessionId());
         assertThat(summary.capabilities().inputAttachments()).isFalse();
     }
 

@@ -81,7 +81,7 @@ class ManagedSchemaTimeContractTest {
                 });
             }
         }
-        assertEquals(88, count);
+        assertEquals(89, count);
         assertAll(checks);
     }
 

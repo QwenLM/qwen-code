@@ -41,6 +41,7 @@ public class ManagedSkillCatalogService {
         return view(session);
     }
 
+    @Transactional(transactionManager = "managedAgentTransactionManager", readOnly = true, isolation = Isolation.REPEATABLE_READ)
     public WebShellSessionSkills get(SessionPrincipal principal, String sessionId) {
         var session = sessions.requireReadableSession(principal, sessionId);
         return view(session);

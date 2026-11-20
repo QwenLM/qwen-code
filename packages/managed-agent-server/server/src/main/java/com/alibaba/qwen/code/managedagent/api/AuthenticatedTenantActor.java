@@ -13,8 +13,10 @@ public interface AuthenticatedTenantActor extends Principal {
      * no production implementation overrides this today, so the whole
      * subject axis of the ownership contract stays test-only. A future
      * adapter must carry the subject in its signed material — never an
-     * HTTP header or request body — and the tenant filter will start
-     * enforcing it then.
+     * HTTP header or request body — and also wire it into the tenant
+     * filter's {@code TenantContext}: {@code TenantContextFilter} forwards
+     * the actor id only, so overriding this method alone changes nothing
+     * on a live request.
      */
     default String actorSubjectId() {
         return null;

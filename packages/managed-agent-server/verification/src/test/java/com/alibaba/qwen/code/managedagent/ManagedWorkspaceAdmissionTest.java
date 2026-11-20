@@ -1355,9 +1355,13 @@ class ManagedWorkspaceAdmissionTest {
                     com.alibaba.qwen.code.managedagent.model.SessionPrincipal
                             .of(tenant, "actor-b", "subject-b"),
                     "rename", sessionId, "new title"))
-                    .isInstanceOfSatisfying(ManagedAgentException.class, error ->
-                            assertThat(error.getCode()).isIn("session_not_found",
-                                    "workspace_unavailable"));
+                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                        // A live, workspace-bound Session answers the
+                        // non-creator with this one refusal; a 404 here would
+                        // collapse "unreadable" into "unknown".
+                        assertThat(error.getStatus()).isEqualTo(409);
+                        assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                    });
         });
     }
 
