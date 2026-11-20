@@ -73,11 +73,24 @@ export class ConversationHandler {
         // The handlers stop at the cancelled signal; a run they have not
         // settled within the cap ends here, and its late work is dropped.
         state.settleTimer ??= setTimeout(() => {
-          this.finish(state, {
-            reason: 'cancelled',
-            rounds: (state.round ?? 0) + 1,
-            ...(state.model?.turn ? { turn: state.model.turn } : {}),
-          });
+          const finish = () =>
+            this.finish(state, {
+              reason: 'cancelled',
+              rounds: (state.round ?? 0) + 1,
+              ...(state.model?.turn ? { turn: state.model.turn } : {}),
+            });
+          try {
+            const pending = state.input.getPendingToolSettlement?.();
+            if (pending) {
+              void pending.then(finish, (error: unknown) =>
+                this.bus.reportFailure('conversation', event, error),
+              );
+            } else {
+              finish();
+            }
+          } catch (error) {
+            this.bus.reportFailure('conversation', event, error);
+          }
         }, CANCEL_SETTLEMENT_CAP_MS);
         return;
       }

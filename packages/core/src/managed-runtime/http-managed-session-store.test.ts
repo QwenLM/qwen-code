@@ -1181,6 +1181,176 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  // reacquireWriter clears the grant for the whole /writers:acquire round
+  // trip. A seal that starts inside that window must wait for the acquire
+  // and seal the grant handed back, instead of reading the gap as "never
+  // held a writer" and leaving the late lease live.
+  it('holds a close open until the deferred acquire answers, then seals the late grant', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: true });
+    let renewal: Promise<unknown> | undefined;
+    let closing: Promise<void> | undefined;
+    try {
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.reacquire).toHaveBeenCalledTimes(1);
+      expect(rig.observed.acquiresAfterBoot).toBe(1);
+      // The parked acquire owns the grant-less window.
+      expect(rig.grant()).toBeUndefined();
+      let closed = false;
+      closing = rig.stores.close().then(() => {
+        closed = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(closed).toBe(false);
+      expect(rig.server.sealCount).toBe(0);
+      rig.releaseAcquire();
+      await closing;
+      expect(rig.server.sealCount).toBe(1);
+      expect(rig.journal.writerSealed).toBe(true);
+    } finally {
+      rig.releaseAcquire();
+      rig.release();
+      await closing?.catch(() => undefined);
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  // stopLocal() holds the client open for the whole acquire round trip, so
+  // the late grant it waited for arrives on a client that has already
+  // stopped. Sealing it is refused locally, so `reacquireWriter` restores the
+  // expired grant it replaced: nothing adopts the late grant, and the next
+  // renewal must not be scheduled against it.
+  it('holds a local stop open until the deferred acquire answers and does not resume renewal', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: true });
+    let renewal: Promise<unknown> | undefined;
+    let stopping: Promise<void> | undefined;
+    try {
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      // The stop below rejects this renewal, and fake timers flush the
+      // microtask queue before the `finally` handler is attached. Attach one
+      // now so the rejection is never unhandled; the assertions below still
+      // read the settled promise.
+      void renewal.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.observed.acquiresAfterBoot).toBe(1);
+      let stopped = false;
+      stopping = rig.stores.stopLocal().then(() => {
+        stopped = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      // The stop does not resolve before the parked acquire does.
+      expect(stopped).toBe(false);
+      const sealsWhileWaiting = rig.server.sealCount;
+      const renewalsWhileWaiting = rig.observed.ordinaryRenewals;
+      rig.releaseAcquire();
+      await stopping;
+      expect(stopped).toBe(true);
+      // A locally stopped client seals nothing: stopLocal is a local close,
+      // and the lease it waited for is left to lapse on the Store.
+      expect(rig.server.sealCount).toBe(sealsWhileWaiting);
+      await expect(renewal).rejects.toThrow('locally stopped');
+      // The expired grant is back, not a writer-less client: the late grant
+      // was acquired for a client that stopped meanwhile, so `sealGrant()`
+      // refused it locally and `reacquireWriter`'s catch restored the grant
+      // it replaced. That is why the lease below is `bootLeaseUntil` and not
+      // the late grant's `bootLeaseUntil + 300_001`.
+      expect(rig.grant()?.leaseUntil).toBe(rig.observed.bootLeaseUntil);
+      // No renewal timer survives the stop, so the late grant is not kept
+      // alive.
+      await vi.advanceTimersByTimeAsync(rig.observed.bootLeaseUntil);
+      expect(rig.observed.ordinaryRenewals).toBe(renewalsWhileWaiting);
+    } finally {
+      rig.releaseAcquire();
+      rig.release();
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  // joinOriginalCsiWriter refuses while an acquire is parked: it stops the
+  // renewal timer and joins the current one, so handing back a writer it
+  // never joined would let the retirement fence a lease that is still being
+  // minted. Nor may the refusal be permanent: once the acquire answers, the
+  // client holds its grant and the join must report the real reason the late
+  // grant cannot retire instead of the stale "unresolved authority".
+  it('refuses the original CSI writer join while a deferred acquire is in flight', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: true });
+    let renewal: Promise<unknown> | undefined;
+    try {
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      renewal = rig.authority.renewActivation({ leaseDurationMs: 120_000 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(rig.observed.acquiresAfterBoot).toBe(1);
+      await expect(rig.stores.csiRetirement.joinWriter()).rejects.toThrow(
+        'unresolved authority',
+      );
+      rig.releaseAcquire();
+      await renewal?.catch(() => undefined);
+      // The deferred acquire bumped the writer generation, so the client now
+      // holds a grant retirement cannot prepare. Asserting the re-join
+      // rejects on that reason proves the refusal above did not latch a
+      // permanently poisoned join.
+      await expect(rig.stores.csiRetirement.joinWriter()).rejects.toThrow(
+        'original CSI writer cannot prepare retirement',
+      );
+    } finally {
+      rig.releaseAcquire();
+      rig.release();
+      await renewal?.catch(() => undefined);
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  // A failed re-acquisition must put the expired grant back: dropping it
+  // would turn the next settlement into a writer-less client that fences a
+  // log the Store never actually took away.
+  it('restores the expired grant and surfaces the failure when the acquire is refused', async () => {
+    vi.useFakeTimers();
+    const rig = await bootWithHeldRenewalAnswer({ holdAcquires: false });
+    const originalFetch = rig.server.fetch.getMockImplementation()!;
+    let refuseAcquire = false;
+    rig.server.fetch.mockImplementation(async (input, init) => {
+      if (refuseAcquire && requestUrl(input).endsWith('/writers:acquire'))
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_writer_conflict',
+              message: 'The writer lease was taken by another boot.',
+            },
+          },
+          409,
+        );
+      return originalFetch(input, init);
+    });
+    try {
+      vi.setSystemTime(rig.observed.bootLeaseUntil + 1);
+      refuseAcquire = true;
+      await expect(
+        rig.authority.renewActivation({ leaseDurationMs: 120_000 }),
+      ).rejects.toBeInstanceOf(ManagedSessionStoreHttpError);
+      expect(rig.observed.acquiresAfterBoot).toBe(1);
+      // The expired grant is back, not a writer-less client.
+      expect(rig.grant()?.leaseUntil).toBe(rig.observed.bootLeaseUntil);
+    } finally {
+      rig.release();
+      await rig.stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   // Boots a writer whose ordinary renewals after boot are processed by the
   // Store but have their answers held until release(); with refuseRenewal
   // the held answer is a refusal instead, and the request never reaches the
@@ -2706,87 +2876,114 @@ describe('HTTP Managed Session store', () => {
     return { stores, session };
   }
 
-  it.each([1, 2, 3])(
-    'requires storage 3 before committing model statistics (version=%s)',
-    async (version) => {
+  it.each([false, true])(
+    'stamps a clean suspension seal with its wake projection (wakeDispatch=%s)',
+    async (wakeDispatch) => {
       const server = new FakeManagedSessionStore();
-      server.supportedStorageVersion = version;
+      server.wakeDispatch = wakeDispatch;
       const { stores, session } = await bootStoresAndSession(server);
-      try {
-        if (version === 3) server.headOverrides['storageVersion'] = 3;
-        expect(stores.supportsModelDiagnostics()).toBe(version === 3);
-        await enableManagedSessionDiagnostics(session);
-        await new ManagedHookActivationController(session).runTurn(
-          'diagnostics-turn',
-          async (scope) => {
-            const complete = await scope.beginMainAttempt('model');
-            if (version === 3) await complete(true, []);
-            else
-              await expect(complete(true, [])).rejects.toThrow(
-                'storage version 3',
-              );
-          },
-        );
-        const event = session.authority.lastEventOfKind('model.attempt')!;
-        expect(event.payload['state']).toBe(
-          version === 3 ? 'output_committed' : 'started',
-        );
-      } finally {
-        await session.close().catch(() => undefined);
-      }
+      expect(stores.supportsWakeDispatch()).toBe(wakeDispatch);
+      await session.authority.close({ pending: true, dueAt: 1234 });
+      expect(server.sealBodies.at(-1)?.['wake']).toEqual({
+        revision: server.storedTransactions.length,
+        pending: true,
+        dueAt: 1234,
+      });
     },
   );
 
-  it.each([1, 2, 3, 4])(
-    'requires storage 4 before committing execution diagnostics (version=%s)',
-    async (version) => {
-      const server = new FakeManagedSessionStore();
-      server.supportedStorageVersion = version;
-      const { stores, session } = await bootStoresAndSession(server);
-      try {
-        expect(stores.supportsExecutionDiagnostics()).toBe(version === 4);
-        if (version === 4) server.headOverrides['storageVersion'] = 4;
-        await enableManagedExecutionDiagnostics(session);
-        const record = {
-          uuid: 'activity-request',
-          parentUuid: null,
-          sessionId: SESSION_KEY.sessionId,
-          timestamp: new Date().toISOString(),
-          type: 'assistant' as const,
-          cwd: '/workspace',
-          version: 'test',
-          message: {
-            role: 'model',
-            parts: [
-              { functionCall: { id: 'call', name: 'read_file', args: {} } },
-            ],
-          },
-        };
-        if (version === 4) {
-          await session.sink.write(record);
-          expect(
-            session.authority.lastEventOfKind('message.committed')?.payload[
-              'diagnosticsRef'
-            ],
-          ).toBeDefined();
-        } else {
-          await expect(session.sink.write(record)).rejects.toThrow(
-            'storage version 4',
-          );
-          expect(
-            session.authority.lastEventOfKind('message.committed'),
-          ).toBeUndefined();
-        }
-      } finally {
-        await session.close().catch(() => undefined);
-      }
-    },
-  );
-
-  it('continues writing and cold restores after diagnostics promote storage to version 3', async () => {
+  it('sends no wake stamp on a bare seal', async () => {
     const server = new FakeManagedSessionStore();
-    server.supportedStorageVersion = 3;
-    server.enforceReaderCeiling = true;
+    server.wakeDispatch = true;
+    const { session } = await bootStoresAndSession(server);
+    await session.authority.close();
+    expect(server.sealBodies.at(-1)).not.toHaveProperty('wake');
+  });
+
+  it('refreshes the wake-dispatch capability on every ordinary writer renewal', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      expect(stores.supportsWakeDispatch()).toBe(false);
+      server.wakeDispatch = true;
+      await stores.assertWritable();
+      expect(stores.supportsWakeDispatch()).toBe(true);
+      server.wakeDispatch = false;
+      await stores.assertWritable();
+      expect(stores.supportsWakeDispatch()).toBe(false);
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  });
+
+  it('refreshes the wake-dispatch capability on an activation renewal', async () => {
+    const server = new FakeManagedSessionStore();
+    server.activationLeaseRenewal = true;
+    const { stores, authority } = await bootOriginalCsiAuthority(server);
+    try {
+      expect(stores.supportsWakeDispatch()).toBe(false);
+      server.wakeDispatch = true;
+      await authority.renewActivation({ leaseDurationMs: 60_000 });
+      expect(stores.supportsWakeDispatch()).toBe(true);
+    } finally {
+      await stores.stopLocal();
+    }
+  });
+
+  it('commits model statistics', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      expect(stores.supportsModelDiagnostics()).toBe(true);
+      await enableManagedSessionDiagnostics(session);
+      await new ManagedHookActivationController(session).runTurn(
+        'diagnostics-turn',
+        async (scope) => {
+          const complete = await scope.beginMainAttempt('model');
+          await complete(true, []);
+        },
+      );
+      const event = session.authority.lastEventOfKind('model.attempt')!;
+      expect(event.payload['state']).toBe('output_committed');
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  });
+
+  it('commits execution diagnostics', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      expect(stores.supportsExecutionDiagnostics()).toBe(true);
+      await enableManagedExecutionDiagnostics(session);
+      const record = {
+        uuid: 'activity-request',
+        parentUuid: null,
+        sessionId: SESSION_KEY.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'assistant' as const,
+        cwd: '/workspace',
+        version: 'test',
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'call', name: 'read_file', args: {} } },
+          ],
+        },
+      };
+      await session.sink.write(record);
+      expect(
+        session.authority.lastEventOfKind('message.committed')?.payload[
+          'diagnosticsRef'
+        ],
+      ).toBeDefined();
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  });
+
+  it('continues writing and cold restores after diagnostics commits', async () => {
+    const server = new FakeManagedSessionStore();
     const first = await bootStoresAndSession(server);
     try {
       await enableManagedSessionDiagnostics(first.session);
@@ -2795,7 +2992,6 @@ describe('HTTP Managed Session store', () => {
         async (scope) => {
           const complete = await scope.beginMainAttempt('model');
           await complete(true, []);
-          server.headOverrides['storageVersion'] = 3;
         },
       );
       await appendMessage(
@@ -2825,58 +3021,46 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
-  it.each([undefined, 1, 2])(
-    'requires Store acknowledgement before a bounded retraction (version=%s)',
-    async (version) => {
-      const server = new FakeManagedSessionStore();
-      server.supportedStorageVersion = version;
-      const { session } = await bootStoresAndSession(server);
-      try {
-        const before = server.commits.length;
-        const commit = session.authority.appendExecutionEvent(
-          {
-            operation: 'assistantRetract',
-            commandId: 'bounded',
-            sessionKey: SESSION_KEY,
-            contentDigest: 'a'.repeat(64),
+  it('commits a bounded retraction through the recovery commit route', async () => {
+    const server = new FakeManagedSessionStore();
+    const { session } = await bootStoresAndSession(server);
+    try {
+      const before = server.commits.length;
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'assistantRetract',
+          commandId: 'bounded',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'a'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'bounded',
+          sessionKey: SESSION_KEY,
+          kind: 'message.retracted',
+          occurredAt: Date.now(),
+          subject: {
+            type: 'activation',
+            scopeId: session.activation.activationId,
+            ...session.activation,
           },
-          (sequence) => ({
-            v: 1,
-            sequence,
-            eventId: 'bounded',
-            sessionKey: SESSION_KEY,
-            kind: 'message.retracted',
-            occurredAt: Date.now(),
-            subject: {
-              type: 'activation',
-              scopeId: session.activation.activationId,
-              ...session.activation,
-            },
-            payload: {
-              messageId: 'message',
-              turnId: 'turn',
-              fromSequence: 1,
-              sourceBootId: 'boot',
-              sourceEventEpoch: 'epoch',
-              throughSequence: 1,
-            },
-          }),
-          { class: 'harness', activation: session.activation },
-        );
-        if (version === 2) {
-          await commit;
-          expect(server.commits.length).toBe(before + 1);
-        } else {
-          await expect(commit).rejects.toThrow(
-            'does not support Hosted recovery storage version 2',
-          );
-          expect(server.commits.length).toBe(before);
-        }
-      } finally {
-        await session.close().catch(() => undefined);
-      }
-    },
-  );
+          payload: {
+            messageId: 'message',
+            turnId: 'turn',
+            fromSequence: 1,
+            sourceBootId: 'boot',
+            sourceEventEpoch: 'epoch',
+            throughSequence: 1,
+          },
+        }),
+        { class: 'harness', activation: session.activation },
+      );
+      expect(server.commits.length).toBe(before + 1);
+    } finally {
+      await session.close().catch(() => undefined);
+    }
+  });
 
   // A committed message body must be the reader-facing record the cold
   // projection will replay: the commit-time fence refuses anything else.
@@ -2957,9 +3141,6 @@ describe('HTTP Managed Session store', () => {
         const headers = new Headers(init?.headers);
         expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
         expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
-        expect(headers.get('X-Qwen-Managed-Max-Readable-Storage-Version')).toBe(
-          '5',
-        );
         expect(init?.method).toBe('POST');
         expect(JSON.parse(String(init?.body))).toEqual(request);
         return jsonResponse(request);
@@ -4209,7 +4390,6 @@ describe('HTTP Managed Session store', () => {
         sessionKey: SESSION_KEY,
         head: {
           state: 'ACTIVE',
-          storageVersion: 1,
           writerGeneration: 1,
           journalRevision: transactions.length,
           committedSequence: session.authority.committedSequence,
@@ -4429,7 +4609,6 @@ describe('HTTP Managed Session store', () => {
       sessionKey: SESSION_KEY,
       head: {
         state: 'ACTIVE',
-        storageVersion: 1,
         writerGeneration: 1,
         journalRevision: transactions.length,
         committedSequence: first.authority.committedSequence,
@@ -4530,7 +4709,6 @@ describe('HTTP Managed Session store', () => {
     const leaseUntil = Date.now() + 60_000;
     const head = {
       state: 'ACTIVE',
-      storageVersion: 1,
       writerGeneration: 2,
       journalRevision: 5,
       committedSequence: 5,
@@ -5236,7 +5414,11 @@ describe('HTTP Managed Session store', () => {
       await vi.advanceTimersByTimeAsync(60_000);
       expect(session.authority.writesStopped).toBe(false);
       unavailable = false;
-      await vi.advanceTimersByTimeAsync(25_000);
+      // Let any in-flight settle poll finish, then settle on demand; assert
+      // before the renewed lease expires again so a second, legitimate
+      // renewal stays outside the window.
+      await vi.advanceTimersByTimeAsync(500);
+      await session.authority.settlePendingAppend();
       expect(session.authority.writesStopped).toBe(false);
       expect(session.authority.committedSequence).toBe(committedBefore + 1);
       expect(session.authority.currentActivation?.renewalSeq).toBe(1);
@@ -5304,6 +5486,9 @@ describe('HTTP Managed Session store', () => {
       await vi.advanceTimersByTimeAsync(60_000);
       expect(session.authority.writesStopped).toBe(false);
       unavailable = false;
+      // Let any in-flight settle poll finish first: it rides the serial
+      // queue, and under fake timers it only completes when timers advance.
+      await vi.advanceTimersByTimeAsync(500);
       // The funnel's new entry settles on demand before it reads replay.
       await session.authority.settlePendingAppend();
       expect(session.authority.writesStopped).toBe(false);
@@ -5366,7 +5551,8 @@ describe('HTTP Managed Session store', () => {
       server.editStoredTransaction(server.storedTransactions.length - 1, {
         recordDigest: 'f'.repeat(64),
       });
-      await vi.advanceTimersByTimeAsync(25_000);
+      await vi.advanceTimersByTimeAsync(500);
+      await session.authority.settlePendingAppend().catch(() => undefined);
       expect(session.authority.writesStopped).toBe(true);
       // A fenced log must not keep extending the lease it just acquired:
       // the takeover this error asks for can only start once it lapses.
@@ -5415,17 +5601,20 @@ describe('HTTP Managed Session store', () => {
         domain: 'goal_state' as const,
         content: { record: JSON.parse(MESSAGE_BODY.toString('utf8')) },
       };
+      // Same-call settlement proves the lost acknowledgement landed on this
+      // call, so the caller observes a successful commit.
       await expect(
         session.authority.commitDomainRecord(command, request, {
           class: 'trusted_entry',
         }),
-      ).rejects.toThrow('append outcome is unknown');
+      ).resolves.toMatchObject({ receipt: { replayed: false } });
       failing = false;
       const replayed = await session.authority.commitDomainRecord(
         command,
         request,
         { class: 'trusted_entry' },
       );
+      expect(replayed.receipt.replayed).toBe(true);
       const committed = server.commits.find(
         (commit) => commit['operation'] === 'recordGoalState',
       );
@@ -5482,13 +5671,15 @@ describe('HTTP Managed Session store', () => {
         sessionKey: SESSION_KEY,
         contentDigest: 'a'.repeat(64),
       };
+      // Same-call settlement proves the lost acknowledgement landed on this
+      // call, so the caller observes a successful commit.
       await expect(
         session.authority.commitExtensionRecord(
           command,
           { domain: 'mcp_configuration', record: template },
           { class: 'trusted_entry' },
         ),
-      ).rejects.toThrow('append outcome is unknown');
+      ).resolves.toMatchObject({ receipt: { replayed: false } });
       failing = false;
       await expect(
         session.authority.commitExtensionRecord(
@@ -6905,7 +7096,6 @@ describe('HTTP Managed Session store', () => {
         sessionKey: SESSION_KEY,
         head: {
           state: 'ACTIVE',
-          storageVersion: 1,
           writerGeneration: 1,
           journalRevision: transactions.length,
           committedSequence: first.authority.committedSequence,
@@ -7474,7 +7664,6 @@ describe('HTTP Managed Session store', () => {
         sessionKey: SESSION_KEY,
         head: {
           state: 'ACTIVE',
-          storageVersion: 1,
           writerGeneration: 1,
           journalRevision: transactions.length,
           committedSequence: session.authority.committedSequence,
@@ -7600,7 +7789,6 @@ describe('HTTP Managed Session store', () => {
         sessionKey: SESSION_KEY,
         head: {
           state: 'ACTIVE',
-          storageVersion: 1,
           writerGeneration: 1,
           journalRevision: transactions.length,
           committedSequence: session.authority.committedSequence,
@@ -7796,7 +7984,6 @@ describe('HTTP Managed Session store', () => {
         sessionKey: SESSION_KEY,
         head: {
           state: 'ACTIVE',
-          storageVersion: 1,
           writerGeneration: 1,
           journalRevision: transactions.length,
           committedSequence: session.authority.committedSequence,
@@ -7923,7 +8110,6 @@ describe('HTTP Managed Session store', () => {
       lastCommitDigest: last['commitDigest'] ?? null,
       activationEpoch: last['activationEpoch'],
       latestCheckpointResourceId: checkpoint,
-      storageVersion: 1,
       pageCount: coverage,
       resourceCount: resources.size,
       lastPageDigest: previous,
@@ -8338,8 +8524,6 @@ describe('HTTP Managed Session store', () => {
 
   it.each([
     ['recoveryStatus', 'BLOCKED_RESOURCE'],
-    ['storageVersion', 3],
-    ['storageVersion', 4],
     ['state', 'SEALED'],
     ['writerGeneration', 2],
     ['compactedThroughRevision', 1],
@@ -9266,7 +9450,6 @@ describe('HTTP Managed Session store', () => {
       sessionKey: SESSION_KEY,
       head: {
         state: 'ACTIVE',
-        storageVersion: 1,
         writerGeneration: 1,
         journalRevision: transactions.length,
         committedSequence: first.authority.committedSequence,
@@ -9323,9 +9506,9 @@ describe('HTTP Managed Session store', () => {
 
 class FakeManagedSessionStore {
   activationLeaseRenewal = false;
+  wakeDispatch = false;
+  readonly sealBodies: Array<Record<string, unknown>> = [];
   private activationLease?: ManagedSessionActivationLease;
-  supportedStorageVersion: number | undefined = 2;
-  enforceReaderCeiling = false;
   readonly commits: Array<Record<string, unknown>> = [];
   readonly recoveryBlocks: Array<Record<string, unknown>> = [];
   readonly headOverrides: Record<string, unknown> = {};
@@ -9350,21 +9533,6 @@ class FakeManagedSessionStore {
     const headers = new Headers(init?.headers);
     expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
     expect(headers.get('X-Qwen-Managed-Writer-Token')).toMatch(/^[ab]{32}$/);
-    if (
-      this.enforceReaderCeiling &&
-      Number(headers.get('X-Qwen-Managed-Max-Readable-Storage-Version') ?? 1) <
-        Number(this.headOverrides['storageVersion'] ?? 1)
-    )
-      return jsonResponse(
-        {
-          error: {
-            code: 'managed_session_reader_unsupported',
-            message:
-              'This reader cannot read the Managed Session storage version.',
-          },
-        },
-        409,
-      );
     const suffix = url.pathname.slice(
       url.pathname.indexOf('/internal/managed-session-store/v1/sessions/') +
         `/internal/managed-session-store/v1/sessions/${SESSION_KEY.sessionId}`
@@ -9480,6 +9648,9 @@ class FakeManagedSessionStore {
     }
     if (suffix === '/writers:seal') {
       this.sealCount++;
+      this.sealBodies.push(
+        JSON.parse(String(init?.body)) as Record<string, unknown>,
+      );
       if (this.sealFailuresRemaining > 0) {
         this.sealFailuresRemaining--;
         return jsonResponse(
@@ -9500,7 +9671,7 @@ class FakeManagedSessionStore {
           ? { activationLease: this.activationLease }
           : {}),
         state: this.state,
-        storageVersion: 1,
+        activityDiagnostics: false,
         writerGeneration: this.writerGeneration,
         journalRevision: this.transactions.length,
         committedSequence: this.committedSequence,
@@ -9784,12 +9955,10 @@ class FakeManagedSessionStore {
   private grant(): Record<string, unknown> {
     return {
       activationLeaseRenewal: this.activationLeaseRenewal,
+      ...(this.wakeDispatch ? { wakeDispatch: true } : {}),
       ...(this.activationLease
         ? { activationLease: this.activationLease }
         : {}),
-      ...(this.supportedStorageVersion === undefined
-        ? {}
-        : { supportedStorageVersion: this.supportedStorageVersion }),
       writerGeneration: this.writerGeneration,
       leaseUntil: this.leaseUntil,
       journalRevision: this.transactions.length,

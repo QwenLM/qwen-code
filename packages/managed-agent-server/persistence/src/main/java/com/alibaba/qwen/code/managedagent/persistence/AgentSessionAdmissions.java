@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions;
+import com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.StandaloneSkill;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
@@ -115,6 +116,21 @@ final class AgentSessionAdmissions {
         return admission;
     }
 
+    // Pre-admission capability read for default Skill discovery: resolves the
+    // same pin admission will use, without locking the Workspace. External
+    // storage never admits extension pins, so it answers null.
+    String creationToolProfile(String tenantId, String actorId,
+            String agentId, String requestedRevision, String workspaceId) {
+        AgentSessionPolicies.AgentPin pin = sessionPolicies.resolveAgentPin(tenantId, agentId, requestedRevision, true);
+        if (!WorkspaceToolProfiles.isPublicShell(pin.toolProfile())
+                && !WorkspaceToolProfiles.MCP.equals(pin.toolProfile())) {
+            return pin.toolProfile();
+        }
+        ResolvedBinding workspace = workspaces.resolveForCreation(
+                tenantId, actorId, new WorkspaceSelection(workspaceId, "."));
+        return workspaces.isExternal(workspace.binding()) ? null : pin.toolProfile();
+    }
+
     Admission insertWorkspaceSessionCommand(SessionCreationCommand command) {
         String tenantId = command.tenantId();
         String actorId = command.actorId();
@@ -206,8 +222,9 @@ final class AgentSessionAdmissions {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         List<Map<String, Object>> merged = new ArrayList<>(pin.skills());
-        var injectedCatalog = ManagedLoopSkill.mergeInto(merged, skills, pin.toolProfile(), command.sessionSkillsSupported());
-        var effectiveSkills = injectedCatalog != null ? injectedCatalog : AgentDefinitionExtensions.sessionSkills(merged);
+        List<StandaloneSkill> packageSkills = command.extensionSelection() == null ? List.of() : command.extensionSelection().standaloneSkills();
+        var injectedCatalog = ManagedLoopSkill.mergeInto(merged, skills, pin.toolProfile(), command.sessionSkillsSupported(), packageSkills);
+        var effectiveSkills = injectedCatalog != null ? injectedCatalog : AgentDefinitionExtensions.sessionSkills(merged, packageSkills);
         if (worktree != null && sessionWorktrees == null) {
             throw new ManagedAgentException(409, "worktree_unavailable", "Session worktrees are unavailable.");
         }
@@ -222,7 +239,13 @@ final class AgentSessionAdmissions {
         if (worktree != null) {
             sessionWorktrees.admit(tenantId, actorId, admission.sessionId(), worktree, workspace);
         }
-        if (workspaceChildAgentsEnabled && publicChildrenSupported && (!sshWorkspace || managedExtensionExecutionEnabled)
+        // D5′: SSH roots admit children under the same arms as local roots;
+        // the configuration and harness capability gates, not the Workspace
+        // transport, decide. Resident/CSI Workspaces stay excluded
+        // structurally, not by a resident gate: the provisioner capability
+        // arms admit only local-process/SSH, and isPublicShell refuses their
+        // files-only profile.
+        if (workspaceChildAgentsEnabled && publicChildrenSupported
                 && (managedExtensionExecutionEnabled || "qwen-code".equals(agentId) && pin.digest() == null)
                 && WorkspaceToolProfiles.isPublicShell(pin.toolProfile())) {
             jdbc.update("UPDATE ma_session SET public_child_agents_version=1 WHERE tenant_id=? AND session_id=?",
@@ -344,7 +367,8 @@ final class AgentSessionAdmissions {
         }
         SessionRecord parent = storeRows.requireSessionForUpdate(tenantId,
                 parentSessionId);
-        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())) {
+        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())
+                || WorkspaceToolProfiles.EXTERNAL_FILES.equals(parent.toolProfile())) {
             throw new ManagedAgentException(409,
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");

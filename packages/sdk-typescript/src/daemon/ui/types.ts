@@ -42,6 +42,7 @@ export type DaemonUiEventType =
   | 'session.metadata.changed'
   | 'session.artifact.changed'
   | 'session.source.changed'
+  | 'session.sub_session_task.changed'
   | 'session.approval_mode.changed'
   | 'session.available_commands'
   | 'session.state_resync_required'
@@ -155,9 +156,22 @@ export interface DaemonInputReferenceAnnotation {
 
 export type DaemonInputAnnotation = DaemonInputReferenceAnnotation;
 
+/**
+ * The session that sent this message from another session (`/send`, or a
+ * sub-session launch). Normalization separates it from the wire's
+ * `inputAnnotations` because it covers no text range.
+ */
+export interface DaemonInputSourceAnnotation {
+  type: 'source';
+  sessionId: string;
+  workspaceCwd: string;
+  title?: string;
+}
+
 export interface DaemonTextDeltaMeta extends Record<string, unknown> {
   qwenDiscreteMessage?: boolean;
   inputAnnotations?: DaemonInputAnnotation[];
+  sourceAnnotation?: DaemonInputSourceAnnotation;
 }
 
 export interface DaemonUiUserImageEvent extends DaemonUiEventBase {
@@ -238,6 +252,8 @@ export interface DaemonTranscriptTimingMeta {
   durationMs: number;
   /** `kind === 'request'`: dispatch to first user-visible content. */
   ttftMs?: number;
+  /** `kind === 'request'`: request start to first user-visible content. */
+  firstVisibleOffsetMs?: number;
   /** `kind === 'request'`: 'error' means the request failed. */
   status?: 'ok' | 'error';
   responseId?: string;
@@ -560,6 +576,13 @@ export interface DaemonUiSessionArtifactChangedEvent extends DaemonUiEventBase {
   change: DaemonSessionArtifactChange;
 }
 
+/** A launch reported back to `sessionId` started or settled. */
+export interface DaemonUiSessionSubSessionTaskChangedEvent
+  extends DaemonUiEventBase {
+  type: 'session.sub_session_task.changed';
+  sessionId: string;
+}
+
 export interface DaemonUiSessionApprovalModeChangedEvent
   extends DaemonUiEventBase {
   type: 'session.approval_mode.changed';
@@ -860,6 +883,7 @@ export type DaemonUiEvent =
   // Session-meta events
   | DaemonUiSessionMetadataChangedEvent
   | DaemonUiSessionArtifactChangedEvent
+  | DaemonUiSessionSubSessionTaskChangedEvent
   | DaemonUiSessionSourceChangedEvent
   | DaemonUiSessionApprovalModeChangedEvent
   | DaemonUiSessionAvailableCommandsEvent
@@ -1387,7 +1411,8 @@ export interface DaemonTranscriptBlockChangeSummary {
   /**
    * The latest revision that was not a pure append to one streaming tail
    * block. For summaries from the same source, equal values therefore prove
-   * that every intervening revision was such an append.
+   * that every intervening revision was such an append. Passive Mod log lines
+   * can follow the streaming block without ending it.
    */
   tailAppendBarrierRevision: number;
   /** The streaming tail block changed at this revision, when eligible. */
@@ -1407,9 +1432,9 @@ export interface DaemonTranscriptTruncationDetail {
   oldestRetainedRecordId?: string;
   /**
    * Set for `kind: 'blocks'`: whether the eviction removed blocks from the
-   * OLDEST end. True for retention trimming (oldest-first), which can evict
-   * the record an exclusive pagination anchor points at; false for a tail-only
-   * rewind. Replay replacement can also change the oldest retained anchor.
+   * OLDEST end of the record-bearing history. True when retention trims the
+   * history prefix, false for Mod-log-only eviction or a tail-only rewind.
+   * Replay replacement can also change the oldest retained anchor.
    * Consumers should only re-anchor pagination when this is true.
    */
   evictedOldest?: boolean;

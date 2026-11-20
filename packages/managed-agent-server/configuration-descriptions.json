@@ -68,6 +68,10 @@
       "en": "The embedded Runtime Broker: its private HTTP listener for the Hosted Harness, the provisioner that places and recovers the Runtime workers that run Hosted tools, their Workspace mounts and isolation, and the keys that encrypt the Runtime credentials it persists.",
       "zh": "内嵌 Runtime Broker：包括面向 Hosted Harness 的私有 HTTP 监听器、放置并恢复执行 Hosted 工具的 Runtime worker 的 provisioner、worker 的 Workspace 挂载与隔离方式，以及加密其持久化 Runtime 凭据的密钥。"
     },
+    "qwen.managed-agent.runtime-broker.mcp-parking": {
+      "en": "Keeps the MCP connections of idle suspended Sessions alive for reuse on reopen, and reclaims them after an idle period.",
+      "zh": "让空闲挂起 Session 的 MCP 连接保持存活以便重开时复用，并在空闲一段时间后回收。"
+    },
     "qwen.managed-agent.runtime-broker.retention": {
       "en": "Database cleanup of old terminal Runtime records (tool executions, Runtime Sessions and bindings), run in bounded batches on a dedicated scheduler.",
       "zh": "在独立调度线程上按有限批次清理数据库中已终结的旧 Runtime 记录（工具执行、Runtime Session 和绑定）。"
@@ -219,8 +223,8 @@
       "zh": "渠道适配器对一条出站投递的认领在未收到回执时保持有效的时长。超时后，对账任务将该投递结果记为未知，且不会自动重发。不带单位的数字按秒计。"
     },
     "qwen.managed-agent.channels.enabled": {
-      "en": "Whether the trusted channel adapter routes under `/internal/managed-channels/` (register, disconnect, inbound events, delivery claims, receipts and resends) are served. They authenticate by the tenant header alone, so startup refuses it unless `qwen.managed-agent.internal-server.port` sets a separate internal listener.",
-      "zh": "是否提供 `/internal/managed-channels/` 下的受信渠道适配器路由（注册、断开、入站事件、投递认领、回执与重发）。这些路由仅凭租户请求头鉴权，因此未通过 `qwen.managed-agent.internal-server.port` 配置独立的内部监听端口时，启动时拒绝。"
+      "en": "Whether the trusted channel adapter routes under `/internal/managed-channels/` (register, disconnect, inbound events, delivery claims, receipts and resends, and PR-watch binding create/list/retire plus private PR-event injection) are served. They authenticate by the tenant header alone, so startup refuses it unless `qwen.managed-agent.internal-server.port` sets a separate internal listener.",
+      "zh": "是否提供 `/internal/managed-channels/` 下的受信渠道适配器路由（注册、断开、入站事件、投递认领、回执与重发，以及 PR-watch 绑定的创建/列表/退订与私有 PR 事件注入）。这些路由仅凭租户请求头鉴权，因此未通过 `qwen.managed-agent.internal-server.port` 配置独立的内部监听端口时，启动时拒绝。"
     },
     "qwen.managed-agent.channels.scan-delay": {
       "en": "How long the channel reconcile pass waits between runs; each run settles up to 50 outbound delivery claims older than `qwen.managed-agent.channels.claim-lease` as unknown. Accepts a duration such as `30s`; a plain number is milliseconds.",
@@ -475,8 +479,8 @@
       "zh": "已受理的 Turn 在被 Harness 以超时失败结束之前允许运行的时长，避免停滞的模型流永久占用 Session。随每个 Turn 发送。`qwen.managed-agent.harness.enabled` 为 true 时，取值不在 `1ms` 到约 24.8 天之间会被拒绝：单个 Harness 时启动时拒绝；开启 `qwen.managed-agent.harness.pool.enabled` 时则改为所有池成员都无法加入；不带单位的数字按秒解析。"
     },
     "qwen.managed-agent.harness.workspace-child-agents-enabled": {
-      "en": "Whether qualified Workspace Shell Sessions created while it is on may delegate work to public child agents: built-in `qwen-code` Sessions, and AgentDefinition Sessions too while managed extension execution is on. It takes effect only with `qwen.managed-agent.harness.workspace-shell-enabled`, `qwen.managed-agent.runtime-broker.durable-local-process`, `qwen.managed-agent.runtime-broker.provisioner=local-process`, `qwen.managed-agent.runtime-broker.bound-session-isolation-class=session` and a Harness that supports it; otherwise it stays off without an error. Setting it false stops further child launches.",
-      "zh": "是否允许在其开启期间创建的、符合条件的 Workspace Shell Session 将工作委派给公共子 agent：内置 `qwen-code` Session，以及开启托管扩展执行时的 AgentDefinition Session。仅在启用 `qwen.managed-agent.harness.workspace-shell-enabled` 与 `qwen.managed-agent.runtime-broker.durable-local-process`、`qwen.managed-agent.runtime-broker.provisioner=local-process`、`qwen.managed-agent.runtime-broker.bound-session-isolation-class=session` 且 Harness 支持时生效，否则不报错、保持关闭。设为 false 会停止后续的子 agent 启动。"
+      "en": "Whether qualified Workspace Shell Sessions created while it is on may delegate work to public child agents: built-in `qwen-code` Sessions, and AgentDefinition Sessions too while managed extension execution is on. It takes effect only with `qwen.managed-agent.harness.workspace-shell-enabled`, `qwen.managed-agent.runtime-broker.bound-session-isolation-class=session`, a durable `local-process` Broker (`qwen.managed-agent.runtime-broker.durable-local-process`) or an SSH Broker (`qwen.managed-agent.runtime-broker.provisioner=ssh-process` with configured nodes and `session` isolation), and a single or pooled Harness that advertises the capability; otherwise it stays off without an error. Resident/CSI Workspaces never qualify. Setting it false stops further child launches.",
+      "zh": "是否允许在其开启期间创建的、符合条件的 Workspace Shell Session 将工作委派给公共子 agent：内置 `qwen-code` Session，以及开启托管扩展执行时的 AgentDefinition Session。仅在启用 `qwen.managed-agent.harness.workspace-shell-enabled`、`qwen.managed-agent.runtime-broker.bound-session-isolation-class=session`、持久 `local-process` Broker（`qwen.managed-agent.runtime-broker.durable-local-process`）或 SSH Broker（`qwen.managed-agent.runtime-broker.provisioner=ssh-process`、已配置节点且 `session` 隔离），且单个或池化 Harness 广告该能力时生效，否则不报错、保持关闭。常驻/CSI Workspace 始终不符合条件。设为 false 会停止后续的子 agent 启动。"
     },
     "qwen.managed-agent.harness.workspace-files-enabled": {
       "en": "Whether Workspace-bound Sessions get the Hosted Workspace file tools (`hosted-workspace-files/1`) and the Workspace file routes, which otherwise answer `409 workspace_files_disabled`. Startup requires the Harness, the Session Store and `qwen.managed-agent.runtime-broker.enabled`; a `local-process` Broker with `session` isolation and Workspace mounts, a creation root, verified Workspace recovery or SSH nodes; and approval mode `yolo`, `default` or `auto-edit`. External Runtime provisioners refuse it.",
@@ -571,8 +575,8 @@
       "zh": "当前生效的 Runtime 凭据密钥的 ID，与它写入的每份密文一起保存，读取时据此选取对应密钥。不属于机密。开启 `qwen.managed-agent.runtime-broker.enabled` 时必填；空值、超过 512 个字符，或与 `qwen.managed-agent.runtime-broker.previous-credential-keys` 中某个 ID 相同时启动时拒绝。同时更换 ID 和密钥即为一次轮换：须把旧的 ID 与密钥保留在该映射中。"
     },
     "qwen.managed-agent.runtime-broker.durable-local-process": {
-      "en": "Whether the `local-process` provisioner registers every Runtime worker launch in `qwen.managed-agent.runtime-broker.state-directory` so that a restarted Broker adopts the same live worker; when off, workers stop with the Broker. Needs Linux, or macOS with `qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery` off, and a state directory outside every Workspace root; startup refuses otherwise. Trusted reboot recovery, child Workspaces, Workspace creation, local directory import and `workspace` bound-Session isolation require it.",
-      "zh": "`local-process` provisioner 是否把每次 Runtime worker 启动登记到 `qwen.managed-agent.runtime-broker.state-directory`，使重启后的 Broker 接管仍在运行的同一 worker；关闭时 worker 随 Broker 退出而停止。需要 Linux，或关闭 `qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery` 的 macOS，且状态目录须位于所有 Workspace 根目录之外，否则启动时拒绝。可信重启恢复、子 Workspace、Workspace 创建、本地目录导入以及 `workspace` 取值的绑定 Session 隔离都依赖此项。"
+      "en": "Whether the `local-process` provisioner registers every Runtime worker launch in `qwen.managed-agent.runtime-broker.state-directory` so that a restarted Broker adopts the same live worker; when off, workers stop with the Broker. Needs Linux or macOS and a state directory outside every Workspace root; startup refuses otherwise. Trusted reboot recovery, child Workspaces, Workspace creation, local directory import and `workspace` bound-Session isolation require it.",
+      "zh": "`local-process` provisioner 是否把每次 Runtime worker 启动登记到 `qwen.managed-agent.runtime-broker.state-directory`，使重启后的 Broker 接管仍在运行的同一 worker；关闭时 worker 随 Broker 退出而停止。需要 Linux 或 macOS，且状态目录须位于所有 Workspace 根目录之外，否则启动时拒绝。可信重启恢复、子 Workspace、Workspace 创建、本地目录导入以及 `workspace` 取值的绑定 Session 隔离都依赖此项。"
     },
     "qwen.managed-agent.runtime-broker.enabled": {
       "en": "Whether the control plane runs the embedded Runtime Broker, which places the Runtime workers that execute Hosted tools and serves the Hosted Harness on `qwen.managed-agent.runtime-broker.host` and `qwen.managed-agent.runtime-broker.port`. When on, startup requires `qwen.managed-agent.runtime-broker.token`, `qwen.managed-agent.runtime-broker.credential-key-id`, `qwen.managed-agent.runtime-broker.credential-key`, `qwen.managed-agent.runtime-broker.workspace-cwd` and `qwen.managed-agent.harness.capability-digest`. Hosted Workspace files and child Workspaces require it.",
@@ -641,6 +645,22 @@
       "en": "The installed factory kind that places Runtime workers: `local-process` (local Node.js workers), `ssh-process` (registered SSH Workspaces), `static` (a preconfigured worker), or `external-scratch` or `external-workspace` (an operator-run HTTP provider). A trusted additional provider may register its own kind. With the Broker enabled, missing or duplicate kinds fail before resources are created. Embedding hosts must explicitly include the selected backend artifact.",
       "zh": "放置 Runtime worker 所用的已安装工厂 kind：`local-process`（本机 Node.js worker）、`ssh-process`（已注册 SSH Workspace）、`static`（预配置 worker）、`external-scratch` 或 `external-workspace`（运维方 HTTP provider）。其他可信 provider 可以注册自己的 kind。Broker 启用时，缺失或重复的 kind 在创建资源前拒绝。嵌入服务须显式添加所选后端产物。"
     },
+    "qwen.managed-agent.runtime-broker.mcp-parking.batch-size": {
+      "en": "How many Runtime Sessions one reclamation tick may examine. Must be between 1 and 1000; checked at startup even while parking is off.",
+      "zh": "每轮回收最多检查的 Runtime Session 数。取值须在 1 到 1000 之间；即使未启用 park 也会在启动时校验，越界则启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.mcp-parking.enabled": {
+      "en": "Whether suspended Sessions keep their MCP connections and storage membership until reclamation. Off keeps draining them on every suspension. Takes effect only with `qwen.managed-agent.runtime-broker.enabled`, and never applies to external storage.",
+      "zh": "挂起的 Session 是否保留其 MCP 连接和存储成员资格直到被回收。关闭时每次挂起都照常 drain。仅在启用 `qwen.managed-agent.runtime-broker.enabled` 时生效，且从不适用于外部存储。"
+    },
+    "qwen.managed-agent.runtime-broker.mcp-parking.idle-duration": {
+      "en": "How long a Session must stay suspended before its parked MCP connections are closed and its storage membership is handed back. Physical maintenance on the same storage reclaims sooner. A suffix-less number binds as milliseconds. Must be at least `1ms`; checked at startup even while parking is off.",
+      "zh": "Session 须保持挂起多久，其 parked MCP 连接才会被关闭、存储成员资格才会被交还。同一存储上的物理维护会提前触发回收。不带单位的数字按毫秒绑定。不得小于 `1ms`；即使未启用 park 也会在启动时校验，越界则启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.mcp-parking.scan-delay": {
+      "en": "How long the reclamation job waits after one tick finishes before it starts the next. A suffix-less number binds as milliseconds. Must be at least `1ms`; checked at startup even while parking is off.",
+      "zh": "回收任务在一轮结束后等待多久再开始下一轮。不带单位的数字按毫秒绑定。不得小于 `1ms`；即使未启用 park 也会在启动时校验，越界则启动时拒绝。"
+    },
     "qwen.managed-agent.runtime-broker.retention.batch-size": {
       "en": "How many records one retention tick may handle: it caps the bindings scanned, the child records scanned and the total rows deleted per tick. Must be between 1 and 1000; checked at startup even while retention is off.",
       "zh": "每轮保留期清理最多处理的记录数：同时限制每轮扫描的绑定数、扫描的子记录数和删除的总行数。取值须在 1 到 1000 之间；即使未启用清理也会在启动时校验，越界则启动时拒绝。"
@@ -703,8 +723,8 @@
       "zh": "Hosted Harness 访问内嵌 Runtime Broker 私有监听端口时出示的 Bearer 令牌；它也用于授权仅限回环地址的外部存储登记接口。属于密钥。`qwen.managed-agent.runtime-broker.enabled` 为 true 时必填，最长 512 个字符。也可以改由 `qwen.managed-agent.harness.credentials-file` 中的 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 提供；两处同时设置时启动时拒绝。"
     },
     "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery": {
-      "en": "Whether, after a whole-host reboot on Linux, the Broker treats the changed kernel boot ID as proof that the original local workers stopped, and clears the holders of their saved Runtime bindings once every execution is terminal. It scans 8 saved bindings every 5 seconds and never starts a replacement worker or replays an execution. Requires `qwen.managed-agent.runtime-broker.durable-local-process` and the `local-process` provisioner; startup refuses it otherwise and on macOS.",
-      "zh": "Linux 主机整机重启后，Broker 是否把内核 boot ID 的变化视为原本地 worker 已停止的证据，并在所有执行都已终结后清除这些已保存 Runtime 绑定的持有者。它每 5 秒扫描 8 个已保存的绑定，从不启动替代 worker，也不重放执行。要求 `qwen.managed-agent.runtime-broker.durable-local-process` 和 `local-process` provisioner；不满足条件或在 macOS 上时启动时拒绝。"
+      "en": "Whether, after a whole-host reboot on Linux or macOS, the Broker treats the changed boot identity (the kernel boot ID on Linux, the boot session UUID on the same macOS hardware) as proof that the original local workers stopped, and clears the holders of their saved Runtime bindings once every execution is terminal. It scans 8 saved bindings every 5 seconds and never starts a replacement worker or replays an execution. Requires `qwen.managed-agent.runtime-broker.durable-local-process` and the `local-process` provisioner; startup refuses it otherwise.",
+      "zh": "Linux 或 macOS 主机整机重启后，Broker 是否把启动身份的变化（Linux 的内核 boot ID，同一 macOS 硬件上的 boot session UUID）视为原本地 worker 已停止的证据，并在所有执行都已终结后清除这些已保存 Runtime 绑定的持有者。它每 5 秒扫描 8 个已保存的绑定，从不启动替代 worker，也不重放执行。要求 `qwen.managed-agent.runtime-broker.durable-local-process` 和 `local-process` provisioner；不满足条件时启动时拒绝。"
     },
     "qwen.managed-agent.runtime-broker.v3-result-window": {
       "en": "How long the Runtime Broker keeps waiting for the worker's result of a dispatched Shell or Monitor execution that publishes its output (Tool v3, with `qwen.managed-agent.tool-publication.enabled`) before marking it `UNKNOWN`; a value shorter than the longest such call turns that call into `UNKNOWN`. Other tool executions do not use this window. A value above `30m` buys nothing on the shipped path: the Hosted Harness stops waiting for a Tool v3 execution after its own fixed 30 minutes. A suffix-less number binds as seconds. Startup refuses a value below `1s`.",
@@ -847,6 +867,11 @@
     "qwen.managed-agent.trusted-actor-header": {
       "en": "The name of a request header (for example `X-Qwen-Actor-Id`) whose value is trusted as the caller's actor ID, together with `X-Qwen-Tenant-Id`, when no upstream principal is present. Used only in open authentication mode; combining it with signed mode is refused at startup. In open mode, `qwen.managed-agent.runtime-broker.local-directory-import-enabled` requires it. Never set it where untrusted clients can reach the server. Empty disables it.",
       "zh": "一个请求头名称（例如 `X-Qwen-Actor-Id`），在没有上游认证主体时，其值连同 `X-Qwen-Tenant-Id` 一起被信任为调用方的 actor ID。仅在 open 认证模式下使用；与 signed 模式同时配置时启动时拒绝。open 模式下开启 `qwen.managed-agent.runtime-broker.local-directory-import-enabled` 时必须设置本项。切勿在不可信客户端能访问服务端的环境中设置。为空时禁用。"
+    },
+    "qwen.managed-agent.wake-dispatch.enabled": {
+      "en": "Lets a Hosted Harness suspend an idle Session whose only pending inputs are deferred, unattempted wake inputs. The Session Store advertises the capability in its writer grants, the suspension seal stamps the head with the earliest due time, and the wake recovery scan loads the Session when that time arrives without replaying its journal. Defaults off. Disabling it stops new such suspensions; heads already stamped are still delivered when due.",
+      "zh": "允许 Hosted Harness 挂起一个空闲 Session，前提是它的待处理输入全部是延后到期且未被尝试过的唤醒输入。Session Store 会在 writer grant 中公告该能力，挂起时的 seal 会在 head 上记下最早的到期时间，唤醒恢复扫描在到期时加载该 Session，无需重放 journal。默认关闭。关闭后不再产生新的此类挂起；已带戳的 head 仍会在到期时投递。",
+      "type": "boolean"
     },
     "qwen.managed-agent.wake-recovery.scan-delay": {
       "en": "How long the wake recovery scan waits between passes; each pass finds up to eight Sessions holding committed inputs that no writer owns and reattaches them so their wake runs. Runs only with `qwen.managed-agent.session-store.enabled` and an available Hosted Harness. Accepts a duration such as `2s`; a plain number is milliseconds.",

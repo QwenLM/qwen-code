@@ -57,6 +57,10 @@ export const RU_PART5: Record<
     `Не показано: ${v?.count ?? 0} ${ruPlural(v?.count, 'рабочая область', 'рабочие области', 'рабочих областей')} (нет доверия или удалённый доступ).`,
   'goals.notYetEvaluated': 'ещё не оценено',
   'goals.openSessionHint': 'Открыть сессию этой цели',
+  'goals.viewAll': 'Все цели',
+  'goals.budget.turns': 'Ходы',
+  'goals.budget.tokens': 'Токены',
+  'goals.budget.time': 'Активное время',
   'goals.error.emptyCondition': 'Введите условие для цели.',
   'goals.error.clearKeyword': (v) =>
     `"${v?.word ?? ''}" снимает цель, а не задаёт её. Опишите условие, к которому нужно работать.`,
@@ -234,6 +238,11 @@ export const RU_PART5: Record<
   'model.useMain': 'Использовать основную модель',
   'model.disabled': 'Отключено',
   'model.setVision': 'Задать модель зрения',
+  'model.setVisionTimeout': 'Задать тайм-аут моста зрения',
+  'model.invalidOption': (v) =>
+    `Недопустимый параметр /model «${v?.option ?? ''}».`,
+  'model.invalidVisionTimeout': (v) =>
+    `Недопустимое значение --timeout "${v?.value ?? ''}". Укажите целое положительное число секунд, например 60, 60s или 90000ms.`,
   'model.switch': 'Сменить модель',
   'model.unknown': 'неизвестно',
   'resume.current': 'текущая',

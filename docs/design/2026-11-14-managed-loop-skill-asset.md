@@ -123,7 +123,6 @@ The loop gate is also **not visible to Java** at admission time.
 - No hot-swap of the catalog into a live Session (the receipt is immutable).
 - No Web Shell scheduling UI; no change to the creation-import UX beyond the
   variant appearing in the catalog.
-- The real `/loop` model-turn E2E remains a separate validation effort.
 
 ## Proposed solution
 
@@ -341,9 +340,20 @@ later snapshot read would reject.
   these reddens it.
 - Image: a scripts test pins the Dockerfile COPY set against the contracts pom
   includes so a missing asset copy reddens.
-- Skill E2E (deferred to the separate E2E effort): `/loop 5m …` creates the
-  definition and runs the prompt immediately; `/loop list` shows it; `/loop
-clear` retires it.
+- Skill E2E (`npm run test:e2e:managed-loop-skill`, the full-stack runner's
+  `--loop-skill` mode): the Session is created with a caller `loop` import whose
+  body is the verbatim bundled reference, so admission's replace path runs as in
+  a real creation. The attestation is bidirectional: the import's marker
+  description must be gone (the server replaced it with the variant) while a
+  second, non-loop probe skill's marker remains (caller skills reached
+  admission), so the arm distinguishes a replace that ran from caller skills
+  never arriving. A creator-bearing `files/4` definition receives the cron
+  variant, the model's first streamed round carries that body in the Skill tool
+  result, `cron_list` echoes the created prompt, and `cron_delete` retires the id
+  the automation store minted with the delete result stating the retirement. The
+  arm runs as a step of the full-tier `hosted-failover-e2e` CI job; observing a
+  scheduled fire remains out of scope here and is covered by the follow-up
+  [scheduled-fire observation E2E](2026-11-17-managed-loop-fire-e2e.md).
 
 ## Acceptance criteria
 

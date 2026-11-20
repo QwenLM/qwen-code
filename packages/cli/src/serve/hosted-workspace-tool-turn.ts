@@ -80,6 +80,7 @@ import {
   HOSTED_WORKSPACE_READ_PROFILE,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
+  isHostedWorkspaceExternalShellProfile,
   isHostedWorkspaceSearchProfile,
   isHostedWorkspaceGlobProfile,
   isHostedWorkspaceReadProfile,
@@ -737,6 +738,40 @@ export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
       additionalProperties: false,
     },
   },
+];
+
+const HOSTED_FOREGROUND_SHELL_DESCRIPTION =
+  'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.';
+
+/**
+ * The one foreground Shell declaration: the shared declaration without
+ * `is_background`, so both lanes tell the model the same thing about the same
+ * schema.
+ */
+function hostedForegroundShellTool(): FunctionDeclaration {
+  const shell = HOSTED_WORKSPACE_SHELL_TOOLS.find(
+    (tool) => tool.name === 'run_shell_command',
+  )!;
+  const schema = structuredClone(shell.parametersJsonSchema) as {
+    properties?: Record<string, unknown>;
+  };
+  delete schema.properties?.['is_background'];
+  return {
+    ...shell,
+    description: HOSTED_FOREGROUND_SHELL_DESCRIPTION,
+    parametersJsonSchema: schema,
+  };
+}
+
+/**
+ * The external placement's whole tool set (#15512 slice C). Foreground Shell
+ * only — no `is_background`, no `monitor` and no `web_fetch`, because this
+ * placement's drain can only prove one worker's foreground captures, and
+ * `web_fetch` would need an egress lane it does not have.
+ */
+export const HOSTED_WORKSPACE_EXTERNAL_SHELL_TOOLS: FunctionDeclaration[] = [
+  ...HOSTED_WORKSPACE_FILE_TOOLS,
+  hostedForegroundShellTool(),
 ];
 
 const HOSTED_GLOB_TOOL: FunctionDeclaration = {
@@ -2366,32 +2401,44 @@ export class HostedWorkspaceToolTurn {
       recoveryBroker?: HostedWorkspaceBroker;
     },
   ) {
-    if (
-      extras?.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
-      (publicationOrShell !== undefined ||
+    const externalShellLane = isHostedWorkspaceExternalShellProfile(
+      extras?.profile,
+    );
+    const externalLane =
+      externalShellLane ||
+      extras?.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE;
+    // The Shell lane's publication is the capture its drain proves, so it is
+    // required there and forbidden on files; every other lane is closed on both.
+    const closedLane =
+      externalLane &&
+      ((externalShellLane
+        ? publicationOrShell === undefined
+        : publicationOrShell !== undefined) ||
         shell !== undefined ||
         [
-          extras.mcp,
-          extras.hooks,
-          extras.memory,
-          extras.childRuns,
-          extras.monitors,
-          extras.backgroundLane,
-          extras.childAgents,
-          extras.messages,
-          extras.teams,
-          extras.commands,
-          extras.skills,
-          extras.extensionConfig,
-          extras.allowedToolNames,
+          extras!.mcp,
+          extras!.hooks,
+          extras!.memory,
+          extras!.childRuns,
+          extras!.monitors,
+          extras!.backgroundLane,
+          extras!.childAgents,
+          extras!.messages,
+          extras!.teams,
+          extras!.commands,
+          extras!.skills,
+          extras!.extensionConfig,
+          extras!.allowedToolNames,
         ].some((lane) => lane !== undefined) ||
-        (extras.extensionAgents?.length ?? 0) > 0 ||
-        extras.memoryOnly === true ||
-        extras.publicPlanMode === true ||
-        extras.memberPlanMode === true)
-    )
+        (extras!.extensionAgents?.length ?? 0) > 0 ||
+        extras!.memoryOnly === true ||
+        extras!.publicPlanMode === true ||
+        extras!.memberPlanMode === true);
+    if (closedLane)
       throw new Error(
-        'External files profile does not support optional lanes.',
+        externalShellLane
+          ? 'External Shell profile requires a publication and no other lanes.'
+          : 'External files profile does not support optional lanes.',
       );
     this.configuredOptions = options;
     this.memory = extras?.memory;
@@ -2678,6 +2725,13 @@ export class HostedWorkspaceToolTurn {
       );
       return this.advertised;
     }
+    if (isHostedWorkspaceExternalShellProfile(this.profile)) {
+      this.advertised = hostedWorkspaceDeclarations(
+        [...HOSTED_WORKSPACE_EXTERNAL_SHELL_TOOLS, HOSTED_GLOB_TOOL],
+        !this.fileBackupsEnabled,
+      );
+      return this.advertised;
+    }
     if (
       this.profile === HOSTED_WORKSPACE_FILE_PROFILE ||
       (this.profile === undefined &&
@@ -2761,16 +2815,7 @@ export class HostedWorkspaceToolTurn {
             tool.name === 'run_shell_command' &&
             !this.backgroundShellAdmitted()
           ) {
-            const schema = structuredClone(tool.parametersJsonSchema) as {
-              properties?: Record<string, unknown>;
-            };
-            delete schema.properties?.['is_background'];
-            tool = {
-              ...tool,
-              description:
-                'Run one foreground shell command in the saved Session working directory. Timeout is 1..600000 ms. Shell file mutations are not backed up. Changing tracked file content or permissions can cause subsequent Write/Edit and undo conflicts.',
-              parametersJsonSchema: schema,
-            };
+            tool = hostedForegroundShellTool();
           }
           if (tool.name === 'cron_create' && !loopTool) {
             // The profile has no loop_wakeup to fall back to; do not name it.
@@ -3208,7 +3253,8 @@ export class HostedWorkspaceToolTurn {
           original === this.broker &&
           !this.hooks &&
           !this.mcp &&
-          !isHostedWorkspaceShellProfile(this.profile)
+          !isHostedWorkspaceShellProfile(this.profile) &&
+          !isHostedWorkspaceExternalShellProfile(this.profile)
         ) {
           await oweHostedTurnCleanup(this.session, this.promptId, original);
           this.cleanupOwed = original.runtime !== undefined;
@@ -3345,7 +3391,8 @@ export class HostedWorkspaceToolTurn {
             if (
               !this.cleanupOwed &&
               !this.mcp &&
-              !isHostedWorkspaceShellProfile(this.profile)
+              !isHostedWorkspaceShellProfile(this.profile) &&
+              !isHostedWorkspaceExternalShellProfile(this.profile)
             )
               await oweHostedTurnCleanup(
                 this.session,
@@ -3356,6 +3403,7 @@ export class HostedWorkspaceToolTurn {
               !this.mcp &&
               !this.hooks &&
               !isHostedWorkspaceShellProfile(this.profile) &&
+              !isHostedWorkspaceExternalShellProfile(this.profile) &&
               this.broker.runtime
             )
               this.cleanupOwed = true;
@@ -10434,20 +10482,14 @@ export class HostedWorkspaceToolTurn {
           questions: hostedQuestions(call.args),
         }
       : {
-          ...(continuationRef
-            ? {
-                v: 3 as const,
-                continuationRef,
-                ...(HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
-                  ? { inputRef }
-                  : {}),
-              }
-            : HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
-              ? { v: 2 as const, inputRef }
-              : { v: 1 as const }),
+          v: 3 as const,
           ...identity,
           policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
           options: HOSTED_APPROVAL_OPTIONS,
+          ...(continuationRef ? { continuationRef } : {}),
+          ...(HOSTED_INPUT_PREVIEW_TOOLS.includes(call.name)
+            ? { inputRef }
+            : {}),
           ...(requiresHumanDecision
             ? { requiresHumanDecision: true as const }
             : {}),

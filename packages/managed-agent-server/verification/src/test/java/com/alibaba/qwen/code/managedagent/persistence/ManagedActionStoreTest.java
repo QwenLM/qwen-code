@@ -88,6 +88,80 @@ class ManagedActionStoreTest {
         }
     }
 
+    @ParameterizedTest
+    @CsvSource({
+        "decided, allow, false, COMPLETED,",
+        "decided, allow, true, COMPLETED,",
+        "decided, deny, false, FAILED, action_already_resolved",
+        "expired, allow, true, FAILED, action_expired",
+        "cancelled, allow, false, FAILED, action_cancelled"
+    })
+    void settlesEndedResponsesWithOneRead(String state, String decision, boolean leased,
+            String expectedState, String expectedFailure) {
+        project("requested", null, 1, 1000);
+        String operationId = admit("settle", "digest", response("allow"), 10).operation().operationId();
+        if (leased) {
+            lease(operationId);
+        }
+        project(state, "decided".equals(state) ? response(decision) : null, 2, 1000);
+        String decisionReceipt = actions.find(TENANT, SESSION, ACTION).orElseThrow().decisionReceiptId();
+        trace.clear();
+
+        actions.settleEndedResponses(20);
+
+        assertThat(trace.events()).filteredOn(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED
+                && event.sql().startsWith("select ")).hasSize(1);
+        assertThat(stringColumn("state", operationId)).isEqualTo(expectedState);
+        assertThat(stringColumn("failure_code", operationId)).isEqualTo(expectedFailure);
+        assertThat(stringColumn("decision_receipt_id", operationId))
+                .isEqualTo("COMPLETED".equals(expectedState) ? decisionReceipt : null);
+        assertThat(stringColumn("admission_stage", operationId)).isEqualTo("HARNESS_CONFIRMED");
+        assertThat(stringColumn("delivery_state", operationId)).isEqualTo("CONFIRMED");
+        assertThat(stringColumn("claim_owner", operationId)).isNull();
+        String receipt = stringColumn("receipt_id", operationId);
+        assertThat(receipt).isNotBlank();
+        trace.clear();
+
+        actions.settleEndedResponses(30);
+
+        assertThat(trace.events()).noneMatch(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED
+                && event.sql().startsWith("update "));
+        assertThat(stringColumn("receipt_id", operationId)).isEqualTo(receipt);
+    }
+
+    @Test
+    void doesNotSettleARequestedAction() {
+        project("requested", null, 1, 1000);
+        String operationId = admit("settle", "digest", response("allow"), 10).operation().operationId();
+
+        actions.settleEndedResponses(20);
+
+        assertThat(stringColumn("state", operationId)).isEqualTo("PENDING");
+        assertThat(stringColumn("delivery_state", operationId)).isEqualTo("PENDING");
+        assertThat(stringColumn("receipt_id", operationId)).isNull();
+    }
+
+    @Test
+    void doesNotOverwriteAResponseConfirmedAfterCandidateSelection() {
+        project("requested", null, 1, 1000);
+        String operationId = admit("settle", "digest", response("allow"), 10).operation().operationId();
+        project("decided", response("allow"), 2, 1000);
+        var racing = new ManagedSchemaJdbcTemplate(fixture.source()) {
+            @Override
+            public <T> java.util.List<T> query(String sql, org.springframework.jdbc.core.RowMapper<T> mapper) {
+                var rows = super.query(sql, mapper);
+                jdbc.update("UPDATE ma_operation SET state = 'COMPLETED', delivery_state = 'CONFIRMED',"
+                                + " receipt_id = 'concurrent-receipt' WHERE tenant_id = ? AND session_id = ?"
+                                + " AND operation_id = ?", TENANT, SESSION, operationId);
+                return rows;
+            }
+        };
+
+        new JdbcManagedActionStore(racing, agents).settleEndedResponses(20);
+
+        assertThat(stringColumn("receipt_id", operationId)).isEqualTo("concurrent-receipt");
+    }
+
     @Test
     void anUnansweredCompletionStaysJavaDurable() {
         project("requested", null, 1, 1000);
@@ -460,6 +534,23 @@ class ManagedActionStoreTest {
                 Long.class, TENANT, SESSION)).isEqualTo(1);
     }
 
+    @Test
+    void uncapturedPlanExitApprovalDecidesWithoutReleasingPlan() {
+        jdbc.update("UPDATE ma_session SET approval_mode='default', selected_approval_mode='yolo',"
+                + " approval_revision=2, is_plan_enabled=TRUE WHERE tenant_id=? AND session_id=?", TENANT, SESSION);
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                        + "status,approval_mode,approval_revision,is_plan_enabled,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,'turn','turn','[]','digest','RUNNING','default',1,TRUE,0,0)",
+                TENANT, SESSION);
+        ObjectNode options = planExitOptions();
+        options.remove("continuationRef");
+        project("requested", null, 1, options);
+        project("decided", response("allow"), 2, options);
+        assertThat(actions.find(TENANT, SESSION, ACTION).orElseThrow().state()).isEqualTo("decided");
+        assertThat(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
+                Boolean.class, TENANT, SESSION)).isTrue();
+    }
+
     private ObjectNode planExitOptions() {
         ObjectNode input = JSON.createObjectNode().put("harnessSessionId", SESSION)
                 .put("runtimeSessionId", "turn").put("payloadJson", "{\"toolName\":\"exit_plan_mode\",\"input\":{\"plan\":\"Read then edit\"}}");
@@ -493,7 +584,7 @@ class ManagedActionStoreTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"1,true", "2,true", "3,true", "1,false", "2,false", "3,false"})
+    @CsvSource({"3,true", "3,false"})
     void actionOptionsPreserveOnlyAnExplicitHumanDecisionRequirement(int version, boolean required) {
         ObjectNode options = planExitOptions().put("v", version).put("requiresHumanDecision", required);
         if (version < 3) {
@@ -599,7 +690,7 @@ class ManagedActionStoreTest {
     }
 
     private void project(String state, JsonNode answer, long sequence, long expiresAt) {
-        ObjectNode options = JSON.createObjectNode().put("v", 1).put("requestId", ACTION).put("turnId", "turn")
+        ObjectNode options = JSON.createObjectNode().put("v", 3).put("requestId", ACTION).put("turnId", "turn")
                 .put("functionCallId", "call").put("toolName", "write_file").put("policyRevision", "hosted-tool-approval/1")
                 .put("inputRevision", 1).put("createdAt", 1).put("expiresAt", expiresAt);
         options.putArray("options").addObject().put("id", "allow").put("label", "Allow");

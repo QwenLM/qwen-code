@@ -184,7 +184,6 @@ class EventTransportBrokerGate {
                 .build();
         opened.add(producer);
         when(harness.isAvailable()).thenReturn(true);
-        when(harness.activateForWake(anyString(), anyString())).thenReturn(true);
         doAnswer(invocation -> {
             Outcome outcome = (Outcome) invocation.callRealMethod();
             ManagedEventEnvelope envelope = invocation.getArgument(0);
@@ -269,7 +268,7 @@ class EventTransportBrokerGate {
         await().atMost(DELIVERY).untilAsserted(() ->
                 assertThat(outcomes.get(session)).containsExactly(
                         Outcome.SCHEDULED, Outcome.DUPLICATE));
-        verify(harness, timeout(10_000).times(1)).activateForWake(TENANT,
+        verify(harness, timeout(10_000).times(1)).recoverForWake(TENANT,
                 session);
         assertThat(wakeWatermark(session)).isEqualTo(3);
     }
@@ -286,7 +285,7 @@ class EventTransportBrokerGate {
         await().atMost(DELIVERY).untilAsserted(() ->
                 assertThat(outcomes.get(session)).containsExactly(
                         Outcome.SCHEDULED, Outcome.DUPLICATE));
-        verify(harness, timeout(10_000).times(1)).activateForWake(TENANT,
+        verify(harness, timeout(10_000).times(1)).recoverForWake(TENANT,
                 session);
         assertThat(wakeWatermark(session)).isEqualTo(5);
     }
@@ -381,7 +380,7 @@ class EventTransportBrokerGate {
 
         await().atMost(DELIVERY).until(() -> staleSaw.contains(wakeBody));
         assertThat(staleAnswers).containsOnly(ConsumeResult.SUCCESS);
-        verify(staleHarness, never()).activateForWake(anyString(),
+        verify(staleHarness, never()).recoverForWake(anyString(),
                 anyString());
         assertThat(wakeWatermark(session)).isNull();
 
@@ -419,7 +418,7 @@ class EventTransportBrokerGate {
                 TENANT, session);
         inject(bootstrapLiteTopic(), wake);
         verify(harness, timeout(DELIVERY.toMillis()).times(1))
-                .activateForWake(TENANT, session);
+                .recoverForWake(TENANT, session);
         assertThat(wakeWatermark(session)).isEqualTo(3);
     }
 
@@ -914,7 +913,7 @@ class EventTransportBrokerGate {
 
     private void head(String session, String state, long committed,
             int leaseOffsetSeconds, String writer) {
-        jdbc.update("INSERT INTO ma_session_head (tenant_id, workspace_id, session_id, storage_version, state, writer_generation, writer_id, writer_lease_until, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified, tenant_key, harness_key, harness_session_id, head_kind) VALUES (?, ?, ?, 1, ?, 1, ?, (" + ManagedSchemaTime.SQL_NOW + " + " + (leaseOffsetSeconds * 1000L) + "), 3, ?, 0, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, ?, ?, 'MANAGED_SESSION')",
+        jdbc.update("INSERT INTO ma_session_head (tenant_id, workspace_id, session_id, state, writer_generation, writer_id, writer_lease_until, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified, tenant_key, harness_key, harness_session_id, head_kind) VALUES (?, ?, ?, ?, 1, ?, (" + ManagedSchemaTime.SQL_NOW + " + " + (leaseOffsetSeconds * 1000L) + "), 3, ?, 0, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, ?, ?, 'MANAGED_SESSION')",
                 TENANT, WORKSPACE, session, state, writer, committed,
                 ManagedSchemaKeys.key(TENANT), ManagedSchemaKeys.key(session),
                 session);

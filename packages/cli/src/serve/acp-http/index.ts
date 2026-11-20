@@ -26,6 +26,12 @@ import {
   listenerIdentityOf,
   listenerIdentityOfSocket,
 } from '../local-control/listener-identity.js';
+import type { SseAdmissionCaps } from '../daemon-status.js';
+import {
+  checkSseAdmission,
+  countSseStream,
+  evaluateSseAdmission,
+} from '../sse-occupancy.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
@@ -446,6 +452,12 @@ export interface MountAcpHttpOptions {
   enabled?: boolean;
   path?: string;
   maxConnections?: number;
+  /**
+   * Daemon-wide stream admission caps (issue #17554), shared with the REST
+   * surfaces. Absent means unlimited (direct embeds / unit fixtures). The
+   * per-mount ACP connection cap remains as the protocol-level bound.
+   */
+  sseAdmissionCaps?: SseAdmissionCaps;
   /** Bearer token for WS auth (WS bypasses Express middleware). */
   token?: string;
   /**
@@ -532,6 +544,16 @@ export interface MountAcpHttpOptions {
    * upgrade listener's security checks. Matched paths skip the ACP init flow.
    */
   extraWsRoutes?: readonly ExtraWsRoute[];
+  /** Java's one-time terminal ticket replaces daemon bearer verification. */
+  managedTerminalUpgrade?: {
+    matches: (rawPath: string) => boolean;
+    forward: (
+      req: IncomingMessage,
+      socket: Duplex,
+      head: Buffer,
+      tracked: Set<Duplex>,
+    ) => void;
+  };
   workspaceVoiceConnection?: (
     runtime: WorkspaceRuntime,
     ws: WebSocket,
@@ -1189,6 +1211,30 @@ export function mountAcpHttp(
       ? normalizeSessionIdForLookup(rawSessionId)
       : undefined;
 
+    // Authorization BEFORE resource admission (review R1-3): a foreign
+    // session id must keep its terminal 403 even at saturation — a retryable
+    // 503 would send the client into an endless back-off against a request
+    // that can never succeed, and log a refusal for a request that would
+    // have consumed no slot.
+    if (sessionId && !conn.ownsSession(sessionId)) {
+      res.status(403).json({ error: 'Session not owned by this connection' });
+      return;
+    }
+
+    // Shared stream admission (issue #17554): ACP SSE pins a listener slot
+    // exactly like the REST event stream, so it counts against the same
+    // aggregate cap and per-listener clamps.
+    if (
+      !checkSseAdmission({
+        surface: 'acpSse',
+        req,
+        res,
+        caps: opts.sseAdmissionCaps,
+      })
+    ) {
+      return;
+    }
+
     if (!sessionId) {
       // Connection-scoped stream. onClose logs the disconnect so a
       // half-dead connection (conn stream gone, replies silently buffering)
@@ -1240,18 +1286,15 @@ export function mountAcpHttp(
         },
         () => conn.touch(),
       );
+      countSseStream('acpSse', req, res);
       stream.open();
       conn.attachConnStream(stream);
       return;
     }
 
-    // Session-scoped stream — only for a session THIS connection owns
-    // (created via session/new or attached via session/load|resume). Stops
-    // one connection eavesdropping on another's session event stream.
-    if (!conn.ownsSession(sessionId)) {
-      res.status(403).json({ error: 'Session not owned by this connection' });
-      return;
-    }
+    // Session-scoped stream — ownership was verified above the admission
+    // gate (created via session/new or attached via session/load|resume).
+    // Stops one connection eavesdropping on another's session event stream.
 
     // Fresh controller per stream so a reconnect gets a live (non-aborted)
     // signal; `attachSessionStream` installs it and tears down any prior
@@ -1293,6 +1336,7 @@ export function mountAcpHttp(
     }
     // Open (write SSE headers + `retry:`) BEFORE attaching, so the protocol
     // handshake precedes any buffered frames the attach flushes.
+    countSseStream('acpSse', req, res);
     stream.open();
     // Pass the resume cursor INTO attach: when resuming, attach skips flushing
     // id-bearing buffered frames because the ring replay below redelivers every
@@ -1589,6 +1633,7 @@ export function mountAcpHttp(
   // its own `'upgrade'` registration. The `ExtraWsRoute` invariant is
   // unchanged — still exactly ONE listener per server, and still this one.
   const upgradeServers = new Set<import('node:http').Server>();
+  const managedTerminalSockets = new Set<Duplex>();
   const upgradeCredentials =
     opts.credentials ?? singleTokenCredentials(opts.token);
 
@@ -1698,6 +1743,11 @@ export function mountAcpHttp(
         opts.cdpTunnelOverWs === true &&
         opts.cdpTunnelRegistry !== undefined &&
         rawPath === CDP_PATH;
+      const managedTerminalUpgrade = opts.managedTerminalUpgrade?.matches(
+        rawPath,
+      )
+        ? opts.managedTerminalUpgrade
+        : undefined;
       const extraRoute = opts.extraWsRoutes?.find(
         (route) => route.path === rawPath,
       );
@@ -1712,6 +1762,7 @@ export function mountAcpHttp(
       if (
         rawPath !== path &&
         !isCdpPath &&
+        !managedTerminalUpgrade &&
         !extraRoute &&
         !isPluralAcpShape &&
         !isPluralVoiceShape
@@ -1750,7 +1801,12 @@ export function mountAcpHttp(
           socket.destroy();
           return;
         }
-      } else if (fromLoopback && !authenticatedRemoteBind) {
+      } else if (
+        // Java terminal tickets must not inherit an authenticated bind's
+        // relaxed Host check.
+        fromLoopback &&
+        (managedTerminalUpgrade !== undefined || !authenticatedRemoteBind)
+      ) {
         const allowed = new Set([
           `localhost:${localPort}`,
           `127.0.0.1:${localPort}`,
@@ -1828,6 +1884,22 @@ export function mountAcpHttp(
           socket.destroy();
           return;
         }
+      }
+
+      if (managedTerminalUpgrade) {
+        if (upgradeListenerIdentity.kind !== 'primary' || !fromLoopback) {
+          logReject('managed-terminal-primary-loopback-required');
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        managedTerminalUpgrade.forward(
+          req,
+          socket,
+          head,
+          managedTerminalSockets,
+        );
+        return;
       }
 
       // Auth: WS bypasses Express middleware. Same posture as REST:
@@ -2010,6 +2082,27 @@ export function mountAcpHttp(
         return;
       }
 
+      // Shared stream admission (issue #17554): an ACP WS connection pins a
+      // listener slot exactly like an SSE stream. Refuse BEFORE the upgrade
+      // so the client sees an HTTP 503, not a successful 101 followed by a
+      // close. Extra WS routes (voice etc.) keep their own gates.
+      if (!extraRoute) {
+        const refusal = evaluateSseAdmission(
+          listenerIdentityOfSocket(socket).kind,
+          opts.sseAdmissionCaps,
+        );
+        if (refusal) {
+          logReject(
+            `sse-connection-limit scope=${refusal.scope} active=${refusal.active} limit=${refusal.limit}`,
+          );
+          socket.write(
+            'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\n\r\n',
+          );
+          socket.destroy();
+          return;
+        }
+      }
+
       wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
         if (disposed) {
           ws.close(1012, 'Server shutting down');
@@ -2021,6 +2114,12 @@ export function mountAcpHttp(
           extraRoute.onConnection(ws, req);
           return;
         }
+        // The upgrade req is a raw IncomingMessage; occupancy only reads
+        // its socket to resolve the listener tag.
+        const releaseWsOccupancy = countSseStream(
+          'acpWs',
+          req as unknown as Request,
+        );
         activeMount.webSockets.add(ws);
         activeMount.pendingWebSockets.add(ws);
         let initialized = false;
@@ -2063,6 +2162,7 @@ export function mountAcpHttp(
         // the socket goes away. WsStream's onClose handles ACP teardown.
         ws.on('close', () => {
           clearTimeout(initTimer);
+          releaseWsOccupancy();
           activeMount.webSockets.delete(ws);
           activeMount.pendingWebSockets.delete(ws);
           if (clientMcp) {
@@ -2681,6 +2781,8 @@ export function mountAcpHttp(
         mount.registry.dispose();
       }
       drainingWorkspaceIds.clear();
+      for (const socket of managedTerminalSockets) socket.destroy();
+      managedTerminalSockets.clear();
       if (wss) {
         for (const client of wss.clients) {
           client.close(1012, 'Server shutting down');

@@ -139,10 +139,12 @@ describe('WebShellTranscript contract', () => {
         language="zh-CN"
         workspaceCwd="/workspace"
         virtualScrollThreshold={25}
+        overscan={0}
       />,
     );
 
-    const { props } = latestObservation();
+    const { props, customization } = latestObservation();
+    expect(customization.overscan).toBe(0);
     expect(props.messages).toMatchObject([
       { id: 'user', role: 'user', content: 'hello' },
       {

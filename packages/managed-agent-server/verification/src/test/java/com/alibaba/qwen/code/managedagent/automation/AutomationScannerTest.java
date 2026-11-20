@@ -894,6 +894,9 @@ class AutomationScannerTest {
                 ManagedExtensionProjection.recordKey(sessionId, "automation_run",
                         first.id()), tenant, WORKSPACE, sessionId, first.id(),
                 "0".repeat(64), clock.get());
+        jdbc.update("UPDATE ma_schedule_occurrence SET is_run_terminal = 1"
+                        + " WHERE tenant_id = ? AND schedule_id = ? AND session_id = ? AND run_id = ?",
+                tenant, automation.id(), sessionId, first.id());
         assertThat(service.run(tenant, ACTOR, automation.id(), "manual-3")
                 .body().outcome()).isEqualTo("fired");
         PublicList<PublicAutomationRun> runs = service.listRuns(tenant, ACTOR,
@@ -1956,6 +1959,9 @@ class AutomationScannerTest {
                                     sessionId, "automation_run", wedgedRunId),
                             tenant, WORKSPACE, sessionId, wedgedRunId,
                             "0".repeat(64), clock.get());
+                    jdbc.update("UPDATE ma_schedule_occurrence SET is_run_terminal = 1"
+                                    + " WHERE tenant_id = ? AND schedule_id = ? AND session_id = ? AND run_id = ?",
+                            tenant, id, sessionId, wedgedRunId);
                 }
                 return answer;
             }

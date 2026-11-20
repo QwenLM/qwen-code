@@ -259,3 +259,80 @@ describe('DingtalkInteractiveCardClient', () => {
     },
   );
 });
+
+describe('DingtalkInteractiveCardClient strictResponses (H5e, R1-2)', () => {
+  beforeEach(() => {
+    fetchMock.mockReset();
+  });
+
+  function strictClient(): DingtalkInteractiveCardClient {
+    return new DingtalkInteractiveCardClient({
+      robotCode: 'robot-code',
+      getAccessToken: vi.fn().mockResolvedValue('access-token'),
+      invalidateAccessToken: vi.fn<(token: string) => void>(),
+      fetch: fetchMock,
+      strictResponses: true,
+    });
+  }
+
+  const CREATE = {
+    templateId: STATUS_CARD_TEMPLATE_ID,
+    outTrackId: 'status-1',
+    target: { chatId: 'user-1', isGroup: false },
+    cardParamMap: { content: 'hello' },
+  };
+
+  it('tolerant (Legacy): a non-JSON 200 body and a missing deliverResults both resolve', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('not json', { status: 200 }));
+    await expect(
+      createClient().createAndDeliver(CREATE),
+    ).resolves.toBeUndefined();
+    fetchMock.mockResolvedValueOnce(response({ result: {} }));
+    await expect(
+      createClient().createAndDeliver(CREATE),
+    ).resolves.toBeUndefined();
+  });
+
+  it('strict: a non-JSON 200 body throws ambiguous', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('not json', { status: 200 }));
+    await expect(
+      strictClient().createAndDeliver(CREATE),
+    ).rejects.toMatchObject<DingtalkCardRequestError>({ retryable: true });
+  });
+
+  it.each([{ result: {} }, { result: { deliverResults: [] } }, {}])(
+    'strict: a create answer without a success deliverResults throws ambiguous (%j)',
+    async (body) => {
+      fetchMock.mockResolvedValueOnce(response(body));
+      await expect(
+        strictClient().createAndDeliver(CREATE),
+      ).rejects.toMatchObject<DingtalkCardRequestError>({ retryable: true });
+    },
+  );
+
+  it('strict: a confirmed deliverResults success resolves', async () => {
+    fetchMock.mockResolvedValueOnce(
+      response({ result: { deliverResults: [{ success: true }] } }),
+    );
+    await expect(
+      strictClient().createAndDeliver(CREATE),
+    ).resolves.toBeUndefined();
+  });
+
+  it('strict: an edit with a readable 200 body resolves, an unreadable one throws', async () => {
+    fetchMock.mockResolvedValueOnce(response({ result: true }));
+    await expect(
+      strictClient().updateInstance({
+        outTrackId: 'status-1',
+        cardParamMap: {},
+      }),
+    ).resolves.toBeUndefined();
+    fetchMock.mockResolvedValueOnce(new Response('', { status: 200 }));
+    await expect(
+      strictClient().updateInstance({
+        outTrackId: 'status-1',
+        cardParamMap: {},
+      }),
+    ).rejects.toMatchObject<DingtalkCardRequestError>({ retryable: true });
+  });
+});
