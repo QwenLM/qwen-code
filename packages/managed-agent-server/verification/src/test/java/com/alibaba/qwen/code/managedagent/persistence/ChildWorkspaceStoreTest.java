@@ -79,8 +79,8 @@ class ChildWorkspaceStoreTest {
                 id.getBytes(StandardCharsets.UTF_8), kind);
         if ("LOCAL".equals(kind)) {
             String physical = ManagedSchemaKeys.key("local-test", id);
-            jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, mount_state, mount_revision)"
-                    + " VALUES (?, ?, 'LOCAL', 'READY', 1)", physical, physical);
+            jdbc.update("INSERT INTO ma_storage_owner (storage_key, storage_kind, mount_state, mount_revision)"
+                    + " VALUES (?, 'LOCAL', 'READY', 1)", physical);
             jdbc.update("UPDATE ma_storage SET physical_key = ?, registration_state = 'REGISTERED', registration_revision = 1,"
                     + " registration_json = '{}', mount_revision = 1 WHERE alias_key = ?", physical, alias);
         }

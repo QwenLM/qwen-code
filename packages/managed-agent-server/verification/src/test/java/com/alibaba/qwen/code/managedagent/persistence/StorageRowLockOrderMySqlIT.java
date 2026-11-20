@@ -295,8 +295,8 @@ class StorageRowLockOrderMySqlIT {
         jdbc.update("UPDATE ma_storage SET physical_key = ?, registration_state = 'REGISTERED', storage_kind = 'LOCAL',"
                 + " registration_revision = 1, registration_json = '{}' WHERE alias_key = ?", PHYSICAL,
                 RuntimeAdmissionFences.storageAliasKey(TENANT, STORAGE));
-        jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, mount_state)"
-                + " VALUES (?, ?, 'LOCAL', 'READY')", PHYSICAL, PHYSICAL);
+        jdbc.update("INSERT INTO ma_storage_owner (storage_key, storage_kind, mount_state)"
+                + " VALUES (?, 'LOCAL', 'READY')", PHYSICAL);
     }
 
     private static void admit(ManagedSchemaJdbcTemplate jdbc, boolean shared) {

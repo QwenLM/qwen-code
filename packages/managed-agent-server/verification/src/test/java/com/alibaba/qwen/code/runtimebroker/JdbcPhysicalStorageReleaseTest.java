@@ -254,9 +254,8 @@ public class JdbcPhysicalStorageReleaseTest {
             alias(tenant, "second");
             execute(
                     "INSERT INTO"
-                        + " ma_storage_owner(storage_key,physical_key,storage_kind,tenant_id,storage_id,mount_state)"
-                        + " VALUES(?,?,?,?,?,'READY')",
-                    physical,
+                        + " ma_storage_owner(storage_key,storage_kind,tenant_id,storage_id,mount_state)"
+                        + " VALUES(?,?,?,?,'READY')",
                     physical,
                     storageKind,
                     (tenant + "-first").getBytes(StandardCharsets.UTF_8),

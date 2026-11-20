@@ -82,12 +82,12 @@ public final class RuntimeAdmissionFences {
         }
         try (PreparedStatement statement =
                 connection.prepareStatement(
-                        "SELECT physical_key, mount_state, storage_kind"
+                        "SELECT storage_key, mount_state, storage_kind"
                                 + " FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE")) {
             statement.setString(1, key);
             try (ResultSet row = statement.executeQuery()) {
                 if (!row.next()
-                        || !key.equals(row.getString("physical_key"))
+                        || !key.equals(row.getString("storage_key"))
                         || !"LOCAL".equals(row.getString("storage_kind"))
                         || !"READY".equals(row.getString("mount_state"))) {
                     throw new RuntimeBrokerException(

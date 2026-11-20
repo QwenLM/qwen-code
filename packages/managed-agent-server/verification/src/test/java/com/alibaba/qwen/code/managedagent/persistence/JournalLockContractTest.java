@@ -105,8 +105,8 @@ class JournalLockContractTest {
                         + " storage_kind, registration_state, registration_revision, registration_json)"
                         + " VALUES (?, ?, 'storage', ?, 'LOCAL', 'REGISTERED', 1, '{}')",
                 RuntimeAdmissionFences.storageAliasKey(TENANT, "storage"), TENANT, physical);
-        jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, mount_state)"
-                + " VALUES (?, ?, 'LOCAL', 'READY')", physical, physical);
+        jdbc.update("INSERT INTO ma_storage_owner (storage_key, storage_kind, mount_state)"
+                + " VALUES (?, 'LOCAL', 'READY')", physical);
         jdbc.update("UPDATE ma_session SET workspace_storage_id = 'storage' WHERE tenant_id = ?", TENANT);
         trace.clear();
         boolean placement = "placement-publication".equals(route);

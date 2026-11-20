@@ -130,7 +130,7 @@ final class WorkspaceMigrationAdmission {
         }
         var registered = registrations.getFirst();
         var owners = jdbc.query("SELECT * FROM ma_storage_owner WHERE storage_key = ?" + lock,
-                (row, index) -> registered.ownerKey().equals(row.getString("physical_key"))
+                (row, index) -> registered.ownerKey().equals(row.getString("storage_key"))
                         && "EXTERNAL".equals(row.getString("storage_kind"))
                         && tenant.equals(row.getString("tenant_id")) && storage.equals(row.getString("storage_id"))
                         && registered.mountRoot().equals(row.getString("mount_root"))

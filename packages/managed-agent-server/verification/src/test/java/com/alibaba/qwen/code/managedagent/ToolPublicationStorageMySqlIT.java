@@ -305,8 +305,8 @@ class ToolPublicationStorageMySqlIT {
                         + " storage_kind, registration_state, registration_revision, registration_json)"
                         + " VALUES (?, 'tenant-1', 'storage', ?, 'LOCAL', 'REGISTERED', 1, '{}')",
                 RuntimeAdmissionFences.storageAliasKey("tenant-1", "storage"), PHYSICAL);
-        journal.jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, tenant_id, storage_id, mount_state)"
-                + " VALUES (?, ?, 'LOCAL', 'tenant-1', 'storage', 'READY')", PHYSICAL, PHYSICAL);
+        journal.jdbc.update("INSERT INTO ma_storage_owner (storage_key, storage_kind, tenant_id, storage_id, mount_state)"
+                + " VALUES (?, 'LOCAL', 'tenant-1', 'storage', 'READY')", PHYSICAL);
         journal.jdbc.update("UPDATE ma_session SET workspace_storage_id = 'storage' WHERE tenant_id = 'tenant-1'");
     }
 

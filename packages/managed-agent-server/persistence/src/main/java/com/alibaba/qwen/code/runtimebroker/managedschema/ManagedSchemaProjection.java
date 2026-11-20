@@ -174,7 +174,7 @@ public enum ManagedSchemaProjection {
                     + "tenant_id, storage_id, mount_revision, mount_state, mount_operation_id, "
                     + "mount_completed_operation_id, mount_root, mount_host_id, mount_device, mount_inode, "
                     + "mount_birth_time, mount_registration_id, storage_kind, "
-                    + "maintenance_id, maintenance_generation, physical_key, "
+                    + "maintenance_id, maintenance_generation, "
                     + "member_count"),
     TENANT_GUARD(
             "tenant_key, tenant_id, guard_domain"),

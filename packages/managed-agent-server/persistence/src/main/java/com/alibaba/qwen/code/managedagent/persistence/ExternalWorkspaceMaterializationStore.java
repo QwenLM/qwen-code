@@ -88,12 +88,12 @@ public final class ExternalWorkspaceMaterializationStore {
                     || jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ?"
                             + " AND tenant_id = ? AND storage_id = ? AND physical_key = ? AND registration_revision = ?",
                             Long.class, aliasKey, tenant, registeredAliasId, physical, revision) != 1
-                    || jdbc.queryForList("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ? AND physical_key = ?"
+                    || jdbc.queryForList("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ?"
                             + " AND tenant_id = ? AND storage_id = ? AND storage_kind = 'EXTERNAL'"
                             + " AND mount_revision = ? AND mount_root = ? AND mount_state = 'UNVERIFIED'"
                             + " AND holder_key IS NULL AND binding_id IS NULL AND runtime_generation IS NULL"
                             + " AND runtime_session_id IS NULL AND maintenance_id IS NULL AND maintenance_generation IS NULL FOR UPDATE",
-                            String.class, physical, physical, tenant, registeredAliasId, revision,
+                            String.class, physical, tenant, registeredAliasId, revision,
                             registration.mountRoot()).size() != 1
                     || !jdbc.queryForList("SELECT workspace_id FROM ma_workspace WHERE tenant_id = ?"
                             + " AND (workspace_id = ? OR storage_id = ?)", tenant, registeredAliasId, registeredAliasId).isEmpty()

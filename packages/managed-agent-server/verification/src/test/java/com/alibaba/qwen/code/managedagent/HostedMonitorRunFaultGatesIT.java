@@ -261,10 +261,10 @@ class HostedMonitorRunFaultGatesIT {
                                 "storage-" + index),
                         tenant, "storage-" + index, physical);
                 jdbc.update("INSERT INTO ma_storage_owner (storage_key,"
-                        + " physical_key, storage_kind, tenant_id,"
-                        + " storage_id, mount_state) VALUES (?, ?, 'LOCAL',"
+                        + " storage_kind, tenant_id,"
+                        + " storage_id, mount_state) VALUES (?, 'LOCAL',"
                         + " ?, ?, 'READY')",
-                        physical, physical, tenant, "storage-" + index);
+                        physical, tenant, "storage-" + index);
             }
         }
         var sessions = new ArrayList<Map<String, Object>>();

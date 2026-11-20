@@ -289,9 +289,9 @@ public class WorkspaceStorageGuard {
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             prepareAlias(tenantId, storageId, key, operationId);
             jdbc.update("INSERT INTO ma_storage_owner"
-                    + " (storage_key, physical_key, tenant_id, storage_id) VALUES (?, ?, ?, ?)"
+                    + " (storage_key, tenant_id, storage_id) VALUES (?, ?, ?)"
                     + " ON DUPLICATE KEY UPDATE storage_key = storage_key",
-                    key, key, tenantId, storageId);
+                    key, tenantId, storageId);
             Registration row = row(key, true);
             requireNoExecutionMembers(key);
             if (row == null || row.holderKey() != null || row.bindingId() != null
@@ -584,14 +584,14 @@ public class WorkspaceStorageGuard {
     }
 
     private Registration row(String key, boolean lock) {
-        List<Registration> rows = jdbc.query("SELECT physical_key, tenant_id, storage_id, holder_key,"
+        List<Registration> rows = jdbc.query("SELECT storage_key, tenant_id, storage_id, holder_key,"
                 + " binding_id, runtime_generation, runtime_session_id,"
                 + " mount_revision, mount_state, mount_operation_id, mount_root,"
                 + " mount_host_id, mount_device, mount_inode, mount_birth_time, mount_registration_id,"
                 + " mount_completed_operation_id"
                 + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL'"
                 + (lock ? " FOR UPDATE" : ""), (result, index) -> {
-                    if (!key.equals(result.getString("physical_key"))) {
+                    if (!key.equals(result.getString("storage_key"))) {
                         throw WorkspaceExecutionStore.unavailable();
                     }
                     return new Registration(
@@ -744,10 +744,10 @@ public class WorkspaceStorageGuard {
             if (physical.equals(previous)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
-            int created = jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, tenant_id, storage_id,"
+            int created = jdbc.update("INSERT INTO ma_storage_owner (storage_key, storage_kind, tenant_id, storage_id,"
                     + " mount_root, mount_host_id, mount_device, mount_inode, mount_birth_time, mount_registration_id,"
-                    + " mount_revision, mount_state, mount_completed_operation_id) VALUES (?, ?, 'LOCAL', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'READY', ?)",
-                    physical, physical, source.tenantId(), source.storageId(), target.root(), target.hostId(), target.device(), target.inode(),
+                    + " mount_revision, mount_state, mount_completed_operation_id) VALUES (?, 'LOCAL', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'READY', ?)",
+                    physical, source.tenantId(), source.storageId(), target.root(), target.hostId(), target.device(), target.inode(),
                     target.birthTime(), registration, source.mountRevision() + 1, operation);
             if (created != 1 || jdbc.update("UPDATE ma_storage SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", physical_key = ?, registration_revision = registration_revision + 1 WHERE alias_key = ? AND physical_key = ? AND storage_kind = 'LOCAL'",
                     physical, RuntimeAdmissionFences.storageAliasKey(source.tenantId(), source.storageId()), previous) != 1) {

@@ -147,10 +147,10 @@ public class JdbcSshWorkspaceStore
             LocalStorageOwners.requireNonOverlapping(jdbc, physicalIdentity(identity));
             String physical = physicalKey(identity);
             String root = SshWorkspaceStore.string(identity, "root");
-            jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, tenant_id, storage_id,"
+            jdbc.update("INSERT INTO ma_storage_owner (storage_key, storage_kind, tenant_id, storage_id,"
                             + " mount_root, mount_host_id, mount_device, mount_inode, mount_birth_time, mount_registration_id)"
-                            + " VALUES (?, ?, 'SSH_LOCAL', ?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE storage_key = storage_key",
-                    physical, physical, intent.tenantId(), intent.storageId(), root, SshWorkspaceStore.string(identity, "hostId"),
+                            + " VALUES (?, 'SSH_LOCAL', ?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE storage_key = storage_key",
+                    physical, intent.tenantId(), intent.storageId(), root, SshWorkspaceStore.string(identity, "hostId"),
                     SshWorkspaceStore.string(identity, "device"), SshWorkspaceStore.string(identity, "inode"), SshWorkspaceStore.string(identity, "birthTime"), intent.registrationId());
             var rows = jdbc.queryForList("SELECT storage_kind, mount_registration_id FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE", physical);
             if (rows.size() != 1 || !KIND.equals(rows.getFirst().get("storage_kind"))

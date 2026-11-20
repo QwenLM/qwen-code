@@ -396,8 +396,8 @@ class ManagedLockScopeConcurrencyMySqlIT {
                             + " VALUES (?, ?, ?, ?, 'LOCAL', 'REGISTERED', 1, '{}')",
                     RuntimeAdmissionFences.storageAliasKey(TENANT, alias), TENANT, alias, physical);
         }
-        jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, tenant_id, storage_id, mount_state)"
-                + " VALUES (?, ?, 'LOCAL', ?, 'storage', 'READY')", physical, physical, TENANT);
+        jdbc.update("INSERT INTO ma_storage_owner (storage_key, storage_kind, tenant_id, storage_id, mount_state)"
+                + " VALUES (?, 'LOCAL', ?, 'storage', 'READY')", physical, TENANT);
         jdbc.update("UPDATE ma_session SET workspace_storage_id = 'storage' WHERE tenant_id = ?", TENANT);
         if (distinctAliases) {
             jdbc.update("UPDATE ma_session SET workspace_storage_id = 'storage-other' WHERE tenant_id = ? AND session_id = 'storage-b'", TENANT);

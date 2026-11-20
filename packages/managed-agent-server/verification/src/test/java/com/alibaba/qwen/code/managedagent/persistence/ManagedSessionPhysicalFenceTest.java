@@ -79,10 +79,9 @@ class ManagedSessionPhysicalFenceTest {
                 STORAGE,
                 physical);
         jdbc.update(
-                "INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, tenant_id,"
-                        + " storage_id, mount_state) VALUES (?, ?, 'LOCAL', 'first-tenant',"
+                "INSERT INTO ma_storage_owner (storage_key, storage_kind, tenant_id,"
+                        + " storage_id, mount_state) VALUES (?, 'LOCAL', 'first-tenant',"
                         + " 'first-alias', 'READY')",
-                physical,
                 physical);
     }
 

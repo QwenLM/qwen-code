@@ -174,7 +174,7 @@ public final class JdbcRuntimeBindingRepository
             String physical = external ? null : localStorageOwnerKey(connection, claim.getRequest().getScope().getTenantId(),
                     claim.getRequest().getStorageId(), true);
             if (physical != null) {
-                try (var lock = connection.prepareStatement("SELECT physical_key FROM ma_storage_owner WHERE storage_key = ?"
+                try (var lock = connection.prepareStatement("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ?"
                         + " AND storage_kind = (SELECT storage_kind FROM ma_storage WHERE alias_key = ?)"
                         + " FOR UPDATE")) {
                     lock.setString(1, physical);
