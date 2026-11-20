@@ -172,10 +172,14 @@ public class JournalPackTransactions {
                 String tenant = text(candidate.get("tenant_id"));
                 String session = text(candidate.get("session_id"));
                 ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(jdbc, tenant, session);
+                // SEALED is the normal resting state between writer leases; an ACTIVE-only
+                // recheck leaves aged sealed-head packs PUBLISHED forever, and 32 of them
+                // stall the global LIMIT 32 window fleet-wide. Coverage is proven by the
+                // packed-through-revision comparison below, for any head state.
                 List<Map<String, Object>> heads = jdbc.queryForList(
                         "SELECT packed_through_revision FROM ma_session_head WHERE tenant_id = ?"
                                 + " AND session_id = ? AND head_kind = 'MANAGED_SESSION'"
-                                + " AND state = 'ACTIVE' AND COALESCE(compacted_through_revision, 0) = 0 FOR UPDATE",
+                                + " AND COALESCE(compacted_through_revision, 0) = 0 FOR UPDATE",
                         tenant, session);
                 Map<String, Object> pack = lockPack(candidate);
                 if (heads.isEmpty() || pack == null || !"PUBLISHED".equals(pack.get("state"))

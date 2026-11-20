@@ -861,6 +861,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_archived_session_export',
   'workspace_session_live_state',
   'workspace_session_live_state_batch',
+  'restart_recovery',
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
@@ -979,6 +980,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_archived_session_export' &&
       f !== 'workspace_session_live_state' &&
       f !== 'workspace_session_live_state_batch' &&
+      f !== 'restart_recovery' &&
       f !== 'workspace_session_metadata' &&
       f !== 'session_worktree_persistence_v1' &&
       f !== 'session_worktree_reset_v1' &&
@@ -1066,6 +1068,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_archived_session_export',
   'workspace_session_live_state',
   'workspace_session_live_state_batch',
+  'restart_recovery',
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
@@ -30421,6 +30424,7 @@ describe('createServeApp', () => {
           JSON.parse(await fsp.readFile(sidecarPath, 'utf8')),
         ).toMatchObject({
           workspaceCwd: repo,
+          carriedFrom: realpathSync(repo),
           worktreeBranch: '',
           originalHeadCommit: baseCommit,
           worktreeBase: baseCommit,
@@ -30558,6 +30562,25 @@ describe('createServeApp', () => {
             return null;
           }
         };
+        await fsp.writeFile(
+          path.join(siblingPath, 'session-carry.txt'),
+          'sibling-carry\n',
+        );
+        const routedCarryEntry = {
+          path: 'session-carry.txt',
+          hash: (
+            await execFileAsync(
+              'git',
+              ['hash-object', '--no-filters', '--', 'session-carry.txt'],
+              { cwd: siblingPath },
+            )
+          ).stdout.trim(),
+          executable:
+            ((await fsp.stat(path.join(siblingPath, 'session-carry.txt')))
+              .mode &
+              0o100) !==
+            0,
+        };
         const createWorktreeCalls: unknown[][] = [];
         mockWt.impl = (cwd?: string) => ({
           isGitRepository: async () => true,
@@ -30583,6 +30606,7 @@ describe('createServeApp', () => {
             return {
               success: true,
               worktree: { slug, path: worktreePath, branch: '' },
+              carriedEntries: [routedCarryEntry],
             };
           },
         });
@@ -30658,6 +30682,8 @@ describe('createServeApp', () => {
         expect(sidecar.originalHeadCommit).toBe(rootHead);
         expect(sidecar.worktreeBase).toBe(siblingHead);
         expect(sidecar.originalCwd).toBe(repo);
+        expect(sidecar.carriedFrom).toBe(realpathSync(siblingPath));
+        expect(sidecar.carriedEntries).toEqual([routedCarryEntry]);
       } finally {
         mockWt.impl = undefined;
         mockWt.readSidecar = undefined;
@@ -38631,6 +38657,28 @@ describe('createServeApp', () => {
       expect(bridge.updateMetadataCalls[0]?.metadata).toEqual({
         displayName: 'My Session',
       });
+    });
+
+    it('routes an initial title through the conditional metadata update', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440321';
+      const initializeSessionTitle = vi.fn(() => ({ displayName: 'Manual' }));
+      const bridge = Object.assign(fakeBridge(), { initializeSessionTitle });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).patch(`/session/${sessionId}/metadata`),
+      )
+        .set('X-Qwen-Client-Id', 'web-client')
+        .send({ initialDisplayName: 'First prompt' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ sessionId, displayName: 'Manual' });
+      expect(initializeSessionTitle).toHaveBeenCalledExactlyOnceWith(
+        sessionId,
+        'First prompt',
+        { clientId: 'web-client' },
+      );
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
     });
 
     it('fails closed before updating metadata in a non-trusted embed', async () => {
@@ -52347,7 +52395,9 @@ describe('Unified SSE admission/occupancy (issue #17554)', () => {
       const chunk = await reader.read();
       if (chunk.done) break;
       buffer += decoder.decode(chunk.value, { stream: true });
-      for (const frame of buffer.split('\n\n')) {
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop() ?? '';
+      for (const frame of frames) {
         const dataLine = frame
           .split('\n')
           .find((line) => line.startsWith('data: '));
