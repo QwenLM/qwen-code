@@ -40,7 +40,10 @@ import type {
   ChatRecord,
   ChatCompressionRecordPayload,
 } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
-import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
+import {
+  filterHostedTurnHistory,
+  normalizeHostedTurnRecords,
+} from './hosted-turn-history.js';
 import { buildSessionHistoryFromConversation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
 import type { HostedMemorySession } from './hosted-memory-session.js';
@@ -531,6 +534,10 @@ async function runPreparedHostedHarnessTextTurn(
   model: HostedAgentDefinition['model'] | undefined,
   runtimeView?: RuntimeContentGeneratorView,
 ): Promise<HostedHarnessModelResult> {
+  const modelRecords = normalizeHostedTurnRecords(
+    input.history,
+    input.excludedPromptIds,
+  );
   let todoContext = await input.toolTurn?.todoInstructions?.();
   const contextWithInstructions = (context: string | undefined) =>
     [
@@ -552,14 +559,10 @@ async function runPreparedHostedHarnessTextTurn(
     input.resumeFromToolResults !== undefined ||
     (input.resumeModel?.pendingToolResults ?? false);
   const excludeUnanswered = (history: Content[]) =>
-    history.filter(
-      (entry) =>
-        entry.role !== 'user' ||
-        !input.excludedPromptIds?.has(getApiHistoryPromptId(entry) ?? ''),
-    );
+    filterHostedTurnHistory(history, input.excludedPromptIds);
   const initialMessages: Content[] = excludeUnanswered(
     buildSessionHistoryFromConversation({
-      messages: input.history,
+      messages: modelRecords,
     }).apiHistory,
   );
   if (!input.resumeFromToolResults && !input.resumeModel)
@@ -628,7 +631,7 @@ async function runPreparedHostedHarnessTextTurn(
             resumedAfter:
               event !== HookEventName.InstructionsLoaded &&
               input.resumeFromToolResults
-                ? input.history.at(-1)?.uuid
+                ? modelRecords.at(-1)?.uuid
                 : null,
           }),
         )
@@ -941,7 +944,7 @@ async function runPreparedHostedHarnessTextTurn(
           stage: 'fast',
           durationMs: 0,
         };
-      const messages: Content[] = input.history.flatMap((record) => {
+      const messages: Content[] = modelRecords.flatMap((record) => {
         if (record.type !== 'user' && record.type !== 'assistant') return [];
         if (input.excludedPromptIds?.has(record.daemonPromptId ?? ''))
           return [];
@@ -1005,7 +1008,7 @@ async function runPreparedHostedHarnessTextTurn(
     // injects them before the first request too.
     let injectedContext: string | undefined;
     let injectedTools: ReadonlySet<string> | undefined;
-    const lastAssistant = input.history.findLastIndex(
+    const lastAssistant = modelRecords.findLastIndex(
       (record) => record.type === 'assistant',
     );
     const resumedIds = new Set(
@@ -1014,7 +1017,7 @@ async function runPreparedHostedHarnessTextTurn(
       ),
     );
     const historyRecords = input.resumeFromToolResults
-      ? input.history.flatMap((record, index) => {
+      ? modelRecords.flatMap((record, index) => {
           if (index <= lastAssistant) return [record];
           if (record.type !== 'system' || record.subtype !== 'chat_compression')
             return [];
@@ -1030,7 +1033,7 @@ async function runPreparedHostedHarnessTextTurn(
             typeof prefix !== 'number' ||
             !Number.isSafeInteger(prefix) ||
             prefix < 0 ||
-            payload.compressedHistory.length !== prefix + 1 ||
+            payload.compressedHistory.length < prefix + 1 ||
             pending?.role !== 'user' ||
             !responses?.length ||
             responses.some((response) => !resumedIds.has(response.id ?? ''))
@@ -1041,15 +1044,15 @@ async function runPreparedHostedHarnessTextTurn(
               ...record,
               systemPayload: {
                 ...payload,
-                compressedHistory: payload.compressedHistory.slice(0, prefix),
+                compressedHistory: payload.compressedHistory.slice(0, -1),
                 ...(payload.promptIds
-                  ? { promptIds: payload.promptIds.slice(0, prefix) }
+                  ? { promptIds: payload.promptIds.slice(0, -1) }
                   : {}),
               },
             },
           ];
         })
-      : input.history;
+      : modelRecords;
     const restored = buildSessionHistoryFromConversation({
       messages: historyRecords,
     });
@@ -1058,9 +1061,9 @@ async function runPreparedHostedHarnessTextTurn(
       client.setCompressionObserver(input.commitCompression, {
         restoreRecentFiles: false,
       });
-    // Failed and cancelled turns have no assistant record, and curated
-    // history drops an empty assistant record while keeping its prompt. Omit
-    // both kinds of unanswered prompt even when later completed turns follow.
+    // Text-only turns need a visible answer; curated history can drop an
+    // empty assistant record while keeping its prompt. Tool-profile turns
+    // can carry calls without text and use journal-based group exclusion.
     const answered = (entry: Content | undefined): boolean =>
       entry?.role === 'model' &&
       !!entry.parts?.some((part) => !part.thought && !!part.text);

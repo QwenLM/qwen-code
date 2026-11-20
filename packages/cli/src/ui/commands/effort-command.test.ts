@@ -258,6 +258,21 @@ describe('effortCommand', () => {
     expect(setReasoningEffort).not.toHaveBeenCalled();
   });
 
+  it('rejects a tier the built-in table rules out, with no declaration', async () => {
+    // gpt-5-pro accepts only `high`, and the wire path already re-tiers anything
+    // else, so the command must not offer or persist it (#17411).
+    Object.assign(context.services.config!, {
+      getModel: () => 'gpt-5-pro',
+      getAuthType: () => 'openai',
+      getResolvedModelConfig: () => undefined,
+    });
+    const res = await effortCommand.action!(context, 'low');
+    expect(res).toMatchObject({ messageType: 'error' });
+    expect((res as { content: string }).content).toContain('Choose one of:');
+    expect(setReasoningEffort).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
   it('does not offer tier autocompletion (tiers are hinted via argumentHint)', () => {
     // No completion so bare `/effort` opens the picker instead of auto-picking
     // the first tier; `/effort <tier>` still parses in the action above.

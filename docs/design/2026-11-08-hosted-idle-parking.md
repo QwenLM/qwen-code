@@ -4,6 +4,8 @@
 
 Status: proposal for discussion, not accepted. This is step 6 of [#16320](https://github.com/QwenLM/qwen-code/issues/16320), whose steps 1–5 have merged, and it is discussed under [#15082](https://github.com/QwenLM/qwen-code/issues/15082). It extends the non-destructive release of the [Kubernetes shared Hosted Harness pool](2026-10-21-managed-harness-kubernetes.md). Code references are to `main` at `0807f5d391`. A bare `:line` refers to the file named last.
 
+The later [stateless Hosted Harness proposal](2026-11-16-managed-stateless-harness.md) keeps this document as the baseline for idle timing, Java cache recovery, concurrency and uncertain outcomes, and extends the goal to request-scoped residency. It explicitly records different choices for the initial Store protocol, placement, MCP/Hook lifetime and defaults. Both remain proposals; the later plan does not imply that this document's phases have been implemented or its open questions accepted. The measurements below remain historical evidence and must be repeated for the implementation being enabled.
+
 ## What parking has to remove
 
 While a Session stays loaded in the Hosted Harness, it costs platform work with nothing running. #16320 measured 51–56 statements a minute per resident Session. The sources of that work:

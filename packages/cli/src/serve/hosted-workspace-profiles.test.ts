@@ -5,6 +5,8 @@
  */
 import { expect, it } from 'vitest';
 import {
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+  HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
   HOSTED_WORKSPACE_FILE_PROFILE_V3,
@@ -20,6 +22,7 @@ import {
   isHostedWorkspacePublicShellProfile,
   isHostedWorkspaceShellProfile,
   isHostedWorkspaceSearchProfile,
+  hasHostedExternalExcludedOptions,
 } from './hosted-workspace-profiles.js';
 
 it('admits the saved internal TeamLead as Shell execution without search', () => {
@@ -61,10 +64,88 @@ it('pre-approves glob only on the search profiles and the read profile', () => {
   );
 });
 
+it('recognizes external files without enabling search or Shell', () => {
+  expect(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE).toBe(
+    'hosted-workspace-external-files/1',
+  );
+  expect(
+    isHostedWorkspaceProfile(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE),
+  ).toBe(true);
+  expect(
+    isHostedWorkspaceGlobProfile(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE),
+  ).toBe(true);
+  expect(
+    isHostedWorkspaceSearchProfile(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE),
+  ).toBe(false);
+  expect(
+    isHostedWorkspaceShellProfile(HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE),
+  ).toBe(false);
+  expect(isHostedWorkspaceProfile('hosted-workspace-external-files/2')).toBe(
+    false,
+  );
+});
+
 it('rejects the removed Shell profile', () => {
   expect(isHostedWorkspaceProfile('hosted-workspace-shell/2')).toBe(false);
   expect(isHostedWorkspaceShellProfile('hosted-workspace-shell/2')).toBe(false);
   expect(isHostedWorkspaceGlobProfile('hosted-workspace-shell/2')).toBe(false);
+});
+
+it('refuses every closed option the external lanes cannot serve', () => {
+  for (const key of [
+    'agentDefinition',
+    'sessionSkillsRef',
+    'hookCatalog',
+    'mcpServers',
+    'initialSelection',
+    'publicChildModelRoute',
+    'publicChildExtensionAgent',
+    'lineage',
+    'captureBytes',
+    'memoryStoreId',
+  ]) {
+    expect(
+      hasHostedExternalExcludedOptions(
+        { [key]: 'value' },
+        HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+      ),
+      `${key} must be refused at create`,
+    ).toBe(true);
+  }
+  expect(
+    hasHostedExternalExcludedOptions(
+      {},
+      HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+    ),
+  ).toBe(false);
+  expect(
+    hasHostedExternalExcludedOptions(
+      null,
+      HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+    ),
+  ).toBe(false);
+  // memoryStoreId is the lane the profile's own turn guard rejects as
+  // `External files profile does not support optional lanes.`, so the create
+  // surface must refuse it rather than admit a Session whose every turn fails.
+  expect(
+    hasHostedExternalExcludedOptions(
+      { memoryStoreId: 'mem-1' },
+      HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+    ),
+  ).toBe(true);
+  // The Shell lane requires captureBytes instead, so only that key differs.
+  expect(
+    hasHostedExternalExcludedOptions(
+      { captureBytes: 4096 },
+      HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
+    ),
+  ).toBe(false);
+  expect(
+    hasHostedExternalExcludedOptions(
+      { memoryStoreId: 'mem-1' },
+      HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
+    ),
+  ).toBe(true);
 });
 
 // The self-paced /loop revision skips the retired `shell/2` and takes

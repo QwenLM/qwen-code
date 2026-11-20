@@ -25,13 +25,29 @@ export function OpenTuiVoiceIndicator({
   status,
   interimText,
   audioLevel = 0,
+  screenReader = false,
 }: {
   status: VoiceInputStatus;
   interimText?: string;
   audioLevel?: number;
+  screenReader?: boolean;
 }) {
   const { width } = useTerminalDimensions();
   if (status === 'idle') return null;
+  // The meter is a 100 ms animation and the interim transcript grows per
+  // recognised word, so speech takes a stable label plus the live value on
+  // the replacing lane instead of a scrollback line per audio frame.
+  if (screenReader)
+    return (
+      <text id="screen-reader-live-voice">
+        {status === 'recording'
+          ? t('listening…')
+          : status === 'refining'
+            ? t('refining…')
+            : t('transcribing…')}
+        {interimText ? `\n${interimText}` : ''}
+      </text>
+    );
   const level = Number.isFinite(audioLevel) ? audioLevel : 0;
   const filled = Math.round(Math.max(0, Math.min(1, level * 12)) * 16);
   return (

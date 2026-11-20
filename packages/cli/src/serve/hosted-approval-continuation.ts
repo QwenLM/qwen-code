@@ -36,6 +36,21 @@ import {
 import { isHostedMemoryTool } from './hosted-memory-session.js';
 import { hostedRuntimeSessionId } from './hosted-workspace-broker.js';
 import { readHostedTurnApprovalSelection } from './hosted-approval-selection.js';
+import { isHostedWorkspacePublicShellProfile } from './hosted-workspace-profiles.js';
+
+/**
+ * #17260: the saved continuation was captured under a public-child
+ * topology this Session no longer runs (a `hosted-workspace-shell/*`
+ * child profile after the move off the shell topology). The mismatch is
+ * a durable property of the journal, not a transient fault: the load
+ * route answers the typed terminal decline instead of the retriable
+ * refusal, so the coordinator abandons the stale recovery once.
+ */
+export class HostedPublicChildRecoveryProfileChanged extends Error {
+  constructor() {
+    super('Public child recovery profile changed.');
+  }
+}
 
 const NATIVE_TOOLS = new Set([
   'read_file',
@@ -246,11 +261,9 @@ export async function readHostedApprovalContinuation(
     );
     if (
       definition.publicChildAgentsVersion !== 1 ||
-      (definition.toolProfile !== 'hosted-workspace-shell/1' &&
-        definition.toolProfile !== 'hosted-workspace-shell/3' &&
-        definition.toolProfile !== 'hosted-workspace-shell/4')
+      !isHostedWorkspacePublicShellProfile(definition.toolProfile)
     )
-      throw new Error('Public child recovery profile changed.');
+      throw new HostedPublicChildRecoveryProfileChanged();
   }
   const ids = new Set<string>();
   const runtimeIds = new Set<string>();
@@ -385,7 +398,7 @@ export async function readHostedApprovalContinuation(
           await readHostedQuestionDecision(session, action, options);
       }
       if (
-        (options.v !== 3 && options.v !== 4) ||
+        !options.continuationRef ||
         (questionBatch && options.v !== 4) ||
         options.functionCallId !== item.call.callId ||
         options.turnId !== promptId ||
@@ -508,7 +521,7 @@ export async function findHostedApprovalContinuation(
       !callIds.includes(options.functionCallId)
     )
       continue;
-    if (options.v !== 3 && options.v !== 4) return undefined;
+    if (!options.continuationRef) return undefined;
     approvalRef ??= options.continuationRef;
   }
   const planRef = batch

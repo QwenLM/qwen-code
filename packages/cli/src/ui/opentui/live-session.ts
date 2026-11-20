@@ -127,6 +127,7 @@ import {
   type IndividualToolCallDisplay,
 } from '../types.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
+import { logAgentLoopEntry } from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import type { OpenTuiInputSubmission } from './input-submission.js';
 
 const checkpointLogger = createDebugLogger('OPENTUI_CHECKPOINT');
@@ -746,10 +747,10 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
       throw err;
     })
     .then(async () => {
-      // Every OpenTUI transcript row is drawn again on change, so reply rows
-      // are offered in both screen modes.
+      // Every OpenTUI transcript row is drawn again on change, so reply and
+      // thinking rows are offered in both screen modes.
       await getInteractiveModSession(config)?.initialize(
-        ['AbovePrompt', 'AssistantMessage'],
+        ['AbovePrompt', 'AssistantMessage', 'Thinking'],
         {
           prompts: true,
           runsPrompts: true,
@@ -1111,6 +1112,7 @@ export async function* livePromptEvents(
         // round and its batch run in one `runAgentLoop` call.
         const onSharedLoop =
           config.isUnifiedAgentLoopEnabled?.('opentui') === true;
+        logAgentLoopEntry(config, 'opentui');
         // Seeded before the turn's first round is sent, so the calls it
         // makes are not taken for replays.
         if (onSharedLoop && !duplicates)

@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels;
 
 public final class WorkspaceToolProfiles {
     public static final String FILES = "hosted-workspace-files/1";
+    public static final String EXTERNAL_FILES = "hosted-workspace-external-files/1";
     public static final String MCP = "hosted-workspace-mcp/1";
     public static final String SHELL = "hosted-workspace-shell/1";
     /**
@@ -49,10 +50,12 @@ public final class WorkspaceToolProfiles {
     }
 
     public static int lifecycleProtocol(String profile) {
-        if (FILES.equals(profile)) {
+        // D3: ordinary files closes on the unified v2; external-files keeps v1
+        // (its Runtime does not support the v2 resource phase).
+        if (EXTERNAL_FILES.equals(profile)) {
             return 1;
         }
-        if (SHELL.equals(profile) || SHELL_V3.equals(profile)
+        if (FILES.equals(profile) || SHELL.equals(profile) || SHELL_V3.equals(profile)
                 || SHELL_V4.equals(profile) || MCP.equals(profile)) {
             return 2;
         }
@@ -72,8 +75,11 @@ public final class WorkspaceToolProfiles {
                 && ("qwen-code".equals(session.agentId())
                         ? session.agentDefinitionDigest() == null
                         : session.agentDefinitionDigest() != null)
-                && (FILES.equals(session.toolProfile()) || FILES_V3.equals(session.toolProfile())
-                        || FILES_V4.equals(session.toolProfile())
+                && (EXTERNAL_FILES.equals(session.toolProfile())
+                        ? "qwen-code".equals(session.agentId()) && session.agentDefinitionDigest() == null
+                                && session.publicChildAgentsVersion() == 0
+                        : FILES.equals(session.toolProfile()) || FILES_V3.equals(session.toolProfile())
+                                || FILES_V4.equals(session.toolProfile())
                         || isPublicShell(session.toolProfile()));
     }
 

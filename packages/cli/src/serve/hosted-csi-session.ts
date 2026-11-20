@@ -270,18 +270,6 @@ async function initialize(
     });
     owner.stores = stores;
     const journal = await stores.journalStore.open({ sessionKey: owner.key });
-    if (
-      owner.admission.profile === 'csi-files-retirement/3' &&
-      !stores.supportsExecutionDiagnostics()
-    )
-      throw new Refusal('csi_activity_storage_unavailable');
-    if (
-      ['csi-files-retirement/2', 'csi-files-retirement/3'].includes(
-        owner.admission.profile,
-      ) &&
-      !stores.supportsModelDiagnostics()
-    )
-      throw new Refusal('csi_diagnostics_storage_unavailable');
     owner.recovering = (await stores.publication.owner()).writerGeneration > 1;
     active(owner);
     const definitionRef = owner.recovering
@@ -343,6 +331,7 @@ async function initialize(
       ),
       activation,
       releaseActivation: deny,
+      stopRenewal: deny,
       replaceActivation: deny,
       prepareOwnershipRelease: deny,
       close: deny,

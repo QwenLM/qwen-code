@@ -15,6 +15,10 @@ import type { UiEvent } from '../telemetry/uiTelemetry.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
+  isUnverifiableIdentityError,
+  openNoFollow,
+} from '../utils/no-follow-open.js';
+import {
   extractJsonStringField,
   unescapeJsonString,
 } from '../utils/sessionStorageUtils.js';
@@ -341,58 +345,103 @@ async function summarizeTranscriptFile(
   let lastLine = '';
   let lastTsFallback: string | undefined;
 
-  const fileStream = fs.createReadStream(filePath);
-  const rl = readline.createInterface({
-    input: fileStream,
-    crlfDelay: Infinity,
-  });
+  // Open through the shared no-follow helper (read-only, O_NONBLOCK where
+  // available) and recheck the type on the opened fd: the check-then-use window
+  // spans the whole enumeration, so a path swapped to a writerless FIFO after
+  // Phase 1 must not park the load. O_NONBLOCK keeps the open from blocking; the
+  // fd-level isFile() check below is what refuses a non-regular file. Symlink
+  // policy: the helper refuses a symlinked final component (ELOOP), unlike the
+  // symlink-following Phase-1 statSync prefilter, so a symlinked transcript is
+  // skipped. That refusal applies to every caller of this shared reader — the
+  // dashboard replay, the persisting migration, and the pre-deletion salvage —
+  // so a symlinked transcript's usage is neither replayed, migrated, nor
+  // salvaged. The session-list readers follow the link, so the session still
+  // appears there without its usage.
+  const handle = await openNoFollow(filePath, { nonBlocking: true }).catch(
+    async (error: unknown) => {
+      // A volume with no inode numbers (FAT/exFAT, some SMB) cannot prove
+      // identity, and a usage replay is not identity-sensitive: degrade to the
+      // plain non-blocking open, keeping the fd-level isFile() recheck below as
+      // the type guard (the gitDiff.ts posture). A genuine symlink refusal or
+      // identity race keeps code ELOOP and must still throw.
+      if (!isUnverifiableIdentityError(error)) throw error;
+      return fs.promises.open(
+        filePath,
+        fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0),
+      );
+    },
+  );
+  // Own the fd explicitly (autoClose: false + finally close). The finally closes
+  // the descriptor on every exit — including a stat() that rejects before any
+  // stream exists to close it, which would otherwise leak the fd on each retry.
   try {
-    for await (const line of rl) {
-      if (line.trim().length === 0) continue;
-      lastLine = line;
-      // First-match extraction: a record's own `timestamp` precedes any nested
-      // payload, so this is the record's timestamp even on huge tool-result
-      // lines. Tolerant of non-compact writers (spaces around the colon).
-      const ts = extractJsonStringField(line, 'timestamp');
-      if (ts !== undefined) lastTsFallback = ts;
+    if (!(await handle.stat()).isFile()) {
+      throw new Error(`non-regular transcript: ${filePath}`);
+    }
+    const fileStream = handle.createReadStream({ autoClose: false });
+    const rl = readline.createInterface({
+      input: fileStream,
+      crlfDelay: Infinity,
+    });
+    try {
+      for await (const line of rl) {
+        if (line.trim().length === 0) continue;
+        lastLine = line;
+        // First-match extraction: a record's own `timestamp` precedes any nested
+        // payload, so this is the record's timestamp even on huge tool-result
+        // lines. Tolerant of non-compact writers (spaces around the colon).
+        const ts = extractJsonStringField(line, 'timestamp');
+        if (ts !== undefined) lastTsFallback = ts;
 
-      if (!header) {
-        const recs = jsonl.parseLineTolerant<ChatRecord>(line, filePath);
-        if (recs.length > 0) header = recs[0]!;
-      }
+        if (!header) {
+          const recs = jsonl.parseLineTolerant<ChatRecord>(line, filePath);
+          if (recs.length > 0) header = recs[0]!;
+        }
 
-      if (line.includes('"ui_telemetry"')) {
-        for (const record of jsonl.parseLineTolerant<ChatRecord>(
-          line,
-          filePath,
-        )) {
-          if (record.type === 'system' && record.subtype === 'ui_telemetry') {
-            const payload = record.systemPayload as
-              | { uiEvent?: UiEvent }
-              | undefined;
-            if (
-              payload?.uiEvent &&
-              payload.uiEvent['event.name'] !== 'request_lifecycle' &&
-              payload.uiEvent['event.name'] !== 'tool_lifecycle' &&
-              payload.uiEvent['event.name'] !== 'hook_lifecycle'
-            ) {
-              telemetry.addEvent(payload.uiEvent);
-              hasEvents = true;
+        if (line.includes('"ui_telemetry"')) {
+          for (const record of jsonl.parseLineTolerant<ChatRecord>(
+            line,
+            filePath,
+          )) {
+            if (record.type === 'system' && record.subtype === 'ui_telemetry') {
+              const payload = record.systemPayload as
+                | { uiEvent?: UiEvent }
+                | undefined;
+              if (
+                payload?.uiEvent &&
+                payload.uiEvent['event.name'] !== 'request_lifecycle' &&
+                payload.uiEvent['event.name'] !== 'tool_lifecycle' &&
+                payload.uiEvent['event.name'] !== 'hook_lifecycle'
+              ) {
+                telemetry.addEvent(payload.uiEvent);
+                hasEvents = true;
+              }
             }
           }
         }
       }
+    } catch (e) {
+      // Rethrow read errors (EMFILE/EACCES/EIO/EBUSY, …) rather than returning
+      // null: a failed scan must not be memoized as an authoritative "no usage"
+      // result, or one transient error hides the session until its file changes.
+      // The rebuild worker's catch skips the cache write, so the next load retries.
+      debugLogger.debug(
+        `summarizeTranscriptFile: cannot read ${filePath}: ${e}`,
+      );
+      throw e;
+    } finally {
+      rl.close();
+      fileStream.destroy();
     }
-  } catch (e) {
-    // Rethrow read errors (EMFILE/EACCES/EIO/EBUSY, …) rather than returning
-    // null: a failed scan must not be memoized as an authoritative "no usage"
-    // result, or one transient error hides the session until its file changes.
-    // The rebuild worker's catch skips the cache write, so the next load retries.
-    debugLogger.debug(`summarizeTranscriptFile: cannot read ${filePath}: ${e}`);
-    throw e;
   } finally {
-    rl.close();
-    fileStream.destroy();
+    // Closing is best-effort: a close() failure must not discard a scan whose
+    // bytes were fully read, nor mask a pending read error (the no-follow-open
+    // helper guards its own close the same way).
+    await handle.close().catch((closeErr: unknown) => {
+      debugLogger.debug(
+        `summarizeTranscriptFile: close failed for ${filePath}: ${closeErr}`,
+      );
+    });
   }
 
   if (!header) return null;
@@ -614,10 +663,11 @@ async function rebuildFromSessionJsonl(
         );
         continue;
       }
-      // Only regular files are readable transcripts: a FIFO (or any other
-      // special file) passing the name filter would block open() forever
-      // and wedge the whole rebuild — the daemon's usage dashboard serves
-      // from this path.
+      // Cheap prefilter: skip non-regular entries here to avoid a wasted
+      // open/fstat/close per special file. It is not what keeps the load from
+      // wedging — the scan opens with O_NONBLOCK, so no open can block, and the
+      // fd-level isFile() recheck in summarizeTranscriptFile is what refuses a
+      // non-regular file swapped in after this enumeration.
       if (!stats.isFile()) {
         debugLogger.debug(
           `rebuildFromSessionJsonl: skipping non-regular entry ${filePath}`,

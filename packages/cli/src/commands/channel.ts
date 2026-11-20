@@ -7,6 +7,9 @@ import { reloadCommand } from './channel/reload.js';
 import { setCommand } from './channel/set.js';
 import { daemonWorkerCommand } from './channel/daemon-worker.js';
 import { managedEmailCommand } from './channel/managed-email.js';
+import { managedDingtalkCommand } from './channel/managed-dingtalk.js';
+import { managedGithubCommand } from './channel/managed-github.js';
+import { managedWecomCommand } from './channel/managed-wecom.js';
 import {
   pairingListCommand,
   pairingApproveCommand,
@@ -32,6 +35,9 @@ export const channelCommand: CommandModule = {
       .command(startCommand)
       .command(daemonWorkerCommand)
       .command(managedEmailCommand)
+      .command(managedDingtalkCommand)
+      .command(managedGithubCommand)
+      .command(managedWecomCommand)
       .command(stopCommand)
       .command(statusCommand)
       .command(reloadCommand)
