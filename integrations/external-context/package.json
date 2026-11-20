@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/external-context",
-  "version": "0.28.0",
+  "version": "0.28.0-nightly.20261119.f8d4f706ea",
   "private": true,
   "description": "Provider-bound external context for Qwen Code",
   "type": "module",
