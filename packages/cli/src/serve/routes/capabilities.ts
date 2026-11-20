@@ -64,6 +64,7 @@ async function workflowsEnabledForRuntime(
   if (
     !runtime ||
     !runtime.trusted ||
+    runtime.provenance === 'live-conversation' ||
     runtime.generationGuard?.closed ||
     runtime.routeFileSystemFactory.sshWorkspace
   )

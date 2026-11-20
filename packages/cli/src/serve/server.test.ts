@@ -6704,7 +6704,7 @@ describe('createServeApp', () => {
       });
     });
 
-    it('classifies the daemon-owned Live runtime without exposing provenance', async () => {
+    it('classifies the daemon-owned Live runtime without advertising Workflow or exposing provenance', async () => {
       const primaryBridge = fakeBridge();
       const liveRuntime: WorkspaceRuntime = {
         ...makeWorkspaceRuntimeForTest({
@@ -6728,7 +6728,7 @@ describe('createServeApp', () => {
       const app = createServeApp(baseOpts, undefined, {
         bridge: primaryBridge,
         workspaceRegistry: registry,
-        daemonEnv: {},
+        daemonEnv: { QWEN_CODE_ENABLE_WORKFLOWS: '1' },
       });
 
       const response = await request(app)
@@ -6746,7 +6746,7 @@ describe('createServeApp', () => {
         displayName: 'Conversations',
         primary: false,
         trusted: true,
-        workflowsEnabled: true,
+        workflowsEnabled: false,
         kind: 'live',
       });
       expect(response.body.features).not.toContain('multi_workspace_sessions');

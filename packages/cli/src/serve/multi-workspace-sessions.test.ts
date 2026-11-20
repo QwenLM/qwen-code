@@ -1296,7 +1296,7 @@ describe('multi-workspace session dispatch', () => {
         cwd: PRIMARY_CWD,
         primary: true,
         trusted: true,
-        workflowsEnabled: false,
+        workflowsEnabled: true,
       },
       {
         id: 'secondary-id',
@@ -1304,7 +1304,7 @@ describe('multi-workspace session dispatch', () => {
         displayName: 'Secondary workspace',
         primary: false,
         trusted: true,
-        workflowsEnabled: false,
+        workflowsEnabled: true,
       },
     ]);
     expect(res.body.limits.maxSessionsPerWorkspace).toBe(32);

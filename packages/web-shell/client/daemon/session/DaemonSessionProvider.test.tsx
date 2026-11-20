@@ -13013,6 +13013,7 @@ describe('DaemonSessionProvider', () => {
     'success',
     'both fail',
     'replay read fails',
+    'newer replay commands arrive',
     'live commands arrive',
   ] as const)(
     'keeps the Workflow catalog current through SSE delta replay (%s)',
@@ -13046,7 +13047,9 @@ describe('DaemonSessionProvider', () => {
         workflowsEnabled: false,
         savedWorkflows: [],
       });
-      if (reads === 'both fail') {
+      const reconnectReadFails =
+        reads === 'both fail' || reads === 'newer replay commands arrive';
+      if (reconnectReadFails) {
         supportedCommands.mockRejectedValueOnce(
           new Error('Reconnect read failed'),
         );
@@ -13075,8 +13078,9 @@ describe('DaemonSessionProvider', () => {
             sessionId: status.sessionId,
             update: {
               sessionUpdate: 'available_commands_update',
-              availableCommands: [],
+              availableCommands: [{ name: 'older-command', description: '' }],
               _meta: {
+                availableSkills: ['older-skill'],
                 workflowStatus: {
                   workflowsEnabled: true,
                   savedWorkflows: [catalog[0]],
@@ -13085,9 +13089,30 @@ describe('DaemonSessionProvider', () => {
             },
           },
         };
+        if (reads === 'newer replay commands arrive') {
+          yield {
+            id: 7,
+            v: 1,
+            type: 'session_update',
+            data: {
+              sessionId: status.sessionId,
+              update: {
+                sessionUpdate: 'available_commands_update',
+                availableCommands: [{ name: 'later-command', description: '' }],
+                _meta: { availableSkills: ['later-skill'] },
+              },
+            },
+          };
+        }
         backlogDelivered.resolve();
         await finishReplay.promise;
-        yield { v: 1, type: 'replay_complete', data: { lastEventId: 6 } };
+        yield {
+          v: 1,
+          type: 'replay_complete',
+          data: {
+            lastEventId: reads === 'newer replay commands arrive' ? 7 : 6,
+          },
+        };
         if (reads === 'live commands arrive') {
           yield {
             v: 1,
@@ -13129,7 +13154,7 @@ describe('DaemonSessionProvider', () => {
         await backlogDelivered.promise;
       });
       expect(connection?.supportedCommands?.savedWorkflows).toEqual(
-        reads === 'both fail' ? [] : catalog,
+        reconnectReadFails ? [] : catalog,
       );
 
       await act(async () => {
@@ -13148,10 +13173,33 @@ describe('DaemonSessionProvider', () => {
         ]);
         expect(connection?.skills).toEqual(['fresh-skill']);
       }
+      if (reads === 'newer replay commands arrive') {
+        expect(connection?.commands?.map(({ name }) => name)).toEqual([
+          'later-command',
+          'later-skill',
+        ]);
+        expect(connection?.skills).toEqual(['later-skill']);
+        expect(connection?.supportedCommands).toMatchObject({
+          availableCommands: expect.arrayContaining([
+            expect.objectContaining({ name: 'later-command' }),
+          ]),
+          availableSkills: ['later-skill'],
+          workflowsEnabled: true,
+        });
+        expect(connection?.workflowStatusRevision).toBe(1);
+      }
+      if (reads === 'both fail') {
+        expect(connection?.commands?.map(({ name }) => name)).toEqual([
+          'older-command',
+          'older-skill',
+        ]);
+        expect(connection?.skills).toEqual(['older-skill']);
+      }
       const expected = {
         success: latest,
         'both fail': [catalog[0]],
         'replay read fails': catalog,
+        'newer replay commands arrive': [catalog[0]],
         'live commands arrive': latest,
       };
       expect(connection?.supportedCommands?.savedWorkflows).toEqual(
