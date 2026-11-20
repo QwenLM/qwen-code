@@ -426,16 +426,12 @@ function mergeCompactToolGroups(
     // Each thought remembers the tool that follows it. Consecutive agents may
     // later render as one row anchored at the first agent; launch narration
     // bound to later agents follows that aggregate row.
-    const thoughts: Array<{
-      content: string;
-      isStreaming?: boolean;
-      beforeToolCallId?: string;
-      parentToolCallId?: string;
-    }> = [];
+    const thoughts: NonNullable<DaemonToolGroupMessage['thoughts']> = [];
     const thoughtsAwaitingTool: Array<(typeof thoughts)[number]> = [];
     for (const item of run) {
       if (item.role === 'thinking') {
         const thought = {
+          id: item.id,
           content: item.content,
           ...(item.isStreaming === true ? { isStreaming: true } : {}),
           ...(item.parentToolCallId

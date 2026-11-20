@@ -3165,6 +3165,80 @@ describe('thinking rows in the compact summary', () => {
     expect(translateButtons()).toBe(1);
   });
 
+  it('withdraws a queued thought when its workflow summary closes', async () => {
+    const { ModRowAsker, ModRowAskerContext } = await import('./mod-rows');
+    const { ModRowsProvider } = await import('./ModAssistantMessage');
+    const observers: Array<
+      (entries: Array<{ isIntersecting: boolean }>) => void
+    > = [];
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(
+          callback: (entries: Array<{ isIntersecting: boolean }>) => void,
+        ) {
+          observers.push(callback);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    try {
+      const first = Promise.withResolvers<void>();
+      const ask = vi.fn(async () => ({ status: 'answered' as const }));
+      ask.mockImplementationOnce(async () => {
+        await first.promise;
+        return { status: 'answered' };
+      });
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <ModRowAskerContext.Provider value={new ModRowAsker(ask)}>
+              <ModRowsProvider messages={[]}>
+                <ToolGroup
+                  compactSummary
+                  tools={[
+                    makeTool({ callId: 'workflow', toolName: 'workflow' }),
+                  ]}
+                  thoughts={[
+                    { content: 'First thought', beforeToolCallId: 'workflow' },
+                    { content: 'Second thought' },
+                  ]}
+                />
+              </ModRowsProvider>
+            </ModRowAskerContext.Provider>
+          </I18nProvider>,
+        ),
+      );
+
+      const summary = container.querySelector('button')!;
+      act(() => summary.click());
+      act(() => {
+        for (const header of container.querySelectorAll<HTMLElement>(
+          '[data-testid="compact-thinking-summary"]',
+        )) {
+          header.click();
+        }
+      });
+      expect(observers).toHaveLength(2);
+      act(() => {
+        for (const observer of observers) observer([{ isIntersecting: true }]);
+      });
+      expect(ask).toHaveBeenCalledOnce();
+      act(() => summary.click());
+      expect(container.querySelector('[inert]')).not.toBeNull();
+      // The first request can settle before the visibility observer reports the collapse.
+      await act(async () => first.resolve());
+      expect(ask).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('renders thoughts interleaved with their tools in original order', () => {
     const container = renderToolGroup(
       [

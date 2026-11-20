@@ -212,6 +212,7 @@ export interface DaemonToolGroupMessage extends DaemonMessageMeta {
    * trail the last tool.
    */
   thoughts?: Array<{
+    id?: string;
     content: string;
     isStreaming?: boolean;
     beforeToolCallId?: string;

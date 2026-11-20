@@ -180,7 +180,7 @@ does not.
 | Prompts    | `prompt.submit` and `$.prompt.submit` in headless runs and the Ink and OpenTUI terminals, described in [Submitted prompts](#submitted-prompts)                                                          |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input                 |
 | Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                                |
-| Drawing    | `ui.render` draws the [band above the prompt](#the-band-above-the-prompt) and rewrites [reply rows](#reply-rows) and [thinking rows](#thinking-rows) in the Ink and OpenTUI terminals and the Web Shell |
+| Drawing    | `ui.render` draws the [band above the prompt](#the-band-above-the-prompt) in Ink and OpenTUI. Rewrites [reply rows](#reply-rows) and [thinking rows](#thinking-rows) in Ink, OpenTUI, and the Web Shell |
 | Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                                 |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
@@ -1211,11 +1211,11 @@ a subagent's text are not offered. A hook receives:
 
 `isFirstOfReply` is `false` on a block that follows another reply block with
 nothing but thinking or Mod log lines between them. The same text and flag make the same
-row: a second browser tab or a reload is answered from the first answer
-without running the hooks again, for as long as the session stays open. The
-Web Shell asks one row at a time per session, and the 30-second limit and the
-one-row-at-a-time queue apply as in the terminal. A row shows its own text
-until it is answered and keeps its answer after it scrolls away. The copy
+row. A second browser tab or a reload reuses the answer while it remains
+in the session's cache. The Web Shell asks one row at a time per session.
+The terminal's 30-second limit and one-row-at-a-time queue also apply.
+A row shows its own text until it is answered and keeps its answer after it
+scrolls away. The copy
 buttons copy the original text. A row asked again after
 `$.ui.invalidate('ui.render')` draws its new answer once the Web Shell asks
 for it again, which today means after a reload.
@@ -1284,8 +1284,10 @@ hook run. A subagent's thoughts are not offered. A hook receives:
 ```
 
 As with [reply rows in the Web Shell](#in-the-web-shell), the same text is the
-same row: expanding a thought again, a reload or a second tab draws the first
-answer without running the hooks again, for as long as the session stays open.
+same row. Reopening a thought, reloading the page, or opening a second tab
+reuses the answer while it remains cached. The session retains up to 1,000
+inactive rows shared between replies and thoughts. An evicted row can run
+its hooks again.
 The collapsed line keeps the original text. Once the Web Shell draws a Mod's
 rewrite of a thought, it hides the translate button beside that thought, which
 would translate the original. An exported transcript draws the original

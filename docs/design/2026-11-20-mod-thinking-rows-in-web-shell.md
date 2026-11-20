@@ -15,7 +15,7 @@ The Web Shell draws a thought in two places. A thought with no tool beside it is
 Goals:
 
 - The `Thinking` site in the Web Shell, for both thought rows and thought lines folded into a tool summary, with the terminals' contract.
-- A thought costs a hook run only once someone expands it and it is on screen, and once per text. Expanding it again, a reload or a second tab does not run the hooks again.
+- A thought costs a hook run only once someone expands it and it is on screen. Expanding it again, reloading or opening a second tab reuses the answer while it remains cached.
 - The stored thought and what the model reads keep the original.
 
 Non-goals:
@@ -45,9 +45,9 @@ There is no new capability tag. A Web Shell that asks an older daemon for a thou
 
 ### Asked from the expanded body
 
-The thought row and the thought line draw an expanded thought with the same body. In the live transcript, that body is swapped for one that asks the session's Mods. The body exists only while the thought is expanded. A collapsed thought, or one inside a collapsed tool summary, is never asked for, and collapsing a thought withdraws an ask that has not started.
+The thought row and the thought line draw an expanded thought with the same body. In the live transcript, that body is swapped for one that asks the session's Mods. The body exists only while the thought and its enclosing tool summary are expanded. Closing either withdraws an ask that has not started, including when a workflow summary keeps its tool details mounted.
 
-The body asks once the thought is complete, its text is not blank, and it intersects the viewport. It uses the same one-at-a-time asker as reply rows. A thought expanded while it streams shows the stream and is asked for when it completes. The answer is kept, so a thought expanded again shows its rewrite at once, and an expanded thought keeps showing the rewrite after it scrolls out of view. Only the body reads the asker, so the thought headers keep their memo boundaries and do not render again per streamed chunk.
+The body asks once the thought is complete, its text is not blank, and it intersects the viewport. It uses the same one-at-a-time asker as reply rows. An expanded thought in a tool summary keeps its state when a new tool call moves it from the end of the summary to just before that tool. It shows the stream and is asked for when it completes. The session's cache retains up to 1,000 inactive rows shared between replies and thoughts. Only the body reads the asker, so the thought headers keep their memo boundaries and do not render again per streamed chunk.
 
 ### Which thoughts
 
@@ -69,6 +69,7 @@ Unit tests:
 - Bridge: `initialize` declares both sites.
 - Web Shell, thought row: one root is rendered through streaming, complete, expanded, collapsed and expanded again. The thought is asked only once it is complete, expanded and on screen, with its trailing whitespace trimmed. It keeps the answer off screen, and expanding it again draws the kept answer without another ask. Once rewritten, it hides its translate button, also after being collapsed.
 - Web Shell, other cases: a collapsed thought, a blank thought and a subagent's thought are not asked for. In the compact tool summary, a folded thought is asked once expanded and then drops its translate button, while a subagent's folded thought is not asked and keeps its button. After the session answers `unhooked` for thinking rows, the page asks for no more thoughts and keeps asking for reply rows.
+- Web Shell, compact summary: a new tool call completes an expanded streaming thought and moves it before the tool. The thought stays expanded and shows the rewrite. Closing a workflow summary withdraws a queued thought before the visibility observer reports the collapse.
 - Web Shell, transcript: a thought from a missing parent stays apart from the model's thought and keeps its parent, and the compact fold carries the parent.
 - Mutation check: each of these tests fails once the subagent check, the trim, the parent rule for merging, the parent in the fold or the hidden translate button is removed.
 
@@ -85,17 +86,17 @@ A browser check ran against the real Web Shell, with two turns:
 - Expanded, the standalone thought showed render #1, and it still showed #1 after being collapsed and expanded again. The folded thoughts showed #2 and #3.
 - After a reload and in a second tab, all three showed their first renders, and the Mod's log still counted three renders.
 
-The export renderer grew by 565 bytes, from 2,146,831 to 2,147,396 of its 2,148,200-byte budget.
+The export renderer grew by 379 bytes, from 2,146,831 to 2,147,210 of its 2,148,200-byte budget.
 
 Acceptance: in the Web Shell, with `experimental.mods` on and a Mod that rewrites `Thinking`:
 
 - Each complete, expanded thought on screen shows the rewritten text, as a row of its own or in a tool summary.
-- A reload shows it again without running the hook.
+- A reload shows the cached rewrite again without running the hook.
 - A thought that stays collapsed never runs the hook.
 
 ## Risks and open questions
 
 - A thought whose hook awaits a model call shows the original when expanded, then changes height when the answer arrives.
-- A tool summary mounts its lines only while it is expanded, so its thoughts start collapsed each time it is expanded. A thought expanded again shows its kept answer at once.
+- A workflow summary keeps its lines mounted when collapsed. Its thoughts resume their expansion state when the summary reopens and draw any cached answers.
 - The page knows a thought was rewritten only once it has drawn the rewrite. A collapsed thought therefore shows the translate button until it is expanded, including after a reload, though the session already keeps its answer.
-- The export renderer is 804 bytes under its budget after this step.
+- The export renderer is 990 bytes under its budget after this step.

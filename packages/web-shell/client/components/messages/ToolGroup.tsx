@@ -1,5 +1,4 @@
 import {
-  Fragment,
   memo,
   useCallback,
   useContext,
@@ -14,6 +13,7 @@ import type {
   ACPToolCall,
   PermissionRequest,
   TodoItem,
+  ToolGroupMessage,
 } from '../../adapters/types';
 import type { SessionContentGenerator } from './AssistantMessage';
 import {
@@ -114,12 +114,7 @@ interface ToolGroupProps {
    * the original order. Streaming entries drive the "Thinking…" summary;
    * each entry renders as a click-to-expand row.
    */
-  thoughts?: Array<{
-    content: string;
-    isStreaming?: boolean;
-    beforeToolCallId?: string;
-    parentToolCallId?: string;
-  }>;
+  thoughts?: ToolGroupMessage['thoughts'];
   pendingApproval?: PermissionRequest | null;
   workspaceCwd?: string;
   onTurnOutputOpen?: (request: TurnOutputOpenRequest) => void;
@@ -2016,11 +2011,13 @@ const ThoughtLine = memo(function ThoughtLine({
   content,
   isStreaming,
   fromSubagent,
+  showGroupContent,
   generateContent,
 }: {
   content: string;
   isStreaming?: boolean;
   fromSubagent: boolean;
+  showGroupContent: boolean;
   generateContent?: SessionContentGenerator;
 }) {
   const transcriptRenderMode = useTranscriptRenderMode();
@@ -2046,7 +2043,7 @@ const ThoughtLine = memo(function ThoughtLine({
         generateContent={generateContent}
         onToggle={handleToggle}
       />
-      {showContent && (
+      {showGroupContent && showContent && (
         <div className={styles.chatSummaryThoughtContent}>
           <ThinkingBody
             content={content}
@@ -2202,6 +2199,23 @@ export const ToolGroup = memo(function ToolGroup({
   };
 
   if (!hasApprovalTool) {
+    const renderThoughts = (beforeToolCallId?: string) =>
+      (thoughts ?? [])
+        .filter((thought) => thought.beforeToolCallId === beforeToolCallId)
+        .map((thought, index) => (
+          <ThoughtLine
+            key={
+              thought.id === undefined
+                ? `thought-position:${beforeToolCallId ?? ''}:${index}`
+                : `thought:${thought.id}`
+            }
+            content={thought.content}
+            isStreaming={thought.isStreaming}
+            fromSubagent={thought.parentToolCallId !== undefined}
+            showGroupContent={showGroupContent}
+            generateContent={generateContent}
+          />
+        ));
     return (
       <div className={isLocateFlashing ? flashStyles.flash : undefined}>
         <button
@@ -2303,90 +2317,52 @@ export const ToolGroup = memo(function ToolGroup({
           >
             <div className={styles.chatSummaryContentInner}>
               <div className={`${styles.group} ${styles.chatSummaryGroup}`}>
-                {tools.map((tool) => {
-                  if (groupedAgentCallIds.has(tool.callId)) return null;
-                  const parallelAgents = parallelAgentsByFirstCallId.get(
-                    tool.callId,
-                  );
-                  return (
-                    <Fragment key={tool.callId}>
-                      {thoughts
-                        ?.filter(
-                          (thought) => thought.beforeToolCallId === tool.callId,
-                        )
-                        .map((thought, index) => (
-                          <ThoughtLine
-                            key={`thought-${tool.callId}-${index}`}
-                            content={thought.content}
-                            isStreaming={thought.isStreaming}
-                            fromSubagent={
-                              thought.parentToolCallId !== undefined
-                            }
-                            generateContent={generateContent}
+                {[
+                  ...tools.flatMap((tool) => {
+                    if (groupedAgentCallIds.has(tool.callId)) return [];
+                    const beforeTool = renderThoughts(tool.callId);
+                    const parallelAgents = parallelAgentsByFirstCallId.get(
+                      tool.callId,
+                    );
+                    if (parallelAgents) {
+                      return [
+                        ...beforeTool,
+                        <div
+                          key={`tool:${tool.callId}`}
+                          className={styles.chatSummaryParallelAgents}
+                          data-testid="compact-parallel-agents"
+                        >
+                          <ParallelAgentsGroup
+                            agents={parallelAgents}
+                            pendingApproval={pendingApproval}
                           />
-                        ))}
-                      {parallelAgents ? (
-                        <>
-                          <div
-                            className={styles.chatSummaryParallelAgents}
-                            data-testid="compact-parallel-agents"
-                          >
-                            <ParallelAgentsGroup
-                              agents={parallelAgents}
-                              pendingApproval={pendingApproval}
-                            />
-                          </div>
-                          {parallelAgents
-                            .slice(1)
-                            .flatMap((agent) =>
-                              thoughts
-                                ?.filter(
-                                  (thought) =>
-                                    thought.beforeToolCallId === agent.callId,
-                                )
-                                .map((thought, index) => (
-                                  <ThoughtLine
-                                    key={`thought-${agent.callId}-${index}`}
-                                    content={thought.content}
-                                    isStreaming={thought.isStreaming}
-                                    fromSubagent={
-                                      thought.parentToolCallId !== undefined
-                                    }
-                                    generateContent={generateContent}
-                                  />
-                                )),
-                            )}
-                        </>
-                      ) : (
-                        <ToolLine
-                          tool={tool}
-                          approval={pendingApproval}
-                          workspaceCwd={workspaceCwd}
-                          onTurnOutputOpen={onTurnOutputOpen}
-                          onToolResultOpen={onToolResultOpen}
-                          summaryOnly={!singleTool || compactToolLines}
-                          forceExpanded={
-                            documentMode || (!!singleTool && !compactToolLines)
-                          }
-                          detailsVisible={showGroupContent}
-                          hideHeader={!!singleTool && !compactToolLines}
-                          revealSeq={revealSeqFor(tool)}
-                        />
-                      )}
-                    </Fragment>
-                  );
-                })}
-                {thoughts
-                  ?.filter((thought) => thought.beforeToolCallId === undefined)
-                  .map((thought, index) => (
-                    <ThoughtLine
-                      key={`thought-trailing-${index}`}
-                      content={thought.content}
-                      isStreaming={thought.isStreaming}
-                      fromSubagent={thought.parentToolCallId !== undefined}
-                      generateContent={generateContent}
-                    />
-                  ))}
+                        </div>,
+                        ...parallelAgents
+                          .slice(1)
+                          .flatMap((agent) => renderThoughts(agent.callId)),
+                      ];
+                    }
+                    return [
+                      ...beforeTool,
+                      <ToolLine
+                        key={`tool:${tool.callId}`}
+                        tool={tool}
+                        approval={pendingApproval}
+                        workspaceCwd={workspaceCwd}
+                        onTurnOutputOpen={onTurnOutputOpen}
+                        onToolResultOpen={onToolResultOpen}
+                        summaryOnly={!singleTool || compactToolLines}
+                        forceExpanded={
+                          documentMode || (!!singleTool && !compactToolLines)
+                        }
+                        detailsVisible={showGroupContent}
+                        hideHeader={!!singleTool && !compactToolLines}
+                        revealSeq={revealSeqFor(tool)}
+                      />,
+                    ];
+                  }),
+                  ...renderThoughts(),
+                ]}
               </div>
             </div>
           </div>
