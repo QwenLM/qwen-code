@@ -11,9 +11,9 @@ Worker/Harness image jobs:
   image artifacts:  worker-image.json and harness-image.json
 
 Ordering guarantees:
-  1. Local verification: releaseId/sourceSha match, native mode is verify, both image
-     records describe this exact runtime, and every SHA256 in both PROVENANCE documents
-     and assembly-validation.json matches the bytes on disk.
+  1. Local verification: releaseId/sourceSha match, native mode matches the declared gate
+     (package or verify), both image records describe this exact runtime, and every SHA256
+     in both PROVENANCE documents and assembly-validation.json matches the bytes on disk.
   2. Credential gate: OSS candidates and Maven credentials must exist; the OSS
      credential actually used must HEAD the release prefix successfully. Maven deploy
      runs before the first OSS object so a Maven failure cannot strand an immutable
@@ -91,8 +91,8 @@ def verify_inputs(native_dir, runtime_dir, release_id, source_sha):
     native_prov_path = locate(native_dir, "**/artifact/PROVENANCE.json", "native PROVENANCE")
     native_artifact = native_prov_path.parent
     native_prov = json.loads(native_prov_path.read_text())
-    if native_prov.get("mode") != "verify":
-        fail("native provenance mode must be verify before publication")
+    if native_prov.get("mode") not in ("package", "verify"):
+        fail("native provenance mode must be package or verify before publication")
     runtime_prov_path = locate(runtime_dir, "**/PROVENANCE.json", "runtime PROVENANCE")
     runtime_root = runtime_prov_path.parent
     runtime_prov = json.loads(runtime_prov_path.read_text())
@@ -137,6 +137,7 @@ def verify_inputs(native_dir, runtime_dir, release_id, source_sha):
     return {
         "coordinate": coordinate,
         "sdkCoordinate": sdk_coordinate,
+        "nativeMode": native_prov.get("mode"),
         "sdkVersion": sdk_version,
         "serverJar": server_jar,
         "serverPom": server_pom,
@@ -387,6 +388,8 @@ def main():
                         help="Directory containing worker-image.json")
     parser.add_argument("--harness-image-dir", type=Path, required=True,
                         help="Directory containing harness-image.json")
+    parser.add_argument("--expected-native-mode", choices=("package", "verify"),
+                        help="Native producer mode that must match provenance")
     parser.add_argument("--repo", type=Path, default=Path("."),
                         help="qwen-code checkout (for resolve-oss-sts.sh fallback)")
     args = parser.parse_args()
@@ -395,6 +398,8 @@ def main():
         fail("sourceSha must be a full lowercase 40-hex commit SHA")
 
     plan = verify_inputs(args.native_dir, args.runtime_dir, args.release_id, args.source_sha)
+    if args.expected_native_mode and plan.get("nativeMode") != args.expected_native_mode:
+        fail(f"native mode {plan.get('nativeMode')!r} != expected {args.expected_native_mode!r}")
     images = {
         "worker": verify_image_record(
             args.worker_image_dir, "worker", WORKER_REPOSITORY, args.release_id,

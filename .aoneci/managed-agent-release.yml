@@ -10,6 +10,9 @@ params:
   sourceSha:
     description: "Required full 40-hex qwen-code commit SHA; every parallel job must check out exactly this commit"
     default: ""
+  nativeGate:
+    description: "package compiles and assembles MAS/SDK without tests (default); verify additionally runs full unit + MySQL 8.4 + Checkstyle gates"
+    default: "package"
   publish:
     description: "true publishes MAS/SDK to Maven, runtime to OSS, and the release manifest with Worker/Harness digests"
     default: "false"
@@ -26,6 +29,7 @@ jobs:
             echo "checkout HEAD does not match required sourceSha" >&2
             exit 1
           }
+          case "${{ params.nativeGate }}" in package|verify) ;; *) echo "nativeGate must be package or verify" >&2; exit 1 ;; esac
       - uses: setup-env@2.0.8
         inputs:
           java-version: "21"
@@ -43,9 +47,9 @@ jobs:
           code=0
           bash -o pipefail -c '
             python3 -u .aoneci/scripts/build-managed-agent-native.py \
-              --mode verify --release-id "$1" --source-sha "$2" --out "$3" 2>&1 |
-              tee "$3/producer.log"
-          ' managed-release "${{ params.releaseId }}" "${{ params.sourceSha }}" .aone-output/native_release || code=$?
+              --mode "$1" --release-id "$2" --source-sha "$3" --out "$4" 2>&1 |
+              tee "$4/producer.log"
+          ' "${{ params.nativeGate }}" "${{ params.releaseId }}" "${{ params.sourceSha }}" .aone-output/native_release || code=$?
           echo "$code" > .aone-output/native_release/exit-code
       - uses: upload-artifact@1.1.4
         inputs:
@@ -206,6 +210,7 @@ jobs:
           python3 .aoneci/scripts/publish-managed-release.py \
             --release-id "${{ params.releaseId }}" \
             --source-sha "${{ params.sourceSha }}" \
+            --expected-native-mode "${{ params.nativeGate }}" \
             --native-dir .aone-publish/native \
             --runtime-dir .aone-publish/runtime \
             --worker-image-dir .aone-publish/worker-image \
