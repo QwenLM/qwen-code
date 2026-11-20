@@ -25,7 +25,7 @@
 
 锁刻意保持按条目：按目的地的锁会让一个配置 name + endpoint 的两个注册各拿一把锁并发运行，重复入站处理。账本键控在不收窄锁的前提下加跨注册隔离。
 
-`channel-base` 的共享 `destinationKey` 注释更新为点名 WeCom、DingTalk **与 GitHub** 为绑定注册身份的适配器，留 email（独立变体）为剩余后续。
+`channel-base` 的共享 `destinationKey` 注释更新为点名 WeCom、DingTalk **与 GitHub** 为绑定注册身份的适配器，留 email（独立变体）为剩余后续。_（更新：email 注册身份键控已在 #17925 加入；注释现点名 WeCom、DingTalk、GitHub 与 email 为绑定者。）_
 
 ## 升级后果与诊断
 
@@ -35,7 +35,7 @@
 
 ## 涉及文件
 
-- `packages/channels/base/src/managed-channel.ts` —— `destinationKey` 注释：点名 WeCom、DingTalk 与 GitHub 为绑定者；email 仍为后续。
+- `packages/channels/base/src/managed-channel.ts` —— `destinationKey` 注释：点名 WeCom、DingTalk 与 GitHub 为绑定者；email 仍为后续。_（更新：email 已在 #17925 加入绑定者。）_
 - `packages/channels/github/src/managed-state.ts` —— 存储构造函数：条目键控目录 + 身份键控账本文件；`load()` 拆臂；`strandedLegacyLedger()`（pending/outbound/`watchPending`/水位/readable）+ `archiveStrandedLegacy()` + `entryWatchEpisodes()`（跨旧账本、键控账本与归档的条目作用域 `Math.max` 合并）。
 - `packages/channels/github/src/managed-github-adapter.ts` —— 传 `destinationKey` 给存储；`connect()` 滞留通知（pending 计数并入 `watchPending`，附排队迁移丢失子句）+ 把条目作用域 episode 合并进加载态 + 延迟归档 + 归档路径日志。
 - `packages/channels/github/src/managed-state.test.ts` —— 更新文件路径期望；加键控、隔离、滞留与损坏旧账本见证；`entryWatchEpisodes()` 净化（含非安全整数）、归档存活、兄弟 `Math.max` 合并（两种读取顺序）、不裁剪的携带来源、仅存 prs 基线的携带、越过不可读来源继续的见证；`watchPending` 计数 + unknown 回执出站见证。
@@ -51,7 +51,7 @@
 - `disconnect()` 的行注销门控是独立问题，本次不动。
 - 滞留诊断仅覆盖升级前的 `managed-state.json`。升级后若 `destinationKey` 变更，前一注册的身份键控账本（`managed-state-<hash>.json`）被废弃而无提示——这与 DingTalk 兄弟相同，已并入 #17769 第 1 项跟踪，不在本次实现；故本诊断不应被读作覆盖一切滞留情形。
 - 无控制面（Java）改动；无 `channel-base` 契约/API 改动——仅更新 `destinationKey` 注释。
-- email 存储不在范围（独立变体）；它是剩余后续。
+- email 存储不在范围（独立变体）；它是剩余后续。_（更新：email 注册身份键控已在 #17925 加入。）_
 
 ## 开放问题
 
