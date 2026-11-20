@@ -11460,8 +11460,21 @@ export function registerSessionRoutes(
         }
         sawRecord = true;
       }
-      // A clipped fragment alone cannot establish an intact tail.
-      if (continuation && !sawRecord) return false;
+      if (continuation && !sawRecord) {
+        // Find the clipped record's boundary using at most one earlier window.
+        const prefixLength = Math.min(readStart, 64 * 1024);
+        const prefixStart = readStart - prefixLength;
+        const prefixBuffer = Buffer.alloc(prefixLength);
+        fs.readSync(fd, prefixBuffer, 0, prefixLength, prefixStart);
+        const boundary = prefixBuffer.lastIndexOf(0x0a);
+        if (boundary < 0 && prefixStart > 0) return false;
+        return parseLineTolerantWithIntegrity(
+          Buffer.concat([prefixBuffer, buffer.subarray(0, bytesRead)])
+            .toString('utf8', boundary + 1)
+            .trim(),
+          filePath,
+        ).complete;
+      }
       return true;
     } catch {
       return false;

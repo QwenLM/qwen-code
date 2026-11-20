@@ -118,10 +118,15 @@ reader. Complete `}{`-glued object records therefore remain recoverable. An
 invalid or torn record, including one truncated before the `session_source`
 subtype, is indeterminate metadata rather than evidence of an ordinary
 source-less session.
-If the window starts inside a record and dropping its first fragment leaves no
-complete record, including a fragment followed only by a trailing empty line,
-the fallback treats the tail as indeterminate. This includes a window consisting
-solely of a clipped record fragment with no newline.
+The ordinary tail read stays at 64 KiB. Only when a clipped first fragment is
+discarded and no complete record is found afterward does the fallback read one
+additional prefix of at most 64 KiB to locate that record's boundary and verify
+it with the same canonical reader. This keeps a complete large final record,
+including one followed by a newline, recoverable without treating a trailing
+newline as proof of completeness. If the record's start cannot be reached in
+that bounded context, or there is no complete record after a clipped fragment
+beyond that context, the metadata remains indeterminate. The fallback's tail
+and boundary context is at most 128 KiB for this case.
 
 Before emitting an item, the route checks the runtime's in-memory session
 summary and omits a session whose prompt is active or queued. That check does

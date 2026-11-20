@@ -471,6 +471,77 @@ describe('POST /sessions/recovery', () => {
     expect(response.body.workspaces[0].items).toEqual([]);
   });
 
+  it('keeps a complete large final record followed by a newline', async () => {
+    const fixture = makeFixture();
+    const ordinary = randomUUID();
+    fixture.seed(ordinary, [inFlight('p1', Date.now())]);
+    const transcriptPath = path.join(
+      path.dirname(fixture.sessionService.getPromptLedgerPath(ordinary)),
+      `${ordinary}.jsonl`,
+    );
+    const largeRecord = JSON.stringify({
+      uuid: 'complete-large-record',
+      parentUuid: null,
+      sessionId: ordinary,
+      timestamp: new Date().toISOString(),
+      type: 'user',
+      cwd: fixture.runtime.workspaceCwd,
+      version: '1.0.0',
+      message: {
+        role: 'user',
+        parts: [{ text: 'complete-' + 'y'.repeat(70 * 1024) }],
+      },
+    });
+    expect(Buffer.byteLength(largeRecord)).toBeGreaterThan(64 * 1024);
+    expect(JSON.parse(largeRecord).uuid).toBe('complete-large-record');
+    writeFileSync(transcriptPath, `${largeRecord}\n`, {
+      encoding: 'utf8',
+      flag: 'a',
+    });
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery')
+      .send({ workspaces: [fixture.runtime.workspaceId] });
+
+    expect(response.body.workspaces[0].items).toEqual([
+      expect.objectContaining({ sessionId: ordinary }),
+    ]);
+  });
+
+  it('rejects a record whose start is beyond the bounded boundary probe', async () => {
+    const fixture = makeFixture();
+    const unknown = randomUUID();
+    fixture.seed(unknown, [inFlight('p1', Date.now())]);
+    const transcriptPath = path.join(
+      path.dirname(fixture.sessionService.getPromptLedgerPath(unknown)),
+      `${unknown}.jsonl`,
+    );
+    const largeRecord = JSON.stringify({
+      uuid: 'outside-boundary-evidence',
+      parentUuid: null,
+      sessionId: unknown,
+      timestamp: new Date().toISOString(),
+      type: 'user',
+      cwd: fixture.runtime.workspaceCwd,
+      version: '1.0.0',
+      message: {
+        role: 'user',
+        parts: [{ text: 'z'.repeat(128 * 1024) }],
+      },
+    });
+    expect(Buffer.byteLength(largeRecord)).toBeGreaterThan(128 * 1024);
+    writeFileSync(transcriptPath, `${largeRecord}\n`, {
+      encoding: 'utf8',
+      flag: 'a',
+    });
+
+    const response = await request(fixture.app)
+      .post('/sessions/recovery')
+      .send({ workspaces: [fixture.runtime.workspaceId] });
+
+    expect(response.body.workspaces[0].items).toEqual([]);
+  });
+
   it('reads source metadata only for recovery candidates', async () => {
     const metadataRead = vi.spyOn(
       SessionService.prototype,
