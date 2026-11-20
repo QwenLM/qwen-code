@@ -19,7 +19,7 @@ import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
-import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
+import com.alibaba.qwen.code.runtimebroker.ManagedCheckpointHistory;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
@@ -397,7 +397,7 @@ public class JdbcManagedExtensionRecordStore
                 recordBytes,
                 resources,
                 committedAt,
-                CsiNativeActivationProof.records(recordBytes));
+                ManagedCheckpointHistory.records(recordBytes));
     }
 
     private ApplyResult apply(

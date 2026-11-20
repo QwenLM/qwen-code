@@ -12283,29 +12283,43 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
       expect(text).toContain('sessionPrWatch');
     });
 
-    it('names the two retired limit knobs in the deprecation warning', async () => {
-      // Both knobs are honoured nowhere now: a silent acceptance would leave
-      // an operator who tuned the cap or disabled the reserve gate with no
-      // signal at all.
-      const previous = channel;
-      previous?.disconnect();
-      channel = new TestableGithubChannel(
-        'test-github',
-        makeConfig({ prWatchBudgetReserve: 0 }),
-        makeBridge(),
-        { boundSessions },
-      );
-      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-      let text = '';
-      try {
-        await channel.connect();
-      } finally {
-        text = stderr.mock.calls.map((call) => String(call[0])).join('');
-        stderr.mockRestore();
-      }
-      expect(text).toContain('prWatchBudgetReserve');
-      expect(text).toContain('ignored');
-    });
+    it.each([
+      ['prWatchLimit only', { prWatchLimit: 5 }],
+      ['prWatchBudgetReserve only', { prWatchBudgetReserve: 0 }],
+      ['both knobs', { prWatchLimit: 5, prWatchBudgetReserve: 0 }],
+    ])(
+      'names all four deprecated keys in the deprecation warning (%s)',
+      async (_label, knobs) => {
+        // Both knobs are honoured nowhere now: a silent acceptance would leave
+        // an operator who tuned the cap or disabled the reserve gate with no
+        // signal at all. Each knob alone must warn, so neither can be dropped
+        // from the predicate or from the message unnoticed.
+        const previous = channel;
+        previous?.disconnect();
+        channel = new TestableGithubChannel(
+          'test-github',
+          makeConfig(knobs),
+          makeBridge(),
+          { boundSessions },
+        );
+        const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+        let text = '';
+        try {
+          await channel.connect();
+        } finally {
+          text = stderr.mock.calls.map((call) => String(call[0])).join('');
+          stderr.mockRestore();
+        }
+        expect(text).toContain('prWatchEvents');
+        expect(text).toContain('watch:*');
+        expect(text).toContain('prWatchLimit');
+        expect(text).toContain('prWatchBudgetReserve');
+        expect(text).toContain('ignored');
+        expect(text).toContain('built-in budget');
+        // One warning, not one per key.
+        expect(text.split('are deprecated').length - 1).toBe(1);
+      },
+    );
 
     it('decouples the notification cursor from bound backpressure (F2)', async () => {
       await initChannel({ deliverToBoundSessions: true }, { boundSessions });

@@ -5,14 +5,17 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -29,6 +32,7 @@ import {
   localFilterOverrides,
   parseArgs,
   parseRepo,
+  requireBoundary,
   reviewState,
   validateContext,
 } from '../../scripts/verify-pr-prepare.mjs';
@@ -799,6 +803,26 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(result.stdout).toMatch(
       /node \/trusted-scripts\/verify-pr-prepare\.mjs --require-isolation --artifact-dir "\/work\/tmp\/pr42-verify-\d{8}-\d{6}"/,
     );
+    // R3-4: the printed VM guidance must carry the same scoping as the skill —
+    // a VM runs no --require-isolation gate, so there is no in-boundary gate
+    // command and no boundary-gate.json (naming an --artifact-dir invocation
+    // without the gate would dead-end the operator at parseArgs' exit 2) — and
+    // name the FULL mode:"vm" shape with the attestation gloss the checker
+    // requires (what the operator confirmed: nothing mounted, no host
+    // credentials), never the inverted "what the VM mounts".
+    expect(result.stdout).toContain(
+      'A VM boundary takes the same trusted copy',
+    );
+    expect(result.stdout).toContain('NO --require-isolation gate');
+    expect(result.stdout).toContain('no boundary-gate.json for a VM');
+    expect(result.stdout).toContain(
+      'Declare mode:"vm" per the VM bullet above with by (the maintainer),',
+    );
+    expect(result.stdout).toContain(
+      'attestation (what the operator confirmed: nothing mounted,',
+    );
+    expect(result.stdout).toContain('no host credentials), and approval');
+    expect(result.stdout).not.toContain('what the VM mounts');
 
     const root = realpathSync(dir);
     const contextPath = join(root, 'tmp', 'verify-context', 'pr42.json');
@@ -810,6 +834,15 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     // has no repo member, so prepare adds it where the snapshot is written.
     expect(context.repo).toBe(REPO);
     expect(context.number).toBe(42);
+    // The printed digest must be the sha256 of exactly the bytes written to
+    // contextPath, under the two-space label the skill's sed anchors on: the
+    // checker rehashes what it reads back, so a re-aligned label, a renamed
+    // row, or a different serialisation would empty every round's pr.sha256
+    // while the consumer-side pin stayed green (R3-1).
+    const digest = createHash('sha256')
+      .update(readFileSync(contextPath))
+      .digest('hex');
+    expect(result.stdout).toContain(`  context-sha256  ${digest}`);
     const artifacts = result.stdout.match(/artifacts {2}(\S+)/)?.[1];
     expect(artifacts).toMatch(/pr42-verify-\d{8}-\d{6}$/);
     expect(existsSync(join(artifacts, 'evidence'))).toBe(true);
@@ -818,6 +851,150 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(
       JSON.parse(readFileSync(join(artifacts, 'context.json'), 'utf8')),
     ).toEqual({ repo: REPO, pr: 42, baseRefOid: base, headRefOid: head });
+  });
+
+  // A PR-committed symlink at the snapshot path would redirect the host-side
+  // write; prepare must refuse rather than follow it (deferred symlink guard).
+  it('refuses to write the host snapshot through a symlink', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const root = realpathSync(dir);
+    const contextDir = join(root, 'tmp', 'verify-context');
+    mkdirSync(contextDir, { recursive: true });
+    // Both the link and its target stay under gitignored tmp/ so the tree is
+    // still clean and the refusal comes from the symlink guard, not tree state.
+    const target = join(root, 'tmp', 'redirect-target.json');
+    writeFileSync(target, '{}');
+    symlinkSync(target, join(contextDir, 'pr42.json'));
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(result.status).toBe(3);
+    expect(result.stderr).toMatch(
+      /refusing to write the host snapshot through a symlink/,
+    );
+    expect(readFileSync(target, 'utf8')).toBe('{}');
+  });
+
+  // R5-1: a symlink one component above the leaves (the tmp/ container) is
+  // followed by mkdirSync before any leaf guard runs; it must be refused before
+  // anything is created. A tracked symlink is unmodified, so the tree gates pass.
+  it('refuses a PR-committed symlink at the tmp container', () => {
+    const { dir, base } = makeRepo();
+    const root = realpathSync(dir);
+    const target = mkdtempSync(join(tmpdir(), 'r5-attacker-'));
+    symlinkSync(target, join(root, 'tmp'));
+    execFileSync('git', ['add', '-f', 'tmp'], { cwd: dir, env: gitEnv });
+    execFileSync('git', ['commit', '--amend', '--no-edit', '-q'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: dir,
+      env: gitEnv,
+      encoding: 'utf8',
+    }).trim();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    const redirected = existsSync(join(target, 'verify-context'));
+    rmSync(target, { recursive: true, force: true });
+    expect(result.status).toBe(3);
+    expect(result.stderr).toMatch(
+      /refusing to write the host snapshot through a symlink/,
+    );
+    expect(redirected).toBe(false);
+  });
+
+  // R5-4: a hard link at the snapshot path would make writeFileSync truncate a
+  // tracked file the round does not own; the write-side alias rule must refuse.
+  it('refuses a hard link at the snapshot path', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const root = realpathSync(dir);
+    const contextDir = join(root, 'tmp', 'verify-context');
+    mkdirSync(contextDir, { recursive: true });
+    const tracked = join(root, 'head.txt');
+    const before = readFileSync(tracked, 'utf8');
+    linkSync(tracked, join(contextDir, 'pr42.json'));
+    const result = runPrepare(dir, ['42', '--repo', REPO], env);
+    expect(result.status).toBe(3);
+    expect(result.stderr).toMatch(/non-single-link file/);
+    expect(readFileSync(tracked, 'utf8')).toBe(before);
+  });
+
+  // R5-1 structural fix: the authoritative snapshot goes straight to a host
+  // destination outside the clone, so it never transits the PR-writable tree.
+  it('writes the authoritative snapshot to --context-out', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const hostDir = mkdtempSync(join(tmpdir(), 'r5-context-out-'));
+    const hostPath = join(hostDir, 'pr42.json');
+    const result = runPrepare(
+      dir,
+      ['42', '--repo', REPO, '--context-out', hostPath],
+      env,
+    );
+    expect(result.status).toBe(0);
+    const hostSnap = JSON.parse(readFileSync(hostPath, 'utf8'));
+    expect(hostSnap.headRefOid).toBe(head);
+    expect(hostSnap.repo).toBe(REPO);
+    expect(result.stdout).toContain(`  context    ${hostPath}`);
+    const digest = createHash('sha256')
+      .update(readFileSync(hostPath))
+      .digest('hex');
+    expect(result.stdout).toContain(`  context-sha256  ${digest}`);
+    rmSync(hostDir, { recursive: true, force: true });
+  });
+
+  // R7-1: a relative --context-out resolves inside the PR-writable clone; a
+  // PR-committed symlink there must not redirect the host-side write.
+  it('refuses an in-clone --context-out target', () => {
+    const { dir, base } = makeRepo();
+    const root = realpathSync(dir);
+    const hostDir = mkdtempSync(join(tmpdir(), 'r7-host-'));
+    const hostTarget = join(hostDir, 'host-target.txt');
+    writeFileSync(hostTarget, 'ORIGINAL-HOST-FILE');
+    symlinkSync(hostTarget, join(root, 'snap.json'));
+    execFileSync('git', ['add', '-f', 'snap.json'], { cwd: dir, env: gitEnv });
+    execFileSync('git', ['commit', '--amend', '--no-edit', '-q'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: dir,
+      env: gitEnv,
+      encoding: 'utf8',
+    }).trim();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const result = runPrepare(
+      dir,
+      ['42', '--repo', REPO, '--context-out', 'snap.json'],
+      env,
+    );
+    const targetBytes = readFileSync(hostTarget, 'utf8');
+    rmSync(hostDir, { recursive: true, force: true });
+    expect(result.status).toBe(3);
+    expect(result.stderr).toMatch(/inside the PR clone/);
+    expect(targetBytes).toBe('ORIGINAL-HOST-FILE');
+  });
+
+  // R7-1: an outside destination that is a symlink is refused by the leaf guard.
+  it('refuses a symlink at an outside --context-out destination', () => {
+    const { dir, base, head } = makeRepo();
+    const env = installFakeGh(snapshotFor({ base, head }));
+    const hostDir = mkdtempSync(join(tmpdir(), 'r7-out-'));
+    const hostTarget = join(hostDir, 'host-target.txt');
+    writeFileSync(hostTarget, 'ORIGINAL-HOST-FILE');
+    const outPath = join(hostDir, 'pr42.json');
+    symlinkSync(hostTarget, outPath);
+    const result = runPrepare(
+      dir,
+      ['42', '--repo', REPO, '--context-out', outPath],
+      env,
+    );
+    const targetBytes = readFileSync(hostTarget, 'utf8');
+    rmSync(hostDir, { recursive: true, force: true });
+    expect(result.status).toBe(3);
+    expect(result.stderr).toMatch(/through a symlink/);
+    expect(targetBytes).toBe('ORIGINAL-HOST-FILE');
   });
 
   // The CI lane writes the same review state beside its metadata, and a round
@@ -927,8 +1104,10 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
         observed: ['/.dockerenv'],
         signals: ['/.dockerenv'],
         credentialFree: true,
+        nonceSha256: createHash('sha256').update('nonce').digest('hex'),
       }),
     );
+    writeFileSync(join(artifacts, 'harness.log'), 'container-nonce: nonce\n');
     const writeReport = (oid) =>
       writeFileSync(join(artifacts, 'report.md'), `merge-ready · ${oid}\n`);
     const check = () =>
@@ -1052,6 +1231,18 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
         credentialFree: true,
       });
       expect(typeof record.at).toBe('string');
+      // R16-1: the record carries only the nonce hash, never the plaintext,
+      // and the hash matches the container-local file the battery echoes
+      // from. A host battery cannot recover the plaintext from the record.
+      expect(record.nonce).toBeUndefined();
+      expect(record.nonceSha256).toMatch(/^[0-9a-f]{64}$/);
+      const containerNonce = readFileSync(
+        join(env.HOME, '.qwen-verify-nonce'),
+        'utf8',
+      ).trim();
+      expect(record.nonceSha256).toBe(
+        createHash('sha256').update(containerNonce).digest('hex'),
+      );
 
       // A failed gate writes no record: the checker must not see a pass.
       const art2 = makeTmpDir();
@@ -1068,6 +1259,89 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
       expect(noDir.status).toBe(0);
     },
   );
+
+  // Ungated producer witness: the gate-pass path above is ambient-gated on an
+  // observed container marker, but requireBoundary's detectors take seams, so
+  // a fake /.dockerenv exercises the record write on a bare host. R16-1: the
+  // record carries only the nonce hash, never the plaintext, and the hash
+  // matches the container-local file the battery echoes from.
+  it('writes a hash-only nonce record bound to the container-local plaintext', () => {
+    const art = makeTmpDir();
+    const home = makeTmpDir();
+    const rc = requireBoundary(art, {
+      env: { QWEN_VERIFY_CREDENTIAL_FREE: '1' },
+      exists: (p) => p === '/.dockerenv',
+      home,
+    });
+    expect(rc).toBe(0);
+    const record = JSON.parse(
+      readFileSync(join(art, 'boundary-gate.json'), 'utf8'),
+    );
+    expect(record.nonce).toBeUndefined();
+    expect(record.nonceSha256).toMatch(/^[0-9a-f]{64}$/);
+    const plaintext = readFileSync(
+      join(home, '.qwen-verify-nonce'),
+      'utf8',
+    ).trim();
+    expect(record.nonceSha256).toBe(
+      createHash('sha256').update(plaintext).digest('hex'),
+    );
+    // The plaintext never rides the record: a host battery cannot copy it out.
+    expect(JSON.stringify(record)).not.toContain(plaintext);
+  });
+
+  // R1-4: an unwritable/absent $HOME must fail the gate before the pass line,
+  // not silently write a record whose nonce plaintext exists nowhere (which
+  // would leave the round uncertifiable only after the whole battery ran).
+  // R2-4: seed a stale pass record so the refusal's invalidateRecord() is
+  // witnessed — a failed re-run must not leave an earlier pass's record behind.
+  it('fails the gate when the container-local nonce cannot be written', () => {
+    const art = makeTmpDir();
+    const missingHome = join(makeTmpDir(), 'no-such-home');
+    writeFileSync(
+      join(art, 'boundary-gate.json'),
+      JSON.stringify({ gate: 'require-isolation', passed: true }),
+    );
+    const rc = requireBoundary(art, {
+      env: { QWEN_VERIFY_CREDENTIAL_FREE: '1' },
+      exists: (p) => p === '/.dockerenv',
+      home: missingHome,
+    });
+    expect(rc).toBe(3);
+    expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
+  });
+
+  // R5-1: an unresolvable $HOME must reach the gate's exit-3 refusal, not
+  // escape as an uncaught throw (exit 1) that leaves a stale pass record
+  // behind; an empty home must not write the nonce into the PR-writable CWD.
+  // home:null models os.homedir() throwing (no passwd entry for the UID +
+  // unset HOME); home:'' models HOME set but empty (join('', …) is relative).
+  it('fails the gate on an unresolvable or empty $HOME without a stray nonce', () => {
+    const cwd = process.cwd();
+    const sandbox = makeTmpDir();
+    process.chdir(sandbox);
+    try {
+      for (const home of [null, '']) {
+        const art = makeTmpDir();
+        writeFileSync(
+          join(art, 'boundary-gate.json'),
+          JSON.stringify({ gate: 'require-isolation', passed: true }),
+        );
+        const rc = requireBoundary(art, {
+          env: { QWEN_VERIFY_CREDENTIAL_FREE: '1' },
+          exists: (p) => p === '/.dockerenv',
+          home,
+        });
+        expect(rc).toBe(3);
+        // The stale pass record is invalidated, not left for the checker.
+        expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
+        // No plaintext landed in the process CWD (the PR-writable mount).
+        expect(existsSync(join(sandbox, '.qwen-verify-nonce'))).toBe(false);
+      }
+    } finally {
+      process.chdir(cwd);
+    }
+  });
 
   // R10-20: a self-chosen container= string is a declaration, not an observed
   // boundary. On a bare host it must not mint a passing gate record.

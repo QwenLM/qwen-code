@@ -294,13 +294,7 @@ final class RuntimeBindingProvisioning {
             // exactly capacity and shutdown.
             boolean busy = failure instanceof RuntimeBrokerException brokerFailure && brokerFailure.isRetryable()
                     && (claimed.getResourceHandle() == null
-                            || RuntimeProvisionFailureHandler.externalRetryable(request, brokerFailure)
-                            || (request.isManagedContext() && brokerFailure.getStatusCode() == 409
-                                    && "workspace_csi_busy".equals(brokerFailure.getCode()))
-                            || (!request.isManagedContext()
-                                    && "kubernetes-scratch".equals(request.getProvisionerKind())
-                                    && brokerFailure.getStatusCode() == 503
-                                    && "runtime_kubernetes_capacity".equals(brokerFailure.getCode())));
+                            || RuntimeProvisionFailureHandler.externalRetryable(request, brokerFailure));
             if (!busy) {
                 blockRecoveryQuietly(claimed, failure);
             }
@@ -805,6 +799,7 @@ final class RuntimeBindingProvisioning {
                             new BindingContext(ready, lease));
                 });
     }
+
 
     /** The one identity for "the reconciliation ran out of time" — the fault-gate predicates key on it. */
     private static RuntimeBrokerException reconcileTimeout() {

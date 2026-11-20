@@ -59,7 +59,6 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.managedagent.workspace.SessionWorktreeService;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
@@ -192,9 +191,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     }
 
     private boolean supportsClose(SessionRecord session) {
-        if (CsiFilesRetirementProfile.isProfile(session.toolProfile())) {
-            return false;
-        }
         return session.workspace() == null || RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
                 && (WorkspaceToolProfiles.isExternal(session.toolProfile())
                         ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()));
@@ -716,6 +712,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                     .planModeSupported(harness.supportsPlanMode())
                     .skills(additions)
                     .publicChildrenSupported(harness.supportsPublicChildAgents())
+                    .sessionSkillsSupported(harness.supportsSessionSkills())
                     .modelId(modelId)
                     .extensionPins(extensionPins)
                     .extensionSelection(extensionSelection)
@@ -823,8 +820,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             com.fasterxml.jackson.databind.JsonNode snapshot) {
         List<Map<String, Object>> normalizedInput = normalizeInput(input);
         SessionRecord parent = store.requireSession(tenantId, parentSessionId);
-        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())
-                || CsiFilesRetirementProfile.isProfile(parent.toolProfile())) {
+        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())) {
             throw new ManagedAgentException(409,
                     "child_parent_unavailable",
                     "The parent Session cannot admit a child.");
@@ -1688,9 +1684,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
-        if (CsiFilesRetirementProfile.isProfile(session.toolProfile())) {
-            return false;
-        }
         return retention || session.workspace() != null
                 && RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
                 && (WorkspaceToolProfiles.isExternal(session.toolProfile())

@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.service;
 
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
@@ -128,11 +127,6 @@ final class RuntimeExecutionCancellation {
                             if (ManagedHoldFamily.of(current) != null) {
                                 throw conflict("runtime_execution_conflict",
                                         "A background process settles only on stop evidence");
-                            }
-                            if (CsiFilesRetirementProfile.isProfile(context.binding().getRequest().getScope())
-                                    && current.getAuthorizedDispatchGeneration() != null) {
-                                throw conflict("csi_execution_cancel_unavailable",
-                                        "An authorized private CSI execution does not support cancellation");
                             }
                             requested = requestCancel(current);
                             if (isPreparedProviderCancellation(requested)) {

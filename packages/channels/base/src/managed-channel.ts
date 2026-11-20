@@ -13,7 +13,7 @@
 // See docs/design/2026-11-13-managed-channel-dingtalk-adapter.md.
 
 /** The adapters the managed path enables. */
-export type ManagedChannelAdapter = 'email' | 'dingtalk';
+export type ManagedChannelAdapter = 'email' | 'dingtalk' | 'github';
 
 /** The route policy pinned with the first binding of each route. */
 export interface ManagedChannelPolicy {
@@ -67,6 +67,38 @@ export type ManagedReceipt =
       acceptedAt: number;
     }
   | { outcome: 'unknown' | 'rejected' };
+
+/**
+ * The outbound segment ledger cap, shared by every managed provider so the
+ * state validator's bound and the adapter's `.slice(-N)` cannot drift apart
+ * (#17173 R1-12).
+ */
+export const MANAGED_OUTBOUND_LIMIT = 64;
+
+/**
+ * Validate one persisted segment receipt. Shared beside the ManagedReceipt
+ * type so the providers cannot drift (#17173 R1-29): an absent receipt is
+ * valid (the segment is still unanswered), `unknown`/`rejected` carry only
+ * the outcome, and `accepted` must carry a well-formed ordinal, provider
+ * message id and timestamp.
+ */
+export function validManagedReceipt(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const receipt = value as Partial<ManagedReceipt>;
+  if (receipt.outcome === 'unknown' || receipt.outcome === 'rejected')
+    return Object.keys(receipt).length === 1;
+  return (
+    receipt.outcome === 'accepted' &&
+    Number.isSafeInteger(receipt.ordinal) &&
+    (receipt.ordinal as number) >= 0 &&
+    typeof receipt.providerMessageId === 'string' &&
+    receipt.providerMessageId.length > 0 &&
+    receipt.providerMessageId.length <= 512 &&
+    Number.isSafeInteger(receipt.acceptedAt) &&
+    (receipt.acceptedAt as number) >= 0
+  );
+}
 
 /** The trusted control-plane surface the adapter talks to. */
 export interface ManagedChannelControlPlane {

@@ -19,12 +19,10 @@ import static com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionSt
 final class WorkspaceAttachmentAuthorizer {
     private final JdbcWorkspaceExecutionStore store;
     private final JdbcTemplate jdbc;
-    private final ResidentWorkspaces residents;
 
-    WorkspaceAttachmentAuthorizer(JdbcWorkspaceExecutionStore store, JdbcTemplate jdbc, ResidentWorkspaces residents) {
+    WorkspaceAttachmentAuthorizer(JdbcWorkspaceExecutionStore store, JdbcTemplate jdbc) {
         this.store = store;
         this.jdbc = jdbc;
-        this.residents = residents;
     }
 
     void authorizeAttachment(SessionRecord session, boolean cancellation,
@@ -60,20 +58,12 @@ final class WorkspaceAttachmentAuthorizer {
         if (!cancellation && !committedStop && authority == null && !legacyClose) {
             requireWorktreeAncestorsReady(jdbc, session.tenantId(), session.sessionId());
         }
-        var resident = residents.find(binding);
         if (external) {
             if (!store.isExternal(binding) || !WorkspaceToolProfiles.isExternal(session.toolProfile())) {
                 throw unavailable();
             }
-        } else if (resident == null) {
-            WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         } else {
-            if (!WorkspaceToolProfiles.FILES.equals(session.toolProfile())
-                    || jdbc.queryForObject("SELECT COUNT(*) FROM ma_session WHERE tenant_id = ? AND session_id = ?"
-                            + " AND parent_session_id IS NULL", Long.class, session.tenantId(), session.sessionId()) != 1) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-            }
-            ResidentWorkspaces.requireRegistration(jdbc, resident);
+            WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         }
         // Verdicts per matched row: 0 structural mismatch, 1 refused only by
         // operator-mutable grant or registry state, 2 authorized.

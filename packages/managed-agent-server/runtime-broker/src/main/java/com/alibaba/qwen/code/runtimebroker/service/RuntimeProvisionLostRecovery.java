@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.runtimebroker.service;
 
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeObservation;
@@ -87,9 +86,6 @@ final class RuntimeProvisionLostRecovery {
 
     CompletionStage<BindingContext> reclaimLostBindingNow(
             RuntimeBindingRecord record, RuntimeProvisionRequest request) {
-        if (CsiFilesRetirementProfile.isProfile(record.getRequest().getScope())) {
-            return failed(CsiFilesRetirementProfile.releaseUnavailable());
-        }
         RuntimeBindingRecord claimed = bindingRepository.claimOperation(
                 record.getBindingId(), brokerOwnerId, operationLeaseDuration);
         if (claimed == null || claimed.getState() != RuntimeBindingRecord.State.LOST) {
@@ -110,9 +106,6 @@ final class RuntimeProvisionLostRecovery {
     }
 
     CompletionStage<RuntimeBindingRecord> cleanupLost(RuntimeBindingRecord claimed) {
-        if (CsiFilesRetirementProfile.isProfile(claimed.getRequest().getScope())) {
-            return failed(CsiFilesRetirementProfile.releaseUnavailable());
-        }
         return safeStage(() -> {
             RuntimeBindingRecord recovered = recoverLostDrained(claimed,
                     false);

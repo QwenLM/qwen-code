@@ -142,12 +142,12 @@ this recovery exception.
 | Prompts    | `prompt.submit` and `$.prompt.submit` in headless runs and the Ink and OpenTUI terminals, described in [Submitted prompts](#submitted-prompts)                                                                         |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input                                |
 | Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                                               |
-| Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, and for reply blocks in both terminals, described in [The band above the prompt](#the-band-above-the-prompt) and [Reply rows](#reply-rows) |
+| Drawing    | `ui.render` draws the [band above the prompt](#the-band-above-the-prompt) and rewrites complete [reply rows](#reply-rows) and expanded [thinking rows](#thinking-rows) in both the Ink and OpenTUI terminal interfaces |
 | Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                                                |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
 Runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
-`$.session.messages` and `repo`, `$.state`, `$.clock.after` and `every`, `ui.render` sites other than the band above the prompt and reply rows, streaming events and hot reload are not implemented.
+`$.session.messages` and `repo`, `$.state`, `$.clock.after` and `every`, additional `ui.render` sites, streaming events and hot reload are not implemented.
 Commands cannot return `context`, `exitCode` or engine references yet. Hooks for
 other Claude Code events load without running, as described in
 [Middleware and recovery](#middleware-and-recovery).
@@ -1150,9 +1150,48 @@ in the terminal scrollback, a printed row cannot change, so the site is not
 offered and its hooks are skipped. OpenTUI always draws them. Subagent views,
 the session preview and headless runs do not raise the site yet. A row whose text is too large for a Mod payload is not raised.
 
+## Thinking rows
+
+`Thinking` is a Qwen Code site; Claude Code has no counterpart. The Ink and
+OpenTUI terminals raise it when a complete, expanded block of the model's
+thinking is visible in the main transcript. Click a collapsed thought to
+open it, or press `ctrl+o` to expand all thoughts and scroll to the ones you
+want to read. A hook receives:
+
+```js
+{
+  surface: 'terminal',
+  component: 'Thinking',
+  requestId: '41', // the transcript item's id
+  props: {
+    text: 'Check how the worker queues dispatches first.', // the block's markdown
+  },
+}
+```
+
+```js
+on('ui.render', { component: 'Thinking' }, ($, e, next) =>
+  next({ ...e, props: { ...e.props, text: e.props.text.toUpperCase() } }),
+);
+```
+
+Spread `e.props` as above, so the hook keeps working if a later release adds
+a prop. The hook rewrites the expanded body. The envelope and prop keys are
+pinned. A rewritten `text` holds at most 100,000 characters and no control
+characters other than tabs and line breaks. A block needs nonblank text to
+trigger the hook. The session keeps the original thought and uses the same
+answer cache as [reply rows](#reply-rows) when a thought is reopened or
+scrolled back into view.
+
+Ink offers the site with virtualized history and can split a long thought
+into several blocks, each raised on its own. The `/copy` command reads
+assistant replies, so Ink omits its Mermaid and LaTeX source hints from
+thinking bodies.
+
 The host raises a site only when some hook may hear it: a hook that names a
 `component` in its matcher hears only the sites it names, and `ui.invalidate`
-re-runs only the sites the calling Mod may hear.
+re-runs only the sites the calling Mod may hear. A hook with no `component`
+matcher hears every site, including `Thinking`.
 
 ## TypeScript, JSX and relative imports
 

@@ -36,8 +36,8 @@ class SharedExternalDispatchTest {
         String writeJson = "{\"toolName\":\"write_file\",\"input\":{}}";
         String writeDigest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
                 .digest(writeJson.getBytes(StandardCharsets.UTF_8)));
-        var read = VerifiedDispatchPayload.verify(json, digest);
-        var writePayload = VerifiedDispatchPayload.verify(writeJson, writeDigest);
+        var read = VerifiedDispatchPayload.of(digest, "read_file");
+        var writePayload = VerifiedDispatchPayload.of(writeDigest, "write_file");
         var first = prepare(fixture, "first", digest);
         var second = prepare(fixture, "second", digest);
         var write = prepare(fixture, "write", writeDigest);
@@ -73,6 +73,50 @@ class SharedExternalDispatchTest {
         }
         assertNull(executions.claimValidatedDispatch(third.getExecutionCallId(), "owner-c", lease, read));
     }
+
+    @Test
+    void sharedReadsStayFencedBehindAnInFlightSharedWrite() throws Exception {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:shared-dispatch-writer-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        ManagedSchema.initialize(source);
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
+        var fixture = new RuntimeRecoveryContract.Fixture(bindings, sessions, executions, UUID.randomUUID().toString());
+        String writeJson = "{\"toolName\":\"write_file\",\"input\":{}}";
+        String writeDigest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(writeJson.getBytes(StandardCharsets.UTF_8)));
+        String readJson = "{\"toolName\":\"read_file\",\"input\":{}}";
+        String readDigest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(readJson.getBytes(StandardCharsets.UTF_8)));
+        var writePayload = VerifiedDispatchPayload.of(writeDigest, "write_file");
+        var read = VerifiedDispatchPayload.of(readDigest, "read_file");
+        var writer = prepare(fixture, "writer", writeDigest);
+        var reader = prepare(fixture, "reader", readDigest);
+        var lateReader = prepare(fixture, "late-reader", readDigest);
+        try (var connection = source.getConnection();
+                var statement = connection.prepareStatement("UPDATE ma_runtime_binding SET provisioner_kind = ?,"
+                        + " isolation_class = ? WHERE binding_id = ?")) {
+            statement.setString(1, "external-workspace");
+            statement.setString(2, "workspace");
+            JdbcRepositorySupport.setIdentity(statement, 3, fixture.binding.getBindingId());
+            statement.executeUpdate();
+        }
+        var lease = Duration.ofMinutes(1);
+        // The writer holds the shared slot; both read disjuncts must fence.
+        assertNotNull(executions.claimValidatedDispatch(writer.getExecutionCallId(), "owner-w", lease, writePayload));
+        assertNull(executions.claimValidatedDispatch(reader.getExecutionCallId(), "owner-r", lease, read));
+        // Once the writer settles, a read claims again.
+        try (var connection = source.getConnection();
+                var statement = connection.prepareStatement("UPDATE ma_tool_execution SET execution_state = 'SETTLED'"
+                        + " WHERE execution_call_id_hash = ?")) {
+            statement.setString(1, JdbcRepositorySupport.valueKey(writer.getExecutionCallId()));
+            statement.executeUpdate();
+        }
+        assertNotNull(executions.claimValidatedDispatch(lateReader.getExecutionCallId(), "owner-r2", lease, read));
+    }
+
     private static ToolExecutionRecord prepare(RuntimeRecoveryContract.Fixture fixture, String suffix, String digest) {
         return fixture.bindings.admitExecution(fixture.sessions, fixture.executions,
                 ToolExecutionRecord.prepared(fixture.id + suffix, fixture.id + suffix + "-key",

@@ -370,6 +370,58 @@ class ExternalWorkspaceRetirementServiceTest {
         assertThat(service.inspect(request)).isNull();
     }
 
+    @Test
+    void slotActiveBindingMovedBetweenReadAndLockAnswersBlocked() {
+        makeReady();
+        // The slot still pins the original binding as active while the binding
+        // row already carries a different version, the shape a concurrent
+        // re-provision leaves between the pre-transaction read and the lock.
+        original = bindings.claimOperation(original.getBindingId(), "bump", Duration.ofMinutes(1));
+        original = bindings.compareAndSet(original, original.withAttestation(
+                original.getLease(), original.getResourceHandle(), Instant.now(), Instant.now()));
+        bindings.releaseOperation(original.getBindingId(), "bump", original.getOperationGeneration());
+
+        assertThatThrownBy(() -> service.retire(request, this::terminated))
+                .isInstanceOf(RuntimeBrokerException.class)
+                .hasFieldOrPropertyWithValue("statusCode", 409)
+                .hasFieldOrPropertyWithValue("code", "external_workspace_retirement_blocked");
+        assertThat(service.inspect(request)).isNull();
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_workspace", String.class)).isEqualTo("ACTIVE");
+    }
+
+    @Test
+    void activeTurnJournalAnswersBlockedNotTheJournalStoreCode() {
+        makeReady();
+        // An unsettled journal entry makes requireIdleJournal refuse with its
+        // own code; retirement must answer its documented refusal instead.
+        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key,"
+                + " tenant_id, session_id, harness_session_id, head_kind,"
+                + " state, storage_version, writer_generation,"
+                + " journal_revision, committed_sequence, activation_epoch,"
+                + " compacted_through_revision, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, 'tenant', 'user-session', 'user-session', 'MANAGED_SESSION', 'ACTIVE', 1, 1, 1, 1, 0,"
+                + " 0, 0, 0)",
+                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey("tenant"),
+                com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey("user-session"));
+        byte[] journalBytes = "{\"managedSession\":{\"kind\":\"input.accepted\",\"payload\":{\"turnId\":\"active-turn\",\"source\":\"user\"}}}"
+                .getBytes(StandardCharsets.UTF_8);
+        jdbc.update("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
+                + " command_key_hash, transaction_id, operation, command_id,"
+                + " content_digest, first_sequence, last_sequence, event_count, writer_generation,"
+                + " writer_id, writer_token_hash, activation_epoch, record_encoding, record_bytes,"
+                + " byte_length, record_digest, gmt_create) VALUES ('tenant', 'workspace', 'user-session', 1,"
+                + " ?, 'tx', 'op', 'command', ?, 1, 1, 1, 1, 'writer', ?, 1, 'jsonl', ?, ?, ?, 1)",
+                "6".repeat(64), "7".repeat(64), "0".repeat(64),
+                journalBytes, journalBytes.length, "8".repeat(64));
+
+        assertThatThrownBy(() -> service.retire(request, this::terminated))
+                .isInstanceOf(RuntimeBrokerException.class)
+                .hasFieldOrPropertyWithValue("statusCode", 409)
+                .hasFieldOrPropertyWithValue("code", "external_workspace_retirement_blocked");
+        assertThat(service.inspect(request)).isNull();
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_workspace", String.class)).isEqualTo("ACTIVE");
+    }
+
     // R18-83: a session that ever projected a tool result or reclaimed a
     // capture keeps a permanent-success operation row. Those rows are not
     // live work, so they must not fence retirement forever.

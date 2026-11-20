@@ -37,9 +37,8 @@ import java.util.concurrent.Executors;
  * <p>The provider receives the Broker-minted boot document, echoes the logical
  * request handle and reports the worker's HTTP(S) origin. The Broker keeps every
  * identity decision: the handle is bound to a digest of the token-free boot
- * document, and every endpoint is attested before use. Like the Kubernetes
- * scratch provider, {@link #release} is never treated as authority to stop a
- * worker another Broker may own.
+ * document, and every endpoint is attested before use. {@link #release} is
+ * never treated as authority to stop a worker another Broker may own.
  *
  * <p>This class also owns the transport, identity and recovery mechanics shared
  * by the external kind family ({@link ExternalRuntimeKinds}). The default
@@ -241,7 +240,32 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
                 // endpoint; never enter provisioning or mint a replacement.
                 if (observation.getOutcome() == RuntimeObservation.Outcome.UNKNOWN
                         && lastLease != null && supportsReattach(request)) {
-                    observation = reattach(request, seed, handle, originalEndpoint);
+                    try {
+                        observation = reattach(request, seed, handle, originalEndpoint);
+                    } catch (RuntimeBrokerException failure) {
+                        if ("runtime_broker_resource_conflict".equals(failure.getCode())) {
+                            // A GONE reattach answer is an identity verdict
+                            // (the worker is provably gone), not a transient
+                            // failure: keep it on the permanent-conflict path.
+                            throw failure;
+                        }
+                        // Any other non-retryable refusal is an evidence
+                        // verdict (for example a continuity denial), not a
+                        // transport failure: keep it on the permanent arm
+                        // instead of retrying until the reconcile timeout.
+                        if (!failure.isRetryable()
+                                && !"runtime_external_provider_failed".equals(failure.getCode())) {
+                            throw failure;
+                        }
+                        // A retryable failing reattach proves nothing about
+                        // identity: the observed worker may still be running,
+                        // so this must stay retryable and never reach the
+                        // conflict arm that permanently fences the binding.
+                        // Assign instead of returning so the endpoint
+                        // bookkeeping below still runs, keeping the lease
+                        // usable for a later confirm.
+                        observation = RuntimeObservation.unknown(handle);
+                    }
                 }
                 if (observation.getOutcome() == RuntimeObservation.Outcome.READY
                         && originalEndpoint != null && !originalEndpoint.equals(observation.getEndpoint())) {

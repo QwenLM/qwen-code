@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfi
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -63,7 +64,7 @@ final class ExternalWorkspaceSessionPolicies {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();
             }
             effective = new AgentSessionPolicies.AgentPin(resolvedPin.revision(), null, resolvedPin.approvalMode(),
-                    profile, false, false);
+                    profile, false, false, List.of());
         }
         return selectApprovalMode(effective, command.requestedApprovalMode(), command.approvalSelectionSupported());
     }
@@ -82,7 +83,7 @@ final class ExternalWorkspaceSessionPolicies {
                     "The selected approval mode is not available for this Agent.");
         }
         return new AgentSessionPolicies.AgentPin(pin.revision(), pin.digest(), requested, pin.toolProfile(),
-                pin.hooks(), pin.mcp());
+                pin.hooks(), pin.mcp(), pin.skills());
     }
 
     /** The legacy v1 close refusal exempts an external-files Session on its registered EXTERNAL Workspace. */

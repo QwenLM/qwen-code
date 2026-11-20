@@ -4,8 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createShowResult } from '../contracts.js';
-import { ViewController, type ViewState } from './controller.js';
+import { createShowResult, parseToolResult } from '../contracts.js';
+import {
+  ViewController,
+  type ViewState,
+  type ViewStateHost,
+} from './controller.js';
 import type { UiWorkerResponse } from './runtime-contract.js';
 import type { ApplyOutcome } from './surface.js';
 
@@ -25,7 +29,7 @@ const event = {
 const inputs = { rate: { value: '7', checked: false } };
 const controllers: ViewController[] = [];
 
-function harness() {
+function harness(stateHost?: ViewStateHost) {
   const worker = {
     postMessage: vi.fn(),
     terminate: vi.fn(),
@@ -50,6 +54,7 @@ function harness() {
     createWorker,
     vi.fn(),
     onStatus,
+    stateHost,
   );
   controllers.push(controller);
   const reply = (data: UiWorkerResponse) => {
@@ -576,5 +581,101 @@ describe('current applied parameter snapshots', () => {
       reason: 'error',
     });
     expect(unreadable.worker.terminate).toHaveBeenCalledOnce();
+  });
+
+  describe('view state', () => {
+    it('starts from the loaded state and hands every set state to the host', async () => {
+      const save = vi.fn();
+      const load = vi.fn().mockResolvedValue('{"items":[1]}');
+      const h = harness({ load, save });
+      const result = createShowResult(document);
+      await h.controller.receive(result);
+      expect(load).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardId: parseToolResult(result).cardId,
+        }),
+      );
+      expect(h.worker.postMessage).toHaveBeenLastCalledWith(
+        expect.objectContaining({ type: 'init', state: '{"items":[1]}' }),
+      );
+      h.reply({
+        sequence: 1,
+        patches: [],
+        execution: 'initialized',
+        state: '1',
+      });
+      expect(save).toHaveBeenLastCalledWith('1');
+      h.controller.event(event);
+      h.complete(2);
+      expect(save).toHaveBeenCalledTimes(1);
+      h.controller.event({ ...event, value: '8' });
+      // The user changed an input while the round ran: its patches are
+      // dropped, but the Worker already holds the state it set.
+      h.surface.apply.mockReturnValueOnce({ kind: 'superseded', inputs });
+      h.reply({ sequence: 3, patches: [], execution: 'handled', state: '2' });
+      expect(save).toHaveBeenLastCalledWith('2');
+      expect(h.state().lastUpdate).toBe('superseded');
+    });
+
+    it('keeps the saved state when the view rejects a round', async () => {
+      const save = vi.fn();
+      const h = harness({ load: async () => '1', save });
+      await h.controller.receive(createShowResult(document));
+      h.complete(1);
+      h.controller.event(event);
+      h.surface.apply.mockImplementationOnce(() => {
+        throw new Error('A view update referenced a missing element.');
+      });
+      h.reply({ sequence: 2, patches: [], execution: 'handled', state: '2' });
+
+      expect(h.state().phase).toBe('error');
+      expect(save).not.toHaveBeenCalled();
+    });
+
+    it('starts without state when loading fails', async () => {
+      const h = harness({
+        load: vi.fn().mockRejectedValue(new Error('unavailable')),
+        save: vi.fn(),
+      });
+      await h.controller.receive(createShowResult(document));
+      expect(h.worker.postMessage).toHaveBeenLastCalledWith(
+        expect.objectContaining({ type: 'init', state: null }),
+      );
+      expect(h.state().phase).toBe('starting');
+    });
+
+    it('does not count a slow load against the startup time limit', async () => {
+      vi.useFakeTimers();
+      let resolve!: (state: string | null) => void;
+      const h = harness({
+        load: () => new Promise((settle) => (resolve = settle)),
+        save: vi.fn(),
+      });
+      const receiving = h.controller.receive(createShowResult(document));
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(h.state().phase).toBe('starting');
+      resolve('null');
+      await receiving;
+      expect(h.worker.postMessage).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(h.state()).toMatchObject({
+        phase: 'error',
+        error: expect.stringMatching(/time limit/),
+      });
+    });
+
+    it('rejects a round that reports a state that is not JSON text', async () => {
+      const save = vi.fn();
+      const h = harness({ load: async () => null, save });
+      await h.controller.receive(createShowResult(document));
+      h.reply({
+        sequence: 1,
+        patches: [],
+        execution: 'initialized',
+        state: 1 as unknown as string,
+      });
+      expect(save).not.toHaveBeenCalled();
+      expect(h.state().phase).toBe('error');
+    });
   });
 });

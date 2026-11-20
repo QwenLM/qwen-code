@@ -29,7 +29,7 @@ public record SessionCreationCommand(
         WorkspaceSelection selection, String requestedApprovalMode,
         boolean approvalSelectionSupported, Boolean requestedPlanMode,
         boolean planModeSupported, List<Map<String, Object>> skills,
-        boolean publicChildrenSupported, String modelId,
+        boolean publicChildrenSupported, boolean sessionSkillsSupported, String modelId,
         List<ManagedExtensionPackages.Pin> extensionPins,
         com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages.Selection extensionSelection,
         Set<String> extensionLifecycleProfiles,
@@ -57,6 +57,7 @@ public record SessionCreationCommand(
         private boolean planModeSupported;
         private List<Map<String, Object>> skills = List.of();
         private boolean publicChildrenSupported;
+        private boolean sessionSkillsSupported;
         private String modelId;
         private List<ManagedExtensionPackages.Pin> extensionPins;
         private com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages.Selection extensionSelection;
@@ -146,6 +147,11 @@ public record SessionCreationCommand(
             return this;
         }
 
+        public Builder sessionSkillsSupported(boolean value) {
+            this.sessionSkillsSupported = value;
+            return this;
+        }
+
         public Builder modelId(String value) {
             this.modelId = value;
             return this;
@@ -196,7 +202,7 @@ public record SessionCreationCommand(
                     requestDigest, agentId, requestedRevision, title, input,
                     payloadDigest, selection, requestedApprovalMode,
                     approvalSelectionSupported, requestedPlanMode, planModeSupported,
-                    skills, publicChildrenSupported, modelId, extensionPins, extensionSelection,
+                    skills, publicChildrenSupported, sessionSkillsSupported, modelId, extensionPins, extensionSelection,
                     extensionLifecycleProfiles, worktree, modelConfig, memoryStoreId,
                     requestedToolProfile);
         }

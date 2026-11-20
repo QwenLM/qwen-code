@@ -67,6 +67,8 @@ import { Checkbox } from './ui/checkbox';
 import type { MessageDeletionControls } from '../hooks/useMessageDeletion';
 import { summaryRunFirstMemberId, summaryRunId } from './summaryRunId';
 import type { SessionContentGenerator } from './messages/AssistantMessage';
+import type { HookStatisticsTurn } from './messages/hook-statistics-context';
+import { collectHookStatisticsTurns } from './messages/hook-statistics-turns';
 import { MessageTimestamp } from './MessageTimestamp';
 import {
   TurnOutputs,
@@ -107,6 +109,7 @@ export interface MessageListProps {
   deletion?: MessageDeletionControls;
   messages: Message[];
   frozenViewport?: boolean;
+  hookStatisticsSessionId?: string;
   terminalBackgroundShellTaskIds?: ReadonlySet<string>;
   pendingApproval: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
@@ -861,6 +864,15 @@ function collectFinalAssistantTurnIds(
   return turnIdByAssistantId;
 }
 
+function isTurnFromSession(data: unknown): boolean {
+  if (!data || typeof data !== 'object' || !('backgroundTask' in data)) {
+    return false;
+  }
+  const task = (data as { backgroundTask?: { fromSession?: unknown } })
+    .backgroundTask;
+  return !!task?.fromSession;
+}
+
 /**
  * A turn's hideable "steps": tool activity, plans, mid-turn assistant text,
  * non-final background notifications, and background result markers. Final
@@ -884,6 +896,13 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
     case 'system':
       if (item.message.source === 'background_notification') {
         return !isFinalAnswer;
+      }
+      // A turn another session's reply started keeps its source in view.
+      if (
+        item.message.source === 'background_notification_turn_started' &&
+        isTurnFromSession(item.message.data)
+      ) {
+        return false;
       }
       return (
         item.message.source === 'background_notification_turn_started' ||
@@ -3039,6 +3058,7 @@ export const MessageList = memo(
       messages,
       deletion,
       frozenViewport = false,
+      hookStatisticsSessionId,
       sessionKey,
       terminalBackgroundShellTaskIds,
       pendingApproval,
@@ -3108,7 +3128,7 @@ export const MessageList = memo(
       let lastId: string | undefined;
       let turnIndex = 0;
       for (const message of messages) {
-        if (message.role !== 'user') continue;
+        if (message.role !== 'user' || message.agentMessage?.sentTo) continue;
         turnIndexById.set(message.id, turnIndex);
         lastId = message.id;
         turnIndex += 1;
@@ -3758,6 +3778,17 @@ export const MessageList = memo(
       }
       return heads;
     }, [messages]);
+    const hookTurns = useMemo<ReadonlyMap<string, HookStatisticsTurn>>(() => {
+      const sessionId = hookStatisticsSessionId ?? sourceSessionId;
+      return sessionId && transcriptRenderMode !== 'document'
+        ? collectHookStatisticsTurns(messages, sessionId)
+        : new Map();
+    }, [
+      messages,
+      hookStatisticsSessionId,
+      sourceSessionId,
+      transcriptRenderMode,
+    ]);
     const assistantFeedbackEnabled = shouldOfferAssistantFeedback({
       renderMode: transcriptRenderMode,
       sessionId: sourceSessionId,
@@ -5965,6 +5996,7 @@ export const MessageList = memo(
           return (
             <MessageItem
               message={displayItem.message}
+              hookTurn={hookTurns.get(displayItem.message.id)}
               onLocateBackgroundSource={
                 displayItem.message.role === 'system' &&
                 displayItem.message.source ===
@@ -6124,6 +6156,7 @@ export const MessageList = memo(
         latestFinalAssistantTurnId,
         assistantFeedbackEnabled,
         assistantFeedbackHeadById,
+        hookTurns,
         assistantFeedbackRatings,
         handleAssistantFeedbackRate,
         frozenViewport,

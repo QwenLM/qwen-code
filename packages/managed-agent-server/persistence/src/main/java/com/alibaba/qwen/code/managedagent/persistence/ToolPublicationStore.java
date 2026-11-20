@@ -4,15 +4,12 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationC
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
-import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -60,8 +57,6 @@ public final class ToolPublicationStore {
     private final RuntimeBindingRepository bindings;
     private final Capacity capacity;
     private final ToolPublicationCapacityStore quotas;
-    private final WorkspaceCsiReservationStore csi;
-    private final ToolPublicationEvidence evidence;
     private final DataSource transactionSource;
 
     private enum Access {
@@ -74,11 +69,7 @@ public final class ToolPublicationStore {
     private record PublicationTarget(Row row, JsonNode binding, RuntimeBindingRecord runtime, boolean placement) {
     }
 
-    private record Original(RuntimeBindingRecord runtime, ToolExecutionRecord execution,
-            WorkspaceCsiReservationStore.Retirement retirement) {
-        boolean csi() {
-            return WorkspaceCsiReservationStore.PROVISIONER_KIND.equals(runtime.getRequest().getProvisionerKind());
-        }
+    private record Original(RuntimeBindingRecord runtime, ToolExecutionRecord execution) {
     }
     public ToolPublicationStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
             JdbcManagedSessionStore sessions, ToolExecutionRepository executions,
@@ -92,8 +83,6 @@ public final class ToolPublicationStore {
         this.bindings = Objects.requireNonNull(bindings);
         this.capacity = Objects.requireNonNull(capacity);
         this.quotas = new ToolPublicationCapacityStore(jdbc, capacity);
-        this.csi = new WorkspaceCsiReservationStore(jdbc, manager, JSON);
-        this.evidence = new ToolPublicationEvidence(jdbc, sessions, this);
         this.transactionSource = manager instanceof DataSourceTransactionManager nativeManager
                 ? nativeManager.getDataSource() : null;
     }
@@ -109,14 +98,6 @@ public final class ToolPublicationStore {
 
     public JsonNode apply(JsonNode input, String writerToken, String publicationToken) {
         JsonNode request = ToolPublicationContract.parse("request", input);
-        if (TransactionSynchronizationManager.isActualTransactionActive()) {
-            JsonNode hint = request.get("binding");
-            if (hint == null) {
-                requireStagedCall(request.get("sessionKey"), text(request, "publicationId"));
-            } else {
-                requireNoCsiAmbient(hint);
-            }
-        }
         String operation = text(request, "operation");
         String hash = ("reserve".equals(operation) || "renew".equals(operation))
                 ? ToolPublicationContract.tokenHash(publicationToken) : null;
@@ -140,9 +121,6 @@ public final class ToolPublicationStore {
             String publicationId, String publicationToken) {
         RuntimeBindingRecord runtime = bindings.findById(execution.getBindingId());
         require(runtime != null, "Original Runtime binding is missing");
-        require(!TransactionSynchronizationManager.isActualTransactionActive()
-                || !WorkspaceCsiReservationStore.PROVISIONER_KIND.equals(runtime.getRequest().getProvisionerKind()),
-                "CSI publication cannot join an ambient transaction");
         var runtimeScope = runtime.getRequest().getScope();
         String tenant = runtimeScope.getTenantId();
         String workspace = runtimeScope.getWorkspaceId();
@@ -218,25 +196,16 @@ public final class ToolPublicationStore {
         try {
             original = lockOriginal(binding);
         } catch (RuntimeException error) {
-            // Accepted tasks must leave the queue when their original CSI
+            // Accepted tasks must leave the queue when their original
             // authority is gone; credential/SQL failures may recover elsewhere.
             boolean missingRuntime = error instanceof IllegalStateException && error.getCause() == null
                     && ("Runtime binding slot is unavailable".equals(error.getMessage())
                     || "Original Runtime binding is unavailable".equals(error.getMessage()));
-            boolean fencedCsi = error instanceof RuntimeBrokerException broker
-                    && "workspace_csi_unavailable".equals(broker.getCode()) && !broker.isRetryable();
-            if (expectedBindingDigest != null && (missingRuntime || fencedCsi)) {
+            if (expectedBindingDigest != null && missingRuntime) {
                 throw new ManagedAgentException(409, "managed_tool_publication_runtime_unavailable",
                         "Original publication runtime is unavailable");
             }
             throw error;
-        }
-        // An ordinary producer takes no tenant publication guard: it locks the
-        // head before the publication row, as collection does, and nothing
-        // after the head takes the guard. A CSI original keeps it (design
-        // 2026-11-04-managed-publication-tenant-guards, C2).
-        if (original.csi()) {
-            lockTenant(row.tenant());
         }
         return producerBindingAfterParentLocked(scope, publicationId, suppliedHash, row,
                 binding, original, access, deferActivationLapse);
@@ -252,7 +221,6 @@ public final class ToolPublicationStore {
             String suppliedHash, Row row, JsonNode binding, Original original, Access access,
             boolean deferActivationLapse) {
         JsonNode key = binding.get("sessionKey");
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, row.tenant(), row.session());
         ToolPublicationRetentionStore.requireLive(jdbc, row.tenant(), row.session());
         require(row.tenant().equals(text(key, "tenantId"))
                 && row.workspace().equals(text(key, "workspaceId"))
@@ -352,18 +320,10 @@ public final class ToolPublicationStore {
         // of different Sessions may overlap between their sums and commits and
         // briefly pass the tenant byte and active-capture limits together;
         // that bounded, self-correcting overshoot is accepted (design
-        // 2026-11-04-managed-publication-tenant-guards). A CSI publication
-        // takes the guard in lockOriginal before the root, as its retirement
-        // and continuation paths expect (#13800); later guard locks are re-entrant.
-        boolean csi = WorkspaceCsiReservationStore.PROVISIONER_KIND
-                .equals(target.runtime().getRequest().getProvisionerKind());
-        if (csi) {
-            JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenant,
-                    JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-        }
+        // 2026-11-04-managed-publication-tenant-guards).
         JsonNode owner = request.get("owner");
         var writer = sessions.lockPublicationWriter(tenant, workspace, session,
-                text(owner, "writerId"), owner.get("writerGeneration").longValue(), writerToken, target.placement(), csi);
+                text(owner, "writerId"), owner.get("writerGeneration").longValue(), writerToken, target.placement(), false);
         String operation = text(request, "operation");
         List<Row> rows = jdbc.query("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture"
                         + " WHERE scope_key = ? AND publication_id = ? FOR UPDATE",
@@ -475,34 +435,8 @@ public final class ToolPublicationStore {
     }
 
     private Original lockOriginal(JsonNode b, boolean acknowledgement, RuntimeBindingRecord runtime) {
-        WorkspaceCsiReservationStore.Retirement retirement = null;
         ToolExecutionRecord execution;
-        if (WorkspaceCsiReservationStore.PROVISIONER_KIND.equals(runtime.getRequest().getProvisionerKind())) {
-            require(bindings instanceof JdbcRuntimeBindingRepository
-                    && executions instanceof JdbcToolExecutionRepository
-                    && ((JdbcToolExecutionRepository) executions).usesDataSource(jdbc.getDataSource()),
-                    "CSI publication admission requires native repositories");
-            var locked = csi.lockPublication((JdbcRuntimeBindingRepository) bindings, runtime);
-            runtime = locked.binding();
-            retirement = locked.retirement();
-            execution = jdbc.execute((ConnectionCallback<ToolExecutionRecord>) connection -> {
-                var target = DataSourceUtils.getTargetConnection(connection);
-                require(DataSourceUtils.isConnectionTransactional(target, jdbc.getDataSource()),
-                                                "CSI publication requires the original transaction"
-                                                        + " connection");
-                if (acknowledgement) {
-                    var session = new JdbcRuntimeSessionRepository(jdbc.getDataSource()).findByIdForUpdate(
-                            target, locked.binding().getRequest().getScope(), text(b.path("reference"), "sessionId"));
-                    require(session != null && session.getState() == RuntimeSessionRecord.State.READY
-                            && session.getBindingId().equals(locked.binding().getBindingId())
-                            && session.getRuntimeGeneration() == locked.binding().getGeneration()
-                            && session.getSession().getHarnessSessionId().equals(text(b.path("sessionKey"), "sessionId")),
-                            "Original Runtime Session is unavailable");
-                }
-                return ((JdbcToolExecutionRepository) executions).findByExecutionCallIdForUpdate(
-                        target, text(b, "executionCallId"));
-            });
-        } else if (bindings instanceof JdbcRuntimeBindingRepository nativeBindings
+        if (bindings instanceof JdbcRuntimeBindingRepository nativeBindings
                 && executions instanceof JdbcToolExecutionRepository nativeExecutions) {
             require(nativeBindings.usesDataSource(jdbc.getDataSource())
                     && nativeExecutions.usesDataSource(jdbc.getDataSource())
@@ -518,7 +452,7 @@ public final class ToolPublicationStore {
                 require(originalBinding != null, "Original Runtime binding is missing");
                 var originalExecution = nativeExecutions.findByExecutionCallIdForUpdate(
                         target, text(b, "executionCallId"));
-                return new Original(originalBinding, originalExecution, null);
+                return new Original(originalBinding, originalExecution);
             });
             runtime = locked.runtime();
             execution = locked.execution();
@@ -542,21 +476,13 @@ public final class ToolPublicationStore {
                 && text(b, "publicationId").equals(execution.getReference().get("publicationId"))
                 && text(ref, "argsDigest").equals(execution.getReference().get("argsDigest"))
                 && execution.getRequestDigest().equals(text(b, "requestDigest")), "Broker execution identity conflicts");
-        return new Original(runtime, execution, retirement);
+        return new Original(runtime, execution);
     }
 
     private static void requireAccess(Original original, Access access) {
         RuntimeBindingRecord runtime = original.runtime();
         ToolExecutionRecord execution = original.execution();
-        if (original.csi() && original.retirement() != null && access != Access.DISPATCH) {
-            require(execution.wasDispatchAuthorizedBefore(original.retirement().sealedBindingVersion()),
-                    "Original execution was not authorized before CSI retirement");
-            boolean producing = execution.getState() == ToolExecutionRecord.State.EXECUTING
-                    || execution.getState() == ToolExecutionRecord.State.CANCEL_REQUESTED;
-            require(access == Access.SETTLE ? execution.getState() == ToolExecutionRecord.State.SETTLED
-                    : producing || access == Access.CLAIM && execution.getState() == ToolExecutionRecord.State.SETTLED,
-                    "Original execution cannot authorize publication settlement");
-        } else if (access == Access.SETTLE) {
+        if (access == Access.SETTLE) {
             require(execution.getState() == ToolExecutionRecord.State.SETTLED,
                     "Original result is not settled");
         } else {
@@ -654,133 +580,29 @@ public final class ToolPublicationStore {
         return binding;
     }
 
-    private JsonNode savedBinding(String scope, String publicationId) {
-        Row row = publicationRow(scope, publicationId);
-        return storedBinding(row.binding(), row.digest(), "Stored binding is corrupt");
-    }
-
-    /** Locks placement and, for a CSI original, its settled result; answers whether it was CSI. */
+    /** Locks placement and verifies the finished binding; always returns false (CSI removed). */
     boolean lockOriginalSettledResult(JsonNode key, String publicationId, JsonNode finished) {
-        return lockOriginalSettledResult(key, publicationId, finished, false) != null;
+        PublicationTarget target = lockPublicationPlacement(key, publicationId, null, false);
+        require(target.binding().equals(finished.path("binding")), "Original finished binding conflicts");
+        return false;
     }
 
     ToolExecutionRecord lockOriginalAcknowledgementResult(JsonNode key, String publicationId, JsonNode finished) {
-        require(usesDataSource(jdbc.getDataSource()) && TransactionSynchronizationManager.isActualTransactionActive(),
-                "Original acknowledgement requires the native transaction");
-        return lockOriginalSettledResult(key, publicationId, finished, true);
+        throw new IllegalStateException("Original acknowledgement is no longer supported");
     }
 
-    private ToolExecutionRecord lockOriginalSettledResult(JsonNode key, String publicationId,
-            JsonNode finished, boolean acknowledgement) {
-        String scope = hash(JSON.createArrayNode().add(text(key, "tenantId"))
-                .add(text(key, "workspaceId")).add(text(key, "sessionId")).toString());
-        PublicationTarget target = lockPublicationPlacement(key, publicationId, null, false);
-        Row row = target.row();
-        JsonNode binding = target.binding();
-        require(binding.equals(finished.path("binding")), "Original finished binding conflicts");
-        RuntimeBindingRecord runtime = target.runtime();
-        if (!WorkspaceCsiReservationStore.PROVISIONER_KIND.equals(runtime.getRequest().getProvisionerKind())) {
-            require(!acknowledgement, "Original acknowledgement requires CSI authority");
-            return null;
-        }
-        Original original = lockOriginal(binding, acknowledgement, runtime);
-        require(!acknowledgement || original.retirement() != null,
-                "Original acknowledgement requires CSI retirement");
-        lockTenant(row.tenant());
-        producerBindingAfterParentLocked(scope, publicationId, null, row, binding, original, Access.SETTLE);
-        JsonNode savedResult = JSON.valueToTree(original.execution().getResult());
-        // JDBC can change numeric types and scales without changing their JSON values.
-        boolean sameResult = finished.path("result").equals((left, right) -> {
-            if (left.isNumber() && right.isNumber()) {
-                return left.decimalValue().compareTo(right.decimalValue());
-            }
-            return left.equals(right) ? 0 : 1;
-        }, savedResult);
-        require(sameResult, "Original settled Broker result conflicts with terminal result");
-        JsonNode terminal = finished.path("terminal");
-        var publication = jdbc.query("SELECT producer_phase, finish_operation_id, finish_digest,"
-                + " terminal_resource_id, CASE WHEN is_quarantined THEN 1 ELSE 0"
-                                    + " END AS is_quarantined FROM ma_output_capture WHERE scope_key ="
-                                    + " ? AND publication_id = ? FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                scope, publicationId).getFirst();
-        require(("FINISHED".equals(publication.get("producer_phase"))
-                || "REFERENCED".equals(publication.get("producer_phase")))
-                && ((Number) publication.get("is_quarantined")).intValue() == 0
-                && text(finished, "finishOperationId").equals(publication.get("finish_operation_id"))
-                && text(terminal, "resourceId").equals(publication.get("terminal_resource_id"))
-                && text(terminal, "digest").equals(publication.get("finish_digest")),
-                "Original finished publication changed");
-        var operation = jdbc.query(
-                                "SELECT scope_key, publication_id, operation_id, state, slot_key,"
-                                    + " request_digest FROM ma_operation WHERE operation_kind IN"
-                                    + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND"
-                                    + " scope_key = ? AND publication_id = ? AND operation_id = ?"
-                                    + " FOR UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId, text(finished, "finishOperationId")).getFirst();
-        require("SUCCEEDED".equals(operation.get("state")) && "terminal".equals(operation.get("slot_key"))
-                && (!acknowledgement || scope.equals(operation.get("scope_key"))
-                        && publicationId.equals(operation.get("publication_id"))
-                        && text(finished, "finishOperationId").equals(operation.get("operation_id")))
-                && hash(JSON.createArrayNode().add("terminal").add(terminal.path("byteLength").longValue())
-                        .add(text(terminal, "digest")).toString()).equals(operation.get("request_digest")),
-                "Original finish operation changed");
-        var object = jdbc.query(
-                                "SELECT scope_key, publication_id, resource_id, kind AS"
-                                    + " resource_kind, byte_length, sha256, capture_state AS state,"
-                                    + " operation_id FROM ma_resource WHERE scope_key = ? AND"
-                                    + " publication_id = ? AND slot_key = X'7465726d696e616c' FOR"
-                                    + " UPDATE", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId).getFirst();
-        require("VERIFIED".equals(object.get("state"))
-                && (!acknowledgement || scope.equals(object.get("scope_key"))
-                        && publicationId.equals(object.get("publication_id")))
-                && text(terminal, "resourceId").equals(object.get("resource_id"))
-                && "managed-tool-terminal".equals(object.get("resource_kind"))
-                && ((Number) object.get("byte_length")).longValue() == terminal.path("byteLength").longValue()
-                && text(terminal, "digest").equals(object.get("sha256"))
-                && text(finished, "finishOperationId").equals(object.get("operation_id")),
-                "Original terminal resource changed");
-        producerBindingAfterParentLocked(scope, publicationId, null, row, binding, original, Access.SETTLE);
-        return original.execution();
-    }
-
-    // The admission lanes' entry: placement or, for an ordinary original, the
-    // Session root; for a CSI original its settled result and the tenant
-    // publication guard; then root and head, as collection does (designs
-    // 2026-11-04-managed-publication-tenant-guards C2, -placement).
+    // The admission lanes' entry: placement or the Session root, then root
+    // and head, as collection does (design 2026-11-04-managed-publication-placement).
     void lockAdmissionLane(JsonNode key, String publicationId, JsonNode original,
             String writerId, long writerGeneration, String writerToken) {
         boolean placement = lockPublicationPlacement(key, publicationId, false);
-        boolean csi = lockOriginalSettledResult(key, publicationId, original);
-        if (csi) {
-            lockTenant(text(key, "tenantId"));
-        }
+        lockOriginalSettledResult(key, publicationId, original);
         sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
-                text(key, "sessionId"), writerId, writerGeneration, writerToken, placement, csi);
+                text(key, "sessionId"), writerId, writerGeneration, writerToken, placement, false);
     }
 
     void requireStagedCall(JsonNode key, String publicationId) {
-        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
-            return;
-        }
-        String scope = hash(JSON.createArrayNode().add(text(key, "tenantId"))
-                .add(text(key, "workspaceId")).add(text(key, "sessionId")).toString());
-        JsonNode binding = savedBinding(scope, publicationId);
-        requireNoCsiAmbient(binding);
-    }
-
-    private void requireNoCsiAmbient(JsonNode binding) {
-        RuntimeBindingRecord runtime = bindings.findById(text(binding, "runtimeBindingId"));
-        require(runtime != null && !WorkspaceCsiReservationStore.PROVISIONER_KIND
-                .equals(runtime.getRequest().getProvisionerKind()),
-                "CSI staged publication cannot join an ambient transaction");
-    }
-
-    private void lockTenant(String tenant) {
-        // Grant lanes funnel through this helper for their first tenant
-        // guard acquisition; it runs bounded with the shared named-failure
-        // mapping: a held row answers tenant_guard_contended instead of
-        // out-waiting the caller (#13800).
-        JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(jdbc, tenant,
-                JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
+        // No CSI ambient check needed; all publications are ordinary.
     }
 
     private static JsonNode grant(String id, Row row) {

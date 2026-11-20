@@ -1,10 +1,8 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
@@ -20,7 +18,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.transport.ManagedCsiProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedExtensionCommandProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedExtensionProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedHookProtocol;
@@ -160,23 +157,21 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             });
         }
         // Reject a missing directory before a new claim can strand storage ownership.
-        if (!ResidentWorkspaceProfile.selects(session.getScope())) {
-            if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(context.runtime().getRequest().getProvisionerKind())) {
-                WorkspaceRuntimeResolver.requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
-            } else if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(context.runtime().getRequest().getProvisionerKind()) && resolver != null) {
-                try {
-                    resolver.verifyInstallable(context.binding(), context.binding().getCwdRelative());
-                } catch (RuntimeBrokerException error) {
-                    // Nothing is claimed yet, so the probe verdict is a definite
-                    // refusal: surface the workspace_unavailable contract the
-                    // Hosted tool turn recognizes instead of the ssh_runtime_*
-                    // verdict an unrecognized code would park into Session
-                    // recovery. The original verdict stays as the cause.
-                    throw WorkspaceExecutionStore.unavailable(error);
-                }
-            } else {
-                throw WorkspaceExecutionStore.unavailable();
+        if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(context.runtime().getRequest().getProvisionerKind())) {
+            WorkspaceRuntimeResolver.requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
+        } else if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(context.runtime().getRequest().getProvisionerKind()) && resolver != null) {
+            try {
+                resolver.verifyInstallable(context.binding(), context.binding().getCwdRelative());
+            } catch (RuntimeBrokerException error) {
+                // Nothing is claimed yet, so the probe verdict is a definite
+                // refusal: surface the workspace_unavailable contract the
+                // Hosted tool turn recognizes instead of the ssh_runtime_*
+                // verdict an unrecognized code would park into Session
+                // recovery. The original verdict stays as the cause.
+                throw WorkspaceExecutionStore.unavailable(error);
             }
+        } else {
+            throw WorkspaceExecutionStore.unavailable();
         }
         ownership.claim(context.binding(), context.session());
         // Failure retains ownership: a missing response cannot prove the worker did nothing.
@@ -377,35 +372,6 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         return delegate.acknowledgeV3(lease, session, reference, receipt);
     }
 
-    @Override
-    public CompletionStage<Map<String, Object>> acknowledgeCsi(RuntimeLease lease, RuntimeSession session,
-            Map<String, Object> boot, Map<String, Object> expectedPod, Map<String, Object> request,
-            Map<String, Object> expectedCaptureIdentity) {
-        if (!managed(session)) {
-            throw WorkspaceExecutionStore.unavailable();
-        }
-        Context context = context(lease, session, false, false, true);
-        var runtime = context.runtime();
-        if (!"kubernetes-workspace".equals(runtime.getRequest().getProvisionerKind())
-                || runtime.getState() != RuntimeBindingRecord.State.DRAINING || !runtime.isDrainRequested()
-                || runtime.getProvisionSeed() == null || runtime.getAttestationGeneration() <= 0
-                || context.session().getState() != RuntimeSessionRecord.State.READY
-                || !context.session().getSession().getScope().equals(session.getScope())
-                || !Long.toString(runtime.getGeneration()).equals(expectedCaptureIdentity.get("bindingGeneration"))) {
-            throw WorkspaceExecutionStore.unavailable();
-        }
-        try {
-            @SuppressWarnings("unchecked")
-            var storage = (Map<String, Object>) boot.get("storage");
-            var originalBoot = ManagedCsiProtocol.boot(runtime.getRequest(), runtime.getProvisionSeed(), storage);
-            ManagedCsiProtocol.validateAcknowledgementRequest(request, originalBoot, expectedPod);
-            ManagedCsiProtocol.validateAcknowledgementIdentity(lease, session, boot, request, expectedCaptureIdentity);
-        } catch (RuntimeException failure) {
-            throw WorkspaceExecutionStore.unavailable();
-        }
-        return delegate.acknowledgeCsi(lease, session, boot, expectedPod, request, expectedCaptureIdentity);
-    }
-
     private void requireOwnedWorkspace(RuntimeLease lease, RuntimeSession session) {
         assertHeld(requireOwnedContext(lease, session));
     }
@@ -553,10 +519,6 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                         "SSH Runtime supports files and foreground Shell only.", false);
             }
         }
-        if (CsiFilesRetirementProfile.isProfile(session.getScope())) {
-            throw new RuntimeBrokerException(501, "csi_control_not_qualified",
-                    "Generic CSI runtime controls are not qualified.", false);
-        }
         if (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)
                 || ManagedExtensionCommandProtocol.isOperation(operation)
                 || ManagedShellProtocol.isOperation(operation)
@@ -599,8 +561,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         } else if (managed(session) && !"history".equals(operation.get("kind"))) {
             Context context = context(lease, session, true);
             assertHeld(context);
-            if (!ResidentWorkspaceProfile.selects(session.getScope())
-                    && "raw-file-history".equals(operation.get("kind")) && "rewind".equals(operation.get("action"))) {
+            if ("raw-file-history".equals(operation.get("kind")) && "rewind".equals(operation.get("action"))) {
                 ownership.beginRewind(context.binding(), context.session());
                 return delegate.control(lease, session, operation).thenApply(result -> {
                     ownership.endRewind(context.binding(), context.session());
@@ -806,11 +767,6 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     private Context context(RuntimeLease lease, RuntimeSession session, boolean authorize, boolean hook) {
-        return context(lease, session, authorize, hook, false);
-    }
-
-    private Context context(RuntimeLease lease, RuntimeSession session, boolean authorize,
-            boolean hook, boolean originalCsi) {
         ContextBinding binding;
         if (authorize) {
             var resolved = hook ? resolver.resolveHook(session.getHarnessSessionId(), session.getScope().getLifecycleAuthority())
@@ -829,11 +785,8 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 || !session.getTurnKind().equals(record.getSession().getTurnKind())
                 || record.getRuntimeGeneration() != runtime.getGeneration()
                 || !runtime.getRequest().getScope().equals(session.getScope())
-                || (originalCsi
-                        ? !"workspace".equals(session.getScope().getIsolationClass()) || runtime.getRequest().getIsolationKey() != null
-                        : !(ResidentWorkspaceProfile.selects(runtime.getRequest())
-                                || HarnessOwnership.sharesRuntimeSessions(runtime.getRequest())
-                                || session.getHarnessSessionId().equals(runtime.getRequest().getIsolationKey())))
+                || !(HarnessOwnership.sharesRuntimeSessions(runtime.getRequest())
+                        || session.getHarnessSessionId().equals(runtime.getRequest().getIsolationKey()))
                 || !binding.getStorageId().equals(runtime.getRequest().getStorageId())
                 || !binding.getTenantId().equals(session.getScope().getTenantId())
                 || !binding.getWorkspaceId().equals(session.getScope().getWorkspaceId())
@@ -852,8 +805,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     private static boolean managed(RuntimeSession session) {
-        return WorkspaceExecutionProfile.admitsCapabilityDigest(session.getScope().getCapabilityDigest())
-                || ResidentWorkspaceProfile.selects(session.getScope());
+        return WorkspaceExecutionProfile.admitsCapabilityDigest(session.getScope().getCapabilityDigest());
     }
 
     private static boolean sameLease(RuntimeLease left, RuntimeLease right) {

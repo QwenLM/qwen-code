@@ -1,8 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.service;
 
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
-import com.alibaba.qwen.code.runtimebroker.NativeCsiExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -10,13 +8,16 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
-import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
 
@@ -160,7 +161,7 @@ final class RuntimeExecutionDispatcher {
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant,
             VerifiedDispatchPayload verifiedPayload, String externalChannelId) {
-        if (com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalShellRequest(
+        if (WorkspaceExecutionProfile.isExternalShellRequest(
                 context.binding().getRequest())
                 && (!isPublicationV3(prepared.getReference())
                         || prepared.getReference().containsKey("runtimeProtocol")
@@ -174,21 +175,15 @@ final class RuntimeExecutionDispatcher {
             throw invalid("runtime_payload_invalid",
                     "External Shell requires a foreground Tool v3 Shell payload");
         }
-        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalShellRequest(
+        if (!WorkspaceExecutionProfile.isExternalShellRequest(
                 context.binding().getRequest())
-                && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+                && WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
                 && (!"deferred".equals(prepared.getReference().get("dispatchMode"))
                         || prepared.getReference().containsKey("runtimeProtocol") || grant != null
                         || !prepared.isCancelRequested() && (payload == null
                                 || !Set.of("read_file", "write_file", "edit", "glob")
                                         .contains(String.valueOf(payload.get("toolName")))))) {
             throw invalid("runtime_payload_invalid", "External Workspace requires a file Tool v2 payload");
-        }
-        if (CsiFilesRetirementProfile.isProfile(context.binding().getRequest().getScope())
-                && (!(bindingRepository instanceof NativeCsiExecutionRepository)
-                        || payload == null || !Set.of("read_file", "write_file", "edit").contains(String.valueOf(payload.get("toolName"))) || grant != null)) {
-            throw new RuntimeBrokerException(501, "csi_file_dispatch_unavailable",
-                    "Private CSI dispatch requires original JDBC authorization and a finite file payload.", false);
         }
         if (!prepared.isCancelRequested()) {
             bindingRepository.requireHarnessAdmission(context.binding().getRequest(), context.session().getScope(),
@@ -631,12 +626,7 @@ final class RuntimeExecutionDispatcher {
                 && !failure.isRetryable();
     }
 
-    private static Map<String, Object> dispatchReference(ToolExecutionRecord record, RuntimeScope scope) {
-        if (CsiFilesRetirementProfile.isProfile(scope)) {
-            Map<String, Object> reference = new LinkedHashMap<>(record.getReference());
-            reference.put("executionCallId", record.getExecutionCallId());
-            return Map.copyOf(reference);
-        }
+    private static Map<String, Object> dispatchReference(ToolExecutionRecord record) {
         if (!isProtocolV3(record.getReference())) {
             return record.getReference();
         }
@@ -748,8 +738,7 @@ final class RuntimeExecutionDispatcher {
                     }
                 } catch (RuntimeException exception) {
                     if (exception instanceof RuntimeBrokerException failure && !failure.isRetryable()
-                            && (failure.getCode().startsWith("csi_")
-                                    || "runtime_admission_closed".equals(failure.getCode()))) {
+                            && "runtime_admission_closed".equals(failure.getCode())) {
                         closeLocked();
                     }
                     // A transient repository failure does not prove claim loss.

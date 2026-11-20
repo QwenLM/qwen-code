@@ -140,6 +140,20 @@ export interface ServeOptions {
    */
   maxConnections?: number;
   /**
+   * Admission cap on concurrent REST SSE streams (`GET /session/:id/events`).
+   * Long-lived SSE connections share the listener's `maxConnections` quota
+   * with short requests; without a separate SSE ceiling a fleet of idle or
+   * stalled streams can occupy every listener slot, after which Node closes
+   * new sockets at accept time WITHOUT an HTTP response — taking `/health`
+   * and the Web Shell down with them. When unset, the cap derives from the
+   * effective listener cap (80%, leaving ≥20% headroom for short requests);
+   * when the listener cap is disabled the SSE cap is disabled too. Streams
+   * at the cap are rejected with `503` + `Retry-After` instead of a silent
+   * socket close. `0` (or `Infinity`) disables the cap explicitly.
+   * NaN / negative values throw at boot.
+   */
+  maxSseConnections?: number;
+  /**
    * Per-session SSE replay ring depth. Threaded into the bridge as
    * `BridgeOptions.eventRingSize` and used at every `new EventBus(...)`
    * construction site. Defaults to 8000. Must be a positive
@@ -375,7 +389,14 @@ export interface ServeOptions {
   /** Trusted startup URL for the operator-only original CSI attachment. */
   hostedCsiSessionStoreUrl?: string;
   /**
-   * Per-SSE-connection idle deadline.
+   * Per-SSE-connection writer stall budget (ms). A stream whose write is
+   * stuck waiting for `drain` (the consumer stopped reading) for longer
+   * than this budget is force-evicted with a terminal `client_evicted`
+   * frame. When unset, a default 60s budget applies — the reaper only
+   * fires on backpressure stalls, so healthy idle streams are never
+   * evicted and the normal write path pays no per-chunk timestamp cost.
+   * Direct embeds may pass `0` to disable the reaper; the CLI flag
+   * validates positive integers.
    */
   writerIdleTimeoutMs?: number;
   /** ACP child auto-reap delay. Keepalive windows may extend it. */

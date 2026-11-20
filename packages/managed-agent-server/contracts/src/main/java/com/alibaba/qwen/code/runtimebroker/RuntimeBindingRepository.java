@@ -131,6 +131,9 @@ public interface RuntimeBindingRepository {
         requireHookAdmission(scope, harnessSessionId, authority);
     }
 
+    /** Bindings isolated to one Harness Session ({@code isolation_class = 'session'}),
+     * in any state. Shared Workspace bindings never match; resolve those by
+     * request key ({@link #findActive}) or by id. See {@link HarnessOwnership}. */
     public List<RuntimeBindingRecord> findByHarnessSession(String tenantId, String harnessSessionId,
             String afterBindingId, int limit);
 
@@ -143,17 +146,6 @@ public interface RuntimeBindingRepository {
     public RuntimeBindingRecord findOrCreate(RuntimeProvisionRequest request);
 
     public RuntimeBindingRecord findActive(RuntimeProvisionRequest request);
-
-    /**
-     * Returns the durable generation that most recently represented this
-     * request, including a released generation. Trusted saved-runtime
-     * recovery uses this to distinguish "never provisioned" from "the
-     * original generation was retired"; normal admission uses
-     * {@link #findActive(RuntimeProvisionRequest)}. Implementations must not
-     * fall back to {@code findActive}: after a retirement that fallback
-     * reports "never provisioned" for a request that was provisioned.
-     */
-    public RuntimeBindingRecord findLatestForRequest(RuntimeProvisionRequest request);
 
     public List<RuntimeBindingRecord> findActiveByIsolationKey(RuntimeScope scope,
             String isolationKey);

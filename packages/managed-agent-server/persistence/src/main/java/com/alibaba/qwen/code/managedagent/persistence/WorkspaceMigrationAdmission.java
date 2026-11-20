@@ -141,10 +141,7 @@ final class WorkspaceMigrationAdmission {
                         && registered.mountRoot().equals(row.getString("mount_root"))
                         && registered.registrationRevision() == row.getLong("mount_revision")
                         && "UNVERIFIED".equals(row.getString("mount_state"))
-                        && row.getObject("maintenance_id") == null && row.getObject("maintenance_generation") == null
-                        && "RELEASED".equals(row.getString("csi_phase")) && row.getLong("csi_revision") == 0
-                        && row.getObject("csi_reservation_id") == null && row.getObject("csi_registration_key") == null
-                        && row.getObject("csi_registration_revision") == null && row.getObject("csi_provision_request_id") == null,
+                        && row.getObject("maintenance_id") == null && row.getObject("maintenance_generation") == null,
                 registered.ownerKey());
         if (owners.size() != 1 || !owners.getFirst()) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();

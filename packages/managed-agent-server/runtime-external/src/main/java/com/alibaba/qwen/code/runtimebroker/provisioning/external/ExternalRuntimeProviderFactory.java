@@ -99,7 +99,6 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
                                 .contains(harness.getApprovalMode().toLowerCase(java.util.Locale.ROOT)))
                 || workspace && (settings.getManagedExtensions().isEnabled() || settings.getExtensions().isEnabled())
                 || !runtimeBroker.getWorkspaceMounts().isEmpty()
-                || !runtimeBroker.getResidentWorkspaces().isEmpty()
                 || StringUtils.isNotBlank(runtimeBroker.getWorkspaceCreationRoot())
                 || runtimeBroker.isLocalDirectoryImportEnabled()
                 || runtimeBroker.isVerifiedWorkspaceRecoveryEnabled()
