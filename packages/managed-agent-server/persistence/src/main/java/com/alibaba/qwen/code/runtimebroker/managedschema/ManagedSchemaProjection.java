@@ -177,7 +177,7 @@ public enum ManagedSchemaProjection {
                     + "maintenance_id, maintenance_generation, physical_key, "
                     + "member_count"),
     TENANT_GUARD(
-            "tenant_key, tenant_id, guard_domain"),
+            "tenant_id, guard_domain"),
     TOOL_EXECUTION(
             "execution_call_id_hash, execution_call_id, idempotency_key_hash, idempotency_key, "
                     + "binding_id, runtime_generation, harness_session_id, runtime_session_id, "

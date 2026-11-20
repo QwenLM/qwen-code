@@ -1681,24 +1681,22 @@ public final class JdbcRuntimeBindingRepository
      */
     public static void lockPlacementDomain(Connection connection, String tenantId, int timeoutSeconds)
             throws SQLException {
-        String key = JdbcRepositorySupport.valueKey(tenantId);
         try (PreparedStatement insert = connection.prepareStatement(
-                        "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES"
-                            + " (?, ?, 'runtime_placement') ON DUPLICATE KEY UPDATE tenant_key ="
-                            + " tenant_key")) {
+                        "INSERT INTO ma_tenant_guard (tenant_id, guard_domain) VALUES"
+                            + " (?, 'runtime_placement') ON DUPLICATE KEY UPDATE tenant_id ="
+                            + " tenant_id")) {
             insert.setQueryTimeout(timeoutSeconds);
-            insert.setString(1, key);
-            JdbcRepositorySupport.setIdentity(insert, 2, tenantId);
+            insert.setString(1, tenantId);
             insert.executeUpdate();
         }
         try (PreparedStatement lock = connection.prepareStatement(
-                        "SELECT tenant_id FROM ma_tenant_guard WHERE tenant_key = ? AND"
+                        "SELECT tenant_id FROM ma_tenant_guard WHERE tenant_id = ? AND"
                                 + " guard_domain = 'runtime_placement' FOR UPDATE")) {
             lock.setQueryTimeout(timeoutSeconds);
-            lock.setString(1, key);
+            lock.setString(1, tenantId);
             try (ResultSet result = lock.executeQuery()) {
                 if (!result.next() || !tenantId.equals(result.getString("tenant_id"))) {
-                    throw new IllegalStateException("Runtime placement tenant hash collision");
+                    throw new IllegalStateException("Runtime placement tenant conflict");
                 }
             }
         }

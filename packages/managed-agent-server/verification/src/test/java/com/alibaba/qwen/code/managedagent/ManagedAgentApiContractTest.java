@@ -1870,6 +1870,7 @@ class ManagedAgentApiContractTest {
         exchange(drift, "webShellCommandUserMessages", 404,
                 post(WEB_SHELL + "/user-messages/command").header(TENANT, tenant).principal(actor(tenant)),
                 "{\"sessionId\":\"missing\",\"idempotencyKey\":\"queue-missing\",\"command\":{\"action\":\"resume\"}}");
+        seedDegradedExtensionConfiguration(workspaceTenant, publicBoundId);
         exchangeExtensions(drift, workspaceTenant, actor, publicBoundId);
         exchange(drift, "webShellSessionWorktreeOptions", 200,
                 post(WEB_SHELL + "/workspaces/worktrees/options").header(TENANT, workspaceTenant).principal(actor),
@@ -3683,7 +3684,9 @@ class ManagedAgentApiContractTest {
             AuthenticatedTenantActor actor, String sessionId) throws Exception {
         String base = "/v1/agents/workspaces/ws-default/extensions";
         String id = "ext_11111111-1111-4111-8111-111111111111";
-        String operation = "11111111-1111-4111-8111-111111111111";
+        // Must stay unknown to the seeded configuration, whose fixture command
+        // carries the 11111111 operationId.
+        String operation = "22222222-2222-4222-8222-222222222222";
         String digest = "a".repeat(64);
         String encodedManifest = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(("{\"schemaVersion\":1,\"compilerVersion\":1,"
                 + "\"name\":\"fixture\",\"version\":\"1\",\"target\":{\"platform\":\"linux\",\"arch\":\"x64\"},\"components\":[\"skills\"]}")
@@ -3727,7 +3730,9 @@ class ManagedAgentApiContractTest {
                 .header(IDEMPOTENCY_KEY, "extension-publish-web").param("workspaceId", "ws-default").param("packageDigest", digest).param("manifest", encodedManifest)
                 .contentType(MediaType.APPLICATION_OCTET_STREAM).content("archive"), null);
         String session = "/v1/agents/sessions/" + sessionId + "/extensions";
-        exchange(drift, "getSessionExtensionConfiguration", 200, get(session).header(TENANT, tenant).principal(actor), null);
+        String degradedSnapshot = exchange(drift, "getSessionExtensionConfiguration", 200, get(session).header(TENANT, tenant).principal(actor), null);
+        assertThat(json(degradedSnapshot).path("degradedComponents").path(id).toString()).isEqualTo("[\"hooks\"]");
+        assertThat(json(degradedSnapshot).path("extensions").get(0).path("extensionId").asText()).isEqualTo(id);
         exchange(drift, "applySessionExtensionConfiguration", 409, post(session).header(TENANT, tenant).principal(actor)
                 .header(IDEMPOTENCY_KEY, "extension-apply"), "{\"expectedConfigRevision\":0,\"extensions\":[]}");
         exchange(drift, "getSessionExtensionOperation", 404, get(session + "/operations/" + operation).header(TENANT, tenant).principal(actor), null);
@@ -3735,7 +3740,8 @@ class ManagedAgentApiContractTest {
         exchange(drift, "recoverPreviousSessionExtensions", 409, post(session + "/operations/" + operation + "/recover-previous").header(TENANT, tenant).principal(actor), null);
         String query = "{\"sessionId\":\"" + sessionId + "\"";
         String control = query + ",\"operationId\":\"" + operation + "\"}";
-        exchange(drift, "webShellSessionExtensionsQuery", 200, post(WEB_SHELL + "/session-extensions/query").header(TENANT, tenant).principal(actor), query + "}");
+        String webSnapshot = exchange(drift, "webShellSessionExtensionsQuery", 200, post(WEB_SHELL + "/session-extensions/query").header(TENANT, tenant).principal(actor), query + "}");
+        assertThat(json(webSnapshot).path("degradedComponents").path(id).toString()).isEqualTo("[\"hooks\"]");
         exchange(drift, "webShellSessionExtensionsSubmit", 409, post(WEB_SHELL + "/session-extensions/submit").header(TENANT, tenant).principal(actor),
                 query + ",\"idempotencyKey\":\"extension-apply-web\",\"command\":{\"expectedConfigRevision\":0,\"extensions\":[]}}");
         exchange(drift, "webShellSessionExtensionsContinue", 409, post(WEB_SHELL + "/session-extensions/continue").header(TENANT, tenant).principal(actor), control);
@@ -3777,6 +3783,102 @@ class ManagedAgentApiContractTest {
         exchange(drift, "webShellRuntimeSkillSnapshot", 401, post(WEB_SHELL + "/session-extensions/skills/snapshot").header(TENANT, tenant), query + "}");
         exchange(drift, "webShellRuntimeSkillImports", 401, post(WEB_SHELL + "/session-extensions/skills/imports").header(TENANT, tenant),
                 query + ",\"idempotencyKey\":\"skill-import\"}");
+    }
+
+    /**
+     * Commits an active extension configuration whose single package reports
+     * its hook component as degraded, so the management snapshot exchanges
+     * schema-validate the additive degradedComponents map against the closed
+     * published schema.
+     */
+    private void seedDegradedExtensionConfiguration(String tenant, String sessionId) throws Exception {
+        ExtensionRecordJournal journal = new ExtensionRecordJournal(
+                sessionStore, tenant, "ws-default", sessionId).open();
+        byte[] partBytes = "{\"skills\":[]}".getBytes(StandardCharsets.UTF_8);
+        var part = new ManagedSessionStoreModels.CommitResource("degraded-part", "managed-extension-contributions-part", 1,
+                partBytes.length, DigestUtils.sha256Hex(partBytes), java.util.Base64.getEncoder().encodeToString(partBytes));
+        ObjectNode manifest = objectMapper.createObjectNode().put("kind", "managed-extension-contributions")
+                .put("formatVersion", 1).put("byteLength", partBytes.length).put("digest", part.digest());
+        manifest.putArray("parts").addObject().put("resourceId", part.resourceId()).put("kind", part.kind())
+                .put("schemaVersion", 1).put("byteLength", part.byteLength()).put("digest", part.digest());
+        byte[] manifestBytes = ExtensionRecordJournal.bytes(manifest);
+        var contributions = new ManagedSessionStoreModels.CommitResource("degraded-contributions", "managed-extension-contributions", 1,
+                manifestBytes.length, DigestUtils.sha256Hex(manifestBytes), java.util.Base64.getEncoder().encodeToString(manifestBytes));
+        String extensionId = "ext_11111111-1111-4111-8111-111111111111";
+        ObjectNode bundle = objectMapper.createObjectNode().put("kind", "managed-extension-config-bundle")
+                .put("formatVersion", 1).put("configRevision", 4);
+        ObjectNode pkg = bundle.putArray("packages").addObject();
+        pkg.putObject("pin").put("extensionId", extensionId).put("packageRevision", 1).put("packageDigest", "a".repeat(64));
+        pkg.put("assetRoot", "extension://" + extensionId + "/");
+        pkg.putObject("contributionsRef").put("resourceId", contributions.resourceId()).put("kind", contributions.kind())
+                .put("schemaVersion", 1).put("byteLength", contributions.byteLength()).put("digest", contributions.digest());
+        pkg.putArray("degradedComponents").add("hooks");
+        byte[] bundleBytes = ExtensionRecordJournal.bytes(bundle);
+        var bundleResource = new ManagedSessionStoreModels.CommitResource("degraded-bundle", "managed-extension-config-bundle", 1,
+                bundleBytes.length, DigestUtils.sha256Hex(bundleBytes), java.util.Base64.getEncoder().encodeToString(bundleBytes));
+        ObjectNode bundleRef = objectMapper.createObjectNode().put("resourceId", bundleResource.resourceId())
+                .put("kind", bundleResource.kind()).put("schemaVersion", 1)
+                .put("byteLength", bundleResource.byteLength()).put("digest", bundleResource.digest());
+        List<ManagedSessionStoreModels.CommitResource> resources = new ArrayList<>();
+        for (String id : List.of("root", "hstage", "rstage", "henable", "renable")) {
+            resources.add(new ManagedSessionStoreModels.CommitResource(id, "managed-test", 1, 2, DigestUtils.sha256Hex("{}"),
+                    java.util.Base64.getEncoder().encodeToString("{}".getBytes(StandardCharsets.UTF_8))));
+        }
+        resources.addAll(List.of(bundleResource, contributions, part));
+        ObjectNode preparing = degradedConfigPhase("nullable_preparing", 1, null);
+        commitDegradedConfigPhase(journal, tenant, sessionId, preparing, false, resources);
+        ObjectNode prepared = (ObjectNode) degradedConfigPhase("prepared", 2, preparing).set("bundleRef", bundleRef);
+        commitDegradedConfigPhase(journal, tenant, sessionId, prepared, false, resources);
+        ObjectNode committed = (ObjectNode) degradedConfigPhase("prepared", 3, prepared).put("phase", "committed")
+                .set("bundleRef", bundleRef);
+        commitDegradedConfigPhase(journal, tenant, sessionId, committed, true, resources);
+        ObjectNode active = (ObjectNode) degradedConfigPhase("active", 4, committed).set("bundleRef", bundleRef);
+        commitDegradedConfigPhase(journal, tenant, sessionId, active, false, resources);
+    }
+
+    private ObjectNode degradedConfigPhase(String name, long revision, JsonNode previous) throws Exception {
+        ObjectNode body = ManagedConfigInstallContractTest.record(ManagedConfigInstallContractTest.content(name), revision);
+        if (previous != null) {
+            byte[] bytes = ExtensionRecordJournal.bytes(previous);
+            body.putObject("previousRecordRef").put("resourceId", ExtensionRecordJournal.resourceId(bytes))
+                    .put("kind", "managed-config_install").put("schemaVersion", 1)
+                    .put("byteLength", bytes.length).put("digest", DigestUtils.sha256Hex(bytes));
+        }
+        for (String field : List.of("rootSnapshotRef", "bundleRef")) {
+            if (!body.path(field).isNull()) {
+                ((ObjectNode) body.path(field)).put("digest", DigestUtils.sha256Hex("{}"));
+            }
+        }
+        for (String field : List.of("stageAckRefs", "enableAckRefs")) {
+            for (JsonNode ref : body.path(field)) {
+                ((ObjectNode) ref).put("digest", DigestUtils.sha256Hex("{}"));
+            }
+        }
+        return body;
+    }
+
+    private void commitDegradedConfigPhase(ExtensionRecordJournal journal, String tenant, String sessionId,
+            ObjectNode body, boolean binding, List<ManagedSessionStoreModels.CommitResource> resources) {
+        String operation = body.path("operationId").asText();
+        var request = journal.request("commitDomainRecord", operation + ":phase:" + body.path("revision").asLong(),
+                ExtensionRecordJournal.bytes(body), 1000,
+                event -> ((ObjectNode) event.path("payload")).put("operationId", operation), records -> {
+                    if (!binding) {
+                        return records;
+                    }
+                    ObjectNode event = objectMapper.createObjectNode().put("v", 1)
+                            .put("sequence", journal.committedSequence() + 2)
+                            .put("eventId", "config-bound:" + body.path("revision").asLong())
+                            .put("kind", "config.bound").put("occurredAt", 1000);
+                    event.putObject("sessionKey").put("tenantId", tenant).put("workspaceId", "ws-default").put("sessionId", sessionId);
+                    ObjectNode payload = event.putObject("payload").put("revision", body.path("configRevision").asLong());
+                    payload.putNull("previousRevision").set("bundleRef", body.get("bundleRef"));
+                    payload.set("rootSnapshotRef", body.get("rootSnapshotRef"));
+                    int cut = records.indexOf('\n') + 1;
+                    return records.substring(0, cut) + ExtensionRecordJournal.line(sessionId, "managed_session_event_v1", event) + records.substring(cut);
+                }, binding ? 1 : 0, "config_install", resources);
+        journal.commit(request);
+        journal.committed(request);
     }
 
     private String exchange(Map<String, String> drift, String operationId,
