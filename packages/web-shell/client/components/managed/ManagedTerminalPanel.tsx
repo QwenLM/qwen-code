@@ -5,9 +5,8 @@
  */
 
 import { useEffect, useRef } from 'react';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
-import '@xterm/xterm/css/xterm.css';
+import type { Terminal } from '@xterm/xterm';
+import type { FitAddon } from '@xterm/addon-fit';
 import { useTheme } from '../../themeContext';
 import { useI18n } from '../../i18n';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
@@ -18,6 +17,7 @@ import {
   RECONNECT_MAX_MS,
   xtermTheme,
 } from '../terminal/terminal-protocol';
+import { useTerminalRuntime } from '../terminal/use-terminal-runtime';
 import { managedTerminalProtocols } from './managed-terminal-protocol';
 import type { ManagedAgentTerminalProvider } from './managed-agent-provider';
 
@@ -67,6 +67,7 @@ function ManagedTerminalSurface({
 }: ManagedTerminalSurfaceProps) {
   const theme = useTheme();
   const { t } = useI18n();
+  const runtime = useTerminalRuntime();
   const tRef = useRef(t);
   tRef.current = t;
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -81,7 +82,8 @@ function ManagedTerminalSurface({
 
   useEffect(() => {
     const container = containerRef.current;
-    if (!container) return;
+    if (!container || !runtime || runtime === 'failed') return;
+    const { Terminal, FitAddon } = runtime;
 
     function createTerminal(handlesPrimaryDa = false) {
       const term = new Terminal({
@@ -494,18 +496,27 @@ function ManagedTerminalSurface({
       wsRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [terminal, sessionId, terminalId, clientId]);
+  }, [terminal, sessionId, terminalId, clientId, runtime]);
 
   return (
-    <div
-      ref={containerRef}
-      data-managed-terminal
-      className="min-h-0 flex-1 overflow-hidden rounded-md"
-      style={{
-        padding: '0.25rem 0.5rem',
-        background: theme === 'light' ? '#ffffff' : '#0a0a0a',
-      }}
-    />
+    <>
+      {runtime && runtime !== 'failed' && <style>{runtime.styles}</style>}
+      <div
+        ref={containerRef}
+        data-managed-terminal
+        className="min-h-0 flex-1 overflow-hidden rounded-md"
+        style={{
+          padding: '0.25rem 0.5rem',
+          background: theme === 'light' ? '#ffffff' : '#0a0a0a',
+        }}
+      >
+        {(!runtime || runtime === 'failed') && (
+          <div role={runtime === 'failed' ? 'alert' : 'status'}>
+            {t(runtime === 'failed' ? 'common.failedToLoad' : 'common.loading')}
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 

@@ -178,8 +178,8 @@ class ManagedActionsTest {
         ActionJournal journal = new ActionJournal(journals, tenant, session, System.currentTimeMillis(), 9007199254740991L)
                 .withQuestions(input);
         journal.change("requested", null);
-        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
-                Integer.class, tenant, session)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT has_activity_diagnostics FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
+                Boolean.class, tenant, session)).isFalse();
         for (JsonNode view : inputViews(tenant, session, journal.id)) {
             boolean web = view.has("actionId");
             assertThat(view.path("kind").asText()).isEqualTo("question");
@@ -567,7 +567,7 @@ class ManagedActionsTest {
                     .withInput(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{\"content\":\"foreign secret\"}}"));
             foreign.change("requested", null);
             ActionJournal local = new ActionJournal(journals, tenant, session, 100, 1000);
-            local.options.put("v", 2);
+            local.options.put("v", 3);
             local.options.set("inputRef", foreign.options.path("inputRef").deepCopy());
             assertThatThrownBy(() -> local.change("requested", null))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode())
@@ -640,7 +640,7 @@ class ManagedActionsTest {
             switch (fault) {
                 case "oldExtra" -> journal.options.putNull("inputRef");
                 case "missingRef" -> journal.options.put("v", 2);
-                case "version" -> journal.options.put("v", 3);
+                case "version" -> journal.options.put("v", 5);
                 case "extra" -> {
                     journal.withInput(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{}}"));
                     journal.options.put("extra", true);

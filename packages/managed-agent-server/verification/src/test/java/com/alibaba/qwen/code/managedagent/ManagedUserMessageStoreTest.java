@@ -493,7 +493,8 @@ class ManagedUserMessageStoreTest {
         long childRevision = queueRevision(child);
         var parentOperation = kind == OperationKind.CLOSE
                 ? workspaceStore.beginWorkspaceClose(TENANT, parent, ACTOR, ACTOR, "workspace-close", "digest", true)
-                : workspaceStore.beginWorkspaceLifecycle(TENANT, parent, kind, ACTOR, ACTOR, "workspace-delete", "digest", true, 1);
+                : workspaceStore.beginWorkspaceLifecycle(TENANT, parent, kind, ACTOR, ACTOR, "workspace-delete", "digest", true,
+                        WorkspaceToolProfiles.lifecycleProtocol(WorkspaceToolProfiles.FILES));
         assertThat(workspaceStore.requireSession(TENANT, parent).status()).isEqualTo(kind == OperationKind.CLOSE ? "CLOSING" : "DELETING");
         assertThat(queueRevision(parent)).isEqualTo(parentRevision + 1);
         assertThat(queueRevision(child)).isEqualTo(childRevision);
