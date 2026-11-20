@@ -1131,6 +1131,16 @@ export async function applyMcpServerAction(
           if (toolRegistry) {
             await toolRegistry.discoverToolsForServer(server.name);
           }
+          // A pattern this action cannot write — System's, or an operator's
+          // `--disable-mcp-server` — stays in the runtime list, and the server
+          // is still refused. Report that instead of a success the next
+          // discovery contradicts.
+          if (config.isMcpServerDisabled?.(server.name)) {
+            return {
+              message: `Cannot enable '${server.name}': an exclusion from a scope this action cannot write still disables it.`,
+              changed: false,
+            };
+          }
           return { message: `Enabled '${server.name}'.`, changed: true };
         }
         // Disable.

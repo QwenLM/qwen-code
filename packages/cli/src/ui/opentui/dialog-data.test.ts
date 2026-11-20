@@ -1592,6 +1592,33 @@ describe('applyMcpServerAction (real server actions)', () => {
     expect(result.changed).toBe(true);
   });
 
+  it('does not report Enabled while an unwritable exclusion still disables it', async () => {
+    // The runtime list merges every scope plus `--disable-mcp-server`; a
+    // pattern this action cannot write survives the rewrite, so discovery
+    // refuses the server again. Reporting success there is a lie the next
+    // refresh contradicts (finding R5-4).
+    const discoverToolsForServer = vi.fn(async () => {});
+    const config = stubConfig({
+      getToolRegistry: (() => ({
+        discoverToolsForServer,
+      })) as unknown as Config['getToolRegistry'],
+      getExcludedMcpServers: () => ['docs*'],
+      setExcludedMcpServers: () => {},
+      isMcpServerDisabled: () => true,
+    } as Partial<Config>);
+    const { settings } = createFakeSettings();
+    const result = await applyMcpServerAction(
+      config,
+      settings,
+      serverInfo({ name: 'docs', isDisabled: true }),
+      'toggle-disable',
+    );
+
+    expect(result.changed).toBe(false);
+    expect(result.message).not.toContain("Enabled 'docs'");
+    expect(result.message).toContain('cannot');
+  });
+
   it('disable writes mcp.excluded to the user scope and disables the server', async () => {
     const disableMcpServer = vi.fn(async () => {});
     const config = stubConfig({
