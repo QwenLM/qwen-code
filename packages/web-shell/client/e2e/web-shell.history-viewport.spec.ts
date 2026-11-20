@@ -49,7 +49,14 @@ async function historyScenario(
   page: import('@playwright/test').Page,
   baseURL: string | undefined,
   pageRecords: number,
+  options: { answer?: (record: number) => string } = {},
 ) {
+  // Even records are prompts, odd records are answers.
+  const event = (record: number) =>
+    recordEvent(
+      record,
+      record % 2 && options.answer ? options.answer(record) : undefined,
+    );
   await page.setViewportSize({ width: 1600, height: 900 });
   const count = pageRecords * 12;
   const sessionId = `history-navigation-${pageRecords}`;
@@ -64,6 +71,7 @@ async function historyScenario(
   const daemon = await installMockDaemon(page, scenario, { baseURL });
   const requests: Array<{ start: number; end: number; anchored: boolean }> = [];
   let hold = false;
+  let fail = false;
   let release: (() => void) | undefined;
   await page.route(`${baseURL}/**`, async (route) => {
     const url = new URL(route.request().url());
@@ -128,12 +136,16 @@ async function historyScenario(
         await new Promise<void>((resolve) => {
           release = resolve;
         });
+      if (fail && !at) {
+        await route.fulfill({ status: 500, json: { error: 'page failed' } });
+        return;
+      }
       await route.fulfill({
         json: {
           v: 1,
           sessionId,
           events: Array.from({ length: end - start }, (_, index) =>
-            recordEvent(start + index),
+            event(start + index),
           ),
           hasMore: backward ? start > 0 : end < count + 40,
           ...((backward ? start > 0 : end < count + 40)
@@ -157,6 +169,9 @@ async function historyScenario(
     requests,
     hold: () => {
       hold = true;
+    },
+    fail: (value: boolean) => {
+      fail = value;
     },
     release: () => {
       hold = false;
@@ -300,3 +315,66 @@ for (const pageRecords of [16, 200]) {
     );
   });
 }
+
+test('stacks the pinned prompt below the history error banner, and its Retry loads the page', async ({
+  page,
+  baseURL,
+}) => {
+  const pageRecords = 16;
+  // Answers taller than the viewport, so a prompt row can be above it.
+  const fixture = await historyScenario(page, baseURL, pageRecords, {
+    answer: (record) =>
+      `ANSWER ${record} ` + 'lorem ipsum dolor sit amet '.repeat(400),
+  });
+  const ordinal = (fixture.count - 2 * pageRecords) / 2;
+  const rail = page.locator('[data-global-turn-navigation]');
+  await expect(rail).toBeVisible();
+  await rail
+    .locator('div')
+    .first()
+    .evaluate((element, ordinal) => {
+      const item = element.querySelector<HTMLElement>('[aria-setsize]')!;
+      element.scrollTop =
+        ordinal *
+        (element.scrollHeight / Number(item.getAttribute('aria-setsize')));
+    }, ordinal);
+  await rail.locator(`[data-turn-ordinal="${ordinal}"]`).click();
+  const viewport = page.locator('[data-history-viewport="historical"]');
+  await expect(viewport).toBeVisible();
+  const scroll = viewport.locator('[data-web-shell-message-list]');
+  await expect(scroll).toContainText(`ANSWER ${ordinal * 2 + 1}`);
+
+  // The older page fails, so the error banner stays.
+  fixture.fail(true);
+  const previous = fixture.requests.length;
+  await scroll.hover();
+  await page.mouse.wheel(0, -100000);
+  await expect.poll(() => fixture.requests.length).toBeGreaterThan(previous);
+  const alert = viewport.locator('[role="alert"]');
+  await expect(alert).toBeVisible();
+
+  // Put the first answer under the top edge, with its prompt row above it.
+  await scroll.evaluate((element) => {
+    const answer = [
+      ...element.querySelectorAll('[data-web-shell-message-row]'),
+    ].find((row) => row.textContent?.includes('ANSWER'))!;
+    element.scrollTop +=
+      answer.getBoundingClientRect().top -
+      element.getBoundingClientRect().top +
+      200;
+  });
+  const pinned = viewport.locator('[data-pinned-turn-prompt]');
+  await expect(pinned).toBeVisible();
+  await expect(alert).toBeVisible();
+  const bannerBox = (await alert.locator('..').boundingBox())!;
+  const pinnedBox = (await pinned.boundingBox())!;
+  expect(pinnedBox.y).toBeGreaterThanOrEqual(bannerBox.y + bannerBox.height);
+
+  // Retry takes the click through the top stack, which passes other clicks
+  // to the transcript.
+  fixture.fail(false);
+  const failed = fixture.requests.length;
+  await alert.getByRole('button').click();
+  await expect.poll(() => fixture.requests.length).toBeGreaterThan(failed);
+  await expect(alert).toHaveCount(0);
+});

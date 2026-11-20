@@ -11,6 +11,7 @@ const observed = vi.hoisted(() => ({
   loading: false,
   error: undefined as string | undefined,
   railFollow: undefined as { current: number } | undefined,
+  retry: undefined as unknown as ReturnType<typeof vi.fn>,
   rows: [] as Array<{
     id: string;
     key?: string;
@@ -36,7 +37,7 @@ vi.mock('../hooks/useTranscriptViewport', () => ({
     historical: false,
     loading: observed.loading,
     error: observed.error,
-    retry: vi.fn(),
+    retry: observed.retry,
     viewKey: 'live',
     toolSources: new Map(),
     pin: vi.fn(),
@@ -123,6 +124,7 @@ beforeEach(() => {
   observed.loading = false;
   observed.error = undefined;
   observed.railFollow = undefined;
+  observed.retry = vi.fn();
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
     callback(0);
@@ -186,6 +188,32 @@ describe('TranscriptViewport pinned prompt', () => {
         .querySelector('[data-web-shell-message-list]')
         ?.querySelector('[data-pinned-turn-prompt]'),
     ).toBeNull();
+  });
+
+  it('keeps the label across an agent @-mention inside a known turn', () => {
+    const mention = {
+      id: 'mention-0',
+      role: 'user',
+      content: '@helper check this',
+      timestamp: 1,
+      sourceBlockIds: ['mention-0'],
+      agentMessage: {
+        kind: 'agent_mention',
+        author: { agentId: 'a1', name: 'helper' },
+      },
+      author: { name: 'helper' },
+    } as Message;
+    observed.rows = [{ id: 'output-0b', top: -10, bottom: 300 }];
+    renderViewport({
+      messages: [
+        message('prompt-0'),
+        message('output-0a'),
+        mention,
+        message('output-0b'),
+        message('prompt-1'),
+      ],
+    });
+    expect(pinnedText()).toBe('First prompt');
   });
 
   it('keeps the label when the prompt row has left the virtualizer window', () => {
@@ -270,8 +298,22 @@ describe('TranscriptViewport pinned prompt', () => {
       )?.parentElement;
       // In flow in one column, the second child starts below the first.
       expect([...stack!.children]).toEqual([banner, overlay]);
+      // The top stack passes clicks through, so the banner takes them back.
+      expect(banner!.className).toContain('pointer-events-auto');
     },
   );
+
+  it('retries the history page from the error banner', () => {
+    observed.rows = [{ id: 'output-1a', top: -10, bottom: 300 }];
+    observed.error = 'failed';
+    renderViewport();
+    act(() =>
+      container!
+        .querySelector<HTMLButtonElement>('[role="alert"] button')!
+        .click(),
+    );
+    expect(observed.retry).toHaveBeenCalledTimes(1);
+  });
 
   it('keeps a shell command row in the turn before it', () => {
     const shell = {

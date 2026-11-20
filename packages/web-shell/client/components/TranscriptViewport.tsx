@@ -248,8 +248,10 @@ export const TranscriptViewport = forwardRef<
       for (const id of ids) mapped = blockOrdinal.get(id) ?? mapped;
       if (mapped !== undefined) ordinal = mapped;
       // A `!command` row is not a turn in the index, so it stays in the
-      // turn before it, as on the rail.
-      else if (message.role === 'user') ordinal = null;
+      // turn before it, as on the rail. An agent's @-mention or message is a
+      // user-role row inside a turn, never a turn head in the index, so it
+      // keeps the turn too.
+      else if (message.role === 'user' && !message.agentMessage) ordinal = null;
       if (ordinal !== undefined) for (const id of ids) map.set(id, ordinal);
     }
     return map;

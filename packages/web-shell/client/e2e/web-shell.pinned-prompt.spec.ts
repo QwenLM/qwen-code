@@ -10,7 +10,7 @@ const TURNS = 12;
 // Output rows in one turn. More than the virtualizer's overscan once expanded.
 const OUTPUTS = 60;
 const PER_TURN = OUTPUTS + 1;
-// Long enough to wrap to two lines at 900px, so the small-viewport clamp has
+// Long enough to wrap to two lines at 540px, so the small-viewport clamp has
 // something to clamp.
 const label = (turn: number) =>
   `Prompt of turn ${turn}: ` +
@@ -74,14 +74,26 @@ async function openSession(page: Page, baseURL: string | undefined) {
   ).toBeVisible();
 }
 
+// The rail shows wherever the transcript has gutters for it, so the hidden-rail
+// cases switch the chat to the full width.
+async function hideRail(page: Page) {
+  await page.getByRole('button', { name: /Ultra wide|超宽/ }).click();
+  await expect(page.locator('[data-global-turn-navigation]')).toBeHidden();
+}
+
 const list = (page: Page) => page.locator('[data-web-shell-message-list]');
 const pinned = (page: Page) => page.locator('[data-pinned-turn-prompt]');
 const rowWith = (page: Page, text: string) =>
   list(page).locator('[data-web-shell-message-row]', { hasText: text });
 
 // Rows are virtualized, so walk up from the live tail until the row is mounted,
-// then put its top `below` pixels under the top edge of the viewport.
+// then put its top `below` pixels under the top edge of the viewport. Rows
+// mounting above it change their measured heights, so repeat until the row
+// stays at that offset.
 async function scrollToRow(page: Page, text: string, below = 0) {
+  // A user scroll first, so the list stops following the live tail.
+  await list(page).hover();
+  await page.mouse.wheel(0, -1500);
   await expect
     .poll(() =>
       list(page).evaluate(
@@ -93,11 +105,13 @@ async function scrollToRow(page: Page, text: string, below = 0) {
             element.scrollTop -= 1000;
             return false;
           }
-          element.scrollTop +=
+          const delta =
             row.getBoundingClientRect().top -
             element.getBoundingClientRect().top +
             below;
-          return true;
+          if (Math.abs(delta) <= 1) return true;
+          element.scrollTop += delta;
+          return false;
         },
         { text, below },
       ),
@@ -111,7 +125,7 @@ test('pins the prompt of the turn being read when the rail is hidden @smoke', as
 }) => {
   await page.setViewportSize({ width: 1100, height: 900 });
   await openSession(page, baseURL);
-  await expect(page.locator('[data-global-turn-navigation]')).toBeHidden();
+  await hideRail(page);
 
   await scrollToRow(page, `ANSWER 5.${OUTPUTS}`, 200);
   await expect(pinned(page)).toHaveText(label(5));
@@ -140,6 +154,7 @@ test('keeps the label after the prompt row leaves the virtualizer window', async
 }) => {
   await page.setViewportSize({ width: 1100, height: 900 });
   await openSession(page, baseURL);
+  await hideRail(page);
   await scrollToRow(page, 'QUESTION 5');
   await rowWith(page, 'QUESTION 5')
     .locator('xpath=following-sibling::*')
@@ -166,6 +181,7 @@ test('stays out of row sizing, scroll position and hit testing', async ({
 }) => {
   await page.setViewportSize({ width: 1100, height: 900 });
   await openSession(page, baseURL);
+  await hideRail(page);
   await scrollToRow(page, `ANSWER 5.${OUTPUTS}`, 200);
   await expect(pinned(page)).toBeVisible();
   await expect(list(page).locator('[data-pinned-turn-prompt]')).toHaveCount(0);
@@ -221,14 +237,14 @@ test('agrees with the rail highlight when the rail is visible', async ({
 });
 
 test('takes one line on a small viewport', async ({ page, baseURL }) => {
-  await page.setViewportSize({ width: 900, height: 480 });
+  await page.setViewportSize({ width: 540, height: 480 });
   await openSession(page, baseURL);
   await scrollToRow(page, `ANSWER 5.${OUTPUTS}`, 200);
   await expect(pinned(page)).toBeVisible();
   expect((await pinned(page).boundingBox())!.height).toBeLessThanOrEqual(30);
 
   // The same label takes two lines on a taller viewport.
-  await page.setViewportSize({ width: 900, height: 900 });
+  await page.setViewportSize({ width: 540, height: 900 });
   await expect
     .poll(async () => (await pinned(page).boundingBox())?.height ?? 0)
     .toBeGreaterThan(30);
