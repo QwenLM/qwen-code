@@ -212,40 +212,6 @@ async function worktreeAllowedRoots(
 const SIDECAR_SUFFIX = '.worktree.json';
 
 /**
- * Scans another sidecar dir for a sidecar that names the checkout and
- * belongs to a session still on the bridge. Returns the refusal reason, or
- * `undefined` when there is none; a dir that cannot be listed, or a
- * sidecar in it that cannot be read, also refuses.
- */
-async function findLiveSessionNamingCheckout(
-  dir: string,
-  lockKey: string,
-  isSessionLive: (sessionId: string) => boolean,
-): Promise<string | undefined> {
-  let entries: string[];
-  try {
-    entries = await fsp.readdir(dir);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    return `sidecar scan failed: ${
-      error instanceof Error ? error.message : String(error)
-    }`;
-  }
-  for (const entry of entries) {
-    if (!entry.endsWith(SIDECAR_SUFFIX)) continue;
-    const other = await readWorktreeSessionStrict(path.join(dir, entry));
-    if (other.state === 'missing') continue;
-    if (other.state === 'invalid') return `unreadable sibling sidecar ${entry}`;
-    if (canonicalPath(other.session.worktreePath) !== lockKey) continue;
-    const otherId = entry.slice(0, -SIDECAR_SUFFIX.length);
-    if (isSessionLive(otherId)) {
-      return `session ${otherId} naming the checkout is still live`;
-    }
-  }
-  return undefined;
-}
-
-/**
  * Full ownership verification, called under the cleanup lock before the
  * record is deleted. The sidecar is re-read because the pre-read was
  * advisory; the marker must name exactly this session; the checkout
@@ -316,39 +282,43 @@ export async function verifyWorktreeCleanupOwnership(
   }
   const chatsDir = path.dirname(plan.sidecarPath);
   const ownFile = path.basename(plan.sidecarPath);
-  let entries: string[];
-  try {
-    entries = await fsp.readdir(chatsDir);
-  } catch (error) {
-    return {
-      ok: false,
-      reason: `sidecar scan failed: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    };
-  }
-  const tombstoneIds: string[] = [];
+  const tombstoneIds = new Set<string>();
   let olderTombstone = false;
-  for (const entry of entries) {
-    if (!entry.endsWith(SIDECAR_SUFFIX) || entry === ownFile) continue;
-    const other = await readWorktreeSessionStrict(path.join(chatsDir, entry));
-    if (other.state === 'missing') continue;
-    if (other.state === 'invalid') {
-      return { ok: false, reason: `unreadable sibling sidecar ${entry}` };
+  for (const dir of [chatsDir, plan.otherStateSidecarDir]) {
+    if (dir === undefined) continue;
+    let entries: string[];
+    try {
+      entries = await fsp.readdir(dir);
+    } catch (error) {
+      if (
+        dir !== chatsDir &&
+        (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ) {
+        continue;
+      }
+      return {
+        ok: false,
+        reason: `sidecar scan failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      };
     }
-    if (canonicalPath(other.session.worktreePath) !== plan.lockKey) continue;
-    // A tombstone (a session that handed the checkout on in a reset)
-    // legitimately names the same checkout; it is evidence of the
-    // transfer, not sharing. It cannot own the checkout while the marker,
-    // read above under the ownership lock every reset also takes, names
-    // this session. The link is not followed: each reset rewrites only the
-    // pair it transfers between, so after several resets older tombstones
-    // name sessions that may since have been deleted or archived.
-    if (other.session.supersededBy === undefined) {
-      return { ok: false, reason: `checkout shared with ${entry}` };
+    for (const entry of entries) {
+      if (!entry.endsWith(SIDECAR_SUFFIX) || entry === ownFile) continue;
+      const other = await readWorktreeSessionStrict(path.join(dir, entry));
+      if (other.state === 'missing') continue;
+      if (other.state === 'invalid') {
+        return { ok: false, reason: `unreadable sibling sidecar ${entry}` };
+      }
+      if (canonicalPath(other.session.worktreePath) !== plan.lockKey) continue;
+      // Tombstones record a transfer. Each reset updates only the pair
+      // involved, so older tombstones may point to deleted sessions.
+      if (other.session.supersededBy === undefined) {
+        return { ok: false, reason: `checkout shared with ${entry}` };
+      }
+      tombstoneIds.add(entry.slice(0, -SIDECAR_SUFFIX.length));
+      if (other.session.supersededBy !== sessionId) olderTombstone = true;
     }
-    tombstoneIds.push(entry.slice(0, -SIDECAR_SUFFIX.length));
-    if (other.session.supersededBy !== sessionId) olderTombstone = true;
   }
   // With only the direct predecessor, the one-reset rule discounts it
   // regardless: the bridge may have reopened it at the workspace root since
@@ -366,14 +336,6 @@ export async function verifyWorktreeCleanupOwnership(
           reason: `superseded session ${otherId} is still live`,
         };
       }
-    }
-    if (plan.otherStateSidecarDir !== undefined) {
-      const otherState = await findLiveSessionNamingCheckout(
-        plan.otherStateSidecarDir,
-        plan.lockKey,
-        isSessionLive,
-      );
-      if (otherState !== undefined) return { ok: false, reason: otherState };
     }
   }
   // Every guard above verified plan.lockKey, but the removal call

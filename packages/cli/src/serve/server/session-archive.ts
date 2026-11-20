@@ -657,7 +657,9 @@ export async function deleteDaemonSessions(params: {
             }
           };
           try {
-            await bridge.closeSession(sessionId);
+            await bridge.closeSession(sessionId, undefined, {
+              forDeletion: true,
+            });
           } catch (error) {
             // A 'session_closing' refusal means a bridge-internal
             // auto-close (last-detach, idle reaper) is in flight — the

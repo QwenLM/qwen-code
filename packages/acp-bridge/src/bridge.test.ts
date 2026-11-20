@@ -35672,6 +35672,168 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('closeSession', () => {
+    it.each(['queued fork', 'btw', 'fork'])(
+      'rejects a %s for a session closing for deletion',
+      async (request) => {
+        const close = deferred<{ closed: true }>();
+        let closingId: string;
+        const handle = makeChannel({
+          extMethodImpl: (method, params) => {
+            if (
+              method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+              params['sessionId'] === closingId
+            ) {
+              return close.promise;
+            }
+            return { closed: true, answer: 'Still available', launched: true };
+          },
+        });
+        const channelFactory = vi.fn(async () => handle.channel);
+        const bridge = makeBridge({ channelFactory, sessionScope: 'thread' });
+        try {
+          const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+          const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+          closingId = a.sessionId;
+          expect(channelFactory).toHaveBeenCalledTimes(1);
+
+          const queuedFork =
+            request === 'queued fork'
+              ? bridge.launchSessionForkAgent(a.sessionId, 'Review this')
+              : undefined;
+          void queuedFork?.catch(() => undefined);
+          await expect(
+            bridge.closeSession(a.sessionId, undefined, {
+              forDeletion: true,
+              agentCloseTimeoutMs: 10,
+            }),
+          ).rejects.toBeInstanceOf(BridgeTimeoutError);
+          const sideRequest =
+            queuedFork ??
+            (request === 'btw'
+              ? bridge.generateSessionBtw(a.sessionId, 'What is this?')
+              : bridge.launchSessionForkAgent(a.sessionId, 'Review this'));
+          await expect(sideRequest).rejects.toMatchObject({
+            code: 'session_closing',
+          });
+          const requestedMethods = handle.agent.extMethodCalls.map(
+            ({ method }) => method,
+          );
+          expect(requestedMethods).not.toContain(
+            request === 'btw'
+              ? SERVE_CONTROL_EXT_METHODS.sessionBtw
+              : SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
+          );
+          await expect(
+            bridge.generateSessionBtw(b.sessionId, 'What is this?'),
+          ).resolves.toEqual({
+            sessionId: b.sessionId,
+            answer: 'Still available',
+          });
+        } finally {
+          close.resolve({ closed: true });
+          await bridge.shutdown();
+        }
+      },
+    );
+
+    it('keeps a sibling turn running when closing a session for deletion times out', async () => {
+      const promptStarted = deferred<void>();
+      const prompt = deferred<PromptResponse>();
+      const close = deferred<{ closed: true }>();
+      let closingId: string;
+      const handle = makeChannel({
+        promptImpl: () => {
+          promptStarted.resolve();
+          return prompt.promise;
+        },
+        extMethodImpl: (method, params) => {
+          if (
+            method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+            params['sessionId'] === closingId
+          ) {
+            return close.promise;
+          }
+          return { closed: true };
+        },
+      });
+      const channelFactory = vi.fn(async () => handle.channel);
+      const bridge = makeBridge({ channelFactory, sessionScope: 'thread' });
+      try {
+        const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        closingId = a.sessionId;
+        expect(channelFactory).toHaveBeenCalledTimes(1);
+        const running = bridge.sendPrompt(b.sessionId, {
+          sessionId: b.sessionId,
+          prompt: [{ type: 'text', text: 'Keep running' }],
+        });
+        void running.catch(() => undefined);
+        await promptStarted.promise;
+        expect(bridge.getSessionSummary(b.sessionId).activeWorkState).toBe(
+          'active',
+        );
+
+        const options = { forDeletion: true, agentCloseTimeoutMs: 10 };
+        await expect(
+          bridge.closeSession(a.sessionId, undefined, options),
+        ).rejects.toBeInstanceOf(BridgeTimeoutError);
+        expect(handle.killed).toBe(false);
+        await expect(
+          bridge.closeSession(a.sessionId, undefined, options),
+        ).rejects.toMatchObject({ code: 'session_closing' });
+        expect(bridge.getSessionSummary(b.sessionId).activeWorkState).toBe(
+          'active',
+        );
+
+        prompt.resolve({ stopReason: 'end_turn' });
+        await expect(running).resolves.toMatchObject({
+          stopReason: 'end_turn',
+        });
+        close.resolve({ closed: true });
+        await expect.poll(() => bridge.sessionCount).toBe(1);
+        expect(bridge.getSessionSummary(b.sessionId).sessionId).toBe(
+          b.sessionId,
+        );
+      } finally {
+        prompt.resolve({ stopReason: 'end_turn' });
+        close.resolve({ closed: true });
+        await bridge.shutdown();
+      }
+    });
+
+    it('keeps the deletion target retryable when the child declines closure', async () => {
+      let closed = false;
+      const handle = makeChannel({
+        extMethodImpl: () => ({ closed }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      try {
+        const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await expect(
+          bridge.closeSession(a.sessionId, undefined, { forDeletion: true }),
+        ).rejects.toThrow('Agent did not acknowledge session close');
+        expect(bridge.getSessionSummary(a.sessionId).sessionId).toBe(
+          a.sessionId,
+        );
+        expect(handle.killed).toBe(false);
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: SERVE_CONTROL_EXT_METHODS.sessionClose,
+          params: {
+            sessionId: a.sessionId,
+            requireFlush: true,
+            drainTimeoutMs: sessionCloseDrainBudgetMs(10_000),
+          },
+        });
+        closed = true;
+        await expect(
+          bridge.closeSession(a.sessionId, undefined, { forDeletion: true }),
+        ).resolves.toBeUndefined();
+        expect(bridge.sessionCount).toBe(0);
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
     it('publishes session_closed and removes session from maps', async () => {
       const handles: Array<{ killed: boolean }> = [];
       const factory: ChannelFactory = async () => {
