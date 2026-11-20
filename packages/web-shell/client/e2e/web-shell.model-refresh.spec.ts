@@ -127,6 +127,13 @@ test('reloads on open and shows a newly configured Gemini model @smoke', async (
   let reloads = 0;
   await page.route('**/workspaces/*/models/reload', async (route) => {
     reloads += 1;
+    scenario.state.models = {
+      currentModelId: scenario.currentModel,
+      availableModels: [
+        { modelId: scenario.currentModel, name: 'Qwen Test' },
+        { modelId: 'gemini-4-neon(gemini)', name: 'gemini-4-neon' },
+      ],
+    };
     await route.fulfill({
       contentType: 'application/json',
       body: JSON.stringify({ status: 'applied' }),
@@ -138,13 +145,6 @@ test('reloads on open and shows a newly configured Gemini model @smoke', async (
     replayCompleteEvent({ sessionId: scenario.sessionId }),
   );
   const selector = page.locator('[data-web-shell-model-button]');
-  scenario.state.models = {
-    currentModelId: scenario.currentModel,
-    availableModels: [
-      { modelId: scenario.currentModel, name: 'Qwen Test' },
-      { modelId: 'gemini-4-neon(gemini)', name: 'gemini-4-neon' },
-    ],
-  };
   await selector.click();
 
   await expect(
@@ -152,7 +152,7 @@ test('reloads on open and shows a newly configured Gemini model @smoke', async (
   ).toBeVisible();
   await expect(selector).toContainText('Qwen Test');
   expect(scenario.currentModel).toBe('qwen-test');
-  expect(reloads).toBe(0);
+  expect(reloads).toBe(1);
 });
 
 test('refreshes the model picker without selecting or replaying a session @smoke', async ({
@@ -228,7 +228,7 @@ test('refreshes the model picker without selecting or replaying a session @smoke
   ).toHaveCount(0);
   await expect(selector).toContainText('Qwen Test');
   expect(scenario.currentModel).toBe('qwen-test');
-  expect(reloads).toBe(2);
+  expect(reloads).toBe(3);
   await page.screenshot({
     path: testInfo.outputPath('model-refresh-after.png'),
   });

@@ -36,10 +36,7 @@ export function useModelRefresh(
       setRefreshing(true);
       setError(undefined);
       try {
-        await actions.refreshModels(
-          localOnly ? undefined : beforeRefresh,
-          localOnly ? { reloadProviders: false } : undefined,
-        );
+        await actions.refreshModels(localOnly ? undefined : beforeRefresh);
       } catch (err) {
         if (request === generation.current && owner.isCurrent()) {
           setError(err instanceof Error ? err.message : String(err));

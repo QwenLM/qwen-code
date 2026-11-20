@@ -58,18 +58,13 @@ describe('model refresh controls', () => {
       await state.refreshLocal!();
     });
     expect(beforeRefresh).not.toHaveBeenCalled();
-    expect(mock.actions.refreshModels).toHaveBeenLastCalledWith(undefined, {
-      reloadProviders: false,
-    });
+    expect(mock.actions.refreshModels).toHaveBeenLastCalledWith(undefined);
 
     await act(async () => {
       await state.refresh!();
     });
     expect(beforeRefresh).toHaveBeenCalledOnce();
-    expect(mock.actions.refreshModels).toHaveBeenLastCalledWith(
-      beforeRefresh,
-      undefined,
-    );
+    expect(mock.actions.refreshModels).toHaveBeenLastCalledWith(beforeRefresh);
   });
 
   it('keeps composer props stable across unrelated parent renders', async () => {

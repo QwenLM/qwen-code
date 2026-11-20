@@ -61,6 +61,7 @@ function isThirdPartyGeminiBaseUrl(baseUrl: string): boolean {
 
 function withoutDoneSentinel(
   stream: AsyncGenerator<GeminiStreamPart, void, unknown>,
+  response: Response,
 ): AsyncGenerator<GeminiStreamPart, void, unknown> {
   const iterator = stream[Symbol.asyncIterator]();
   return {
@@ -70,6 +71,7 @@ function withoutDoneSentinel(
       const payload = await result.value.responseInternal.clone().text();
       if (payload.trim() !== '[DONE]') return result;
       await iterator.return?.();
+      await response.body?.cancel();
       return { done: true, value: undefined };
     },
     async return() {
@@ -89,11 +91,7 @@ function withoutDoneSentinel(
 
 function installIsolatedTransport(
   client: GoogleGenAI,
-  options: {
-    apiKey?: string;
-    baseUrl?: string;
-    hasExplicitCredentialHeader: boolean;
-  },
+  options: { apiKey?: string },
 ): boolean {
   // @google/genai 2.6 has no public fetch hook. Both model request paths use
   // this instance's final HTTP call after the SDK has built the URL and auth.
@@ -101,35 +99,36 @@ function installIsolatedTransport(
     apiClient?: GeminiApiClient;
   };
   if (typeof apiClient?.apiCall !== 'function') return false;
-  const thirdPartyGemini =
-    options.baseUrl !== undefined &&
-    !client.vertexai &&
-    isThirdPartyGeminiBaseUrl(options.baseUrl);
+  const destinations = new WeakMap<Response, string>();
   const apiCall = apiClient.apiCall.bind(apiClient);
-  apiClient.apiCall = (url, init) => {
-    if (
-      thirdPartyGemini &&
-      options.apiKey &&
-      !options.hasExplicitCredentialHeader
-    ) {
+  apiClient.apiCall = async (url, init) => {
+    if (options.apiKey && !client.vertexai && isThirdPartyGeminiBaseUrl(url)) {
       const headers = new Headers(init.headers);
-      if (!headers.has('authorization')) {
+      const explicitNativeKey = headers.get('x-goog-api-key');
+      if (
+        !headers.has('authorization') &&
+        (explicitNativeKey === null || explicitNativeKey === options.apiKey)
+      ) {
         headers.set('Authorization', `Bearer ${options.apiKey}`);
         init = { ...init, headers };
       }
     }
-    return retryContext.getStore()?.singleAttempt
+    const response = await (retryContext.getStore()?.singleAttempt
       ? fetch(url, { ...init, redirect: 'error' })
-      : apiCall(url, init);
+      : apiCall(url, init));
+    destinations.set(response, url);
+    return response;
   };
-  if (
-    thirdPartyGemini &&
-    typeof apiClient.processStreamResponse === 'function'
-  ) {
+  if (typeof apiClient.processStreamResponse === 'function') {
     const processStreamResponse =
       apiClient.processStreamResponse.bind(apiClient);
-    apiClient.processStreamResponse = (response) =>
-      withoutDoneSentinel(processStreamResponse(response));
+    apiClient.processStreamResponse = (response) => {
+      const stream = processStreamResponse(response);
+      const destination = destinations.get(response) ?? response.url;
+      return !client.vertexai && isThirdPartyGeminiBaseUrl(destination)
+        ? withoutDoneSentinel(stream, response)
+        : stream;
+    };
   }
   return true;
 }
@@ -213,12 +212,6 @@ export class LlmContentGenerator implements ContentGenerator {
         })()
       : options;
 
-    const hasExplicitCredentialHeader = Object.keys(
-      allCustomHeaders ?? {},
-    ).some((name) => {
-      const normalized = name.toLowerCase();
-      return normalized === 'authorization' || normalized === 'x-goog-api-key';
-    });
     const configuredBaseUrl = finalOptions.httpOptions?.baseUrl;
     this.googleGenAI = new GoogleGenAI(finalOptions);
     this.clientBaseUrl = finalOptions.httpOptions?.baseUrl;
@@ -232,8 +225,6 @@ export class LlmContentGenerator implements ContentGenerator {
     }
     this.hasIsolatedTransport = installIsolatedTransport(this.googleGenAI, {
       apiKey: finalOptions.apiKey,
-      baseUrl: configuredBaseUrl,
-      hasExplicitCredentialHeader,
     });
     this.contentGeneratorConfig = contentGeneratorConfig;
     this.cliConfig = cliConfig;
