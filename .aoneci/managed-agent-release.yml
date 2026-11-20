@@ -1,8 +1,8 @@
 name: qwen-managed-agent-release
 # Release producer: builds and verifies the managed-agent native artifacts, builds the runtime
-# archive and Worker/Harness images from the same checkout, then verifies and exposes the
-# complete release bundle. No candidate, base-source archive, or patch sequence: the source
-# of truth is the pipeline checkout itself, identified by its full HEAD SHA in every provenance.
+# archive and Worker/Harness images from the same checkout, then publishes the complete set.
+# No candidate, base-source archive, or patch sequence: the source of truth is the pipeline
+# checkout itself, identified by its full HEAD SHA in every provenance.
 params:
   releaseId:
     description: "Immutable release id stamped into both artifacts, e.g. managed-20261118.1"
@@ -14,7 +14,7 @@ params:
     description: "package compiles and assembles MAS/SDK without tests (default); verify additionally runs full unit + MySQL 8.4 + Checkstyle gates"
     default: "package"
   publish:
-    description: "true verifies all release inputs and uploads the release bundle manifest"
+    description: "true publishes MAS/SDK to Maven and uploads the release manifest with Worker/Harness digests"
     default: "false"
 jobs:
   native_release:
@@ -141,16 +141,19 @@ jobs:
           name: managed-agent-harness-image
           path: .aone-output/harness-image.json
           if-no-files-found: error
-  # Bundle verifier: starts only after native packaging, runtime construction and both image
+  # Publisher: starts only after native packaging, runtime construction and both image
   # pushes succeed. It re-checks every producer exit code and SHA256, verifies that both image
-  # records belong to this runtime, and uploads the immutable release manifest. Maven publication
-  # remains a separate authenticated operation; OSS is not a release dependency.
+  # records belong to this runtime, publishes SDK and MAS to Maven, verifies readback, and
+  # uploads the immutable release manifest. OSS remains an optional channel.
   publish_release:
     needs: [native_release, runtime_release]
     when: ${{ params.publish == 'true' }}
     runs-on: [aone-hosted]
     timeout: 60m
     image: hub.docker.alibaba-inc.com/aone-base-global/data-agent-ci:latest
+    envs:
+      MAVEN_USERNAME: ${{secrets.MAVEN_USERNAME}}
+      MAVEN_PASSWORD: ${{secrets.MAVEN_PASSWORD}}
     steps:
       - uses: checkout
       - name: Verify checkout source identity
@@ -159,6 +162,7 @@ jobs:
             echo "checkout HEAD does not match required sourceSha" >&2
             exit 1
           }
+          case "${{ params.nativeGate }}" in package|verify) ;; *) echo "nativeGate must be package or verify" >&2; exit 1 ;; esac
       - uses: setup-env@2.0.8
         inputs:
           java-version: "21"
@@ -195,7 +199,7 @@ jobs:
             [ "$code" = "0" ] || failed=1
           done
           [ "$failed" = "0" ] || { echo "a producer job failed; refusing to publish" >&2; exit 1; }
-      - name: Verify and assemble the Managed release bundle
+      - name: Publish the Managed release
         run: |
           mkdir -p .aone-output/release_bundle
           python3 .aoneci/scripts/publish-managed-release.py \
@@ -206,7 +210,8 @@ jobs:
             --runtime-dir .aone-publish/runtime \
             --worker-image-dir .aone-publish/worker-image \
             --harness-image-dir .aone-publish/harness-image \
-            --bundle-out .aone-output/release_bundle/release-manifest.json
+            --oss-skip-if-no-credential \
+            --published-manifest-out .aone-output/release_bundle/release-manifest.json
       - uses: upload-artifact@1.1.4
         inputs:
           name: managed-agent-release-bundle

@@ -14,19 +14,18 @@ Ordering guarantees:
   1. Local verification: releaseId/sourceSha match, native mode matches the declared gate
      (package or verify), both image records describe this exact runtime, and every SHA256
      in both PROVENANCE documents and assembly-validation.json matches the bytes on disk.
-  2. Credential gate: OSS candidates and Maven credentials must exist; the OSS
-     credential actually used must HEAD the release prefix successfully. Maven deploy
-     runs before the first OSS object so a Maven failure cannot strand an immutable
-     OSS release without its manifest.
+  2. Credential gate: Maven credentials must exist. OSS candidates are optional;
+     when no OSS credential can HEAD the release prefix, the runtime archive and
+     manifest are uploaded as CI artifacts instead of OSS objects, and the run
+     still publishes Maven coordinates and image digests.
   3. Every OSS PUT sends x-oss-forbid-overwrite; every written object is read back
      and its SHA256 re-verified. SDK and MAS are both published to Maven. The release
      manifest, including immutable Worker/Harness image digests, is written last as
      the commit marker for the release.
 
 With --bundle-out, the script stops after verification and writes a release bundle
-manifest. This is the Aone CI mode: CI artifacts carry MAS/SDK and runtime, build-image
-has already pushed Worker/Harness, and authenticated Maven publication remains a
-separate manual operation.
+manifest. With --published-manifest-out, it also records the final post-publication
+manifest while uploading the JARs and image digests.
 
 Credentials are read from the environment and are never printed, never put on a
 command line, and never embedded in an error message.
@@ -393,10 +392,14 @@ def main():
                         help="Directory containing worker-image.json")
     parser.add_argument("--harness-image-dir", type=Path, required=True,
                         help="Directory containing harness-image.json")
+    parser.add_argument("--oss-skip-if-no-credential", action="store_true",
+                        help="Skip OSS upload and emit manifest as local artifact when no OSS credential works")
     parser.add_argument("--expected-native-mode", choices=("package", "verify"),
                         help="Native producer mode that must match provenance")
     parser.add_argument("--bundle-out", type=Path,
                         help="verify the inputs and write a release bundle manifest without external writes")
+    parser.add_argument("--published-manifest-out", type=Path,
+                        help="write the final manifest here when publishing")
     parser.add_argument("--repo", type=Path, default=Path("."),
                         help="qwen-code checkout (for resolve-oss-sts.sh fallback)")
     args = parser.parse_args()
@@ -440,14 +443,18 @@ def main():
     runtime_key = f"managedagent/runtime/{args.release_id}/qwen-runtime-{args.release_id}.tar.gz"
     manifest_key = f"managedagent/releases/{args.release_id}/release-manifest.json"
 
-    # Credential gate: everything is verified before the first external write.
-    oss_name, access_key, secret, security_token = resolve_oss_credentials(args.repo, server_key)
     require_maven_credentials()
-    print(f"credentials ok: OSS identity {oss_name}, Maven repository {MAVEN_REPO_ID}")
 
-    for key in (runtime_key, manifest_key):
-        if oss_head(key, access_key, secret, security_token) == 200:
-            fail(f"OSS object already exists, refusing to overwrite: {key}")
+    oss_name = None
+    access_key = secret = security_token = None
+    if not args.oss_skip_if_no_credential:
+        oss_name, access_key, secret, security_token = resolve_oss_credentials(args.repo, server_key)
+        print(f"credentials ok: OSS identity {oss_name}, Maven repository {MAVEN_REPO_ID}")
+        for key in (runtime_key, manifest_key):
+            if oss_head(key, access_key, secret, security_token) == 200:
+                fail(f"OSS object already exists, refusing to overwrite: {key}")
+    else:
+        print("OSS credential check skipped; runtime archive and manifest will be CI artifacts only")
 
     # Maven deploy happens before the first OSS object, so its failure cannot strand a
     # forbid-overwrite release id on OSS without its manifest.
@@ -470,25 +477,42 @@ def main():
     maven_verify(server_pom_url, plan["hashes"]["serverPomSha256"], maven_username, maven_password)
     print(f"verified maven {plan['coordinate']}")
 
-    oss_put(server_key, plan["serverJar"], access_key, secret, security_token)
-    oss_verify(server_key, plan["hashes"]["serverJarSha256"], access_key, secret, security_token)
-    oss_put(runtime_key, plan["runtimeTar"], access_key, secret, security_token)
-    oss_verify(runtime_key, plan["hashes"]["runtimeTarSha256"], access_key, secret, security_token)
+    if oss_name:
+        oss_put(server_key, plan["serverJar"], access_key, secret, security_token)
+        oss_verify(server_key, plan["hashes"]["serverJarSha256"], access_key, secret, security_token)
+        oss_put(runtime_key, plan["runtimeTar"], access_key, secret, security_token)
+        oss_verify(runtime_key, plan["hashes"]["runtimeTarSha256"], access_key, secret, security_token)
+    else:
+        print("OSS upload skipped; server JAR and runtime archive remain as CI artifacts")
 
     manifest.update({
         "publishedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "bucket": BUCKET,
-        "objects": {
+        "objects": ({
             "serverJar": {"key": server_key, "sha256": plan["hashes"]["serverJarSha256"]},
             "runtime": {"key": runtime_key, "sha256": plan["hashes"]["runtimeTarSha256"]},
+        } if oss_name else {}),
+        "maven": {
+            "repository": MAVEN_REPO_URL,
+            "sdk": plan["sdkCoordinate"],
+            "server": plan["coordinate"],
         },
+        "images": images,
+        "hashes": plan["hashes"],
     })
     manifest_path = Path(tempfile.mkstemp(prefix="release-manifest-", suffix=".json")[1])
     try:
-        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-        manifest_sha = sha256(manifest_path)
-        oss_put(manifest_key, manifest_path, access_key, secret, security_token)
-        oss_verify(manifest_key, manifest_sha, access_key, secret, security_token)
+        manifest_text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        manifest_path.write_text(manifest_text)
+        if args.published_manifest_out:
+            args.published_manifest_out.parent.mkdir(parents=True, exist_ok=True)
+            args.published_manifest_out.write_text(manifest_text)
+        if oss_name:
+            manifest_sha = sha256(manifest_path)
+            oss_put(manifest_key, manifest_path, access_key, secret, security_token)
+            oss_verify(manifest_key, manifest_sha, access_key, secret, security_token)
+        else:
+            print(f"manifest written locally: {manifest_path}")
     finally:
         manifest_path.unlink(missing_ok=True)
     print(f"release {args.release_id} published")
