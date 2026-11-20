@@ -139,6 +139,15 @@ afterEach(() => {
 });
 
 describe('MemoryMessage', () => {
+  it('isolates the memory file path without pinning its localized panel', async () => {
+    memory.readMemoryFile.mockResolvedValue({ content: 'ذاكرة عربية' });
+    await mountOnUserTab();
+    const path = container.querySelector('[class*="detailPath"]');
+    expect(path?.getAttribute('dir')).toBe('ltr');
+    expect(path?.textContent).toBe(GLOBAL_PATH);
+    expect(path?.parentElement?.hasAttribute('dir')).toBe(false);
+  });
+
   it('retries a failed content read from the mounted panel refresh control', async () => {
     memory.readMemoryFile.mockRejectedValue(
       new Error('temporary read failure'),

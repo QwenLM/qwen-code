@@ -180,7 +180,7 @@ describe('ReadFile output availability', () => {
 });
 
 describe('tool result row direction', () => {
-  it('renders the Arabic quota notice auto-direction and machine summaries LTR', () => {
+  it('renders quota notices and arbitrary summaries with auto direction', () => {
     const quota = renderToolLine(
       makeTool({
         toolName: 'CustomTool',
@@ -209,8 +209,43 @@ describe('tool result row direction', () => {
     );
     const machineRow = machine.querySelector('[class*="lineOutput"]');
     expect(machineRow?.textContent).toBe('health OK');
-    expect(machineRow?.getAttribute('dir')).toBe('ltr');
+    expect(machineRow?.getAttribute('dir')).toBe('auto');
   });
+
+  it.each(['CustomTool', 'mcp__server__lookup', 'TodoWrite'])(
+    'resolves Arabic %s summaries in interactive and document mode',
+    (toolName) => {
+      for (const mode of ['interactive', 'document'] as const) {
+        const tool = makeTool({
+          toolName,
+          status: 'completed',
+          content: [
+            {
+              type: 'content',
+              content: { type: 'text', text: 'نتيجة عربية من الأداة' },
+            },
+          ],
+        });
+        const container =
+          mode === 'interactive'
+            ? renderToolLine(tool, {}, {}, 'ar')
+            : renderToolGroup(
+                [tool],
+                {},
+                undefined,
+                'document',
+                undefined,
+                undefined,
+                'ar',
+              );
+        const row = container.querySelector(
+          '[class*="lineOutput"], pre[dir="auto"]',
+        );
+        expect(row?.textContent).toContain('نتيجة عربية');
+        expect(row?.getAttribute('dir')).toBe('auto');
+      }
+    },
+  );
 
   it('keeps the quota notice auto-direction in the todo fallback row', () => {
     const container = renderToolLine(
@@ -319,7 +354,7 @@ function renderToolGroup(
     | boolean = 'interactive',
   onOpenSubagent?: (tool: ACPToolCall) => void,
   onOpenMonitor?: (tool: ACPToolCall) => Promise<boolean>,
-  language: 'en' | 'zh-CN' | 'zh-TW' = 'en',
+  language: 'en' | 'zh-CN' | 'zh-TW' | 'ar' = 'en',
   generateContent?: SessionContentGenerator,
   mcpAppHostUrl?: string,
   documentExpanded = true,

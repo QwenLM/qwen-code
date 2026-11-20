@@ -1800,10 +1800,7 @@ export const ToolLine = memo(function ToolLine({
         isTodo &&
         !hasTodoList &&
         result && (
-          <div
-            className={styles.lineOutput}
-            dir={quotaDisplay ? 'auto' : 'ltr'}
-          >
+          <div className={styles.lineOutput} dir="auto">
             {renderWithSessionLinks(result, transcriptRenderMode)}
           </div>
         )}
@@ -1844,7 +1841,7 @@ export const ToolLine = memo(function ToolLine({
                 ? `${styles.lineOutput} ${styles.expandedLineOutput}`
                 : styles.lineOutput
             }
-            dir={quotaDisplay ? 'auto' : 'ltr'}
+            dir="auto"
           >
             {renderWithSessionLinks(result, transcriptRenderMode)}
           </div>

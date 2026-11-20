@@ -2031,18 +2031,27 @@ function TaskDetail({
 
       {task.kind === 'shell' && (
         <>
-          <DetailField label={t('tasks.detail.workingDir')} value={task.cwd} />
+          <DetailField
+            label={t('tasks.detail.workingDir')}
+            value={task.cwd}
+            machine
+          />
           {task.outputFile && (
             <DetailField
               label={t('tasks.detail.outputFile')}
               value={task.outputFile}
+              machine
             />
           )}
         </>
       )}
 
       {task.kind === 'monitor' && (
-        <DetailField label={t('tasks.detail.command')} value={task.command} />
+        <DetailField
+          label={t('tasks.detail.command')}
+          value={task.command}
+          machine
+        />
       )}
 
       {task.kind === 'agent' && task.subagentType && (
@@ -2125,6 +2134,7 @@ function TaskDetail({
         <DetailField
           label={t('tasks.detail.outputFile')}
           value={task.outputFile}
+          machine
         />
       )}
 
@@ -2179,11 +2189,21 @@ function TaskDetail({
   );
 }
 
-function DetailField({ label, value }: { label: string; value: string }) {
+function DetailField({
+  label,
+  value,
+  machine = false,
+}: {
+  label: string;
+  value: string;
+  machine?: boolean;
+}) {
   return (
     <div className={styles.detailField}>
       <div className={styles.detailFieldLabel}>{label}</div>
-      <div className={styles.detailContent}>{value}</div>
+      <div className={styles.detailContent} dir={machine ? 'ltr' : undefined}>
+        {value}
+      </div>
     </div>
   );
 }

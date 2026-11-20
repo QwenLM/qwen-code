@@ -38,6 +38,9 @@ const LTR_CODE_SURFACES: Array<[string, string]> = [
 // pinning a localized sibling fails here too.
 const LTR_MACHINE_RENDERS: Array<[string, string, string, number]> = [
   ['./messages/TasksStatusMessage.tsx', 'div', 'shellFieldValue', 2],
+  ['./messages/MemoryMessage.tsx', 'div', 'detailPath', 1],
+  ['./messages/ModelManagementSection.tsx', 'bdi', 'modelId', 1],
+  ['./messages/ModelManagementSection.tsx', 'bdi', 'modelBaseUrl', 1],
   ['./messages/tools/ShellToolOutput.tsx', 'pre', 'shellFailure', 1],
   ['./messages/tools/ShellToolOutput.tsx', 'pre', 'shellOutput', 2],
   ['./DesktopRelayControl.tsx', 'code', 'font-mono', 2],

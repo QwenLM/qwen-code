@@ -224,6 +224,30 @@ it('keeps polling workflow tasks when an enabled panel opens empty', async () =>
 });
 
 describe('TasksStatusMessage monitor details', () => {
+  it('pins explicit machine details but not localized agent type in Arabic documents', () => {
+    const container = renderPanel(
+      [
+        agentTask('agent-rtl', { outputFile: '/tmp/نتيجة/output.json' }),
+        monitorTask({ command: 'tail -f /tmp/سجل/server.log' }),
+      ],
+      { renderMode: 'document', language: 'ar' },
+    );
+    const values = Array.from(
+      container.querySelectorAll('[class*="detailContent"]'),
+    );
+    for (const text of [
+      '/tmp/نتيجة/output.json',
+      'tail -f /tmp/سجل/server.log',
+    ]) {
+      expect(
+        values.find((value) => value.textContent === text)?.getAttribute('dir'),
+      ).toBe('ltr');
+    }
+    expect(
+      values.some((value) => value.textContent && !value.hasAttribute('dir')),
+    ).toBe(true);
+  });
+
   it('renders a complete inert snapshot without polling in document mode', () => {
     vi.useFakeTimers();
     const tasks = Array.from({ length: 10 }, (_, index) =>
