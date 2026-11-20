@@ -982,6 +982,31 @@ describe('TurnBoundaryCompactionEngine', () => {
         firstTurn: backgroundTurn,
         secondTurn: { ...backgroundTurn, taskId: 'task-b' },
       },
+      {
+        name: 'same turnId with different kind',
+        firstTurn: backgroundTurn,
+        secondTurn: { ...backgroundTurn, kind: 'agent' },
+      },
+      {
+        name: 'same turnId with different startedAt',
+        firstTurn: backgroundTurn,
+        secondTurn: { ...backgroundTurn, startedAt: 1001 },
+      },
+      {
+        name: 'first-chunk-only sourceTurnId',
+        firstTurn: backgroundTurn,
+        secondTurn: {
+          turnId: 'background-a',
+          taskId: 'task-a',
+          kind: 'shell',
+          startedAt: 1000,
+        },
+      },
+      {
+        name: 'first-chunk-only label',
+        firstTurn: { ...backgroundTurn, label: 'Background task' },
+        secondTurn: backgroundTurn,
+      },
     ])(
       'keeps background-turn descriptor changes discrete in full and summary replay: $name',
       ({ firstTurn, secondTurn }) => {
