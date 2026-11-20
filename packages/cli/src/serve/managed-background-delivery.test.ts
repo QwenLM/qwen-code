@@ -26,7 +26,10 @@ import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/m
 import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { HostedMonitorSession } from './hosted-monitor-session.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
+import { reattachAndDrainBackgroundDeliveries } from './hosted-background-delivery-recovery.js';
 import {
+  MANAGED_OBSERVATION_PULL_ROUTE,
+  MANAGED_SHELL_PUBLISHER_DETACH_ROUTE,
   MANAGED_SHELL_PUBLISHER_ROUTE,
   ManagedShellPublisherRegistry,
 } from './managed-shell-publisher.js';
@@ -470,4 +473,375 @@ it('keeps the capture in held mode while the publisher is unavailable and resume
     createHash('sha256').update(Buffer.from('part2\n')).digest('hex'),
   );
   expect(manifest.captureId).toBe(prepared.identity.captureId);
+});
+
+it('long-polls observation-pull while held, supersedes older waiters, returns attached when attached, and trims on ackThrough', async () => {
+  const r = await rig({ install: true });
+  const prepared = await r.registry.prepare(
+    r.request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  const sink = prepared.sink as WorkerBackgroundCaptureSink;
+  sink.setStarted(11);
+
+  const workerBase = `http://127.0.0.1:${(worker!.address() as { port: number }).port}`;
+  const headers = {
+    authorization: 'Bearer runtime-token',
+    'cache-control': 'no-store',
+    'content-type': 'application/json',
+    'x-qwen-managed-lease-id': 'lease-a',
+    'x-qwen-managed-lease-epoch': '1',
+  };
+  const pull = async (
+    afterSeq: number,
+    ackThrough = 0,
+    waitMs = 0,
+  ): Promise<Record<string, unknown>> => {
+    const res = await fetch(workerBase + MANAGED_OBSERVATION_PULL_ROUTE.path, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        protocolVersion: 3,
+        toolResult: MANAGED_TOOL_RESULT_PROTOCOL,
+        executionCallId: r.executionCallId,
+        afterSeq,
+        ackThrough,
+        waitMs,
+      }),
+    });
+    expect(res.status).toBe(200);
+    return (await res.json()) as Record<string, unknown>;
+  };
+
+  // Attached run returns immediately with status = attached and no entries.
+  const whileAttached = await pull(0, 0, 5_000);
+  expect(whileAttached['status']).toBe('attached');
+  expect(whileAttached['entries']).toEqual([]);
+
+  // Older generation detach is refused; matching generation switches to held.
+  expect((await r.install(2)).status).toBe(200);
+  const staleDetach = await fetch(
+    workerBase + MANAGED_SHELL_PUBLISHER_DETACH_ROUTE.path,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        protocolVersion: 3,
+        toolResult: MANAGED_TOOL_RESULT_PROTOCOL,
+        sessionId: r.key.sessionId,
+        writerGeneration: 1,
+      }),
+    },
+  );
+  expect(staleDetach.status).toBe(409);
+
+  const validDetach = await fetch(
+    workerBase + MANAGED_SHELL_PUBLISHER_DETACH_ROUTE.path,
+    {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        protocolVersion: 3,
+        toolResult: MANAGED_TOOL_RESULT_PROTOCOL,
+        sessionId: r.key.sessionId,
+        writerGeneration: 2,
+      }),
+    },
+  );
+  expect(validDetach.status).toBe(200);
+  expect(sink.run.deliveryMode).toBe('held');
+
+  // First long-poll waits; a second long-poll immediately supersedes the first.
+  const olderPull = pull(0, 0, 5_000);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const newerPull = pull(0, 0, 5_000);
+  expect((await olderPull)['status']).toBe('superseded');
+
+  // Writing output while held wakes the active long poll without waiting 5s.
+  await sink.write('stdout', Buffer.from('staged-line\n'));
+  await sink.finish('stdout', true);
+  const batch = await newerPull;
+  expect(batch['status']).toBe('held');
+  const entries = batch['entries'] as Array<{ deliverySeq: number }>;
+  expect(entries.length).toBe(1);
+  expect(entries[0]!.deliverySeq).toBe(1);
+  expect(sink.run.pendingCount).toBe(1);
+
+  // Next pull carries ackThrough = 1, trimming the outbox on the worker.
+  const acked = await pull(1, 1, 0);
+  expect(acked['ackedThrough']).toBe(1);
+  expect(sink.run.pendingCount).toBe(0);
+});
+
+it('re-attaches before draining staged deliveries without gaps or duplicate commits across suspension', async () => {
+  const r = await rig({ install: true });
+  const runtimeSessionId = 'rt-session-1';
+  const routeRef = await session!.resources.publish(
+    'managed-tool-input',
+    Buffer.from(
+      JSON.stringify({
+        harnessSessionId: r.key.sessionId,
+        runtimeSessionId,
+      }),
+      'utf8',
+    ),
+  );
+  const defRef = await session!.resources.publish(
+    'managed-tool-definition',
+    Buffer.from(JSON.stringify({ name: 'shell' }), 'utf8'),
+  );
+  const activation = session!.activation;
+  await session!.authority.appendExecutionEvent(
+    {
+      operation: 'toolIntent',
+      commandId: 'intent:' + r.executionCallId,
+      sessionKey: r.key,
+      contentDigest: routeRef.digest,
+    },
+    (sequence) => ({
+      v: 1,
+      sequence,
+      eventId: 'intent:' + r.executionCallId,
+      sessionKey: r.key,
+      kind: 'tool.intent',
+      occurredAt: Date.now(),
+      subject: {
+        type: 'activation',
+        scopeId: activation.activationId,
+        ...activation,
+      },
+      payload: {
+        executionCallId: r.executionCallId,
+        batchId: 'batch:' + r.executionCallId,
+        ordinal: 0,
+        toolDefinitionRef: defRef,
+        argsRef: routeRef,
+        outcomeSource: 'runtime',
+      },
+    }),
+    { class: 'harness', activation },
+  );
+
+  const prepared = await r.registry.prepare(
+    r.request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  const sink = prepared.sink as WorkerBackgroundCaptureSink;
+  sink.setStarted(21);
+
+  // Entry 1 lands directly on the first Harness publisher (generation 1).
+  await sink.write('stdout', Buffer.from('direct-1\n'));
+  await sink.finish('stdout', true);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  expect(sink.run.lastApplied).toBe(1);
+
+  // Suspend: detach generation 1 and close the first Harness publisher.
+  const workerBase = `http://127.0.0.1:${(worker!.address() as { port: number }).port}`;
+  const workerHeaders = {
+    authorization: 'Bearer runtime-token',
+    'cache-control': 'no-store',
+    'content-type': 'application/json',
+    'x-qwen-managed-lease-id': 'lease-a',
+    'x-qwen-managed-lease-epoch': '1',
+  };
+  await fetch(workerBase + MANAGED_SHELL_PUBLISHER_DETACH_ROUTE.path, {
+    method: 'POST',
+    headers: workerHeaders,
+    body: JSON.stringify({
+      protocolVersion: 3,
+      toolResult: MANAGED_TOOL_RESULT_PROTOCOL,
+      sessionId: r.key.sessionId,
+      writerGeneration: 1,
+    }),
+  });
+  await publisher!.close();
+  publisher = undefined;
+
+  // While suspended, worker produces stderr output (entry 2), which the Broker
+  // pulls, stores resources into the Session resource store, and stages without
+  // inline bytesBase64.
+  await sink.write('stderr', Buffer.from('staged-2\n'));
+  await sink.finish('stderr', true);
+  const pullRes = await fetch(
+    workerBase + MANAGED_OBSERVATION_PULL_ROUTE.path,
+    {
+      method: 'POST',
+      headers: workerHeaders,
+      body: JSON.stringify({
+        protocolVersion: 3,
+        toolResult: MANAGED_TOOL_RESULT_PROTOCOL,
+        executionCallId: r.executionCallId,
+        afterSeq: 0,
+        ackThrough: 0,
+        waitMs: 0,
+      }),
+    },
+  );
+  const pulled = (await pullRes.json()) as {
+    entries: Array<
+      Record<string, unknown> & {
+        deliverySeq: number;
+        resources: Array<{
+          ref: ManagedSessionDurableRef;
+          bytesBase64: string;
+        }>;
+      }
+    >;
+  };
+  expect(pulled.entries.map((e) => e.deliverySeq)).toEqual([2]);
+  const stagedRows: Array<Record<string, unknown>> = [];
+  for (const entry of pulled.entries) {
+    for (const resItem of entry.resources) {
+      await r.resources.publish(
+        resItem.ref.kind,
+        Buffer.from(resItem.bytesBase64, 'base64'),
+        resItem.ref.resourceId,
+      );
+    }
+    stagedRows.push({ ...entry, resources: [] });
+  }
+  // Acknowledge stagedThrough = 2 to the worker.
+  await fetch(workerBase + MANAGED_OBSERVATION_PULL_ROUTE.path, {
+    method: 'POST',
+    headers: workerHeaders,
+    body: JSON.stringify({
+      protocolVersion: 3,
+      toolResult: MANAGED_TOOL_RESULT_PROTOCOL,
+      executionCallId: r.executionCallId,
+      afterSeq: 2,
+      ackThrough: 2,
+      waitMs: 0,
+    }),
+  });
+
+  // Also enqueue terminal (entry 3) in the worker's outbox BEFORE re-attach:
+  // the moment registerPublisher(gen 2) lands, the worker immediately pushes
+  // entry 3 while the Harness is still draining entry 2!
+  sink.setProcessResult({
+    exitCode: 0,
+    signal: null,
+    rawOutput: Buffer.from('direct-1\n'),
+    output: 'direct-1\n',
+    error: null,
+    aborted: false,
+    pid: 21,
+    executionMethod: 'child_process',
+  });
+  const envelopePromise = sink.finalize('success', []);
+
+  // Mock Broker HTTP server forwarding publisher re-attach to worker and
+  // serving staged-deliveries:list + staged-deliveries:acknowledge.
+  const ackedCalls: Array<{ executionCallId: string; throughSeq: number }> = [];
+  const brokerApp = express();
+  brokerApp.use(express.json());
+  brokerApp.post(
+    `/internal/runtime-broker/v1/tool-sessions/${runtimeSessionId}:publisher`,
+    async (req, res) => {
+      const forward = await fetch(
+        workerBase + MANAGED_SHELL_PUBLISHER_ROUTE.path,
+        {
+          method: 'POST',
+          headers: workerHeaders,
+          body: JSON.stringify({
+            protocolVersion: 3,
+            toolResult: MANAGED_TOOL_RESULT_PROTOCOL,
+            sessionId: r.key.sessionId,
+            publisher: req.body.publisher,
+            writerGeneration: req.body.writerGeneration,
+          }),
+        },
+      );
+      const data = (await forward.json()) as Record<string, unknown>;
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        protocolVersion: 1,
+        harnessSessionId: r.key.sessionId,
+        runtimeSessionId,
+        installed: true,
+        bindingGeneration: '1',
+        observation: data['observation'],
+        observedRuns: data['observedRuns'],
+      });
+    },
+  );
+  brokerApp.post(
+    `/internal/runtime-broker/v1/harness-sessions/${r.key.sessionId}/staged-deliveries/list`,
+    async (_req, res) => {
+      // Delay list slightly so the worker's live push of entry 3 arrives at
+      // the new publisher BEFORE staged entry 2 finishes draining.
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        protocolVersion: 1,
+        harnessSessionId: r.key.sessionId,
+        entries: stagedRows,
+      });
+    },
+  );
+  brokerApp.post(
+    `/internal/runtime-broker/v1/harness-sessions/${r.key.sessionId}/staged-deliveries/acknowledge`,
+    (req, res) => {
+      ackedCalls.push({
+        executionCallId: req.body.executionCallId,
+        throughSeq: req.body.throughSeq,
+      });
+      stagedRows.splice(
+        0,
+        stagedRows.length,
+        ...stagedRows.filter(
+          (row) => (row['deliverySeq'] as number) > req.body.throughSeq,
+        ),
+      );
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        protocolVersion: 1,
+        harnessSessionId: r.key.sessionId,
+        acknowledged: true,
+      });
+    },
+  );
+  server = createServer(brokerApp);
+  await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
+  const brokerPort = (server.address() as { port: number }).port;
+
+  const lane: {
+    publisher?: HostedShellPublisher;
+    readonly resources: DurableToolResultResourceStore;
+    readonly assertWritable: () => Promise<void>;
+  } = {
+    resources: r.resources,
+    assertWritable: async () => {},
+  };
+
+  await reattachAndDrainBackgroundDeliveries({
+    managed: session!,
+    lane,
+    writerOwner: {
+      owner: async () => ({ writerId: 'writer-2', writerGeneration: 2 }),
+    },
+    brokerOptions: {
+      baseUrl: `http://127.0.0.1:${brokerPort}`,
+      token: 'broker-token',
+    },
+    childRuns: r.orchestrator,
+    monitors: r.monitors,
+  });
+  publisher = lane.publisher;
+
+  const envelope = await envelopePromise;
+  const receipt = await r.registry.accept(prepared.identity, envelope);
+  expect(receipt.deliveryStatus).toBe('blocked');
+  expect(ackedCalls).toEqual([
+    { executionCallId: r.executionCallId, throughSeq: 2 },
+  ]);
+  expect(stagedRows).toEqual([]);
+
+  const record = r.orchestrator.record(r.executionCallId)!;
+  expect(record.run.state).toBe('settled');
+  expect(record.exitCode).toBe(0);
+  const manifest = parseToolResultManifestBytes(
+    await r.resources.read(record.outputRef!),
+  );
+  const stdout = manifest.contents.find((c) => c.streamId === 'stdout')!;
+  const stderr = manifest.contents.find((c) => c.streamId === 'stderr')!;
+  expect(stdout.byteLength).toBe(Buffer.byteLength('direct-1\n'));
+  expect(stderr.byteLength).toBe(Buffer.byteLength('staged-2\n'));
 });

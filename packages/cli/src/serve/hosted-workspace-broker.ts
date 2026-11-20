@@ -5,6 +5,10 @@
  */
 
 import {
+  parseManagedDeliveryEntry,
+  type ManagedDeliveryEntry,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-delivery-entry.js';
+import {
   parseManagedRuntimeProviderResult,
   type ManagedWorkspaceContextFile,
 } from './managed-runtime-provider-protocol.js';
@@ -460,6 +464,7 @@ export class HostedWorkspaceBroker {
   /** Phase 3b: set by the latest registerPublisher when the worker signals
    * it owns the background capture and Monitor policy. */
   observationOwned = false;
+  observedRuns: Readonly<Record<string, number>> = {};
 
   async registerPublisher(
     publisher: {
@@ -485,7 +490,80 @@ export class HostedWorkspaceBroker {
       throw new Error('Runtime did not install the original Shell publisher.');
     }
     this.observationOwned = response['observation'] === true;
+    const rawRuns = response['observedRuns'];
+    if (rawRuns && typeof rawRuns === 'object' && !Array.isArray(rawRuns)) {
+      const parsed: Record<string, number> = {};
+      for (const [id, seq] of Object.entries(
+        rawRuns as Record<string, unknown>,
+      )) {
+        const value = Number(seq);
+        if (Number.isSafeInteger(value) && value >= 0) {
+          parsed[id] = value;
+        }
+      }
+      this.observedRuns = parsed;
+    } else {
+      this.observedRuns = {};
+    }
     return generation;
+  }
+
+  async detachPublisher(
+    writerGeneration: number,
+    appliedThrough?: Readonly<Record<string, number>>,
+  ): Promise<void> {
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/publisher/detach`,
+      {
+        writerGeneration,
+        ...(appliedThrough ? { appliedThrough } : {}),
+      },
+    );
+    if (response['detached'] !== true) {
+      throw new Error('Runtime did not detach the Shell publisher.');
+    }
+  }
+
+  async listStagedDeliveries(writer: {
+    readonly writerId: string;
+    readonly writerGeneration: number;
+  }): Promise<ManagedDeliveryEntry[]> {
+    const response = await this.request(
+      `/harness-sessions/${encodeURIComponent(this.key.sessionId)}/staged-deliveries/list`,
+      {
+        writerId: writer.writerId,
+        writerGeneration: writer.writerGeneration,
+      },
+      true,
+      16 * 1024 * 1024,
+    );
+    const entries = response['entries'];
+    if (!Array.isArray(entries)) {
+      throw new Error('Runtime Broker staged deliveries response is invalid.');
+    }
+    return entries.map(parseManagedDeliveryEntry);
+  }
+
+  async acknowledgeStagedDeliveries(
+    writer: {
+      readonly writerId: string;
+      readonly writerGeneration: number;
+    },
+    executionCallId: string,
+    throughSeq: number,
+  ): Promise<void> {
+    const response = await this.harnessRequest(
+      `/harness-sessions/${encodeURIComponent(this.key.sessionId)}/staged-deliveries/acknowledge`,
+      {
+        writerId: writer.writerId,
+        writerGeneration: writer.writerGeneration,
+        executionCallId,
+        throughSeq,
+      },
+    );
+    if (response['acknowledged'] !== true) {
+      throw new Error('Runtime Broker did not acknowledge staged deliveries.');
+    }
   }
 
   async prepare(

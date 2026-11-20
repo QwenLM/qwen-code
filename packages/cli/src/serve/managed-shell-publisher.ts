@@ -41,7 +41,25 @@ export const MANAGED_SHELL_PUBLISHER_ROUTE = Object.freeze({
   path: '/internal/managed-runtime/v3/publisher',
   protocolVersion: 3,
   requestBodyLimitBytes: 16 * 1024,
+  responseBodyLimitBytes: 64 * 1024,
+  cacheControl: 'no-store',
+} as const);
+export const MANAGED_SHELL_PUBLISHER_DETACH_ROUTE = Object.freeze({
+  key: 'publisherDetach',
+  method: 'POST',
+  path: '/internal/managed-runtime/v3/publisher/detach',
+  protocolVersion: 3,
+  requestBodyLimitBytes: 16 * 1024,
   responseBodyLimitBytes: 16 * 1024,
+  cacheControl: 'no-store',
+} as const);
+export const MANAGED_OBSERVATION_PULL_ROUTE = Object.freeze({
+  key: 'observationPull',
+  method: 'POST',
+  path: '/internal/managed-runtime/v3/observations/pull',
+  protocolVersion: 3,
+  requestBodyLimitBytes: 16 * 1024,
+  responseBodyLimitBytes: 16 * 1024 * 1024,
   cacheControl: 'no-store',
 } as const);
 const PREFIX = { protocolVersion: 3, toolResult: MANAGED_TOOL_RESULT_PROTOCOL };
@@ -492,14 +510,22 @@ export class ManagedShellPublisherRegistry
           }
         }
         this.sessions.set(sessionId, publisher);
+        const observedRuns: Record<string, number> = {};
         if (writerGeneration !== undefined) {
           this.sessionGenerations.set(sessionId, writerGeneration);
+        }
+        if (this.observation.enabled) {
+          const effectiveGen =
+            writerGeneration ?? this.sessionGenerations.get(sessionId) ?? 1;
           for (const {
             sessionId: runSession,
             run,
           } of this.workerRuns.values()) {
             if (runSession === sessionId) {
-              run.attach(publisher, writerGeneration);
+              observedRuns[run.executionCallId] = run.lastApplied;
+              if (writerGeneration !== undefined) {
+                run.attach(publisher, effectiveGen);
+              }
             }
           }
         }
@@ -509,11 +535,195 @@ export class ManagedShellPublisherRegistry
           installed: true,
           // Phase 3b: tells the Harness this worker owns the background
           // capture and Monitor policy, so it bypasses its own loop.
-          ...(this.observation.enabled ? { observation: true } : {}),
+          ...(this.observation.enabled
+            ? { observation: true, observedRuns }
+            : {}),
         });
       },
       handleManagedRuntimeJsonError,
     );
+
+    app.post(
+      MANAGED_SHELL_PUBLISHER_DETACH_ROUTE.path,
+      managedRuntimeNoStore,
+      authorizeManagedRuntime(identity),
+      managedRuntimeJsonBody(
+        MANAGED_SHELL_PUBLISHER_DETACH_ROUTE.requestBodyLimitBytes,
+      ),
+      (req: Request, res: Response) => {
+        let sessionId: string;
+        let writerGeneration: number | undefined;
+        try {
+          const keys = Object.keys(req.body ?? {});
+          const body = publisherFields(
+            req.body,
+            keys.includes('writerGeneration')
+              ? [
+                  'protocolVersion',
+                  'toolResult',
+                  'sessionId',
+                  'writerGeneration',
+                ]
+              : ['protocolVersion', 'toolResult', 'sessionId'],
+          );
+          if (
+            body['protocolVersion'] !== 3 ||
+            body['toolResult'] !== MANAGED_TOOL_RESULT_PROTOCOL ||
+            typeof body['sessionId'] !== 'string' ||
+            !body['sessionId'] ||
+            body['sessionId'].length > 512
+          ) {
+            throw new Error('Invalid detach.');
+          }
+          sessionId = body['sessionId'];
+          if ('writerGeneration' in body) {
+            const gen = Number(body['writerGeneration']);
+            if (!Number.isSafeInteger(gen) || gen < 1) {
+              throw new Error('Invalid writer generation.');
+            }
+            writerGeneration = gen;
+          }
+        } catch {
+          res.status(400).json({ code: 'managed_runtime_attestation_invalid' });
+          return;
+        }
+        if (
+          !available(sessionId) ||
+          !this.detachSession(sessionId, writerGeneration)
+        ) {
+          res.status(409).json({ code: 'managed_runtime_identity_conflict' });
+          return;
+        }
+        res.json({
+          ...PREFIX,
+          sessionId,
+          detached: true,
+        });
+      },
+      handleManagedRuntimeJsonError,
+    );
+
+    app.post(
+      MANAGED_OBSERVATION_PULL_ROUTE.path,
+      managedRuntimeNoStore,
+      authorizeManagedRuntime(identity),
+      managedRuntimeJsonBody(
+        MANAGED_OBSERVATION_PULL_ROUTE.requestBodyLimitBytes,
+      ),
+      (req: Request, res: Response) => {
+        let executionCallId: string;
+        let afterSeq: number;
+        let ackThrough = 0;
+        let waitMs = 0;
+        let maxEntries = 64;
+        try {
+          const raw = publisherObject(req.body);
+          for (const key of Object.keys(raw)) {
+            if (
+              ![
+                'protocolVersion',
+                'toolResult',
+                'executionCallId',
+                'afterSeq',
+                'ackThrough',
+                'waitMs',
+                'maxEntries',
+              ].includes(key)
+            ) {
+              throw new Error('Unexpected observation pull field.');
+            }
+          }
+          if (
+            raw['protocolVersion'] !== 3 ||
+            raw['toolResult'] !== MANAGED_TOOL_RESULT_PROTOCOL ||
+            typeof raw['executionCallId'] !== 'string' ||
+            !raw['executionCallId'] ||
+            raw['executionCallId'].length > 512
+          ) {
+            throw new Error('Invalid executionCallId.');
+          }
+          executionCallId = raw['executionCallId'];
+          afterSeq = Number(raw['afterSeq']);
+          if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) {
+            throw new Error('Invalid afterSeq.');
+          }
+          if (raw['ackThrough'] !== undefined) {
+            ackThrough = Number(raw['ackThrough']);
+            if (!Number.isSafeInteger(ackThrough) || ackThrough < 0) {
+              throw new Error('Invalid ackThrough.');
+            }
+          }
+          if (raw['waitMs'] !== undefined) {
+            waitMs = Number(raw['waitMs']);
+            if (
+              !Number.isSafeInteger(waitMs) ||
+              waitMs < 0 ||
+              waitMs > 30_000
+            ) {
+              throw new Error('Invalid waitMs.');
+            }
+          }
+          if (raw['maxEntries'] !== undefined) {
+            maxEntries = Number(raw['maxEntries']);
+            if (
+              !Number.isSafeInteger(maxEntries) ||
+              maxEntries < 1 ||
+              maxEntries > 256
+            ) {
+              throw new Error('Invalid maxEntries.');
+            }
+          }
+        } catch {
+          res.status(400).json({ code: 'managed_runtime_attestation_invalid' });
+          return;
+        }
+        const workerRun = this.workerRuns.get(executionCallId);
+        if (!workerRun) {
+          res.json({
+            ...PREFIX,
+            executionCallId,
+            status: 'missing',
+            ackedThrough: 0,
+            closed: true,
+            entries: [],
+          });
+          return;
+        }
+        void workerRun.run
+          .pullForStage({ afterSeq, ackThrough, waitMs, maxEntries })
+          .then((batch) => {
+            res.json({
+              ...PREFIX,
+              executionCallId,
+              status: batch.status,
+              ackedThrough: batch.ackedThrough,
+              closed: batch.closed,
+              entries: batch.entries,
+            });
+          });
+      },
+      handleManagedRuntimeJsonError,
+    );
+  }
+
+  detachSession(sessionId: string, writerGeneration?: number): boolean {
+    const previousGeneration = this.sessionGenerations.get(sessionId) ?? 0;
+    if (
+      writerGeneration !== undefined &&
+      writerGeneration < previousGeneration
+    ) {
+      return false;
+    }
+    if (writerGeneration !== undefined) {
+      this.sessionGenerations.set(sessionId, writerGeneration);
+    }
+    this.sessions.delete(sessionId);
+    for (const { sessionId: runSession, run } of this.workerRuns.values()) {
+      if (runSession === sessionId) {
+        run.detach(writerGeneration);
+      }
+    }
+    return true;
   }
 
   async prepare(request: LocalShellCaptureRequest): Promise<{

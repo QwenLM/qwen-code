@@ -131,6 +131,15 @@ function entryBytes(entry: ManagedDeliveryEntry): number {
 
 export type DeliveryMode = 'attached' | 'held';
 
+export type ObservationPullStatus = 'held' | 'attached' | 'superseded';
+
+export interface ObservationPullBatch {
+  readonly status: ObservationPullStatus;
+  readonly ackedThrough: number;
+  readonly closed: boolean;
+  readonly entries: readonly ManagedDeliveryEntry[];
+}
+
 /**
  * One background run's ordered outbox and its delivery state. The worker
  * pushes to the resident Harness while attached; a failed push switches to
@@ -141,6 +150,7 @@ export class BackgroundDeliveryRun {
   private nextSeq = 1;
   private outboxBytes = 0;
   private appliedThrough = 0;
+  private harnessAppliedThrough = 0;
   private stagedThrough = 0;
   private mode: DeliveryMode = 'held';
   private descriptor: ShellPublisherDescriptor | undefined;
@@ -152,6 +162,14 @@ export class BackgroundDeliveryRun {
     (receipt: ToolResultAcknowledgement) => void
   > = [];
   private readonly roomWaiters: Array<() => void> = [];
+  private stageWaiter:
+    | {
+        readonly afterSeq: number;
+        readonly maxEntries: number;
+        readonly timer: ReturnType<typeof setTimeout>;
+        readonly resolve: (batch: ObservationPullBatch) => void;
+      }
+    | undefined;
   private closed = false;
 
   constructor(
@@ -169,12 +187,20 @@ export class BackgroundDeliveryRun {
     return this.appliedThrough;
   }
 
+  get lastHarnessApplied(): number {
+    return this.harnessAppliedThrough;
+  }
+
   get lastStaged(): number {
     return this.stagedThrough;
   }
 
   get pendingCount(): number {
     return this.outbox.length;
+  }
+
+  get isClosedOrTerminal(): boolean {
+    return this.closed || this.terminalEmitted;
   }
 
   /** A newer (or same) writer generation replaces the publisher; older refused. */
@@ -186,13 +212,25 @@ export class BackgroundDeliveryRun {
     this.descriptor = descriptor;
     this.writerGeneration = writerGeneration;
     this.mode = 'attached';
+    this.finishStageWaiter('attached', []);
     void this.pushPending();
     return true;
   }
 
-  detach(): void {
+  detach(writerGeneration?: number): boolean {
+    if (
+      writerGeneration !== undefined &&
+      writerGeneration < this.writerGeneration
+    ) {
+      return false;
+    }
+    if (writerGeneration !== undefined) {
+      this.writerGeneration = writerGeneration;
+    }
     this.mode = 'held';
     this.descriptor = undefined;
+    this.wakeStageWaiterIfReady();
+    return true;
   }
 
   /** Resolves once the outbox has room for `size` more bytes. The capture's
@@ -214,7 +252,11 @@ export class BackgroundDeliveryRun {
     const size = entryBytes(entry);
     this.outbox.push(entry);
     this.outboxBytes += size;
-    void this.pushPending();
+    if (this.mode === 'held') {
+      this.wakeStageWaiterIfReady();
+    } else {
+      void this.pushPending();
+    }
   }
 
   nextDeliverySeq(): number {
@@ -339,6 +381,7 @@ export class BackgroundDeliveryRun {
         // the entries for the next consumer. Any waiter on the terminal
         // receipt is released as blocked rather than hanging.
         this.mode = 'held';
+        this.wakeStageWaiterIfReady();
         for (const waiter of this.receiptWaiters.splice(0)) {
           waiter({
             executionCallId: this.executionCallId,
@@ -354,12 +397,12 @@ export class BackgroundDeliveryRun {
     return this.pushing;
   }
 
-  private acknowledge(appliedThrough: number): void {
-    if (appliedThrough <= this.appliedThrough) return;
-    this.appliedThrough = appliedThrough;
+  private advanceAckedPrefix(ackedThrough: number): void {
+    if (ackedThrough <= this.appliedThrough) return;
+    this.appliedThrough = ackedThrough;
     while (
       this.outbox.length > 0 &&
-      this.outbox[0].deliverySeq <= appliedThrough
+      this.outbox[0].deliverySeq <= ackedThrough
     ) {
       const dropped = this.outbox.shift()!;
       this.outboxBytes -= entryBytes(dropped);
@@ -370,10 +413,131 @@ export class BackgroundDeliveryRun {
     }
   }
 
+  private acknowledge(appliedThrough: number): void {
+    if (appliedThrough > this.harnessAppliedThrough) {
+      this.harnessAppliedThrough = appliedThrough;
+    }
+    this.advanceAckedPrefix(appliedThrough);
+  }
+
   /** The Broker's staging acknowledgement (Slice 2). */
   acknowledgeStaged(stagedThrough: number): void {
     if (stagedThrough > this.stagedThrough) this.stagedThrough = stagedThrough;
-    this.acknowledge(stagedThrough);
+    this.advanceAckedPrefix(stagedThrough);
+  }
+
+  private selectStageBatch(
+    afterSeq: number,
+    maxEntries: number,
+  ): ManagedDeliveryEntry[] {
+    const cursor = Math.max(afterSeq, this.stagedThrough);
+    const batch: ManagedDeliveryEntry[] = [];
+    let batchBytes = 0;
+    for (const entry of this.outbox) {
+      if (entry.deliverySeq <= cursor) continue;
+      const size = entryBytes(entry);
+      if (
+        batch.length > 0 &&
+        (batch.length >= maxEntries ||
+          batchBytes + size > MANAGED_DELIVERY_REQUEST_LIMIT_BYTES)
+      ) {
+        break;
+      }
+      batch.push(entry);
+      batchBytes += size;
+      if (
+        batch.length >= maxEntries ||
+        batchBytes > MANAGED_DELIVERY_REQUEST_LIMIT_BYTES
+      ) {
+        break;
+      }
+    }
+    return batch;
+  }
+
+  private finishStageWaiter(
+    status: ObservationPullStatus,
+    entries: readonly ManagedDeliveryEntry[],
+  ): void {
+    const waiter = this.stageWaiter;
+    if (!waiter) return;
+    this.stageWaiter = undefined;
+    clearTimeout(waiter.timer);
+    waiter.resolve({
+      status,
+      ackedThrough: this.appliedThrough,
+      closed: this.isClosedOrTerminal && this.outbox.length === 0,
+      entries,
+    });
+  }
+
+  private wakeStageWaiterIfReady(): void {
+    const waiter = this.stageWaiter;
+    if (!waiter) return;
+    if (this.mode === 'attached') {
+      this.finishStageWaiter('attached', []);
+      return;
+    }
+    const batch = this.selectStageBatch(waiter.afterSeq, waiter.maxEntries);
+    if (batch.length > 0 || this.isClosedOrTerminal) {
+      this.finishStageWaiter('held', batch);
+    }
+  }
+
+  /**
+   * Lease-fenced Broker staging pull. Keeps only the newest waiting long poll
+   * per run so a fresh pull immediately supersedes an older waiting pull.
+   */
+  pullForStage(params: {
+    readonly afterSeq: number;
+    readonly ackThrough?: number;
+    readonly waitMs?: number;
+    readonly maxEntries?: number;
+  }): Promise<ObservationPullBatch> {
+    this.finishStageWaiter('superseded', []);
+    if (params.ackThrough !== undefined && params.ackThrough > 0) {
+      this.acknowledgeStaged(params.ackThrough);
+    }
+    const maxEntries = Math.max(1, Math.min(params.maxEntries ?? 64, 256));
+    if (this.mode === 'attached') {
+      return Promise.resolve({
+        status: 'attached',
+        ackedThrough: this.appliedThrough,
+        closed: this.isClosedOrTerminal && this.outbox.length === 0,
+        entries: [],
+      });
+    }
+    const immediate = this.selectStageBatch(params.afterSeq, maxEntries);
+    const waitMs = Math.max(0, Math.min(params.waitMs ?? 0, 30_000));
+    if (immediate.length > 0 || waitMs === 0 || this.isClosedOrTerminal) {
+      return Promise.resolve({
+        status: 'held',
+        ackedThrough: this.appliedThrough,
+        closed: this.isClosedOrTerminal && this.outbox.length === 0,
+        entries: immediate,
+      });
+    }
+    return new Promise<ObservationPullBatch>((resolve) => {
+      const timer = setTimeout(() => {
+        if (this.stageWaiter?.resolve === resolve) {
+          const entries =
+            this.mode === 'held'
+              ? this.selectStageBatch(params.afterSeq, maxEntries)
+              : [];
+          this.finishStageWaiter(
+            this.mode === 'attached' ? 'attached' : 'held',
+            entries,
+          );
+        }
+      }, waitMs);
+      if (typeof timer.unref === 'function') timer.unref();
+      this.stageWaiter = {
+        afterSeq: params.afterSeq,
+        maxEntries,
+        timer,
+        resolve,
+      };
+    });
   }
 
   /** Resolves with the terminal receipt once the terminal entry is applied. */
@@ -400,6 +564,7 @@ export class BackgroundDeliveryRun {
     this.closed = true;
     this.mode = 'held';
     this.descriptor = undefined;
+    this.wakeStageWaiterIfReady();
     for (const waiter of this.roomWaiters.splice(0)) waiter();
     for (const waiter of this.receiptWaiters.splice(0)) {
       waiter({

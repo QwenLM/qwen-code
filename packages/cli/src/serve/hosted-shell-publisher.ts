@@ -31,9 +31,11 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import {
   parseToolResultEnvelope,
+  parseToolResultManifest,
   type ToolResultEnvelope,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import {
+  MANAGED_DELIVERY_REQUEST_LIMIT_BYTES,
   parseManagedDeliveryEntry,
   type ManagedDeliveryEntry,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-delivery-entry.js';
@@ -48,9 +50,12 @@ import {
 } from './managed-shell-publisher.js';
 
 interface RegisteredCapture {
-  readonly request: LocalShellCaptureRequest;
-  readonly modelCallId: string;
-  readonly admission: ManagedShellResultSession | LocalShellStreamResultSession;
+  readonly request?: LocalShellCaptureRequest;
+  readonly modelCallId?: string;
+  readonly admission?:
+    | ManagedShellResultSession
+    | LocalShellStreamResultSession;
+  readonly restored?: boolean;
   readonly store: ResourceToolResultSegmentStore;
   readonly offsets: { stdout: number; stderr: number };
   readonly ended: { stdout: boolean; stderr: boolean };
@@ -110,6 +115,7 @@ export class HostedShellPublisher {
   /** Phase 3b: the highest contiguous delivery sequence applied per run. */
   private readonly appliedThrough = new Map<string, number>();
   private readonly operations = new Set<Promise<unknown>>();
+  private deliveryGate: Promise<void> | undefined;
   private server?: Server;
   private descriptor?: ShellPublisherDescriptor;
   private closing = false;
@@ -157,7 +163,10 @@ export class HostedShellPublisher {
         next();
       },
       express.json({
-        limit: SHELL_PUBLISHER_BODY_LIMIT,
+        limit: Math.max(
+          SHELL_PUBLISHER_BODY_LIMIT,
+          MANAGED_DELIVERY_REQUEST_LIMIT_BYTES,
+        ),
         strict: true,
         inflate: false,
       }),
@@ -217,6 +226,8 @@ export class HostedShellPublisher {
     const previous = this.captures.get(id);
     if (previous) {
       if (
+        previous.restored ||
+        !previous.request ||
         managedToolDigest(previous.request) !== managedToolDigest(request) ||
         previous.modelCallId !== modelCallId
       )
@@ -276,6 +287,106 @@ export class HostedShellPublisher {
     });
   }
 
+  /**
+   * Restores a reloaded background capture slot for Phase 3b re-attach and
+   * staged-delivery drain without opening a new legacy stream session.
+   */
+  restoreBackgroundCapture(
+    executionCallId: string,
+    recordDomain: 'child_run' | 'monitor_run',
+    lastManifest: ManagedSessionDurableRef | null = null,
+  ): void {
+    if (this.captures.has(executionCallId)) return;
+    this.captures.set(executionCallId, {
+      restored: true,
+      store: new ResourceToolResultSegmentStore(this.resources),
+      offsets: { stdout: 0, stderr: 0 },
+      ended: { stdout: false, stderr: false },
+      background: {
+        lastManifest,
+        recordDomain,
+        remainder: '',
+        decoder: new StringDecoder('utf8'),
+      },
+    });
+  }
+
+  /**
+   * Holds incoming worker delivery pushes while re-attach drains staged rows,
+   * so staged entries commit before live pushes without flipping back to held.
+   */
+  holdDeliveries(): () => void {
+    let release!: () => void;
+    const previous = this.deliveryGate;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const chained = previous ? previous.then(() => current) : current;
+    this.deliveryGate = chained;
+    return () => {
+      release();
+      if (this.deliveryGate === chained) {
+        this.deliveryGate = undefined;
+      }
+    };
+  }
+
+  appliedWatermarks(): Readonly<Record<string, number>> {
+    return Object.fromEntries(this.appliedThrough.entries());
+  }
+
+  async applyStagedDeliveries(
+    stagedEntries: readonly ManagedDeliveryEntry[],
+    observedRuns: Readonly<Record<string, number>>,
+    acknowledgeRun: (
+      executionCallId: string,
+      throughSeq: number,
+    ) => Promise<void>,
+  ): Promise<void> {
+    const byRun = new Map<string, ManagedDeliveryEntry[]>();
+    for (const entry of stagedEntries) {
+      let group = byRun.get(entry.executionCallId);
+      if (!group) {
+        group = [];
+        byRun.set(entry.executionCallId, group);
+      }
+      group.push(entry);
+    }
+    for (const [executionCallId, group] of byRun) {
+      group.sort((a, b) => a.deliverySeq - b.deliverySeq);
+      const capture = this.captures.get(executionCallId);
+      if (!capture?.background) {
+        throw new Error(
+          'Staged delivery names an unregistered background capture: ' +
+            executionCallId,
+        );
+      }
+      let applied =
+        this.appliedThrough.get(executionCallId) ?? group[0].deliverySeq - 1;
+      for (const delivered of group) {
+        if (delivered.deliverySeq <= applied) continue;
+        if (delivered.deliverySeq !== applied + 1) {
+          throw new Error('Staged delivery sequence is not contiguous.');
+        }
+        if (delivered.resources.length > 0) {
+          await this.publishDeliveryResources(delivered);
+        }
+        await this.applyDeliveryEntry(capture, delivered, executionCallId);
+        applied = delivered.deliverySeq;
+        this.appliedThrough.set(executionCallId, applied);
+      }
+      await acknowledgeRun(executionCallId, applied);
+    }
+    for (const [executionCallId, acked] of Object.entries(observedRuns)) {
+      if (Number.isSafeInteger(acked) && acked > 0) {
+        const prev = this.appliedThrough.get(executionCallId) ?? 0;
+        if (acked > prev) {
+          this.appliedThrough.set(executionCallId, acked);
+        }
+      }
+    }
+  }
+
   private async handle(candidate: unknown): Promise<unknown> {
     const body = publisherObject(candidate);
     if (body['operation'] === 'prepare') {
@@ -285,6 +396,9 @@ export class HostedShellPublisher {
       const entry = this.captures.get(String(capture['executionCallId']));
       if (
         !entry ||
+        entry.restored ||
+        !entry.request ||
+        !entry.admission ||
         managedToolDigest(entry.request) !== managedToolDigest(request)
       )
         throw new Error('Unregistered Shell capture.');
@@ -324,7 +438,8 @@ export class HostedShellPublisher {
     }
     const id = body['executionCallId'];
     const entry = typeof id === 'string' ? this.captures.get(id) : undefined;
-    if (!entry?.sink) throw new Error('Shell capture was not prepared.');
+    if (!entry?.sink || !entry.admission)
+      throw new Error('Shell capture was not prepared.');
     await entry.admission.assertWritable();
     const sink = entry.sink;
     if (body['operation'] === 'write') {
@@ -1025,6 +1140,9 @@ export class HostedShellPublisher {
    * from its oldest unacknowledged entry.
    */
   private async applyDelivery(body: Record<string, unknown>): Promise<unknown> {
+    if (this.deliveryGate) {
+      await this.deliveryGate;
+    }
     publisherFields(body, ['operation', 'executionCallId', 'entries']);
     const executionCallId = String(body['executionCallId']);
     const entry = this.captures.get(executionCallId);
@@ -1089,7 +1207,19 @@ export class HostedShellPublisher {
       );
     }
     if (delivered.kind === 'output') {
-      if (owner.startReceiptRef === null) return undefined;
+      if (owner.startReceiptRef === null || owner.run.execution === 'settled') {
+        return undefined;
+      }
+      if (
+        owner.outputRef !== null &&
+        (await this.manifestRevisionAtLeast(
+          owner.outputRef,
+          delivered.manifestRevision,
+        ))
+      ) {
+        background.lastManifest = owner.outputRef;
+        return undefined;
+      }
       if (domain === 'monitor_run') {
         await this.monitors!.advanceOutput(
           executionCallId,
@@ -1107,6 +1237,17 @@ export class HostedShellPublisher {
     if (delivered.kind === 'observation') {
       if (domain !== 'monitor_run' || !this.monitors) {
         throw new Error('Observation delivery requires a monitor_run record.');
+      }
+      if (owner.run.execution === 'settled') {
+        return undefined;
+      }
+      const currentSeq = (owner as { observationSequence: number })
+        .observationSequence;
+      if (delivered.sequence <= currentSeq) {
+        return undefined;
+      }
+      if (delivered.sequence !== currentSeq + 1) {
+        throw new Error('Observation sequence is not contiguous.');
       }
       const input: ManagedSessionInputRequest | undefined =
         delivered.notification && !this.lifecyclePrepared
@@ -1128,22 +1269,63 @@ export class HostedShellPublisher {
       if (input) this.onNotification?.();
       return undefined;
     }
-    // terminal: advance the final manifest, then settle the record.
-    if (delivered.manifestRef && owner.startReceiptRef !== null) {
-      if (domain === 'monitor_run') {
-        await this.monitors!.advanceOutput(
-          executionCallId,
-          delivered.manifestRef,
-        );
-      } else {
-        await this.childRuns!.advanceOutput(
-          executionCallId,
-          delivered.manifestRef,
-        );
+    // terminal: advance the final manifest, then settle the record (idempotent
+    // if an earlier attempt committed before acknowledging).
+    if (
+      delivered.manifestRef &&
+      owner.startReceiptRef !== null &&
+      owner.run.execution !== 'settled'
+    ) {
+      const targetManifest = parseToolResultManifest(
+        JSON.parse(
+          (await this.resources.read(delivered.manifestRef)).toString('utf8'),
+        ),
+      );
+      const alreadyAdvanced =
+        owner.outputRef !== null &&
+        (await this.manifestRevisionAtLeast(
+          owner.outputRef,
+          targetManifest.revision,
+        ));
+      if (!alreadyAdvanced) {
+        if (domain === 'monitor_run') {
+          await this.monitors!.advanceOutput(
+            executionCallId,
+            delivered.manifestRef,
+          );
+        } else {
+          await this.childRuns!.advanceOutput(
+            executionCallId,
+            delivered.manifestRef,
+          );
+        }
       }
       background.lastManifest = delivered.manifestRef;
     }
     entry.envelope = delivered.envelope;
+    if (owner.run.execution === 'settled') {
+      const settledRef =
+        delivered.manifestRef ?? owner.outputRef ?? background.lastManifest;
+      return {
+        executionCallId,
+        manifest: settledRef,
+        deliveryStatus: 'blocked',
+        historyRevision: null,
+        outcomeRef:
+          settledRef ??
+          (await this.session.resources.publish(
+            'managed-tool-outcome',
+            Buffer.from(
+              JSON.stringify({
+                schemaVersion: 1,
+                decision: 'blocked',
+                envelope: delivered.envelope,
+                manifestRef: null,
+              }),
+            ),
+          )),
+      };
+    }
     if (domain === 'monitor_run') {
       if (!this.monitors) {
         throw new Error(
@@ -1203,6 +1385,16 @@ export class HostedShellPublisher {
           ),
         )),
     };
+  }
+
+  private async manifestRevisionAtLeast(
+    ref: ManagedSessionDurableRef,
+    revision: number,
+  ): Promise<boolean> {
+    const manifest = parseToolResultManifest(
+      JSON.parse((await this.resources.read(ref)).toString('utf8')),
+    );
+    return manifest.revision >= revision;
   }
 
   close(): Promise<void> {

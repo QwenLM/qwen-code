@@ -276,6 +276,7 @@ import {
   isHostedConfigScopedOwner,
 } from './hosted-hook-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
+import { reattachAndDrainBackgroundDeliveries } from './hosted-background-delivery-recovery.js';
 import { reconcileNeverStartedChildRuns } from './hosted-never-started-reconcile.js';
 import {
   ChildMessagesPendingError,
@@ -8858,6 +8859,22 @@ export function registerHostedHarnessSessionRoutes(
           resumeModel,
           body?.['cancellationTakeover'] === true,
         );
+      const deliveryRecoveryLane = session.backgroundLane ?? session.shell;
+      if (
+        brokerOptions &&
+        deliveryRecoveryLane &&
+        session.stores?.publication &&
+        !unsettledPromptId(session)
+      ) {
+        await reattachAndDrainBackgroundDeliveries({
+          managed,
+          lane: deliveryRecoveryLane,
+          writerOwner: session.stores.publication,
+          brokerOptions,
+          childRuns: session.childRuns,
+          monitors: session.monitors,
+        });
+      }
       if (
         brokerOptions &&
         hasHostedCleanupDebt(managed) &&
