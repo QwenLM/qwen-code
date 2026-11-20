@@ -1,0 +1,29 @@
+FROM hub.docker.alibaba-inc.com/aone-base-global/data-agent-harness:harness-d3047ffa953e-20261028202631@sha256:b95080f138f3d793fa164145a72e6c91f8777e846132360a8795ac884b01eb6c AS toolchain
+FROM hub.docker.alibaba-inc.com/aone-base-global/node:22-bookworm-slim@sha256:ac60cef2e76f7f817fbf77eb6680abb7362d5ef73691fe2e72ddfd4ae37b858d
+ARG SOURCE_SHA
+ARG RELEASE_ID
+ENV QWEN_INSTALL_PREFIX=/opt/qwen \
+    PATH=/opt/qwen/bin:$PATH \
+    LANG=C.UTF-8
+COPY --from=toolchain /opt/qwen/lib/node_modules/@qwen-code/qwen-code/node_modules/ /opt/qwen/lib/node_modules/@qwen-code/qwen-code/node_modules/
+COPY runtime.tar.gz runtime.sha256 /tmp/
+COPY PROVENANCE.json /opt/qwen/runtime-provenance.json
+COPY verify-managed-image.cjs /opt/qwen/verify-managed-image.cjs
+RUN set -eu; \
+    sha256sum -c /tmp/runtime.sha256; \
+    tar -xzf /tmp/runtime.tar.gz -C /opt/qwen/lib/node_modules/@qwen-code; \
+    rm /tmp/runtime.tar.gz /tmp/runtime.sha256; \
+    test -s /opt/qwen/lib/node_modules/@qwen-code/qwen-code/LICENSE; \
+    mkdir -p /opt/qwen/bin; \
+    ln -s ../lib/node_modules/@qwen-code/qwen-code/cli-entry.js /opt/qwen/bin/qwen; \
+    chmod 0755 /opt/qwen/lib/node_modules/@qwen-code/qwen-code/cli-entry.js; \
+    node /opt/qwen/verify-managed-image.cjs /opt/qwen/lib/node_modules/@qwen-code/qwen-code \
+      /opt/qwen/runtime-provenance.json harness "$SOURCE_SHA"
+RUN mkdir -p /app/harness/workspace /app/harness/runtime \
+    && chmod -R a+rwX /app/harness
+WORKDIR /app/harness
+ENTRYPOINT ["/opt/qwen/bin/qwen"]
+CMD ["--version"]
+LABEL org.opencontainers.image.title="data-agent-harness" \
+      org.opencontainers.image.version="${RELEASE_ID}" \
+      org.opencontainers.image.revision="${SOURCE_SHA}"

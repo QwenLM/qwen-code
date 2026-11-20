@@ -1,0 +1,2091 @@
+{
+  "privateRelease": "0.1.0-managed-default-extensions-20261120.41-external-workspace-publisher",
+  "privateSdkRelease": "0.1.0-main-sync-20261120.8-external-workspace-publisher",
+  "privateSourceTreeSha256": "c10de34deba8a8bf44eb26187ed1c53f1dfd294914caebe35554bf7305243500",
+  "privateSourceFiles": 14781,
+  "previousReleaseCommit": "5b1cde6defb943f4392f4e3441fd8bf82098cce2",
+  "privateBaselineCommit": "6ddbf8f0f6583cedb285cd32dfeb1ffbb1efbe57",
+  "previousUpstreamSnapshot": "843844a081900d9d3f1deccc2a5fc793cb7e2edf",
+  "upstreamRevision": "b19a5391dbc32927ec54581adfd24ca5240d1c78",
+  "patches": [
+    {
+      "name": "preview-integration.patch",
+      "sha256": "f1ad96727c07df5ff3fb0c89da2fd3f0fb595361ea11ca3a771da22c15f87083",
+      "files": [
+        {
+          "path": "docs/design/2026-10-25-external-hosted-workspace.md",
+          "integration": "present"
+        },
+        {
+          "path": "docs/design/2026-10-25-external-hosted-workspace.zh-CN.md",
+          "integration": "present"
+        },
+        {
+          "path": "docs/design/2026-11-03-managed-preview-main-sync.md",
+          "integration": "present"
+        },
+        {
+          "path": "docs/design/2026-11-03-managed-preview-main-sync.zh-CN.md",
+          "integration": "present"
+        },
+        {
+          "path": "docs/design/2026-11-04-managed-session-sql-mode.md",
+          "integration": "present"
+        },
+        {
+          "path": "docs/design/2026-11-04-managed-session-sql-mode.zh-CN.md",
+          "integration": "present"
+        },
+        {
+          "path": "docs/design/2026-11-05-managed-preview-workspace-boot.md",
+          "integration": "present"
+        },
+        {
+          "path": "docs/design/2026-11-05-managed-preview-workspace-boot.zh-CN.md",
+          "integration": "present"
+        },
+        {
+          "path": "docs/design/2026-11-07-hosted-dynamic-model-catalog.md",
+          "integration": "present"
+        },
+        {
+          "path": "docs/design/2026-11-07-hosted-dynamic-model-catalog.zh-CN.md",
+          "integration": "present"
+        },
+        {
+          "path": "integration-tests/helpers/hosted-sse-observer.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/capability-parity.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-context-compression.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-context-compression.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-contract.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-contract.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-model.integration.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-model.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-model.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-session.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-session.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-hook-model.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-hook-model.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-model-provider.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-model-provider.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-workflow-turn.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-workflow-turn.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-workspace-profiles.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-workspace-profiles.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-workspace-tool-turn.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-workspace-tool-turn.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-context-worker.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-external-publication.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-external-publication.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-external-storage.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-external-storage.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-runtime-attestation-worker.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-runtime-attestation-worker.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/workspace-recovery-session.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/workspace-recovery-session.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/README.md",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/adapters/src/main/java/com/alibaba/qwen/code/managedagent/harness/HarnessPoolConnector.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/adapters/src/main/java/com/alibaba/qwen/code/managedagent/harness/QwenHostedHarnessConnector.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/harness/HarnessConnector.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/session/SessionAdmissionStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/session/SessionPolicyStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/session/SessionQueryStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/session/UserMessagePolicy.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/workspace/RuntimeWarmer.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/workspace/WorkspaceToolProfiles.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/model/SessionPrincipal.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/model/TenantContext.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/repository/ManagedUserMessageStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/repository/ManagedWorkspaceRegistry.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/repository/WorkspaceExecutionStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/settings/ManagedAgentSettings.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/HarnessOwnership.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/RuntimeAdmission.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/RuntimeBindingRepository.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/RuntimeProvisioner.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/ToolExecutionRepository.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/VerifiedDispatchPayload.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/WorkspaceExecutionProfile.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/schema/ManagedSchemaContract.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/spi/ExternalRuntimeClient.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/spi/ExternalStorageRegistry.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/spi/ExternalWorkspaceProvider.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/spi/ExternalWorkspaceRecoveryGateway.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/artifact/ManagedArtifactService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/artifact/ManagedToolDetailsService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/catalog/ManagedHookCatalogService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/catalog/ManagedMcpCatalogService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/catalog/ManagedMcpManagementService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/catalog/ManagedSkillCatalogService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/extensions/ManagedExtensionManagementService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/ContextCompressionService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedActionService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedAgentService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedEventStreamService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedTaskCancelService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedTaskService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedUserMessagePolicy.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/SessionLifecycleCoordinator.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/SessionLifecycleService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/SessionRecoveryService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/UserMessageDispatcher.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/workspace/runtime/ManagedRuntimeCoordinator.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/workspace/runtime/WorkspaceRuntimeProvisioner.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/workspace/runtime/WorkspaceRuntimeResolver.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/workspace/runtime/WorkspaceRuntimeTransport.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/pom.xml",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentLifecycleOperations.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentSessionAdmissions.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentSessionCommands.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentSessionQueries.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/EphemeralWorkspaceRegistration.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ExternalStorageRegistrationStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ExternalWorkspaceMaterializationStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ExternalWorkspaceRecoveryService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ExternalWorkspaceRegistrationService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ExternalWorkspaceRetirementService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/JdbcManagedUserMessageStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/JdbcManagedWorkspaceRegistry.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/JdbcWorkspaceExecutionStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/JournalLifecycleAuthorization.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedAgentStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionPrincipal.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiReservationStore.java",
+          "integration": "retired-by-upstream"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/WorkspaceMigrationAdmission.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/WorkspaceStorageKindGuard.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/runtimebroker/managedschema/ManagedSchemaProjection.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/runtimebroker/persistence/JdbcEphemeralPlacementIsolation.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/runtimebroker/persistence/JdbcExternalWorkspaceOwnership.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/runtimebroker/persistence/JdbcRepositorySupport.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/runtimebroker/persistence/JdbcRuntimeBindingRepository.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/runtimebroker/persistence/JdbcToolExecutionRepository.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/resources/db/managed-schema/V1__managed_schema.sql",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-broker/src/main/java/com/alibaba/qwen/code/runtimebroker/routing/RoutingRuntimeProvisioner.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-broker/src/main/java/com/alibaba/qwen/code/runtimebroker/service/BindingRenewal.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-broker/src/main/java/com/alibaba/qwen/code/runtimebroker/service/RuntimeBindingProvisioning.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-broker/src/main/java/com/alibaba/qwen/code/runtimebroker/service/RuntimeBrokerService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-broker/src/main/java/com/alibaba/qwen/code/runtimebroker/service/RuntimeDrainCoordinator.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-broker/src/main/java/com/alibaba/qwen/code/runtimebroker/service/RuntimeExecutionDispatcher.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-broker/src/main/java/com/alibaba/qwen/code/runtimebroker/service/RuntimeProvisionFailureHandler.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-external/src/main/java/com/alibaba/qwen/code/runtimebroker/provisioning/external/ExternalHttpRuntimeClient.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-external/src/main/java/com/alibaba/qwen/code/runtimebroker/provisioning/external/ExternalRuntimeProviderFactory.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-external/src/main/java/com/alibaba/qwen/code/runtimebroker/provisioning/external/ExternalRuntimeProvisioner.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-external/src/main/java/com/alibaba/qwen/code/runtimebroker/provisioning/external/ExternalWorkspaceProvisioner.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-http/src/main/java/com/alibaba/qwen/code/runtimebroker/adapter/HttpRuntimeTransport.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/api/AuthenticatedTenantActor.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/api/ExternalStorageRegistrationController.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/api/ManagedActionController.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/api/ManagedExtensionManagementController.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/api/ManagedHookController.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/api/ManagedMcpController.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/api/PublicAgentController.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/api/TenantContextFilter.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/api/UserMessageController.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/api/WebShellAgentController.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/api/WebShellSkillsController.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/config/ManagedAgentProperties.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/config/runtime/EmbeddedRuntimeBroker.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/maintenance/WorkspaceMigrationMain.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/maintenance/WorkspaceRecoveryCommand.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/preflight/ManagedAgentPreflight.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/BackfillWitnessesTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/EmbeddedRuntimeBrokerTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/EventTransportMultiNodeGate.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ExtensionRecordJournal.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ExternalPublicFilesE2E.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/HookAdmissionHistory.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/HostedConcurrentTurnBurstMySqlIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/HostedEventStreamLivenessIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/HostedMySqlIsolationIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/Issue13180HardenedVerificationTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/Issue13180InternalPortTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedActionsTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedAgentApiContractTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedAgentMySqlIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedAgentServerIntegrationTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedAgentStoreLocaleTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedApprovalSelectionTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedArtifactApiIntegrationTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedCwdChangeOperationTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedEventIdentityMigrationTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedExtensionRecordStoreTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedModelSelectionMySqlIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedModelSelectionTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedRenameReconciliationTest.java",
+          "integration": "retired-by-upstream"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedSessionLifecycleTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedSessionMessageStoreTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedSessionModelConfigTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedSessionOperationMigrationTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedSessionOperationStoreTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedSessionOwnerTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedTaskCancelOperationTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedTurnCommandOperationMySqlIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedTurnCommandOperationTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedTurnQueryTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedUserMessageStoreTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedWebShellRenameTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedWorkspaceAdmissionTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/SurfaceAdmissionAcceptanceTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/VerificationFixtures.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/adapters/workspace/ChildWorktreeGitTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/api/SurfaceRegistry.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/api/TenantContextFilterTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/catalog/ManagedMcpManagementServiceTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/config/ManagedAgentPropertiesTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/config/ManagedDataSourceSqlModeMySqlIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/config/runtime/ExternalWorkspaceFactoryTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/config/runtime/SshRuntimeWiringTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/extensions/ManagedExtensionManagementServiceTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/harness/QwenHostedHarnessConnectorTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/maintenance/WorkspaceCsiSessionMainTest.java",
+          "integration": "retired-by-upstream"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/AgentLockContractTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/AgentStateStoreProxyTransactionTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ExternalStorageRegistrationTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ExternalWorkspaceMaterializationMySqlIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ExternalWorkspaceMaterializationTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ExternalWorkspaceOwnershipMySqlIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ExternalWorkspaceOwnershipTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ExternalWorkspaceRecoveryServiceTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ExternalWorkspaceRetirementServiceTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/HostedWorkspaceConcurrencyIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ManagedAgentEventSequenceConcurrencyTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ManagedAgentTurnDeferralTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ManagedLockScopeConcurrencyMySqlIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSchemaSessionMySqlIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSchemaSessionStoreTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionGuardConvoyIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionHistoryTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ManagedStoreDecompositionTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/RecoverySettlementStoreTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/SessionWorktreeStoreTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ToolPublicationRetentionStoreTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiNativeActivationGateTest.java",
+          "integration": "retired-by-upstream"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/WorkspaceCsiSqlWorkerMySqlIT.java",
+          "integration": "retired-by-upstream"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/WorkspaceLifecycleStoreTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/preflight/ExternalRuntimeConfigurationTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/Issue13181QueryBudgetTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/ManagedAgentReplayOutageTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/ManagedAgentServiceWorkflowChildTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/ManagedAgentSessionCapabilitiesTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/ManagedAgentWorkspaceReplayTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/ManagedEventReplayTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/ManagedEventStreamServiceTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/ManagedInputAttachmentTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/MessageProjectionGapHealTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/ReplayFloorAdvancerBacklogTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/ReplayFloorAdvancerTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/ReplayFloorRetractionTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/SessionPrincipalOwnershipTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/SessionRecoveryServiceTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/workspace/ChildWorkspaceServiceTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/workspace/runtime/WorkspaceRuntimeInstallProbeTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/workspace/runtime/WorkspaceRuntimeResolverTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/workspace/runtime/WorkspaceRuntimeTransportTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/runtimebroker/RuntimeExternalWorkspaceDrainTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/runtimebroker/SharedExternalDispatchTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/runtimebroker/adapter/HttpRuntimeTransportTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/runtimebroker/managedschema/ManagedSchemaTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/runtimebroker/provisioning/external/ExternalHttpRuntimeClientTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/runtimebroker/provisioning/external/ExternalRuntimeProvisionerTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/runtimebroker/provisioning/external/ExternalWorkspaceBootContractTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/runtimebroker/provisioning/external/ExternalWorkspaceProvisionerTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/runtimebroker/service/RuntimeExecutionDispatcherTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/resources/capability-parity/managed-surface.txt",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/resources/csi-native-activation-generator.mjs",
+          "integration": "retired-by-upstream"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/resources/lock-contract/entries.txt",
+          "integration": "retired-by-upstream"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/resources/lock-contract/sql-owners.txt",
+          "integration": "retired-by-upstream"
+        },
+        {
+          "path": "packages/web-shell/client/components/managed/ManagedRecoveryPanel.tsx",
+          "integration": "retired-by-upstream"
+        },
+        {
+          "path": "packages/web-shell/client/components/managed/ManagedSessionsPage.test.tsx",
+          "integration": "present"
+        },
+        {
+          "path": "packages/web-shell/client/components/managed/ManagedSessionsPage.tsx",
+          "integration": "present"
+        },
+        {
+          "path": "scripts/run-managed-agent-server-e2e.ts",
+          "integration": "present"
+        },
+        {
+          "path": "scripts/tests/managed-agent-server-e2e.test.js",
+          "integration": "present"
+        }
+      ]
+    },
+    {
+      "name": "external-files-session-skills.patch",
+      "sha256": "0303b29ec9e7f244c2c462df12522857d78de6b713786cb2f0c42b17f8357e3e",
+      "files": [
+        {
+          "path": "packages/cli/src/serve/hosted-harness-session.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-workspace-profiles.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-workspace-profiles.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-workspace-tool-turn.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-workspace-tool-turn.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/adapters/src/main/java/com/alibaba/qwen/code/managedagent/harness/QwenHostedHarnessConnector.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/session/SessionQueryStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentSessionAdmissions.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentSessionQueries.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedAgentStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/harness/QwenHostedHarnessConnectorTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ExternalWorkspaceMaterializationTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ManagedStoreDecompositionTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/SessionPrincipalOwnershipTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/resources/lock-contract/entries.txt",
+          "integration": "retired-by-upstream"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/resources/lock-contract/sql-owners.txt",
+          "integration": "retired-by-upstream"
+        }
+      ]
+    },
+    {
+      "name": "external-files-turn-skills.patch",
+      "sha256": "e11156899697c644a64ebd1a6a8978f42b2fe1c9cf8b1c0041eb1a4f4a64c23e",
+      "files": [
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ExternalWorkspaceMaterializationTest.java",
+          "integration": "present"
+        }
+      ]
+    },
+    {
+      "name": "managed-default-extensions.patch",
+      "sha256": "8336c369ea901f063a505db7bfb782fab455e9a0c3c76f5ef531605281526c41",
+      "files": [
+        {
+          "path": "packages/cli/src/serve/hosted-approval-continuation.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-extension-agent.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-extension-session.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-contract.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-model.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-session.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-model-recovery.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-workspace-broker.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-workspace-profiles.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-workspace-tool-turn.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-context-envelope.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-context-worker.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-extension-profile.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-extension-runtime.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-runtime-bootstrap.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-runtime-worker-routes.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-workspace-activation.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/core/src/extension/managed-package.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/core/src/managed-runtime/managed-child-operations.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/core/src/managed-runtime/managed-extension-agent-policy.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/core/src/managed-runtime/managed-extension-content-policy.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/core/src/managed-runtime/managed-extension-contributions.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/core/src/managed-runtime/managed-extension-package.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/adapters/src/main/java/com/alibaba/qwen/code/managedagent/harness/HarnessFeature.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/adapters/src/main/java/com/alibaba/qwen/code/managedagent/harness/QwenHostedHarnessConnector.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/adapters/src/main/java/com/alibaba/qwen/code/managedagent/harness/SdkHarnessBoundary.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/harness/HarnessConnector.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/persistence/ManagedHostedRecoveryRecords.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/session/DeferredSessionSelection.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/session/SessionAdmissionStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/session/SessionCreationCommand.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/settings/ManagedAgentSettings.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/ManagedExtensionExecutionProfile.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/RuntimeDrainReceipt.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/WorkspaceExecutionProfile.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/protocol/ManagedContextProtocol.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/transport/ManagedExtensionProtocol.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/extensions/ManagedExtensionManagementService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedAgentService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/workspace/runtime/ManagedRuntimeCoordinator.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/workspace/runtime/WorkspaceRuntimeResolver.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/workspace/runtime/WorkspaceRuntimeTransport.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentSessionAdmissions.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentSessionPolicies.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/JdbcManagedSessionSkills.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/JdbcWorkspaceExecutionStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedAgentStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedExtensionAgentLaunch.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/runtimebroker/persistence/JdbcExternalWorkspaceOwnership.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/runtimebroker/persistence/JdbcRuntimeBindingRepository.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-broker/src/main/java/com/alibaba/qwen/code/runtimebroker/service/RuntimeBrokerService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-external/src/main/java/com/alibaba/qwen/code/runtimebroker/provisioning/external/ExternalRuntimeProviderFactory.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-external/src/main/java/com/alibaba/qwen/code/runtimebroker/provisioning/external/ExternalRuntimeProvisioner.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-external/src/main/java/com/alibaba/qwen/code/runtimebroker/provisioning/external/ExternalWorkspaceProvisioner.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-http/src/main/java/com/alibaba/qwen/code/runtimebroker/adapter/HttpRuntimeTransport.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/config/RuntimeBrokerConfiguration.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedModelSelectionTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ExternalWorkspaceMaterializationTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ExternalWorkspaceOwnershipTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ManagedStoreDecompositionTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/ManagedAgentSessionCapabilitiesTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/runtimebroker/RuntimeSharedExtensionOwnerTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/runtimebroker/provisioning/external/ExternalWorkspaceBootContractTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/resources/lock-contract/entries.txt",
+          "integration": "retired-by-upstream"
+        }
+      ]
+    },
+    {
+      "name": "content-only-approval-selection.patch",
+      "sha256": "03eddab9a890f97f1cefa63c0460a2bbbe6ce84022581a99e71f42ae3258d83b",
+      "files": [
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/JournalLifecycleAuthorization.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ExternalWorkspaceMaterializationTest.java",
+          "integration": "present"
+        }
+      ]
+    },
+    {
+      "name": "content-only-child-launch-contract.patch",
+      "sha256": "c8ec5533026ba50a8f5800b3ec0c1dd57d15046ffc32a69a70cee1b2e3d48515",
+      "files": [
+        {
+          "path": "packages/cli/src/serve/hosted-workspace-tool-turn.child-agent.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-workspace-tool-turn.ts",
+          "integration": "present"
+        }
+      ]
+    },
+    {
+      "name": "content-only-runtime-owner.patch",
+      "sha256": "780165288b4e9bd1056aa6354293756451cc02ad3beeac16c7b6d71c78268db8",
+      "files": [
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedExtensionAgentLaunch.java",
+          "integration": "present"
+        }
+      ]
+    },
+    {
+      "name": "upstream-17281.patch",
+      "sha256": "e95fdbca9b6912698b7df31b25860880fddb497dbd4a0f820059439d93eb1817",
+      "files": [
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/persistence/ManagedSessionStoreModels.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/workspace/ChildResultRelay.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/JdbcManagedExtensionRecordStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/JournalResourceWrites.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/JournalStoreRows.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedInheritedExtensionConfigurationMySqlIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedInheritedExtensionConfigurationTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedPublishedAgentConfigurationMySqlIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedPublishedAgentConfigurationTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/workspace/ChildResultRelayTest.java",
+          "integration": "present"
+        }
+      ]
+    },
+    {
+      "name": "upstream-17260.patch",
+      "sha256": "6b16817b2730bbd79cbb5fd1c31b9a456ebb2df9ba52e181a3230c0efe565c8b",
+      "files": [
+        {
+          "path": "docs/design/2026-10-02-hosted-replaceable-harness.md",
+          "integration": "present"
+        },
+        {
+          "path": "docs/design/2026-10-02-hosted-replaceable-harness.zh-CN.md",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-approval-continuation.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-approval-continuation.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-session.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-session.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-runtime-recovery.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-workspace-profiles.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/adapters/src/main/java/com/alibaba/qwen/code/managedagent/harness/QwenHostedHarnessConnector.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/harness/HostedHarnessRecoveryDeclinedException.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/HarnessCoordinator.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/harness/QwenHostedHarnessConnectorTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/RecoverySettlementTest.java",
+          "integration": "present"
+        }
+      ]
+    },
+    {
+      "name": "config-install-resource-closure.patch",
+      "sha256": "4085e79499d3f35a361889122145377bac4d6e423b861861ac439120cfea99c1",
+      "files": []
+    },
+    {
+      "name": "content-only-child-member.patch",
+      "sha256": "3a8c67a946424002a06779f27115ad7dac7fbc1d0c5c00c42057e01d2bd0005c",
+      "files": [
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedExtensionAgentLaunch.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ManagedExtensionAgentLaunchMySqlIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ManagedExtensionAgentLaunchTest.java",
+          "integration": "present"
+        }
+      ]
+    },
+    {
+      "name": "external-child-execution-actor.patch",
+      "sha256": "401aedd568bebb771cfa6dce6d5d13a30029d927a4b0fa578bbf4c6b1466abe1",
+      "files": [
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/JdbcWorkspaceExecutionStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/WorkspaceLifecycleStoreTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/resources/lock-contract/sql-owners.txt",
+          "integration": "retired-by-upstream"
+        }
+      ]
+    },
+    {
+      "name": "external-child-saved-context.patch",
+      "sha256": "f494f900907ca9fc20e9c5a38a18a155befe1eab0ba62835957ee7a358df3102",
+      "files": [
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/runtimebroker/persistence/JdbcExternalWorkspaceOwnership.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ExternalWorkspaceOwnershipTest.java",
+          "integration": "present"
+        }
+      ]
+    },
+    {
+      "name": "external-child-model-template.patch",
+      "sha256": "60f9d999cdede8fd726f9bb92671a56b78a381b4ff916d9dc8f2435837e46e45",
+      "files": [
+        {
+          "path": "packages/cli/src/serve/hosted-harness-model.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-model.ts",
+          "integration": "present"
+        }
+      ]
+    },
+    {
+      "name": "shared-binding-member.patch",
+      "sha256": "6847c30638234a60dfcce62b28cfe5bd48bf02ae4eefc8bb81424338de91b4c6",
+      "files": [
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/runtimebroker/RuntimeSessionRepository.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/runtimebroker/persistence/InMemoryRuntimeSessionRepository.java",
+          "integration": "retired-by-upstream"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/runtimebroker/persistence/JdbcRuntimeSessionRepository.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-broker/src/main/java/com/alibaba/qwen/code/runtimebroker/service/RuntimeBindingRegistry.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/runtime-broker/src/main/java/com/alibaba/qwen/code/runtimebroker/service/RuntimeBrokerService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/runtimebroker/RuntimeSharedExtensionOwnerTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/runtimebroker/persistence/JdbcRepositoryContract.java",
+          "integration": "present"
+        }
+      ]
+    },
+    {
+      "name": "external-shell-publisher.patch",
+      "sha256": "b34714d21f9e90e50ad128e8e1b0c5f315a164f47c0756f26553edb5a459f69d",
+      "files": [
+        {
+          "path": "packages/cli/src/serve/managed-external-publication.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-external-storage.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-runtime-attestation-worker.ts",
+          "integration": "present"
+        }
+      ]
+    },
+    {
+      "name": "admission-workspace-shell-executable.patch",
+      "sha256": "0eba289da1c696e97925b66a4384de31cf78ba8a90fbb3fcdce47d607d76d7fa",
+      "files": [
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentSessionAdmissions.java",
+          "integration": "present"
+        }
+      ]
+    },
+    {
+      "name": "session-source.patch",
+      "sha256": "5766b5a978ff9d022a2c208d6107db4110543a81a802aed97477ecdad46a7bf1",
+      "files": [
+        {
+          "path": "packages/managed-agent-server/README.md",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/session/SessionAdmissionStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/session/SessionCreationCommand.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/session/SessionQueryStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/session/SessionSource.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/model/ApiModels.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/model/StoreModels.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedAgentService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentSessionAdmissions.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentSessionQueries.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentStoreRows.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedAgentStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/runtimebroker/managedschema/ManagedSchemaProjection.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/resources/db/managed-schema/V1__managed_schema.sql",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/api/WebShellAgentController.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedAgentApiContractTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ManagedStoreDecompositionTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/ManagedSessionSourceMySqlIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/ManagedSessionSourceTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/SessionCreationCommandContractTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/SessionSourceContractTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/web-shell/client/components/managed/generated/managed-agent-api.ts",
+          "integration": "present"
+        }
+      ]
+    },
+    {
+      "name": "prompt-submission.patch",
+      "sha256": "144439209b2bb9c1fa3505789c2f63b8a0675742bcdbcdaab7be3cfba750e167",
+      "files": [
+        {
+          "path": "packages/acp-bridge/README.md",
+          "integration": "present"
+        },
+        {
+          "path": "packages/acp-bridge/src/transcript-replay.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/acp-bridge/src/transcript-replay.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/acp-integration/session/Session.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/acp-integration/session/Session.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-model.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-model.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-prompt-surface.integration.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-session.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-harness-session.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-input.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-input.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-member-chain.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/hosted-member-chain.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-runtime-attestation-worker.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/cli/src/serve/managed-runtime-container.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/core/src/config/config.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/core/src/core/workflow-intent.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/core/src/core/workflow-intent.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/core/src/hooks/hookEventHandler.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/core/src/hooks/hookEventHandler.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/core/src/managed-runtime/http-managed-session-store.test.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/core/src/managed-runtime/http-managed-session-store.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/core/src/managed-runtime/prompt-submission.ts",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/README.md",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/adapters/src/main/java/com/alibaba/qwen/code/managedagent/harness/HarnessPoolConnector.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/adapters/src/main/java/com/alibaba/qwen/code/managedagent/harness/QwenHostedHarnessConnector.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/adapters/src/main/java/com/alibaba/qwen/code/managedagent/harness/SdkHarnessBoundary.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/adapters/src/main/java/com/alibaba/qwen/code/managedagent/harness/SdkHarnessRules.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/adapters/src/main/java/com/alibaba/qwen/code/managedagent/harness/UnavailableHarnessConnector.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/harness/HarnessConnector.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/session/PromptSubmission.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/session/SessionAdmissionStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/contracts/session/SessionCreationCommand.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/harness/contracts/HarnessRules.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/model/ApiModels.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/model/StoreModels.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/repository/ManagedUserMessageStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/HarnessCoordinator.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/HarnessEventProjector.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/control-plane/src/main/java/com/alibaba/qwen/code/managedagent/session/ManagedAgentService.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentEventJournal.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentMessageProjection.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentSessionAdmissions.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentSessionCommands.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/AgentStoreRows.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/JdbcManagedUserMessageStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedAgentStore.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/runtimebroker/managedschema/ManagedSchemaProjection.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/persistence/src/main/resources/db/managed-schema/V1__managed_schema.sql",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/api/PublicAgentController.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/api/WebShellAgentController.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/HarnessEventProjectorTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/HostedConcurrentTurnBurstMySqlIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedAgentApiContractTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedAgentServerIntegrationTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedUserMessageMySqlIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/ManagedUserMessageStoreTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/automation/AutomationScannerConcurrencyMySqlIT.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/automation/AutomationScannerTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/channel/ManagedChannelServiceTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/harness/HarnessPoolConnectorTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/harness/HarnessSdkValuesTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/harness/QwenHostedHarnessConnectorTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSchemaSessionStoreTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/AdmittedTurnRetryTerminalStateTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/HarnessCoordinatorTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/ManagedSessionSourceTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/PromptSubmissionTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/RecoverySettlementTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/SessionLifecycleCoordinatorTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/session/SessionMessageRelayTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/workspace/ChildResultRelayTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/sdk-java/qwencode/README.md",
+          "integration": "present"
+        },
+        {
+          "path": "packages/sdk-java/qwencode/src/main/java/com/alibaba/qwen/code/daemon/SubmitHarnessTurn.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/sdk-java/qwencode/src/test/java/com/alibaba/qwen/code/daemon/HostedHarnessClientTest.java",
+          "integration": "present"
+        },
+        {
+          "path": "packages/sdk-java/qwencode/src/test/java/com/alibaba/qwen/code/daemon/SubmitHarnessTurnTest.java",
+          "integration": "present"
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "Historical patch inventory only; CI builds checkout directly and does not apply these patches.",
+    "Present means the path survived integration, not proof of behavioral equivalence.",
+    "Session source and prompt submission were ported to the upstream principal, raw-actor, tool-profile and decomposed-store interfaces.",
+    "Compilation and behavioral acceptance are separate; package mode compiles tests but does not execute them."
+  ]
+}

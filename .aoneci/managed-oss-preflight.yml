@@ -1,0 +1,37 @@
+name: qwen-managed-oss-preflight
+
+# Read-only proof that the project's DWCODE and DW_NOTEBOOK OSS credential
+# pairs can read the Managed release bucket. It never prints credentials and
+# never writes an object.
+params:
+  object:
+    description: "Existing object to HEAD; must belong to the managed release bucket"
+    default: "managedagent/java/qwen-managed-agent-server-0.1.0-managed-default-extensions-20261117.37-shell-admission.jar"
+jobs:
+  preflight:
+    runs-on: [aone-hosted]
+    timeout: 15m
+    image: hub.docker.alibaba-inc.com/aone-base-global/data-agent-ci:latest
+    envs:
+      DWCODE_OSS_ACCESS_KEY_ID: ${{secrets.DWCODE_OSS_ACCESS_KEY_ID}}
+      DWCODE_OSS_ACCESS_KEY_SECRET: ${{secrets.DWCODE_OSS_ACCESS_KEY_SECRET}}
+      DW_NOTEBOOK_OSS_ACCESS_KEY_ID: ${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_ID}}
+      DW_NOTEBOOK_OSS_ACCESS_KEY_SECRET: ${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_SECRET}}
+    steps:
+      - uses: checkout
+      - uses: setup-env@2.0.8
+        inputs:
+          python-version: "3.11"
+      - name: Probe the DWCODE and DW_NOTEBOOK OSS credentials
+        run: |
+          set -eu
+          case "${{ params.object }}" in
+            managedagent/java/*|managedagent/runtime/*) ;;
+            *) echo "object is outside the managed release prefix" >&2; exit 1 ;;
+          esac
+          result=$(python3 .aoneci/scripts/oss-managed-release-preflight.py "${{ params.object }}")
+          printf '%s\n' "$result"
+          printf '%s\n' "$result" | grep -q '^DW_NOTEBOOK: HTTP 200,' || {
+            echo "DW_NOTEBOOK cannot read the Managed release bucket" >&2
+            exit 1
+          }

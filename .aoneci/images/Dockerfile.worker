@@ -1,0 +1,24 @@
+# Preserve the deployed platform bootstrap; replace only the private Qwen runtime.
+FROM hub.docker.alibaba-inc.com/aone-base-global/dataworks-data-agent:0.1.0.preview.20261107165207.202611071655@sha256:ce40260aa3a10cab66e1f0fd95363a2542e6c1041c3f5336ee9d00ca8e48a722
+ARG SOURCE_SHA
+ARG RELEASE_ID
+COPY runtime.tar.gz runtime.sha256 /tmp/
+COPY PROVENANCE.json /opt/data-agent-worker/runtime-provenance.json
+COPY verify-managed-image.cjs /opt/data-agent-worker/verify-managed-image.cjs
+RUN set -eu; \
+    sha256sum -c /tmp/runtime.sha256; \
+    test -x /opt/data-agent-worker/bin/node; \
+    mv /opt/data-agent-worker/lib/qwen-code/node_modules /tmp/managed-runtime-native; \
+    rm -rf /opt/data-agent-worker/lib/qwen-code; \
+    tar -xzf /tmp/runtime.tar.gz -C /opt/data-agent-worker/lib; \
+    mv /tmp/managed-runtime-native /opt/data-agent-worker/lib/qwen-code/node_modules; \
+    rm /tmp/runtime.tar.gz /tmp/runtime.sha256; \
+    printf '%s\n' '#!/bin/sh' 'exec /opt/data-agent-worker/bin/node /opt/data-agent-worker/lib/qwen-code/cli-entry.js "$@"' > /opt/data-agent-worker/bin/qwen; \
+    chmod 0755 /opt/data-agent-worker/bin/qwen; \
+    test -s /opt/data-agent-worker/licenses/node-LICENSE; \
+    test -s /opt/data-agent-worker/lib/qwen-code/LICENSE; \
+    /opt/data-agent-worker/bin/node /opt/data-agent-worker/verify-managed-image.cjs \
+      /opt/data-agent-worker/lib/qwen-code /opt/data-agent-worker/runtime-provenance.json worker "$SOURCE_SHA"
+LABEL org.opencontainers.image.title="data-agent-worker" \
+      org.opencontainers.image.version="${RELEASE_ID}" \
+      org.opencontainers.image.revision="${SOURCE_SHA}"

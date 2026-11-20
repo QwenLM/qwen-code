@@ -1,0 +1,212 @@
+name: qwen-managed-agent-release
+# Release producer: builds and verifies the managed-agent native artifacts, builds the runtime
+# archive and Worker/Harness images from the same checkout, then publishes the complete set.
+# No candidate, base-source archive, or patch sequence: the source of truth is the pipeline
+# checkout itself, identified by its full HEAD SHA in every provenance.
+params:
+  releaseId:
+    description: "Immutable release id stamped into both artifacts, e.g. managed-20261118.1"
+    default: ""
+  sourceSha:
+    description: "Required full 40-hex qwen-code commit SHA; every parallel job must check out exactly this commit"
+    default: ""
+  publish:
+    description: "true publishes MAS/SDK to Maven, runtime to OSS, and the release manifest with Worker/Harness digests"
+    default: "false"
+jobs:
+  native_release:
+    runs-on: [aone-hosted, dind]
+    timeout: 240m
+    image: hub.docker.alibaba-inc.com/aone-base-global/data-agent-ci:latest
+    steps:
+      - uses: checkout
+      - name: Verify checkout source identity
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ params.sourceSha }}" || {
+            echo "checkout HEAD does not match required sourceSha" >&2
+            exit 1
+          }
+      - uses: setup-env@2.0.8
+        inputs:
+          java-version: "21"
+          maven-version: "3.9.9"
+          maven-vendor: official
+          maven-cache: true
+          maven-build-cache: false
+          python-version: "3.11"
+          node-version: "22"
+      - name: Verify and package native artifacts from the current checkout
+        run: |
+          set -eu
+          mkdir -p .aone-output/native_release
+          echo 1 > .aone-output/native_release/exit-code
+          code=0
+          bash -o pipefail -c '
+            python3 -u .aoneci/scripts/build-managed-agent-native.py \
+              --mode verify --release-id "$1" --source-sha "$2" --out "$3" 2>&1 |
+              tee "$3/producer.log"
+          ' managed-release "${{ params.releaseId }}" "${{ params.sourceSha }}" .aone-output/native_release || code=$?
+          echo "$code" > .aone-output/native_release/exit-code
+      - uses: upload-artifact@1.1.4
+        inputs:
+          name: managed-agent-native-release
+          path: .aone-output/native_release/**
+          if-no-files-found: error
+      - name: Restore build result
+        run: exit "$(cat .aone-output/native_release/exit-code)"
+  # The server JAR carries only the native modules. The Harness sidecar and the Worker run the
+  # TypeScript CLI from the runtime archive, so both artifacts must come from the same checkout
+  # SHA. This job runs in parallel with native verification; publication waits for both.
+  runtime_release:
+    runs-on: [aone-hosted, dind]
+    timeout: 180m
+    image: hub.docker.alibaba-inc.com/aone-base-global/data-agent-ci:latest
+    steps:
+      - uses: checkout
+      - name: Verify checkout source identity
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ params.sourceSha }}" || {
+            echo "checkout HEAD does not match required sourceSha" >&2
+            exit 1
+          }
+      - uses: setup-env@2.0.8
+        inputs:
+          python-version: "3.11"
+          node-version: "22"
+      - name: Build the Worker/Harness runtime archive from the current checkout
+        run: |
+          set -eu
+          mkdir -p .aone-output/runtime_release
+          echo 1 > .aone-output/runtime_release/exit-code
+          code=0
+          bash -o pipefail -c '
+            python3 -u .aoneci/scripts/build-managed-runtime-release.py \
+              --release "$1" --source-sha "$2" --out "$3" 2>&1 |
+              tee "$3/producer.log"
+          ' managed-release "${{ params.releaseId }}" "${{ params.sourceSha }}" .aone-output/runtime_release || code=$?
+          echo "$code" > .aone-output/runtime_release/exit-code
+      - uses: upload-artifact@1.1.4
+        inputs:
+          name: managed-agent-runtime-release
+          path: .aone-output/runtime_release/**
+          if-no-files-found: error
+      - name: Restore runtime archive result
+        run: exit "$(cat .aone-output/runtime_release/exit-code)"
+      - name: Prepare images from this run's runtime
+        run: |
+          python3 .aoneci/scripts/prepare-managed-images.py \
+            --runtime .aone-output/runtime_release --out .aone-output/images \
+            --release "${{ params.releaseId }}" --source-sha "${{ params.sourceSha }}"
+      - uses: build-image
+        id: worker_image
+        inputs:
+          image-name: hub.docker.alibaba-inc.com/aone-base-global/data-agent-worker
+          image-tag: worker-${{ params.releaseId }}
+          dockerfile-path: .aone-output/images/worker/Dockerfile
+          context-dir: .aone-output/images/worker
+          build-args: SOURCE_SHA=${{ params.sourceSha }},RELEASE_ID=${{ params.releaseId }}
+          platform: amd64
+      - name: Record Worker image
+        run: |
+          python3 .aoneci/scripts/record-managed-image.py \
+            --runtime .aone-output/runtime_release --producer worker \
+            --digest "${{ steps.worker_image.outputs.image-digest }}" \
+            --out .aone-output/worker-image.json
+      - uses: upload-artifact@1.1.4
+        inputs:
+          name: managed-agent-worker-image
+          path: .aone-output/worker-image.json
+          if-no-files-found: error
+      - uses: build-image
+        id: harness_image
+        inputs:
+          image-name: hub.docker.alibaba-inc.com/aone-base-global/data-agent-harness
+          image-tag: harness-${{ params.releaseId }}
+          dockerfile-path: .aone-output/images/harness/Dockerfile
+          context-dir: .aone-output/images/harness
+          build-args: SOURCE_SHA=${{ params.sourceSha }},RELEASE_ID=${{ params.releaseId }}
+          platform: amd64
+      - name: Record Harness image
+        run: |
+          python3 .aoneci/scripts/record-managed-image.py \
+            --runtime .aone-output/runtime_release --producer harness \
+            --digest "${{ steps.harness_image.outputs.image-digest }}" \
+            --out .aone-output/harness-image.json
+      - uses: upload-artifact@1.1.4
+        inputs:
+          name: managed-agent-harness-image
+          path: .aone-output/harness-image.json
+          if-no-files-found: error
+  # Publisher: starts only after full native verification, runtime construction and both image
+  # pushes succeed. It re-checks every producer exit code and SHA256, verifies that both image
+  # records belong to this runtime, gates credentials before the first write, publishes SDK and
+  # MAS to Maven, verifies readback, and writes the release manifest last as the commit marker.
+  publish_release:
+    needs: [native_release, runtime_release]
+    when: ${{ params.publish == 'true' }}
+    runs-on: [aone-hosted]
+    timeout: 60m
+    image: hub.docker.alibaba-inc.com/aone-base-global/data-agent-ci:latest
+    envs:
+      BOOTSTRAP_TOKEN: ${{secrets.BOOTSTRAP_TOKEN}}
+      BASE_SOURCE_OSS_ACCESS_KEY_ID: ${{secrets.BASE_SOURCE_OSS_ACCESS_KEY_ID}}
+      BASE_SOURCE_OSS_ACCESS_KEY_SECRET: ${{secrets.BASE_SOURCE_OSS_ACCESS_KEY_SECRET}}
+      DWCODE_OSS_ACCESS_KEY_ID: ${{secrets.DWCODE_OSS_ACCESS_KEY_ID}}
+      DWCODE_OSS_ACCESS_KEY_SECRET: ${{secrets.DWCODE_OSS_ACCESS_KEY_SECRET}}
+      DW_NOTEBOOK_OSS_ACCESS_KEY_ID: ${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_ID}}
+      DW_NOTEBOOK_OSS_ACCESS_KEY_SECRET: ${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_SECRET}}
+      MAVEN_USERNAME: ${{secrets.MAVEN_USERNAME}}
+      MAVEN_PASSWORD: ${{secrets.MAVEN_PASSWORD}}
+    steps:
+      - uses: checkout
+      - name: Verify checkout source identity
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ params.sourceSha }}" || {
+            echo "checkout HEAD does not match required sourceSha" >&2
+            exit 1
+          }
+      - uses: setup-env@2.0.8
+        inputs:
+          java-version: "21"
+          maven-version: "3.9.9"
+          maven-vendor: official
+          maven-cache: false
+          maven-build-cache: false
+          python-version: "3.11"
+      - uses: download-artifact@0.1.7
+        inputs:
+          name: managed-agent-native-release
+          path: .aone-publish/native
+      - uses: download-artifact@0.1.7
+        inputs:
+          name: managed-agent-runtime-release
+          path: .aone-publish/runtime
+      - uses: download-artifact@0.1.7
+        inputs:
+          name: managed-agent-worker-image
+          path: .aone-publish/worker-image
+      - uses: download-artifact@0.1.7
+        inputs:
+          name: managed-agent-harness-image
+          path: .aone-publish/harness-image
+      - name: Restore producer exit codes
+        run: |
+          set -eu
+          codefiles=$(find .aone-publish -name exit-code -type f | sort)
+          [ -n "$codefiles" ] || { echo "no producer exit-code files found" >&2; exit 1; }
+          failed=0
+          for codefile in $codefiles; do
+            code=$(cat "$codefile")
+            echo "producer exit code ($codefile): $code"
+            [ "$code" = "0" ] || failed=1
+          done
+          [ "$failed" = "0" ] || { echo "a producer job failed; refusing to publish" >&2; exit 1; }
+      - name: Publish the Managed release
+        run: |
+          python3 .aoneci/scripts/publish-managed-release.py \
+            --release-id "${{ params.releaseId }}" \
+            --source-sha "${{ params.sourceSha }}" \
+            --native-dir .aone-publish/native \
+            --runtime-dir .aone-publish/runtime \
+            --worker-image-dir .aone-publish/worker-image \
+            --harness-image-dir .aone-publish/harness-image
