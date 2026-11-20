@@ -50,7 +50,6 @@ from pathlib import Path
 BUCKET = "dataworks-upload-and-download-inner-pre"
 OSS_HOST = f"{BUCKET}.oss-cn-zhangjiakou.aliyuncs.com"
 MAVEN_REPO_URL = "https://mvnrepo.alibaba-inc.com/mvn/repository"
-MAVEN_DEPLOY_URL = "https://artlab.alibaba-inc.com/1/maven/thirdparty"
 MAVEN_REPO_ID = "alibaba-releases"
 WORKER_REPOSITORY = "hub.docker.alibaba-inc.com/aone-base-global/data-agent-worker"
 HARNESS_REPOSITORY = "hub.docker.alibaba-inc.com/aone-base-global/data-agent-harness"
@@ -368,7 +367,7 @@ def maven_deploy(jar, pom, coordinate, username, password):
             "mvn", "-B", "-ntp", "deploy:deploy-file",
             "-s", settings.name,
             f"-DrepositoryId={MAVEN_REPO_ID}",
-            f"-Durl={MAVEN_DEPLOY_URL}",
+            f"-Durl={MAVEN_REPO_URL}",
             f"-DgroupId={group_id}",
             f"-DartifactId={artifact_id}",
             f"-Dversion={version}",
@@ -467,10 +466,10 @@ def main():
     # forbid-overwrite release id on OSS without its manifest.
     maven_username = os.environ["MAVEN_USERNAME"]
     maven_password = os.environ["MAVEN_PASSWORD"]
-    sdk_jar_url = artifact_url(plan["sdkCoordinate"], "jar", MAVEN_DEPLOY_URL)
-    sdk_pom_url = artifact_url(plan["sdkCoordinate"], "pom", MAVEN_DEPLOY_URL)
-    server_jar_url = artifact_url(plan["coordinate"], "jar", MAVEN_DEPLOY_URL)
-    server_pom_url = artifact_url(plan["coordinate"], "pom", MAVEN_DEPLOY_URL)
+    sdk_jar_url = artifact_url(plan["sdkCoordinate"], "jar")
+    sdk_pom_url = artifact_url(plan["sdkCoordinate"], "pom")
+    server_jar_url = artifact_url(plan["coordinate"], "jar")
+    server_pom_url = artifact_url(plan["coordinate"], "pom")
     maven_probe(sdk_jar_url, sdk_pom_url, maven_username, maven_password)
     maven_probe(server_jar_url, server_pom_url, maven_username, maven_password)
     maven_deploy(plan["sdkJar"], plan["sdkPom"], plan["sdkCoordinate"],

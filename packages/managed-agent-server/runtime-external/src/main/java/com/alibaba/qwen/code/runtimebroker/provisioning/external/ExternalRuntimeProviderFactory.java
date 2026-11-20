@@ -97,10 +97,7 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
                         || harness.getApprovalMode() == null
                         || !Set.of("default", "auto-edit")
                                 .contains(harness.getApprovalMode().toLowerCase(java.util.Locale.ROOT)))
-                // Control-plane package management and source import do not execute on the
-                // external Worker, so only worker-side execution is restricted.
-                || workspace && (settings.getManagedExtensions().isEnabled()
-                        && !"content-only".equals(settings.getManagedExtensions().getMode()))
+                || workspace && (settings.getManagedExtensions().isEnabled() || settings.getExtensions().isEnabled())
                 || !runtimeBroker.getWorkspaceMounts().isEmpty()
                 || StringUtils.isNotBlank(runtimeBroker.getWorkspaceCreationRoot())
                 || runtimeBroker.isLocalDirectoryImportEnabled()
@@ -112,7 +109,7 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
                     ? "External Workspace Runtime supports registered files Sessions, plus foreground Shell"
                             + " behind qwen.managed-agent.harness.external-workspace-shell-enabled with tool"
                             + " publication and default or auto-edit approval; local mounts, local Shell,"
-                            + " managed extension execution, children and recovery features must stay disabled"
+                            + " extensions, children and recovery features must stay disabled"
                     : "External Runtime supports scratch Sessions only;"
                             + " managed Workspace features must be disabled");
         }
