@@ -511,7 +511,7 @@ describe('OpenTuiFooter', () => {
         streaming={false}
         onOpenEffort={onOpenEffort}
         statusLine={{
-          lines: ['qwen3-coder-plus high'],
+          lines: ['qwen3-coder-plus high · extra'],
           useThemeColors: true,
           respectUserColors: false,
           hideContextIndicator: false,
@@ -528,6 +528,10 @@ describe('OpenTuiFooter', () => {
     fireEvent.mouseUp(tier, { button: 0 });
     expect(onOpenEffort).toHaveBeenCalledOnce();
 
+    // A non-left button is not a tap.
+    fireEvent.mouseUp(tier, { button: 2 });
+    expect(onOpenEffort).toHaveBeenCalledOnce();
+
     // A drag that ends on the tier leaves selected text, so it is a selection
     // release rather than a click.
     mocks.state.selectionText = 'high';
@@ -539,6 +543,39 @@ describe('OpenTuiFooter', () => {
     mocks.state.selectionText = '';
     fireEvent.mouseUp(screen.getByText('qwen3-coder-plus'), { button: 0 });
     expect(onOpenEffort).toHaveBeenCalledOnce();
+
+    // The run after the tier is inert too.
+    fireEvent.mouseUp(screen.getByText(/· extra/), { button: 0 });
+    expect(onOpenEffort).toHaveBeenCalledOnce();
+  });
+
+  it('leaves an ANSI-bearing status line inert', () => {
+    const onOpenEffort = vi.fn();
+    render(
+      <Footer
+        config={fakeConfig()}
+        streaming={false}
+        onOpenEffort={onOpenEffort}
+        statusLine={{
+          lines: ['\u001b[31mqwen3-coder-plus high\u001b[0m'],
+          useThemeColors: true,
+          respectUserColors: false,
+          hideContextIndicator: false,
+          reasoningSegment: {
+            text: 'qwen3-coder-plus high',
+            effort: 'high',
+          },
+        }}
+      />,
+    );
+
+    // findEffortSpan skips a line carrying ANSI, so no separate tier run is
+    // rendered and there is nothing to click.
+    expect(screen.queryByText('high')).toBeNull();
+    fireEvent.mouseUp(screen.getByText(/qwen3-coder-plus high/), {
+      button: 0,
+    });
+    expect(onOpenEffort).not.toHaveBeenCalled();
   });
 
   it('treats a missing renderer selection as a tap', () => {
