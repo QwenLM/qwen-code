@@ -315,6 +315,8 @@ export interface TokenUsageDayModelTotals {
   cachedTokens: number;
   thoughtsTokens: number;
   totalTokens: number;
+  /** Sum of end-to-end API response durations, for an average-latency read. */
+  apiDurationMs: number;
 }
 
 /** `localDate` -> model -> counters. */
@@ -357,6 +359,7 @@ async function accumulateMonthByDay(
             cachedTokens: 0,
             thoughtsTokens: 0,
             totalTokens: 0,
+            apiDurationMs: 0,
           };
           byModel.set(record.model, totals);
         }
@@ -366,6 +369,7 @@ async function accumulateMonthByDay(
         totals.cachedTokens += record.cachedTokens;
         totals.thoughtsTokens += record.thoughtsTokens;
         totals.totalTokens += record.totalTokens;
+        totals.apiDurationMs += record.apiDurationMs;
       }
     }
   } finally {

@@ -94,6 +94,7 @@ function ledgerDay(
         cachedTokens: o.cachedTokens ?? 0,
         thoughtsTokens: o.thoughtsTokens ?? 0,
         totalTokens: o.totalTokens ?? o.inputTokens + outputTokens,
+        apiDurationMs: 0,
       },
     ],
   ]);

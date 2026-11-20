@@ -8,8 +8,14 @@ import {
   loadUsageHistory,
   aggregateUsage,
   getTimeRangeBounds,
+  buildUsageDayTable,
+  sumUsageWindowByModel,
+  loadTokenUsageDailyByModel,
+  localDateKey,
+  modelTokens,
   type AggregatedReport,
   type TimeRange,
+  type UsageDayModelTable,
   type UsageSummaryRecord,
 } from '@qwen-code/qwen-code-core';
 
@@ -81,50 +87,67 @@ function calculateStreaks(dates: string[]): {
 }
 
 function buildHeatmap(
-  records: UsageSummaryRecord[],
-  start: Date,
-  end: Date,
+  table: UsageDayModelTable,
+  startKey: string,
+  endKey: string,
 ): Record<string, number> {
   const heatmap: Record<string, number> = {};
-  for (const r of records) {
-    if (r.timestamp < start.getTime() || r.timestamp > end.getTime()) continue;
-    if (!r.models) continue;
-    const ts = new Date(r.timestamp);
-    const key = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, '0')}-${String(ts.getDate()).padStart(2, '0')}`;
-    let totalTokens = 0;
-    for (const m of Object.values(r.models)) {
-      totalTokens +=
-        m.totalTokens || m.inputTokens + m.outputTokens + m.thoughtsTokens;
-    }
-    heatmap[key] = (heatmap[key] || 0) + totalTokens;
+  for (const [day, byModel] of table) {
+    if (day < startKey || day > endKey) continue;
+    let tokens = 0;
+    for (const m of byModel.values()) tokens += modelTokens(m);
+    heatmap[day] = tokens;
   }
   return heatmap;
 }
 
 function buildTokensPerDay(
-  records: UsageSummaryRecord[],
-  start: Date,
-  end: Date,
+  table: UsageDayModelTable,
+  startKey: string,
+  endKey: string,
 ): Array<{ date: string; model: string; tokens: number }> {
-  const dayModel = new Map<string, number>();
-  for (const r of records) {
-    const ts = new Date(r.timestamp);
-    if (r.timestamp < start.getTime() || r.timestamp > end.getTime()) continue;
-    if (!r.models) continue;
-    const dateKey = `${ts.getFullYear()}-${String(ts.getMonth() + 1).padStart(2, '0')}-${String(ts.getDate()).padStart(2, '0')}`;
-    for (const [model, m] of Object.entries(r.models)) {
-      const key = `${dateKey}|${model}`;
-      const tokens =
-        m.totalTokens || m.inputTokens + m.outputTokens + m.thoughtsTokens;
-      dayModel.set(key, (dayModel.get(key) || 0) + tokens);
+  const result: Array<{ date: string; model: string; tokens: number }> = [];
+  for (const [day, byModel] of table) {
+    if (day < startKey || day > endKey) continue;
+    for (const [model, m] of byModel) {
+      result.push({ date: day, model, tokens: modelTokens(m) });
     }
   }
-  const result: Array<{ date: string; model: string; tokens: number }> = [];
-  for (const [key, tokens] of dayModel) {
-    const [date, model] = key.split('|') as [string, string];
-    result.push({ date, model, tokens });
-  }
   return result.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/**
+ * Replaces the report's token-bearing fields with the shared accounting table's
+ * window slice. Session-granular fields (sessions, duration, tools, files,
+ * skills, projects) stay on the session records: the per-request ledger carries
+ * none of them, and it has no project dimension to attribute tokens to.
+ */
+function applyTokenWindow(
+  report: AggregatedReport,
+  table: UsageDayModelTable,
+  startKey: string,
+  endKey: string,
+): void {
+  const models = sumUsageWindowByModel(table, startKey, endKey);
+  const next: AggregatedReport['models'] = {};
+  let requests = 0;
+  let latency = 0;
+  for (const [model, m] of models) {
+    requests += m.requests;
+    latency += m.apiDurationMs;
+    next[model] = {
+      requests: m.requests,
+      inputTokens: m.inputTokens,
+      outputTokens: m.outputTokens,
+      cachedTokens: m.cachedTokens,
+      thoughtsTokens: m.thoughtsTokens,
+      totalTokens: m.totalTokens,
+      totalLatencyMs: m.apiDurationMs,
+    };
+  }
+  report.models = next;
+  report.totalRequests = requests;
+  report.totalLatencyMs = latency;
 }
 
 export function getPreviousRangeBounds(
@@ -256,15 +279,42 @@ export async function loadStatsData(
   }
   const report = aggregateUsage(records, range);
   const { start, end } = getTimeRangeBounds(range);
+  const prevBounds = getPreviousRangeBounds(range);
 
-  const heatmap = buildHeatmap(records, start, end);
+  // One accounting table for this surface and the daemon usage dashboard. The
+  // ledger window has to reach back far enough for the previous range too, or
+  // the delta would compare a ledger-backed current against a record-backed past.
+  const earliestMs = Math.min(
+    start.getTime(),
+    prevBounds?.start.getTime() ?? start.getTime(),
+  );
+  const ledgerDaily = await loadTokenUsageDailyByModel(
+    localDateKey(earliestMs),
+  );
+  const table = buildUsageDayTable(records, ledgerDaily);
+
+  applyTokenWindow(
+    report,
+    table,
+    localDateKey(start.getTime()),
+    localDateKey(end.getTime()),
+  );
+
+  const heatmap = buildHeatmap(
+    table,
+    localDateKey(start.getTime()),
+    localDateKey(end.getTime()),
+  );
   const heatmapDates = Object.keys(heatmap);
   const { currentStreak, longestStreak } = calculateStreaks(heatmapDates);
 
-  const tokensPerDay = buildTokensPerDay(records, start, end);
+  const tokensPerDay = buildTokensPerDay(
+    table,
+    localDateKey(start.getTime()),
+    localDateKey(end.getTime()),
+  );
 
   let delta: StatsData['delta'] = null;
-  const prevBounds = getPreviousRangeBounds(range);
   if (prevBounds) {
     const prevFiltered = records.filter(
       (r) =>
@@ -273,6 +323,13 @@ export async function loadStatsData(
     );
     if (prevFiltered.length > 0) {
       const previousReport = aggregateUsage(prevFiltered, 'all');
+      applyTokenWindow(
+        previousReport,
+        table,
+        localDateKey(prevBounds.start.getTime()),
+        // `end` is exclusive, so the window's last day is the one before it.
+        localDateKey(prevBounds.end.getTime() - 1),
+      );
       delta = computeDelta(report, previousReport);
     }
   }

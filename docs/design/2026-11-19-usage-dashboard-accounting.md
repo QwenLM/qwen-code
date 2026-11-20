@@ -4,10 +4,11 @@
 
 Status: implemented. Defect 1 is fixed outright; defect 2 is fixed on both the
 read and persist sides; defect 3 is fixed wherever the per-request ledger covers
-the day. Finding 4 is **retracted** — the ledger disproved it. Finding 5 is
-**corrected**: last-wins was right for existing records, and what needed fixing is
-the run-delta regression that fixing defect 2 introduces. Records written before
-these changes stay as they are — there is no migration.
+the day, on the daemon dashboard **and** the TUI cross-session view. Finding 4 is
+**retracted** — the ledger disproved it. Finding 5 is **corrected**: last-wins was
+right for existing records, and what needed fixing is the run-delta regression
+that fixing defect 2 introduces. Records written before these changes stay as they
+are — there is no migration.
 
 ## Problem
 
@@ -114,8 +115,9 @@ explicitly left the local-`today` window semantics out of scope.
 
 - In scope: `usage-dashboard-service.ts`, `tokenUsageService.ts` (read path only),
   the `usage-stats` route, the Web Shell usage tab's output tile, the persist side
-  (`UiTelemetryService`, the two replay sites, the two persist callers), and
-  `usageHistoryService`'s record marker and reduction.
+  (`UiTelemetryService`, the two replay sites, the two persist callers),
+  `usageHistoryService`'s record marker and reduction, and the TUI cross-session
+  view (`statsDataService.loadStatsData`).
 - Out of scope: the `/stats` session view, whose cumulative resumed-history
   semantics are intentional; the ledger and usage-record schemas; migrating
   records already on disk; cost billing; the replay cache's scan bounds.
@@ -194,6 +196,32 @@ though it may cover earlier runs, because it may also be replay-inflated.
 Undercounting that ambiguous overlap is the safe direction; double counting is
 not.
 
+## Implemented solution (TUI cross-session view)
+
+`/stats`'s historical ranges read `loadUsageHistory` + `aggregateUsage` with no
+ledger involvement, so they carried the same inflation: measured 2.06x the ledger
+truth over 7 days and 6.25x over 30 days, with average latency inflated too
+(24,057 ms against 8,621 ms for one day) because the request denominator was
+inflated.
+
+The table build and window sum are now **shared exports** of
+`usage-dashboard-service` — `buildUsageDayTable(records, ledgerDaily)` and
+`sumUsageWindowByModel(table, startKey, endKey)` — used by both surfaces, so the
+two cannot drift. `TokenUsageDayModelTotals` gained `apiDurationMs` so the latency
+column comes from the same source as the tokens.
+
+`loadStatsData` loads the ledger once (reaching back far enough for the previous
+range too), builds the table, and replaces the report's `models`, `totalRequests`
+and `totalLatencyMs` for both the current and the previous window — otherwise the
+delta would compare a ledger-backed present against a record-backed past. Heatmap,
+tokens-per-day and streaks derive from the table.
+
+Stays on session records: `sessionCount`, `totalDurationMs`, tools, files, skills
+and **projects**. The ledger has no project dimension (#4479 privacy boundary), so
+the per-project token column cannot be corrected from it and remains
+record-derived — an acknowledged inconsistency with the corrected totals rather
+than a fabricated attribution.
+
 ## Design decisions and rationale
 
 - **The ledger is the intended daily source.** #4479 chose per-response JSONL with
@@ -220,6 +248,12 @@ not.
   replace the non-token tiles.
 - **No payload shape change.** The dashboard JSON is unchanged, so the SDK types
   and the Web Shell client needed no new fields.
+- **One table, two surfaces.** Extracting the table build and window sum rather
+  than reimplementing them for the TUI keeps a single accounting truth; the
+  dashboard's frozen-ledger exactness was re-checked after the extraction.
+- **Exclusive window ends.** The previous-range bound is exclusive, so its last
+  local day is `localDateKey(end - 1)`. Treating it inclusively pulled today into
+  "yesterday" and was caught by the delta test.
 
 ## Constraints
 
@@ -251,6 +285,11 @@ not.
 - **Mixed-era sessions.** A conversation spanning the upgrade keeps only its run
   deltas, so pre-upgrade activity for that id can be undercounted (see the
   deliberate trade above).
+- **Per-project tokens stay inflated.** The TUI projects table cannot be corrected
+  from the ledger, so it disagrees with the corrected totals above it.
+- **Calendar-day windows now apply to the TUI too.** Its heatmap, tokens-per-day
+  and delta previously filtered by millisecond bounds; the boundary day is now
+  whole, matching the dashboard.
 - Records written before this change stay inflated, so other consumers of
   `loadUsageHistory` (notably the TUI cross-session view) still see the old
   numbers for that history. Only newly written records are correct.
@@ -277,6 +316,9 @@ not.
   written twice collapsing, cumulative records keeping last-wins, a cumulative
   record losing to run deltas, and a whole-transcript replay not adding on top.
   Plus a two-arm comparison of `loadUsageHistory` on the real history.
+- TUI: unit tests for day replacement, per-day attribution, uncovered days, and a
+  ledger-backed previous window for the delta; plus `loadStatsData` against an
+  independent ledger scan on both the live history and a frozen copy.
 - Mutation-witness each new guard, and record which suites were actually run.
 
 ## Acceptance criteria
@@ -306,6 +348,11 @@ not.
   `usage_record.jsonl`: 2,065 raw records, none marked, both arms returning 2,043
   records / 379,387,040,763 tokens with an identical per-session/per-window key
   (`IDENTICAL_REDUCTION=true`).
+- The TUI cross-session view matches the ledger for tokens, requests, average
+  latency and cache hit rate. **Verified** on the live history and on a frozen
+  copy: all three windows at 1.00x (before: 2.06x for 7 days, 6.25x for 30 days).
+- The dashboard stays exact after the shared-table extraction. **Verified**:
+  `ALL_RANGES_EXACT=true`, 0 day mismatches on a fresh frozen copy.
 
 ## Open questions
 
@@ -316,8 +363,8 @@ not.
   sizes that work.
 - Should daemon sessions persist usage at session end (the open question inherited
   from the replay-cache design), which would shrink the replay path?
-- Should the TUI cross-session view (`statsDataService.ts`) adopt the same
-  accounting, since it shares `loadUsageHistory` and the same dedup?
+- Should the per-project token column be dropped, relabelled, or attributed some
+  other way, now that it disagrees with the corrected totals?
 - No session-identity change is needed: finding 4 was retracted, and the reduction
   keys on `sessionId` plus the run window without touching what any writer uses as
   its identity. The pre-deletion salvage and the persisting migration keep writing

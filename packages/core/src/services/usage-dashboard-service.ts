@@ -107,7 +107,11 @@ export interface LoadUsageDashboardOptions {
   heatmapDays?: number;
 }
 
-function modelTokens(m: {
+/**
+ * A model's token total: the reported total, or the component sum for records
+ * that predate it. Shared so every usage surface applies the same fallback.
+ */
+export function modelTokens(m: {
   totalTokens: number;
   inputTokens: number;
   outputTokens: number;
@@ -116,7 +120,8 @@ function modelTokens(m: {
   return m.totalTokens || m.inputTokens + m.outputTokens + m.thoughtsTokens;
 }
 
-function localDateKey(ts: number): string {
+/** The local calendar day an epoch-ms instant falls on, as `YYYY-MM-DD`. */
+export function localDateKey(ts: number): string {
   const d = new Date(ts);
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, '0');
@@ -131,15 +136,23 @@ function startOfLocalDay(ms: number): Date {
 }
 
 /** Local day -> model -> counters. Every token-bearing output derives from it. */
-type DayModelTable = TokenUsageDailyByModel;
+export type UsageDayModelTable = TokenUsageDailyByModel;
 
 /**
- * Session-record tokens bucketed by the day the session ended. This is the
- * fallback attribution for days the per-request ledger does not cover; it cannot
- * split a session's spend across the days it actually ran.
+ * The shared accounting table for every cross-session usage surface: session
+ * records bucketed by the day the session ended, with each day the per-request
+ * ledger covers **replaced** by the ledger's counters.
+ *
+ * Replacing rather than adding is what keeps one run from being counted twice —
+ * the same requests exist in both sources. Days the ledger does not cover keep
+ * the session-record attribution, which preserves history from before the ledger
+ * existed and the behavior of a user with usage statistics disabled.
  */
-function tableFromRecords(records: UsageSummaryRecord[]): DayModelTable {
-  const table: DayModelTable = new Map();
+export function buildUsageDayTable(
+  records: UsageSummaryRecord[],
+  ledgerDaily?: TokenUsageDailyByModel,
+): UsageDayModelTable {
+  const table: UsageDayModelTable = new Map();
   for (const r of records) {
     if (!r.models) continue;
     const day = localDateKey(r.timestamp);
@@ -149,24 +162,62 @@ function tableFromRecords(records: UsageSummaryRecord[]): DayModelTable {
       table.set(day, byModel);
     }
     for (const [model, m] of Object.entries(r.models)) {
-      const totals = byModel.get(model) ?? {
-        requests: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        cachedTokens: 0,
-        thoughtsTokens: 0,
-        totalTokens: 0,
-      };
+      const totals = byModel.get(model) ?? emptyDayModelTotals();
       totals.requests += m.requests;
       totals.inputTokens += m.inputTokens;
       totals.outputTokens += m.outputTokens;
       totals.cachedTokens += m.cachedTokens;
       totals.thoughtsTokens += m.thoughtsTokens;
       totals.totalTokens += m.totalTokens;
+      totals.apiDurationMs += m.totalLatencyMs ?? 0;
       byModel.set(model, totals);
     }
   }
+  if (ledgerDaily) {
+    for (const [day, byModel] of ledgerDaily) {
+      table.set(day, new Map(byModel));
+    }
+  }
   return table;
+}
+
+function emptyDayModelTotals(): TokenUsageDayModelTotals {
+  return {
+    requests: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedTokens: 0,
+    thoughtsTokens: 0,
+    totalTokens: 0,
+    apiDurationMs: 0,
+  };
+}
+
+/**
+ * Per-model counters summed over the local days in `[startKey, endKey]`. Day
+ * buckets cannot be split by hour, so a window selects whole local days.
+ */
+export function sumUsageWindowByModel(
+  table: UsageDayModelTable,
+  startKey: string,
+  endKey: string,
+): Map<string, TokenUsageDayModelTotals> {
+  const models = new Map<string, TokenUsageDayModelTotals>();
+  for (const [day, byModel] of table) {
+    if (day < startKey || day > endKey) continue;
+    for (const [model, m] of byModel) {
+      const totals = models.get(model) ?? emptyDayModelTotals();
+      totals.requests += m.requests;
+      totals.inputTokens += m.inputTokens;
+      totals.outputTokens += m.outputTokens;
+      totals.cachedTokens += m.cachedTokens;
+      totals.thoughtsTokens += m.thoughtsTokens;
+      totals.totalTokens += m.totalTokens;
+      totals.apiDurationMs += m.apiDurationMs;
+      models.set(model, totals);
+    }
+  }
+  return models;
 }
 
 function dayTokens(byModel: Map<string, TokenUsageDayModelTotals>): {
@@ -186,7 +237,7 @@ function dayTokens(byModel: Map<string, TokenUsageDayModelTotals>): {
 }
 
 function buildHeatmap(
-  table: DayModelTable,
+  table: UsageDayModelTable,
   startKey: string,
   endKey: string,
 ): Record<string, UsageHeatmapDay> {
@@ -205,7 +256,7 @@ function buildHeatmap(
  * the day table; session counts stay session-granular.
  */
 function buildDaily(
-  table: DayModelTable,
+  table: UsageDayModelTable,
   records: UsageSummaryRecord[],
   startMs: number,
   endMs: number,
@@ -258,40 +309,10 @@ export function buildUsageDashboard(
   const todayKey = localDateKey(now);
   const rangeStartKey = localDateKey(getTimeRangeBounds(range).start.getTime());
 
-  const table = tableFromRecords(records);
-  // A day the ledger covers is authoritative and REPLACES the session-record
-  // copy: the same requests appear in both, so adding them would double count.
-  // Days it does not cover keep the session-record attribution, which is what
-  // preserves heatmap history from before the ledger existed.
-  if (ledgerDaily) {
-    for (const [day, byModel] of ledgerDaily) {
-      table.set(day, new Map(byModel));
-    }
-  }
-
-  const windowModels = new Map<string, TokenUsageDayModelTotals>();
+  const table = buildUsageDayTable(records, ledgerDaily);
+  const windowModels = sumUsageWindowByModel(table, rangeStartKey, todayKey);
   let requests = 0;
-  for (const [day, byModel] of table) {
-    if (day < rangeStartKey || day > todayKey) continue;
-    for (const [model, m] of byModel) {
-      requests += m.requests;
-      const totals = windowModels.get(model) ?? {
-        requests: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        cachedTokens: 0,
-        thoughtsTokens: 0,
-        totalTokens: 0,
-      };
-      totals.requests += m.requests;
-      totals.inputTokens += m.inputTokens;
-      totals.outputTokens += m.outputTokens;
-      totals.cachedTokens += m.cachedTokens;
-      totals.thoughtsTokens += m.thoughtsTokens;
-      totals.totalTokens += m.totalTokens;
-      windowModels.set(model, totals);
-    }
-  }
+  for (const m of windowModels.values()) requests += m.requests;
 
   let inputTokens = 0;
   let outputTokens = 0;

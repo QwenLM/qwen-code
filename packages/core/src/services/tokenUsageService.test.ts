@@ -635,6 +635,8 @@ describe('tokenUsageService', () => {
       cachedTokens: 0,
       thoughtsTokens: 0,
       totalTokens: 330,
+      // Two responses at the fixture's default 100 ms each.
+      apiDurationMs: 200,
     });
     expect(table.get('2026-05-25')?.get('model-b')?.requests).toBe(1);
     expect(table.get('2026-05-24')?.get('model-a')?.totalTokens).toBe(10);
