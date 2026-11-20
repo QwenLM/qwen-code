@@ -2,6 +2,8 @@
 
 [中文](README.zh-CN.md)
 
+> **Historical deployment template.** The Kubernetes EndpointSlice pool discovery described here has been removed from the Java control plane and cold-archived under [`packages/sdk-java/managed-kubernetes-archive/`](../../../sdk-java/managed-kubernetes-archive/). Java now supports only `discovery: static` with an explicit `instances` list; startup refuses `discovery: kubernetes` and the `namespace`/`service-name`/`service-uid`/`port-name` properties with `Harness pool discovery must be static`, and `discovery-rbac.yaml` / `discovery-role-binding.yaml` are no longer read by any code. The EndpointSlice sections below are preserved for restoring the archived discovery; follow-up issue [#17427](https://github.com/QwenLM/qwen-code/issues/17427) tracks retiring or adapting this package. For a current pool, configure static instances as shown under "Build and configure".
+
 This opt-in package runs the Hosted Harness as a private, horizontally expandable pool. Java retains tenant/actor admission, durable placement and subscriptions. Session RPCs target the selected EndpointSlice Pod address and exact instance/boot; the Service is a discovery anchor. The existing local-process deployment does not enable the pool environment variable or Java pool configuration.
 
 See the [design](../../../../docs/design/2026-10-21-managed-harness-kubernetes.md) for ownership, fencing and the acceptance matrix. These files are deployment templates. No cluster, certificate issuer, metrics adapter or production capacity has been validated by adding them.
@@ -31,7 +33,7 @@ Publish the image through the deployment system and replace `qwen-harness:replac
 
 Create the Envoy ConfigMap from the reviewed configuration, then apply the filled settings, RBAC and pool manifests in the Harness namespace through your normal deployment workflow:
 
-Each manifest contains one resource. Apply the Deployment in `harness-pool.yaml` together with `harness-service.yaml`, `harness-pdb.yaml` and `harness-network-policy.yaml`. Java discovery requires both `discovery-rbac.yaml` and `discovery-role-binding.yaml`.
+Each manifest contains one resource. Apply the Deployment in `harness-pool.yaml` together with `harness-service.yaml`, `harness-pdb.yaml` and `harness-network-policy.yaml`. The archived EndpointSlice discovery additionally required `discovery-rbac.yaml` and `discovery-role-binding.yaml`; static discovery does not use them.
 
 ```sh
 kubectl create configmap qwen-harness-envoy --from-file=envoy.yaml=packages/managed-agent-server/distribution/kubernetes/envoy.yaml --dry-run=client -o yaml
@@ -47,11 +49,10 @@ qwen:
     harness:
       pool:
         enabled: true
-        discovery: kubernetes
-        namespace: YOUR_HARNESS_NAMESPACE
-        service-name: qwen-harness
-        service-uid: YOUR_ACTUAL_SERVICE_UID
-        port-name: https
+        discovery: static
+        instances:
+          - instance-id: YOUR_HARNESS_INSTANCE_ID
+            base-url: https://YOUR_HARNESS_ENDPOINT:8443
         key-store-file: /etc/java-tls/client.p12
         key-store-password-file: /etc/java-tls/client-password
         trust-store-file: /etc/java-tls/trust.p12

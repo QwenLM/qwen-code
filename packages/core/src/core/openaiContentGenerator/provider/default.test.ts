@@ -206,6 +206,22 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(client).toBeDefined();
     });
 
+    it('uses only explicit OpenAI account headers on an isolated route', () => {
+      const customHeaders = {
+        'OpenAI-Organization': 'target-organization',
+        'OpenAI-Project': 'target-project',
+      };
+      providerWith({ isolatedRoute: true, customHeaders }).buildClient();
+
+      expect(OpenAI).toHaveBeenCalledWith(
+        expect.objectContaining({
+          organization: null,
+          project: null,
+          defaultHeaders: { 'User-Agent': UA, ...customHeaders },
+        }),
+      );
+    });
+
     it('installs session ID injection on the runtime fetch', async () => {
       const runtimeFetch = vi.fn(
         async (_input: string | URL | Request, _init?: RequestInit) =>

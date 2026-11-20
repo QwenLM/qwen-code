@@ -9,12 +9,12 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.evidence.CancelEvidence;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.h2.jdbcx.JdbcDataSource;
@@ -88,7 +88,7 @@ class ManagedTurnCommandOperationTest {
             }
         };
         store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), clock,
-                ignored -> {}, new ManagedWorkspaceRegistry(jdbc),
+                ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc),
                 new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION",
                 "create", "digest", "qwen-code", null, null, List.of(), null)
@@ -277,7 +277,7 @@ class ManagedTurnCommandOperationTest {
         };
         ManagedAgentStore racing = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(racingJdbc,
                 new ObjectMapper(), clock, ignored -> {},
-                new ManagedWorkspaceRegistry(racingJdbc),
+                new JdbcManagedWorkspaceRegistry(racingJdbc),
                 new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         assertThat(racing.turnInputAcceptance(TENANT, sessionId,
                 admitted.operationId())).isEqualTo(AcceptanceVerdict.unknown());
@@ -768,13 +768,13 @@ class ManagedTurnCommandOperationTest {
     void managedHead(String state, long compactedThrough) {
         jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key,"
                         + " tenant_id, session_id, harness_session_id, head_kind,"
-                        + " state, storage_version, writer_generation,"
+                        + " state, writer_generation,"
                         + " journal_revision, committed_sequence, activation_epoch,"
                         + " compacted_through_revision, gmt_create, gmt_modified)"
-                        + " VALUES (?, ?, ?, ?, ?, 'MANAGED_SESSION', ?, 1, 1, 1, 1, 0,"
+                        + " VALUES (?, ?, ?, ?, ?, 'MANAGED_SESSION', ?, 1, 1, 1, 0,"
                         + " ?, 0, 0)",
-                JdbcRuntimeBindingRepository.harnessDrainKey(TENANT),
-                JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), TENANT,
+                RuntimeAdmissionFences.harnessDrainKey(TENANT),
+                RuntimeAdmissionFences.harnessDrainKey(sessionId), TENANT,
                 sessionId, sessionId, state, compactedThrough);
     }
 

@@ -225,7 +225,7 @@ public final class ManagedChannelJdbcContract {
         assertThrows(IllegalArgumentException.class, () -> deliveries
                 .findOrCreate(new ChannelDelivery(tenant, channel,
                         "delivery-bad", "segment-1", 0, "sending", null, 0,
-                        0)));
+                        0, 1)));
         assertThrows(IllegalArgumentException.class, () -> deliveries
                 .findOrCreate(delivery(tenant, channel, "delivery-bad",
                         "segment-1", -1)));
@@ -380,7 +380,7 @@ public final class ManagedChannelJdbcContract {
     private static ChannelDelivery delivery(String tenant, String channel,
             String deliveryId, String segmentId, int ordinal) {
         return new ChannelDelivery(tenant, channel, deliveryId, segmentId,
-                ordinal, "planned", null, 0, 0);
+                ordinal, "planned", null, 0, 0, 1);
     }
 
     private static int count(JdbcTemplate jdbc, String table, String tenant) {

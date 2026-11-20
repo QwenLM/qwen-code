@@ -900,3 +900,234 @@ describe('useVoiceCapture', () => {
     expect(onError).not.toHaveBeenCalled();
   });
 });
+
+describe('useVoiceCapture flush', () => {
+  async function startRecording(): Promise<MockWebSocket> {
+    const result = await renderHookHost();
+    await act(async () => {
+      result.start();
+    });
+    const ws = MockWebSocket.latest;
+    if (!ws) throw new Error('WebSocket was not created');
+    await act(async () => {
+      ws.onopen?.();
+    });
+    expect(capture?.status).toBe('recording');
+    return ws;
+  }
+
+  function deliverFinal(ws: MockWebSocket, text: string): void {
+    ws.onmessage?.({
+      data: JSON.stringify({ type: 'final', text }),
+    } as MessageEvent);
+  }
+
+  it('stops the capture and resolves with the final transcript instead of onFinal', async () => {
+    const ws = await startRecording();
+    let pending!: Promise<string>;
+    await act(async () => {
+      pending = capture!.flush();
+    });
+    expect(ws.sent).toContain(JSON.stringify({ type: 'stop' }));
+    expect(capture?.status).toBe('transcribing');
+    let flushed: string | undefined;
+    await act(async () => {
+      deliverFinal(ws, 'send this dictation');
+      flushed = await pending;
+    });
+    expect(flushed).toBe('send this dictation');
+    expect(onFinal).not.toHaveBeenCalled();
+    expect(capture?.status).toBe('idle');
+  });
+
+  it('resolves empty immediately while idle', async () => {
+    await renderHookHost();
+    let flushed: string | undefined;
+    await act(async () => {
+      flushed = await capture!.flush();
+    });
+    expect(flushed).toBe('');
+    expect(MockWebSocket.latest).toBeUndefined();
+  });
+
+  it('resolves empty after a failed capture', async () => {
+    const ws = await startRecording();
+    await act(async () => {
+      ws.onmessage?.({
+        data: JSON.stringify({ type: 'error', message: 'model missing' }),
+      } as MessageEvent);
+    });
+    expect(capture?.status).toBe('error');
+    let flushed: string | undefined;
+    await act(async () => {
+      flushed = await capture!.flush();
+    });
+    expect(flushed).toBe('');
+  });
+
+  it('finalizes a capture that is still connecting when the socket opens', async () => {
+    const result = await renderHookHost();
+    await act(async () => {
+      result.start();
+    });
+    const ws = MockWebSocket.latest;
+    if (!ws) throw new Error('WebSocket was not created');
+    ws.readyState = 0;
+
+    let pending!: Promise<string>;
+    await act(async () => {
+      pending = capture!.flush();
+    });
+    expect(capture?.status).toBe('connecting');
+    await act(async () => {
+      ws.readyState = MockWebSocket.OPEN;
+      ws.onopen?.();
+    });
+    expect(ws.sent).toEqual([
+      JSON.stringify({ type: 'start' }),
+      JSON.stringify({ type: 'stop' }),
+    ]);
+    expect(capture?.status).toBe('transcribing');
+    let flushed: string | undefined;
+    await act(async () => {
+      deliverFinal(ws, 'connected then sent');
+      flushed = await pending;
+    });
+    expect(flushed).toBe('connected then sent');
+    expect(onFinal).not.toHaveBeenCalled();
+  });
+
+  it('waits for an already transcribing capture without sending stop twice', async () => {
+    const ws = await startRecording();
+    await act(async () => {
+      capture!.stop();
+    });
+    expect(capture?.status).toBe('transcribing');
+    const stopFrames = ws.sent.filter(
+      (frame) => frame === JSON.stringify({ type: 'stop' }),
+    );
+    expect(stopFrames).toHaveLength(1);
+
+    let flushed: string | undefined;
+    await act(async () => {
+      const pending = capture!.flush().then((text) => {
+        flushed = text;
+      });
+      deliverFinal(ws, 'already finalizing');
+      await pending;
+    });
+    expect(flushed).toBe('already finalizing');
+    expect(
+      ws.sent.filter((frame) => frame === JSON.stringify({ type: 'stop' })),
+    ).toHaveLength(1);
+  });
+
+  it('resolves empty when the server reports an error mid-flush', async () => {
+    const ws = await startRecording();
+    let flushed: string | undefined;
+    await act(async () => {
+      const pending = capture!.flush().then((text) => {
+        flushed = text;
+      });
+      ws.onmessage?.({
+        data: JSON.stringify({ type: 'error', message: 'transcribe failed' }),
+      } as MessageEvent);
+      await pending;
+    });
+    expect(flushed).toBe('');
+    expect(capture?.status).toBe('error');
+    expect(onError).toHaveBeenCalledWith('transcribe failed');
+  });
+
+  it('resolves empty when the socket closes mid-flush', async () => {
+    const ws = await startRecording();
+    let flushed: string | undefined;
+    await act(async () => {
+      const pending = capture!.flush().then((text) => {
+        flushed = text;
+      });
+      ws.onclose?.({ code: 1006, reason: '' } as CloseEvent);
+      await pending;
+    });
+    expect(flushed).toBe('');
+    expect(capture?.status).toBe('error');
+  });
+
+  it('resolves empty when the owner changes mid-flush', async () => {
+    const ws = await startRecording();
+    let pending!: Promise<string>;
+    await act(async () => {
+      pending = capture!.flush();
+    });
+    await act(async () => {
+      ownerKey = 'workspace-b:session-b';
+      root?.render(
+        React.createElement(
+          I18nProvider,
+          { language: 'zh-CN' },
+          React.createElement(TestHost),
+        ),
+      );
+    });
+    expect(await pending).toBe('');
+    expect(ws.sent).toContain(JSON.stringify({ type: 'abort' }));
+    expect(onFinal).not.toHaveBeenCalled();
+  });
+
+  it('resolves empty when the hook unmounts mid-flush', async () => {
+    const ws = await startRecording();
+    let flushed: string | undefined;
+    await act(async () => {
+      const pending = capture!.flush().then((text) => {
+        flushed = text;
+      });
+      root?.unmount();
+      root = null;
+      await pending;
+    });
+    expect(flushed).toBe('');
+    expect(ws.readyState).toBe(3);
+  });
+
+  it('returns the same promise for concurrent flushes', async () => {
+    const ws = await startRecording();
+    await act(async () => {
+      const first = capture!.flush();
+      const second = capture!.flush();
+      expect(second).toBe(first);
+      deliverFinal(ws, 'once');
+      expect(await first).toBe('once');
+      expect(await second).toBe('once');
+    });
+    expect(
+      ws.sent.filter((frame) => frame === JSON.stringify({ type: 'stop' })),
+    ).toHaveLength(1);
+  });
+
+  it('surfaces a timeout error and resolves empty when finalization never lands', async () => {
+    vi.useFakeTimers();
+    const result = await renderHookHost();
+    await act(async () => {
+      result.start();
+    });
+    const ws = MockWebSocket.latest;
+    if (!ws) throw new Error('WebSocket was not created');
+    ws.readyState = 0;
+
+    let flushed: string | undefined;
+    await act(async () => {
+      const pending = capture!.flush().then((text) => {
+        flushed = text;
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+      await pending;
+    });
+    expect(flushed).toBe('');
+    // The stalled send must tell the user why the dictation is missing —
+    // a silent abort would drop the words without any feedback.
+    expect(capture?.status).toBe('error');
+    expect(capture?.errorMessage).toBe('Transcription timed out.');
+    expect(onError).toHaveBeenCalledWith('Transcription timed out.');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});

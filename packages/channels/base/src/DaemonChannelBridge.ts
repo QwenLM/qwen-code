@@ -4,12 +4,14 @@ import type {
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 import {
+  BACKGROUND_WORKFLOW_APPROVAL_META_KEY,
   CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
   CHANNEL_TURN_NOTICE_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   ChannelPromptCancelledError,
   parseBackgroundResponseContext,
   resolvePromptImages,
@@ -826,6 +828,9 @@ export class DaemonChannelBridge
             prompt,
             _meta: {
               [CHANNEL_PROMPT_META_KEY]: true,
+              ...(options?.workflowOrigin
+                ? { [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: options.workflowOrigin }
+                : {}),
               ...(options?.outputMode === 'per_task'
                 ? { [CHANNEL_OUTPUT_MODE_META_KEY]: 'per_task' }
                 : {}),
@@ -1271,6 +1276,12 @@ export class DaemonChannelBridge
         const explicitKind = getString(update['kind']);
         const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
         if (
+          type === 'tool_call_update' &&
+          meta?.[BACKGROUND_WORKFLOW_APPROVAL_META_KEY] === true
+        ) {
+          break;
+        }
+        if (
           !explicitKind &&
           toolCallId &&
           getString(update['status']) === 'in_progress' &&
@@ -1360,7 +1371,9 @@ export class DaemonChannelBridge
     }
     const requestId = data['requestId'];
     this.requestToSession.set(requestId, sessionId);
-    this.emitResponseBoundary(sessionId);
+    if (data.toolCall._meta?.[BACKGROUND_WORKFLOW_APPROVAL_META_KEY] !== true) {
+      this.emitResponseBoundary(sessionId);
+    }
     this.emit('permissionRequest', {
       requestId,
       sessionId,

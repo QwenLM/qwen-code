@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.adapters.workspace;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceException;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeOperations;
 import org.apache.commons.lang3.StringUtils;
 
 import java.io.IOException;
@@ -48,7 +49,7 @@ import java.util.regex.Pattern;
  * repository's own config was read as data and found free of keys that
  * name a program (docs/design/2026-10-09-managed-child-workspace.md).
  */
-public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorktreeGit {
+public final class ChildWorktreeGit implements ChildWorktreeOperations {
     /** The reserved directory below the storage root that holds every child Workspace. */
 
     private static final int MIN_MAJOR = 2;
@@ -666,7 +667,7 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
                 throw ChildWorkspaceException.diverged("A submodule pointer cannot be written at " + change.getKey());
             }
         }
-        Map<String, Entry> owed = changes(root, repository, parentTree, mergedTree);
+        Map<String, Entry> owed = changes(recorded);
         if (owed.isEmpty()) {
             return;
         }
@@ -1032,8 +1033,12 @@ public final class ChildWorktreeGit implements com.alibaba.qwen.code.managedagen
 
     /** The non-gitlink paths that differ between two trees, with their {@code to} entries. */
     private Map<String, Entry> changes(Path root, Repository repository, String from, String to) {
+        return changes(diffTree(root, repository, from, to));
+    }
+
+    private Map<String, Entry> changes(Map<String, Change> diff) {
         Map<String, Entry> changes = new LinkedHashMap<>();
-        for (Map.Entry<String, Change> change : diffTree(root, repository, from, to).entrySet()) {
+        for (Map.Entry<String, Change> change : diff.entrySet()) {
             if (!change.getValue().gitlink()) {
                 changes.put(change.getKey(), new Entry(change.getValue().toMode(), change.getValue().toObjectId()));
             }

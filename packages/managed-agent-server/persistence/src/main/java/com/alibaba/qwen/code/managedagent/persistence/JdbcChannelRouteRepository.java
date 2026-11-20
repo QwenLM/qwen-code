@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelRouteRepository;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelStoreSupport;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
@@ -72,7 +73,7 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
                 jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id,"
                                 + " session_id, target_kind, target_key, request_digest, request_json, result_json, phase, state,"
                                 + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'CHANNEL_INGRESS', ?, ?, ?, 'SESSION', ?, ?, ?, ?, ?, ?, ?, ?)",
-                        operation, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(candidate.tenantId(), candidate.sessionId()), scope, route, candidate.tenantId(), candidate.sessionId(), target, digest, request,
+                        operation, ManagedSessionStore.sessionScopeKey(candidate.tenantId(), candidate.sessionId()), scope, route, candidate.tenantId(), candidate.sessionId(), target, digest, request,
                         candidate.inputId() == null ? null : JSON.createObjectNode().put("inputId", candidate.inputId()).toString(),
                         "admitted".equals(candidate.state()) ? "ADMITTED" : "STAGING", candidate.state(), now, now);
             }
@@ -142,9 +143,9 @@ public final class JdbcChannelRouteRepository implements ChannelRouteRepository 
     }
 
     private ChannelRoute row(java.sql.ResultSet row, int index) throws java.sql.SQLException {
-        JsonNode body = ManagedToolResultStore.parse(row.getString("request_json"));
+        JsonNode body = JdbcManagedToolResultStore.parse(row.getString("request_json"));
         JsonNode result = row.getString("result_json") == null ? JSON.createObjectNode()
-                : ManagedToolResultStore.parse(row.getString("result_json"));
+                : JdbcManagedToolResultStore.parse(row.getString("result_json"));
         List<String> refs = new ArrayList<>();
         body.path("stagedAttachmentRefs").forEach(ref -> refs.add(ref.asText()));
         return new ChannelRoute(row.getString("tenant_id"), row.getString("operation_id"), body.path("channelId").asText(),

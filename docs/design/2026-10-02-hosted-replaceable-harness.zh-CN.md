@@ -205,6 +205,35 @@ load 会把同样的 journal 状态原地停靠）、`batch_not_durable`（批�
 按普通 attach 作答：写了 turn_settled 的 Turn 已完成，绝不能被盖成
 终态失败——普通 attach 被接纳后，daemon 自己的投影会补写终态记录）。
 
+第八种 reason `public_child_recovery_unsupported`（#17260）指向
+Session 自身的耐久形态在这个 Harness 上根本无法打开：在 shell 拓扑下
+持久化的 public-child Session 如今由不具备 public child agents 的
+Harness 服务，或保存的审批续跑档案的 public-child profile 与当前拓扑
+不再匹配。与 journal 状态类 decline 不同，这个 Harness 上没有任何结算
+路径能偿付它，因此 coordinator 在首次 drive 即放弃恢复——取消也包括
+在内——不做 reconcile/park 绕行，直接把 Turn 以
+`managed_runtime_recovery_blocked` 结算为 FAILED，使其永久离开两条恢复
+扫描。记录的文案只陈述已确证的事实：绑定了 harness boot 的 Session 报告
+放弃了停靠的恢复，而没有 boot 的 Session 走 `createOrLoad`（既没有停靠、
+也没有回放）则报告该 Turn 未经派发即结算。
+
+这个判定经两条路径到达 coordinator。一是 connector 依据自身能力探测在
+本地抛出；二是当不匹配的恰是保存续跑档案自己的 profile（探测看不到的
+形态）时，daemon 在 wire 上以同一个类型化 decline 作答。因此 connector
+中每个会驱动 load 的入口都把 `hosted_turn_recovery_declined` 这个 body
+code 映射成类型化异常，普通 open/load 路由也包括在内。该映射以 code 为
+准，绝不只看 409 状态码：裸 409 对附件回退路径仍然意味着「Harness 已
+持有该 Session」。
+
+与 `checkpoint_blocked` 一样，这个 reason 只在拿到正向耐久证据时触发：
+connector 面向准入的能力探测会把不可达的 daemon（以及 pooled 部署）
+折叠成「不支持」，用于拒绝新启动是安全的，但照搬到恢复会在一次瞬态
+故障中把 Turn 终态掉。因此 decline 要求一次完整完成、且证明该能力
+确实缺席的 capabilities 读取；能力面读不到时保持普通的瞬态拒绝。
+围栏终态写入之后，缓存附件的丢弃是尽力而为：其失败只记日志，绝不
+拖住终态——终态行已经让所有扫描不再投递该 Turn，而下一个进程本来
+就会丢掉缓存。
+
 `checkpoint_blocked` 只对耐久判定触发（`opaque_state`、
 `invalid_state`、`identity_mismatch`）。被 authorization 层抹平成
 `missing_state` / `missing_checkpoint` 的瞬时 Managed Session Store

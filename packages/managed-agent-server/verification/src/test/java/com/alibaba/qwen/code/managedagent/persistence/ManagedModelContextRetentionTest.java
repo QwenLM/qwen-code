@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -22,7 +23,7 @@ class ManagedModelContextRetentionTest {
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
         ManagedSchema.initialize(source);
         var jdbc = new ManagedSchemaJdbcTemplate(source);
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session");
+        String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
         String record = ManagedExtensionProjection.recordKey("session", "hosted_context_usage", "latest");
         String resource = ManagedSchemaKeys.key(scope, "resource");
         byte[] body = "{}".getBytes(StandardCharsets.UTF_8);

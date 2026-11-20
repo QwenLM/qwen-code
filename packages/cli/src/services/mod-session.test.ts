@@ -17,6 +17,7 @@ import {
   MOD_MAX_BYTES,
   type ModCommand,
   type ModLog,
+  type ModModelHost,
   type ModPromptSubmit,
   type ModPromptSubmitted,
   type ModQueuedPrompt,
@@ -35,6 +36,8 @@ import {
   LlmEventType,
   type ServerLlmStreamEvent,
 } from '@qwen-code/qwen-code-core/core/turn.js';
+import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import { getAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/request-context.js';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import {
   getRuntimeContentGenerator,
@@ -46,6 +49,7 @@ import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOu
 import {
   MOD_PROMPT_TURN_LIMIT,
   ModSession,
+  type ModAcpHost,
   type ModTerminalHost,
 } from './mod-session.js';
 import { CommandService } from '../services/CommandService.js';
@@ -70,7 +74,7 @@ describe('Mod session ownership', () => {
   const tempDirs: string[] = [];
   const setup = (
     overrides: Record<string, unknown> = {},
-    terminal?: ModTerminalHost,
+    terminal?: ModTerminalHost | ModAcpHost,
   ) => {
     const extension = {
       id: 'id',
@@ -189,6 +193,35 @@ describe('Mod session ownership', () => {
     expect(repeat).toHaveBeenCalledTimes(1);
   });
 
+  it('aborts old session.end model calls during a session switch', async () => {
+    const generateText = vi.fn().mockResolvedValue({ text: 'current answer' });
+    const { session, runtime, config } = setup({
+      getModel: () => 'current-model',
+      getContentGeneratorConfig: () => ({ authType: 'openai' }),
+      getAllConfiguredModels: () => [],
+      getBaseLlmClient: () => ({ generateText }),
+    });
+    const signal = new AbortController().signal;
+    await session.initialize(signal);
+    const runModel = mocks.create.mock.calls[0][12] as ModModelHost;
+    const input = { model: 'sonnet', prompt: 'test request' };
+    let ending: Awaited<ReturnType<ModModelHost>> | undefined;
+    runtime.end.mockImplementationOnce(async () => {
+      ending = await runModel(input, signal);
+    });
+
+    config.getSessionId.mockReturnValue('session-2');
+    await session.syncSession('clear');
+    expect(ending).toMatchObject({ isAnswered: false, reason: 'aborted' });
+    expect(generateText).not.toHaveBeenCalled();
+
+    await expect(runModel(input, signal)).resolves.toMatchObject({
+      isAnswered: true,
+      text: 'current answer',
+    });
+    expect(generateText).toHaveBeenCalledOnce();
+  });
+
   it('serializes roots and refuses a queued call after group invalidation', async () => {
     const { session, runtime, extension } = setup();
     const signal = new AbortController().signal;
@@ -304,6 +337,90 @@ describe('Mod session ownership', () => {
     );
     expect(mocks.load).not.toHaveBeenCalled();
     expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it('loads in an ACP session for the ACP host only, raising no prompts or tool events', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write');
+    const log = vi.fn();
+    const acp = { getExperimentalZedIntegration: () => true };
+    const { session, adapter } = setup(acp, { surface: null, log });
+    await session.initialize(new AbortController().signal);
+    session.flushLogs();
+    const args = mocks.create.mock.calls[0]!;
+    // surface, prompts, queuePrompt and tools.
+    expect([args[5], args[10], args[11], args[14]]).toEqual([
+      null,
+      false,
+      undefined,
+      false,
+    ]);
+    expect(log).toHaveBeenCalledWith(
+      expect.objectContaining({ to: 'transcript', text: 'startup log' }),
+      'hello-mod',
+      'session-1',
+    );
+    expect(adapter.emitSystemMessage).not.toHaveBeenCalled();
+    expect(stderr).not.toHaveBeenCalled();
+    stderr.mockRestore();
+
+    // The ACP host outside ACP mode loads nothing.
+    mocks.create.mockClear();
+    const outside = setup({}, { surface: null, log }).session;
+    await outside.initialize(new AbortController().signal);
+    expect(mocks.create).not.toHaveBeenCalled();
+  });
+
+  it('lets each open Mod session listen to telemetry without a leak warning', async () => {
+    const before = uiTelemetryService.getMaxListeners();
+    const { session } = setup();
+    expect(uiTelemetryService.getMaxListeners()).toBe(before + 1);
+    await session.close();
+    expect(uiTelemetryService.getMaxListeners()).toBe(before);
+  });
+
+  it("reads an ACP session's context without changing telemetry", async () => {
+    let catalog = '';
+    const chat = new LlmChat(
+      { getAutoMemoryContext: () => catalog } as Config,
+      {},
+      [{ role: 'user', parts: [getAutoMemorySnapshot([], 'catalog')!] }],
+      undefined,
+      uiTelemetryService,
+    );
+    chat.seedResumeTokenCounts(250, 0);
+    const { session } = setup(
+      {
+        getExperimentalZedIntegration: () => true,
+        getContentGeneratorConfig: () => ({ contextWindowSize: 1000 }),
+        getProjectRoot: () => '/workspace',
+        getModel: () => 'fixture',
+        getLlmClient: () => ({
+          isInitialized: () => true,
+          getChat: () => chat,
+        }),
+      },
+      { surface: null, log: vi.fn() },
+    );
+    // Another session in the process answered last.
+    uiTelemetryService.setLastPromptTokenCount(900);
+    await session.initialize(new AbortController().signal);
+    const facts = mocks.create.mock.calls[0]![7] as () => ModSessionFacts;
+    expect(facts().usage.context).toEqual({
+      tokens: 250,
+      window: 1000,
+      percent: 25,
+    });
+
+    // Reading the newly visible catalog from the telemetry listener used to
+    // invalidate the counts and synchronously enter the same listener again.
+    catalog = 'catalog';
+    uiTelemetryService.setLastPromptTokenCount(900);
+    expect(facts().usage.context).toEqual({
+      tokens: 0,
+      window: 1000,
+      percent: 0,
+    });
+    expect(uiTelemetryService.getLastPromptTokenCount()).toBe(900);
   });
 
   it('initializes once, buffers logs behind init, and uses the command signal', async () => {

@@ -5,7 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.event.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.event.TransportWakeActivator.LoadOutcome;
 import com.alibaba.qwen.code.managedagent.event.TransportWakeActivator.Outcome;
-import com.alibaba.qwen.code.managedagent.persistence.TransportConsumerStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcTransportConsumerStore;
 import com.alibaba.qwen.code.managedagent.repository.TransportConsumerStore.WakeFence;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -27,7 +27,7 @@ import static org.mockito.Mockito.when;
 class TransportWakeActivatorTest {
     private static final String DIGEST = "a".repeat(64);
 
-    private TransportConsumerStore store;
+    private JdbcTransportConsumerStore store;
     private HarnessConnector harness;
     private List<String> activated;
     private List<Runnable> queued;
@@ -46,7 +46,7 @@ class TransportWakeActivatorTest {
 
     private static WakeFence fence(String status, String workspace,
             String state, long committed, boolean liveWriter) {
-        return new WakeFence(status, workspace, state, committed, liveWriter);
+        return new WakeFence(status, workspace, state, committed, liveWriter, false);
     }
 
     private void fenceIs(String status, String workspace, String state,
@@ -62,7 +62,7 @@ class TransportWakeActivatorTest {
 
     @BeforeEach
     void setUp() {
-        store = mock(TransportConsumerStore.class);
+        store = mock(JdbcTransportConsumerStore.class);
         harness = mock(HarnessConnector.class);
         when(harness.isAvailable()).thenReturn(true);
         activated = new ArrayList<>();
@@ -102,6 +102,16 @@ class TransportWakeActivatorTest {
         fenceIs("ACTIVE", "w1", "ACTIVE", 5, true);
 
         assertEquals(Outcome.OWNED, activator.onWake(wake(3)));
+
+        verifyNoAttempt();
+    }
+
+    @Test
+    void aWakeForAStampedHeadNotYetDueIsLeftToTheBackstop() {
+        when(store.wakeFence("t1", "s1")).thenReturn(Optional.of(
+                new WakeFence("ACTIVE", "w1", "SEALED", 5, false, true)));
+
+        assertEquals(Outcome.NOT_DUE, activator.onWake(wake(3)));
 
         verifyNoAttempt();
     }

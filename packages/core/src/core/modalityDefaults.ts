@@ -51,10 +51,16 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^qwen3\.5-plus/, { image: true, video: true }],
   [/^qwen3\.6-plus/, { image: true, video: true }],
   [/^qwen3\.7-plus/, { image: true, video: true }],
-  // Qwen 3.8 series: flash/plus support image + video; max supports image only
+  // The stable Qwen 3.8 chat models accept images and video. Max variants
+  // without catalog metadata default to image input.
   [/^qwen3\.8-flash/, { image: true, video: true }],
   [/^qwen3\.8-plus/, { image: true, video: true }],
+  [/^qwen3\.8-max$/, { image: true, video: true }],
   [/^qwen3\.8-max/, { image: true }],
+  // qwen4-max is native multimodal (text/image/video input). Named ahead of
+  // the text-only /^qwen/ fallback so a served id without catalog metadata
+  // still accepts media.
+  [/^qwen4-max/, { image: true, video: true }],
   [/^coder-model$/, { image: true, video: true }],
 
   // Qwen VL (vision-language) models: image + video

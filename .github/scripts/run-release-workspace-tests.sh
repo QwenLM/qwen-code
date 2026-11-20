@@ -33,16 +33,36 @@ npm run test:release:workspaces -- --shard="${shard}/3" --passWithNoTests "${ret
     # any pattern over headers is incomplete by construction, while the count
     # needs no pattern.
     #
-    # `--workspaces` prints one summary per workspace into one log, so both
-    # figures are whole-file sums and a passing tally cannot cover a later
-    # workspace's crash. Reaching this branch means at least one transport
-    # line, so a log with no `Errors` summary at all counts 0 against it and
-    # the pass is refused, not granted.
+    # `--workspaces` prints one summary per workspace into one log, so the
+    # `Errors` figure is a whole-file sum and a passing tally cannot cover a
+    # later workspace's crash. Reaching this branch means at least one
+    # transport line, so a log with no `Errors` summary at all counts 0
+    # against it and the pass is refused, not granted.
+    #
+    # The transport figure counts only inside Vitest's own unhandled-error
+    # sections, opened by the ruler-shaped `Unhandled Errors` line and closed
+    # by the summary, never the whole file: a test's console output is echoed
+    # at column 0 too, so a printed copy of the prefix or of the header could
+    # otherwise move the count in either direction. Inside the section it
+    # matches the error's OWN header line — a column-zero
+    # `Error: [vitest-worker]: Timeout calling` — not every line carrying the
+    # prefix: the message, stack and code frames there are producer-controlled,
+    # so a frame quoting the prefix could otherwise stand in for a second
+    # timeout and make `timeouts == errors` out of one error. What the pass
+    # still guarantees: at least one unhandled error Vitest itself counted, and
+    # every one of them being the transport. This is the same rule the CI unit
+    # lane applies (.github/scripts/ci/run-unit-test-lanes.sh).
     errors=$(awk '/^[[:space:]]*Errors[[:space:]]+[0-9]+ errors?$/ { total += $2 } END { print total + 0 }' "${log}")
-    timeouts=$(grep -cE '\[vitest-worker\]: Timeout calling' "${log}" || true)
+    timeouts=$(awk '
+      /^[^[:alnum:]]+Unhandled Errors[^[:alnum:]]+$/ { inside = 1; next }
+      inside && /^[[:space:]]*(Test Files|Tests|Errors)[[:space:]]/ { inside = 0 }
+      inside && /^Error: \[vitest-worker\]: Timeout calling/ { count++ }
+      END { print count + 0 }
+    ' "${log}")
     if [ "${status}" -lt 128 ] \
       && grep -qE '^[[:space:]]*Tests[[:space:]]+[0-9]+ passed' "${log}" \
       && ! grep -qE '^[[:space:]]*(Tests|Test Files)[[:space:]]+[0-9]+ failed' "${log}" \
+      && [ "${errors}" -ge 1 ] \
       && [ "${errors}" -eq "${timeouts}" ]; then
       echo "::warning title=Workspace tests passed through a Vitest transport timeout::Every test passed and all ${errors} unhandled error(s) Vitest counted were its own worker RPC timing out. Treated as a pass."
       exit 0

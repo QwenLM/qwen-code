@@ -2,8 +2,8 @@ package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.*;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
@@ -45,7 +45,7 @@ class HostedWorkspaceRecoveryWorkerIT {
     @Autowired private DataSource source;
     @Autowired private JdbcTemplate jdbc;
     @Autowired private ManagedAgentStore store;
-    @Autowired private WorkspaceExecutionStore authority;
+    @Autowired private JdbcWorkspaceExecutionStore authority;
 
     @TempDir private Path temporary;
 

@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -47,13 +48,8 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         addCaptureObject(scope, "pub-1", session, slot, slot, objectKey, inline, "VERIFIED");
     }
 
-    protected void seedCaptureGc(String captureScope, String publication, String targetSession) {
-        String id = "capture-gc-" + ManagedSchemaKeys.key(captureScope, publication);
-        addOperation(OperationKind.CAPTURE_GC, captureScope, publication, targetSession, id, "PENDING");
-    }
-
     protected String cursor() {
-        return ManagedToolResultStore.parse(jdbc.queryForObject("SELECT COALESCE(result_json, '{}') FROM ma_operation"
+        return JdbcManagedToolResultStore.parse(jdbc.queryForObject("SELECT COALESCE(result_json, '{}') FROM ma_operation"
                 + " WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", String.class, scope)).path("cursor").asText("");
     }
 
@@ -83,6 +79,189 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
                 publicationScope, sessionId, publication, ToolPublicationRetentionStore.hash(publicationScope + publication),
                 "capture-" + publication, scope);
         return publicationScope;
+    }
+
+    @Test
+    void retirementEnqueuesAllCapturesInBoundedBatchesAndRollsBackEveryIntentOnFailure() {
+        for (int index = 2; index <= 65; index++) {
+            addPublication("pub-" + index, session);
+        }
+        tx.executeWithoutResult(status -> ToolPublicationRetentionStore.lockDeletion(jdbc, tenant, session));
+        var batchSizes = new ArrayList<Integer>();
+        var fail = new AtomicBoolean(true);
+        var recording = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
+            @Override public int update(String sql, Object... args) {
+                if (sql.startsWith("INSERT IGNORE INTO ma_operation") && sql.contains("'CAPTURE_GC'")) {
+                    assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isTrue();
+                    batchSizes.add(args.length / 13);
+                    if (batchSizes.size() == 2 && fail.getAndSet(false)) {
+                        throw new org.springframework.dao.DataAccessResourceFailureException("second enqueue batch");
+                    }
+                }
+                return super.update(sql, args);
+            }
+        };
+        assertThatThrownBy(() -> tx.executeWithoutResult(status -> {
+            ToolPublicationRetentionStore.lockDeletion(recording, tenant, session);
+            ToolPublicationRetentionStore.retire(recording, tenant, session, "delete-1");
+        })).hasMessageContaining("second enqueue batch");
+        assertThat(batchSizes).containsExactly(32, 32);
+        assertThat(jdbc.queryForObject("SELECT retired_at FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                Long.class, tenant, session)).isNull();
+        assertThat(jdbc.queryForObject("SELECT retirement_generation FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                Long.class, tenant, session)).isZero();
+        assertThat(jdbc.queryForList("SELECT retention_state FROM ma_output_capture", String.class))
+                .hasSize(65).containsOnly("PINNED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation", Long.class)).isZero();
+        batchSizes.clear();
+        tx.executeWithoutResult(status -> {
+            ToolPublicationRetentionStore.lockDeletion(recording, tenant, session);
+            ToolPublicationRetentionStore.retire(recording, tenant, session, "delete-1");
+        });
+        assertThat(batchSizes).containsExactly(32, 32, 1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'CAPTURE_GC'",
+                Long.class)).isEqualTo(65);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'",
+                Long.class)).isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"LEASED", "SUCCEEDED"})
+    void retirementReplayRepairsMissingIntentsWithoutResettingProgress(String state) {
+        addPublication("pub-2", session);
+        addPublication("pub-3", session);
+        String otherScope = addPublication("pub-1", "other-session");
+        String workspaceScope = ToolPublicationDataStore.scope(tenant, "workspace-2", session);
+        jdbc.update("UPDATE ma_output_capture SET scope_key = ?, workspace_id = 'workspace-2'"
+                + " WHERE scope_key = ? AND publication_id = ?", workspaceScope, scope, "pub-2");
+        retire();
+        String sessionScope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        assertThat(scope).isNotEqualTo(sessionScope);
+        assertThat(jdbc.queryForMap("SELECT scope_key, session_scope_key, workspace_id FROM ma_operation"
+                + " WHERE operation_kind = 'CAPTURE_GC' AND publication_id = ?", "pub-2"))
+                .containsEntry("scope_key", workspaceScope).containsEntry("session_scope_key", sessionScope)
+                .containsEntry("workspace_id", "workspace-2");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE scope_key = ?",
+                Long.class, otherScope)).isZero();
+        jdbc.update("UPDATE ma_operation SET state = ?, phase = 'DELETING', claim_owner = 'collector',"
+                + " claim_generation = 7, claim_until = ?, available_at = ?, completed_at = 1234,"
+                + " result_json = '{\"version\":1,\"cursor\":\"kept\",\"collectedBytes\":123}'"
+                + " WHERE operation_kind = 'SESSION_RESOURCE_GC' OR publication_id = ?",
+                state, ToolPublicationRetentionStore.now(jdbc) + 60000, ManagedSchemaTime.NEVER_DUE_MILLIS, "pub-1");
+        var progress = jdbc.queryForList("SELECT * FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'"
+                + " OR publication_id = ? ORDER BY operation_key", "pub-1");
+        var root = jdbc.queryForMap("SELECT retired_at, retirement_generation, retirement_operation_id FROM ma_session"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
+        jdbc.update("DELETE FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND publication_id = ?", "pub-2");
+        retire();
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'CAPTURE_GC'"
+                + " AND scope_key = ? AND publication_id = ?", String.class, workspaceScope, "pub-2")).isEqualTo("PENDING");
+        assertThat(jdbc.queryForList("SELECT * FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'"
+                + " OR publication_id = ? ORDER BY operation_key", "pub-1")).usingRecursiveComparison().isEqualTo(progress);
+        jdbc.update("DELETE FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC' OR publication_id = ?", "pub-3");
+        retire();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation", Long.class)).isEqualTo(4);
+        assertThat(jdbc.queryForList("SELECT * FROM ma_operation WHERE publication_id = ?", "pub-1"))
+                .usingRecursiveComparison().isEqualTo(progress.stream().filter(row -> "pub-1".equals(row.get("publication_id"))).toList());
+        assertThat(jdbc.queryForMap("SELECT retired_at, retirement_generation, retirement_operation_id FROM ma_session"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, session)).isEqualTo(root);
+        assertThatThrownBy(() -> tx.executeWithoutResult(status -> {
+            ToolPublicationRetentionStore.lockDeletion(jdbc, tenant, session);
+            ToolPublicationRetentionStore.retire(jdbc, tenant, session, "another-delete");
+        })).hasMessageContaining("another operation");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"full", "short", "deleted-tail", "rollback"})
+    void operationRepairFreezesRoundAndRevisitsSkippedOrRolledBackRows(String mode) {
+        int captures = "short".equals(mode) ? 65 : 64;
+        boolean rollback = "rollback".equals(mode);
+        boolean deletedTail = "deleted-tail".equals(mode);
+        for (int index = 2; index <= captures; index++) {
+            addPublication("pub-" + index, session);
+        }
+        retire();
+        jdbc.update("UPDATE ma_session SET is_recovery_protected = TRUE WHERE tenant_id = ?", tenant);
+        jdbc.update("UPDATE ma_operation SET state = 'SUCCEEDED', available_at = ? WHERE operation_kind = 'CAPTURE_GC'",
+                ManagedSchemaTime.NEVER_DUE_MILLIS);
+        jdbc.update("DELETE FROM ma_operation WHERE operation_kind = 'CAPTURE_GC' AND publication_id IN (?, ?)",
+                "pub-1", "pub-" + captures);
+        if (!rollback) {
+            jdbc.update("UPDATE ma_output_capture SET retention_state = 'PINNED' WHERE publication_id = ?", "pub-1");
+        }
+        var ids = jdbc.queryForList("SELECT id FROM ma_output_capture ORDER BY id", Long.class);
+        assertThat(ids).hasSize(captures);
+        var pages = new ArrayList<List<Long>>();
+        var bounds = new ArrayList<List<Object>>();
+        var maxima = new ArrayList<Long>();
+        var recording = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
+            @Override public <T> T queryForObject(String sql, Class<T> type) {
+                T value = super.queryForObject(sql, type);
+                if (sql.equals("SELECT MAX(id) FROM ma_output_capture")) {
+                    maxima.add(((Number) value).longValue());
+                }
+                return value;
+            }
+            @Override public <T> List<T> query(String sql, RowMapper<T> mapper, Object... args) {
+                var rows = super.query(sql, mapper, args);
+                if (sql.contains("AS needs_operation")) {
+                    assertThat(sql).contains("WHERE id > ? AND id <= ? ORDER BY id LIMIT 32) c ORDER BY c.id");
+                    bounds.add(List.of(args));
+                    pages.add(rows.stream().map(row -> ((Number) ((java.util.Map<?, ?>) row).get("id")).longValue()).toList());
+                }
+                return rows;
+            }
+        };
+        var objects = new DeletingObjects();
+        var gc = collector(recording, objects, true);
+        tx.executeWithoutResult(status -> {
+            assertThat(gc.runOnce()).isFalse();
+            if (rollback) {
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'CAPTURE_GC'"
+                        + " AND publication_id = ?", Long.class, "pub-1")).isEqualTo(1);
+                status.setRollbackOnly();
+            }
+        });
+        assertThat(pages).containsExactly(ids.subList(0, 32));
+        assertThat(bounds).containsExactly(List.of(0L, ids.getLast()));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'CAPTURE_GC'",
+                Long.class)).isEqualTo(captures - 2);
+        jdbc.update("UPDATE ma_output_capture SET retention_state = 'RETIRING' WHERE publication_id = ?", "pub-1");
+        if (deletedTail) {
+            jdbc.update("DELETE FROM ma_output_capture WHERE id > ?", ids.get(31));
+        }
+        int roundPages = (captures + 31) / 32;
+        for (int scan = 1; scan <= roundPages; scan++) {
+            for (int index = 0; index < 32; index++) {
+                addPublication("new-" + scan + "-" + index, session);
+            }
+            assertThat(maxima).containsExactly(ids.getLast());
+            assertThat(gc.runOnce()).isFalse();
+            if (scan < roundPages) {
+                assertThat(maxima).containsExactly(ids.getLast());
+                assertThat(bounds.getLast()).containsExactly(ids.get(scan * 32 - 1), ids.getLast());
+                assertThat(pages.getLast()).isEqualTo(deletedTail ? List.of()
+                        : ids.subList(scan * 32, Math.min((scan + 1) * 32, captures)));
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'CAPTURE_GC'"
+                        + " AND publication_id = ?", Long.class, "pub-1")).isZero();
+            }
+        }
+        long latest = jdbc.queryForObject("SELECT MAX(id) FROM ma_output_capture", Long.class);
+        assertThat(maxima).containsExactly(ids.getLast(), latest);
+        assertThat(bounds.getLast()).containsExactly(0L, latest);
+        assertThat(pages).hasSize(roundPages + 1);
+        assertThat(pages.getLast()).isEqualTo(ids.subList(0, 32));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'CAPTURE_GC'",
+                Long.class)).isEqualTo(captures - (deletedTail ? 1 : 0));
+        assertThat(jdbc.queryForObject("SELECT failure_code FROM ma_operation WHERE operation_kind = 'CAPTURE_GC'"
+                + " AND publication_id = ?", String.class, "pub-1")).isEqualTo("recovery_protected");
+        if (!deletedTail) {
+            assertThat(jdbc.queryForObject("SELECT failure_code FROM ma_operation WHERE operation_kind = 'CAPTURE_GC'"
+                    + " AND publication_id = ?", String.class, "pub-" + captures)).isEqualTo("recovery_protected");
+        }
+        assertThat(objects.deleted).isEmpty();
+        assertThat(jdbc.queryForList("SELECT retention_state FROM ma_output_capture WHERE id <= ?",
+                String.class, ids.getLast())).containsOnly("RETIRING");
     }
 
     @Test
@@ -116,7 +295,6 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         }
         addObject("healthy", "healthy/exact-key", null);
         retire();
-        seedCaptureGc(scope, "pub-1", session);
         jdbc.update("UPDATE ma_operation SET available_at = 1 WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
         var evaluations = new java.util.concurrent.atomic.AtomicInteger();
         var template = new ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
@@ -209,7 +387,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
     @ValueSource(strings = {"VERIFIED", "CANDIDATE", "QUARANTINED"})
     void failedPrefixAllowsCollectionOnlyWithVerifiedObjects(String objectState) {
         String failed = addOperation(OperationKind.OUTPUT_VERIFY, scope, "pub-1", session, "failed-prefix", "FAILED");
-        jdbc.update("UPDATE ma_operation SET slot_key = X'7072656669783a7374646f7574', execution_mode = 'ASYNC', is_verification_ready = TRUE,"
+        jdbc.update("UPDATE ma_operation SET slot_key = X'7072656669783a7374646f7574', is_verification_ready = TRUE,"
                 + " failure_status = 403, failure_code = 'managed_tool_publication_storage_denied' WHERE operation_key = ?", failed);
         addObject("one", "failed-prefix/exact-key", null);
         addObject("inline", null, new byte[] {8});
@@ -279,7 +457,6 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         retire();
         long retiredAt = ToolPublicationRetentionStore.now(jdbc) - Duration.ofHours(2).toMillis();
         jdbc.update("UPDATE ma_session SET retired_at = ? WHERE tenant_id = ?", retiredAt, tenant);
-        seedCaptureGc(scope, "pub-1", session);
         jdbc.update("UPDATE ma_operation SET failure_code = 'grace_period', available_at = ? WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?",
                 retiredAt + Duration.ofHours(1).toMillis(), scope);
         var properties = new ManagedAgentProperties();
@@ -353,7 +530,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
     @Test
     void resourceHandoffRetriesWithinSecondsUntilTheSessionLedgerSettles() {
         addObject("one", "handoff/exact-key", null);
-        String resourceScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String resourceScope = ManagedSessionStore.sessionScopeKey(tenant, session);
         jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
                 + " owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id,"
                 + " journal_revision, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, ?, 'workspace-1', ?,"
@@ -361,7 +538,6 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
                 resourceScope, resourceScope, ManagedSchemaKeys.key(resourceScope, "one"), tenant,
                 session);
         retire();
-        seedCaptureGc(scope, "pub-1", session);
         jdbc.update("UPDATE ma_operation SET available_at = 1 WHERE operation_kind ="
                 + " 'CAPTURE_GC' AND scope_key = ?", scope);
         var gc = collector(new DeletingObjects());
@@ -422,7 +598,6 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         });
         long deadline = jdbc.queryForObject("SELECT retired_at FROM ma_session"
                 + " WHERE tenant_id = ? AND session_id = ?", Long.class, tenant, heldSession) + grace.toMillis();
-        seedCaptureGc(scope, "pub-1", session);
         jdbc.update("UPDATE ma_operation SET available_at = 1 WHERE operation_kind = 'CAPTURE_GC' AND scope_key = ?", scope);
         var properties = new ManagedAgentProperties();
         properties.getToolPublication().setGcEnabled(true);
@@ -483,10 +658,10 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
 
         for (String resource : List.of("target-result", "sibling-result")) {
             jdbc.update("UPDATE ma_resource SET state = 'REFERENCED', publish_command_id = 'publish' WHERE session_scope_key = ? AND resource_id = ?",
-                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), resource);
+                    ManagedSessionStore.sessionScopeKey(tenant, session), resource);
         }
         for (String resource : List.of("message-1", "checkpoint-1")) {
-            String resourceScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+            String resourceScope = ManagedSessionStore.sessionScopeKey(tenant, session);
             jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace-1', ?, ?, ?, 1, 1, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                     ManagedSchemaKeys.key(resourceScope, resource), resourceScope, tenant, session, resource,
                     resource.equals("message-1") ? "managed-message" : "managed-checkpoint", scope, new byte[] {2});
@@ -494,8 +669,6 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         long used = jdbc.queryForObject("SELECT capture_used_bytes + producer_used_bytes + admission_used_bytes"
                 + " FROM ma_output_capture WHERE scope_key = ? AND publication_id = X'7075622d31'", Long.class, scope);
         retire();
-        seedCaptureGc(scope, "pub-1", session);
-        seedCaptureGc(scope, "pub-2", session);
         jdbc.update("UPDATE ma_operation SET available_at = 1 WHERE operation_kind = 'CAPTURE_GC'"
                 + " AND scope_key = ? AND publication_id = ?", scope, "pub-2");
         assertThat(collector(new DeletingObjects()).runOnce()).isTrue();
@@ -531,8 +704,6 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         addCaptureObject(scope, "pub-2", session, "two", "two", "healthy", null, "VERIFIED");
 
         retire();
-        seedCaptureGc(scope, "pub-1", session);
-        seedCaptureGc(scope, "pub-2", session);
         jdbc.update("UPDATE ma_operation SET available_at = 1 WHERE operation_kind = 'CAPTURE_GC'"
                 + " AND scope_key = ? AND publication_id = ?", scope, "pub-2");
         var objects = new DeletingObjects() {
@@ -830,6 +1001,8 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         retire();
         var objects = new DeletingObjects();
         assertThat(collector(jdbc, objects, false).runOnce()).isFalse();
+        assertThat(jdbc.queryForList("SELECT operation_kind FROM ma_operation WHERE state = 'PENDING'", String.class))
+                .containsExactlyInAnyOrder("CAPTURE_GC", "SESSION_RESOURCE_GC");
         jdbc.update("UPDATE ma_output_capture SET is_write_evidence = FALSE WHERE scope_key = ?", scope);
         assertThat(collector(objects).runOnce()).isFalse();
         assertThat(objects.deleted).isEmpty();

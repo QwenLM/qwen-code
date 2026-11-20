@@ -39,7 +39,12 @@ interface SessionCatalogHookOptions {
   pollIntervalMs?: number;
 }
 
+interface SessionCatalogQueriesOptions extends SessionCatalogHookOptions {
+  pollQueries?: (query: SessionCatalogQuery, index: number) => boolean;
+}
+
 export interface WebShellSessionsOptions extends SessionCatalogHookOptions {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   pageSize?: number;
   cursor?: string;
   archiveState?: DaemonSessionArchiveState;
@@ -121,13 +126,14 @@ export function useSessionCatalogQuery(
 export function useSessionCatalogQueries(
   client: DaemonClient,
   queries: readonly SessionCatalogQuery[],
-  options: SessionCatalogHookOptions = {},
+  options: SessionCatalogQueriesOptions = {},
 ): readonly SessionCatalogSnapshot[] {
   const {
     autoLoad = false,
     enabled = true,
     maxAgeMs,
     pollIntervalMs,
+    pollQueries,
   } = options;
   const store = useMemo(() => getSessionCatalogStore(client), [client]);
   const queriesKey = queries.map(getSessionCatalogQueryKey).join('\n');
@@ -139,16 +145,21 @@ export function useSessionCatalogQueries(
     stableQueriesRef.current = { key: queriesKey, queries: [...queries] };
   }
   const stableQueries = stableQueriesRef.current.queries;
+  const pollQueriesRef = useRef(pollQueries);
+  pollQueriesRef.current = pollQueries;
   const cachedSnapshots = useRef<readonly SessionCatalogSnapshot[]>([]);
 
   const subscribe = useCallback(
     (listener: () => void) => {
       if (!enabled) return () => undefined;
-      const unsubscribes = stableQueries.map((query) =>
+      const unsubscribes = stableQueries.map((query, index) =>
         store.subscribe(query, listener, {
           autoLoad,
           ...(maxAgeMs !== undefined ? { maxAgeMs } : {}),
-          ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
+          ...(pollIntervalMs !== undefined &&
+          (pollQueriesRef.current?.(query, index) ?? true)
+            ? { pollIntervalMs }
+            : {}),
         }),
       );
       return () => {
@@ -328,8 +339,9 @@ export function useSessionActivePromptState(
  * Every view that owns a provider needs its own bridge: a split pane and a
  * side task each mount one (via ChatPane), and each is an observer of a turn
  * it did not submit — the case where the event stream alone cannot tell a long
- * silent tool call from a finished turn (#9487). Publishing `undefined` while
- * the answer is unknown leaves that provider's pre-existing heuristics alone.
+ * silent tool call from a finished turn (#9487). Before authority is available,
+ * `undefined` leaves the existing heuristics alone; losing known activity
+ * reconciles the provider against a fresh session snapshot.
  *
  * Returns both live facts for callers that need them; the boolean wrapper
  * below preserves the existing prompt-only API.
@@ -357,7 +369,7 @@ export function useDaemonSessionActivityBridge(
   // Publish only what may settle a turn. On the catalog-fallback path this is
   // always `undefined`, so the provider never sees a `true` there and no
   // fallback refetch can produce the `true -> undefined` transition that
-  // settles. A genuine loss of live-state coverage still does.
+  // reconciles. A genuine loss of live-state coverage still does.
   const daemonActivePrompt = authoritative ? hasActivePrompt : undefined;
   useEffect(() => {
     // A retained snapshot from before this session became the target may still
@@ -512,6 +524,7 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
     enabled = true,
     maxAgeMs,
     pollIntervalMs,
+    sortBy,
     pageSize,
     cursor,
     archiveState,
@@ -538,6 +551,7 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
   const workspaceCwd = workspace.workspaceCwd;
   const listOptions = useMemo<DaemonSessionListPageOptions>(
     () => ({
+      ...(sortBy !== undefined ? { sortBy } : {}),
       ...(pageSize !== undefined ? { pageSize } : {}),
       ...(cursor !== undefined ? { cursor } : {}),
       ...(archiveState !== undefined ? { archiveState } : {}),
@@ -549,6 +563,7 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
       ...(liveOnly === true ? { liveOnly: true } : {}),
     }),
     [
+      sortBy,
       archiveState,
       cursor,
       group,

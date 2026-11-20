@@ -134,6 +134,38 @@ describe('local history restoration', () => {
     ]);
   });
 
+  it('remaps replayed local ids without crypto.randomUUID (non-secure context)', () => {
+    const cryptoObject = globalThis.crypto;
+    const descriptor = Object.getOwnPropertyDescriptor(
+      cryptoObject,
+      'randomUUID',
+    );
+    Object.defineProperty(cryptoObject, 'randomUUID', {
+      value: undefined,
+      configurable: true,
+    });
+    try {
+      const store = createDaemonTranscriptStore({
+        blocks: [block('local', 'p')],
+      });
+      restoreLocalDeletionBlocks(store, [
+        block('local', 'local-command:stats'),
+      ]);
+      const ids = store.getSnapshot().blocks.map((item) => item.id);
+      expect(ids).toHaveLength(2);
+      expect(ids[0]).toMatch(
+        /^reloaded:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+      expect(ids[1]).toBe('local');
+    } finally {
+      if (descriptor) {
+        Object.defineProperty(cryptoObject, 'randomUUID', descriptor);
+      } else {
+        delete (cryptoObject as { randomUUID?: unknown }).randomUUID;
+      }
+    }
+  });
+
   it('uses current order when a failed reload cache has no surviving anchors', () => {
     const local = block('local', 'local-command:stats');
     const store = createDaemonTranscriptStore();

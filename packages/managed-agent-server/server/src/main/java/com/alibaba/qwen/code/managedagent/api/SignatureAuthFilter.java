@@ -56,10 +56,15 @@ public class SignatureAuthFilter extends OncePerRequestFilter
         if (security.getMode() != BrokerSecurity.Mode.SIGNED) {
             return true;
         }
+        String path = PublicSurface.pathWithinApplication(request);
+        // The terminal upgrade authenticates with the single-use ticket, not
+        // the signature headers a browser WebSocket cannot set.
+        if (PublicSurface.terminalUpgrade(request)) {
+            return true;
+        }
         // Coverage follows the routed path (as the tenant filter does); the
         // canonical string still signs the raw request URI.
-        return !PublicSurface.covers(
-                PublicSurface.pathWithinApplication(request));
+        return !PublicSurface.covers(path);
     }
 
     @Override
@@ -301,8 +306,10 @@ public class SignatureAuthFilter extends OncePerRequestFilter
         String content = request.getContentType();
         return content != null && content.equalsIgnoreCase(MediaType.APPLICATION_OCTET_STREAM_VALUE)
                 && ("POST".equals(request.getMethod())
-                && (path.matches("/v1/agents/workspaces/[^/]+/extensions")
-                || path.equals("/api/agent/web-shell/v1/workspace-extensions/publish"))
+                && (path.matches("/v1/agents/workspaces/[^/]+/extensions(?:/imports(?:/preview)?)?")
+                || path.equals("/api/agent/web-shell/v1/workspace-extensions/publish")
+                || path.equals("/api/agent/web-shell/v1/workspace-extensions/imports")
+                || path.equals("/api/agent/web-shell/v1/workspace-extensions/imports/preview"))
                 || "PUT".equals(request.getMethod())
                 && path.matches("/v1/agents/workspaces/[^/]+/extensions/ext_[a-f0-9-]{36}/packages/[a-f0-9]{64}"));
     }

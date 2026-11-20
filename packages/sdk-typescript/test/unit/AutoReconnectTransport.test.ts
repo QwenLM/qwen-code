@@ -555,6 +555,71 @@ describe('AutoReconnectTransport', () => {
   // ---- supportsReplay from inner ----------------------------------------
 
   describe('supportsReplay', () => {
+    it.each([
+      {
+        initialType: 'acp-ws',
+        initialReplay: false,
+        nextType: 'rest',
+        nextReplay: true,
+      },
+      {
+        initialType: 'rest',
+        initialReplay: true,
+        nextType: 'acp-ws',
+        nextReplay: false,
+      },
+    ] as const)(
+      'tracks replay support after reconnecting from $initialType to $nextType',
+      async ({ initialType, initialReplay, nextType, nextReplay }) => {
+        const initial = createMockTransport({
+          type: initialType,
+          supportsReplay: initialReplay,
+          fetch: vi.fn(async () => {
+            throw new DaemonTransportClosedError();
+          }),
+        });
+        const replacement = createMockTransport({
+          type: nextType,
+          supportsReplay: nextReplay,
+        });
+        const transport = new AutoReconnectTransport({
+          baseUrl: 'http://d',
+          initial,
+          factory: () => replacement,
+        });
+
+        expect(transport.supportsReplay).toBe(initialReplay);
+        await transport.fetch('http://d/health', { method: 'GET' });
+        expect(transport.type).toBe(nextType);
+        expect(transport.supportsReplay).toBe(nextReplay);
+        transport.dispose();
+      },
+    );
+
+    it('reports replay support after falling back from WebSocket to REST', async () => {
+      const initial = createMockTransport({
+        type: 'acp-ws',
+        supportsReplay: false,
+        fetch: vi.fn(async () => {
+          throw new DaemonTransportClosedError();
+        }),
+      });
+      const transport = new AutoReconnectTransport({
+        baseUrl: 'http://d',
+        initial,
+        factory: async () => {
+          throw new Error('WebSocket unavailable');
+        },
+        fetch: async () => new Response('{}'),
+      });
+
+      expect(transport.supportsReplay).toBe(false);
+      await transport.fetch('http://d/health', { method: 'GET' });
+      expect(transport.type).toBe('rest');
+      expect(transport.supportsReplay).toBe(true);
+      transport.dispose();
+    });
+
     it('reflects inner transport supportsReplay=true', () => {
       const inner = createMockTransport({ supportsReplay: true });
       const transport = new AutoReconnectTransport({

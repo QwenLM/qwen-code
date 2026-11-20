@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -24,22 +25,22 @@ final class WorkspaceStorageMarkers {
     Marker read(Path root) {
         Path file = root.resolve(FILE_NAME);
         if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ,
                 LinkOption.NOFOLLOW_LINKS)) {
             if (channel.size() > 4096) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             ByteBuffer bytes = ByteBuffer.allocate((int) channel.size());
             while (bytes.hasRemaining()) {
                 if (channel.read(bytes) <= 0) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                    throw WorkspaceExecutionStore.unavailable();
                 }
             }
             return json.readValue(bytes.array(), Marker.class);
         } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
@@ -60,14 +61,14 @@ final class WorkspaceStorageMarkers {
                 Files.createLink(file, temporary);
             } catch (java.nio.file.FileAlreadyExistsException ignored) {
                 if (!expected.equals(read(root))) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                    throw WorkspaceExecutionStore.unavailable();
                 }
             }
             try (FileChannel directory = FileChannel.open(root, StandardOpenOption.READ)) {
                 directory.force(true);
             }
         } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         } finally {
             try {
                 Files.deleteIfExists(temporary);
@@ -76,31 +77,31 @@ final class WorkspaceStorageMarkers {
             }
         }
         if (!expected.equals(read(root))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
     Marker readProbe(Path root) {
         Path file = root.resolve(FILE_NAME);
         if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         try (FileChannel channel = FileChannel.open(file,
                 StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
             if (channel.size() > 4096) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             ByteBuffer bytes = ByteBuffer.allocate((int) channel.size());
             while (bytes.hasRemaining()) {
                 if (channel.read(bytes) <= 0) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                    throw WorkspaceExecutionStore.unavailable();
                 }
             }
             return json.readValue(bytes.array(), Marker.class);
         } catch (JsonProcessingException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailableTransient(error);
+            throw WorkspaceExecutionStore.unavailableTransient(error);
         }
     }
 
