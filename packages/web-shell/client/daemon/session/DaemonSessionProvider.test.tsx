@@ -17918,6 +17918,30 @@ describe('DaemonSessionProvider', () => {
     // model request on it. The shared `replayedThenIdle` stream is what the
     // positive case above uses, so this is not vacuous the way a
     // `catchingUp`-blocked assertion would be.
+    it('does not surface a refusal notice for the unattended attempt', async () => {
+      // The load, not the user, started this continuation, so a refusal must
+      // stay quiet — the recovery banner is the affordance (finding R2-1).
+      const { session, continued } = setup({
+        kind: 'interrupted_prompt',
+        canContinue: true,
+      });
+      continued.mockRejectedValueOnce(
+        new Error('Session has no resumable interrupted turn'),
+      );
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        sessionId: 'session-1',
+        autoContinueInterruptedTurn: true,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+
+      expect(session.continueSession).toHaveBeenCalledTimes(1);
+      expect(notices).toEqual([]);
+    });
+
     it('leaves a dangling tool call to the Continue button', async () => {
       const { continued } = setup({
         kind: 'interrupted_turn',

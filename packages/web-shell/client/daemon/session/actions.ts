@@ -1606,8 +1606,14 @@ export function createDaemonSessionActions({
     },
 
     async continueSession(options = {}) {
+      // The load-time automatic continuation runs without the user asking
+      // for it, so a refusal there must not surface a `Continue failed`
+      // notice the user never triggered; the banner stays as the affordance.
+      const notify: AddDaemonSessionNotice = options.silent
+        ? () => {}
+        : addNotice;
       const session = requireSessionForAction(
-        addNotice,
+        notify,
         sessionRef.current,
         'Continue failed',
         'continue_session',
@@ -1615,7 +1621,7 @@ export function createDaemonSessionActions({
       const sessionId = session.sessionId;
       if (hasSessionActivePrompt() || activePromptsRef.current.has(sessionId)) {
         throw dispatchActionError(
-          addNotice,
+          notify,
           'Continue failed',
           'A prompt is already in progress',
           'continue_session',
@@ -1631,7 +1637,7 @@ export function createDaemonSessionActions({
         connection.context?.recovery?.canContinue !== true
       ) {
         throw dispatchActionError(
-          addNotice,
+          notify,
           'Continue failed',
           'Session has no resumable interrupted turn',
           'continue_session',
@@ -1709,7 +1715,7 @@ export function createDaemonSessionActions({
         // event or a reload reconciles it. Never automatically POST again.
         publishStandaloneWorkingDirectoryError(sessionId, error);
         throw dispatchActionError(
-          addNotice,
+          notify,
           'Continue failed',
           error,
           'continue_session',

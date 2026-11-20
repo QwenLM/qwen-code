@@ -5758,7 +5758,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     }
     if (autoContinuedRecoveriesRef.current.has(recovery)) return;
     autoContinuedRecoveriesRef.current.add(recovery);
-    void actions.continueSession().catch((error: unknown) => {
+    void actions.continueSession({ silent: true }).catch((error: unknown) => {
+      // A refusal must not forfeit the resume for the whole load: release
+      // the claim so the next eligible render retries it. `silent` keeps
+      // the user from seeing a `Continue failed` notice for a load they did
+      // nothing to trigger; the banner remains the affordance.
+      autoContinuedRecoveriesRef.current.delete(recovery);
       if (!isDaemonTurnError(error)) {
         console.warn('Automatic continuation failed', error);
       }
