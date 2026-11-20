@@ -216,74 +216,7 @@ jobs:
           GH_TOKEN: '${{ github.token }}'
           REPO: '${{ github.repository }}'
           RUN_ID: '${{ github.run_id }}'
-        run: |-
-          set -euo pipefail
-
-          # A required-name check counts as a full-suite report only when this
-          # PR's review run actually contained the full callee. Sharing the
-          # head with another PR, or reporting a fast/no-suite pass under the
-          # same name, is not coverage.
-          run_reports_full() {
-            local run="$1"
-            local event prs metadata jobs
-            [[ "${run}" != "${RUN_ID}" ]] || return 1
-            metadata="$(gh api "repos/${REPO}/actions/runs/${run}" --jq '[.event, ([.pull_requests[].number] | map(tostring) | join(" "))] | @tsv')" || exit 1
-            IFS=$'\t' read -r event prs <<< "${metadata}"
-            [[ -n "${event}" ]] || exit 1
-            [[ "${event}" == 'pull_request_review' ]] || return 1
-            [[ " ${prs} " == *" ${PR_NUMBER} "* ]] || return 1
-            jobs="$(gh api "repos/${REPO}/actions/runs/${run}/jobs?per_page=100" --jq '[.jobs[].name | startswith("SDK Java (full)")] | any')" || exit 1
-            [[ "${jobs}" == 'true' ]]
-          }
-
-          # A reopened or manually rerun pull request must not let a new fast
-          # result replace an existing full result on the same head. Find any
-          # prior full report (not only the latest check of the name), then
-          # leave the required context to that full run.
-          prior_full_reported=false
-          if [[ "${TOUCHED}" == 'true' && "${EVENT_NAME}" == 'pull_request' ]]; then
-            urls="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs?check_name=Managed%20Agent%20gate&filter=all&per_page=100" \
-              --jq '.check_runs[].details_url')"
-            for run in $({ grep -oE '/runs/[0-9]+/' <<< "${urls}" || true; } | tr -dc '0-9\n' | sort -u); do
-              if run_reports_full "${run}"; then
-                prior_full_reported=true
-                break
-              fi
-            done
-          fi
-
-          tier=none
-          if [[ "${TOUCHED}" == 'true' ]]; then
-            case "${EVENT_NAME}" in
-              pull_request)
-                if [[ "${prior_full_reported}" != 'true' ]]; then
-                  tier=fast
-                fi
-                ;;
-              push | merge_group) tier=fast ;;
-              pull_request_review)
-                # A maintainer's approval only. qwen-triage-finalize.yml watches
-                # this workflow and posts a deferred APPROVE once a PR's checks
-                # land green, so an ungated check lets the gate's own fast tier
-                # buy the most expensive run in the repository with no human
-                # involved. An empty association fails closed the same way.
-                if [[ "${REVIEW_STATE}" == 'approved' && "${BASE_REF}" == 'main' &&
-                  ' OWNER MEMBER COLLABORATOR ' == *" ${REVIEW_AUTHOR_ASSOCIATION} "* ]]; then
-                  tier=full
-                  urls="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs?check_name=Managed%20Agent%20gate&per_page=100" \
-                    --jq '.check_runs[] | select(.status != "completed" or .conclusion == "success") | .details_url')"
-                  for run in $({ grep -oE '/runs/[0-9]+/' <<< "${urls}" || true; } | tr -dc '0-9\n' | sort -u); do
-                    if run_reports_full "${run}"; then
-                      echo "Run ${run} already covers ${HEAD_SHA}."
-                      tier=none
-                      break
-                    fi
-                  done
-                fi
-                ;;
-            esac
-          fi
-          echo "tier=${tier}" >> "${GITHUB_OUTPUT}"
+        run: bash .github/scripts/managed-agent-gate-tier.sh
 
   suite:
     name: 'SDK Java (${{ needs.scope.outputs.tier }})'

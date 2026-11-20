@@ -77,8 +77,9 @@ workspace install as `mysql-integration`. Together that adds about 16 minutes:
 `.github/scripts/managed-agent-gate-scope.mjs` matches the changed paths:
 `packages/managed-agent-server/`, `packages/sdk-java/`,
 `packages/cli/src/serve/`, `packages/core/src/managed-runtime/`, the Hosted
-integration helpers and config, the scripts `sdk-java.yml` runs, and the gate
-files themselves. Pull request and review events diff the test merge commit
+integration helpers and config, the scripts `sdk-java.yml` runs, the gate
+workflow, and `.github/scripts/managed-agent-gate-tier.sh`. Pull request and
+review events diff the test merge commit
 against its first parent, so the set is the PR's own change. A push diffs
 `before..after` and a merge group diffs its base. Renames count both paths,
 and the diff runs with git's path quoting off so a non-ASCII file name still
@@ -147,8 +148,16 @@ do not count, and a fast-tier or untouched pass from the PR push run does not
 count. The covering run must also belong to the same pull request and
 show the `SDK Java (full)` callee in its jobs: a review run of another PR on
 the same head, or a run that reported the name without running the suite, ran
-no Java lane and does not count. After a failed full run, the next approval or
+no Java lane and does not count. GitHub leaves `pull_requests` empty for fork
+review runs, so the approval dedup confirms that the current PR still points at
+this head SHA and then matches the candidate run's head branch to the PR's
+head ref. After a failed full run, the next approval or
 **Re-run failed jobs** retries it.
+
+The reopened or manually rerun `pull_request` case is deliberately SHA-scoped
+rather than PR-scoped: branch protection reads the required context by commit,
+so any full-suite report already published for that head must remain the
+result that a new fast run cannot overwrite.
 
 ### Concurrency
 

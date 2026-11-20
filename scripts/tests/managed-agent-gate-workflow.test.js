@@ -78,6 +78,7 @@ describe('Managed Agent gate scope', () => {
     '.github/workflows/sdk-java.yml',
     '.github/workflows/managed-agent-gate.yml',
     '.github/scripts/managed-agent-gate-scope.mjs',
+    '.github/scripts/managed-agent-gate-tier.sh',
   ])('runs the suite for %s', (path) => {
     expect(touchesManagedAgent(['README.md', path])).toBe(true);
   });
@@ -494,13 +495,18 @@ describe('Managed Agent gate required check', () => {
 
 describe('Managed Agent gate tier selection', () => {
   const step = gate.jobs.scope.steps.find((s) => s.name === 'Choose the tier');
+  expect(step.run).toBe('bash .github/scripts/managed-agent-gate-tier.sh');
+  const tierScript = readFileSync(
+    '.github/scripts/managed-agent-gate-tier.sh',
+    'utf8',
+  );
   const dir = mkdtempSync(join(tmpdir(), 'managed-agent-gate-'));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
-  // A stand-in gh: check-runs prints FAKE_URLS; a run lookup prints the
-  // event and pull request numbers recorded for that id in FAKE_EVENTS
-  // ("id=event:pr ..."), tab-separated as the step's @tsv read expects; a
-  // jobs lookup prints whether that id is listed in FAKE_FULL, standing in
-  // for a run whose callee actually executed the full suite.
+  // A stand-in gh: check-runs prints FAKE_URLS (approval dedup) or
+  // FAKE_ALL_URLS (the pull_request scan); a run lookup prints event, pull
+  // request numbers and head branch from FAKE_EVENTS ("id=event:prs:branch");
+  // a direct PR lookup supplies the fork fallback's head ref; a jobs lookup
+  // reports FAKE_FULL membership.
   writeFileSync(
     join(dir, 'gh'),
     [
@@ -509,8 +515,9 @@ describe('Managed Agent gate tier selection', () => {
       'case "$2" in',
       '  */check-runs*filter=all*) printf "%s" "${FAKE_ALL_URLS}" ;;',
       '  */check-runs*) printf "%s" "${FAKE_URLS}" ;;',
+      '  */pulls/*) printf \'%s\\t%s\\n\' "${HEAD_SHA}" "${FAKE_HEAD_REF:-feature}" ;;',
       '  */actions/runs/*/jobs*) id="${2%/jobs*}"; id="${id##*/}"; [[ " ${FAKE_FULL:-} " == *" ${id} "* ]] && echo true || echo false ;;',
-      '  */actions/runs/*) id="${2##*/}"; for p in ${FAKE_EVENTS}; do if [[ "${p%%=*}" == "${id}" ]]; then rec="${p#*=}"; printf \'%s\\t%s\\n\' "${rec%%:*}" "${rec#*:}"; fi; done ;;',
+      '  */actions/runs/*) id="${2##*/}"; for p in ${FAKE_EVENTS}; do if [[ "${p%%=*}" == "${id}" ]]; then rec="${p#*=}"; event="${rec%%:*}"; rest="${rec#*:}"; if [[ "${rest}" == *:* ]]; then prs="${rest%%:*}"; branch="${rest#*:}"; else prs="${rest}"; branch=""; fi; [[ -n "${prs}" ]] || prs=-; printf \'%s\\t%s\\t%s\\n\' "${event}" "${prs}" "${branch}"; fi; done ;;',
       'esac',
     ].join('\n'),
   );
@@ -519,7 +526,7 @@ describe('Managed Agent gate tier selection', () => {
   const runTier = (env) => {
     const output = join(dir, 'output');
     writeFileSync(output, '');
-    const result = spawnSync('bash', ['-c', step.run], {
+    const result = spawnSync('bash', ['-c', tierScript], {
       env: {
         PATH: `${dir}:${process.env.PATH}`,
         GITHUB_OUTPUT: output,
@@ -562,6 +569,17 @@ describe('Managed Agent gate tier selection', () => {
         EVENT_NAME: 'pull_request',
         FAKE_ALL_URLS: url(42),
         FAKE_EVENTS: '42=pull_request_review:7',
+        FAKE_FULL: '42',
+      }),
+    ).toBe('tier=none');
+  });
+
+  it('keeps a fork head full result when its run omits pull request numbers', () => {
+    expect(
+      tier({
+        EVENT_NAME: 'pull_request',
+        FAKE_ALL_URLS: url(42),
+        FAKE_EVENTS: '42=pull_request_review:',
         FAKE_FULL: '42',
       }),
     ).toBe('tier=none');
@@ -651,6 +669,26 @@ describe('Managed Agent gate tier selection', () => {
         ...approve,
         FAKE_URLS: url(42),
         FAKE_EVENTS: '42=pull_request_review:7',
+      }),
+    ).toBe('tier=full');
+    // Fork review runs omit pull_requests; the fallback also matches the run's
+    // head branch to the current PR after confirming its head SHA.
+    expect(
+      tier({
+        ...approve,
+        FAKE_URLS: url(42),
+        FAKE_EVENTS: '42=pull_request_review::feature',
+        FAKE_FULL: '42',
+        FAKE_HEAD_REF: 'feature',
+      }),
+    ).toBe('tier=none');
+    expect(
+      tier({
+        ...approve,
+        FAKE_URLS: url(42),
+        FAKE_EVENTS: '42=pull_request_review::other-branch',
+        FAKE_FULL: '42',
+        FAKE_HEAD_REF: 'feature',
       }),
     ).toBe('tier=full');
   });

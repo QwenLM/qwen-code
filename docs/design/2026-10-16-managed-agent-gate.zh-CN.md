@@ -66,7 +66,8 @@ Runtime Broker 子集。其中一部分测试要加载已构建的 Core 与 CLI 
 `.github/scripts/managed-agent-gate-scope.mjs` 匹配变更路径：
 `packages/managed-agent-server/`、`packages/sdk-java/`、
 `packages/cli/src/serve/`、`packages/core/src/managed-runtime/`、Hosted 集成测试
-helper 与配置、`sdk-java.yml` 运行的脚本，以及门禁自身文件。Pull request 与 review
+helper 与配置、`sdk-java.yml` 运行的脚本、门禁 workflow，以及
+`.github/scripts/managed-agent-gate-tier.sh`。Pull request 与 review
 事件都用测试 merge commit 对比它的第一父提交，得到的就是 PR 自身的变更集；push 对比
 `before..after`，merge group 对比其 base。重命名的新旧路径都计入；diff 关闭 git 的
 路径引号化，因此含非 ASCII 字符的文件名也能匹配。范围外的改动仍由夜间运行兜底。
@@ -120,7 +121,13 @@ push 之后。只有维护者的 approve 才会启动全量层级：reviewer 的
 本次运行自己的重跑不算，PR push 运行的 fast 层级或未改到通过也不算。被认定的运行还必须
 属于同一个 pull request，且其 job 列表中存在 `SDK Java (full)` callee：同一 head 上
 另一个 PR 的 review 运行、或未跑套件就报告该名字的运行，都没有跑过任何 Java lane，
-不算数。全量失败后，下一个 approve 或 **Re-run failed jobs** 会重试。
+不算数。GitHub 对 fork review 运行会留下空的 `pull_requests`，因此 approve 去重会先确认
+当前 PR 仍指向这个 head SHA，再把候选运行的 head branch 与该 PR 的 head ref 匹配。
+全量失败后，下一个 approve 或 **Re-run failed jobs** 会重试。
+
+重新打开或手动重跑的 `pull_request` 分支刻意按 SHA 而不是按 PR 去重：branch protection
+按 commit 读取必需 context，因此该 head 上已经发布过的任何全量报告都必须保留，新的
+fast 运行不能覆盖它。
 
 ### 并发
 
