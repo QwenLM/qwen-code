@@ -9,7 +9,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
 
@@ -160,7 +159,7 @@ class WorkspaceCreationSchemaMySqlIT {
                     assertTrue(result.next());
                     assertEquals(0, result.getInt(1), "A disposable empty catalog is required");
                 }
-                executeResource(connection, ManagedSchema.RESOURCE);
+                ManagedSchema.initialize(source);
                 receipt(connection, "existing", "SESSION_COMMAND");
                 statement.execute("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
                         + " VALUES ('tenant','session','qwen-code',1,1)");
@@ -207,20 +206,6 @@ class WorkspaceCreationSchemaMySqlIT {
                 statement.execute("UPDATE ma_session SET model_id='m',model_revision=1");
                 statement.execute("UPDATE ma_turn SET model_id='m',model_revision=1");
                 assertThrows(SQLException.class, () -> statement.execute("UPDATE ma_session SET model_revision=9007199254740992"));
-            }
-        }
-    }
-
-    private static void executeResource(Connection connection, String resource) throws Exception {
-        try (var statement = connection.createStatement();
-                var input = ManagedSchema.class.getResourceAsStream(resource)) {
-            for (String sql :
-                    new String(input.readAllBytes(), StandardCharsets.UTF_8)
-                            .replaceAll("(?m)^--[^\\n]*", "")
-                            .split(";")) {
-                if (!sql.isBlank()) {
-                    statement.execute(sql);
-                }
             }
         }
     }
