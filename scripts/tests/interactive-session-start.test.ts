@@ -6,7 +6,7 @@
 
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // No PR-triggered job collects the behavioural cases in
 // integration-tests/interactive/interactive-session.test.ts: ci.yml's
@@ -106,4 +106,298 @@ describe('InteractiveSession.start source pins (#13552)', () => {
     // re-arms the control arm on the nightly legs.
     expect(source).toMatch(/\.\.\.baseEnv,\s*\.\.\.options\?\.env,/);
   });
+});
+
+// Only PTY transport is controlled; the real terminal/parser and helper run.
+const lifecyclePty = vi.hoisted(() => ({ spawn: vi.fn() }));
+vi.mock('@lydell/node-pty', () => ({ spawn: lifecyclePty.spawn }));
+import {
+  InteractiveSession,
+  type InteractiveSessionLifecycleEvent,
+} from '../../integration-tests/interactive/interactive-session.js';
+
+type FakeExit = { exitCode: number; signal?: number };
+function fakePty(
+  options: {
+    ignoreDefault?: boolean;
+    defaultError?: boolean;
+    force?: 'exit' | 'no-exit' | 'error';
+  } = {},
+) {
+  const pid = 421337;
+  const outputs: Array<(data: string) => void> = [];
+  const exits: Array<(status: FakeExit) => void> = [];
+  let ended = false;
+  const exit = (status: FakeExit) => {
+    if (ended) return;
+    ended = true;
+    for (const listener of exits) listener(status);
+  };
+  const force = () => {
+    if (options.force === 'error')
+      throw Object.assign(new Error('owned kill failure'), { code: 'EACCES' });
+    if (options.force !== 'no-exit') exit({ exitCode: 0, signal: 9 });
+  };
+  const kill = vi.fn((signal?: string) => {
+    if (signal === 'SIGKILL') return force();
+    if (options.defaultError) throw new Error('owned default kill failure');
+    if (!options.ignoreDefault) exit({ exitCode: 0, signal: 1 });
+  });
+  lifecyclePty.spawn.mockReturnValue({
+    pid,
+    kill,
+    onData: (fn: (data: string) => void) => {
+      outputs.push(fn);
+      return { dispose() {} };
+    },
+    onExit: (fn: (status: FakeExit) => void) => {
+      exits.push(fn);
+      return { dispose() {} };
+    },
+  });
+  return {
+    pid,
+    kill,
+    force,
+    exit,
+    data: (data: string) => {
+      for (const fn of outputs) fn(data);
+    },
+  };
+}
+function settleStart(attempt: Promise<InteractiveSession>) {
+  return attempt.then(
+    (session) => ({ ok: true as const, session }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+}
+function expectStartupError(
+  outcome: Awaited<ReturnType<typeof settleStart>>,
+  message: string,
+) {
+  expect(outcome).toMatchObject({ ok: false, error: expect.any(Error) });
+  if (outcome.ok) throw new Error('Expected startup rejection');
+  expect(outcome.error).toMatchObject({
+    message: expect.stringContaining(message),
+  });
+}
+function expectObserverFields(
+  events: InteractiveSessionLifecycleEvent[],
+  pid: number,
+) {
+  expect(events.length).toBeGreaterThan(0);
+  for (const event of events) {
+    expect(event.pid).toBe(pid);
+    expect(event.observerPid).toBe(process.pid);
+    expect(event.hrtimeNs).toMatch(/^\d+$/);
+  }
+  expect(pid).not.toBe(process.pid);
+  for (let i = 1; i < events.length; i++) {
+    expect(BigInt(events[i].hrtimeNs)).toBeGreaterThanOrEqual(
+      BigInt(events[i - 1].hrtimeNs),
+    );
+  }
+}
+
+// No subprocess, Bun, native PTY or OS signal is used by these cases.
+describe('InteractiveSession public lifecycle observations', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    lifecyclePty.spawn.mockReset();
+    vi.stubEnv('RUNNER_ENVIRONMENT', 'github-hosted');
+    vi.stubEnv('RUNNER_OS', 'Linux');
+    vi.stubEnv('RUNNER_ARCH', 'ARM64');
+  });
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('reports spawned PTY identity, raw output, readiness and actual exit as observer-owned data', async () => {
+    const pty = fakePty();
+    const events: InteractiveSessionLifecycleEvent[] = [];
+    const attempt = InteractiveSession.start({
+      command: { bin: '/owned/fake', args: [] },
+      onLifecycle: (event) => {
+        events.push(event);
+      },
+    });
+    const settled = settleStart(attempt);
+    const raw = '\x1b[32mType your message\x1b[0m\r\n';
+    pty.data(raw);
+    await vi.advanceTimersByTimeAsync(200);
+    const outcome = await settled;
+    expect(outcome.ok).toBe(true);
+    if (!outcome.ok)
+      throw new Error('Expected ready session', { cause: outcome.error });
+    const session = outcome.session;
+    expect(events.filter((e) => e.type === 'spawn')).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'ready')).toHaveLength(1);
+    expect(events.find((e) => e.type === 'output')).toMatchObject({
+      data: raw,
+    });
+    const status = { exitCode: 7, signal: 0 };
+    pty.exit(status);
+    await session.close();
+    expect(events.find((e) => e.type === 'exit')).toMatchObject({ status });
+    expect(events.find((e) => e.type === 'close-complete')).toMatchObject({
+      status,
+    });
+    expect(events.filter((e) => e.type === 'close-action')).toMatchObject([
+      { action: 'pty-default', result: 'attempt' },
+      { action: 'pty-default', result: 'returned' },
+    ]);
+    expectObserverFields(events, pty.pid);
+  });
+
+  it('retains raw startup failure once and original error despite throwing observation and capture callbacks', async () => {
+    const pty = fakePty({ defaultError: true });
+    const events: InteractiveSessionLifecycleEvent[] = [];
+    const capture = vi.fn(() => {
+      throw new Error('capture observer failed');
+    });
+    const attempt = InteractiveSession.start({
+      command: { bin: '/owned/fake', args: [] },
+      onStartupFailure: capture,
+      onLifecycle: (event) => {
+        events.push(event);
+        throw new Error('lifecycle observer failed');
+      },
+    });
+    const settled = settleStart(attempt);
+    const raw = '\x1b[31mBOOT_RAW' + 'x'.repeat(1000) + '\x1b[0m';
+    pty.data(raw);
+    pty.exit({ exitCode: 3, signal: 0 });
+    await vi.advanceTimersByTimeAsync(200);
+    expectStartupError(
+      await settled,
+      'CLI exited during startup (code 3, signal 0)',
+    );
+    expect(capture).toHaveBeenCalledExactlyOnceWith(raw);
+    expect(events.filter((e) => e.type === 'startup-failure')).toHaveLength(1);
+    expect(
+      events.find((e) => e.type === 'close-action' && e.result === 'error'),
+    ).toMatchObject({
+      action: 'pty-default',
+      error: 'Error: owned default kill failure',
+    });
+    expect(events.find((e) => e.type === 'close-complete')).toMatchObject({
+      status: { exitCode: 3, signal: 0 },
+    });
+    expect(pty.kill).toHaveBeenCalledTimes(1);
+    expectObserverFields(events, pty.pid);
+  });
+
+  it.each(['exit', 'no-exit', 'error'] as const)(
+    'observes forced close %s without changing the 30s startup or 10s+5s cleanup budgets',
+    async (outcome) => {
+      const pty = fakePty({ ignoreDefault: true, force: outcome });
+      const signals = vi
+        .spyOn(process, 'kill')
+        .mockImplementation((pid, signal) => {
+          expect(pid).toBe(-pty.pid);
+          expect(signal).toBe('SIGKILL');
+          pty.force();
+          return true;
+        });
+      const events: InteractiveSessionLifecycleEvent[] = [];
+      const attempt = InteractiveSession.start({
+        command: { bin: '/owned/fake', args: [] },
+        onLifecycle: (event) => {
+          events.push(event);
+        },
+      });
+      const settled = settleStart(attempt);
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(events.some((e) => e.type === 'startup-failure')).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(events.some((e) => e.type === 'startup-failure')).toBe(true);
+      expect(pty.kill).toHaveBeenCalledExactlyOnceWith();
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(
+        events.some(
+          (e) => e.type === 'close-action' && e.action !== 'pty-default',
+        ),
+      ).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const action =
+        process.platform === 'win32' ? 'pty-SIGKILL' : 'group-SIGKILL';
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: 'close-action',
+          action,
+          result: 'attempt',
+        }),
+      );
+      if (outcome === 'no-exit') {
+        await vi.advanceTimersByTimeAsync(4_999);
+        expect(events.some((e) => e.type === 'close-complete')).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+      }
+      expectStartupError(
+        await settled,
+        'Timeout (30000ms) waiting for text: "Type your message"',
+      );
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: 'close-action',
+          action,
+          result: outcome === 'error' ? 'error' : 'returned',
+        }),
+      );
+      expect(events.some((e) => e.type === 'close-error')).toBe(true);
+      expect(events.find((e) => e.type === 'close-complete')).toMatchObject({
+        status: outcome === 'exit' ? { exitCode: 0, signal: 9 } : null,
+      });
+      if (process.platform !== 'win32')
+        expect(signals).toHaveBeenCalledTimes(1);
+      expectObserverFields(events, pty.pid);
+    },
+  );
+
+  it.each(['startup', 'ready-exit'] as const)(
+    'observer mutation of status data cannot change %s outcome',
+    async (phase) => {
+      const pty = fakePty();
+      const attempt = InteractiveSession.start({
+        command: { bin: '/owned/fake', args: [] },
+        onLifecycle: (event) => {
+          if (
+            (event.type === 'exit' || event.type === 'close-complete') &&
+            event.status
+          ) {
+            event.status.exitCode = 99;
+            event.status.signal = 88;
+          }
+        },
+      });
+      const settled = settleStart(attempt);
+      if (phase === 'startup') {
+        const status = { exitCode: 3, signal: 0 };
+        pty.exit(status);
+        await vi.advanceTimersByTimeAsync(200);
+        expectStartupError(
+          await settled,
+          'CLI exited during startup (code 3, signal 0)',
+        );
+        expect(status).toEqual({ exitCode: 3, signal: 0 });
+      } else {
+        pty.data('Type your message');
+        await vi.advanceTimersByTimeAsync(200);
+        const outcome = await settled;
+        expect(outcome.ok).toBe(true);
+        if (!outcome.ok)
+          throw new Error('Expected ready session', { cause: outcome.error });
+        const session = outcome.session;
+        const status = { exitCode: 7, signal: 2 };
+        pty.exit(status);
+        expect(session.exitResult()).toEqual({ exitCode: 7, signal: 2 });
+        await session.close();
+        expect(status).toEqual({ exitCode: 7, signal: 2 });
+        expect(session.exitResult()).toEqual({ exitCode: 7, signal: 2 });
+      }
+    },
+  );
 });

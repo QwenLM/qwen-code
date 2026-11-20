@@ -49,6 +49,7 @@ export interface OpenTuiExtensionDiscoverTabProps {
   onLockChange: (locked: boolean) => void;
   onStatus: (status: ExtensionsStatusMessage | null) => void;
   onInstalled: () => void;
+  reloadRuntime: () => Promise<void>;
   onFooter: (footer: string | null) => void;
   install: (
     source: string,
@@ -286,6 +287,7 @@ export function OpenTuiExtensionDiscoverTab(
     setInstalling(true);
     latest.current.onLockChange(true);
     const install = latest.current.install;
+    const reloadRuntime = latest.current.reloadRuntime;
     let installed = 0;
     const errors: string[] = [];
     const warnings: string[] = [];
@@ -310,6 +312,14 @@ export function OpenTuiExtensionDiscoverTab(
         }
       }
       if (!alive(captured)) return;
+      if (installed > 0) {
+        try {
+          await reloadRuntime();
+        } catch (error) {
+          warnings.push(safe(getErrorMessage(error)));
+        }
+        if (!alive(captured)) return;
+      }
       setPlugins((previous) =>
         previous.map((plugin) =>
           committed.has(keyOf(plugin))

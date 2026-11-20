@@ -206,6 +206,14 @@ describe('TUI product evidence', () => {
       'integration-tests/interactive/tui-memory-manager.test.ts',
       ['component', 'integration'],
     ],
+    [
+      'integration-tests/interactive/tui-extension-partial-acquisition.test.ts',
+      ['component', 'integration'],
+    ],
+    [
+      'integration-tests/interactive/extension-http-git-fixture.ts',
+      ['component', 'integration'],
+    ],
     ['packages/core/src/core/coreToolScheduler.ts', lanes.slice(0, -1)],
     ['packages/core/src/core/client.ts', lanes.slice(0, -1)],
     ['packages/cli/src/ui/opentui/live-turn.ts', lanes.slice(0, -1)],
@@ -409,6 +417,7 @@ describe('TUI product evidence', () => {
     integration: [
       'tui-foreground-shell',
       'tui-extension-acquisition',
+      'tui-extension-partial-acquisition',
       'tui-dual-output',
       'tui-memory-manager',
     ],
@@ -977,6 +986,14 @@ describe('TUI product evidence', () => {
     expect(
       existsSync(
         'integration-tests/interactive/tui-extension-acquisition.test.ts',
+      ),
+    ).toBe(true);
+    expect(commands[0].split(/\s+/)).toContain(
+      'interactive/tui-extension-partial-acquisition.test.ts',
+    );
+    expect(
+      existsSync(
+        'integration-tests/interactive/tui-extension-partial-acquisition.test.ts',
       ),
     ).toBe(true);
   });

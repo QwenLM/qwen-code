@@ -184,6 +184,68 @@ function expectCancelled(outcome: Outcome, text: string) {
 afterEach(cleanup);
 
 describe('useExtensionAcquisition', () => {
+  it.each([false, true])(
+    'defers only the explicit reload while retaining committed install and scope warnings (%s)',
+    async (committedWarning) => {
+      const f = fixture();
+      if (committedWarning) {
+        f.methods.installExtension.mockRejectedValueOnce(
+          Object.assign(new Error('Activation incomplete'), {
+            code: 'extension_committed_with_warnings',
+            committed: true,
+            identity: { id: 'owned-id', name: 'owned' },
+            warnings: [{ code: 'activation', error: 'Activation incomplete' }],
+          }),
+        );
+        f.methods.setExtensionScope.mockImplementationOnce(() => {
+          throw new Error('Scope save failed');
+        });
+      }
+      let status: Awaited<ReturnType<Acquisition['install']>> | undefined;
+      await act(async () => {
+        status = await f.hook.result.current.install(
+          './owned',
+          'project',
+          true,
+          false,
+        );
+      });
+      expect(f.methods.parseInstallSource).toHaveBeenCalledExactlyOnceWith(
+        './owned',
+        '/owned/workspace',
+      );
+      expect(f.methods.installExtension).toHaveBeenCalledTimes(1);
+      expect(f.methods.installExtension.mock.calls[0][5]).toEqual({
+        scope: 'workspace',
+        workspacePath: '/owned/workspace',
+      });
+      expect(f.methods.setExtensionScope).toHaveBeenCalledExactlyOnceWith(
+        'owned',
+        'project',
+      );
+      expect(f.context.reload).not.toHaveBeenCalled();
+      expect(status?.type).toBe(committedWarning ? 'warning' : 'success');
+      if (committedWarning) {
+        expect(status?.text).toContain('Activation incomplete');
+        expect(status?.text).toContain('Scope save failed');
+      }
+      expectSettled(f.hook);
+    },
+  );
+
+  it('keeps the Sources-style three-argument default reload without remembering scope', async () => {
+    const f = fixture();
+    let status: Awaited<ReturnType<Acquisition['install']>> | undefined;
+    await act(async () => {
+      status = await f.hook.result.current.install('./owned', 'user', false);
+    });
+    expect(status?.type).toBe('success');
+    expect(f.methods.installExtension).toHaveBeenCalledTimes(1);
+    expect(f.methods.setExtensionScope).not.toHaveBeenCalled();
+    expect(f.context.reload).toHaveBeenCalledTimes(1);
+    expectSettled(f.hook);
+  });
+
   it('parses the captured cwd, selects the nondefault unique plugin and uses operation-local permissions', async () => {
     const f = fixture(marketplaceMetadata());
     const receivedSettings: string[] = [];

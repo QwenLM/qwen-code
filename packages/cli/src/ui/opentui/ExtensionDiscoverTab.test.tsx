@@ -50,6 +50,9 @@ vi.mock('@opentui/react/jsx-dev-runtime', async () =>
 vi.mock('./theme.js', () => ({ C: new Proxy({}, { get: () => '#ffffff' }) }));
 
 import { OpenTuiExtensionDiscoverTab } from './ExtensionDiscoverTab.js';
+import { useExtensionAcquisition } from './ExtensionAcquisition.js';
+import { reloadPluginsRuntime } from '../../config/extension-runtime-reload.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 
 function plugin(overrides: Partial<DiscoveredPlugin> = {}): DiscoveredPlugin {
   return {
@@ -85,6 +88,7 @@ function renderTab(overrides: Partial<OpenTuiExtensionDiscoverTabProps> = {}) {
     onLockChange: vi.fn(),
     onStatus: vi.fn(),
     onInstalled: vi.fn(),
+    reloadRuntime: vi.fn(async () => {}),
     onFooter: vi.fn(),
     install: vi.fn(async () => ({
       type: 'success' as const,
@@ -133,6 +137,18 @@ async function openDetail(name = 'alpha') {
   expect(screen.getByText(name)).toBeTruthy();
 }
 
+async function selectPairAndScope() {
+  await waitForRow('alpha', 'market-a');
+  await press('space', ' ');
+  await press('down');
+  await press('space', ' ');
+  await press('return');
+  expect(
+    screen.getByText('Install 2 extension(s) to which scope?'),
+  ).toBeTruthy();
+  await press('return');
+}
+
 beforeEach(() => {
   mocks.state.keyboardHandlers.length = 0;
   mocks.state.pasteHandlers.length = 0;
@@ -147,6 +163,256 @@ afterEach(() => {
 });
 
 describe('OpenTuiExtensionDiscoverTab owned component wiring', () => {
+  it.each([true, false])(
+    'reaches the next selected plugin before awaiting a catalog runtime reload (deny beta: %s)',
+    async (denyBeta) => {
+      const catalog = [plugin(), plugin({ name: 'beta' })];
+      const events: string[] = [];
+      const heldReload = deferred<void>();
+      const discoverPlugins = vi.fn(async () => catalog);
+      const parseInstallSource = vi.fn<ExtensionManager['parseInstallSource']>(
+        async (source) => {
+          const name = source.endsWith(':beta') ? 'beta' : 'alpha';
+          events.push(`parse:${name}`);
+          return { source, type: 'local', pluginName: name };
+        },
+      );
+      const installExtension = vi.fn<ExtensionManager['installExtension']>(
+        async (metadata) => {
+          events.push(`install:${metadata.pluginName}`);
+          if (denyBeta && metadata.pluginName === 'beta')
+            throw new Error('B_CONSENT_DENIED');
+          return { name: metadata.pluginName } as Awaited<
+            ReturnType<ExtensionManager['installExtension']>
+          >;
+        },
+      );
+      const setExtensionScope = vi.fn<ExtensionManager['setExtensionScope']>(
+        (name) => {
+          events.push(`scope:${name}`);
+        },
+      );
+      const refreshCache = vi.fn(async () => {
+        events.push('refreshCache');
+        await heldReload.promise;
+      });
+      const refreshTools = vi.fn(async () => {
+        events.push('refreshTools');
+      });
+      const reloadCommands = vi.fn(async () => {
+        events.push('commands');
+      });
+      const manager = {
+        discoverPlugins,
+        parseInstallSource,
+        installExtension,
+        setExtensionScope,
+        refreshCache,
+        refreshTools,
+      } as unknown as ExtensionManager;
+      const config = {
+        isSafeMode: () => false,
+        getExtensionManager: () => manager,
+        getActiveExtensions: () => [],
+      } as unknown as Config;
+      const reload = vi.fn(async () => {
+        events.push('reload');
+        await reloadPluginsRuntime({ config, reloadCommands });
+      });
+      const context = {
+        manager,
+        cwd: '/captured/workspace',
+        isCurrent: () => true,
+        reload,
+        onChanged: vi.fn(),
+        onStatus: vi.fn(),
+      };
+      const onInstalled = vi.fn();
+      function MountedBatch() {
+        const acquisition = useExtensionAcquisition(context);
+        return (
+          <OpenTuiExtensionDiscoverTab
+            manager={context.manager}
+            cwd={context.cwd}
+            isCurrent={context.isCurrent}
+            isActive={!acquisition.permission}
+            availableTerminalHeight={60}
+            reloadSignal={0}
+            marketplaceFilter={null}
+            onLockChange={() => {}}
+            onStatus={context.onStatus}
+            onInstalled={onInstalled}
+            reloadRuntime={reload}
+            onFooter={() => {}}
+            install={(source, scope) =>
+              acquisition.install(source, scope, true, false)
+            }
+          />
+        );
+      }
+      const view = render(<MountedBatch />);
+      try {
+        await waitForRow('alpha', 'market-a');
+        await press('space', ' ');
+        await press('down');
+        await press('space', ' ');
+        await press('return');
+        expect(
+          screen.getByText('Install 2 extension(s) to which scope?'),
+        ).toBeTruthy();
+        await press('return');
+        await waitFor(() => expect(reload).toHaveBeenCalled());
+        expect(events).toEqual([
+          'parse:alpha',
+          'install:alpha',
+          'scope:alpha',
+          'parse:beta',
+          'install:beta',
+          ...(denyBeta ? [] : ['scope:beta']),
+          'reload',
+          'refreshCache',
+        ]);
+        expect(reload).toHaveBeenCalledTimes(1);
+        expect(onInstalled).not.toHaveBeenCalled();
+        await settle(heldReload, undefined);
+        await waitFor(() => expect(onInstalled).toHaveBeenCalledTimes(1));
+        expect(events).toEqual([
+          'parse:alpha',
+          'install:alpha',
+          'scope:alpha',
+          'parse:beta',
+          'install:beta',
+          ...(denyBeta ? [] : ['scope:beta']),
+          'reload',
+          'refreshCache',
+          'refreshTools',
+          'commands',
+        ]);
+        expect(refreshCache).toHaveBeenCalledTimes(1);
+        expect(refreshTools).toHaveBeenCalledTimes(1);
+        expect(reloadCommands).toHaveBeenCalledTimes(1);
+        expect(setExtensionScope.mock.calls).toEqual(
+          denyBeta
+            ? [['alpha', 'user']]
+            : [
+                ['alpha', 'user'],
+                ['beta', 'user'],
+              ],
+        );
+        expect(context.onStatus).toHaveBeenLastCalledWith(
+          denyBeta
+            ? {
+                type: 'error',
+                text: 'Installed 1, failed 1: beta: B_CONSENT_DENIED',
+              }
+            : { type: 'success', text: 'Installed 2 extension(s).' },
+        );
+      } finally {
+        // Settle the deliberately held boundary before unmounting on either result.
+        await settle(heldReload, undefined);
+        view.unmount();
+      }
+    },
+  );
+
+  it('skips runtime reload when every selected install fails', async () => {
+    const service = managerFor([plugin(), plugin({ name: 'beta' })]);
+    const install = vi.fn(
+      async (): Promise<ExtensionsStatusMessage> => ({
+        type: 'error',
+        text: 'DENIED',
+      }),
+    );
+    const tab = renderTab({ manager: service.manager, install });
+    await selectPairAndScope();
+    await waitFor(() => expect(tab.props.onInstalled).toHaveBeenCalledTimes(1));
+    expect(install).toHaveBeenCalledTimes(2);
+    expect(tab.props.reloadRuntime).not.toHaveBeenCalled();
+    expect(tab.props.onStatus).toHaveBeenLastCalledWith({
+      type: 'error',
+      text: 'Installed 0, failed 2: alpha: DENIED; beta: DENIED',
+    });
+  });
+
+  it('keeps committed warning counts and partial-error priority after final reload fails', async () => {
+    const service = managerFor([plugin(), plugin({ name: 'beta' })]);
+    const install = vi
+      .fn<OpenTuiExtensionDiscoverTabProps['install']>()
+      .mockResolvedValueOnce({ type: 'warning', text: 'COMMITTED_WARNING' })
+      .mockRejectedValueOnce(new Error('B_DENIED'));
+    const reloadRuntime = vi.fn(async () => {
+      throw new Error('REFRESH_FAILED https://u:secret@example.invalid');
+    });
+    const tab = renderTab({ manager: service.manager, install, reloadRuntime });
+    await selectPairAndScope();
+    await waitFor(() => expect(tab.props.onInstalled).toHaveBeenCalledTimes(1));
+    expect(install).toHaveBeenCalledTimes(2);
+    expect(reloadRuntime).toHaveBeenCalledTimes(1);
+    const status = vi.mocked(tab.props.onStatus).mock.calls.at(-1)?.[0];
+    expect(status?.type).toBe('error');
+    expect(status?.text).toContain('Installed 1, failed 1:');
+    expect(status?.text).toContain('alpha: COMMITTED_WARNING');
+    expect(status?.text).toContain('beta: B_DENIED');
+    expect(status?.text).toContain('REFRESH_FAILED');
+    expect(status?.text).not.toContain('secret');
+  });
+
+  it.each([
+    ['install', 'replacement'],
+    ['install', 'unmount'],
+    ['reload', 'replacement'],
+    ['reload', 'unmount'],
+  ] as const)(
+    'does not finalize a stale owner held in %s after %s',
+    async (phase, change) => {
+      const service = managerFor([plugin(), plugin({ name: 'beta' })]);
+      const heldInstall = deferred<ExtensionsStatusMessage>();
+      const heldReload = deferred<void>();
+      const success = { type: 'success' as const, text: 'COMMITTED' };
+      const install = vi
+        .fn<OpenTuiExtensionDiscoverTabProps['install']>()
+        .mockResolvedValue(success);
+      if (phase === 'install')
+        install.mockImplementationOnce(() => heldInstall.promise);
+      const reloadRuntime = vi.fn(() => heldReload.promise);
+      let current = true;
+      const tab = renderTab({
+        manager: service.manager,
+        install,
+        reloadRuntime,
+        isCurrent: () => current,
+      });
+      const oldStatus = tab.props.onStatus;
+      const oldInstalled = tab.props.onInstalled;
+      await selectPairAndScope();
+      await waitFor(() =>
+        expect(
+          phase === 'install' ? install : reloadRuntime,
+        ).toHaveBeenCalled(),
+      );
+      vi.mocked(oldStatus).mockClear();
+      current = false;
+      if (change === 'unmount') tab.unmount();
+      else {
+        service.discoverPlugins.mockResolvedValue([
+          plugin({ name: 'successor' }),
+        ]);
+        tab.update({
+          isCurrent: () => true,
+          onStatus: vi.fn(),
+          onInstalled: vi.fn(),
+        });
+        await waitForRow('successor', 'market-a');
+      }
+      await settle(heldInstall, success);
+      await settle(heldReload, undefined);
+      expect(install).toHaveBeenCalledTimes(phase === 'install' ? 1 : 2);
+      expect(reloadRuntime).toHaveBeenCalledTimes(phase === 'install' ? 0 : 1);
+      expect(oldStatus).not.toHaveBeenCalled();
+      expect(oldInstalled).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(['manager', 'cwd', 'predicate'] as const)(
     'discards an old discover result after %s replacement',
     async (replacement) => {
