@@ -1570,6 +1570,14 @@ export interface ConfigParameters {
    * settings fully drive admission). See issue #3696 sub-task 3.
    */
   cliAllowedMcpServerNames?: string[];
+  /**
+   * The startup `--disable-mcp-server` CLI flag values, if passed (the flag
+   * only — NOT the settings-derived exclusion list). A runtime recompute of
+   * the exclusion list (hot-reload, workspace MCP reload) always unions these
+   * back in, so a settings edit cannot re-enable a server the launch flag
+   * disabled. Undefined when the flag was not passed.
+   */
+  cliExcludedMcpServerNames?: string[];
   excludedMcpServers?: string[];
   /**
    * Idle timeout in milliseconds for MCP tool calls. If the MCP server does
@@ -3136,6 +3144,8 @@ export class Config {
   private allowedMcpServers?: string[];
   /** Immutable upper bound from `--allowed-mcp-server-names`; see ConfigParameters. */
   private readonly cliAllowedMcpServerNames?: string[];
+  /** Immutable exclusions from `--disable-mcp-server`; see ConfigParameters. */
+  private readonly cliExcludedMcpServerNames?: string[];
   private excludedMcpServers?: string[];
   private pendingMcpServers?: string[];
   private projectHooksPendingApproval?: boolean;
@@ -3637,6 +3647,7 @@ export class Config {
     this.lspClient = params.lspClient;
     this.allowedMcpServers = params.allowedMcpServers;
     this.cliAllowedMcpServerNames = params.cliAllowedMcpServerNames;
+    this.cliExcludedMcpServerNames = params.cliExcludedMcpServerNames;
     this.excludedMcpServers = params.excludedMcpServers;
     this.pendingMcpServers = params.pendingMcpServers;
     this.projectHooksPendingApproval = params.projectHooksPendingApproval;
@@ -9443,6 +9454,11 @@ export class Config {
    */
   getCliAllowedMcpServerNames(): string[] | undefined {
     return this.cliAllowedMcpServerNames;
+  }
+
+  /** The startup `--disable-mcp-server` names; see ConfigParameters. */
+  getCliExcludedMcpServerNames(): string[] | undefined {
+    return this.cliExcludedMcpServerNames;
   }
 
   /**
