@@ -29,6 +29,7 @@ vi.mock('@opentui/react', () => ({
     removeInputHandler: vi.fn(),
   }),
   useKeyboard: vi.fn(),
+  useAppContext: () => ({ keyHandler: { on: vi.fn(), off: vi.fn() } }),
   useTerminalDimensions: () => ({ width: miscState.width, height: 40 }),
 }));
 const buildJsxRuntime = vi.hoisted(() => async () => {
@@ -253,7 +254,7 @@ describe('sized bodies window from the region budget', () => {
     miscState.width = 100;
   });
 
-  it('windows the /subagents scrollbox the same way', () => {
+  it('reserves a footer row for the selectable /subagents body', () => {
     const { container } = render(
       <OpenTuiSubagentListDialog
         settings={settingsWith({})}
@@ -261,7 +262,7 @@ describe('sized bodies window from the region budget', () => {
         availableTerminalHeight={15}
       />,
     );
-    expect(scrollboxOf(container)).toMatchObject({ height: 9, marginTop: 1 });
+    expect(scrollboxOf(container)).toMatchObject({ height: 8, marginTop: 1 });
   });
 });
 
@@ -286,7 +287,7 @@ describe('read-only sized bodies on very short terminals', () => {
           flexShrink: 1,
         });
         expect(container.textContent).not.toContain(
-          name === 'diff' ? 'Diff' : 'Subagents',
+          name === 'diff' ? 'Diff' : 'Agents',
         );
       },
     );
@@ -304,7 +305,7 @@ describe('read-only sized bodies on very short terminals', () => {
       rerender(dialog(12));
       expect(container.querySelector('[data-scrollbox]')).not.toBe(before);
       expect(scrollboxOf(container)).toMatchObject({
-        height: 6,
+        height: name === 'diff' ? 6 : 5,
         flexShrink: 1,
       });
       rerender(dialog(3));

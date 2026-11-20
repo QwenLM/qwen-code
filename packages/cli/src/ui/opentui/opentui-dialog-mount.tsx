@@ -725,7 +725,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
     case 'subagent_create':
       return (
         <OpenTuiSubagentCreateDialog
-          settings={settings}
+          config={config}
           onClose={onClose}
           availableTerminalHeight={props.availableTerminalHeight}
         />
