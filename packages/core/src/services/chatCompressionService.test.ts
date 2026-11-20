@@ -4642,6 +4642,24 @@ describe('issue #9455: compression requests fit the receiving window', () => {
       expect(requestText(sent[1]!)).toBe(plainCut(typed));
     });
 
+    it('sends the plain cut on the retry when it is one character shorter than the kept request', async () => {
+      // Kept 4,031 characters against a plain cut of 4,030: char/4 rounds
+      // both requests to the same estimate, and the retry must still be the
+      // plain cut.
+      const typed = 'a'.repeat(
+        PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP + MARKER.length + 1,
+      );
+      mockBackend({ window: 25_000, rejection: vllmRejection(25_000) });
+      const result = await compressHistory(
+        typedSession(typed, 12, 20_000),
+        64_000,
+      );
+      expectCompressed(result);
+      expect(sent).toHaveLength(2);
+      expect(requestText(sent[0]!)).toBe(typed);
+      expect(requestText(sent[1]!)).toBe(plainCut(typed));
+    });
+
     it('sends the plain cut when the request overflowed the payload limit', async () => {
       const typed = ASCII.repeat(700);
       mockBackend();

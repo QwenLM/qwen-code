@@ -1142,7 +1142,11 @@ export class ChatCompressionService {
     // nothing, with an output budget held to the reserve, since the estimate
     // that sized the rejected request has just run low. It is sent when it
     // asks for less than the rejected request and its estimate leaves room
-    // in the window, the test the first send passes.
+    // in the window, the test the first send passes. The reduced request
+    // counts as smaller when it holds fewer characters even where char/4
+    // rounds both to one estimate: a rejected kept request (#9455) can be
+    // only a few characters longer than the plain cut, and the retry must
+    // still be the plain cut.
     const shrinkAfterOverflow = (
       error: unknown,
       rejected: Content[],
@@ -1151,7 +1155,8 @@ export class ChatCompressionService {
       const window = Math.min(budgetWindow, ...statedContextWindows(error));
       const reduced = reduceColdInput();
       const inputShrinks =
-        estimateColdRequest(reduced) < estimateColdRequest(rejected);
+        estimateColdRequest(reduced) < estimateColdRequest(rejected) ||
+        historyChars(reduced) < historyChars(rejected);
       const history = inputShrinks ? reduced : rejected;
       const room =
         window - estimateColdRequest(history) - COMPACTION_BUDGET_SAFETY_MARGIN;
