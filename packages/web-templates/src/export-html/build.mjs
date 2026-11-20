@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_976;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_577;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -180,17 +180,23 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_149_976;
 // with 2,425,802 bytes of separate CSS and the same third-party input mix.
 // The warning and ceiling keep 713 and 1,713 bytes above that measurement.
 //
+// A frozen-install build of a clean detached worktree at main 82a0f3031f71
+// measures 2,151,147 bytes of renderer JS on Node 22.22.2, 171 above the
+// previous ceiling. CI's Build unit-test tree (Linux, Node 22.x) measures
+// 2,149,864 bytes. The forbidden-input guard passes. Preserve the existing
+// 713- and 1,713-byte margins above the CI measurement, leaving 430 bytes
+// above the local measurement.
+//
 // The Agent Team peer reports and session approvals (#15658: the teammate chip
 // on background notifications and task rows, its `background.teammate` label
 // across two locales, and the identity map the adapter builds so the
 // turn-started marker is not anonymous) measured 2,148,411 JS bytes in CI on
 // the same lane whose stacked sibling head measured 2,148,174 — a +237 delta
-// for this PR's own copy. The merged tree carries main's larger catalog, so
-// the constants stay at main's re-tracked 2,149,263 lane measurement: adding
-// that delta projects this tree near 2,149,500, still under the warning.
-// Third-party inputs and the forbidden-input guard are unchanged and the CSS
-// asset is separate.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_150_976;
+// for this PR's own copy. Applied to that 2,149,864-byte CI measurement, this
+// tree projects 2,150,101 (476 below the warning) and 2,151,384 locally (193
+// below the ceiling). Third-party inputs and the forbidden-input guard are
+// unchanged and the CSS asset is separate.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_151_577;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
