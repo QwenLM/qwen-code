@@ -12,6 +12,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -215,14 +217,49 @@ class WorkspaceCreationSchemaMySqlIT {
         try (var statement = connection.createStatement();
                 var input = ManagedSchema.class.getResourceAsStream(resource)) {
             for (String sql :
-                    new String(input.readAllBytes(), StandardCharsets.UTF_8)
-                            .replaceAll("(?m)^--[^\\n]*", "")
-                            .split(";")) {
+                    splitStatements(
+                            new String(input.readAllBytes(), StandardCharsets.UTF_8)
+                                    .replaceAll("(?m)^--[^\\n]*", ""))) {
                 if (!sql.isBlank()) {
                     statement.execute(sql);
                 }
             }
         }
+    }
+
+    // Splits on semicolons outside quoted literals: schema COMMENT text may
+    // contain ';' (e.g. 'Active range identity; retired cleanup debt ...'),
+    // which a bare split cuts mid-literal and MySQL rejects. Handles the
+    // doubled-quote and backslash escapes MySQL accepts inside literals.
+    private static List<String> splitStatements(String script) {
+        var statements = new ArrayList<String>();
+        var current = new StringBuilder();
+        char quote = 0;
+        for (int index = 0; index < script.length(); index++) {
+            char c = script.charAt(index);
+            if (quote != 0) {
+                current.append(c);
+                if (c == '\\' && quote == '\'' && index + 1 < script.length()) {
+                    current.append(script.charAt(++index));
+                } else if (c == quote) {
+                    if (index + 1 < script.length() && script.charAt(index + 1) == quote) {
+                        current.append(script.charAt(++index));
+                    } else {
+                        quote = 0;
+                    }
+                }
+            } else if (c == '\'' || c == '"' || c == '`') {
+                quote = c;
+                current.append(c);
+            } else if (c == ';') {
+                statements.add(current.toString());
+                current.setLength(0);
+            } else {
+                current.append(c);
+            }
+        }
+        statements.add(current.toString());
+        return statements;
     }
 
     private static void receipt(Connection connection, String key, String namespace)
