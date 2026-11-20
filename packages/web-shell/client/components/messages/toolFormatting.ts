@@ -387,42 +387,11 @@ function getDaemonGrepDescription(
   const pathPrefix = `${prefix} in `;
   if (!title.startsWith(pathPrefix) || !title.endsWith(filter)) return null;
 
+  // core's formatDisplayPath renders the path (relative, home-elided or
+  // middle-compressed) and the browser cannot reproduce it. The verbatim
+  // pattern and filter framing already exclude prose, so accept any rendering.
   const path = title.slice(pathPrefix.length, title.length - filter.length);
-  const rawPath = getStringArg(args, 'path') || '.';
-  return matchesDaemonGrepPath(path, rawPath, workspaceCwd) ? title : null;
-}
-
-function matchesDaemonGrepPath(
-  shown: string,
-  raw: string,
-  workspaceCwd?: string,
-): boolean {
-  if (!shown) return false;
-
-  const rawPath = normalizeSeparators(raw).replace(/(?<=.)\/+$/, '');
-  const paths = [pathForDisplay(rawPath, workspaceCwd), rawPath].map(
-    (path) => path.replace(/^(?:\.\/)+|\/+$/g, '') || '.',
-  );
-  const [start, end, extra] = shown.split('...');
-  if (isAbsoluteLikePath(rawPath) && shown.startsWith('~/')) {
-    // The browser does not know the daemon's home directory. Match the
-    // unelided home-relative suffix, or the anchors of an elided suffix.
-    if (rawPath.endsWith(`/${shown.slice(2)}`)) return true;
-    if (end?.startsWith('/') && extra === undefined && rawPath.endsWith(end)) {
-      const index = rawPath.indexOf(`/${start.slice(2)}`, 1);
-      if (index > 0 && rawPath.length - index > shown.length) return true;
-    }
-  }
-  return paths.some(
-    (path) =>
-      shown === path ||
-      (start &&
-        end &&
-        extra === undefined &&
-        path.length > shown.length &&
-        path.startsWith(start) &&
-        path.endsWith(end)),
-  );
+  return path ? title : null;
 }
 
 export function getToolSummaryDescription(

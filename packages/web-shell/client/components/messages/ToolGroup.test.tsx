@@ -325,12 +325,6 @@ describe('tool header description direction', () => {
       tag: 'BDI',
     },
     {
-      title: "Grep: 'نمط|pattern' in the text you provided",
-      args: { path: './src' },
-      dir: 'auto',
-      tag: 'SPAN',
-    },
-    {
       title: 'Grep: اعثر على الملاحظات',
       args: { path: 'مجلد', glob: '*.ts' },
       dir: 'auto',
@@ -353,6 +347,35 @@ describe('tool header description direction', () => {
       expect(arg?.tagName).toBe(tag);
       expect(arg?.getAttribute('dir')).toBe(dir);
       expect(arg?.textContent).toBe(title.slice('Grep: '.length));
+    },
+  );
+
+  // core resolves a relative path outside the root to an absolute one, which
+  // the browser then basenames; the daemon title is still machine text.
+  it.each([
+    { path: '../other', daemonPath: '/home/worker/other', shown: 'other' },
+    {
+      path: '../other/deep/dir',
+      daemonPath: '/home/worker/other/deep/dir',
+      shown: 'dir',
+    },
+  ])(
+    'isolates a grep path outside the workspace root: $path',
+    ({ path, daemonPath, shown }) => {
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'grep_search',
+          title: `Grep: 'نمط|pattern' in ${daemonPath}`,
+          args: { pattern: 'نمط|pattern', path },
+        }),
+        {},
+        {},
+        'ar',
+      );
+      const arg = container.querySelector('[class*="lineArg"]');
+      expect(arg?.tagName).toBe('BDI');
+      expect(arg?.getAttribute('dir')).toBe('ltr');
+      expect(arg?.textContent).toBe(`'نمط|pattern' in ${shown}`);
     },
   );
 
