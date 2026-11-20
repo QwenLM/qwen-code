@@ -19,6 +19,7 @@ import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
 import { ModSession } from '../services/mod-session.js';
 import { waitForPendingMemoryTasks } from './memory-tasks.js';
+import { cancelAndSettleWorkflowRuns } from './workflow-shutdown.js';
 import { ControlContext } from './control/ControlContext.js';
 import { ControlDispatcher } from './control/ControlDispatcher.js';
 import { ControlService } from './control/ControlService.js';
@@ -1187,7 +1188,6 @@ class Session {
   private finishShutdown(): void {
     this.abortSession();
     this.dispatcher?.shutdown();
-    this.cleanupSignalHandlers();
   }
 
   private stopMonitorCallbacks(): void {
@@ -1333,7 +1333,11 @@ class Session {
       await this.shutdown();
       throw error;
     } finally {
-      this.cleanupSignalHandlers();
+      try {
+        await cancelAndSettleWorkflowRuns(this.config.getWorkflowRunRegistry());
+      } finally {
+        this.cleanupSignalHandlers();
+      }
     }
   }
 }

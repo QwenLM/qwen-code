@@ -152,7 +152,7 @@ class ToolPublicationLifecycleMySqlIT {
                     .selection(new WorkspaceSelection("neighbor", "."))
                     .build()).sessionId());
             String operationId = transaction.execute(ignored -> agents.beginWorkspaceLifecycle("tenant-1", session,
-                    OperationKind.CLOSE, "owner", "a".repeat(64), "close", "digest", true, 1).operation().operationId());
+                    OperationKind.CLOSE, "owner", "a".repeat(64), "close", "digest", true, 2).operation().operationId());
             var operation = transaction.execute(ignored -> agents.claimOperation("tenant-1", session, operationId,
                     "worker", Duration.ofMinutes(5)).orElseThrow());
             assertThat(transaction.execute(ignored -> lifecycle.recoverEffects(operation)).path("neverInitialized").asBoolean()).isTrue();

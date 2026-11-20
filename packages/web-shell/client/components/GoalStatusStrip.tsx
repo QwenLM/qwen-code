@@ -25,6 +25,18 @@ export function goalStatusTone(
   return 'attention';
 }
 
+/**
+ * Whether a Goal is still a navigation aid: an absent or completed goal is
+ * hidden, matching the Goals listings' `complete` filter. The strip, the
+ * sidebar's reservation/marker decision and the marker's own guard all read
+ * this one predicate so the three surfaces cannot drift apart.
+ */
+export function hasVisibleGoal<T extends { status: GoalStatus }>(
+  goal: T | null | undefined,
+): goal is T {
+  return goal != null && goal.status !== 'complete';
+}
+
 export interface GoalStatusStripProps {
   snapshot: GoalSnapshotV2;
   busy?: boolean;
@@ -116,7 +128,7 @@ export function GoalStatusStrip({
     return () => window.clearInterval(id);
   }, [goal?.status]);
 
-  if (!goal || goal.status === 'complete') return null;
+  if (!hasVisibleGoal(goal)) return null;
 
   const canPause = goal.status === 'active';
   const canResume = canResumeGoal(goal);

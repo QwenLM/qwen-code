@@ -17,6 +17,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import type { SendMessageOptions } from '@qwen-code/qwen-code-core/core/client.js';
 import type { CompletedToolCall } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import type { WorkflowRunHandle } from '@qwen-code/qwen-code-core/agents/runtime/workflow-runner.js';
 
 import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import type {
@@ -38,6 +39,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { formatDuration } from './ui/utils/formatters.js';
 import { waitForPendingMemoryTasks } from './nonInteractive/memory-tasks.js';
+import { cancelAndSettleWorkflowRuns } from './nonInteractive/workflow-shutdown.js';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
@@ -772,6 +774,7 @@ export async function runNonInteractive(
       await failClosedActiveGoalTurn(
         'Headless Goal stopped after the session turn limit',
       );
+      await cancelWorkflowRuns();
       await settleBeforeTerminalOutput();
       if (!ownsAdapter) {
         throw createMaxTurnsExceededError(config);
@@ -975,8 +978,16 @@ export async function runNonInteractive(
     const markAbortExitCommitted = (): void => {
       abortExitCommitted = true;
     };
+    const cancelWorkflowRuns = () =>
+      cancelAndSettleWorkflowRuns(config.getWorkflowRunRegistry());
     const routeAbort = async (): Promise<never> => {
       const exceeded = budgetEnforcer.getExceeded();
+      const reason: unknown = abortController.signal.reason;
+      const recoverable =
+        !exceeded &&
+        reason instanceof TurnInterruptedError &&
+        (options.recoverableCancellation === true ||
+          reason instanceof ModTurnAbortedError);
       endActiveInteraction(exceeded ? 'error' : 'cancelled', {
         ...(exceeded
           ? {
@@ -985,12 +996,15 @@ export async function runNonInteractive(
             }
           : {}),
       });
-      await failClosedActiveGoalTurn(
-        exceeded?.message ?? 'Headless Goal execution was cancelled',
-        exceeded
-          ? goalPauseReasonForRunBudget(exceeded.kind)
-          : GOAL_PAUSE_REASON_USER_INTERRUPT,
-      );
+      await Promise.all([
+        recoverable ? undefined : cancelWorkflowRuns(),
+        failClosedActiveGoalTurn(
+          exceeded?.message ?? 'Headless Goal execution was cancelled',
+          exceeded
+            ? goalPauseReasonForRunBudget(exceeded.kind)
+            : GOAL_PAUSE_REASON_USER_INTERRUPT,
+        ),
+      ]);
       await settleBeforeTerminalOutput();
       if (exceeded) {
         if (!ownsAdapter) {
@@ -1009,14 +1023,7 @@ export async function runNonInteractive(
         // (vs. a useless literal "unreachable").
         throw new Error(exceeded.message);
       }
-      const reason: unknown = abortController.signal.reason;
-      if (
-        reason instanceof TurnInterruptedError &&
-        (options.recoverableCancellation === true ||
-          reason instanceof ModTurnAbortedError)
-      ) {
-        throw reason;
-      }
+      if (recoverable) throw reason;
       if (!ownsAdapter) {
         throw new Error('Operation cancelled.');
       }
@@ -1044,6 +1051,7 @@ export async function runNonInteractive(
       modPrompt?: ModQueuedPrompt;
       todoWorkChainId?: string;
       monitorId?: string;
+      workflowHandle?: WorkflowRunHandle;
       sdkNotification?: {
         task_id: string;
         tool_use_id?: string;
@@ -1909,6 +1917,22 @@ export async function runNonInteractive(
         });
       }
 
+      const workflowRegistry = config.getWorkflowRunRegistry();
+      workflowRegistry.setCompletionCallback((displayText, modelText, meta) => {
+        localQueue.push({
+          displayText,
+          modelText,
+          sendMessageType: SendMessageType.Notification,
+          todoWorkChainId: meta.todoWorkChainId,
+          workflowHandle: workflowRegistry.getHandle(meta.runId),
+        });
+      });
+      // The model may act on a resume hint immediately. Wait for that runner
+      // to release the ID, while still letting other prompts run.
+      const isReadyForModel = ({ workflowHandle }: LocalQueueItem): boolean =>
+        !workflowHandle ||
+        workflowRegistry.getHandle(workflowHandle.runId) !== workflowHandle;
+
       const monitorRegistry = config.getMonitorRegistry();
       if (options.captureMonitorNotifications !== false) {
         // One-shot headless runs capture monitor notifications locally so any
@@ -2032,6 +2056,7 @@ export async function runNonInteractive(
           GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
         );
         await abortBackgroundTasksAndHoldBackNotifications();
+        await cancelWorkflowRuns();
         flushQueuedNotificationsToSdk(localQueue);
         finalizeOneShotMonitors();
         const metrics = uiTelemetryService.getMetrics();
@@ -2061,6 +2086,7 @@ export async function runNonInteractive(
           'Headless Goal stopped after loop detection',
         );
         await abortBackgroundTasksAndHoldBackNotifications();
+        await cancelWorkflowRuns();
         flushQueuedNotificationsToSdk(localQueue);
         finalizeOneShotMonitors();
 
@@ -3114,6 +3140,13 @@ export async function runNonInteractive(
       };
 
       let currentPromptId = prompt_id;
+      // A teammate turn mints its own prompt id (registered as a background
+      // interaction so the ledger excludes it). Track whether the active turn
+      // is a teammate turn so its ToolResult continuations keep that id, while
+      // a later foreground turn restores the base id — otherwise the registered
+      // teammate id would drop every later foreground send from the ledger for
+      // the rest of the run (R8-F2).
+      let teammateTurnActive = false;
       while (true) {
         // Drain pending teammate messages into the conversation.
         // sendMessageStream only reads currentMessages[0].parts,
@@ -3174,10 +3207,19 @@ export async function runNonInteractive(
         } else {
           sendType = SendMessageType.ToolResult;
         }
-        if (isTeammateTurn) {
+        if (isTeammateTurn && sendType === SendMessageType.Teammate) {
           selectActiveInteraction(currentPromptId);
           endActiveInteraction('ok');
           currentPromptId = `${prompt_id}/teammate/${turnCount}`;
+          teammateTurnActive = true;
+        } else if (!teammateTurnActive) {
+          // Foreground turn (or a continuation of one): restore the base id so
+          // a prior teammate turn's registered id does not exclude this send.
+          // A foreground Goal first segment that coincides with a teammate
+          // batch keeps the base id too — it is a Goal/UserQuery send, not a
+          // Teammate send, so it must not wear (or rotate the ledger key to)
+          // the teammate id (R14 deferred).
+          currentPromptId = prompt_id;
         }
         selectActiveInteraction(
           currentPromptId,
@@ -3271,6 +3313,15 @@ export async function runNonInteractive(
                 },
               }
             : {}),
+          // A runtime Goal run keeps the foreground turn's prompt_id for
+          // identity but opens its own ledger turn, so a fallback the
+          // foreground turn exhausted is re-probed for the Goal run. The key
+          // is stable across the run's segments (goalTurn.turnKey), so sticky
+          // marks still persist within the run, as continuations do.
+          ...(goalTurn &&
+            goalTurn.origin === 'runtime' && {
+              ledgerTurnKey: `${prompt_id}/goal/${goalTurn.turnKey}`,
+            }),
         };
         let shouldFinalizeTurn: boolean;
         if (replyOnly) {
@@ -3326,6 +3377,7 @@ export async function runNonInteractive(
               // ends with its result, as on the current loop.
               return await routeAbort();
             case 'max_session_turns':
+              // The client counts turns across the whole session (#15325).
               return await stopAtSessionTurnLimit();
             case 'next_round':
               currentMessages = [{ role: 'user', parts: result.parts ?? [] }];
@@ -3344,6 +3396,7 @@ export async function runNonInteractive(
               endActiveInteraction('ok');
               const nextGoalTurn = queuedGoalTurns.shift();
               if (nextGoalTurn) {
+                teammateTurnActive = false;
                 activeGoalTurn = nextGoalTurn;
                 markGoalTurnDelivered(nextGoalTurn);
                 isFirstGoalSegment = true;
@@ -3531,6 +3584,7 @@ export async function runNonInteractive(
               endActiveInteraction('ok');
               const nextGoalTurn = queuedGoalTurns.shift();
               if (nextGoalTurn) {
+                teammateTurnActive = false;
                 activeGoalTurn = nextGoalTurn;
                 markGoalTurnDelivered(nextGoalTurn);
                 isFirstGoalSegment = true;
@@ -3555,6 +3609,9 @@ export async function runNonInteractive(
           }
         }
         if (shouldFinalizeTurn) {
+          // The turn ended; a subsequent foreground turn must not inherit a
+          // teammate turn's registered prompt id (R8-F2).
+          teammateTurnActive = false;
           await modTurn?.complete();
           if (activeGoalTurn) {
             const completedGoalTurn = activeGoalTurn;
@@ -3663,29 +3720,24 @@ export async function runNonInteractive(
           // Drain-turns count toward getMaxSessionTurns() for symmetry with the main
           // loop — otherwise a looping cron or a model that keeps replying to
           // notifications could exceed the cap silently in headless runs.
-          const drainBatch = async () => {
-            if (localQueue.length === 0) return;
-
-            // Batch-drain: take contiguous same-type items from the front
-            // of the queue. Cron prompts run individually — each needs its
-            // own slash/shell/@ preprocessing and approval cycle.
-            const targetType = localQueue[0]!.sendMessageType;
-            let splitIdx =
-              targetType === SendMessageType.Cron || localQueue[0]!.modPrompt
-                ? 1
-                : 0;
-            if (splitIdx === 0) {
+          const drainBatch = async (start: number) => {
+            // Batch contiguous ready items of the same type. Cron prompts
+            // run individually for their own preprocessing and approvals.
+            const first = localQueue[start]!;
+            const targetType = first.sendMessageType;
+            let end = start + 1;
+            if (targetType !== SendMessageType.Cron && !first.modPrompt) {
               while (
-                splitIdx < localQueue.length &&
-                localQueue[splitIdx]!.sendMessageType === targetType &&
-                localQueue[splitIdx]!.todoWorkChainId ===
-                  localQueue[0]!.todoWorkChainId
+                end < localQueue.length &&
+                localQueue[end]!.sendMessageType === targetType &&
+                localQueue[end]!.todoWorkChainId === first.todoWorkChainId &&
+                isReadyForModel(localQueue[end]!)
               ) {
-                splitIdx++;
+                end++;
               }
             }
             const batch = localQueue
-              .splice(0, splitIdx)
+              .splice(start, end - start)
               .filter((item) => !isCancelledMonitorEvent(item));
 
             if (batch.length === 0) return;
@@ -3974,7 +4026,9 @@ export async function runNonInteractive(
                 // call captured the terminal contract — no point running
                 // more queued prompts that can't influence the result.
                 if (structuredSubmission !== undefined) return;
-                await drainBatch();
+                const start = localQueue.findIndex(isReadyForModel);
+                if (start < 0) return;
+                await drainBatch(start);
               }
             })().finally(() => {
               if (drainPromise === p) drainPromise = null;
@@ -4103,10 +4157,7 @@ export async function runNonInteractive(
             });
           }
 
-          // Wait for running background agents to complete before emitting the final
-          // result. On SIGINT/SIGTERM, abort them and route through
-          // handleCancellationError — otherwise the success emitResult below would
-          // silently convert a cancellation into a completion.
+          // Wait for background work before emitting the final result.
           while (true) {
             if (abortController.signal.aborted) {
               await abortBackgroundTasksAndHoldBackNotifications();
@@ -4134,8 +4185,18 @@ export async function runNonInteractive(
             // paired with one. Monitors are different: they intentionally
             // continue in the background, so final result emission is not
             // gated on monitor lifetime.
+            // Workflow completions belong to this prompt in both adapter modes.
+            const workflowsSettled = () =>
+              !workflowRegistry.hasRunningEntries() &&
+              !workflowRegistry
+                .list()
+                .some(
+                  ({ runId, status }) =>
+                    (status === 'completed' || status === 'failed') &&
+                    workflowRegistry.getHandle(runId),
+                );
             if (!ownsAdapter) {
-              if (localQueue.length === 0) {
+              if (localQueue.length === 0 && workflowsSettled()) {
                 // Preserve the final cancellation checkpoint for reusable
                 // sessions without polling the registry-global task set. An
                 // interrupt queued by the just-finished stream gets one event
@@ -4144,7 +4205,8 @@ export async function runNonInteractive(
                 await new Promise((resolve) => setTimeout(resolve, 0));
                 if (
                   !abortController.signal.aborted &&
-                  localQueue.length === 0
+                  localQueue.length === 0 &&
+                  workflowsSettled()
                 ) {
                   break;
                 }
@@ -4152,6 +4214,7 @@ export async function runNonInteractive(
               }
             } else if (
               !registry.hasUnfinalizedTasks() &&
+              workflowsSettled() &&
               localQueue.length === 0
             ) {
               break;
@@ -4369,6 +4432,7 @@ export async function runNonInteractive(
           throw abortError;
         }
       }
+      if (!recoverableCancellation) await cancelWorkflowRuns();
       if (budgetExceeded) {
         // Always exit AFTER emitResult so STREAM_JSON / JSON consumers
         // see a terminal result envelope before the process dies.
@@ -4440,6 +4504,7 @@ export async function runNonInteractive(
       if (options.captureBackgroundTaskRegistrations !== false) {
         reg.setRegisterCallback(undefined);
       }
+      config.getWorkflowRunRegistry().setCompletionCallback(undefined);
       const monReg = config.getMonitorRegistry();
       // In one-shot (non-Session) runs, abort all running monitors so their
       // piped stdio refs don't keep the Node event loop alive after the result

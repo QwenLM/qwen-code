@@ -89,13 +89,16 @@ public class HarnessCoordinator {
     // it, though, and the exemption alone would retry such a Turn forever
     // with nothing to tell it from a healthy retry. The exemption therefore
     // lapses once the Turn has gone this many budgets without journaled
-    // progress (review round 3, R3-6). The cap reads consecutive_failures,
-    // so it bounds the whole run without progress that ends on a generation
-    // wait, whatever wait family filled the run: no counter tells the
-    // families apart, and the other exempt waits stay uncapped while they
-    // are the current failure. A zero budget is floored to one so a single
-    // change still re-attaches (review round 1, R1-1 and R1-8).
-    private static final int GENERATION_CHURN_BUDGET_FACTOR = 4;
+    // progress (review round 3, R3-6). Pool waits age the same way: a
+    // closing Session, a full cold-open slot or an ownership handoff that
+    // never resolves — a caller can fill an instance's cold-open slots with
+    // its own suspended Sessions — must not keep a Turn retrying forever
+    // either. The cap reads consecutive_failures, so it bounds the whole
+    // run without progress that ends on a capped wait, whatever wait
+    // family filled the run: no counter tells the families apart. A zero
+    // budget is floored to one so a single change still re-attaches
+    // (review round 1, R1-1 and R1-8).
+    private static final int WAIT_CHURN_BUDGET_FACTOR = 4;
     private static final Logger LOG = LoggerFactory.getLogger(
             HarnessCoordinator.class);
     private final AgentStateStore store;
@@ -383,6 +386,16 @@ public class HarnessCoordinator {
             terminal = transientFailure(claimed, submissionAttempted.get(),
                     error, false);
         } catch (HarnessHttpFailure error) {
+            // An uncertain teardown is a refusal, not a wait: only an
+            // operator or the lifecycle authority reconciles the Session,
+            // so no retry budget buys progress. The terminal record keeps
+            // the code that names the recovery it needs.
+            if ("hosted_session_teardown_blocked".equals(
+                    error.getErrorCode())) {
+                terminal = failTerminally(claimed,
+                        "hosted_session_teardown_blocked",
+                        "Hosted Harness Session teardown needs operator"
+                                + " recovery.", error);
             // #14387: a takeover refusal for a workflow Turn with the
             // takeover_unrecovered verdict is terminal in effect — the
             // workflow's in-process executor died with the generation, and
@@ -392,7 +405,7 @@ public class HarnessCoordinator {
             // flight) keeps the retry path: it is not evidence the
             // workflow cannot be observed, and a committed result may
             // already sit journaled behind it.
-            if (recoveryPath.get() && !"CANCELLING".equals(claimed.status())
+            } else if (recoveryPath.get() && !"CANCELLING".equals(claimed.status())
                     && isWorkflowLaunchTurn(claimed)
                     && "hosted_turn_recovery_required".equals(
                             error.getErrorCode())
@@ -1756,27 +1769,28 @@ public class HarnessCoordinator {
         // but not toward the terminal budget (review round 10, R10-2).
         int chargedFailures =
                 current.consecutiveFailures() - current.budgetExemptFailures();
-        // A generation wait keeps its exemption only while the Turn's run
-        // of failures without journaled progress stays under the churn cap.
-        // Past it, the arm for the Turn's phase fails it with that phase's
-        // unavailable code, as if the budget were spent (review round 3,
-        // R3-6).
+        // A generation or pool wait keeps its exemption only while the
+        // Turn's run of failures without journaled progress stays under the
+        // churn cap. Past it, the arm for the Turn's phase fails it with
+        // that phase's unavailable code, as if the budget were spent
+        // (review round 3, R3-6).
         // The wait is read off the failure itself, like every other fact
         // this method derives from it, so no caller can route a generation
-        // change here without the cap (review round 1, R1-5).
+        // change or a pool wait here without the cap (review round 1, R1-5).
         boolean generationWait =
                 error instanceof HarnessGenerationFailure;
+        boolean poolWait = isPoolWait(error);
         int budget = submissionAttempted ? maxPostAdmissionRetries
                 : maxPreAdmissionRetries;
-        boolean generationChurn = generationWait && exemptFromRetryBudget
+        boolean waitChurn = (generationWait && exemptFromRetryBudget || poolWait)
                 && current.consecutiveFailures()
                         >= (long) Math.max(1, budget)
-                                * GENERATION_CHURN_BUDGET_FACTOR;
-        boolean exempt = (exemptFromRetryBudget || isPoolWait(error)) && !generationChurn;
+                                * WAIT_CHURN_BUDGET_FACTOR;
+        boolean exempt = (exemptFromRetryBudget || poolWait) && !waitChurn;
         if (!submissionAttempted
                 && !exempt
                 && (chargedFailures >= maxPreAdmissionRetries
-                        || generationChurn)) {
+                        || waitChurn)) {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
@@ -1822,7 +1836,7 @@ public class HarnessCoordinator {
         if (submissionAttempted
                 && !exempt
                 && (chargedFailures >= maxPostAdmissionRetries
-                        || generationChurn)) {
+                        || waitChurn)) {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
@@ -1905,7 +1919,8 @@ public class HarnessCoordinator {
         }
         return error instanceof HarnessHttpFailure http && http.getStatusCode() == 409
                 && ("hosted_harness_quiescing".equals(http.getErrorCode())
-                        || "hosted_session_closing".equals(http.getErrorCode()));
+                        || "hosted_session_closing".equals(http.getErrorCode())
+                        || "hosted_session_open_busy".equals(http.getErrorCode()));
     }
 
     // #14387: refuse the workflow Turn's unwitnessed re-execution — mark

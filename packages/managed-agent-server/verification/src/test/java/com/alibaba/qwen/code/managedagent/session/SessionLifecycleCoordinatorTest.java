@@ -424,15 +424,15 @@ class SessionLifecycleCoordinatorTest {
 
     /** A workspace-bound parent with one child Session, close admitted. */
     private static World closingWorld(String suffix) {
-        return closingWorldOp(suffix, false);
+        return closingWorldOp(suffix, 0);
     }
 
-    /** The same world, but closing under the lifecycle protocol (P1). */
+    /** The same world, but deleting under lifecycle v2 (ordinary files). */
     private static World closingWorldLifecycle(String suffix) {
-        return closingWorldOp(suffix, true);
+        return closingWorldOp(suffix, 2);
     }
 
-    private static World closingWorldOp(String suffix, boolean protocolOne) {
+    private static World closingWorldOp(String suffix, int lifecycleProtocol) {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:close-cascade-" + suffix + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
@@ -476,10 +476,13 @@ class SessionLifecycleCoordinatorTest {
                         new StoreModels.SessionLineage(session, session,
                                 "run-1", 1))
                 .sessionId());
-        String operation = transactions.execute(ignored -> protocolOne
+        // D3: ordinary files closes on lifecycle v2. The cascade claim
+        // tagging is protocol-independent (any active lifecycle claim
+        // tags the child updates).
+        String operation = transactions.execute(ignored -> lifecycleProtocol != 0
                 ? store.beginWorkspaceLifecycle("tenant", session,
                         OperationKind.DELETE, "owner", "a".repeat(64),
-                        "delete", "digest", true, 1)
+                        "delete", "digest", true, lifecycleProtocol)
                         .operation().operationId()
                 : store.beginWorkspaceClose("tenant", session, "owner",
                         "a".repeat(64), "close", "digest", true)
@@ -1347,9 +1350,11 @@ class SessionLifecycleCoordinatorTest {
         }
     }
 
-    // P1: the cascade's child updates ride the parent's own lifecycle
-    // claim — the fence's matching key. An ordinary parent's updates
-    // stay exactly plain.
+    // The cascade's child updates ride the parent's own lifecycle claim
+    // — the fence's matching key — under lifecycle v2 (ordinary files);
+    // a protocol-0 parent's updates stay exactly plain. External-files
+    // (v1) parents cannot admit children, so v2 is the only reachable
+    // claimed shape.
     @Test
     void lifecycleProtocolClaimTagsEveryCascadeOperation() {
         World plainWorld = closingWorld("claim-plain-");
@@ -1377,6 +1382,8 @@ class SessionLifecycleCoordinatorTest {
                 var lifecycleRecord = lifecycleWorld.store.findOperation(
                         "tenant", lifecycleWorld.session,
                         lifecycleWorld.operation).orElseThrow();
+                assertThat(lifecycleRecord.lifecycleProtocolVersion())
+                        .isEqualTo(2);
                 coordinator.runLifecycleChildOperation(lifecycleRecord,
                         tagged);
                 assertThat(tagged).containsEntry("authority", Map.of(
@@ -1711,11 +1718,15 @@ class SessionLifecycleCoordinatorTest {
         }
     }
 
-    // The relay's stop arm tolerates a child that waits on its recovery or
-    // is already closing; the cascade mirrors exactly those two refusal
-    // codes — any other failure defers the Turn cancel, these two do not.
-    @Test
-    void aToleratedMessageStopRefusalStillCancelsTheTurn() {
+    // The relay's stop arm tolerates a child that waits on its recovery,
+    // is already closing, or is out of cold-open slots; the cascade mirrors
+    // exactly those refusal codes — any other failure defers the Turn
+    // cancel, these do not.
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {
+            "hosted_turn_recovery_required", "hosted_session_closing",
+            "hosted_session_open_busy"})
+    void aToleratedMessageStopRefusalStillCancelsTheTurn(String refusalCode) {
         World world = closingWorld("msg-tolerated-");
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_turn (tenant_id,"
@@ -1729,8 +1740,7 @@ class SessionLifecycleCoordinatorTest {
         var harness = new CascadingHarness(true, false);
         var refusal = Mockito.mock(
                 com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure.class);
-        Mockito.when(refusal.getErrorCode())
-                .thenReturn("hosted_session_closing");
+        Mockito.when(refusal.getErrorCode()).thenReturn(refusalCode);
         harness.messageFailure = refusal;
         List<String> calls = new CopyOnWriteArrayList<>();
         harness.messageApplied = body -> calls.add("message-stop");

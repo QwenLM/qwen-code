@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { BackgroundTaskRegistry } from '@qwen-code/qwen-code-core/agents/background-tasks.js';
+import { WorkflowRunRegistry } from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
 import { runNonInteractiveStreamJson } from './session.js';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
@@ -64,6 +65,7 @@ describe('Session shutdown background notifications', () => {
     '$route pairs a $phase background task (completed=$completed) without another model turn',
     async ({ route, phase, completed }) => {
       const registry = new BackgroundTaskRegistry();
+      const workflows = new WorkflowRunRegistry();
       const output = {
         emitResult: vi.fn(),
         emitMessage: vi.fn(),
@@ -92,6 +94,7 @@ describe('Session shutdown background notifications', () => {
         getMonitorRegistry: () => monitor,
         getBackgroundShellRegistry: () => ({ abortAll: vi.fn() }),
         getBackgroundTaskRegistry: () => registry,
+        getWorkflowRunRegistry: () => workflows,
       } as unknown as Config;
       vi.mocked(StreamJsonOutputAdapter).mockImplementation(
         () => output as unknown as StreamJsonOutputAdapter,

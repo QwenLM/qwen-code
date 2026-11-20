@@ -12,7 +12,13 @@
  */
 
 import { spawn } from 'node:child_process';
-import { cpSync, readdirSync, rmSync } from 'node:fs';
+import {
+  cpSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -297,6 +303,28 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
         : undefined;
       return scenario.reply(messages, dir, subagentRequest);
     }, fakeServerHostOptions());
+    const settingsPath = join(dir, '.qwen', 'settings.json');
+    const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+    settings.modelProviders = {
+      openai: [
+        {
+          id: 'fake-model',
+          baseUrl: server.baseUrl,
+          envKey: 'PARITY_FAKE_API_KEY',
+          generationConfig: {
+            modalities: {
+              image: false,
+              audio: false,
+              video: false,
+              pdf: false,
+            },
+          },
+        },
+      ],
+    };
+    settings.fastModel = 'openai:fake-model';
+    settings.compactionModel = 'openai:fake-model';
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
     // Outside the project, so the folder structure in the requests does not
     // list the session's debug log or background housekeeping markers in
     // QWEN_HOME (#16710).
@@ -326,6 +354,9 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       env: {
         ...process.env,
         QWEN_DEBUG_LOG_FILE: '1',
+        PARITY_FAKE_API_KEY: 'fake-key',
+        QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
+        QWEN_CODE_MODELS_DEV_REFRESH: 'off',
         QWEN_HOME: runtimeDir,
         QWEN_RUNTIME_DIR: runtimeDir,
       },
@@ -387,7 +418,7 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     const count = (line: RegExp) => log.match(line)?.length ?? 0;
     // AgentCore's rounds on the kernel are `runAgentLoop` calls too.
     const kernelSubagentRounds = count(KERNEL_SUBAGENT_ROUND);
-    return {
+    const result = {
       exitCode,
       requests: modelRequests(server, dir),
       frames: streamFrames(stdout, dir),
@@ -399,6 +430,25 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       kernelSubagentRounds,
       kernelMainRounds: count(KERNEL_RUN) - kernelSubagentRounds,
     };
+    const requestModels = server.requests.map(({ body }) => body['model']);
+    expect(new Set(requestModels)).toEqual(new Set(['fake-model']));
+    writeFileSync(
+      join(dir, 'parity-receipt.json'),
+      JSON.stringify(
+        {
+          scenario: scenario.name,
+          shared,
+          kernel,
+          inputModalities:
+            settings.modelProviders.openai[0].generationConfig.modalities,
+          requestModels,
+          ...result,
+        },
+        null,
+        2,
+      ),
+    );
+    return result;
   }
 
   /** The current loop, the shared loop, and the shared loop on the kernel. */

@@ -98,6 +98,103 @@ describe('cleanup', () => {
     expect(cleanupFn).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])(
+    'keeps later cleanups when the current cleanup unregisters itself (priority: %s)',
+    async (first) => {
+      const order: string[] = [];
+      const unregister = registerCleanup(
+        () => {
+          order.push('first');
+          unregister();
+        },
+        { first },
+      );
+      registerCleanup(() => {
+        order.push('second');
+      });
+      registerCleanup(() => {
+        order.push('third');
+      });
+
+      await runExitCleanup();
+
+      expect(order).toEqual(['first', 'second', 'third']);
+    },
+  );
+
+  it('keeps pending cleanups when an awaited cleanup is unregistered', async () => {
+    const order: string[] = [];
+    let finishCleanup!: () => void;
+    const started = vi.fn();
+    const unregister = registerCleanup(async () => {
+      order.push('first');
+      started();
+      await new Promise<void>((resolve) => {
+        finishCleanup = resolve;
+      });
+    });
+    registerCleanup(() => {
+      order.push('second');
+    });
+
+    const cleanup = runExitCleanup();
+    await vi.waitFor(() => expect(started).toHaveBeenCalledOnce());
+    unregister();
+    finishCleanup();
+    await cleanup;
+
+    expect(order).toEqual(['first', 'second']);
+  });
+
+  it('still allows a cleanup to unregister pending work', async () => {
+    const pending = vi.fn();
+    registerCleanup(() => unregister());
+    const unregister = registerCleanup(pending);
+    const following = vi.fn();
+    registerCleanup(following);
+
+    await runExitCleanup();
+
+    expect(pending).not.toHaveBeenCalled();
+    expect(following).toHaveBeenCalledOnce();
+  });
+
+  it('runs newly registered priority work next without repeating the current cleanup', async () => {
+    const order: string[] = [];
+    let registered = false;
+    registerCleanup(() => {
+      order.push('first');
+      if (registered) return;
+      registered = true;
+      registerCleanup(
+        () => {
+          order.push('priority');
+        },
+        { first: true },
+      );
+      registerCleanup(() => {
+        order.push('appended');
+      });
+    });
+    registerCleanup(() => {
+      order.push('second');
+    });
+
+    await runExitCleanup();
+
+    expect(order).toEqual(['first', 'priority', 'second', 'appended']);
+  });
+
+  it('does not unregister another registration of the same callback', async () => {
+    const cleanupFn = vi.fn(() => unregister());
+    const unregister = registerCleanup(cleanupFn);
+    registerCleanup(cleanupFn);
+
+    await runExitCleanup();
+
+    expect(cleanupFn).toHaveBeenCalledTimes(2);
+  });
+
   it('should continue running cleanup functions even if one throws an error', async () => {
     const errorFn = vi.fn(() => {
       throw new Error('Test Error');
@@ -188,6 +285,40 @@ describe('cleanup', () => {
       ).resolves.toBeUndefined();
       expect(rejectFn).toHaveBeenCalledTimes(1);
       expect(nextFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not drain registrations from a later pass after the overall timeout', async () => {
+      vi.useFakeTimers();
+      try {
+        let finishCleanup!: () => void;
+        registerCleanup(
+          () =>
+            new Promise<void>((resolve) => {
+              finishCleanup = resolve;
+            }),
+        );
+        const cleanup = runExitCleanup({
+          _testPerFnTimeoutMs: 1_000,
+          _testOverallTimeoutMs: 10,
+        });
+        await vi.advanceTimersByTimeAsync(10);
+        await cleanup;
+
+        const nextFn = vi.fn();
+        const lastFn = vi.fn();
+        registerCleanup(nextFn);
+        registerCleanup(lastFn);
+        finishCleanup();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(nextFn).not.toHaveBeenCalled();
+        expect(lastFn).not.toHaveBeenCalled();
+
+        await runExitCleanup();
+        expect(nextFn).toHaveBeenCalledOnce();
+        expect(lastFn).toHaveBeenCalledOnce();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

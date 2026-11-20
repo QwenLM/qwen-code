@@ -83,6 +83,11 @@ let mockBackgroundTaskRegistry: {
   setNotificationCallback: ReturnType<typeof vi.fn>;
   setRegisterCallback: ReturnType<typeof vi.fn>;
 };
+let mockWorkflowRunRegistry: {
+  list: ReturnType<typeof vi.fn>;
+  getHandle: ReturnType<typeof vi.fn>;
+  abortAll: ReturnType<typeof vi.fn>;
+};
 
 function createConfig(overrides: ConfigOverrides = {}): Config {
   const base = {
@@ -98,6 +103,7 @@ function createConfig(overrides: ConfigOverrides = {}): Config {
     getMonitorRegistry: () => mockMonitorRegistry,
     getBackgroundShellRegistry: () => mockBackgroundShellRegistry,
     getBackgroundTaskRegistry: () => mockBackgroundTaskRegistry,
+    getWorkflowRunRegistry: () => mockWorkflowRunRegistry,
     getLlmClient: () => ({
       getPendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
       removePendingMemoryTaskPromises: vi.fn(),
@@ -247,6 +253,11 @@ describe('runNonInteractiveStreamJson', () => {
       abortAll: vi.fn(),
       setNotificationCallback: vi.fn(),
       setRegisterCallback: vi.fn(),
+    };
+    mockWorkflowRunRegistry = {
+      list: vi.fn().mockReturnValue([]),
+      getHandle: vi.fn(),
+      abortAll: vi.fn(),
     };
     config = createConfig();
     runNonInteractiveMock.mockReset();
@@ -792,6 +803,31 @@ describe('runNonInteractiveStreamJson', () => {
         memory.resolve(0);
       }
     });
+  });
+
+  it('waits for a cancelled workflow to settle when stdin closes', async () => {
+    let settle!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    mockWorkflowRunRegistry.list.mockReturnValue([{ runId: 'wf_bg' }]);
+    mockWorkflowRunRegistry.getHandle.mockReturnValue({ completion });
+    runNonInteractiveMock.mockResolvedValueOnce(130);
+    mockInputReader.read = async function* () {
+      yield createUserMessage('Start a background workflow');
+    };
+    const finished = vi.fn();
+    const run = runNonInteractiveStreamJson(config, '').then(finished);
+    try {
+      await vi.waitFor(() => {
+        expect(mockWorkflowRunRegistry.abortAll).toHaveBeenCalledOnce();
+      });
+      expect(runNonInteractiveMock).toHaveBeenCalledOnce();
+      expect(finished).not.toHaveBeenCalled();
+    } finally {
+      settle();
+      await run;
+    }
   });
 
   it('initializes session and processes initialize control request', async () => {

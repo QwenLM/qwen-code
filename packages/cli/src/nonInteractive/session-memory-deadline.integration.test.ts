@@ -5,6 +5,7 @@
  */
 
 import { afterEach, expect, it, vi } from 'vitest';
+import { WorkflowRunRegistry } from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { LlmEventType } from '@qwen-code/qwen-code-core/core/turn.js';
 import { runNonInteractiveStreamJson } from './session.js';
@@ -90,6 +91,7 @@ it('finishes within the EOF memory budget when a real runner is already draining
     getRunning: () => [],
     abortAll: vi.fn(),
   };
+  const workflows = new WorkflowRunRegistry();
   const config = {
     initialize: async () => {},
     waitForMcpReady: async () => {},
@@ -135,6 +137,7 @@ it('finishes within the EOF memory budget when a real runner is already draining
       getSnapshot: () => ({ goal: null }),
     }),
     getBackgroundTaskRegistry: () => backgroundTasks,
+    getWorkflowRunRegistry: () => workflows,
     getMonitorRegistry: () => monitors,
     getBackgroundShellRegistry: () => ({ abortAll: vi.fn() }),
     getResumedSessionData: () => undefined,

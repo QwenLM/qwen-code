@@ -4,27 +4,43 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   ManagedChannelControlPlane,
   ManagedClaimedDelivery,
   ManagedInboundEvent,
 } from '@qwen-code/channel-base';
+import { CHANNEL_INBOUND_TRUNCATION_NOTICE } from '@qwen-code/channel-base';
 import {
   ManagedGithubAdapter,
   githubSettings,
+  type GithubCiObservation,
   type GithubComment,
   type GithubNotification,
+  type GithubPrWatchBinding,
+  type GithubPrWatchControlPlane,
+  type GithubPullObservation,
   type GithubSendFailure,
   type ManagedGithubAdapterDeps,
   type ManagedGithubClient,
 } from './managed-github-adapter.js';
 import {
   MANAGED_GITHUB_PENDING_LIMIT,
+  MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT,
   ManagedGithubStateStore,
+  validManagedGithubState,
   type ManagedGithubState,
 } from './managed-state.js';
 
@@ -64,7 +80,10 @@ function comment(overrides: Partial<GithubComment> = {}): GithubComment {
   };
 }
 
-function fakeControlPlane(journal: string[]) {
+function fakeControlPlane(
+  journal: string[],
+  destinationKey = 'cp|tenant-a|chan-1|actor|ws|.',
+) {
   const register: unknown[] = [];
   const submit: ManagedInboundEvent[] = [];
   const receipts: Array<{ deliveryId: string; receipt: unknown }> = [];
@@ -74,14 +93,21 @@ function fakeControlPlane(journal: string[]) {
   let refuseSubmit: { status: number; code?: string } | undefined;
   let refuseClaim: { status: number; code?: string } | undefined;
   const claimLimits: number[] = [];
+  let registerError: (Error & { status?: number; code?: string }) | undefined;
   let receiptError:
     | ((
         deliveryId: string,
       ) => (Error & { status?: number; code?: string }) | undefined)
     | undefined;
   const controlPlane: ManagedChannelControlPlane = {
+    destinationKey,
     register: async (request) => {
       journal.push('register');
+      if (registerError) {
+        const error = registerError;
+        registerError = undefined;
+        throw error;
+      }
       register.push(request);
     },
     disconnect: async () => {
@@ -139,6 +165,9 @@ function fakeControlPlane(journal: string[]) {
     setRefuseClaim: (value: { status: number; code?: string } | undefined) => {
       refuseClaim = value;
     },
+    failNextRegister: (error: Error & { status?: number; code?: string }) => {
+      registerError = error;
+    },
     setReceiptError: (
       fn:
         | ((
@@ -169,7 +198,24 @@ function fakeDeps(
     markReadError: undefined as Error | undefined,
     sendBehavior: 'ok' as 'ok' | 'definitive' | 'transient',
     pollFloor: 0,
+    pull: {
+      headSha: 'sha-a',
+      mergeableState: 'clean',
+      state: 'open',
+    } as GithubPullObservation,
+    pullFor: undefined as
+      | ((prNumber: number) => GithubPullObservation)
+      | undefined,
+    getPullRequestError: undefined as Error | undefined,
+    pullErrorFor: undefined as
+      | ((prNumber: number) => Error | undefined)
+      | undefined,
+    ci: { aggregate: 'passing', failedChecks: [] } as GithubCiObservation,
+    getCiStatusError: undefined as Error | undefined,
   };
+  const pullsSeen: Array<{ owner: string; repo: string; prNumber: number }> =
+    [];
+  const ciSeen: Array<{ owner: string; repo: string; headSha: string }> = [];
   const posted: Array<{
     owner: string;
     repo: string;
@@ -215,6 +261,20 @@ function fakeDeps(
       posted.push({ owner, repo, issueNumber, body });
       return { id: 9000 + posted.length };
     },
+    getPullRequest: async (owner, repo, prNumber) => {
+      journal.push('getPullRequest');
+      pullsSeen.push({ owner, repo, prNumber });
+      const perPrError = knobs.pullErrorFor?.(prNumber);
+      if (perPrError) throw perPrError;
+      if (knobs.getPullRequestError) throw knobs.getPullRequestError;
+      return knobs.pullFor ? knobs.pullFor(prNumber) : knobs.pull;
+    },
+    getCiStatus: async (owner, repo, headSha) => {
+      journal.push('getCiStatus');
+      ciSeen.push({ owner, repo, headSha });
+      if (knobs.getCiStatusError) throw knobs.getCiStatusError;
+      return knobs.ci;
+    },
     pollIntervalFloorMs: () => knobs.pollFloor,
     disconnect: () => {},
   };
@@ -242,8 +302,154 @@ function fakeDeps(
     posted,
     markedRead,
     sinceSeen,
+    pullsSeen,
+    ciSeen,
     compromise: () => compromised!(),
   };
+}
+
+function fakePrWatchPlane(journal: string[]) {
+  const injected: Array<{
+    owner: string;
+    repo: string;
+    prNumber: number;
+    transition: string;
+    headSha: string;
+    evidence: string;
+    episode: number;
+  }> = [];
+  // The state file's content at each inject call: pins that the durable
+  // pending entry was persisted BEFORE the injection side effect.
+  const injectSnapshots: Array<{ pendingKeys: string[]; fired: string[] }> = [];
+  const retired: Array<{ owner: string; repo: string; prNumber: number }> = [];
+  let bindings: GithubPrWatchBinding[] = [];
+  let injectError: (Error & { status?: number; code?: string }) | undefined;
+  let injectErrorFor:
+    | ((prNumber: number) => (Error & { status?: number }) | undefined)
+    | undefined;
+  let listError: (Error & { status?: number; code?: string }) | undefined;
+  let retireError: (Error & { status?: number; code?: string }) | undefined;
+  let onInject: (() => void) | undefined;
+  let stateFile: string | undefined;
+  const plane: GithubPrWatchControlPlane = {
+    listPrWatchBindings: async () => {
+      journal.push('listPrWatchBindings');
+      if (listError) throw listError;
+      return bindings;
+    },
+    retirePrWatchBinding: async (pr) => {
+      journal.push('retirePrWatchBinding');
+      if (retireError) throw retireError;
+      retired.push(pr);
+      bindings = bindings.filter(
+        (b) =>
+          !(
+            b.owner === pr.owner &&
+            b.repo === pr.repo &&
+            b.prNumber === pr.prNumber
+          ),
+      );
+    },
+    injectPrEvent: async (event) => {
+      journal.push(`inject:${event.transition}`);
+      // The rollback fixtures deny the save by putting a directory at the
+      // state file's path; there is no durable state to snapshot then, and
+      // reading it would fail the injection for the wrong reason.
+      if (stateFile && statSync(stateFile).isFile()) {
+        const state = JSON.parse(readFileSync(stateFile, 'utf8')) as {
+          watch?: {
+            prs: Record<
+              string,
+              { pending?: Array<{ key: string }>; fired?: string[] }
+            >;
+          };
+        };
+        const entries = Object.values(state.watch?.prs ?? {});
+        injectSnapshots.push({
+          pendingKeys: entries.flatMap((e) =>
+            (e.pending ?? []).map((p) => p.key),
+          ),
+          fired: entries.flatMap((e) => e.fired ?? []),
+        });
+      }
+      const perPrError = injectErrorFor?.(event.prNumber);
+      if (perPrError) throw perPrError;
+      if (injectError) throw injectError;
+      onInject?.();
+      injected.push(event);
+    },
+  };
+  return {
+    plane,
+    injected,
+    injectSnapshots,
+    retired,
+    setBindings: (value: GithubPrWatchBinding[]) => {
+      bindings = value;
+    },
+    setInjectError: (
+      value: (Error & { status?: number; code?: string }) | undefined,
+    ) => {
+      injectError = value;
+    },
+    setInjectErrorFor: (
+      value:
+        | ((prNumber: number) => (Error & { status?: number }) | undefined)
+        | undefined,
+    ) => {
+      injectErrorFor = value;
+    },
+    setListError: (
+      value: (Error & { status?: number; code?: string }) | undefined,
+    ) => {
+      listError = value;
+    },
+    setRetireError: (
+      value: (Error & { status?: number; code?: string }) | undefined,
+    ) => {
+      retireError = value;
+    },
+    setOnInject: (fn: (() => void) | undefined) => {
+      onInject = fn;
+    },
+    watchStateFile: (file: string) => {
+      stateFile = file;
+    },
+  };
+}
+
+function binding(
+  overrides: Partial<GithubPrWatchBinding> = {},
+): GithubPrWatchBinding {
+  return {
+    owner: 'Owner',
+    repo: 'Repo',
+    prNumber: 9,
+    events: ['ci_failure', 'merge_conflict', 'head_change'],
+    ...overrides,
+  };
+}
+
+async function watchAdapter(
+  cwd = tempCwd(),
+  hooks: { log?: (line: string) => void } = {},
+  config: Record<string, unknown> = CONFIG,
+) {
+  const journal: string[] = [];
+  const plane = fakeControlPlane(journal);
+  const fake = fakeDeps(journal, hooks);
+  const watch = fakePrWatchPlane(journal);
+  const adapter = new ManagedGithubAdapter({
+    name: 'gh-1',
+    cwd,
+    config,
+    controlPlane: plane.controlPlane,
+    deps: { ...fake.deps, prWatchControlPlane: watch.plane },
+    pollLoop: false,
+  });
+  await adapter.connect();
+  watch.watchStateFile(adapter.stateFile);
+  return { adapter, plane, fake, watch, journal };
 }
 
 function delivery(
@@ -324,6 +530,24 @@ function seedState(
   const state = readState(adapter);
   mutate(state);
   writeFileSync(adapter.stateFile, JSON.stringify(state));
+}
+
+// Deny the state save portably: a directory at the state file's path makes
+// ManagedGithubStateStore.save's renameSync fail on every platform, where
+// chmod 0o500 denies the write on POSIX only. restore() puts the captured
+// bytes back, leaving disk exactly as a failed save does — the pre-denial
+// baseline — and is idempotent so a hook and a finally can both call it.
+function denyStateSave(file: string): () => void {
+  const bytes = readFileSync(file, 'utf8');
+  rmSync(file);
+  mkdirSync(file);
+  let restored = false;
+  return () => {
+    if (restored) return;
+    restored = true;
+    rmSync(file, { recursive: true, force: true });
+    writeFileSync(file, bytes);
+  };
 }
 
 async function waitUntil(
@@ -712,6 +936,7 @@ describe('managed GitHub adapter inbound', () => {
     await adapter.tick();
     const ascii = plane.submit[0]!.text;
     expect(ascii.length).toBeLessThanOrEqual(32_000);
+    expect(ascii.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
     // 25,000 CJK characters sit under the 32,000 character line but their
     // 75,000 UTF-8 bytes overflow the 64 KiB JSON envelope; the byte cut must
     // land on a code-point boundary.
@@ -725,24 +950,28 @@ describe('managed GitHub adapter inbound', () => {
     await adapter.tick();
     const cjk = plane.submit[1]!.text;
     expect(cjk.length).toBeLessThan(25_000);
+    expect(cjk.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
     // Mirror the production budget exactly: JSON-serialized bytes minus the
     // two quote characters (fitInboundText's encodedBytes).
     expect(
       Buffer.byteLength(JSON.stringify(cjk), 'utf8') - 2,
     ).toBeLessThanOrEqual(64 * 1024 - 4096);
     expect(/[\uD800-\uDBFF]$/.test(cjk)).toBe(false);
-    // Astral plane: the 32,000-unit UTF-16 slice lands inside the first
-    // surrogate pair; the backoff must drop the lone high surrogate. BMP-only
-    // fixtures above can never exercise this branch.
+    // Astral plane: the reduced core char cap lands inside a surrogate pair;
+    // the backoff must drop the lone high surrogate. BMP-only fixtures above
+    // can never exercise this branch. The '@bot-user ' prefix is 10 units, so
+    // coreCharLimit - 11 x's place the pair's high surrogate at the core cut.
+    const coreCharLimit = 32_000 - CHANNEL_INBOUND_TRUNCATION_NOTICE.length;
     fake.knobs.comments = [
       comment({
         id: 3,
         node_id: 'IC_astral',
-        body: `@bot-user ${'x'.repeat(31_989)}${'😀'.repeat(100)}`,
+        body: `@bot-user ${'x'.repeat(coreCharLimit - 11)}${'😀'.repeat(100)}`,
       }),
     ];
     await adapter.tick();
     const astral = plane.submit[2]!.text;
+    expect(astral.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
     expect(astral.length).toBe(31_999);
     expect(/[\uD800-\uDBFF]$/.test(astral)).toBe(false);
     // Escape inflation: 30,000 control characters are only 30,010 raw UTF-8
@@ -758,6 +987,7 @@ describe('managed GitHub adapter inbound', () => {
     await adapter.tick();
     const ctrl = plane.submit[3]!.text;
     expect(ctrl.length).toBeLessThan(30_010);
+    expect(ctrl.endsWith(CHANNEL_INBOUND_TRUNCATION_NOTICE)).toBe(true);
     expect(
       Buffer.byteLength(JSON.stringify(ctrl), 'utf8') - 2,
     ).toBeLessThanOrEqual(64 * 1024 - 4096);
@@ -2135,5 +2365,2162 @@ describe('managed GitHub adapter round-4 hardening', () => {
       { deliveryId: 'd-1', receipt: { outcome: 'rejected' } },
     ]);
     await adapter.disconnect();
+  });
+});
+
+describe('managed GitHub adapter registration-identity isolation', () => {
+  function identityAdapter(
+    cwd: string,
+    destinationKey: string,
+    hooks: { log?: (line: string) => void } = {},
+  ) {
+    const journal: string[] = [];
+    const plane = fakeControlPlane(journal, destinationKey);
+    const fake = fakeDeps(journal, hooks);
+    const adapter = new ManagedGithubAdapter({
+      name: 'gh-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: fake.deps,
+      pollLoop: false,
+    });
+    return { adapter, plane, fake, journal };
+  }
+
+  function pendingOf(adapter: ManagedGithubAdapter): string[] {
+    const state = (
+      adapter as unknown as { state: { pending: Array<{ eventId: string }> } }
+    ).state;
+    return state.pending.map((entry) => entry.eventId);
+  }
+
+  function pendingEntry(eventId: string) {
+    return {
+      eventId,
+      notificationThreadId: `thread-${eventId}`,
+      event: {
+        accountGeneration: 1,
+        platformEventId: eventId,
+        semanticRevision: 1,
+        scope: {
+          kind: 'chat_thread',
+          senderId: null,
+          chatId: 'Owner/Repo',
+          threadId: 'issue:7',
+        },
+        senderId: 'alice',
+        chatId: 'Owner/Repo',
+        threadId: 'issue:7',
+        subject: 'Issue title',
+        text: '@bot-user help',
+        attachments: [],
+        replyContext: { owner: 'Owner', repo: 'Repo', issueNumber: 7 },
+      },
+    };
+  }
+
+  function seedLegacy(dir: string, state: unknown): void {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'managed-state.json'), JSON.stringify(state));
+  }
+
+  const legacyState = (pending: number, outbound: number) => ({
+    version: 1,
+    generation: 1,
+    cursor: { lastProcessedAt: null, dispatchedComments: [] },
+    pending: Array.from({ length: pending }, (_, i) =>
+      pendingEntry(`github:legacy-${i}`),
+    ),
+    outbound: Array.from({ length: outbound }, (_, i) => ({
+      deliveryId: `d-${i}`,
+      ordinal: i,
+    })),
+  });
+
+  it('a destination change never replays one tenant pending into another', async () => {
+    const cwd = tempCwd();
+    const a = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await a.adapter.connect();
+    const stateFileA = a.adapter.stateFile;
+    seedState(a.adapter, (s) => {
+      s.pending = [pendingEntry('github:IC_1')];
+    });
+    await a.adapter.disconnect();
+
+    // Restart the SAME configured entry against tenant B: a different
+    // destination keys a different ledger FILE beneath the SAME entry
+    // directory, so A's pending claim is never loaded into B.
+    const b = identityAdapter(cwd, 'cp|tenant-b|chan-1|actor|ws|.');
+    await b.adapter.connect();
+    expect(b.adapter.stateFile).not.toBe(stateFileA);
+    expect(dirname(b.adapter.stateFile)).toBe(dirname(stateFileA));
+    expect(pendingOf(b.adapter)).toEqual([]);
+    await b.adapter.tick();
+    expect(b.plane.submit).toHaveLength(0);
+    await b.adapter.disconnect();
+  });
+
+  it('a workspace change within one tenant isolates the ledger', async () => {
+    const cwd = tempCwd();
+    const a = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await a.adapter.connect();
+    seedState(a.adapter, (s) => {
+      s.pending = [pendingEntry('github:IC_1')];
+    });
+    await a.adapter.disconnect();
+    const b = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws-2|.');
+    await b.adapter.connect();
+    expect(b.adapter.stateFile).not.toBe(a.adapter.stateFile);
+    expect(pendingOf(b.adapter)).toEqual([]);
+    await b.adapter.disconnect();
+  });
+
+  it('a second destination of the same entry is refused the shared lock', async () => {
+    const cwd = tempCwd();
+    const a = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await a.adapter.connect();
+    const b = identityAdapter(cwd, 'cp|tenant-b|chan-1|actor|ws|.');
+    await expect(b.adapter.connect()).rejects.toThrow(
+      /owned by another process/,
+    );
+    await a.adapter.disconnect();
+  });
+
+  it('logs the stranded legacy ledger on upgrade rather than dropping it silently', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    const dir = dirname(adapter.stateFile);
+    seedLegacy(dir, legacyState(2, 3));
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain(join(dir, 'managed-state.json'));
+    expect(stranded[0]).toContain('2 pending');
+    expect(stranded[0]).toContain('3 outbound');
+    expect(stranded[0]).toContain('staged-but-unadmitted claims are stranded');
+    expect(stranded[0]).toContain(
+      'outbound segments with an unknown delivery status were dropped',
+    );
+    // Not adopted: the legacy pending never enters this registration's state.
+    expect(pendingOf(adapter)).toEqual([]);
+    // Archive contract: the legacy is renamed (not deleted) to a .stranded-
+    // sibling that still holds the seeded claims, a log line names the archived
+    // path, and a second start does not re-announce it.
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(false);
+    const archived = readdirSync(dir).filter((f) =>
+      f.startsWith('managed-state.json.stranded-'),
+    );
+    expect(archived).toHaveLength(1);
+    const archivedState = JSON.parse(
+      readFileSync(join(dir, archived[0]), 'utf8'),
+    );
+    expect(archivedState.pending).toHaveLength(2);
+    expect(archivedState.outbound).toHaveLength(3);
+    expect(lines.some((l) => l.includes(join(dir, archived[0])))).toBe(true);
+    await adapter.disconnect();
+    lines.length = 0;
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await second.adapter.connect();
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(0);
+    await second.adapter.disconnect();
+  });
+
+  it('a quiescent legacy ledger (0/0) is reported without a loss alarm', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    seedLegacy(dirname(adapter.stateFile), legacyState(0, 0));
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 pending');
+    expect(stranded[0]).toContain('0 outbound');
+    expect(stranded[0]).not.toContain('claims are stranded');
+    expect(stranded[0]).not.toContain(
+      'outbound segments with an unknown delivery status were dropped',
+    );
+    // A genuinely cursor-less 0/0 legacy names no skipped window either.
+    expect(stranded[0]).not.toContain('were never listed');
+    await adapter.disconnect();
+  });
+
+  it('a 0/0 legacy with a watermark names the skipped offline notification window', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    // No pending/outbound, but the bot went down with a watermark: mentions
+    // received while it was down are dropped by the fresh null cursor (R1-4).
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        cursor: {
+          lastProcessedAt: '2026-11-19T09:00:00Z',
+          dispatchedComments: [],
+        },
+        pending: [],
+        outbound: [],
+      }),
+    );
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 pending');
+    expect(stranded[0]).toContain('0 outbound');
+    expect(stranded[0]).toContain('2026-11-19T09:00:00Z');
+    expect(stranded[0]).toContain('were never listed');
+    // The watermark clause is separate from the pending/outbound loss clauses.
+    expect(stranded[0]).not.toContain('claims are stranded');
+    expect(stranded[0]).not.toContain(
+      'outbound segments with an unknown delivery status were dropped',
+    );
+    await adapter.disconnect();
+  });
+
+  it('an outbound-only legacy strand names the outbound consequence, not lost inbound claims', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    seedLegacy(dirname(adapter.stateFile), legacyState(0, 3));
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('0 pending');
+    expect(stranded[0]).toContain('3 outbound');
+    expect(stranded[0]).toContain(
+      'outbound segments with an unknown delivery status were dropped',
+    );
+    expect(stranded[0]).not.toContain(
+      'staged-but-unadmitted claims are stranded',
+    );
+    await adapter.disconnect();
+  });
+
+  it('a pending-only legacy strand names the inbound consequence, not dropped outbound', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    seedLegacy(dirname(adapter.stateFile), legacyState(1, 0));
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('1 pending');
+    expect(stranded[0]).toContain('staged-but-unadmitted claims are stranded');
+    expect(stranded[0]).not.toContain(
+      'outbound segments with an unknown delivery status were dropped',
+    );
+    await adapter.disconnect();
+  });
+
+  it('an unreadable legacy ledger reports unknown counts and a possible loss, not an empty one', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'managed-state.json'), '{not json');
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('unknown pending');
+    expect(stranded[0]).toContain('unknown outbound');
+    expect(stranded[0]).toContain('could not be read');
+    expect(stranded[0]).not.toContain('0 pending');
+    await adapter.disconnect();
+  });
+
+  it('a legacy ledger staged after a rollback is still reported (keyed ledger exists)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await first.adapter.connect();
+    await first.adapter.disconnect();
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(0);
+    lines.length = 0;
+    seedLegacy(dirname(first.adapter.stateFile), legacyState(1, 0));
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await second.adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('1 pending');
+    expect(pendingOf(second.adapter)).toEqual([]);
+    await second.adapter.disconnect();
+  });
+
+  it('a failed first start leaves the legacy ledger unarchived for a rollback to recover', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter, fake } = identityAdapter(
+      cwd,
+      'cp|tenant-a|chan-1|actor|ws|.',
+      { log: (l) => lines.push(l) },
+    );
+    const dir = dirname(adapter.stateFile);
+    seedLegacy(dir, legacyState(1, 0));
+    // The client identity cannot resolve: the ordinary failed-first-start shape.
+    fake.knobs.identityError = new Error('bad credentials');
+    await expect(adapter.connect()).rejects.toThrow('bad credentials');
+    expect(
+      lines.filter((l) => l.includes('is stranded and not replayed')),
+    ).toHaveLength(1);
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+    expect(
+      readdirSync(dir).filter((f) =>
+        f.startsWith('managed-state.json.stranded-'),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('a register-refused first start also leaves the legacy ledger unarchived', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter, plane } = identityAdapter(
+      cwd,
+      'cp|tenant-a|chan-1|actor|ws|.',
+      { log: (l) => lines.push(l) },
+    );
+    const dir = dirname(adapter.stateFile);
+    seedLegacy(dir, legacyState(1, 0));
+    plane.failNextRegister(
+      Object.assign(new Error('channel_disconnected'), {
+        status: 409,
+        code: 'channel_disconnected',
+      }),
+    );
+    await expect(adapter.connect()).rejects.toThrow('channel_disconnected');
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+    expect(
+      readdirSync(dir).filter((f) =>
+        f.startsWith('managed-state.json.stranded-'),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('losing ownership mid-connect leaves the legacy unarchived', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await first.adapter.connect();
+    // Give the keyed ledger an outbound segment so reportOrphanedOutbound has
+    // a receipt await to lose ownership during — a point AFTER where a hoisted
+    // archive would run but BEFORE the ownership re-check (R2-7).
+    seedState(first.adapter, (s) => {
+      s.outbound = [{ deliveryId: 'd-1', ordinal: 0 }];
+    });
+    await first.adapter.disconnect();
+    const dir = dirname(first.adapter.stateFile);
+    seedLegacy(dir, legacyState(1, 0));
+    lines.length = 0;
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    // A reaped stale lock means a second owner won the directory mid-connect.
+    second.plane.controlPlane.receipt = async () => {
+      second.fake.compromise();
+    };
+    await expect(second.adapter.connect()).rejects.toThrow(
+      /stopped during connection/,
+    );
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(true);
+    expect(
+      readdirSync(dir).filter((f) =>
+        f.startsWith('managed-state.json.stranded-'),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('carries the legacy watch.episodes into the fresh keyed ledger', async () => {
+    const cwd = tempCwd();
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'managed-state.json'),
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        cursor: { lastProcessedAt: null, dispatchedComments: [] },
+        pending: [],
+        outbound: [],
+        watch: { prs: {}, episodes: { 'owner/repo#7': 5 } },
+      }),
+    );
+    await adapter.connect();
+    // The durable episode counter survives the upgrade so a post-upgrade
+    // recurrence derives episode 6, not a deduped episode 1 (R2-2). watch.prs
+    // re-baselines empty.
+    const state = readState(adapter);
+    expect(state.watch?.episodes).toEqual({ 'owner/repo#7': 5 });
+    expect(state.watch?.prs).toEqual({});
+    expect(state.pending).toEqual([]);
+    await adapter.disconnect();
+  });
+
+  it('a second registration resumes the entry-scoped episode counters after the first archives the legacy (R3-1)', async () => {
+    const cwd = tempCwd();
+    const mk = (destinationKey: string) => {
+      const journal: string[] = [];
+      const plane = fakeControlPlane(journal, destinationKey);
+      const fake = fakeDeps(journal);
+      const watch = fakePrWatchPlane(journal);
+      const adapter = new ManagedGithubAdapter({
+        name: 'gh-1',
+        cwd,
+        config: CONFIG,
+        controlPlane: plane.controlPlane,
+        deps: { ...fake.deps, prWatchControlPlane: watch.plane },
+        pollLoop: false,
+      });
+      return { adapter, fake, watch };
+    };
+    const a = mk('cp|tenant-a|chan-1|actor|ws|.');
+    const dir = dirname(a.adapter.stateFile);
+    // The legacy ran as registration B and admitted episode 5 for owner/repo#7.
+    seedLegacy(dir, {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: { prs: {}, episodes: { 'owner/repo#7': 5 } },
+    });
+    // Registration A starts first: adopts the counters and archives the legacy.
+    await a.adapter.connect();
+    expect(readState(a.adapter).watch?.episodes).toEqual({ 'owner/repo#7': 5 });
+    expect(existsSync(join(dir, 'managed-state.json'))).toBe(false);
+    await a.adapter.disconnect();
+    // Registration B starts on a fresh ledger AFTER the archive. The counters
+    // must survive entry-scoped (read from the archive / sibling ledger), not
+    // restart at 0 and re-derive the already-admitted episode-1 id.
+    const b = mk('cp|tenant-b|chan-1|actor|ws|.');
+    await b.adapter.connect();
+    expect(readState(b.adapter).watch?.episodes).toEqual({ 'owner/repo#7': 5 });
+    b.watch.setBindings([
+      binding({
+        owner: 'owner',
+        repo: 'repo',
+        prNumber: 7,
+        events: ['merge_conflict'],
+      }),
+    ]);
+    await b.adapter.tick(); // baseline clean (first observation, silent)
+    b.fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await b.adapter.tick(); // merge_conflict recurrence on the same head
+    expect(b.watch.injected).toHaveLength(1);
+    // The carry is entry-scoped (legacy archive + sibling keyed ledger), so B
+    // resumes 5 and this recurrence derives episode 6 — a new input id, not the
+    // already-admitted episode-1 id. Without the entry-scoped carry B would
+    // restart at 0 and re-derive episode 1, silently deduped (the R3-1 loss).
+    expect(b.watch.injected[0]!.episode).toBe(6);
+    await b.adapter.disconnect();
+  });
+
+  it('a roll-forward merges the legacy episode counters into the loaded keyed ledger (R3-1)', async () => {
+    const cwd = tempCwd();
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await first.adapter.connect();
+    // The keyed ledger already carries its own counter and a cursor.
+    seedState(first.adapter, (s) => {
+      s.cursor.lastProcessedAt = '2026-11-19T08:00:00Z';
+      s.watch = { prs: {}, episodes: { 'owner/repo#7': 2 } };
+    });
+    await first.adapter.disconnect();
+    // A rollback stages a legacy with a higher counter for the same PR and a
+    // counter for another PR. The merge must resume the max, not discard the
+    // legacy counters because a keyed ledger was loaded.
+    seedLegacy(dirname(first.adapter.stateFile), {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: { prs: {}, episodes: { 'owner/repo#7': 5, 'owner/repo#8': 3 } },
+    });
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await second.adapter.connect();
+    expect(readState(second.adapter).watch?.episodes).toEqual({
+      'owner/repo#7': 5,
+      'owner/repo#8': 3,
+    });
+    await second.adapter.disconnect();
+  });
+
+  it('the carry never evicts the loaded ledger own counters at the cap (R7-1)', async () => {
+    const cwd = tempCwd();
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await first.adapter.connect();
+    // The loaded keyed ledger already holds the full cap of counters.
+    seedState(first.adapter, (s) => {
+      const episodes: Record<string, number> = {};
+      for (let i = 0; i < MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT; i++) {
+        episodes[`loaded/repo#${i}`] = 1;
+      }
+      s.watch = { prs: {}, episodes };
+    });
+    await first.adapter.disconnect();
+    // A rollback legacy carries one counter the loaded ledger does not track.
+    seedLegacy(dirname(first.adapter.stateFile), {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: { prs: {}, episodes: { 'carried/repo#9999': 7 } },
+    });
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await second.adapter.connect();
+    const state = readState(second.adapter);
+    const episodes = state.watch!.episodes!;
+    expect(Object.keys(episodes).length).toBe(
+      MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT,
+    );
+    // Non-destructive: persist() writes this map back over the loaded ledger,
+    // so evicting an own counter would lose it permanently. Every own counter
+    // is preserved; at the hard bound the overflow carried counter is
+    // bounded-and-accepted (its archive source persists and is re-read next
+    // start), NOT bought by deleting an own counter.
+    expect(episodes['loaded/repo#0']).toBe(1);
+    expect(
+      episodes[`loaded/repo#${MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT - 1}`],
+    ).toBe(1);
+    expect(episodes['carried/repo#9999']).toBeUndefined();
+    expect(validManagedGithubState(state)).toBe(true);
+    await second.adapter.disconnect();
+  });
+
+  it('the carry adds a carried counter when the loaded ledger has room (R7-1)', async () => {
+    const cwd = tempCwd();
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await first.adapter.connect();
+    seedState(first.adapter, (s) => {
+      const episodes: Record<string, number> = {};
+      for (let i = 0; i < MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT - 1; i++) {
+        episodes[`loaded/repo#${i}`] = 1;
+      }
+      s.watch = { prs: {}, episodes };
+    });
+    await first.adapter.disconnect();
+    seedLegacy(dirname(first.adapter.stateFile), {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: { prs: {}, episodes: { 'carried/repo#9999': 7 } },
+    });
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await second.adapter.connect();
+    const episodes = readState(second.adapter).watch!.episodes!;
+    // One free slot: the carried counter is added, own counters untouched.
+    expect(episodes['carried/repo#9999']).toBe(7);
+    expect(episodes['loaded/repo#0']).toBe(1);
+    expect(Object.keys(episodes).length).toBe(
+      MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT,
+    );
+    await second.adapter.disconnect();
+  });
+
+  it('the at-cap carry overflow is logged, never silent (R8)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await first.adapter.connect();
+    seedState(first.adapter, (s) => {
+      const episodes: Record<string, number> = {};
+      for (let i = 0; i < MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT; i++) {
+        episodes[`loaded/repo#${i}`] = 1;
+      }
+      s.watch = { prs: {}, episodes };
+    });
+    await first.adapter.disconnect();
+    seedLegacy(dirname(first.adapter.stateFile), {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: {
+        prs: {},
+        episodes: { 'carried/repo#1': 7, 'carried/repo#2': 8 },
+      },
+    });
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await second.adapter.connect();
+    // No room: both carried counters overflow, and the overflow is logged.
+    expect(
+      lines.some((l) => l.includes('episode carry: 2 counter(s) not carried')),
+    ).toBe(true);
+    const episodes = readState(second.adapter).watch!.episodes!;
+    expect(episodes['carried/repo#1']).toBeUndefined();
+    expect(episodes['loaded/repo#0']).toBe(1);
+    await second.adapter.disconnect();
+  });
+
+  it('the carry never lowers a counter below its prs baseline (R7-2)', async () => {
+    const cwd = tempCwd();
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await first.adapter.connect();
+    // The baseline outlives the watermark: prs episode 9, no episodes key.
+    seedState(first.adapter, (s) => {
+      s.watch = { prs: { 'owner/repo#7': { headSha: 'sha-a', episode: 9 } } };
+    });
+    await first.adapter.disconnect();
+    // A rollback archive holds a LOWER stale counter for the same PR.
+    seedLegacy(dirname(first.adapter.stateFile), {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: { prs: {}, episodes: { 'owner/repo#7': 3 } },
+    });
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    await second.adapter.connect();
+    // The carried 3 must be floored at the baseline 9, or the seed
+    // (episodes ?? prs.episode ?? 0) would rewind to an already-admitted id.
+    expect(readState(second.adapter).watch!.episodes!['owner/repo#7']).toBe(9);
+    await second.adapter.disconnect();
+  });
+
+  it('a roll-forward names queued watch transitions as re-derivable, not never re-derived (R4-3)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await first.adapter.connect();
+    // The keyed ledger has a cursor and a clean baseline for owner/repo#9.
+    seedState(first.adapter, (s) => {
+      s.cursor.lastProcessedAt = '2026-11-19T08:00:00Z';
+      s.watch = {
+        prs: { 'owner/repo#9': { headSha: 'sha-a', mergeableState: 'clean' } },
+      };
+    });
+    await first.adapter.disconnect();
+    // A rollback legacy holds one queued merge_conflict for that PR.
+    seedLegacy(dirname(first.adapter.stateFile), {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: {
+        prs: {
+          'owner/repo#9': {
+            headSha: 'sha-a',
+            pending: [
+              {
+                key: 'prw:merge_conflict:owner/repo#9:1:1',
+                episode: 1,
+                owner: 'owner',
+                repo: 'repo',
+                prNumber: 9,
+                transition: 'merge_conflict',
+                headSha: 'sha-a',
+                evidence: 'Merge conflicts',
+                detectedAt: '2026-11-19T09:00:00Z',
+              },
+            ],
+          },
+        },
+      },
+    });
+    lines.length = 0;
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await second.adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('1 pending');
+    // Roll-forward keeps the loaded baseline, so the next tick re-detects the
+    // edge and may re-derive the transition: the clause must not claim it is
+    // never re-derived (that is only true of a fresh re-baselining ledger).
+    expect(stranded[0]).toContain('may be re-derived');
+    expect(stranded[0]).not.toContain('neither replayed nor re-derived');
+    await second.adapter.disconnect();
+  });
+
+  it('a roll-forward without a baseline for the stranded PR names the drop, not a re-detection promise (R5)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await first.adapter.connect();
+    // The keyed ledger has a cursor but NO watch.prs baseline for the PR (it
+    // was bound only during the rollback window, or no watch pass finished).
+    seedState(first.adapter, (s) => {
+      s.cursor.lastProcessedAt = '2026-11-19T08:00:00Z';
+      s.watch = { prs: {} };
+    });
+    await first.adapter.disconnect();
+    // A rollback legacy holds one queued merge_conflict for that PR.
+    seedLegacy(dirname(first.adapter.stateFile), {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: {
+        prs: {
+          'owner/repo#9': {
+            headSha: 'sha-a',
+            pending: [
+              {
+                key: 'prw:merge_conflict:owner/repo#9:1:1',
+                episode: 1,
+                owner: 'owner',
+                repo: 'repo',
+                prNumber: 9,
+                transition: 'merge_conflict',
+                headSha: 'sha-a',
+                evidence: 'Merge conflicts',
+                detectedAt: '2026-11-19T09:00:00Z',
+              },
+            ],
+          },
+        },
+      },
+    });
+    lines.length = 0;
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await second.adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('1 pending');
+    // No loaded baseline for the stranded PR: the first observation detects
+    // nothing and only records a baseline, so the notice must name the drop,
+    // not promise a re-detection that cannot happen (a cursor alone is not a
+    // baseline).
+    expect(stranded[0]).toContain('queued PR-watch transitions were dropped');
+    expect(stranded[0]).not.toContain('may be re-derived');
+    await second.adapter.disconnect();
+  });
+
+  it('a mixed stranded queue names the baselined and unbaselined subsets separately (deferred item 11)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await first.adapter.connect();
+    // The loaded ledger holds a baseline for #9 only, not #8.
+    seedState(first.adapter, (s) => {
+      s.cursor.lastProcessedAt = '2026-11-19T08:00:00Z';
+      s.watch = {
+        prs: { 'owner/repo#9': { headSha: 'sha-a', mergeableState: 'clean' } },
+      };
+    });
+    await first.adapter.disconnect();
+    const queuedFor = (pr: number, sha: string) => ({
+      key: `prw:merge_conflict:owner/repo#${pr}:1:1`,
+      episode: 1,
+      owner: 'owner',
+      repo: 'repo',
+      prNumber: pr,
+      transition: 'merge_conflict',
+      headSha: sha,
+      evidence: 'Merge conflicts',
+      detectedAt: '2026-11-19T09:00:00Z',
+    });
+    seedLegacy(dirname(first.adapter.stateFile), {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: {
+        prs: {
+          'owner/repo#9': {
+            headSha: 'sha-a',
+            pending: [queuedFor(9, 'sha-a')],
+          },
+          'owner/repo#8': {
+            headSha: 'sha-b',
+            pending: [queuedFor(8, 'sha-b')],
+          },
+        },
+      },
+    });
+    lines.length = 0;
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await second.adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    expect(stranded[0]).toContain('2 pending');
+    // Mixed: the baselined subset may re-derive if its edge recurs; the
+    // unbaselined subset is dropped. Neither "wholly lost" nor a blanket
+    // re-detection promise.
+    expect(stranded[0]).toContain('1 may be re-derived');
+    expect(stranded[0]).toContain('1 are dropped');
+    await second.adapter.disconnect();
+  });
+
+  it('logs an unreadable episode-counter source rather than dropping it silently (deferred item 8)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    const dir = dirname(adapter.stateFile);
+    mkdirSync(dir, { recursive: true });
+    // A corrupt sibling ledger matching the state-file pattern: its counters
+    // cannot be carried, and the operator must be told which source was lost.
+    writeFileSync(
+      join(dir, 'managed-state-0123456789abcdef.json'),
+      '{not json',
+    );
+    await adapter.connect();
+    expect(
+      lines.some(
+        (l) =>
+          l.includes('could not read the episode-counter source') &&
+          l.includes('managed-state-0123456789abcdef.json'),
+      ),
+    ).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('a loaded ledger with a null cursor is still a fresh window (R7)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await first.adapter.connect();
+    // The keyed ledger exists but its cursor is null (no poll yet).
+    seedState(first.adapter, (s) => {
+      s.cursor.lastProcessedAt = null;
+    });
+    await first.adapter.disconnect();
+    seedLegacy(dirname(first.adapter.stateFile), {
+      ...legacyState(1, 0),
+      cursor: {
+        lastProcessedAt: '2026-11-19T09:00:00Z',
+        dispatchedComments: [],
+      },
+    });
+    lines.length = 0;
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await second.adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    // loaded exists but cursor null: the SECOND freshWindow disjunct holds, so
+    // the fresh-window loss clauses fire (not only the !loaded case).
+    expect(stranded[0]).toContain('does not re-list');
+    expect(stranded[0]).toContain('were never listed');
+    await second.adapter.disconnect();
+  });
+
+  it('queued transitions are not adopted even when the episode carry is active (R7)', async () => {
+    const cwd = tempCwd();
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.');
+    const dir = dirname(adapter.stateFile);
+    seedLegacy(dir, {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: {
+        prs: {
+          'owner/repo#9': {
+            headSha: 'sha-h',
+            pending: [
+              {
+                key: 'prw:ci_failure:owner/repo#9:sha-h:1',
+                episode: 1,
+                owner: 'owner',
+                repo: 'repo',
+                prNumber: 9,
+                transition: 'ci_failure',
+                headSha: 'sha-h',
+                evidence: 'CI failing',
+                detectedAt: '2026-11-19T09:00:00Z',
+              },
+            ],
+          },
+        },
+        episodes: { 'owner/repo#7': 5 },
+      },
+    });
+    await adapter.connect();
+    const state = readState(adapter);
+    // The carry IS active here (episodes carried), yet the queued transition is
+    // still NOT adopted — the not-adopted invariant must hold exactly where the
+    // carry is doing work, not only where it is inert.
+    expect(state.watch?.episodes).toEqual({ 'owner/repo#7': 5 });
+    expect(state.watch?.prs ?? {}).toEqual({});
+    await adapter.disconnect();
+  });
+
+  it('a legacy with queued PR-watch transitions names that count, not a quiescent 0 pending (R3-1)', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const { adapter } = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    const dir = dirname(adapter.stateFile);
+    seedLegacy(dir, {
+      version: 1,
+      generation: 1,
+      cursor: { lastProcessedAt: null, dispatchedComments: [] },
+      pending: [],
+      outbound: [],
+      watch: {
+        prs: {
+          'owner/repo#9': {
+            headSha: 'sha-h',
+            pending: [
+              {
+                key: 'prw:ci_failure:owner/repo#9:sha-h:1',
+                episode: 1,
+                owner: 'owner',
+                repo: 'repo',
+                prNumber: 9,
+                transition: 'ci_failure',
+                headSha: 'sha-h',
+                evidence: 'CI failing',
+                detectedAt: '2026-11-19T09:00:00Z',
+              },
+            ],
+          },
+        },
+      },
+    });
+    await adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    // The queued transition is stranded work: name it, not a quiescent 0.
+    expect(stranded[0]).toContain('1 pending');
+    expect(stranded[0]).not.toContain('0 pending');
+    expect(stranded[0]).toContain('queued PR-watch transitions were dropped');
+    // NOT adopted: the fresh ledger carries no queued PR-watch entries (it
+    // re-baselines on the first tick) rather than injecting one registration's
+    // detected events under another. watch is absent here because the legacy
+    // held no episode counters to carry.
+    expect(readState(adapter).watch?.prs ?? {}).toEqual({});
+    await adapter.disconnect();
+  });
+
+  it('a roll-forward over a keyed ledger with a cursor does not claim a skipped window', async () => {
+    const cwd = tempCwd();
+    const lines: string[] = [];
+    const first = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await first.adapter.connect();
+    // The keyed ledger already has a watermark T0.
+    seedState(first.adapter, (s) => {
+      s.cursor.lastProcessedAt = '2026-11-19T08:00:00Z';
+    });
+    await first.adapter.disconnect();
+    // A rollback stages a legacy with a later watermark T1 > T0 and one pending
+    // claim, so the inbound "does not re-list" clause is reachable and only the
+    // freshWindow gate suppresses it (R3-2: a pending-less fixture made the
+    // assertion vacuous).
+    seedLegacy(dirname(first.adapter.stateFile), {
+      ...legacyState(1, 0),
+      cursor: {
+        lastProcessedAt: '2026-11-19T09:00:00Z',
+        dispatchedComments: [],
+      },
+    });
+    lines.length = 0;
+    const second = identityAdapter(cwd, 'cp|tenant-a|chan-1|actor|ws|.', {
+      log: (l) => lines.push(l),
+    });
+    await second.adapter.connect();
+    const stranded = lines.filter((l) =>
+      l.includes('is stranded and not replayed'),
+    );
+    expect(stranded).toHaveLength(1);
+    // The loaded keyed cursor (T0) re-lists from before T1, so the window is
+    // NOT fresh: no false "were never listed" / "does not re-list" claim
+    // (R1-4 fix-induced).
+    expect(stranded[0]).not.toContain('were never listed');
+    expect(stranded[0]).not.toContain('does not re-list');
+    // Positive: the strand is still reported with its pending count even though
+    // no fresh-window loss clause fires. Removing `&& freshWindow` would emit
+    // "does not re-list" here and red the negative assertion above.
+    expect(stranded[0]).toContain('1 pending');
+    expect(stranded[0]).toContain('is stranded and not replayed');
+    await second.adapter.disconnect();
+  });
+});
+
+describe('managed GitHub adapter PR watch', () => {
+  const PR_KEY = 'owner/repo#9';
+
+  it('baselines the first observation silently, even already red and dirty', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: ['build'] };
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    const entry = readState(adapter).watch!.prs[PR_KEY]!;
+    expect(entry).toMatchObject({
+      headSha: 'sha-a',
+      ci: 'failing',
+      mergeableState: 'dirty',
+    });
+    expect(entry.pending ?? []).toHaveLength(0);
+    // Staying red/dirty is not a transition: the second observation agrees.
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('pins a head already failing at bind time so later ticks skip its CI read', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding({ events: ['ci_failure'] })]);
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: ['build'] };
+    await adapter.tick(); // baseline: already red, silent
+    expect(watch.injected).toHaveLength(0);
+    expect(readState(adapter).watch!.prs[PR_KEY]!.ciFiredSha).toBe('sha-a');
+    // The baseline pin closes the once-per-head gate: a head that already
+    // failed can never fire, so re-reading its checks is pure budget.
+    const reads = fake.ciSeen.length;
+    await adapter.tick();
+    await adapter.tick();
+    expect(fake.ciSeen.length).toBe(reads);
+    expect(watch.injected).toHaveLength(0);
+    // A new head is a fresh evaluation: it is read and fires once.
+    fake.knobs.pull = { ...fake.knobs.pull, headSha: 'sha-b' };
+    await adapter.tick();
+    expect(fake.ciSeen.length).toBe(reads + 1);
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]).toMatchObject({
+      transition: 'ci_failure',
+      headSha: 'sha-b',
+    });
+    await adapter.disconnect();
+  });
+
+  it('fires ci_failure once per head and names the failed checks', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline: passing
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: ['build', 'test'] };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]).toMatchObject({
+      owner: 'Owner',
+      repo: 'Repo',
+      prNumber: 9,
+      transition: 'ci_failure',
+      headSha: 'sha-a',
+    });
+    expect(watch.injected[0]!.evidence).toContain('CI failed on head sha-a');
+    expect(watch.injected[0]!.evidence).toContain('build, test');
+    expect(watch.injected[0]!.evidence).not.toContain('may be incomplete');
+    const entry = readState(adapter).watch!.prs[PR_KEY]!;
+    expect(entry.ciFiredSha).toBe('sha-a');
+    expect(entry.fired).toHaveLength(1);
+    expect(entry.pending ?? []).toHaveLength(0);
+    // A flapping aggregate must not re-fire on the same head; the fired pin
+    // even skips the CI read (no event can result).
+    const ciReads = fake.ciSeen.length;
+    fake.knobs.ci = { aggregate: 'passing', failedChecks: [] };
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: ['build'] };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(fake.ciSeen.length).toBe(ciReads);
+    await adapter.disconnect();
+  });
+
+  it('marks the evidence when the failed-check list is incomplete', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline passing
+    fake.knobs.ci = {
+      aggregate: 'failing',
+      failedChecks: ['build'],
+      namesIncomplete: true,
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.evidence).toContain('Failed checks: build.');
+    // A partial list must not read as exhaustive: the bound agent would
+    // otherwise reason about a subset of the breakage as the whole.
+    expect(watch.injected[0]!.evidence).toContain(
+      'The failed-check list may be incomplete.',
+    );
+    await adapter.disconnect();
+  });
+
+  it('fires ci_failure when a pending aggregate settles red on the same head', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    fake.knobs.ci = { aggregate: 'pending', failedChecks: [] };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('ci_failure');
+    await adapter.disconnect();
+  });
+
+  it('resets the CI comparison on a head change and fires head_change', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    await adapter.tick(); // ci_failure on sha-a
+    fake.knobs.pull = { ...fake.knobs.pull, headSha: 'sha-b' };
+    await adapter.tick();
+    const transitions = watch.injected.map((e) => e.transition);
+    expect(transitions).toEqual(['ci_failure', 'head_change', 'ci_failure']);
+    expect(watch.injected[1]!.evidence).toContain('from sha-a to sha-b');
+    expect(watch.injected[2]!.headSha).toBe('sha-b');
+    expect(readState(adapter).watch!.prs[PR_KEY]!.ciFiredSha).toBe('sha-b');
+    await adapter.disconnect();
+  });
+
+  it('does not re-fire ci_failure on a force-push back to a fired head', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    await adapter.tick(); // ci_failure sha-a
+    fake.knobs.pull = { ...fake.knobs.pull, headSha: 'sha-b' };
+    await adapter.tick(); // head_change + ci_failure sha-b
+    fake.knobs.pull = { ...fake.knobs.pull, headSha: 'sha-a' };
+    await adapter.tick(); // head_change back; ci_failure sha-a deduped by ring
+    const ciFires = watch.injected.filter((e) => e.transition === 'ci_failure');
+    expect(ciFires.map((e) => e.headSha)).toEqual(['sha-a', 'sha-b']);
+    expect(
+      watch.injected.filter((e) => e.transition === 'head_change'),
+    ).toHaveLength(2);
+    await adapter.disconnect();
+  });
+
+  it('edge-triggers merge_conflict: dirty → clean → dirty fires again', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline clean
+    const dirty = {
+      headSha: 'sha-a',
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    fake.knobs.pull = dirty;
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('merge_conflict');
+    await adapter.tick(); // still dirty: no re-fire
+    expect(watch.injected).toHaveLength(1);
+    fake.knobs.pull = { ...dirty, mergeableState: 'clean' };
+    await adapter.tick();
+    fake.knobs.pull = dirty;
+    await adapter.tick();
+    const conflicts = watch.injected.filter(
+      (e) => e.transition === 'merge_conflict',
+    );
+    expect(conflicts).toHaveLength(2);
+    await adapter.disconnect();
+  });
+
+  it('never overwrites mergeability with a computing (UNKNOWN) observation', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline clean
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeableState: undefined,
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    expect(readState(adapter).watch!.prs[PR_KEY]!.mergeableState).toBe('clean');
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('merge_conflict');
+    await adapter.disconnect();
+  });
+
+  it('never overwrites the head SHA with a headless observation', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline sha-a
+    fake.knobs.pull = {
+      headSha: undefined,
+      mergeableState: 'clean',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    expect(readState(adapter).watch!.prs[PR_KEY]!.headSha).toBe('sha-a');
+    // The carried baseline is what makes the next real move a head_change: a
+    // blanked baseline loses the move and, with it, the CI re-check that
+    // rides the head change.
+    fake.knobs.pull = { ...fake.knobs.pull, headSha: 'sha-b' };
+    await adapter.tick();
+    const moves = watch.injected.filter((e) => e.transition === 'head_change');
+    expect(moves).toHaveLength(1);
+    expect(moves[0]!.evidence).toContain('from sha-a to sha-b');
+    await adapter.disconnect();
+  });
+
+  it('delivers a merge_conflict from a headless observation by carrying the known head', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding({ events: ['merge_conflict'] })]);
+    await adapter.tick(); // baseline clean on sha-a
+    // The observation names no head, but the baseline does: the carried head is
+    // the inject identity, so the dirty edge is deliverable right away (the
+    // baseline no-advance rule below only covers a never-known head).
+    fake.knobs.pull = {
+      headSha: undefined,
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]).toMatchObject({
+      transition: 'merge_conflict',
+      headSha: 'sha-a',
+    });
+    expect(readState(adapter).watch!.prs[PR_KEY]!.mergeableState).toBe('dirty');
+    await adapter.disconnect();
+  });
+
+  it('does not advance the mergeability baseline from a headless observation', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding({ events: ['merge_conflict'] })]);
+    // A never-known head, with a known mergeability: a headless dirty answer
+    // cannot be injected here, so it must not advance the baseline past the
+    // edge either — the next headed observation still has to fire.
+    fake.knobs.pull = {
+      headSha: undefined,
+      mergeableState: 'clean',
+      state: 'open',
+    };
+    await adapter.tick();
+    fake.knobs.pull = {
+      headSha: undefined,
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(readState(adapter).watch!.prs[PR_KEY]!.mergeableState).toBe('clean');
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('merge_conflict');
+    await adapter.disconnect();
+  });
+
+  it('records no mergeability from a headless observation with no baseline value', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding({ events: ['merge_conflict'] })]);
+    // A never-known head and mergeability: the first observation stores no
+    // mergeableState, so a later headless dirty answer must not create one.
+    fake.knobs.pull = {
+      headSha: undefined,
+      mergeableState: undefined,
+      state: 'open',
+    };
+    await adapter.tick();
+    fake.knobs.pull = {
+      headSha: undefined,
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(
+      readState(adapter).watch!.prs[PR_KEY]!.mergeableState,
+    ).toBeUndefined();
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('merge_conflict');
+    await adapter.disconnect();
+  });
+
+  it('fires merge_conflict from a never-known mergeability (undefined → dirty)', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeableState: undefined,
+      state: 'open',
+    };
+    await adapter.tick(); // first observation: UNKNOWN, silent
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('merge_conflict');
+    await adapter.disconnect();
+  });
+
+  it('persists the pending entry BEFORE the injection side effect', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    await adapter.tick();
+    expect(watch.injectSnapshots).toHaveLength(1);
+    // At inject time the durable queue already holds the event and the fired
+    // ring does not: a crash here replays the pending entry, never a loss.
+    expect(watch.injectSnapshots[0]!.pendingKeys).toEqual([
+      expect.stringContaining('prw:ci_failure:Owner/Repo#9:sha-a:'),
+    ]);
+    expect(watch.injectSnapshots[0]!.fired).toEqual([]);
+    await adapter.disconnect();
+  });
+
+  it('keeps pending on a transient injection failure and re-drives it', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    watch.setInjectError(new Error('connection lost'));
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    const entry = readState(adapter).watch!.prs[PR_KEY]!;
+    expect(entry.pending).toHaveLength(1);
+    expect(entry.fired ?? []).toHaveLength(0);
+    watch.setInjectError(undefined);
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    const settled = readState(adapter).watch!.prs[PR_KEY]!;
+    expect(settled.pending ?? []).toHaveLength(0);
+    expect(settled.fired).toEqual([entry.pending![0]!.key]);
+    await adapter.disconnect();
+  });
+
+  it('re-drives durable pending after a restart', async () => {
+    const cwd = tempCwd();
+    const first = await watchAdapter(cwd);
+    first.watch.setBindings([binding()]);
+    await first.adapter.tick();
+    first.fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    first.watch.setInjectError(new Error('connection lost'));
+    await first.adapter.tick();
+    const pendingKey = readState(first.adapter).watch!.prs[PR_KEY]!.pending![0]!
+      .key;
+    await first.adapter.disconnect();
+
+    const second = await watchAdapter(cwd);
+    second.watch.setBindings([binding()]);
+    await second.adapter.tick();
+    expect(second.watch.injected).toHaveLength(1);
+    expect(second.watch.injectSnapshots[0]!.pendingKeys).toContain(pendingKey);
+    expect(
+      readState(second.adapter).watch!.prs[PR_KEY]!.pending ?? [],
+    ).toHaveLength(0);
+    await second.adapter.disconnect();
+  });
+
+  it('drops an event the control plane deterministically refuses', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    watch.setInjectError(
+      Object.assign(new Error('gone'), { status: 404, code: 'binding_gone' }),
+    );
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    expect(readState(adapter).watch!.prs[PR_KEY]!.pending ?? []).toHaveLength(
+      0,
+    );
+    expect(lines.some((l) => /refused \(404\).*drops/.test(l))).toBe(true);
+    // The drop is durable: a later tick neither re-injects nor re-detects.
+    watch.setInjectError(undefined);
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('is private-only: watch transitions never post a public comment', async () => {
+    const { adapter, plane, fake, watch, journal } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    fake.knobs.pull = {
+      headSha: 'sha-b',
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick(); // ci_failure + head_change + merge_conflict
+    expect(watch.injected).toHaveLength(3);
+    expect(fake.posted).toHaveLength(0);
+    expect(journal).not.toContain('postComment');
+    expect(plane.submit).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('honors the binding event filter and skips an unsubscribed CI read', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding({ events: ['head_change'] })]);
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    expect(fake.ciSeen).toHaveLength(0);
+    fake.knobs.pull = { ...fake.knobs.pull, headSha: 'sha-b' };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('head_change');
+    await adapter.disconnect();
+  });
+
+  it('ignores bindings with no recognized event and malformed bindings', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([
+      binding({ events: ['state_change'] }), // deferred beyond slice 1
+      binding({ prNumber: 10, events: [] }),
+      binding({ prNumber: 11, owner: '' }),
+      binding({ prNumber: 12, events: 'ci_failure' as unknown as string[] }),
+    ]);
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(0);
+    expect(watch.injected).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('logs the bindings folded onto an already-bound PR', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    // The control plane's binding identity hashes the raw owner/repo, so both
+    // spellings are accepted rows (each bound to its own Session). This watch
+    // keys case-insensitively and serves only the first: the folded row is
+    // inert, its Session never receives an event, so the fold must be visible
+    // instead of silent.
+    watch.setBindings([
+      binding({ owner: 'octocat', repo: 'hello-world', prNumber: 7 }),
+      binding({ owner: 'Octocat', repo: 'hello-world', prNumber: 7 }),
+    ]);
+    await adapter.tick();
+    expect(fake.pullsSeen).toEqual([
+      { owner: 'octocat', repo: 'hello-world', prNumber: 7 },
+    ]);
+    expect(Object.keys(readState(adapter).watch!.prs)).toEqual([
+      'octocat/hello-world#7',
+    ]);
+    expect(lines.some((l) => /skipped 1 listed binding\(s\)/.test(l))).toBe(
+      true,
+    );
+    await adapter.disconnect();
+  });
+
+  it('never observes or injects a binding excluded by repoFilter (R7-1)', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(
+      tempCwd(),
+      { log: (line) => lines.push(line) },
+      { ...CONFIG, repoFilterMode: 'allowlist', repoFilter: ['other/repo'] },
+    );
+    // Owner/Repo#9 is excluded; the binding survives from when the filter was
+    // wider because nothing prunes bindings on a config narrowing.
+    watch.setBindings([binding()]);
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: ['build'] };
+    await adapter.tick();
+    await adapter.tick();
+    // No pulls.get, no checks read, no pr_event for the excluded repository.
+    expect(fake.pullsSeen).toHaveLength(0);
+    expect(fake.ciSeen).toHaveLength(0);
+    expect(watch.injected).toHaveLength(0);
+    expect(lines.some((l) => /excluded by repoFilter/.test(l))).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('drops an excluded repo’s durable pending instead of re-injecting it (R7-1)', async () => {
+    const cwd = tempCwd();
+    // Phase 1: a wide filter lets the transition fire, but a transient inject
+    // refusal leaves it durable-pending for the re-drive.
+    const first = await watchAdapter(cwd);
+    first.watch.setBindings([binding()]);
+    first.watch.setInjectError(
+      Object.assign(new Error('transient'), { status: 503 }),
+    );
+    await first.adapter.tick(); // baseline: passing
+    first.fake.knobs.ci = { aggregate: 'failing', failedChecks: ['build'] };
+    await first.adapter.tick(); // fires; inject refused 503 -> pending persists
+    expect(
+      readState(first.adapter).watch!.prs['owner/repo#9']!.pending,
+    ).toHaveLength(1);
+    await first.adapter.disconnect();
+    // Phase 2: the operator narrows the allowlist to another repository. The
+    // re-drive must not inject the excluded repo's pending into its Session.
+    const lines: string[] = [];
+    const second = await watchAdapter(
+      cwd,
+      { log: (line) => lines.push(line) },
+      { ...CONFIG, repoFilterMode: 'allowlist', repoFilter: ['other/repo'] },
+    );
+    second.watch.setBindings([binding()]);
+    await second.adapter.tick();
+    expect(second.watch.injected).toHaveLength(0);
+    expect(lines.some((l) => /dropped 1 pending event\(s\)/.test(l))).toBe(
+      true,
+    );
+    // The pending is dropped and the baseline pruned, not re-injected.
+    const entry = readState(second.adapter).watch?.prs['owner/repo#9'];
+    expect(entry?.pending ?? []).toHaveLength(0);
+    await second.adapter.disconnect();
+  });
+
+  it('rotates the capped observation window so every binding is observed', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    watch.setBindings(
+      Array.from({ length: 31 }, (_, i) => binding({ prNumber: i + 1 })),
+    );
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(30);
+    expect(lines.some((l) => /cap: observed 30\/31/.test(l))).toBe(true);
+    // The 31st binding is past the cap on the first tick...
+    expect(fake.pullsSeen.some((p) => p.prNumber === 31)).toBe(false);
+    // ...but the durable sweep offset rotates the window, so the second tick
+    // observes it. A plain break with no cursor would starve it forever.
+    await adapter.tick();
+    expect(fake.pullsSeen.some((p) => p.prNumber === 31)).toBe(true);
+    expect(new Set(fake.pullsSeen.map((p) => p.prNumber)).size).toBe(31);
+    await adapter.disconnect();
+  });
+
+  it('aborts the pass on a shared rate limit, isolates a permission 403', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding(), binding({ prNumber: 10 })]);
+    fake.knobs.getPullRequestError = Object.assign(new Error('rate limited'), {
+      status: 403,
+      response: { headers: { 'x-ratelimit-remaining': '0' } },
+    });
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(1);
+    // A bare permission 403 (quota left) is per-PR: the rest still watch.
+    fake.knobs.getPullRequestError = Object.assign(new Error('forbidden'), {
+      status: 403,
+      response: { headers: { 'x-ratelimit-remaining': '4999' } },
+    });
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(3);
+    await adapter.disconnect();
+  });
+
+  it('aborts the pass on a revoked credential (401), not just on a rate limit', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    watch.setBindings([binding(), binding({ prNumber: 10 })]);
+    // A revoked token is shared by every watched PR, and a 401 is deliberately
+    // NOT a definitive per-PR read failure: without the abort arm every tick
+    // issues one doomed pulls.get per binding.
+    fake.knobs.getPullRequestError = Object.assign(
+      new Error('401 Unauthorized'),
+      { status: 401 },
+    );
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(1);
+    expect(
+      lines.some((l) =>
+        /pass aborted at owner\/repo#9 \(credential\/rate limit\)/.test(l),
+      ),
+    ).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('aborts the pass on a bare 429 with no rate-limit headers', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    watch.setBindings([binding(), binding({ prNumber: 10 })]);
+    // GitHub (or a proxy in front of it) may answer 429 without retry-after or
+    // a budget header: the status alone is the shared-limit signal, so the arm
+    // must not depend on isRateLimitAnswer's header checks.
+    fake.knobs.getPullRequestError = Object.assign(
+      new Error('429 Too Many Requests'),
+      { status: 429 },
+    );
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(1);
+    expect(
+      lines.some((l) =>
+        /pass aborted at owner\/repo#9 \(credential\/rate limit\)/.test(l),
+      ),
+    ).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('aborts the pass when the CI read answers a shared credential failure', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    watch.setBindings([binding(), binding({ prNumber: 10 })]);
+    // A CI read degrades on transient failures, but a shared one must rethrow
+    // out of observePr and condemn the pass: swallowing it would walk every
+    // remaining binding into the same refusal.
+    fake.knobs.getCiStatusError = Object.assign(new Error('401 Unauthorized'), {
+      status: 401,
+    });
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(1);
+    expect(fake.ciSeen).toHaveLength(1);
+    expect(watch.injected).toHaveLength(0);
+    expect(
+      lines.some((l) =>
+        /pass aborted at owner\/repo#9 \(credential\/rate limit\)/.test(l),
+      ),
+    ).toBe(true);
+    expect(lines.some((l) => /continuing without CI/.test(l))).toBe(false);
+    await adapter.disconnect();
+  });
+
+  it('isolates a permanently unreadable PR and keeps watching the rest', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding(), binding({ prNumber: 10 })]);
+    fake.knobs.pullErrorFor = (prNumber) =>
+      prNumber === 9
+        ? Object.assign(new Error('gone'), { status: 404 })
+        : undefined;
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(2);
+    expect(readState(adapter).watch!.prs[PR_KEY]).toBeUndefined();
+    expect(readState(adapter).watch!.prs['owner/repo#10']).toBeDefined();
+    await adapter.disconnect();
+  });
+
+  it('does not suppress merge_conflict when the CI endpoint fails', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    fake.knobs.getCiStatusError = new Error('checks endpoint down');
+    await adapter.tick();
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('merge_conflict');
+    await adapter.disconnect();
+  });
+
+  it('stays inert without a PR-watch control plane', async () => {
+    const { adapter, fake, journal } = await connectedAdapter();
+    await adapter.tick();
+    expect(fake.pullsSeen).toHaveLength(0);
+    expect(journal).not.toContain('getPullRequest');
+    expect(journal).not.toContain('listPrWatchBindings');
+    await adapter.disconnect();
+  });
+
+  it('prunes unbound entries once their pending drained, never before', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    watch.setInjectError(new Error('connection lost'));
+    await adapter.tick(); // pending held by the transient failure
+    watch.setBindings([]);
+    await adapter.tick(); // unbound, but the in-flight event keeps its entry
+    expect(readState(adapter).watch!.prs[PR_KEY]!.pending).toHaveLength(1);
+    watch.setInjectError(undefined);
+    await adapter.tick(); // drains, then prunes
+    expect(readState(adapter).watch!.prs[PR_KEY]).toBeUndefined();
+    expect(watch.injected).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
+  it('rolls back a detection whose baseline save failed', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline on disk
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    const restore = denyStateSave(adapter.stateFile);
+    try {
+      // The detection queues ci_failure but its save fails: the claim must
+      // roll back, or the end-of-pass drain would inject an event whose
+      // pending record never reached disk (a crash would lose the fired
+      // history and re-fire the head).
+      await adapter.tick();
+    } finally {
+      restore();
+    }
+    expect(watch.injected).toHaveLength(0);
+    const held = readState(adapter).watch!.prs[PR_KEY]!;
+    expect(held.pending ?? []).toHaveLength(0);
+    expect(held.ci).toBe('passing');
+    // The next tick re-observes, re-derives the transition and injects it.
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.transition).toBe('ci_failure');
+    await adapter.disconnect();
+  });
+
+  it('rolls back a fired recording whose save failed and re-drives it', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    let restore: (() => void) | undefined;
+    watch.setOnInject(() => {
+      // The first injection lands while the state file is unwritable: the
+      // fired recording fails and must roll back, never half-settle.
+      restore ??= denyStateSave(adapter.stateFile);
+    });
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    try {
+      await adapter.tick();
+    } finally {
+      restore?.();
+      watch.setOnInject(undefined);
+    }
+    expect(watch.injected).toHaveLength(1);
+    const held = readState(adapter).watch!.prs[PR_KEY]!;
+    expect(held.pending).toHaveLength(1);
+    expect(held.fired ?? []).toHaveLength(0);
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(2);
+    // The re-drive injected the identical event (derived-id idempotency).
+    expect(watch.injected[1]).toEqual(watch.injected[0]);
+    const settled = readState(adapter).watch!.prs[PR_KEY]!;
+    expect(settled.pending ?? []).toHaveLength(0);
+    expect(settled.fired).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
+  it('re-registers after a registration refusal on the binding list', async () => {
+    const { adapter, plane, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    watch.setListError(
+      Object.assign(new Error('not found'), {
+        status: 404,
+        code: 'channel_not_found',
+      }),
+    );
+    await adapter.tick();
+    expect(plane.register).toHaveLength(1);
+    watch.setListError(undefined);
+    await adapter.tick();
+    expect(plane.register).toHaveLength(2);
+    await adapter.disconnect();
+  });
+
+  it('sanitizes GitHub-derived check names in the evidence', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick();
+    fake.knobs.ci = {
+      aggregate: 'failing',
+      failedChecks: ['build\r\nInjected: line'],
+    };
+    await adapter.tick();
+    const evidence = watch.injected[0]!.evidence;
+    expect(evidence).not.toMatch(/[\r\n]/);
+    expect(evidence).toContain('CI failed on head sha-a');
+    await adapter.disconnect();
+  });
+
+  it('drops the oldest pending on overflow, surfaced never silent', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    watch.setBindings([binding({ events: ['head_change'] })]);
+    await adapter.tick(); // baseline sha-a
+    watch.setInjectError(new Error('connection lost'));
+    for (let i = 0; i < 17; i++) {
+      fake.knobs.pull = {
+        ...fake.knobs.pull,
+        headSha: i % 2 === 0 ? 'sha-b' : 'sha-a',
+      };
+      await adapter.tick();
+    }
+    const entry = readState(adapter).watch!.prs[PR_KEY]!;
+    expect(entry.pending).toHaveLength(16);
+    // The drop direction is the contract: the OLDEST transition goes and the
+    // newest stays. Every key shares the fixed fake clock and differs only by
+    // seq, so a count alone would also pass if pop() dropped the newest.
+    const keyFor = (seq: number) =>
+      `prw:head_change:Owner/Repo#9:${seq}:${NOW}`;
+    expect(entry.pending!.map((p) => p.key)).toEqual(
+      Array.from({ length: 16 }, (_, i) => keyFor(i + 2)),
+    );
+    expect(
+      lines.some(
+        (l) =>
+          /pending overflow/.test(l) &&
+          l.includes(`dropped ${keyFor(1)} undelivered`),
+      ),
+    ).toBe(true);
+    expect(watch.injected).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('carries the episode watermark across prune and rebind (no id reuse)', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding({ events: ['merge_conflict'] })]);
+    await adapter.tick(); // baseline clean
+    const dirty = {
+      headSha: 'sha-a',
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    fake.knobs.pull = dirty;
+    await adapter.tick(); // merge_conflict, episode 1
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]!.episode).toBe(1);
+    // Retire the binding: the baseline prunes, but the occurrence watermark
+    // must survive — the admission ledger is permanent and keyed without a
+    // binding discriminant.
+    watch.setBindings([]);
+    await adapter.tick();
+    expect(readState(adapter).watch!.prs[PR_KEY]).toBeUndefined();
+    expect(readState(adapter).watch!.episodes![PR_KEY]).toBe(1);
+    // Rebind (to a second Session, on the wire) and recur: the episode
+    // resumes at 2, so the derived input id is new, never the
+    // already-admitted episode-1 id. A prune that dropped the counter would
+    // restart at 1 and collide.
+    watch.setBindings([binding({ events: ['merge_conflict'] })]);
+    fake.knobs.pull = { ...dirty, mergeableState: 'clean' };
+    await adapter.tick(); // rebind baseline (first observation, silent)
+    fake.knobs.pull = dirty;
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(2);
+    expect(watch.injected[1]!.episode).toBe(2);
+    await adapter.disconnect();
+  });
+
+  it('evicts the oldest episode watermarks past the cap so the state stays loadable', async () => {
+    const cwd = tempCwd();
+    const first = await watchAdapter(cwd);
+    first.watch.setBindings([binding({ events: ['merge_conflict'] })]);
+    await first.adapter.tick(); // baseline clean
+    await first.adapter.disconnect();
+    // A long-lived instance accumulates one watermark per PR it ever watched.
+    // Seed the cap with stale PRs the binding list no longer includes, so the
+    // next transition is the one that crosses the line.
+    seedState(first.adapter, (state) => {
+      const episodes: Record<string, number> = {};
+      for (let i = 0; i < MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT; i++) {
+        episodes[`stale/repo#${i}`] = 1;
+      }
+      state.watch!.episodes = episodes;
+    });
+    const second = await watchAdapter(cwd);
+    second.watch.setBindings([binding({ events: ['merge_conflict'] })]);
+    second.fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeableState: 'dirty',
+      state: 'open',
+    };
+    await second.adapter.tick(); // merge_conflict: the 1025th watermark
+    expect(second.watch.injected).toHaveLength(1);
+    const state = readState(second.adapter);
+    const episodes = state.watch!.episodes!;
+    // save() does not validate but load() refuses an over-cap map: without
+    // the eviction the adapter writes a file it can never start on again.
+    expect(Object.keys(episodes).length).toBeLessThanOrEqual(
+      MANAGED_GITHUB_PR_WATCH_EPISODE_LIMIT,
+    );
+    expect(validManagedGithubState(state)).toBe(true);
+    expect(episodes[PR_KEY]).toBe(1);
+    expect(episodes['stale/repo#0']).toBeUndefined();
+    await second.adapter.disconnect();
+  });
+
+  it('treats a merged/closed PR as terminal: no transition, binding retired', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline open
+    fake.knobs.pull = {
+      headSha: 'sha-a',
+      mergeableState: 'clean',
+      state: 'closed',
+    };
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    await adapter.tick();
+    // A check concluding after the merge must not drive a CI-failure turn.
+    expect(watch.injected).toHaveLength(0);
+    expect(watch.retired).toHaveLength(1);
+    expect(watch.retired[0]!.prNumber).toBe(9);
+    // The binding is gone, so the next tick no longer observes the PR.
+    const seenBefore = fake.pullsSeen.length;
+    await adapter.tick();
+    expect(fake.pullsSeen.length).toBe(seenBefore);
+    await adapter.disconnect();
+  });
+
+  it('keeps a failed retire best-effort: the pass drains and the next tick retries', async () => {
+    const lines: string[] = [];
+    const { adapter, fake, watch } = await watchAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
+    watch.setBindings([binding(), binding({ prNumber: 12 })]);
+    await adapter.tick(); // baseline both open
+    fake.knobs.pullFor = (prNumber) =>
+      prNumber === 9
+        ? {
+            headSha: 'sha-a',
+            mergeableState: 'clean',
+            state: 'closed',
+          }
+        : fake.knobs.pull;
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    watch.setRetireError(new Error('control plane unavailable'));
+    await adapter.tick();
+    // The retire failed, but it is best-effort: it must neither abort the
+    // pass nor starve the co-bound PR, whose ci_failure still drains.
+    expect(watch.retired).toHaveLength(0);
+    expect(watch.injected).toHaveLength(1);
+    expect(watch.injected[0]).toMatchObject({
+      prNumber: 12,
+      transition: 'ci_failure',
+    });
+    expect(
+      lines.some((l) =>
+        /could not retire the terminal PR binding owner\/repo#9.*retries on the next tick/.test(
+          l,
+        ),
+      ),
+    ).toBe(true);
+    // Best-effort means re-driven: the next tick retires the terminal PR.
+    watch.setRetireError(undefined);
+    await adapter.tick();
+    expect(watch.retired).toEqual([
+      { owner: 'Owner', repo: 'Repo', prNumber: 9 },
+    ]);
+    await adapter.disconnect();
+  });
+
+  it('pins a ring-suppressed ci_failure head so the CI read is not re-issued', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding({ events: ['ci_failure', 'head_change'] })]);
+    await adapter.tick(); // baseline sha-a passing
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    await adapter.tick(); // ci_failure fires on sha-a, pin sha-a
+    expect(
+      watch.injected.filter((e) => e.transition === 'ci_failure'),
+    ).toHaveLength(1);
+    // Head moves to sha-b: the pin drops.
+    fake.knobs.pull = { ...fake.knobs.pull, headSha: 'sha-b' };
+    fake.knobs.ci = { aggregate: 'passing', failedChecks: [] };
+    await adapter.tick(); // head_change
+    // Force-push back to sha-a with CI failing: the fired ring still holds the
+    // sha-a ci_failure key so the event is suppressed, but the pin must be
+    // re-set so the next tick skips the CI read for a head that cannot fire.
+    fake.knobs.pull = { ...fake.knobs.pull, headSha: 'sha-a' };
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    await adapter.tick();
+    expect(readState(adapter).watch!.prs[PR_KEY]!.ciFiredSha).toBe('sha-a');
+    const readsAfterSuppressed = fake.ciSeen.length;
+    await adapter.tick(); // same head, still failing: CI read must be skipped
+    expect(fake.ciSeen.length).toBe(readsAfterSuppressed);
+    await adapter.disconnect();
+  });
+
+  it('isolates a transient injection failure to its PR, drains the rest', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding({ prNumber: 9 }), binding({ prNumber: 12 })]);
+    await adapter.tick(); // baseline both
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    watch.setInjectErrorFor((prNumber) =>
+      prNumber === 9 ? new Error('history maintenance') : undefined,
+    );
+    await adapter.tick();
+    // PR 9's inject fails transiently; PR 12 must still inject this tick. A
+    // whole-drain return would starve PR 12 behind the unhealthy PR 9.
+    expect(watch.injected.some((e) => e.prNumber === 12)).toBe(true);
+    expect(watch.injected.some((e) => e.prNumber === 9)).toBe(false);
+    expect(readState(adapter).watch!.prs['owner/repo#9']!.pending).toHaveLength(
+      1,
+    );
+    await adapter.disconnect();
+  });
+
+  it('runs the reply lane before the watch pass', async () => {
+    const { adapter, watch, plane, journal } = await watchAdapter();
+    watch.setBindings([binding()]);
+    plane.enqueue([delivery('d-reply', 1)]);
+    await adapter.tick();
+    const receiptAt = journal.findIndex((l) => l.startsWith('receipt:d-reply'));
+    const pullAt = journal.findIndex((l) => l === 'getPullRequest');
+    expect(receiptAt).toBeGreaterThanOrEqual(0);
+    expect(pullAt).toBeGreaterThanOrEqual(0);
+    // The user-visible outbox must not wait behind the watch's GitHub reads.
+    expect(receiptAt).toBeLessThan(pullAt);
+    await adapter.disconnect();
+  });
+
+  it('persists at most once on an all-quiet tick', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline (a real change, persisted)
+    const save = vi.spyOn(ManagedGithubStateStore.prototype, 'save');
+    await adapter.tick(); // nothing changed: no transition, stable baseline
+    expect(save).not.toHaveBeenCalled();
+    save.mockRestore();
+    // A real detection still persists.
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
+  it('retires the binding when the Harness reports the Session pump-less', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline
+    fake.knobs.ci = { aggregate: 'failing', failedChecks: [] };
+    watch.setInjectError(
+      Object.assign(new Error('pump-less'), {
+        status: 409,
+        code: 'pr_event_wake_unavailable',
+      }),
+    );
+    await adapter.tick();
+    expect(watch.injected).toHaveLength(0);
+    // The binding can never work: retire it instead of leaving it listed to
+    // drop every future transition.
+    expect(watch.retired).toHaveLength(1);
+    expect(watch.retired[0]!.prNumber).toBe(9);
+    await adapter.disconnect();
+  });
+
+  it('does not retire a terminal PR binding after losing the state-file lock', async () => {
+    const { adapter, fake, watch } = await watchAdapter();
+    watch.setBindings([binding()]);
+    await adapter.tick(); // baseline open
+    // The PR turns terminal, but the lock is compromised mid-observation: a
+    // process that no longer owns the state file must not delete a binding
+    // another owner now serves.
+    fake.knobs.pullFor = () => {
+      fake.compromise();
+      return {
+        headSha: 'sha-a',
+        mergeableState: 'clean',
+        state: 'closed',
+      };
+    };
+    await adapter.tick();
+    expect(watch.retired).toHaveLength(0);
+    await adapter.disconnect();
+  });
+
+  it('rotates the window across a restart via the durable sweep offset', async () => {
+    const cwd = tempCwd();
+    const bindings = Array.from({ length: 31 }, (_, i) =>
+      binding({ prNumber: i + 1 }),
+    );
+    const first = await watchAdapter(cwd);
+    first.watch.setBindings(bindings);
+    await first.adapter.tick(); // observes PRs 1-30, persists sweepStart=30
+    expect(first.fake.pullsSeen.some((p) => p.prNumber === 31)).toBe(false);
+    await first.adapter.disconnect();
+    // A fresh process must resume the window at the durable offset, not at 0:
+    // an in-memory-only cursor would starve PR 31 on the first tick of every
+    // process lifetime (the defect R1-1 fixed, returning on restart).
+    const second = await watchAdapter(cwd);
+    second.watch.setBindings(bindings);
+    await second.adapter.tick();
+    expect(second.fake.pullsSeen.some((p) => p.prNumber === 31)).toBe(true);
+    await second.adapter.disconnect();
   });
 });

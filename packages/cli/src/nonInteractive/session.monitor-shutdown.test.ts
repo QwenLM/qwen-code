@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { BackgroundTaskRegistry } from '@qwen-code/qwen-code-core/agents/background-tasks.js';
+import { WorkflowRunRegistry } from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
 import { MonitorRegistry } from '@qwen-code/qwen-code-core/services/monitorRegistry.js';
 import { runNonInteractiveStreamJson } from './session.js';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
@@ -64,6 +65,7 @@ describe('Session unpublished monitor shutdown frames', () => {
     async (route) => {
       const monitors = new MonitorRegistry();
       const backgroundTasks = new BackgroundTaskRegistry();
+      const workflows = new WorkflowRunRegistry();
       const abortAll = vi.spyOn(monitors, 'abortAll');
       const output = {
         emitResult: vi.fn(),
@@ -92,6 +94,7 @@ describe('Session unpublished monitor shutdown frames', () => {
         getMonitorRegistry: () => monitors,
         getBackgroundShellRegistry: () => ({ abortAll: vi.fn() }),
         getBackgroundTaskRegistry: () => backgroundTasks,
+        getWorkflowRunRegistry: () => workflows,
       } as unknown as Config;
       vi.mocked(StreamJsonOutputAdapter).mockImplementation(
         () => output as unknown as StreamJsonOutputAdapter,

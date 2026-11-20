@@ -2,7 +2,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { I18nProvider } from '../i18n';
+import { I18nProvider, type WebShellLanguage } from '../i18n';
 import { buildWaitingActivity } from '../utils/waitingActivity';
 import {
   WaitingMinigame,
@@ -61,14 +61,17 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function render(props: Partial<WaitingMinigameProps> = {}): Rendered {
+function render(
+  props: Partial<WaitingMinigameProps> = {},
+  language: WebShellLanguage = 'en',
+): Rendered {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   const rerender = (next: Partial<WaitingMinigameProps>) => {
     act(() => {
       root.render(
-        <I18nProvider language="en">
+        <I18nProvider language={language}>
           <WaitingMinigame
             open={next.open ?? true}
             onClose={next.onClose ?? vi.fn()}
@@ -162,6 +165,13 @@ describe('WaitingMinigame', () => {
       container.querySelector('[aria-label="Start a random game"]'),
     ).not.toBeNull();
     expect(container.textContent).not.toContain('Score 0');
+  });
+
+  it('formats the heatmap calendar in Traditional Chinese for zh-TW', () => {
+    const { container } = render({}, 'zh-TW');
+    expect(container.textContent).toContain('問答熱度');
+    expect(container.textContent).toContain('11月');
+    expect(container.textContent).not.toContain('Nov');
   });
 
   it('keeps the game entry hidden when games are disabled', () => {
