@@ -1,9 +1,10 @@
 # 托管 GitHub 账本注册身份键控
 
-- **状态：** 提议中
+- **状态：** 已合入 — PR #17775，squash `ceb421295f`（2026-11-20）。延后后续项跟踪于 #17769。
 - **日期：** 2026-11-19
-- **范围：** `packages/channels/github`（状态存储 + 适配器）、`channel-base` 契约注释、测试
+- **范围：** `packages/channels/github`（状态存储 + 适配器）、`channel-base` 契约注释、测试、PR-watch E2E rig
 - **相关：** WeCom 适配器的 P1-D/E 修复（PR #17441）与 DingTalk 键控（PR #17742）；`channel-base` 的共享 `destinationKey` 契约；[英文版](2026-11-19-managed-github-registration-identity.md)
+- **合入时验证：** github 套件 1090 绿；CI 钉住的 PR-watch E2E rig（`npm run test:e2e:managed-pr-watch`）全绿，含 P3 同目的地崩溃重放；rig CI 钉住套件 96 绿；`tsc --build` / ESLint / Prettier 干净；承重变异见证均被杀。episode 携带为非破坏性（绝不驱逐加载账本自己的计数、被携带值以 prs 基线下限、仅有空位才加入、溢出打日志）。
 
 ## 问题
 
