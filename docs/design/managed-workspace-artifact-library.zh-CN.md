@@ -5,8 +5,10 @@
 状态：已随 #17728 合入（squash 提交 `3f7b6088d9`）。合入前已验证：H2 与真实
 MySQL 8.4 集成、surface/契约/准入/parity 门禁、web-shell 聚焦测试、
 build/typecheck/bundle、22 项变异见证矩阵、真实 Spring 启动＋真实 HTTP 准入
-探针；ci.yml 与 Managed Agent gate 在最终 PR head 全绿。延期测试加固后续见
-#17778。
+探针。ci.yml 与 PR 事件触发的 fast-tier Managed Agent gate 在最终 PR head
+全绿；批准后触发的 full tier 其后在本面的索引访问路径断言上报红——未限定
+catalog/schema 的 JDBC 元数据读取在 CI 共享 MySQL 上匹配了每个库的
+ma_operation——已在 #17893 处理。延期测试加固后续见 #17778。
 
 ## 问题与现状
 
