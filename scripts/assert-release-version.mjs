@@ -96,7 +96,7 @@ export function assertVersionUnreleased(version) {
 
   if (shippedTo.length > 0) {
     const error = new Error(
-      `Version ${version} has already shipped; refusing to force-push the release branch over it. Found on: ${shippedTo.join(', ')}. If a previous attempt published only part of the release, complete the remaining artifacts manually — re-running this job will keep failing here while the version stays published.`,
+      `Version ${version} has already shipped; refusing to push the release branch over it. Found on: ${shippedTo.join(', ')}. If a previous attempt published only part of the release, re-run the release: the push step reuses the existing release branch when its contents match, and the publish step skips already-published packages.`,
     );
     error.code = 'VERSION_SHIPPED';
     throw error;

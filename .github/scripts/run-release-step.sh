@@ -176,6 +176,27 @@ case "${step}" in
       # Keep the write credential unavailable until the push step needs it.
       export GH_TOKEN="${CI_BOT_PAT}"
       gh auth setup-git
+      # A release branch left behind by an earlier attempt means this version
+      # may be partially published. Resume it instead of force-pushing over
+      # it: when the regenerated tree matches the branch tip, reuse that
+      # commit so the publish step can skip already-published packages and
+      # ship the rest. A divergent tree is a different release under the same
+      # version and stays refused. This restores the retry semantics the
+      # push-time "already shipped" guard (#9076) accidentally killed: it ran
+      # before publish and failed any rerun whose first attempt had already
+      # pushed the branch, so the per-package skip never got to run.
+      remote_branch="$(git ls-remote --heads origin "refs/heads/${release_branch_name}")"
+      if [[ -n "${remote_branch}" ]]; then
+        git fetch --no-tags origin "refs/heads/${release_branch_name}"
+        release_commit="$(git rev-parse FETCH_HEAD)"
+        if [[ "$(git rev-parse 'HEAD^{tree}')" != "$(git rev-parse "${release_commit}^{tree}")" ]]; then
+          echo "::error::${release_branch_name} already exists with different contents. Resume from that release commit instead."
+          exit 1
+        fi
+        git switch --detach "${release_commit}"
+        echo "::notice::Reusing ${release_branch_name} at ${release_commit}; published npm versions will be skipped."
+        exit 0
+      fi
       # Guard exit codes: 0 unreleased, 2 probe failure (the only retryable
       # one), 3 already shipped, 4 malformed version. Anything but 2 breaks
       # out on the first attempt so a decisive refusal is not logged three
@@ -199,7 +220,7 @@ case "${step}" in
         exit "${guard_status}"
       fi
       echo "Pushing release branch to remote..."
-      git push --force --set-upstream origin "${release_branch_name}" --follow-tags
+      git push --set-upstream origin "${release_branch_name}" --follow-tags
     else
       echo "Dry run enabled. Skipping push."
     fi
