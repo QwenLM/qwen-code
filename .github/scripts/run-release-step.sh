@@ -214,30 +214,30 @@ case "${step}" in
           # Use a three-way exit: 0 = at/behind (safe), 1 = ahead (refuse),
           # 2 = comparison failed (refuse with distinct message).
           compare_result=0
-          node -e "
+          CURRENT_TAG="${current_tag}" RELEASE_VERSION_VAR="${RELEASE_VERSION}" node -e "
             const parse = v => v.replace(/^v/,'').split(/[.-]/).map(s => parseInt(s, 10) || 0);
-            const [a, b] = [process.argv[1], process.argv[2]].map(parse);
+            const [a, b] = [process.env.CURRENT_TAG, process.env.RELEASE_VERSION_VAR].map(parse);
             for (let i = 0; i < Math.max(a.length, b.length); i++) {
               const d = (a[i]||0) - (b[i]||0);
               if (d > 0) process.exit(1);
               if (d < 0) process.exit(0);
             }
             process.exit(0);
-          " "${current_tag}" "${RELEASE_VERSION}" 2>/dev/null || compare_result=$?
+          " 2>/dev/null || compare_result=$?
           # node exits 1 on both "channel is ahead" and internal failure.
           # Re-run without suppression to distinguish: if stderr is empty,
           # the comparison ran and the channel is ahead; otherwise it failed.
           if [[ "${compare_result}" -eq 1 ]]; then
-            node_stderr="$(node -e "
+            node_stderr="$(CURRENT_TAG="${current_tag}" RELEASE_VERSION_VAR="${RELEASE_VERSION}" node -e "
               const parse = v => v.replace(/^v/,'').split(/[.-]/).map(s => parseInt(s, 10) || 0);
-              const [a, b] = [process.argv[1], process.argv[2]].map(parse);
+              const [a, b] = [process.env.CURRENT_TAG, process.env.RELEASE_VERSION_VAR].map(parse);
               for (let i = 0; i < Math.max(a.length, b.length); i++) {
                 const d = (a[i]||0) - (b[i]||0);
                 if (d > 0) process.exit(1);
                 if (d < 0) process.exit(0);
               }
               process.exit(0);
-            " "${current_tag}" "${RELEASE_VERSION}" 2>&1 >/dev/null)" || true
+            " 2>&1 >/dev/null)" || true
             if [[ -n "${node_stderr}" ]]; then
               echo "::error::Cannot compare npm ${NPM_TAG} (${current_tag}) with ${RELEASE_VERSION}: ${node_stderr}. Refusing to resume."
               echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
