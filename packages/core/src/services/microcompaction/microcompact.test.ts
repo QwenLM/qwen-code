@@ -8,6 +8,7 @@ import { describe, expect, it, afterEach } from 'vitest';
 import type { Content } from '@google/genai';
 import type { ClearContextOnIdleSettings } from '../../config/config.js';
 import { enforceFunctionResponseBudget } from '../../tools/tool-response-finalizer.js';
+import { isPersistedOutputStub } from '../../tools/truncation.js';
 import {
   getToolOutputRecovery,
   setToolOutputRecovery,
@@ -1105,7 +1106,7 @@ the last characters`;
         900,
       );
       const part = finalized!.responseParts[0]!;
-      const output = part.functionResponse!.response!['output'];
+      const output = part.functionResponse!.response!['output'] as string;
       expect(output).toContain(
         `Tool output truncated. Persisted tool-output artifact: ${outputFile}`,
       );
@@ -1113,22 +1114,26 @@ the last characters`;
       expect(getToolOutputRecovery(part)).toEqual({
         persistedOutputFiles: [outputFile],
       });
+      expect(isPersistedOutputStub(output)).toBe(true);
 
-      const result = microcompactHistory(
-        [
-          makeToolCall(toolName),
-          { role: 'user', parts: [part] },
-          makeToolCall('run_shell_command'),
-          makeToolResult('run_shell_command', 'newest ordinary output'),
-        ],
-        twoHoursAgo,
-        { ...DEFAULT_SETTINGS, toolResultsNumToKeep: 0 },
-        { force: true },
-      );
-
-      expect(
-        result.history[1]!.parts![0]!.functionResponse!.response!['output'],
-      ).toBe(output);
+      const resumed = JSON.parse(JSON.stringify(part)) as typeof part;
+      expect(getToolOutputRecovery(resumed)).toBeUndefined();
+      for (const candidate of [part, resumed]) {
+        const result = microcompactHistory(
+          [
+            makeToolCall(toolName),
+            { role: 'user', parts: [candidate] },
+            makeToolCall('run_shell_command'),
+            makeToolResult('run_shell_command', 'newest ordinary output'),
+          ],
+          twoHoursAgo,
+          { ...DEFAULT_SETTINGS, toolResultsNumToKeep: 0 },
+          { force: true },
+        );
+        expect(
+          result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+        ).toBe(output);
+      }
     },
   );
 
