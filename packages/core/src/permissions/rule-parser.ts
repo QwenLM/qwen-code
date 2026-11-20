@@ -761,12 +761,6 @@ export function buildPermissionRules(ctx: PermissionCheckContext): string[] {
         // Allow" rule unmatchable and re-prompted for the same directory
         // forever (#17802).
         const posixDir = toPosixPath(dirPath);
-        // With the drive root as the directory, `//D://**` matches nothing and
-        // re-prompts forever, while `//D:/**` would allow the whole volume
-        // for one click, so the rule names only the target.
-        if (/^[A-Za-z]:\/?$/.test(posixDir)) {
-          return [`${displayName}(//${toPosixPath(ctx.filePath)})`];
-        }
         const specifier =
           posixDir.startsWith('/') || isWindowsAbsolutePath(dirPath)
             ? `//${posixDir.replace(/^\/+/, '')}/**`

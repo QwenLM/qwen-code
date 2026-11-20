@@ -1041,6 +1041,10 @@ describe('resolvePathPattern', () => {
     ['drive letter, backslashes', 'D:\\probe\\**'],
     ['`//` prefix + drive letter', '//D:/probe/**'],
     ['`//` prefix + drive letter, backslashes', '//D:\\probe\\**'],
+    // Windows ignores drive-letter case; the fold is lexical, so it holds on
+    // every host platform.
+    ['lowercase drive letter', 'd:/probe/**'],
+    ['`//` prefix + lowercase drive letter', '//d:\\probe\\**'],
   ])('resolves %s to the drive-rooted pattern', (_label, pattern) => {
     expect(resolve(pattern)).toBe('D:/probe/**');
   });
@@ -2232,18 +2236,26 @@ describe('PermissionManager', () => {
       },
     );
 
-    // Released versions saved `Read(D:\/**)` for a file at the drive root.
-    // It has always matched nothing; it must not start allowing the volume.
-    it('does not allow the drive for a rule saved for a drive-root file', async () => {
-      const manager = new PermissionManager(
-        makeConfig({ projectRoot, cwd, permissionsAllow: ['Read(D:\\/**)'] }),
-      );
-      manager.initialize();
+    // "Always Allow" on a file at the drive root saves a rule with a doubled
+    // separator: `Read(D:\/**)` in released versions, `Read(//D://**)` since
+    // #17810. Neither has matched files on the drive; they must not start to.
+    it.each(['D:\\/**', '//D://**'])(
+      'does not allow files on the drive for the drive-root rule %s',
+      async (pattern) => {
+        const manager = new PermissionManager(
+          makeConfig({
+            projectRoot,
+            cwd,
+            permissionsAllow: [`Read(${pattern})`],
+          }),
+        );
+        manager.initialize();
 
-      expect(await manager.evaluate({ toolName: 'read_file', filePath })).toBe(
-        'default',
-      );
-    });
+        expect(
+          await manager.evaluate({ toolName: 'read_file', filePath }),
+        ).toBe('default');
+      },
+    );
 
     it.each([
       ['D:/x/**', 'd:\\x\\a.txt'],
@@ -2272,11 +2284,18 @@ describe('PermissionManager', () => {
       },
     );
 
+    // The drive root canonicalizes to `E:\` (as a `subst` drive does), so only
+    // a candidate anchored at the drive root matches `E:\x\a.txt`.
     it('anchors a root-level wildcard to the drive root', async () => {
+      const native = fs.realpathSync.native;
       const realpath = vi
         .spyOn(fs.realpathSync, 'native')
-        .mockImplementationOnce((base) =>
-          base === 'D:' ? 'D:\\project\\work' : 'D:\\',
+        .mockImplementation((p, options) =>
+          p === 'D:'
+            ? 'D:\\project\\work'
+            : p === 'D:/'
+              ? 'E:\\'
+              : native(p, options),
         );
       try {
         const manager = new PermissionManager(
@@ -2295,7 +2314,10 @@ describe('PermissionManager', () => {
           }),
         ).toBe('default');
         expect(
-          await manager.evaluate({ toolName: 'read_file', filePath }),
+          await manager.evaluate({
+            toolName: 'read_file',
+            filePath: 'E:\\x\\a.txt',
+          }),
         ).toBe('deny');
       } finally {
         realpath.mockRestore();
@@ -2318,32 +2340,6 @@ describe('PermissionManager', () => {
 
         expect(rules).toEqual([rule]);
         expect(await manager.evaluate(ctx)).toBe('allow');
-      },
-    );
-
-    // The drive root as the rule's directory would be `D:/**` once repeated
-    // separators collapse, so one click would allow the whole volume.
-    it.each([
-      ['read_file', 'D:/notes.txt', 'Read(//D:/notes.txt)'],
-      ['list_directory', 'D:\\', 'Read(//D:/)'],
-    ])(
-      'scopes the Always Allow rule for the drive root target %s %s to the target alone',
-      async (toolName, target, rule) => {
-        const ctx = { toolName, filePath: target };
-        const rules = buildPermissionRules(ctx);
-        const manager = new PermissionManager(
-          makeConfig({ projectRoot, cwd, permissionsAllow: rules }),
-        );
-        manager.initialize();
-
-        expect(rules).toEqual([rule]);
-        expect(await manager.evaluate(ctx)).toBe('allow');
-        expect(
-          await manager.evaluate({
-            toolName: 'read_file',
-            filePath: 'D:\\secrets\\key.txt',
-          }),
-        ).toBe('default');
       },
     );
 
