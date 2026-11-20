@@ -208,9 +208,11 @@ function resolveBoolean(
  * accounting. Binary parts get a fixed budget (in chars) derived from
  * the configured token estimate; this keeps base64 payloads from
  * skewing compression size estimation or token-budget math. Binary parts
- * carry the configured flat estimate when the header does not parse (or a
- * `imageTokenFloor` is supplied, as the transport guard does), and the
- * resolution-derived charge when it does.
+ * carry the configured flat estimate when the header does not parse, and
+ * the resolution-derived charge when it does. `imageTokenFloor` (as the
+ * transport guard passes) is a LOWER BOUND on the image charge —
+ * `max(resolution, floor)` — not a branch back to flat: a 4K image
+ * still bills its 4050 resolution tokens even with the 1600 floor.
  */
 export function estimatePartChars(
   part: Part,
