@@ -42,7 +42,7 @@ async function mount() {
       <WebShellPortalRootContext.Provider value={portal}>
         <input type="search" aria-label="App search" className="text-sm" />
         <textarea aria-label="App textarea" className="text-sm" />
-        <div data-composer className="text-sm">
+        <div data-composer className="text-sm touch-input-font-composer">
           <div contentEditable className="cm-content" aria-label="App editor">
             <div className="cm-line">Text</div>
           </div>

@@ -8,10 +8,11 @@ import { expect, test, type Page } from '@playwright/test';
 
 const landscapeTablet = { width: 1024, height: 768 };
 
-// Chromium does not implement -webkit-touch-callout. Open only its feature
-// gate in the test (in both the document and the adopted shadow sheets).
-// Keep the production declarations, selectors and pointer condition intact.
-async function enableSafariRuleInChromium(page: Page) {
+// Playwright's Linux WebKit and Chromium may not expose the iOS Safari
+// feature gate. Open only that gate when missing to test the actual selectors,
+// stylesheet adoption and pointer condition in those engines. This does not
+// test native iOS feature detection or focus zoom.
+async function enableSafariRuleForTest(page: Page) {
   await page.evaluate(() => {
     const shadow = document.querySelector(
       '[data-web-shell-shadow-host="portals"]',
@@ -50,9 +51,8 @@ for (const entry of ['standalone', 'embedded'] as const) {
     for (const shadow of [false, true]) {
       const destination = shadow ? 'shadow portal' : 'document portal';
       test(`${entry} ${dialog} inputs reach 16px in the ${destination} @smoke`, async ({
-        browserName,
         page,
-      }) => {
+      }, testInfo) => {
         await page.setViewportSize(landscapeTablet);
         await page.goto(harnessUrl(entry, dialog, shadow));
 
@@ -66,13 +66,12 @@ for (const entry of ['standalone', 'embedded'] as const) {
         }));
         expect(media.coarse).toBe(true);
         expect(media.landscape).toBe(true);
-        if (browserName === 'webkit') {
-          test.skip(
-            !media.safari,
-            'This WebKit build lacks the Safari feature gate',
-          );
-        } else {
-          await enableSafariRuleInChromium(page);
+        if (!media.safari) {
+          testInfo.annotations.push({
+            type: 'emulated Safari feature gate',
+            description: 'This browser does not support -webkit-touch-callout.',
+          });
+          await enableSafariRuleForTest(page);
         }
         await expect(input).toHaveCSS('font-size', '16px');
         for (const field of ['App search', 'App textarea', 'App editor']) {
@@ -91,25 +90,24 @@ for (const entry of ['standalone', 'embedded'] as const) {
   }
 }
 
-test('keeps desktop portal fields at the compact size @smoke', async ({
-  browser,
-  browserName,
-  baseURL,
-}) => {
-  const page = await browser.newPage({ baseURL, viewport: landscapeTablet });
-  try {
+test.describe('desktop pointer', () => {
+  test.use({ hasTouch: false, isMobile: false, viewport: landscapeTablet });
+
+  test('keeps desktop portal fields at the compact size @smoke', async ({
+    page,
+  }) => {
     await page.goto(harnessUrl('embedded', 'skill', true));
     const input = page.locator(
       '[data-web-shell-portal-root] input[data-slot="input"]:not([type])',
     );
     await expect(input).toHaveCount(1);
-    expect(
-      await page.evaluate(() => matchMedia('(pointer: coarse)').matches),
-    ).toBe(false);
+    const media = await page.evaluate(() => ({
+      coarse: matchMedia('(pointer: coarse)').matches,
+      safari: CSS.supports('-webkit-touch-callout', 'none'),
+    }));
+    expect(media.coarse).toBe(false);
     // Isolate the pointer check from the vendor feature check.
-    if (browserName === 'chromium') await enableSafariRuleInChromium(page);
+    if (!media.safari) await enableSafariRuleForTest(page);
     await expect(input).toHaveCSS('font-size', '14px');
-  } finally {
-    await page.close();
-  }
+  });
 });
