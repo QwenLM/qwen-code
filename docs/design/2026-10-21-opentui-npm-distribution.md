@@ -81,6 +81,8 @@ Node cannot hand off, the existing shared gate selects Ink for an ordinary reque
 and rejects a strict request; native Node FFI is no alternative OpenTUI route.
 No new fallback state, helper, dependency family or runtime-selection mechanism is introduced. The existing private Bun version pin is updated separately within this batch.
 
+> Historical screen-reader contract: the Ink fallback/strict rejection and unwired-helper descriptions below record the earlier design and evidence. For the candidate in [PR #17500](https://github.com/QwenLM/qwen-code/pull/17500), the [Native screen-reader wiring design](2026-11-17-native-screen-reader-wiring.md) supersedes those specific restrictions within its stated scope. This does not claim that the unmerged candidate is available on main or supersede the historical results or other distribution/platform limits.
+
 | Invocation                                                          | Runtime behavior                                                         |
 | ------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | Renderer unset, `ink`, or unknown                                   | Existing runtime and renderer behavior                                   |

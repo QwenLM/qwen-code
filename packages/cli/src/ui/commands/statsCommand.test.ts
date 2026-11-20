@@ -216,6 +216,11 @@ describe('statsCommand', () => {
     it('should return text stats without calling addItem', async () => {
       if (!statsCommand.action) throw new Error('Command has no action');
 
+      // The visible Prompts statistic reads userPromptCount, not the mint
+      // counter (promptCount); distinct values pin that the right one renders.
+      nonInteractiveContext.session.stats.userPromptCount = 7;
+      nonInteractiveContext.session.stats.promptCount = 9;
+
       const result = (await statsCommand.action(nonInteractiveContext, '')) as {
         type: string;
         messageType: string;
@@ -225,7 +230,7 @@ describe('statsCommand', () => {
       expect(result.type).toBe('message');
       expect(result.messageType).toBe('info');
       expect(result.content).toContain('Session duration');
-      expect(result.content).toContain('Prompts');
+      expect(result.content).toContain('Prompts: 7');
       expect(nonInteractiveContext.ui.addItem).not.toHaveBeenCalled();
     });
 

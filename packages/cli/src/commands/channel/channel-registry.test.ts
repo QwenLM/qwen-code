@@ -1160,8 +1160,10 @@ describe('channel registry', () => {
       'email',
       'wecom',
       'wecom-callback',
+      'wecom-webhook',
       'feishu',
       'feishu-webhook',
+      'generic-webhook',
       'qq',
       'github',
       'gitlab',
@@ -1178,8 +1180,10 @@ describe('channel registry', () => {
       'email',
       'wecom',
       'wecom-callback',
+      'wecom-webhook',
       'feishu',
       'feishu-webhook',
+      'generic-webhook',
       'qq',
       'github',
       'gitlab',
@@ -1274,6 +1278,47 @@ describe('channel registry', () => {
         }),
       ]);
     }
+    expect(
+      catalog.find((entry) => entry.type === 'wecom-webhook'),
+    ).toMatchObject({
+      manageable: true,
+      outboundOnly: true,
+      defaultDeliveryTarget: { type: 'chat', id: 'default' },
+      fields: [
+        {
+          key: 'webhookUrl',
+          label: 'Webhook URL',
+          kind: 'secret',
+          required: true,
+          envResolvable: true,
+        },
+      ],
+    });
+    const genericWebhook = catalog.find(
+      (entry) => entry.type === 'generic-webhook',
+    );
+    expect(genericWebhook).toMatchObject({
+      manageable: true,
+      outboundOnly: true,
+      defaultDeliveryTarget: { type: 'chat', id: 'default' },
+    });
+    expect(genericWebhook?.fields).toEqual([
+      expect.objectContaining({
+        key: 'webhookUrl',
+        kind: 'secret',
+        required: true,
+        envResolvable: true,
+      }),
+      expect.objectContaining({
+        key: 'bearerToken',
+        kind: 'secret',
+        envResolvable: true,
+      }),
+      expect.objectContaining({
+        key: 'allowPrivateNetwork',
+        kind: 'boolean',
+      }),
+    ]);
     for (const type of ['dingtalk', 'wecom', 'feishu'] as const) {
       const fields = catalog.find((entry) => entry.type === type)?.fields;
       expect(fields).not.toContainEqual(

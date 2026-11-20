@@ -265,7 +265,7 @@ final class JournalHistoryQueries {
         try {
             JournalStoreRows.HeadRow head = storeRows.requireHead(tenantId, sessionId);
             if (!Set.of("ACTIVE", "SEALED").contains(head.state())
-                    || !"READY".equals(head.recoveryStatus()) || head.storageVersion() != JournalStoreRows.STORAGE_VERSION
+                    || !"READY".equals(head.recoveryStatus())
                     || head.compactedThroughRevision() != 0 || head.latestCheckpointResourceId() != null
                     || head.journalRevision() < 1 || head.committedSequence() < 0
                     || workspaceId != null && !workspaceId.equals(head.workspaceId())) {
@@ -284,11 +284,16 @@ final class JournalHistoryQueries {
                         || !Objects.equals(digest, row.previousCommitDigest())) {
                     return false;
                 }
-                if (row.recordBytes() == null) {
+                byte[] bytes = row.recordBytes();
+                if (bytes == null && packs != null) {
+                    bytes = packs.resolveBytes(tenantId, sessionId, row.journalRevision(),
+                            row.recordDigest(), row.byteLength());
+                }
+                if (bytes == null) {
                     return false;
                 }
-                JournalStoreRows.validateUtf8JsonLines(row.recordBytes(), revision == 1 ? 2 : row.eventCount() + 1);
-                String[] lines = new String(row.recordBytes(), StandardCharsets.UTF_8).split("\n");
+                JournalStoreRows.validateUtf8JsonLines(bytes, revision == 1 ? 2 : row.eventCount() + 1);
+                String[] lines = new String(bytes, StandardCharsets.UTF_8).split("\n");
                 if (revision == 1) {
                     if (!"session.create".equals(row.operation()) || row.eventCount() != 0
                             || row.firstSequence() != 0 || row.lastSequence() != 0 || lines.length != 2
@@ -298,8 +303,8 @@ final class JournalHistoryQueries {
                             || !row.recordDigest().equals(row.contentDigest())) {
                         return false;
                     }
-                    JsonNode engine = JournalStoreRows.CSI_TERMINAL_JSON.readTree(lines[0]);
-                    JsonNode header = JournalStoreRows.CSI_TERMINAL_JSON.readTree(lines[1]);
+                    JsonNode engine = JournalStoreRows.TERMINAL_JSON.readTree(lines[0]);
+                    JsonNode header = JournalStoreRows.TERMINAL_JSON.readTree(lines[1]);
                     JsonNode value = header.path("managedSession");
                     requireInitialResource(value.path("definitionRef"), head, "managed-definition");
                     requireInitialResource(value.path("rootSnapshotRef"), head, "managed-root");
@@ -308,8 +313,7 @@ final class JournalHistoryQueries {
                             || !sessionId.equals(engine.path("sessionId").asText())
                             || !"managed_session_header_v1".equals(header.path("subtype").asText())
                             || !sessionId.equals(header.path("sessionId").asText())
-                            || value.size() != 7 || value.path("formatVersion").asInt() != JournalStoreRows.STORAGE_VERSION
-                            || !"managed-session/1".equals(value.path("minimumReader").asText())
+                            || value.size() != 6 || value.path("formatVersion").asInt() != JournalStoreRows.STORAGE_VERSION
                             || !"managed".equals(value.path("engine").asText())
                             || !"hosted-harness".equals(value.path("createdBy").asText())
                             || value.has("baseTranscriptProof") || !initialScope(value, head)) {
@@ -321,10 +325,10 @@ final class JournalHistoryQueries {
                             || row.lastSequence() != sequence + row.eventCount() || row.commitDigest() == null) {
                         return false;
                     }
-                    var events = JournalStoreRows.CSI_JSON.createArrayNode();
+                    var events = JournalStoreRows.JSON.createArrayNode();
                     boolean activationChanged = false;
                     for (int index = 0; index < row.eventCount(); index++) {
-                        JsonNode record = JournalStoreRows.CSI_TERMINAL_JSON.readTree(lines[index]);
+                        JsonNode record = JournalStoreRows.TERMINAL_JSON.readTree(lines[index]);
                         JsonNode event = record.path("managedSession");
                         JsonNode payload = event.path("payload");
                         String kind = event.path("kind").asText();
@@ -360,7 +364,7 @@ final class JournalHistoryQueries {
                     if (!activationChanged && row.activationEpoch() != activationEpoch) {
                         return false;
                     }
-                    JsonNode markerRecord = JournalStoreRows.CSI_TERMINAL_JSON.readTree(lines[lines.length - 1]);
+                    JsonNode markerRecord = JournalStoreRows.TERMINAL_JSON.readTree(lines[lines.length - 1]);
                     JsonNode marker = markerRecord.path("managedSession");
                     if (!"managed_session_commit_v1".equals(markerRecord.path("subtype").asText())
                             || !sessionId.equals(markerRecord.path("sessionId").asText())
@@ -372,9 +376,9 @@ final class JournalHistoryQueries {
                             || row.lastSequence() != marker.path("lastSequence").asLong(-1)
                             || row.eventCount() != marker.path("eventCount").asInt(-1)
                             || !row.eventsDigest().equals(marker.path("eventsDigest").asText())
-                            || !INITIAL_DIGESTS.digest(JournalStoreRows.CSI_JSON.convertValue(events, Object.class))
+                            || !INITIAL_DIGESTS.digest(JournalStoreRows.JSON.convertValue(events, Object.class))
                                     .equals("sha256:" + row.eventsDigest())
-                            || !INITIAL_DIGESTS.digest(JournalStoreRows.CSI_JSON.convertValue(marker, Object.class))
+                            || !INITIAL_DIGESTS.digest(JournalStoreRows.JSON.convertValue(marker, Object.class))
                                     .equals("sha256:" + row.commitDigest())
                             || !Objects.equals(digest, marker.path("previousCommitDigest").isNull()
                                     ? null : marker.path("previousCommitDigest").asText())) {
@@ -417,7 +421,7 @@ final class JournalHistoryQueries {
         }
         storeRows.verifyStoredResource(resource);
         if ("managed-definition".equals(kind)) {
-            JsonNode definition = JournalStoreRows.CSI_TERMINAL_JSON.readTree(resource.bytes());
+            JsonNode definition = JournalStoreRows.TERMINAL_JSON.readTree(resource.bytes());
             if (definition == null || !definition.isObject()) {
                 throw JournalStoreRows.journalCorrupt();
             }
