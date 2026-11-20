@@ -311,7 +311,8 @@ public class JdbcManagedActionStore
                                 + ManagedExtensionProjection.recordKey(
                                         sessionId, "action_decision", id + ":" + decided.digest());
                 digest = decided.digest();
-                if ("allow".equals(body.path("optionId").asText()) && publicPlanExit(tenantId, sessionId, options)) {
+                if ("allow".equals(body.path("optionId").asText()) && options.has("continuationRef")
+                        && publicPlanExit(tenantId, sessionId, options)) {
                     JsonNode input = read(new String(resource(options.path("inputRef"), "managed-tool-input", resources).bytes(),
                             StandardCharsets.UTF_8));
                     JsonNode request = read(input.path("payloadJson").asText());
