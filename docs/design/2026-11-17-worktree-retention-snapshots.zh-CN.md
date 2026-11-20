@@ -2,7 +2,7 @@
 
 [English](2026-11-17-worktree-retention-snapshots.md) | [简体中文](2026-11-17-worktree-retention-snapshots.zh-CN.md)
 
-- 状态：U1–U3 已在本 PR 实现；U4/U5 仍由 #17237 跟踪。
+- 状态：U1–U3 已通过 [#17533](https://github.com/QwenLM/qwen-code/pull/17533) 合入，squash commit 为 [`17217d136a75a3070143cbded6de6b467039368c`](https://github.com/QwenLM/qwen-code/commit/17217d136a75a3070143cbded6de6b467039368c)；U4/U5 与 P7 仍由 [#17237](https://github.com/QwenLM/qwen-code/issues/17237) 跟踪。
 - 基于：`2026-11-14-web-shell-codex-worktree-parity.md` D7（快照是工作归档）、
   D3（dirty 携带），及 `2026-11-17-worktree-carry-metadata.md`（R9-6，sidecar
   `carriedEntries` 字段）。
@@ -23,7 +23,8 @@ U4 按数量回收及 U5 重开恢复均未实现。上述目标和整体验收�
 
 ## 分解
 
-P6 在 #17237 分支上分五个单元落地；每个可独立测试。
+P6 分为五个可独立测试的单元。U1–U3 已通过 #17533 合入；U4/U5
+仍计划在 #17237 落地。
 
 ### U1 — 快照捕获/恢复服务（core）
 
@@ -178,3 +179,9 @@ Web Shell 呈现入口（chat 头/会话概览）。i18n。同一 session 前缀
 
 - P7 可配置 worktree 根（`worktree.root`）——独立单元，安全敏感的包含性/shell-guard 重推导。
 - 托管（server）会话自身 worktree 设计对齐（后续）。
+
+## 交付与验证证据
+
+U1–U3 切片已通过 [#17533](https://github.com/QwenLM/qwen-code/pull/17533) 落地，squash commit 为 [`17217d136a75a3070143cbded6de6b467039368c`](https://github.com/QwenLM/qwen-code/commit/17217d136a75a3070143cbded6de6b467039368c)。实测运行时矩阵及其边界、独立审查和 squash commit 的产品 CI run，参见[搬运元数据的交付与验证证据](2026-11-17-worktree-carry-metadata.md#delivery-and-verification-evidence)一节。
+
+U4/U5 仍是由 [#17237](https://github.com/QwenLM/qwen-code/issues/17237) 跟踪的未来工作；上述证据不改变目标和 P6 整体验收属于未来完整行为的范围。
