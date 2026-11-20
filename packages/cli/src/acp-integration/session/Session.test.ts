@@ -1431,6 +1431,76 @@ describe('Session', () => {
       expect(isAsyncHookContextPartText(secondLast.text as string)).toBe(true);
       expect(secondLast.text).toContain('async co-occurrence');
     });
+
+    it('delivers async output on a stop-hook continuation, after beforeSend replaces the message', async () => {
+      // The block must be appended AFTER beforeSend: a stop continuation's
+      // beforeSend returns its closure's preparedMessage and the wrapper assigns
+      // message = decision.message, so an earlier append would be discarded while
+      // the registry is already cleared (consumed-but-not-sent on every continuation).
+      const registry = new AsyncHookRegistry();
+      registry.register({
+        hookId: 'bg-1',
+        hookName: 'Background Hook',
+        hookEvent: HookEventName.PostToolUse,
+        sessionId: 'test-session-id',
+        startTime: Date.now(),
+        timeout: 60000,
+        stdout: JSON.stringify({
+          hookSpecificOutput: { additionalContext: 'continuation delivery' },
+        }),
+        stderr: '',
+      });
+      mockConfig.getHookSystem = vi.fn().mockReturnValue({
+        getPendingAsyncOutput: () => registry.getPendingOutput(),
+      } as unknown as ReturnType<Config['getHookSystem']>);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi.fn((name) => name === 'Stop');
+      const decisions: Array<Record<string, unknown>> = [
+        { decision: 'block', reason: 'keep going' },
+        {},
+      ];
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({
+        request: vi.fn().mockImplementation(async (message) => ({
+          success: true,
+          output:
+            message.eventName === 'Stop'
+              ? (decisions.shift() ?? {})
+              : undefined,
+        })),
+      });
+      // The hook completes during the first send, so the block is pending only
+      // for the continuation: the first send's drain ran before this mock.
+      vi.mocked(mockChat.sendMessageStream)
+        .mockImplementationOnce(async () => {
+          registry.complete('bg-1');
+          return createEmptyStream();
+        })
+        .mockImplementation(async () => createEmptyStream());
+      await promptText('hello');
+      const calls = vi.mocked(mockChat.sendMessageStream).mock.calls;
+      expect(calls.length).toBeGreaterThanOrEqual(2);
+      const lastParts = (calls[calls.length - 1][1] as { message: SentPart[] })
+        .message;
+      expect(hasAsyncBlock(lastParts)).toBe(true);
+    });
+
+    it('does not consume the block on a skipped send; the next send delivers it', async () => {
+      // The drain runs after the pre-send early exits, so a token-limit drop must
+      // not consume the pending block (a drain before the exit would lose it).
+      installAsyncOutput('survives a skipped send');
+      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+      mockLlmClient.tryCompressChat.mockResolvedValue({
+        originalTokenCount: 999,
+        newTokenCount: 999,
+        compressionStatus: core.CompressionStatus.NOOP,
+      });
+      const dropped = await promptText('hello');
+      expect(dropped.stopReason).toBe('max_tokens');
+      expect(vi.mocked(mockChat.sendMessageStream)).not.toHaveBeenCalled();
+      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(0);
+      await promptText('hello again');
+      expect(hasAsyncBlock(lastSentParts())).toBe(true);
+    });
   });
 
   describe('session agent records', () => {

@@ -2,7 +2,7 @@
 
 [English](2026-11-20-acp-legacy-async-hook-delivery.md) | [简体中文](2026-11-20-acp-legacy-async-hook-delivery.zh-CN.md)
 
-- **状态**：本改动提出。把能力台账 L11 行从 `differs` 推向 `have`：ACP 默认 legacy 轮次——最后一个仍丢弃待交付异步 hook 输出的模型轮入口——像 `LlmClient` 路径一样 drain 它。
+- **状态**：本改动实现。闭合能力台账 L11 行的 ACP 默认 legacy 入口缺口——最后一个仍丢弃待交付异步 hook 输出的模型轮入口，如今像 `LlmClient` 路径一样 drain 它。在 resume 溯源与显示投影仍是 follow-up 期间，该行保持 `differs`。
 - **日期**：2026-11-20，基于 `main` `e8cdbe441fad`。
 - **相关**：[异步 hook 输出交付](2026-11-16-async-hook-output-delivery.zh-CN.md)（#17477，`LlmClient` 路径）；[异步 hook 上下文大小上限](2026-11-16-async-hook-output-delivery.zh-CN.md)（#17736）；follow-up 台账 #17284（「在 ACP 默认 legacy 轮次交付（R2-1）」项）；helper `hooks/async-hook-context.ts`。
 
@@ -29,4 +29,4 @@
 
 ## 验证
 
-`Session.test.ts` 的调用点见证用 registry 支撑的 `getHookSystem` 驱动真实 wrapper：已完成异步 hook 的输出作为 `<qwen:async-hook-context>` part 交付进外出 `chat.sendMessageStream` 请求；第二次 send 不 drain 任何东西（取走即清空）；无待交付输出时不交付；尾部 UserPromptSubmit 回执仍是最后 part、异步 part 紧随其前；无回执的消息直接追加。变异见证：去掉 drain 使交付用例转红；把尾部回执检测强制为固定 `false` 使共现用例转红。一次真实环境 ACP 运行（配置 `async: true` 的 PostToolUse hook）确认 legacy 轮上该块到达 provider 请求。改动文件 `prettier`/`eslint` 干净；改动文件通过类型检查（以 CI 的 frozen-lockfile 构建为权威）。
+`Session.test.ts` 的调用点见证用 registry 支撑的 `getHookSystem` 驱动真实 wrapper：已完成异步 hook 的输出作为 `<qwen:async-hook-context>` part 交付进外出 `chat.sendMessageStream` 请求；第二次 send 不 drain 任何东西（取走即清空）；无待交付输出时不交付；尾部 UserPromptSubmit 回执仍是最后 part、异步 part 紧随其前；无回执的消息直接追加；stop-hook 续轮在续轮 send 上交付该块（在 `beforeSend` 用其闭包的 prepared message 替换消息之后）；被 token-limit 跳过的 send 不消费该块，由下一次 send 交付。drain 旁的一条 `debugLogger.debug` 记录交付，使取走即清空的「已消费未送达」窗口可诊断。变异见证：去掉 drain 使交付用例转红；把尾部回执检测强制为固定 `false` 使共现用例转红；把 drain 挪到 `beforeSend` 之上仅使续轮用例转红；把它挪到 token-limit 出口之上使被跳过 send 用例转红。一次真实环境 ACP 运行（配置 `async: true` 的 PostToolUse hook）确认 legacy 轮上该块到达 provider 请求。改动文件 `prettier`/`eslint` 干净；改动文件通过类型检查（以 CI 的 frozen-lockfile 构建为权威）。

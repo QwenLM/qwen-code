@@ -11701,6 +11701,11 @@ export class Session implements SessionContext {
       this.config.getHookSystem?.(),
     );
     if (asyncHookContextPart) {
+      // The drain is get-and-clear: once consumed there is no post-hoc evidence,
+      // so log the delivery to make the consume-but-not-sent window diagnosable.
+      debugLogger.debug(
+        `Delivering async hook context (${asyncHookContextPart.text.length} chars) on legacy send for prompt ${promptId}`,
+      );
       const lastPart = message[message.length - 1];
       const syncReceiptTrailing =
         lastPart !== undefined &&
