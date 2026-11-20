@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import type {
   ChatCapabilities,
   ChatStatusFacts,
@@ -14,8 +14,10 @@ import {
 import { useI18n } from '../i18n.js';
 import { useMessagesFromBlocks } from '../hooks/useMessages.js';
 import { getComposerDraftStorageKey } from '../hooks/useComposerCore.js';
-import { extractPendingPermission } from '../adapters/transcriptAdapter.js';
-import { isAskUserPermission } from '../utils/askUserPermission.js';
+import {
+  extractPendingPermission,
+  isAskUserPermissionBlock,
+} from '../adapters/transcriptAdapter.js';
 import { isExitPlanApprovalRequest } from '../utils/todos.js';
 import {
   useDaemonActions,
@@ -84,26 +86,45 @@ export function useDaemonChatController(): SessionChatController {
   const messages = useMessagesFromBlocks(t, blocks);
 
   const sessionId = connection.sessionId;
+  const pendingSplitRef = useRef<{
+    signature: string;
+    pendingApprovals: readonly PendingApproval[];
+    pendingQuestions: readonly PendingQuestion[];
+  } | null>(null);
   // Questions are permission blocks too; split them from tool approvals the same
   // way the existing UI does, so a question is answered with answers rather than
-  // routed through the approval lane as a bare vote. Memoized so the payload
-  // extraction and the array identities are stable while the pending set is
-  // unchanged across streaming ticks.
-  const { pendingApprovals, pendingQuestions } = useMemo(() => {
+  // routed through the approval lane as a bare vote. The provider re-runs its
+  // uncached pending selector on every streaming delta, so `pendingPermissions`
+  // arrives as a fresh array even when the pending content is unchanged. Key the
+  // split on a content signature (request id + question/approval classification)
+  // cached in a ref, so the array identities — and the derivation effect below —
+  // stay stable across those deltas. The signature is content-derived, not
+  // id-derived: a block's payload can change its classification under the same
+  // request id. Classification uses the cheap block-level predicate rather than
+  // the full payload extraction, so a delta does not re-serialize each payload.
+  const classifiedPending = pendingPermissions.map((permission) => ({
+    id: permission.requestId,
+    isQuestion: isAskUserPermissionBlock(permission),
+  }));
+  const pendingSignature = classifiedPending
+    .map(({ id, isQuestion }) => `${id}:${isQuestion ? 'q' : 'a'}`)
+    .join('|');
+  let pendingSplit = pendingSplitRef.current;
+  if (!pendingSplit || pendingSplit.signature !== pendingSignature) {
     const approvals: PendingApproval[] = [];
     const questions: PendingQuestion[] = [];
-    for (const permission of pendingPermissions) {
-      if (isAskUserPermission(extractPendingPermission([permission]))) {
-        questions.push({ id: permission.requestId });
-      } else {
-        approvals.push({ id: permission.requestId, status: 'pending' });
-      }
+    for (const { id, isQuestion } of classifiedPending) {
+      if (isQuestion) questions.push({ id });
+      else approvals.push({ id, status: 'pending' });
     }
-    return {
-      pendingApprovals: approvals as readonly PendingApproval[],
-      pendingQuestions: questions as readonly PendingQuestion[],
+    pendingSplit = {
+      signature: pendingSignature,
+      pendingApprovals: approvals,
+      pendingQuestions: questions,
     };
-  }, [pendingPermissions]);
+    pendingSplitRef.current = pendingSplit;
+  }
+  const { pendingApprovals, pendingQuestions } = pendingSplit;
 
   const factsRef = useRef<LiveFacts>({
     messages,
@@ -334,7 +355,7 @@ export function useDaemonChatController(): SessionChatController {
 
   useEffect(() => {
     const nextPending = new Set(
-      pendingPermissions.map((permission) => permission.requestId),
+      pendingPermissionsRef.current.map((permission) => permission.requestId),
     );
     const signals = derivePermissionSignals(
       prevPendingRef.current,
@@ -349,7 +370,9 @@ export function useDaemonChatController(): SessionChatController {
     for (const decision of signals.decisions) {
       decisionListenerRef.current?.(decision);
     }
-  }, [pendingPermissions]);
+    // Keyed on the content signature, not the provider's per-delta array
+    // identity, so an unchanged pending set does not re-run the derivation.
+  }, [pendingSignature]);
 
   return controllerRef.current.controller;
 }

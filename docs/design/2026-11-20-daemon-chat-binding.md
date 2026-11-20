@@ -53,9 +53,16 @@ gate) are the next increment.
   AskUserQuestion prompts (`isAskUserPermission`) are published as
   `pendingQuestions`; the rest as `pendingApprovals`, matching the existing UI split
   so a question is answered with answers rather than routed through the approval
-  lane as a bare vote. The split is memoized on the pending-permission set so the
-  payload extraction and the array identities stay stable while the set is unchanged
-  across streaming ticks.
+  lane as a bare vote. The provider re-runs its uncached pending selector on every
+  streaming delta, so the split is keyed on a **content signature** (request id +
+  question/approval classification) cached in a ref — not on the provider's
+  per-delta array identity — and the derivation effect is keyed on the same
+  signature, so the array identities and the effect stay stable while the pending
+  content is unchanged. The signature is content-derived, not id-derived, because a
+  block's payload can change its classification under the same request id.
+  Classification uses the cheap block-level predicate `isAskUserPermissionBlock`
+  (tool name + raw input only) rather than the full payload extraction, so a delta
+  does not re-serialize each outstanding approval.
 - **Prompt settlement** is bridged from `useDaemonPromptSettled` (the terminal
   `turn_complete` / `turn_error` / cancelled event) to the controller's
   `subscribePromptSettlement`, keyed by `promptId`.

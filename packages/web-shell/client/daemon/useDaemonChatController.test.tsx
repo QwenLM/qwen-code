@@ -283,17 +283,30 @@ describe('useDaemonChatController', () => {
     ).toBe('unsettled');
   });
 
-  it('keeps the approval/question arrays stable across an unchanged pending set', () => {
-    harness.pendingPermissions = [
-      permissionBlock('a1'),
-      permissionBlock('q1', { questions: true }),
-    ];
+  it('keeps the approval/question arrays stable when the provider re-selects the same pending content', () => {
+    const approval = permissionBlock('a1');
+    const question = permissionBlock('q1', { questions: true });
+    harness.pendingPermissions = [approval, question];
     mountReact(<Probe />);
     const approvals = controller!.pendingApprovals;
     const questions = controller!.pendingQuestions;
+    // The provider's uncached selector hands out a fresh array on every
+    // streaming delta even when the pending content is unchanged.
+    harness.pendingPermissions = [approval, question];
     forceRerender!();
     expect(controller!.pendingApprovals).toBe(approvals);
     expect(controller!.pendingQuestions).toBe(questions);
+  });
+
+  it('reclassifies a permission whose payload changes under the same request id', () => {
+    harness.pendingPermissions = [permissionBlock('a1')];
+    mountReact(<Probe />);
+    expect(controller!.pendingApprovals.map((a) => a.id)).toEqual(['a1']);
+    expect(controller!.pendingQuestions).toHaveLength(0);
+    harness.pendingPermissions = [permissionBlock('a1', { questions: true })];
+    forceRerender!();
+    expect(controller!.pendingApprovals).toHaveLength(0);
+    expect(controller!.pendingQuestions.map((q) => q.id)).toEqual(['a1']);
   });
 
   it('keeps the transcript readable under a connection error with a live session', () => {

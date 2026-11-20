@@ -40,8 +40,12 @@ provider 即可测试的组装。本切片落地**绑定 hook** `useDaemonChatCo
   丢弃的条目。
 - **问题与审批拆分。** 属于 AskUserQuestion 的待处理权限块（`isAskUserPermission`）
   发布为 `pendingQuestions`，其余为 `pendingApprovals`，与既有 UI 拆分一致，使问题
-  带答案应答，而非经审批通道作为裸投票。拆分按待处理权限集合 memoize，使集合在流式
-  tick 间不变时，载荷提取与数组身份保持稳定。
+  带答案应答，而非经审批通道作为裸投票。provider 在每个流式增量都会重跑其无缓存的
+  待处理选择器，故拆分以**内容签名**（request id + 问答分类）为键、缓存在 ref 中——
+  而非以 provider 每增量变化的数组身份为键——派生 effect 也挂同一签名，使待处理内容
+  不变时数组身份与 effect 保持稳定。签名按内容而非仅按 id 派生，因为同一 request id
+  下块的载荷可能改变其分类。分类用轻量的块级谓词 `isAskUserPermissionBlock`（仅读工具
+  名与 raw input），而非完整载荷提取，故增量不会重新序列化每个挂起审批。
 - **prompt 结算**由 `useDaemonPromptSettled`（终态 `turn_complete`/`turn_error`/
   cancelled 事件）桥接到控制器的 `subscribePromptSettlement`，按 `promptId` 键控。
 - **approval 时效与决策结算是派生的**，因为 provider 没有显式通道。纯助手
