@@ -3402,10 +3402,17 @@ export class GitWorktreeService {
           ? undefined
           : carriedBound -
             Buffer.byteLength(JSON.stringify(carriedPaths ?? []), 'utf8');
+      // The worktree is checked out at the revision being created (a PR
+      // head for `--worktree=#<N>`), so the include file is read there,
+      // matching the tree the copy lands in.
       const includedPaths = await this.copyIncludedPathsFromRepo(
         worktreePath,
         options?.dirtyStateSource ?? this.sourceRepoPath,
         includeBudget,
+        await runGitCapture(worktreePath, ['rev-parse', 'HEAD']).then(
+          ({ stdout }) => stdout.trim() || undefined,
+          () => undefined,
+        ),
       );
       if (includedPaths.length > 0) {
         carriedPaths = [...(carriedPaths ?? []), ...includedPaths];
@@ -4233,10 +4240,12 @@ export class GitWorktreeService {
     worktreePath: string,
     sourceRoot = this.sourceRepoPath,
     maxCarriedBytes?: number,
+    revision?: string,
   ): Promise<string[]> {
     const includedPaths = await this.resolveWorktreeIncludePaths(
       sourceRoot,
       maxCarriedBytes,
+      revision,
     );
     return this.copyWorktreeIncludePaths(
       worktreePath,
@@ -4273,6 +4282,7 @@ export class GitWorktreeService {
   private async resolveWorktreeIncludePaths(
     sourceRoot = this.sourceRepoPath,
     maxCarriedBytes?: number,
+    revision?: string,
   ): Promise<{
     paths: string[];
     root: string;
@@ -4288,20 +4298,48 @@ export class GitWorktreeService {
     const repoRoot = (await anchor.getRepoTopLevel()) ?? sourceRoot;
     const includePath = path.join(repoRoot, WORKTREE_INCLUDE_FILE);
 
-    let content: string;
+    // `qwen --worktree=#<N>` checks the new worktree out at the PR head,
+    // while the launch checkout may not carry `.worktreeinclude` at all —
+    // reading the working copy would then find nothing and copy nothing,
+    // even though the checked-out revision names files. Read the file from
+    // the revision the worktree is created at and fall back to the working
+    // copy only when that revision has no such path.
+    let content: string | undefined;
+    if (revision !== undefined) {
+      try {
+        const shown = await runGitCapture(repoRoot, [
+          'show',
+          `${revision}:${WORKTREE_INCLUDE_FILE}`,
+        ]);
+        if (shown.stdout.length <= WORKTREE_INCLUDE_MAX_BYTES) {
+          content = shown.stdout;
+        } else {
+          debugLogger.warn(
+            `resolveWorktreeIncludePaths: ${WORKTREE_INCLUDE_FILE} at ${revision} ` +
+              `is over the ${WORKTREE_INCLUDE_MAX_BYTES}-byte cap; ignoring it`,
+          );
+          return { paths: [], root: repoRoot };
+        }
+      } catch {
+        // The revision has no `.worktreeinclude`; fall through to the
+        // working copy, which is where a not-yet-committed file lives.
+      }
+    }
     try {
-      const stat = await fs.stat(includePath);
-      if (!stat.isFile()) {
-        return { paths: [], root: repoRoot };
+      if (content === undefined) {
+        const stat = await fs.stat(includePath);
+        if (!stat.isFile()) {
+          return { paths: [], root: repoRoot };
+        }
+        if (stat.size > WORKTREE_INCLUDE_MAX_BYTES) {
+          debugLogger.warn(
+            `resolveWorktreeIncludePaths: ${includePath} is ${stat.size} bytes, ` +
+              `over the ${WORKTREE_INCLUDE_MAX_BYTES}-byte cap; ignoring it`,
+          );
+          return { paths: [], root: repoRoot };
+        }
+        content = await fs.readFile(includePath, 'utf8');
       }
-      if (stat.size > WORKTREE_INCLUDE_MAX_BYTES) {
-        debugLogger.warn(
-          `resolveWorktreeIncludePaths: ${includePath} is ${stat.size} bytes, ` +
-            `over the ${WORKTREE_INCLUDE_MAX_BYTES}-byte cap; ignoring it`,
-        );
-        return { paths: [], root: repoRoot };
-      }
-      content = await fs.readFile(includePath, 'utf8');
     } catch (error) {
       if (!(isNodeError(error) && error.code === 'ENOENT')) {
         debugLogger.warn(
